@@ -282,6 +282,41 @@ func TestRowsToMessages_InactiveExcluded(t *testing.T) {
 	}
 }
 
+// TestRowsToMessages_InactiveThinkingOnlyRowNeverReachesTheWire pins the
+// property that makes an output-limit-truncated turn safe to keep in the
+// ledger: the row carries reasoning and nothing else, which the API strips on
+// replay, so replaying it would send an assistant message with empty content
+// and be rejected. Inactive is what keeps that row out of the request while
+// leaving its cost and its display intact.
+func TestRowsToMessages_InactiveThinkingOnlyRowNeverReachesTheWire(t *testing.T) {
+	rows := []domain.Message{
+		{ID: 1, Role: "user", Content: "review the diff"},
+		{ID: 2, Role: "assistant", WindowState: domain.MessageWindowInactive,
+			Reasoning: []domain.ReasoningDetail{{
+				Index: 0, Type: "reasoning.text",
+				Text: "Long deliberation that consumed the whole cap.", Signature: "c2ln",
+			}}},
+		{ID: 3, Role: "user", Content: "that reply hit the output limit; continue"},
+	}
+	msgs, err := RowsToMessages(rows, AssemblyOptions{NoCacheBreakpoint: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range msgs {
+		if m.Role == schemas.ChatMessageRoleAssistant {
+			t.Fatalf("the truncated all-thinking turn must not assemble: %+v", m)
+		}
+		if m.Content == nil {
+			t.Fatalf("no assembled message may be contentless: %+v", m)
+		}
+	}
+	// The two user rows consolidate into one turn — the sequence around the
+	// dropped row stays a legal alternating transcript.
+	if len(msgs) != 1 {
+		t.Fatalf("assembled %d messages, want the two user rows consolidated into one", len(msgs))
+	}
+}
+
 func TestRowsToMessages_ElidedStub(t *testing.T) {
 	rows := []domain.Message{
 		{ID: 1, Role: "assistant", Content: "keep", ToolCalls: []domain.ToolCall{{ID: "t1", Name: "Read", Input: map[string]any{"path": "/x"}}}},

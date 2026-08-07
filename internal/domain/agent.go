@@ -141,6 +141,13 @@ const (
 	// the model to write a wrap-up summary before the turn budget pauses
 	// the run.
 	MessageSubtypeInjectionWrapUp = "injection:wrap-up"
+	// MessageSubtypeInjectionOutputLimit marks the notice written when a
+	// model turn hit the output-token limit before producing any text or
+	// tool call — the whole budget went to reasoning, so the turn recorded
+	// nothing. Delivered, not pending: the next call must read it, and it is
+	// a fact about the turn that just happened rather than input waiting to
+	// be consumed.
+	MessageSubtypeInjectionOutputLimit = "injection:output-limit"
 	// MessageSubtypeInjectionCompactionRequest marks the loop's ask that the
 	// model summarize the conversation so the history can be replaced. It
 	// renders bare on the wire — the subtype is provenance, not an envelope —

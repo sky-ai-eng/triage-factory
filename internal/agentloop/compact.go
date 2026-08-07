@@ -199,7 +199,7 @@ func (e *Engine) compactWarm(ctx context.Context, params Params) error {
 	// same tool_choice (absent), same model, same effort — over the same
 	// transcript plus the one request row. The only cache invalidation in
 	// the whole compaction process is the commit below.
-	completion, err := e.streamWithRetry(ctx, client, e.buildRequest(params, provider, rows))
+	completion, err := e.streamWithRetry(ctx, client, e.buildRequest(params, provider, rows, callMaxTokens(params, provider)))
 	if release != nil {
 		release()
 	}
@@ -271,6 +271,11 @@ func (e *Engine) compactCold(ctx context.Context, params Params) error {
 		Rows:         rows,
 		Tools:        []schemas.ChatTool{compactionTool()},
 		ToolChoice:   forcedCompactionChoice(),
+		// The cap is resolved for the SUMMARIZE model, not the
+		// conversation's: this call's whole output is one tool call carrying
+		// the summary, and a summary cut in half is the only failure this
+		// path has no fallback beneath.
+		MaxTokens: inference.MaxOutputTokens(provider, model),
 	})
 	if release != nil {
 		release()
@@ -300,6 +305,7 @@ func (e *Engine) compactCold(ctx context.Context, params Params) error {
 		Metadata: map[string]any{"compaction_path": "forced"},
 	}
 	stampUsage(replyRow, completion.Usage)
+	stampFinishReason(replyRow, completion.FinishReason)
 	if durationMs > 0 {
 		replyRow.DurationMs = &durationMs
 	}

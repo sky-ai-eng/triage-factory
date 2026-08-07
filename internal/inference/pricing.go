@@ -74,6 +74,14 @@ type modelPrice struct {
 	// price, not just this accessor.
 	MaxInputTokens *float64 `json:"max_input_tokens"`
 
+	// MaxOutputTokens is the model's maximum completion length, read by
+	// ModelMaxOutput for the same reason MaxInputTokens is read by
+	// ModelWindow: the datasheet is already the vendored source of per-model
+	// facts, and a second table would drift from this one. Same float typing,
+	// same reason — an int-typed field fails the whole datasheet unmarshal on
+	// an entry upstream serializes as "64000.0".
+	MaxOutputTokens *float64 `json:"max_output_tokens"`
+
 	InputCostPerToken  *float64 `json:"input_cost_per_token"`
 	OutputCostPerToken *float64 `json:"output_cost_per_token"`
 

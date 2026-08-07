@@ -95,7 +95,10 @@ type Request struct {
 	// Effort is the reasoning effort ("minimal" | "low" | "medium" | "high" |
 	// "none"). Empty leaves reasoning at the provider default.
 	Effort string
-	// MaxTokens caps the completion. Zero leaves it to the provider.
+	// MaxTokens caps the completion. Zero resolves the per-provider budget
+	// policy (MaxOutputTokens) against this request's provider and model —
+	// it never leaves the cap to the provider layer, whose fallback is a
+	// small constant a thinking-heavy turn spends entirely on reasoning.
 	MaxTokens int
 	// Temperature pins the sampling temperature. nil leaves the provider
 	// default — which is why it is a pointer: a caller that wants greedy
@@ -255,10 +258,18 @@ func buildChatRequest(req Request) (*schemas.BifrostChatRequest, error) {
 		effort := req.Effort
 		params.Reasoning = &schemas.ChatReasoning{Effort: &effort}
 	}
-	if req.MaxTokens > 0 {
-		mt := req.MaxTokens
-		params.MaxCompletionTokens = &mt
+	// Always sent, never omitted. Anthropic requires max_tokens, so an
+	// omitted cap is filled downstream by a provider-layer default that knows
+	// nothing about the model or the account — and a turn that spends that
+	// default on reasoning returns no text and no tool calls at all. This is
+	// the structural half of that guarantee: a caller that resolves its own
+	// cap wins, and one that doesn't still gets the budget policy rather than
+	// somebody else's constant.
+	mt := req.MaxTokens
+	if mt <= 0 {
+		mt = MaxOutputTokens(req.Provider, req.Model)
 	}
+	params.MaxCompletionTokens = &mt
 	if req.Temperature != nil {
 		temp := *req.Temperature
 		params.Temperature = &temp

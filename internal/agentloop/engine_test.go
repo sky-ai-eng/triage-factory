@@ -3,6 +3,7 @@ package agentloop
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -339,6 +340,234 @@ func TestRun_LengthStopErrorsEveryCallInTheBatchWithoutExecuting(t *testing.T) {
 		if !strings.Contains(r.Content, "output length limit") {
 			t.Errorf("the result must name the cause: %q", r.Content)
 		}
+	}
+}
+
+// TestRun_EmptyLengthStopIsNeverAConclusion reproduces the dogfood failure
+// exactly: a thinking-heavy turn on a review step burns its whole output cap
+// on reasoning and returns with a `length` stop, no text and no tool calls.
+// Before this arm existed that fell through to the would-stop path, the run
+// "completed" with outcome continue, and the blueprint advanced on a turn
+// that produced nothing at all.
+func TestRun_EmptyLengthStopIsNeverAConclusion(t *testing.T) {
+	tr := newMemTranscript(pendingUser("review the pull request"))
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{reasoning: strings.Repeat("deliberating. ", 500), finish: "length",
+			usage: inference.Usage{PromptTokens: 40000, OutputTokens: 8000}},
+		{text: "Posted the review."},
+	}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+	params := testParams()
+	// Below the model's own ceiling so the escalation has somewhere to go —
+	// on the direct API the resolved budget is already the model maximum.
+	params.MaxTokens = 8000
+
+	got := e.Run(context.Background(), params)
+
+	if got.Kind != ResultConcluded || got.ResultSummary != "Posted the review." {
+		t.Fatalf("the run must continue past the truncated turn and conclude on real work: %+v", got)
+	}
+
+	truncated := tr.find(func(m domain.Message) bool { return m.Role == "assistant" && len(m.Reasoning) > 0 })
+	if truncated == nil {
+		t.Fatal("the truncated turn must still be persisted — its tokens and dollars are real")
+	}
+	if truncated.WindowState != domain.MessageWindowInactive {
+		t.Errorf("window_state = %q, want inactive: replaying an assistant row whose only content is "+
+			"thinking sends an empty message and is rejected", truncated.WindowState)
+	}
+	if truncated.OutputTokens == nil || *truncated.OutputTokens != 8000 {
+		t.Errorf("the truncated row must keep its usage stamp: %+v", truncated.OutputTokens)
+	}
+	if got, ok := truncated.Metadata["finish_reason"].(string); !ok || got != "length" {
+		t.Errorf("finish_reason metadata = %v, want \"length\" — the transcript should say why it stopped", truncated.Metadata)
+	}
+
+	notice := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionOutputLimit })
+	if notice == nil {
+		t.Fatal("the model must be told its turn hit the output limit; nothing else in the transcript says so")
+	}
+	if !isDelivered(*notice) {
+		t.Error("the notice must be delivered — the retry call has to read it")
+	}
+	if !strings.Contains(notice.Content, "output token limit") {
+		t.Errorf("the notice must name the cause: %q", notice.Content)
+	}
+
+	if len(p.requests) != 2 {
+		t.Fatalf("provider calls = %d, want the truncated turn plus one retry", len(p.requests))
+	}
+	if p.requests[0].MaxTokens != 8000 {
+		t.Errorf("first call max_tokens = %d, want the engagement's cap 8000", p.requests[0].MaxTokens)
+	}
+	if p.requests[1].MaxTokens != 16000 {
+		t.Errorf("retry max_tokens = %d, want the cap doubled to 16000", p.requests[1].MaxTokens)
+	}
+}
+
+// TestRun_EmptyLengthStopEscalationIsClampedToTheModel: doubling stops at what
+// the model can actually emit. Asking for more is a rejected request, not a
+// longer answer.
+func TestRun_EmptyLengthStopEscalationIsClampedToTheModel(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{reasoning: "thinking", finish: "length"},
+		{text: "done"},
+	}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+	params := testParams() // claude-sonnet-4-5: 64000 output tokens
+	params.MaxTokens = 40000
+
+	if got := e.Run(context.Background(), params); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+	}
+	if p.requests[1].MaxTokens != 64000 {
+		t.Errorf("retry max_tokens = %d, want the model's own maximum 64000, not 80000", p.requests[1].MaxTokens)
+	}
+}
+
+// TestEscalateMaxTokens pins the clamp arithmetic directly, including the one
+// input the loop cannot produce but a caller can: an explicit cap large
+// enough that doubling it overflows int. A negative cap is not a clamped
+// request, it is a malformed one.
+func TestEscalateMaxTokens(t *testing.T) {
+	const sonnet = "claude-sonnet-4-5" // 64000 output tokens
+	cases := []struct {
+		name    string
+		current int
+		model   string
+		want    int
+	}{
+		{"doubles below the ceiling", 8000, sonnet, 16000},
+		{"clamps at the ceiling", 40000, sonnet, 64000},
+		{"exactly half the ceiling clamps rather than lands on it", 32000, sonnet, 64000},
+		{"an explicit cap already above the ceiling comes back at it", 200000, sonnet, 64000},
+		{"a cap that would overflow the double never goes negative", math.MaxInt, sonnet, 64000},
+		{"an unknown model has no ceiling to clamp against", 8000, "some-model-nobody-ships", 8000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := escalateMaxTokens(tc.current, tc.model); got != tc.want {
+				t.Errorf("escalateMaxTokens(%d, %q) = %d, want %d", tc.current, tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRun_TwoConsecutiveEmptyLengthStopsFailLegibly: the escalated call had
+// strictly more room and still produced nothing, so the cap is not the
+// obstacle. Fail with the limit named rather than buy a third identical turn —
+// and never let a length stop reach a terminal outcome.
+func TestRun_TwoConsecutiveEmptyLengthStopsFailLegibly(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := &scriptedProvider{
+		turns:  []scriptedTurn{{reasoning: "thinking", finish: "length"}},
+		repeat: &scriptedTurn{reasoning: "still thinking", finish: "length"},
+	}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+	params := testParams()
+	params.MaxTokens = 8000
+
+	got := e.Run(context.Background(), params)
+
+	if got.Kind != ResultFailed {
+		t.Fatalf("disposition = %v, want failed: %+v", got.Kind, got)
+	}
+	if got.Outcome != "" {
+		t.Errorf("outcome = %q — a length stop must never resolve to a terminal outcome", got.Outcome)
+	}
+	if len(p.requests) != 2 {
+		t.Fatalf("provider calls = %d, want exactly two — there is never a third", len(p.requests))
+	}
+	if got.Err == nil || !strings.Contains(got.Err.Error(), "16000") {
+		t.Errorf("the failure must name the limit it hit: %v", got.Err)
+	}
+	stopNote := tr.find(func(m domain.Message) bool {
+		return m.Subtype == domain.MessageSubtypeStopNote && strings.Contains(m.Content, "16000-token output limit")
+	})
+	if stopNote == nil {
+		t.Fatal("the transcript must record why the run stopped, with the limit in it")
+	}
+	// Only the first stop bought a continue-notice; the second failed instead.
+	notices := 0
+	for _, r := range tr.snapshot() {
+		if r.Subtype == domain.MessageSubtypeInjectionOutputLimit {
+			notices++
+		}
+	}
+	if notices != 1 {
+		t.Errorf("output-limit notices = %d, want 1", notices)
+	}
+}
+
+// TestRun_LengthStopWithTextKeepsTheTextInTheWindow: the inactive flip is
+// licensed by a row having nothing replayable on it, not by the stop reason
+// alone. A turn cut mid-sentence still said something, and dropping it would
+// discard real work the retry needs.
+func TestRun_LengthStopWithTextKeepsTheTextInTheWindow(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{text: "I read the diff and the first problem is", finish: "length"},
+		{text: "done"},
+	}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+	}
+	cut := tr.find(func(m domain.Message) bool { return strings.HasPrefix(m.Content, "I read the diff") })
+	if cut == nil {
+		t.Fatal("the truncated turn must persist")
+	}
+	if cut.WindowState == domain.MessageWindowInactive {
+		t.Error("a truncated turn that produced text is replayable and must stay in the window")
+	}
+	if tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionOutputLimit }) == nil {
+		t.Error("it is still a truncated turn, not a conclusion — the notice must be written")
+	}
+}
+
+// TestRun_FinishReasonIsRecordedOnEveryAssistantTurn: the investigation that
+// produced this arm had to infer the stop reason from an output-token count
+// that happened to equal a cap. The transcript should just say it.
+func TestRun_FinishReasonIsRecordedOnEveryAssistantTurn(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{calls: []domain.ToolCall{{ID: "c1", Name: "bash"}}},
+		{text: "done"},
+	}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+	}
+	want := map[string]string{"": "tool_calls", "done": "stop"}
+	for _, r := range tr.snapshot() {
+		if r.Role != "assistant" {
+			continue
+		}
+		if got, _ := r.Metadata["finish_reason"].(string); got != want[r.Content] {
+			t.Errorf("assistant row %q: finish_reason = %q, want %q", r.Content, got, want[r.Content])
+		}
+	}
+}
+
+// TestRun_CallsCarryAResolvedTokenCap: nothing TF sends may ride the provider
+// layer's own default, which is a small constant a thinking turn spends
+// entirely on reasoning.
+func TestRun_CallsCarryAResolvedTokenCap(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+
+	// testParams sets no cap — the shape every caller uses, and the one that
+	// produced the bug.
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+	}
+	// Anthropic direct, claude-sonnet-4-5: the model's whole output window.
+	if p.requests[0].MaxTokens != 64000 {
+		t.Errorf("max_tokens = %d, want the resolved per-provider budget 64000", p.requests[0].MaxTokens)
 	}
 }
 

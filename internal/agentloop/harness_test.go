@@ -229,12 +229,17 @@ type scriptedProvider struct {
 }
 
 type scriptedTurn struct {
-	text   string
-	calls  []domain.ToolCall
-	finish string
-	usage  inference.Usage
-	model  string
-	err    error
+	text string
+	// reasoning is the turn's chain of thought. Set alone (no text, no
+	// calls) it is the shape a thinking model returns when the output cap
+	// ran out before it wrote anything: reasoning is all there is, and the
+	// provider strips it on replay.
+	reasoning string
+	calls     []domain.ToolCall
+	finish    string
+	usage     inference.Usage
+	model     string
+	err       error
 	// rawArgs overrides the rendered argument JSON for the call at that
 	// index — for truncation tests, where the wire carries a fragment no
 	// Input map can express.
@@ -290,6 +295,15 @@ func (p *scriptedProvider) Stream(_ context.Context, req inference.Request) (*in
 			}
 		}
 		msg.ChatAssistantMessage = &schemas.ChatAssistantMessage{ToolCalls: toolCalls}
+	}
+	if turn.reasoning != "" {
+		if msg.ChatAssistantMessage == nil {
+			msg.ChatAssistantMessage = &schemas.ChatAssistantMessage{}
+		}
+		text, sig := turn.reasoning, "c2ln"
+		msg.ReasoningDetails = []schemas.ChatReasoningDetails{{
+			Index: 0, Type: "reasoning.text", Text: &text, Signature: &sig,
+		}}
 	}
 	finish := turn.finish
 	if finish == "" {

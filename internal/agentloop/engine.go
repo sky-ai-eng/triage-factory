@@ -120,9 +120,17 @@ type Params struct {
 	// human input. Zero uses DefaultMaxIterations.
 	MaxIterations int
 
-	// MaxTokens and Effort ride through to the provider call unchanged.
+	// Effort rides through to the provider call unchanged.
+	Effort string
+
+	// MaxTokens pins the completion cap for every call this engagement
+	// makes. Zero — what every caller passes — resolves the per-provider
+	// budget policy (inference.MaxOutputTokens) against the provider each
+	// call routes to, which is the only place that knows both halves of it:
+	// Anthropic bills what it generates and a generous cap is free, while
+	// Bedrock reserves the cap against the account's quota at admission and
+	// an oversized one throttles requests that would have fit.
 	MaxTokens int
-	Effort    string
 
 	// MissionAnchored marks a conversation whose opening turn is a
 	// control-plane-minted mission (a task/blueprint-backed delegation).
@@ -330,6 +338,17 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 	turn := 0
 	lastText := ""
 
+	// emptyLengthStops counts CONSECUTIVE turns the provider cut at the
+	// output limit with nothing to show for them, and escalatedMaxTokens is
+	// the one-shot larger cap the next call gets after one. Both are
+	// loop-local for the same reason reactiveCompacted is: they scope a
+	// single call's retry, not cross-claim state. A re-claim starting the
+	// count over is the right answer — it retries once more with the notice
+	// already in the transcript, which beats inheriting a verdict about calls
+	// a different engagement made.
+	emptyLengthStops := 0
+	escalatedMaxTokens := 0
+
 	// reactiveCompacted licenses at most one overflow-triggered compaction
 	// per provider call: a second overflow immediately after compacting
 	// means compaction cannot make this request fit, and retrying is a
@@ -418,9 +437,17 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			return e.failed(ctx, started, turn, fmt.Errorf("resolve provider credentials: %w", err))
 		}
 
-		// 6. Stream.
+		// 6. Stream. The cap is this engagement's resolved per-provider
+		// budget, unless the previous turn hit the limit having produced
+		// nothing — then it is the one-shot escalation, consumed here so it
+		// applies to exactly the call that follows the stop.
+		maxTokens := callMaxTokens(params, provider)
+		if escalatedMaxTokens > 0 {
+			maxTokens = escalatedMaxTokens
+			escalatedMaxTokens = 0
+		}
 		callStarted := time.Now()
-		completion, err := e.streamWithRetry(ctx, client, e.buildRequest(params, provider, rows))
+		completion, err := e.streamWithRetry(ctx, client, e.buildRequest(params, provider, rows, maxTokens))
 		if release != nil {
 			release()
 		}
@@ -456,7 +483,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// 7. Persist — one row, priced, display columns populated. Under a
 		// `length` stop the cut usually lands mid-arguments, leaving the
 		// final tool call's JSON unparseable; stub those arguments empty —
-		// under that stop reason only — so the row persists and step 7 can
+		// under that stop reason only — so the row persists and step 8 can
 		// answer the batch. Everywhere else malformed arguments stay a loud
 		// persist failure: with no truncation to blame they are a provider
 		// bug, not something to paper over.
@@ -477,6 +504,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// safe to run. Answer every one with an instructive error instead of
 		// executing any of them.
 		if isLengthStop(completion.FinishReason) && len(calls) > 0 {
+			emptyLengthStops = 0
 			for _, call := range calls {
 				if err := e.insertToolResult(ctx, params, call, truncatedBatchNotice, true); err != nil {
 					return e.failed(ctx, started, turn, err)
@@ -485,6 +513,39 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			bareDrain = false
 			continue
 		}
+
+		// 8b. The same stop with an EMPTY batch: the cut landed before the
+		// model produced any text or any tool call, which on a thinking model
+		// means the whole cap went to reasoning. There is no batch to answer
+		// and — the bug this arm exists for — nothing to conclude from
+		// either. Falling through to the would-stop path would read a turn
+		// that produced literally nothing as the step being finished, and
+		// advance a blueprint on it.
+		if isLengthStop(completion.FinishReason) {
+			emptyLengthStops++
+			if emptyLengthStops >= maxEmptyLengthStops {
+				// Twice in a row means the cap is not the obstacle — the
+				// escalated call had strictly more room and still produced
+				// nothing. Fail with the limit named, rather than buying a
+				// third identical turn.
+				notice := outputLimitFailureNotice(maxTokens)
+				e.insertNotice(ctx, params, notice)
+				return e.failed(ctx, started, turn, fmt.Errorf(
+					"two consecutive model turns hit the %d-token output limit without producing text or a tool call", maxTokens))
+			}
+			escalatedMaxTokens = escalateMaxTokens(maxTokens, params.Model)
+			e.warn("model turn hit the output token limit before producing anything; retrying with a larger cap",
+				"conversation", params.ConversationID, "model", params.Model,
+				"max_tokens", maxTokens, "retry_max_tokens", escalatedMaxTokens)
+			if err := e.insertDelivered(ctx, params, outputLimitNotice, domain.MessageSubtypeInjectionOutputLimit); err != nil {
+				return e.failed(ctx, started, turn, fmt.Errorf("insert output-limit notice: %w", err))
+			}
+			// Mid-work, not concluding: the model was on its way to an action
+			// when the cut landed, so input arriving now is a steer.
+			bareDrain = false
+			continue
+		}
+		emptyLengthStops = 0
 
 		// 9. Dispatch. Flow-control calls resolve loop-side; everything
 		// else goes into the jail, serially, in call order.
@@ -581,10 +642,17 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 // IS the request-invariance contract: the summarize call differs from the
 // call the loop would otherwise make by its appended request row and by
 // nothing else — same system prompt, same tools in the same order, same
-// (absent) tool_choice, same model, same effort, same token cap. Changing
-// any of these forfeits the cached prefix; only the forced-shape call, which
-// has already forfeited it, builds a request any other way.
-func (e *Engine) buildRequest(params Params, provider schemas.ModelProvider, rows []domain.Message) inference.Request {
+// (absent) tool_choice, same model, same effort. Changing any of those
+// forfeits the cached prefix; only the forced-shape call, which has already
+// forfeited it, builds a request any other way.
+//
+// maxTokens is the one parameter passed in rather than read off params, and
+// the one the two callers may legitimately disagree on. The cached prefix is
+// the system prompt, the tools and the message prefix — the completion cap is
+// not part of it, so the loop's one-shot escalation after a truncated turn
+// costs nothing, while tool_choice (which does invalidate) stays absent on
+// both.
+func (e *Engine) buildRequest(params Params, provider schemas.ModelProvider, rows []domain.Message, maxTokens int) inference.Request {
 	return inference.Request{
 		Provider:     provider,
 		Model:        params.Model,
@@ -592,8 +660,45 @@ func (e *Engine) buildRequest(params Params, provider schemas.ModelProvider, row
 		Rows:         rows,
 		Tools:        e.toolSchemas(params),
 		Effort:       params.Effort,
-		MaxTokens:    params.MaxTokens,
+		MaxTokens:    maxTokens,
 	}
+}
+
+// callMaxTokens is the completion cap for one provider call: the
+// engagement's explicit override when it has one, else the per-provider
+// budget policy resolved against the provider this call actually routes to.
+//
+// It resolves per call rather than once per engagement because the provider
+// does: credentials are resolved per call (an STS triple expires), and the
+// budget an Anthropic-direct call may ask for is not the budget a Bedrock
+// call may — Bedrock reserves the cap against the account's quota at
+// admission, Anthropic bills only what it generates.
+func callMaxTokens(params Params, provider schemas.ModelProvider) int {
+	if params.MaxTokens > 0 {
+		return params.MaxTokens
+	}
+	return inference.MaxOutputTokens(provider, params.Model)
+}
+
+// escalateMaxTokens doubles a cap that just cut a turn short, clamped to what
+// the model can actually emit. A model the datasheet doesn't carry has no
+// ceiling to clamp against, so its cap stays where the budget policy put it:
+// asking for more than a provider accepts turns a truncated turn into a
+// rejected request, which is a worse answer than one more try at the same
+// size.
+func escalateMaxTokens(current int, model string) int {
+	ceiling, ok := inference.ModelMaxOutput(model)
+	if !ok {
+		return current
+	}
+	// Halve the ceiling rather than double the cap: the comparison has to
+	// happen before the multiply, because a caller that pinned an absurd
+	// explicit cap would overflow int and come back with a negative number —
+	// which is not a clamped cap, it is a malformed request.
+	if current >= ceiling/2 {
+		return ceiling
+	}
+	return current * 2
 }
 
 // toolSchemas assembles the call's tool list: the seven in-jail tools, plus
@@ -668,6 +773,34 @@ func stubTruncatedToolArgs(completion *inference.Completion) {
 const truncatedBatchNotice = "This tool call was not executed: the model's response hit the output length limit, " +
 	"so the tool arguments in that message may be silently truncated and are not safe to run. " +
 	"Re-issue the call you intended, with smaller arguments or fewer calls in one message."
+
+// maxEmptyLengthStops bounds consecutive turns cut at the output limit that
+// produced nothing. Two: the first buys a notice and a larger cap, and if the
+// larger cap produces nothing either, a third identical call is not a
+// different experiment.
+const maxEmptyLengthStops = 2
+
+// outputLimitNotice tells the model what the transcript cannot show it — the
+// turn it just took is not in the window, because the whole cap went to
+// reasoning and nothing replayable came out. Without this the model sees its
+// own message vanish and has no account of why.
+const outputLimitNotice = "<system-note>\n" +
+	"Your last reply reached the output token limit while still reasoning, before it produced any text " +
+	"or any tool call, so nothing from it was recorded and no work happened. That turn is not in this " +
+	"conversation — this note is what took its place.\n" +
+	"Continue from where you were, and get to the action sooner: reason more briefly and take the next " +
+	"concrete step in this reply rather than planning the whole remainder first.\n" +
+	"</system-note>"
+
+// outputLimitFailureNotice is the transcript's record of the engagement
+// ending on the second such turn. It names the cap, because the number is
+// what an operator needs to decide whether to raise a budget or shorten the
+// work.
+func outputLimitFailureNotice(maxTokens int) string {
+	return fmt.Sprintf("<system-note>\nThis run stopped: two consecutive model replies reached the %d-token output "+
+		"limit while still reasoning, producing no text and no tool call either time. The work so far is intact — "+
+		"send a message to pick it back up.\n</system-note>", maxTokens)
+}
 
 // failed is every exit that could not continue — and the single place the
 // engine decides whether "could not continue" means failure at all.

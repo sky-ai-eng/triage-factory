@@ -28,6 +28,19 @@ func (e *Engine) persistAssistant(ctx context.Context, params Params, completion
 	row.ConversationID = params.ConversationID
 	row.Model = modelForRow(completion, params)
 	stampUsage(&row, completion.Usage)
+	stampFinishReason(&row, completion.FinishReason)
+	if truncatedEmptyTurn(row, completion.FinishReason) {
+		// The cut landed before the model wrote anything replayable: no text,
+		// no tool call, nothing but reasoning. Such a row is born inactive
+		// rather than flipped a moment later, because there is no moment in
+		// between where it would be legal — the API strips a non-final
+		// thinking block on replay, and an assistant message with empty
+		// content is rejected, so any assembly that saw it active would 400.
+		// Inactive keeps the row in the ledger and in the display (its cost
+		// and tokens are as real as any other call's) while keeping it out of
+		// every future request.
+		row.WindowState = domain.MessageWindowInactive
+	}
 	// Wall time from request to complete message, retries included — the
 	// same request-to-row span the SDK parser stamps.
 	if durationMs > 0 {
@@ -59,6 +72,39 @@ func modelForRow(completion *inference.Completion, params Params) string {
 		return completion.Model
 	}
 	return params.Model
+}
+
+// metadataFinishReason is the metadata key carrying the provider's terminal
+// stop reason for an assistant row.
+const metadataFinishReason = "finish_reason"
+
+// stampFinishReason records why the provider stopped generating. It is an
+// observability fact, not an assembly input, which is why it rides metadata
+// rather than a column — but it is the fact an investigation needs first, and
+// without it a truncated turn has to be inferred from an output-token count
+// that happens to equal a cap. An empty reason (the stream reported none) is
+// left absent rather than stored as "", so "unknown" and "not reported" stay
+// the same thing.
+func stampFinishReason(row *domain.Message, reason string) {
+	if reason == "" {
+		return
+	}
+	if row.Metadata == nil {
+		row.Metadata = map[string]any{}
+	}
+	row.Metadata[metadataFinishReason] = reason
+}
+
+// truncatedEmptyTurn reports an assistant row the provider cut at the output
+// limit before it produced anything a later request could replay — no text,
+// no tool call, no content block. Reasoning alone does not count: the provider
+// keeps the canonical chain of thought and strips non-final blocks on replay,
+// so what reaches the wire from such a row is an empty assistant message.
+func truncatedEmptyTurn(row domain.Message, finishReason string) bool {
+	if !isLengthStop(finishReason) {
+		return false
+	}
+	return row.Content == "" && len(row.ToolCalls) == 0 && len(row.ContentBlocks) == 0
 }
 
 // stampUsage writes the row's four token columns as disjoint counts — the

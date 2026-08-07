@@ -133,6 +133,25 @@ func (e *Engine) insertPending(ctx context.Context, params Params, content, subt
 	return err
 }
 
+// insertDelivered writes a system-authored user row straight into the window,
+// skipping the pending queue. Used where the row is both a statement about
+// the turn that just happened AND the thing the next call must read — the
+// output-limit notice, which stands in for a turn the model can no longer
+// see. Unlike insertNotice it returns its error: the caller is about to make
+// another call that only makes sense with this row in front of it, so a
+// failed write must stop the engagement rather than silently repeat the turn
+// that failed.
+func (e *Engine) insertDelivered(ctx context.Context, params Params, content, subtype string) error {
+	_, err := e.Transcript.Insert(ctx, params.OrgID, &domain.Message{
+		ConversationID: params.ConversationID,
+		UserID:         params.UserID,
+		Role:           "user",
+		Subtype:        subtype,
+		Content:        content,
+	})
+	return err
+}
+
 // insertNotice writes a delivered user row that records something the loop
 // decided — a guard park, an unrecoverable provider error. Delivered
 // (not pending) because it is a statement of fact about this engagement, not
