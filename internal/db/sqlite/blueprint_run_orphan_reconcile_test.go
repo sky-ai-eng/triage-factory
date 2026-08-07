@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -366,4 +367,110 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	if n2, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
 		t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
 	}
+}
+
+// storedTimestampShape reports which on-disk datetime form a stored value
+// carries. The shape depends on how the value was written — a Go time.Time
+// bind, or SQLite's own CURRENT_TIMESTAMP / datetime('now') — and on the
+// connection's _time_format, which the test harness does not set the way
+// production does. So a test must never hardcode the expected layout; it can
+// only compare one writer's shape against another's.
+func storedTimestampShape(t *testing.T, raw string) string {
+	t.Helper()
+	for _, layout := range []string{
+		"2006-01-02 15:04:05.999999999-07:00",     // modernc under _time_format=sqlite (production)
+		"2006-01-02 15:04:05.999999999 -0700 MST", // modernc default (the test harness DSN)
+		"2006-01-02 15:04:05",                     // CURRENT_TIMESTAMP / datetime('now')
+	} {
+		if _, err := time.Parse(layout, raw); err == nil {
+			return layout
+		}
+	}
+	t.Fatalf("stored timestamp %q matches no known on-disk shape", raw)
+	return ""
+}
+
+// TestReconcileOrphanedRuns_MintCrashStampMatchesMarkRunStatus pins that the
+// mint-crash arm writes completed_at in the SAME shape as MarkRunStatus, the
+// primary terminal writer of that column.
+//
+// The arm deliberately mixes clocks — its grace comparison runs on SQLite's own
+// clock (datetime()), its completed_at is bound from Go — which reads as an
+// inconsistency next to the Postgres twin's all-now() statement. It isn't one:
+// an embedded engine shares this process's clock, so there is no DB/app skew
+// for own-DB-time to protect against, and what the column does have is a text
+// format that every other writer already agrees on. "Fixing" the stamp to
+// datetime('now') would put a second shape into the column; this test is what
+// makes that show up here instead of in whatever later query reads the column
+// as text.
+func TestReconcileOrphanedRuns_MintCrashStampMatchesMarkRunStatus(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	task := seedEntityEventTask(t, conn, "stamp-shape")
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "ss-p0", Name: "p0", Body: "b", Source: "user"})
+	insertBlueprintForTest(t, conn, "ss-bp", "Stamp Shape BP")
+	if err := stores.Blueprints.ReplaceSteps(ctx, org, "ss-bp", []string{"ss-p0"}, nil); err != nil {
+		t.Fatalf("ReplaceSteps: %v", err)
+	}
+	newRun := func(id string) string {
+		t.Helper()
+		brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+			ID: id, BlueprintID: "ss-bp", TaskID: task.ID,
+			TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+			WorktreePath: "/tmp/wt-" + id,
+		})
+		if err != nil {
+			t.Fatalf("CreateRun %s: %v", id, err)
+		}
+		return brID
+	}
+	completedAtText := func(brID string) string {
+		t.Helper()
+		var raw string
+		if err := conn.QueryRow(`SELECT CAST(completed_at AS TEXT) FROM blueprint_runs WHERE id = ?`, brID).Scan(&raw); err != nil {
+			t.Fatalf("read completed_at of %s: %v", brID, err)
+		}
+		return raw
+	}
+
+	// The reference: the ordinary terminal write for this column.
+	reference := newRun("ss-marked")
+	if _, err := stores.Blueprints.MarkRunStatus(ctx, org, reference, domain.BlueprintRunStatusFailed, "step_failed", nil); err != nil {
+		t.Fatalf("MarkRunStatus: %v", err)
+	}
+
+	// The subject: childless and past the grace, so the mint-crash arm claims it.
+	swept := newRun("ss-swept")
+	if _, err := conn.Exec(`UPDATE blueprint_runs SET started_at = datetime('now', '-1 hour') WHERE id = ?`, swept); err != nil {
+		t.Fatalf("backdate started_at: %v", err)
+	}
+	if _, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil {
+		t.Fatalf("ReconcileOrphanedRuns: %v", err)
+	}
+	if got, _, _ := blueprintRunStatusDB(t, conn, swept); got != string(domain.BlueprintRunStatusFailed) {
+		t.Fatalf("swept run status = %q, want failed (fixture didn't reach the arm)", got)
+	}
+
+	refRaw, sweptRaw := completedAtText(reference), completedAtText(swept)
+	if refShape, sweptShape := storedTimestampShape(t, refRaw), storedTimestampShape(t, sweptRaw); refShape != sweptShape {
+		t.Errorf("completed_at shapes disagree:\n  MarkRunStatus  %q (%s)\n  mint-crash arm %q (%s)\n"+
+			"both writers must serialize this column identically — see the arm's comment in run_queue.go",
+			refRaw, refShape, sweptRaw, sweptShape)
+	}
+}
+
+// blueprintRunStatusDB reads a blueprint_run's stored status, abort_reason
+// (NULL as ""), and whether completed_at is stamped.
+func blueprintRunStatusDB(t *testing.T, conn *sql.DB, brID string) (status, abortReason string, completedAtSet bool) {
+	t.Helper()
+	var reason sql.NullString
+	var completedAt any
+	if err := conn.QueryRow(`SELECT status, abort_reason, completed_at FROM blueprint_runs WHERE id = ?`, brID).
+		Scan(&status, &reason, &completedAt); err != nil {
+		t.Fatalf("read blueprint_run %s: %v", brID, err)
+	}
+	return status, reason.String, completedAt != nil
 }
