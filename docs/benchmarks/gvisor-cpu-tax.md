@@ -1,8 +1,22 @@
 # gVisor CPU tax — why runs cost ~2.8 cores, not 0.05
 
 Investigation (2026-07-20) prompted by a live deployment showing whole-host
-CPU jump from ~1% to ~12% whenever a single agent run was active — ~50×
-above `docs/benchmarks/sandbox-bench.md`'s "~0.05 cores average" figure.
+CPU jump from ~1% to ~12% whenever a single agent run was active.
+
+**RESOLVED (2026-08-06).** The lever this investigation recommended shipped
+as the native agent loop: the LLM conversation moved host-side into the Go
+executor and the jail's resident process became the compiled Rust tool host
+— bucket A below (the ~72% JS-runtime syscall churn) left the jail
+entirely, not merely compiled in place. Measured on the rebuilt
+`sandbox-bench` (same host, same systrap): **0.026–0.061 cores/run** for
+agent workloads and **0.48 cores/run cycle-averaged (2.1 peak)** for
+CI-shaped build bursts, versus the ~2.8 cores/run measured here — a
+~50–70× in-jail reduction, far past the 2.5–5× projected below. CPU no
+longer binds concurrency on this host class: the 256 subnet ceiling binds
+light fleets and CPU binds CI fleets at ~67 staggered runs / 32 cores,
+with fair-sharing degrading gracefully at 2× oversubscription. Current
+numbers: `docs/benchmarks/sandbox-bench.md`. The analysis below stands as
+the evidence trail.
 
 **Conclusion: one active run costs ~2.8 host cores under gVisor `systrap`, and
 the majority is per-syscall trap-and-dispatch overhead, not the agent's compute.
@@ -93,14 +107,14 @@ blueprints (CI-fix, PR-review: more git/bash spawns) will exceed 2.8 cores.
 
 | constraint | per-run cost | concurrent runs |
 |---|---:|---:|
-| memory (`docs/benchmarks/sandbox-bench.md`) | ~0.5–0.6 GB | ~90 |
+| memory (the sandbox-bench doc as then written) | ~0.5–0.6 GB | ~90 |
 | **CPU, systrap** | ~2.8 cores | **~11** |
 | CPU, kvm | ~0.9 cores | ~35 |
 
 Under systrap, CPU saturates at ~11 concurrent runs — **~8× below** the memory
-cap the existing bench treats as the binding constraint. `docs/benchmarks/sandbox-bench.md`'s
-"CPU cannot bind before memory" conclusion is an artifact of its synthetic
-5%-duty-cycle profile; it does not hold for the real engine under systrap.
+cap the bench of the time treated as the binding constraint. That era's
+"CPU cannot bind before memory" conclusion was an artifact of its synthetic
+5%-duty-cycle profile; it did not hold for the SDK engine under systrap.
 
 ## Why systrap, and the lever
 
@@ -177,16 +191,13 @@ allocator/GC-driven.
   synthetic workload (deterministic strace) — so no CPU win here. The mmap
   source in that proxy is not young-gen scavenge.
 
-### The open lever — must be measured on the real engine
+### The open lever — measured on the real engine below
 
 The synthetic proxy's syscall mix may not match a real delegated run: it opens
 a fresh connection per request (a real run keeps a connection alive to the LLM proxy) and
 never fork/execs (a real run spawns Bash/git constantly — gVisor's worst case).
-**Next step: run the same two instruments (sentry pprof + strace histogram)
-against a real `agentproc.Run` engine** to learn whether the real dominant
-syscalls are mmap (→ allocator choice / V8 flags), fork/exec (→ fewer
-subprocess tool calls), or small I/O (→ buffering). The fix depends on which,
-and it can't be read off the proxy.
+The real-engine decomposition below answered this, and the native loop's
+shipped outcome (see the resolution at the top) settled it in production.
 
 ## Real-engine syscall decomposition (2026-07-20)
 
@@ -232,10 +243,11 @@ non-JS-runtime floor, not to native.
 
 Harness scripts (self-contained, no broker; reusable on any runsc host):
 `mock.mjs` (standalone mock LLM), `engine-run.sh` (netns + real engine +
-strace), `decompose.sh` (3-bucket classifier). A clean permanent bench
-integration is blocked on the `sandbox-bench` claude profile lacking the
-broker wiring the current always-brokered launch path needs — fixing that
-is the prerequisite to folding this in as a `-syscall-profile` mode.
+strace), `decompose.sh` (3-bucket classifier). The bench-integration
+blocker noted at the time — `sandbox-bench` lacking broker wiring — was
+resolved when the bench was rebuilt broker-wired against the native
+runtime; a syscall-profile mode was never needed, because the engine whose
+syscalls were being profiled left the jail entirely.
 
 ## Levers considered, and where each lands
 
@@ -251,7 +263,7 @@ host or other concurrent runs, independent of tenancy):
 | microVM per run (Firecracker) | ~native, stronger isolation | **self-host: no** — needs KVM/nested-virt; forces node provisioning, guest-kernel supply chain; excludes locked-down/air-gapped customers (the isolation-hungry segment). Viable only where the platform IS the microVM (Fly SaaS) |
 | hardened containers (ns+seccomp+Landlock) | ~native | **no** — insufficient: one kernel LPE via an allowed syscall breaks host AND neighbor isolation at once. Only acceptable with per-tenant hosts, which self-host density can't assume |
 | syscall reduction within the JS engine (allocator, buffering) | ~20–40% | modest; unproven on the real engine; keeps the moat intact |
-| **compiled agent harness** (replace the Bun/JSC engine with Go/Rust) | **~2.5–5×** | **the moat-preserving lever** — removes the ~72% JS-runtime syscall churn + (with native tools) the ~12% fork/exec, touching NOTHING in the deployment model. Cost is building/owning the harness (agent quality is the hard part), or forking one |
+| **compiled agent harness** (replace the Bun/JSC engine with Go/Rust) | **~2.5–5× projected — shipped, measured ~50–70×** | **the moat-preserving lever, taken** — shipped as the native loop (Go loop host-side + Rust tool host in-jail), which removed bucket A from the jail entirely rather than compiling it in place; see the resolution at the top |
 
 Note the current vendored `claude` engine is itself Bun/JavaScriptCore, so
 forking another JS harness is CPU-neutral — the density win requires leaving
