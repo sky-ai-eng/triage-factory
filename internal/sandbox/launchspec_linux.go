@@ -262,6 +262,11 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	"NO_PROXY":    {},
 	"no_proxy":    {},
 
+	// Go toolchain policy (agentproc.buildSandboxEnv). Non-credential, and
+	// not a path the broker itself acts on — cmd/go inside the jail is the
+	// only reader.
+	"GOTOOLCHAIN": {},
+
 	// LLM proxy placeholders (agentproc.buildSandboxProxyEnv). The API-key /
 	// AWS-key values here are per-run PLACEHOLDERS scoped to the run's own
 	// proxy, never the real provider credential (Property B).

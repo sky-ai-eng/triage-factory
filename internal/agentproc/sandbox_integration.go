@@ -208,6 +208,19 @@ func buildSandboxEnv(extraEnv []string) []string {
 		"PATH=/opt/tf/bin:/usr/local/bin:/usr/bin:/bin",
 		"HOME=/work",
 		"TERM=xterm",
+		// The rootfs installs Go from alpine's apk, and a distro Go ships
+		// GOTOOLCHAIN=local baked into its go.env so a distro build never
+		// silently swaps toolchains. That default is wrong for us: a repo
+		// whose go.mod floor is newer than the packaged Go then fails to
+		// build at all, with no path forward the agent can take — it is not
+		// root, so it cannot install a package, and the egress allowlist
+		// carries no vendor download host. Restoring the upstream default
+		// makes the version floor self-healing: cmd/go fetches the toolchain
+		// as an ordinary module (golang.org/toolchain) from the module proxy,
+		// which is already an allowlisted registry and is checksum-verified
+		// like any other module. No new host, no new capability — the same
+		// fetch-and-run reach `go build` has for every dependency.
+		"GOTOOLCHAIN=auto",
 		// The sandbox's egress is a fail-closed allowlist of package registries
 		// (egressproxy.DefaultRegistryHosts); the SDK's non-essential hosts —
 		// telemetry, error reporting, the auto-updater, Statsig feature gates —

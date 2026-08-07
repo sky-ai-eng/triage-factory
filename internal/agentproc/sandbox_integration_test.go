@@ -61,6 +61,35 @@ func TestBuildSandboxEnv_CarriesSandboxMarker(t *testing.T) {
 	}
 }
 
+// TestBuildSandboxEnv_CarriesGoToolchainAuto pins the Go version floor's
+// escape hatch onto the base env. The rootfs's Go comes from alpine, whose
+// go.env sets GOTOOLCHAIN=local; under that default a repo requiring a newer
+// Go than the packaged one is simply unbuildable in the jail, because the
+// agent is not root and no vendor download host is allowlisted. "auto" is
+// what makes the floor self-healing, so its absence is a silent capability
+// regression rather than a visible failure — hence a pin rather than a
+// comment. Asserted across extraEnv variants because ExtraEnv is appended
+// verbatim: a caller contributing its own GOTOOLCHAIN would otherwise
+// duplicate the key, and which copy cmd/go reads is platform-dependent.
+func TestBuildSandboxEnv_CarriesGoToolchainAuto(t *testing.T) {
+	const want = "GOTOOLCHAIN=auto"
+	for _, extra := range [][]string{
+		nil,
+		{"TRIAGE_FACTORY_CONVERSATION_ID=r1"},
+	} {
+		var got []string
+		for _, kv := range buildSandboxEnv(extra) {
+			if strings.HasPrefix(kv, "GOTOOLCHAIN=") {
+				got = append(got, kv)
+			}
+		}
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("buildSandboxEnv(%v) carries %v for GOTOOLCHAIN; want exactly one entry, %q",
+				extra, got, want)
+		}
+	}
+}
+
 // TestBuildSandboxEnv_JSCJITDefaultOff pins the engine runtime tuning:
 // the sandbox base env carries BUN_JSC_useJIT=0 by default (the memory
 // win) and drops it when the operator opts back into the JIT.
