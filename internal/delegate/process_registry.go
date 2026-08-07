@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -276,21 +277,39 @@ func (s *Spawner) deregisterProc(runID string) {
 }
 
 // stampExecutor records this spawner instance's executor identity + boot
-// epoch on the run row when the run goes live (an unguarded system write —
+// epoch on the engagement's claim when the run goes live (a system write —
 // the run goroutine holds no JWT claims). This re-stamps what
-// RunQueueStore.ClaimNextRun already wrote atomically at claim (TFAC-578) on
+// RunQueueStore.ClaimNextRun already wrote atomically at claim on
 // a fresh claim — cheap and harmless — but it is the ONLY stamp on the
 // resume path, so it must write both columns, not
 // just executor_id, to keep boot_epoch reflecting the most recent boot that
 // touched the row rather than whatever epoch it was originally claimed
 // under. Best-effort: a failure is logged, not fatal, because executor
 // ownership is a forward-compat hook, not a correctness gate at N=1.
-func (s *Spawner) stampExecutor(orgID, runID string) {
+//
+// Fenced on claimID, because "the process is live" is a claim about ownership
+// and setup is where ownership is most likely to have moved on: a run reaped
+// mid-clone whose process then comes up would otherwise stamp a dead executor
+// onto the successor's claim, and the reaper reads that column. Empty claimID
+// keeps the unfenced active-claim write for callers with no engagement in
+// scope. A refusal is logged loudly and nothing else changes — the engagement
+// carries on to its first transcript write, which meets the same fence and
+// abandons the run properly.
+func (s *Spawner) stampExecutor(orgID, runID, claimID string) {
 	if s.agentRuns == nil {
 		return
 	}
 	executorID, bootEpoch := s.executorIdentity()
-	if err := s.agentRuns.SetExecutorSystem(context.Background(), orgID, runID, executorID, bootEpoch); err != nil {
+	var err error
+	if claimID != "" {
+		err = s.agentRuns.SetExecutorForClaimSystem(context.Background(), orgID, runID, claimID, executorID, bootEpoch)
+	} else {
+		err = s.agentRuns.SetExecutorSystem(context.Background(), orgID, runID, executorID, bootEpoch)
+	}
+	if errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Error("claim fence refused the go-live executor stamp — a successor owns this conversation",
+			"executor", executorID, "run_id", runID, "claim_id", claimID, "org_id", orgID, "error", err)
+	} else if err != nil {
 		delegateLog.Warn("stamp executor on run failed", "executor", executorID, "run_id", runID, "error", err)
 	}
 }

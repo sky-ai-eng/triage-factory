@@ -469,6 +469,11 @@ type ConversationStore interface {
 	// agent subprocess has no JWT-claims context yet.
 	LookupOrgForRunSystem(ctx context.Context, runID string) (string, error)
 	ParkOpenSystem(ctx context.Context, orgID, runID string, park Park) (bool, error)
+
+	// SetSessionSystem is the claimless door onto sdk_session_id. Every
+	// engagement holds a claim and goes through SetSessionForClaimSystem
+	// instead; this one stays for a writer with no engagement in scope, and
+	// for the fenced twin to delegate its write semantics to.
 	SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error
 	// SetActiveClaimPhaseSystem writes claims.phase on the conversation's
 	// ACTIVE claim — the setup/parked sub-state of a live engagement
@@ -508,6 +513,12 @@ type ConversationStore interface {
 	// path where a missing row means the accounting is simply lost.
 	RecordClaimSandboxStatsSystem(ctx context.Context, orgID, claimID string, peakMemMB *int, cpuUsec *int64) error
 
+	// SetWorktreePathSystem is the claimless door onto worktree_path — the
+	// same relationship SetSessionSystem has to its fenced twin. A setup or
+	// rehydrate running as an engagement names its claim
+	// (SetWorktreePathForClaimSystem); a writer that holds none, minting or
+	// enqueueing a conversation no executor can have picked up yet, has no
+	// ownership to assert and writes through here.
 	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error
 
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error)
@@ -549,6 +560,58 @@ type ConversationStore interface {
 	// overwritten with the explicit argument — the claim the fence validated
 	// and the claim the row records are the same one by construction.
 	InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error)
+
+	// SetSessionForClaimSystem records the runtime's session id on the
+	// conversation, refused once the engagement has been fenced out. Same
+	// write as SetSessionSystem; the difference is who is allowed to make it.
+	//
+	// This is the resume coordinate. A fenced-out engagement's late
+	// `system/init` — a zombie whose subprocess came up after a successor
+	// claimed the conversation — would otherwise overwrite the id the
+	// successor is resuming against, and the corruption surfaces a turn later
+	// as a resume into a session that belongs to a dead process. The refusal
+	// is terminal for that id: a zombie's session is discarded, never retried
+	// through the unfenced door.
+	SetSessionForClaimSystem(ctx context.Context, orgID, runID, claimID, sessionID string) error
+
+	// SetExecutorForClaimSystem stamps this engagement's executor identity on
+	// its own claim — the go-live confirmation, made once the agent process
+	// actually exists — refused once the claim is released.
+	//
+	// The unfenced twin resolves "the conversation's active claim" and mints
+	// one when there is none, which is what makes it unsafe for an engagement
+	// to call: setup can outlast a claim, so a run reaped mid-clone whose
+	// process then comes up would re-stamp the SUCCESSOR's claim with a dead
+	// executor's id and boot epoch. Nothing reads that column back to the
+	// process, so the corruption is silent until the reaper reads it and
+	// declares a live engagement's executor lost.
+	//
+	// Two properties, and only one of them is the fence.
+	//
+	// It writes the claim the caller NAMED and mints nothing — on both
+	// dialects, because that is contract rather than enforcement. An
+	// engagement holding a claim needs no mint (ClaimNextRun made it
+	// atomically, in the same statement that reserved the row), and one
+	// holding none is not entitled to invent ownership; a call naming a claim
+	// that isn't there must write nothing at all rather than conjure a row or
+	// land on whichever claim happens to be active.
+	//
+	// It REFUSES a released claim with ErrClaimReleased on Postgres. Local
+	// mode no-ops instead, under the standing N=1 exemption — the write is
+	// equally absent either way, and there is no rival executor for the error
+	// to protect anyone from.
+	SetExecutorForClaimSystem(ctx context.Context, orgID, runID, claimID, executorID string, bootEpoch int64) error
+
+	// SetWorktreePathForClaimSystem records where this engagement's workspace
+	// landed, refused once it no longer owns the conversation. Same write as
+	// SetWorktreePathSystem.
+	//
+	// Setup is the slow part of a run — a clone or a cold rehydrate can outlast
+	// the claim that started it — so this is the write most likely to arrive
+	// late. The path is host-local and the successor may be running on a
+	// different host, so a zombie's stamp points the conversation's resume at a
+	// directory that does not exist where the work is now happening.
+	SetWorktreePathForClaimSystem(ctx context.Context, orgID, runID, claimID, path string) error
 
 	// MarkDeliveredForClaimSystem is the engagement's drain flush: the
 	// pending rows it folded into an assembly are only its to consume while
@@ -609,23 +672,22 @@ type ConversationStore interface {
 	// which is a different thing and must not be treated as a lost race.
 	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, failureKind string) (bool, error)
 
-	// ParkOpenForClaimSystem is ParkOpen driven by the engagement itself: the
-	// park an executor writes when its own run's context is cancelled, refused
-	// once it has been fenced out.
+	// ParkOpenForClaimSystem is ParkOpen driven by the engagement itself,
+	// refused once it has been fenced out. Every park an executor writes
+	// comes through here, deliberate or not: the self-park on its own
+	// cancelled context, and the idle park a turn that simply ended produces.
+	//
+	// The idle one has the weaker story and still needs the fence — a zombie
+	// idle-parking a conversation a successor is mid-turn on flips a running
+	// run to `open` and hands the queue a row somebody is already driving.
 	//
 	// The unfenced twin stays, and is what a USER-initiated cancel uses. That
 	// distinction is the whole reason both exist: a person cancelling a run
 	// is deliberately overriding whichever executor holds it, so their write
-	// must not be gated on ownership, while an executor cancelling itself is
+	// must not be gated on ownership, while an executor parking itself is
 	// only entitled to end a run it still owns. Reaching for the unfenced
 	// version from an engagement path is how the cancel route around this
 	// fence gets rebuilt.
-	//
-	// The idle park has no claim in scope and so goes through the unfenced
-	// ParkOpen. That is a live gap rather than a decision — a zombie executor
-	// can still idle-park a conversation a successor holds — but closing it
-	// means threading a claim id through the live driver, which is its own
-	// change.
 	ParkOpenForClaimSystem(ctx context.Context, orgID, runID, claimID string, park Park) (bool, error)
 
 	// SetClaimPhaseSystem writes claims.phase on one named claim — the

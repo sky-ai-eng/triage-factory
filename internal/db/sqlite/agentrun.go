@@ -785,13 +785,33 @@ func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, m
 // mode is a single process that claims its own work, with no fleet reaper to
 // hand anything over and no second executor to hand it to — the losing side
 // of that race has no way to exist. These wrappers therefore do exactly what
-// their unfenced counterparts do, with the claim id used as the attribution
-// it is on both dialects.
+// their unfenced counterparts do.
+//
+// The claim id carries whichever of its two jobs the write actually has.
+// Where it is attribution — the claim stamped onto a transcript row — it is
+// written here exactly as Postgres writes it. Where it is only the assertion
+// of ownership the fence would have tested — the session id, the worktree
+// path, the terminal, the park — it is unused, because there is no rival
+// owner for it to be measured against.
 //
 // This is not a dialect fork of shared semantics: the write set, the
 // attribution, and the resulting rows are identical. What differs is a
 // refusal that has nothing to refuse. Postgres carries the enforcement and
 // the conformance suite asserts it there.
+//
+// Two are written out below rather than delegated — SetExecutorForClaimSystem
+// and SetClaimPhaseSystem. Their unfenced twins resolve the conversation's
+// ACTIVE claim instead of the named one, and one of them mints a claim when
+// there is none. Neither of those is the fence; both are contract, and
+// delegating would have quietly dropped the caller's claim id on the floor.
+
+func (s *agentRunStore) SetSessionForClaimSystem(ctx context.Context, orgID, runID, claimID, sessionID string) error {
+	return s.SetSession(ctx, orgID, runID, sessionID)
+}
+
+func (s *agentRunStore) SetWorktreePathForClaimSystem(ctx context.Context, orgID, runID, claimID, path string) error {
+	return s.SetWorktreePath(ctx, orgID, runID, path)
+}
 
 func (s *agentRunStore) InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error) {
 	msg.ClaimID = claimID
@@ -812,6 +832,31 @@ func (s *agentRunStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, or
 
 func (s *agentRunStore) ParkOpenForClaimSystem(ctx context.Context, orgID, runID, claimID string, park db.Park) (bool, error) {
 	return s.ParkOpen(ctx, orgID, runID, park)
+}
+
+// SetExecutorForClaimSystem is written out rather than delegated, for the
+// same reason SetClaimPhaseSystem below is: its unfenced twin resolves "the
+// conversation's active claim" and MINTS one when there is none, and those two
+// behaviors are not the fence. They are the contract — a claim-keyed write
+// that never invents ownership — and it holds on both dialects. Delegating
+// would have ignored the caller's claimID and could mint a claim in exactly
+// the edge case (no active claim) where the interface says to write nothing.
+//
+// What local mode drops is only the refusal. A row naming a released claim is
+// a no-op here rather than an ErrClaimReleased, which is the standing N=1
+// exemption: there is no second executor for the refusal to protect the row
+// from. The released_at filter is the twin's own, kept for the same reason
+// SetClaimPhaseSystem keeps it — a released claim's identity is settled
+// history, and rewriting it would be a change neither dialect makes.
+func (s *agentRunStore) SetExecutorForClaimSystem(ctx context.Context, orgID, runID, claimID, executorID string, bootEpoch int64) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE claims SET executor_id = ?, boot_epoch = ?
+		WHERE id = ? AND conversation_id = ? AND released_at IS NULL
+	`, executorID, bootEpoch, claimID, runID)
+	return err
 }
 
 // SetClaimPhaseSystem keeps the released_at filter its active-claim sibling

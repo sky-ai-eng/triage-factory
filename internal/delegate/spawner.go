@@ -1147,6 +1147,43 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, runID, claimID, phase 
 	// start, park, resume). updatePhase stays a pure claim-phase + WS helper.
 }
 
+// setWorktreePath records where a run's workspace resolved, routed exactly the
+// way updatePhase routes a phase: an engagement names its own claim and meets
+// the fence, a writer with no claim in scope goes through the unfenced door.
+//
+// Every production caller is an engagement — a source setup's first clone, a
+// blueprint step's per-claim stamp, a cold rehydrate landing on a new path —
+// and each of them is slow enough to outlive the claim that started it. The
+// empty-claim arm is for a caller minting or enqueueing a conversation no
+// executor can have picked up yet: no successor can exist, so there is nothing
+// to assert ownership against.
+//
+// The fence refusal is logged HERE, once, and every call site then filters it
+// out of its own warning. That split is deliberate: each site's warning names
+// what a lost stamp costs it — a rejected follow-up, a repeat cold rehydrate —
+// and none of those consequences is true of a refusal. The row still has a
+// path; it is the successor's, put there by the engagement that owns the
+// conversation now. A caller that logged the refusal under its own message
+// would be filing a lost claim as a workspace problem.
+//
+// The error is still returned rather than swallowed, so a future caller that
+// wants to change course on losing ownership can, and so the two outcomes stay
+// distinguishable at the call site. No caller does today: a missing path costs
+// a cold rehydrate on the next resume, not the run.
+func (s *Spawner) setWorktreePath(ctx context.Context, orgID, runID, claimID, path string) error {
+	var err error
+	if claimID != "" {
+		err = s.agentRuns.SetWorktreePathForClaimSystem(ctx, orgID, runID, claimID, path)
+	} else {
+		err = s.agentRuns.SetWorktreePathSystem(ctx, orgID, runID, path)
+	}
+	if errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Error("claim fence refused a worktree_path write — a successor owns this conversation; its own workspace stands",
+			"run", runID, "claim_id", claimID, "org_id", orgID, "worktree_path", path, "error", err)
+	}
+	return err
+}
+
 // recomputeTaskBoardColumn is the blueprint-era board placement rule: a task's
 // live column (tasks.status) is a recomputed aggregate over its active
 // blueprint_run's step runs, never a mirror of one run. For a bot-claimed task

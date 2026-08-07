@@ -617,6 +617,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				claudeCwd:     claudeCwd,
 				triggerType:   triggerType,
 				creatorUserID: creatorUserID,
+				claimID:       cfg.claimID,
 			},
 			opts:        baseOpts,
 			perms:       perms,
@@ -631,13 +632,19 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// a successor is driving the conversation. Every branch below records
 	// something about the run — a terminal, a cancellation, a failure — and
 	// none of it is this engagement's to record anymore. The agent is already
-	// dead (the sink killed it), so the only thing left is to leave.
+	// dead (the sink killed it, or the driver closed it on a refused park), so
+	// the only thing left is to leave.
+	//
+	// Two ways to learn it, and either is conclusive: a refused transcript
+	// write (the sink) or a refused park (the driver). They are separate
+	// signals because they come from different writes — a run whose turn ended
+	// quietly may never attempt another insert.
 	//
 	// parked=true is what keeps the workspace on disk. Ownership is gone, so
 	// whether the successor is rehydrating into this very worktree is no
 	// longer knowable from here; a leaked directory is reclaimed by the next
 	// startup sweep, a deleted one that turned out to be in use is not.
-	if sink.fenceTripped() {
+	if sink.fenceTripped() || out.fenced {
 		parked = true
 		return true
 	}
@@ -764,9 +771,15 @@ func (s *Spawner) processCompletion(
 	// cold-resume backstop, flip the status, keep the warm worktree) and skip the
 	// terminal bookkeeping below. An IsError result is always a termination, so
 	// it never takes this branch however envelope-shaped its text.
+	//
+	// A refused park is reported as fenced, not swallowed: the row belongs to
+	// a successor, so nothing here — not the terminal, not the blueprint
+	// advance the caller would run on a plain park — is this engagement's to
+	// decide. parked stays true either way, because that is what keeps the
+	// workspace on disk for whoever holds the conversation now.
 	class, parsed := classifyAgentResult(completion.Result)
 	if !completion.IsError && class == turnNone {
-		_ = s.parkRunOpen(ctx, liveParkContext{
+		fencedOut := s.parkRunOpen(ctx, liveParkContext{
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
@@ -774,9 +787,10 @@ func (s *Spawner) processCompletion(
 			claudeCwd:     claudeCwd,
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
+			claimID:       claimID,
 			reason:        db.ParkIdle(),
 		}, sessionID)
-		return true, false
+		return true, fencedOut
 	}
 
 	// Unconditional upsert of the conversation_memory row at termination: row presence

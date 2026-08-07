@@ -171,6 +171,15 @@ func (s *Spawner) curatorSidecarProvisionFor(orgID, conversationID string) agent
 				// (and re-mint STS material for) a turn that is already
 				// provisioned. Best-effort — a failed clear costs one
 				// redundant re-seal, never the turn.
+				//
+				// Unfenced, and exempt rather than a gap: this closure holds
+				// the conversation, not the claim. Reaching the claim-keyed
+				// write means threading the turn's claim id through the
+				// sidecar bring-up, which is the protocol-adjacent work the
+				// relay ops are already deferred behind. What a stale clear
+				// costs is bounded by what the phase is for — one re-seal by
+				// the backstop sweep, on a turn a successor is provisioning
+				// anyway.
 				if err := s.agentRuns.SetActiveClaimPhaseSystem(provCtx, orgID, conversationID, ""); err != nil {
 					dispatchLog.Warn("clear curator turn awaiting-credentials phase failed",
 						"conversation", conversationID, "error", err)
