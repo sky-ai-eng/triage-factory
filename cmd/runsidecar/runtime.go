@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -217,7 +218,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		result.GitHubAPIURL, result.GitHubAPIToken = url, token
 	}
 	if req.JiraAPIEnabled {
-		srv, url, token, aerr := r.startJiraAPIProxy(req.HostVethIP, req.JiraAPIUpstream)
+		srv, url, token, deployment, aerr := r.startJiraAPIProxy(req.HostVethIP, req.JiraAPIUpstream)
 		if aerr != nil {
 			_ = handle.Shutdown(ctx)
 			if r.githubAPI != nil {
@@ -227,6 +228,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		}
 		r.jiraAPI = srv
 		result.JiraAPIURL, result.JiraAPIToken = url, token
+		result.JiraDeployment = string(deployment)
 	}
 
 	// The real-gh credential-injector proxy: the TLS listener the sandboxed gh
@@ -301,6 +303,7 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 		GitHubAPIToken: proxies.GitHubAPIToken,
 		JiraAPIURL:     proxies.JiraAPIURL,
 		JiraAPIToken:   proxies.JiraAPIToken,
+		JiraDeployment: proxies.JiraDeployment,
 		GitProxyURL:    proxies.GitProxyURL,
 		GitProxyToken:  proxies.GitProxyToken,
 	}
@@ -504,24 +507,29 @@ func (r *credRuntime) startGitHubAPIProxy(hostVethIP, upstream string) (*apiprox
 
 // startJiraAPIProxy binds a Jira-REST credential proxy on the veth IP,
 // resolving the injected auth (Cloud Basic vs Data Center Bearer) from the
-// bundle's Jira credential. upstream defaults to the bundle's Jira URL.
-func (r *credRuntime) startJiraAPIProxy(hostVethIP, upstream string) (*apiproxy.Server, string, string, error) {
+// bundle's Jira credential. upstream defaults to the bundle's Jira URL. The
+// deployment is returned alongside so the orchestrator's proxy client can speak
+// the same REST version the credential's own backend expects — it is derived
+// here because the bundle that names it opens only in this process.
+func (r *credRuntime) startJiraAPIProxy(hostVethIP, upstream string) (*apiproxy.Server, string, string, jira.Deployment, error) {
 	bundle := r.currentBundle()
 	if bundle == nil || bundle.Jira == nil {
-		return nil, "", "", fmt.Errorf("runsidecar: jira api proxy requested but bundle carries no Jira credential")
+		return nil, "", "", "", fmt.Errorf("runsidecar: jira api proxy requested but bundle carries no Jira credential")
 	}
 	if upstream == "" {
 		upstream = bundle.Jira.URL
 	}
 	var auth apiproxy.AuthHeaderSource
+	deployment := jira.DeploymentDataCenter
 	if bundle.Jira.AuthMethod == "cloud" {
 		auth = apiproxy.JiraBasic(bundle.Jira.Email, bundle.Jira.APIToken)
+		deployment = jira.DeploymentCloud
 	} else {
 		auth = apiproxy.JiraBearer(bundle.Jira.PAT)
 	}
 	token, err := randomToken()
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", "", err
 	}
 	srv, err := apiproxy.New(apiproxy.Config{
 		Provider:         apiproxy.ProviderJira,
@@ -531,13 +539,13 @@ func (r *credRuntime) startJiraAPIProxy(hostVethIP, upstream string) (*apiproxy.
 		AuthHeaderSource: auth,
 	})
 	if err != nil {
-		return nil, "", "", fmt.Errorf("runsidecar: construct jira api proxy: %w", err)
+		return nil, "", "", "", fmt.Errorf("runsidecar: construct jira api proxy: %w", err)
 	}
 	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
 	if err != nil {
-		return nil, "", "", fmt.Errorf("runsidecar: start jira api proxy: %w", err)
+		return nil, "", "", "", fmt.Errorf("runsidecar: start jira api proxy: %w", err)
 	}
-	return srv, "http://" + addr, token, nil
+	return srv, "http://" + addr, token, deployment, nil
 }
 
 // randomToken mints a per-run placeholder the orchestrator presents to a

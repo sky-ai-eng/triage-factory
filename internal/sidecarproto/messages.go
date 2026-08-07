@@ -129,6 +129,16 @@ type StartProxiesResult struct {
 	JiraAPIURL   string `json:"jira_api_url,omitempty"`
 	JiraAPIToken string `json:"jira_api_token,omitempty"`
 
+	// JiraDeployment classifies the org's Jira backend (a jira.Deployment
+	// value) so the orchestrator's proxy client picks the REST version the
+	// non-proxy path would — Cloud's v3 needs Atlassian Document Format on a
+	// write, Data Center's v2 needs wiki markup, and guessing wrong fails the
+	// write. It travels because only the sidecar holds the credential the
+	// classification comes from; the value itself is a closed classification,
+	// not credential material, and the orchestrator maps anything it does not
+	// recognize to the Data Center default both backends serve.
+	JiraDeployment string `json:"jira_deployment,omitempty"`
+
 	// GHChannelHost is the injector's bound "host:port" (no scheme) — the value
 	// the orchestrator stamps into the sandbox as GH_HOST. GHChannelToken is the
 	// per-run placeholder the agent's gh presents (GH_ENTERPRISE_TOKEN). Both

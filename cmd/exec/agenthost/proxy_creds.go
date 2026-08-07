@@ -34,8 +34,14 @@ type ProxyCredentials struct {
 	GitHubAPIToken string
 
 	// JiraAPIURL / JiraAPIToken are the same for the Jira-REST proxy.
-	JiraAPIURL   string
-	JiraAPIToken string
+	// JiraDeployment is the org's backend classification (a jira.Deployment
+	// value) relayed from the sidecar, which alone can read it off the sealed
+	// credential — it selects the REST version the client speaks. Empty on a
+	// run with no Jira proxy, and anything unrecognized falls back to Data
+	// Center / v2 in jira.ProxyPlaceholder.
+	JiraAPIURL     string
+	JiraAPIToken   string
+	JiraDeployment string
 
 	// GitProxyURL / GitProxyToken are the run's git-over-HTTPS proxy address and
 	// the per-run placeholder a host-side clone/fetch presents. `workspace add`'s
@@ -72,12 +78,14 @@ func proxyRepoClient(pc *ProxyCredentials, owner, repo string) (*ghclient.Client
 // deployment flavor — the proxy authenticates the placeholder and injects the
 // real Cloud-Basic / DC-Bearer auth on the upstream hop, so the client never
 // needs to know which. BaseURL is the proxy URL; the proxy prepends the real
-// Jira base path (a Cloud gateway /ex/jira/{id} or a DC host root). REST v2 is
-// used for both deployments deliberately — see jira.ProxyPlaceholder for why
-// matching a Cloud org's v3 is gated on ADF-aware comment bodies.
+// Jira base path (a Cloud gateway /ex/jira/{id} or a DC host root). The REST
+// version does follow the deployment, because the two versions disagree on the
+// wire shape of a rich-text write, so the relayed classification is what keeps
+// an agent's comment landing the same way here as on the non-proxy path.
 func proxyJiraClient(pc *ProxyCredentials) (*jiraclient.Client, error) {
 	if pc == nil || pc.JiraAPIURL == "" {
 		return nil, errJiraNotConfigured
 	}
-	return jiraclient.NewClient(jiraclient.ProxyPlaceholder(pc.JiraAPIURL, pc.JiraAPIToken)), nil
+	cfg := jiraclient.ProxyPlaceholder(pc.JiraAPIURL, pc.JiraAPIToken, jiraclient.Deployment(pc.JiraDeployment))
+	return jiraclient.NewClient(cfg), nil
 }
