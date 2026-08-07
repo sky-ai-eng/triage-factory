@@ -1,18 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import type { BlueprintStep, Conversation } from '../types'
 import { setPresenceView } from '../hooks/useWebSocket'
 import { useRunDetail } from '../hooks/useRunDetail'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { isActiveRun } from '../lib/runStatus'
-import { approvalCounts, hasUnresolvedArtifacts, unresolvedArtifacts } from '../lib/approval'
+import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
 import RunStation, {
   type ChainStepLabel,
   type StationActions,
 } from '../components/runstation/RunStation'
 import ReviewOverlay from '../components/ReviewOverlay'
 import PendingPROverlay from '../components/PendingPROverlay'
-import ApprovalList from '../components/ApprovalList'
 import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import { GlassBackdrop } from './setup/glass'
 import { toast } from '../components/Toast/toastStore'
@@ -30,7 +29,6 @@ export default function RunDetail() {
     run,
     task,
     messages,
-    artifacts,
     loading,
     notFound,
     error,
@@ -47,40 +45,17 @@ export default function RunDetail() {
   const [now, setNow] = useState(() => Date.now())
   const [stopPending, setStopPending] = useState(false)
   // Approval is derived now, not a stored run status: the run's unresolved
-  // artifact set (draft PRs + ready reviews) drives a *list* of approvable cards.
-  // `activeArtifact` is the one per-item editor currently open (you edit one at a
-  // time — ReviewOverlay / PendingPROverlay key off a single artifact id);
-  // `listOpen` is the roster panel; `confirmRequeueOpen` gates the destructive
-  // resolve-all on Return-to-queue.
+  // artifact set (draft PRs + ready reviews) surfaces at the top of the
+  // station's artifact lists (the dock popover + the telemetry rail).
+  // `activeArtifact` is the one per-item editor currently open (you edit one at
+  // a time — ReviewOverlay / PendingPROverlay key off a single artifact id);
+  // `confirmRequeueOpen` gates the destructive resolve-all on Return-to-queue.
   const [activeArtifact, setActiveArtifact] = useState<{
     kind: 'review' | 'pr'
     id: string
   } | null>(null)
-  const [listOpen, setListOpen] = useState(false)
   const [confirmRequeueOpen, setConfirmRequeueOpen] = useState(false)
   const [requeueBusy, setRequeueBusy] = useState(false)
-
-  // The unresolved approvable subset — every draft PR + ready review on this run,
-  // joined from the live artifact set and the run projection's authoritative id
-  // list (the ready-review predicate lives server-side, so artifact.state alone
-  // can't reconstruct it).
-  const unresolved = useMemo(
-    () => unresolvedArtifacts(artifacts, run?.pending_artifact_ids ?? []),
-    [artifacts, run?.pending_artifact_ids],
-  )
-
-  // When the last item resolves (here or in another tab — the hook re-pulls the
-  // set on softRefresh / artifact_updated), close the roster: there's nothing
-  // left to approve, and the card re-derives to in-progress (live) / done
-  // (terminal) on its own. No "mark done vs keep open" prompt.
-  //
-  // Gate on the run's authoritative derived predicate, NOT unresolved.length:
-  // the intersection can be transiently empty (the roster opened before
-  // /artifacts loaded, or a fetch race) while approvals genuinely remain —
-  // closing on that would yank the UI out from under the user.
-  useEffect(() => {
-    if (listOpen && !hasUnresolvedArtifacts(run)) setListOpen(false)
-  }, [listOpen, run])
 
   // Presence (TFAC-392): this run's detail page is an answer-capable surface for
   // ITS run's permission prompts. Report run:<id> while mounted (re-firing if the
@@ -213,13 +188,10 @@ export default function RunDetail() {
     void doRequeue()
   }, [run, doRequeue])
 
-  // The dock's "Review N items →" affordance opens the approval roster (the list
-  // of every unresolved draft PR / ready review), not a single overlay.
-  const handleReview = useCallback(() => setListOpen(true), [])
-
-  // Open one artifact's editor overlay by id — from a roster card, or from the
-  // rail's Artifacts list. The per-item editors (ReviewOverlay / PendingPROverlay)
-  // each key off a single artifact id, so they're addressed one at a time.
+  // Open one artifact's editor overlay by id — from the dock's approval
+  // popover, or from the rail's Artifacts list. The per-item editors
+  // (ReviewOverlay / PendingPROverlay) each key off a single artifact id, so
+  // they're addressed one at a time.
   const handleOpenArtifact = useCallback((kind: 'review' | 'pr', artifactId: string) => {
     setActiveArtifact({ kind, id: artifactId })
   }, [])
@@ -262,8 +234,8 @@ export default function RunDetail() {
     onBack: () => navigate(orgHref('/board')),
     onCancel: handleStop,
     onRequeue: handleRequeue,
-    onReview: handleReview,
     onOpenArtifact: handleOpenArtifact,
+    onArtifactResolved: softRefresh,
     onMessage: handleMessage,
     onInterrupt: handleStop,
     stopPending,
@@ -275,17 +247,6 @@ export default function RunDetail() {
   return (
     <div className="relative h-screen p-3">
       <GlassBackdrop />
-
-      {/* The approval roster — one card per unresolved draft PR / ready review,
-          each editable/approvable by id and dismissable in place. */}
-      <ApprovalList
-        open={listOpen}
-        onClose={() => setListOpen(false)}
-        items={unresolved}
-        pendingExpected={hasUnresolvedArtifacts(run)}
-        onOpenItem={handleOpenArtifact}
-        onDismissed={softRefresh}
-      />
 
       {/* Per-item editors — one open at a time, addressed by artifact id. A
           softRefresh on close re-derives the set in place (no spinner flash). */}

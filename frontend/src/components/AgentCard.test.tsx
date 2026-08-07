@@ -125,6 +125,70 @@ describe('AgentCard artifacts affordance', () => {
   })
 })
 
+describe('AgentCard attention row', () => {
+  beforeEach(() => vi.restoreAllMocks())
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('opens the lone unresolved artifact directly — no list detour', () => {
+    vi.stubGlobal('fetch', vi.fn())
+    const onOpenArtifact = renderCard({
+      Status: 'running',
+      artifact_count: 2,
+      has_unresolved_artifacts: true,
+      unresolved_pr_count: 1,
+      unresolved_review_count: 0,
+      pending_artifact_ids: ['pr1'],
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /PR ready to open/ }))
+    expect(onOpenArtifact).toHaveBeenCalledWith('pr', 'pr1')
+    // Straight to the overlay: the artifacts popover never opened, so the
+    // list was never fetched.
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+
+  it('names both kinds and raises the artifacts popover for a mixed set', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            {
+              id: 'pr1',
+              kind: 'pull_request',
+              provider: 'github',
+              state: 'draft',
+              target: 'org/repo#18',
+              external_id: '18',
+              url: 'https://gh/pr',
+              details: null,
+              created_at: '2026-06-25T00:00:00Z',
+            },
+          ]),
+      }),
+    )
+    const onOpenArtifact = renderCard({
+      Status: 'running',
+      artifact_count: 3,
+      has_unresolved_artifacts: true,
+      unresolved_pr_count: 2,
+      unresolved_review_count: 1,
+      pending_artifact_ids: ['pr1', 'pr2', 'rv1'],
+    })
+
+    // The kicker carries the per-kind breakdown, not a bare item count.
+    const row = screen.getByRole('button', { name: /2 PRs · 1 review ready/ })
+    fireEvent.click(row)
+
+    // The popover (the same list the footer button opens) raises with the
+    // run's artifacts; nothing opened directly.
+    expect(await screen.findByText('org/repo#18')).toBeInTheDocument()
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/agent/conversations/r1/artifacts')
+    expect(onOpenArtifact).not.toHaveBeenCalled()
+  })
+})
+
 describe('AgentCard failure-kind rendering', () => {
   it('renders the memory-limit verdict + knob copy for a summaryless killed run', () => {
     // failRun writes no ResultSummary — the kind alone must surface the block.

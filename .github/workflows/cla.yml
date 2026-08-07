@@ -11,6 +11,12 @@ permissions:
   pull-requests: write
   checks: write
 
+# Single source for the allowlist — the CLA action input and the
+# failure-report step below must agree on it. GitHub App committers
+# appear under their "<app-slug>[bot]" login, so the suffix is required.
+env:
+  CLA_ALLOWLIST: "AidanAllchin,sky-ai-bot,triage-factory-sky-ai[bot],dependabot[bot],github-actions[bot],claude[bot],claude"
+
 jobs:
   cla:
     runs-on: ubuntu-latest
@@ -48,4 +54,83 @@ jobs:
           branch: "cla-signatures"
           remote-organization-name: "sky-ai-eng"
           remote-repository-name: "triage-factory"
-          allowlist: "AidanAllchin,sky-ai-bot,triage-factory-sky-ai,dependabot[bot],github-actions[bot],claude[bot],claude"
+          allowlist: ${{ env.CLA_ALLOWLIST }}
+
+      # The action's failure message names only the PR, never the person
+      # ("Committers of Pull Request number N have to sign the CLA"), which
+      # makes every allowlist gap a guessing game. Re-derive the unsigned set
+      # so the error annotation and step summary name the exact logins.
+      - name: Name the unsigned committers
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          # This step exists to explain a failure, so it must survive its own
+          # API hiccups: a failed lookup degrades to a warning naming the
+          # error rather than dying under -e/pipefail with no output at all.
+          if ! committers=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/commits" \
+              --paginate --jq '.[] | .author.login // .commit.author.email' \
+              2>"${RUNNER_TEMP}/gh-commits-err" | sort -u); then
+            echo "::warning::CLA diagnostics unavailable — could not list PR #${PR_NUMBER} commits: $(cat "${RUNNER_TEMP}/gh-commits-err")"
+            exit 0
+          fi
+
+          # A 404 here just means nobody has signed yet; any other failure
+          # means the "unsigned" verdicts below could be wrong, so carry a
+          # caveat instead of silently blaming signed contributors.
+          signatures_caveat=""
+          if ! signed=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/contents/signatures/cla.json?ref=cla-signatures" \
+              --jq '.content' 2>"${RUNNER_TEMP}/gh-sig-err" | base64 -d | jq -r '.signedContributors[].name'); then
+            signed=""
+            if ! grep -q "HTTP 404" "${RUNNER_TEMP}/gh-sig-err"; then
+              signatures_caveat="the signature file could not be read ($(tr '\n' ' ' <"${RUNNER_TEMP}/gh-sig-err")), so some of the committers named here may in fact have signed"
+            fi
+          fi
+
+          # Same matching rules as contributor-assistant: exact match, with
+          # "*" as the only wildcard (so "[bot]" is literal, not a glob class).
+          is_allowed() {
+            local user="$1" pat regex
+            IFS=',' read -ra patterns <<<"$CLA_ALLOWLIST"
+            for pat in "${patterns[@]}"; do
+              pat="${pat// /}"
+              if [[ "$pat" == *'*'* ]]; then
+                regex="^$(printf '%s' "$pat" | sed -e 's/[][\.^$+?(){}|]/\\&/g' -e 's/\*/.*/g')$"
+                [[ "$user" =~ $regex ]] && return 0
+              elif [[ "$user" == "$pat" ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          unsigned=()
+          for user in $committers; do
+            if is_allowed "$user" || grep -qxF "$user" <<<"$signed"; then
+              continue
+            fi
+            unsigned+=("$user")
+          done
+
+          if [[ ${#unsigned[@]} -gt 0 ]]; then
+            echo "::error::CLA check failed for committer(s): ${unsigned[*]} — sign the CLA or add them to the allowlist in .github/workflows/cla.yml"
+            if [[ -n "$signatures_caveat" ]]; then
+              echo "::warning::${signatures_caveat}"
+            fi
+            {
+              echo "### CLA check failed"
+              echo ""
+              echo "Committers on PR #${PR_NUMBER} with no signature and no allowlist match:"
+              for user in "${unsigned[@]}"; do
+                echo "- \`${user}\`"
+              done
+              if [[ -n "$signatures_caveat" ]]; then
+                echo ""
+                echo "> Note: ${signatures_caveat}."
+              fi
+            } >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::CLA action failed, but every committer matches the allowlist or signature file — see the action step's own log for the cause."
+          fi

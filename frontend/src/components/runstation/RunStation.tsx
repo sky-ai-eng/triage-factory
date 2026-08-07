@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { motion, useReducedMotion } from 'motion/react'
+import * as Popover from '@radix-ui/react-popover'
 import { ArrowLeft, ExternalLink, Pause, Send, Square } from 'lucide-react'
 import type { Message, Conversation, Task } from '../../types'
 import type { PendingPermission, PermissionDecisionInput } from '../../lib/permissions'
@@ -17,7 +18,13 @@ import {
   resumeBlockedCopy,
   workStartedAt,
 } from '../../lib/runStatus'
-import { approvalAction, approvalCounts, hasUnresolvedArtifacts } from '../../lib/approval'
+import {
+  approvalAction,
+  approvalCounts,
+  artifactSetKey,
+  hasUnresolvedArtifacts,
+} from '../../lib/approval'
+import ArtifactList from '../ArtifactList'
 import { EventTag, SourceTag } from '../board/cardChrome'
 import { STEP_VAR, type StepState } from '../board/cardStyle'
 import { PermissionPrompt } from '../permissions/PermissionPrompt'
@@ -30,10 +37,14 @@ export interface StationActions {
   onBack: () => void
   onCancel?: () => void
   onRequeue?: () => void
-  onReview?: () => void
-  /** Open an artifact's approval overlay (PR / review) by artifact id, from the
-   *  telemetry rail's Artifacts list. */
+  /** Open an artifact's approval overlay (PR / review) by artifact id — from
+   *  the telemetry rail's Artifacts list, the dock's approval popover, or the
+   *  dock button directly when exactly one item is unresolved. */
   onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
+  /** Re-pull the run projection after an in-place artifact dismiss (the
+   *  artifact list refetches its own rows; the counts and the derived approval
+   *  state live on the run row). */
+  onArtifactResolved?: () => void
   /** Steer the run with a free-form message (live process or `open` resume). */
   onMessage?: (text: string) => void
   /** Stop the run (→ open, resumable). Same operation as onCancel; the two
@@ -164,6 +175,7 @@ export default function RunStation({
           state={st}
           now={now}
           onOpenArtifact={actions.onOpenArtifact}
+          onArtifactResolved={actions.onArtifactResolved}
         />
       </div>
 
@@ -563,10 +575,8 @@ function IntakeDock({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          {hasUnresolved && actions.onReview && (
-            <DockButton tone="var(--color-snooze)" solid onClick={actions.onReview}>
-              {approvalAction(counts)} →
-            </DockButton>
+          {hasUnresolved && actions.onOpenArtifact && (
+            <ApprovalAffordance run={run} counts={counts} actions={actions} />
           )}
           {/* Pause and Cancel are one operation now — both stop the run and
               park it open, resumable. Merging them into a single control is UI
@@ -621,6 +631,73 @@ function IntakeDock({
         </p>
       )}
     </div>
+  )
+}
+
+// ApprovalAffordance — the dock's "your move" control over the unresolved
+// artifact set. Exactly one unresolved item opens its editor directly (no list
+// detour; pending_artifact_ids lists draft PRs first, then ready reviews, so
+// unresolved_pr_count discriminates the head's kind). A plural/mixed set — or
+// a transiently absent id set — raises a popover with the run's artifact list,
+// unresolved rows sorted first: the same list the board card and the telemetry
+// rail use, so there is one approval surface, not a separate roster.
+function ApprovalAffordance({
+  run,
+  counts,
+  actions,
+}: {
+  run: Conversation
+  counts: ReturnType<typeof approvalCounts>
+  actions: StationActions
+}) {
+  const [open, setOpen] = useState(false)
+  const ids = run.pending_artifact_ids ?? []
+
+  if (counts.total === 1 && ids.length > 0) {
+    return (
+      <DockButton
+        tone="var(--color-snooze)"
+        solid
+        onClick={() =>
+          actions.onOpenArtifact?.((run.unresolved_pr_count ?? 0) > 0 ? 'pr' : 'review', ids[0])
+        }
+      >
+        {approvalAction(counts)} →
+      </DockButton>
+    )
+  }
+
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <DockButton tone="var(--color-snooze)" solid>
+          {approvalAction(counts)} →
+        </DockButton>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          side="top"
+          align="end"
+          sideOffset={8}
+          className="z-[100] max-h-[360px] w-[320px] overflow-y-auto rounded-xl border border-border-glass bg-surface-raised/95 p-2.5 shadow-lg shadow-black/[0.08] backdrop-blur-2xl animate-in fade-in-0 zoom-in-95"
+        >
+          <div className="mb-1.5 px-1 font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-text-tertiary/70">
+            Artifacts
+          </div>
+          <ArtifactList
+            runId={run.ID}
+            pendingArtifactIds={run.pending_artifact_ids}
+            refreshKey={artifactSetKey(run)}
+            onOpenApproval={(kind, id) => {
+              setOpen(false)
+              actions.onOpenArtifact?.(kind, id)
+            }}
+            onResolved={actions.onArtifactResolved}
+          />
+          <Popover.Arrow className="fill-surface-raised" />
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }
 
@@ -735,26 +812,24 @@ function StreamShimmer({ light }: { light: string }) {
   )
 }
 
+// Extra button props (onClick, aria/data attributes, ref) pass through so the
+// button can also serve as a Radix popover trigger via asChild.
 function DockButton({
   children,
   tone,
-  onClick,
-  disabled,
   solid,
   icon,
+  ...rest
 }: {
   children: React.ReactNode
   tone: string
-  onClick: () => void
-  disabled?: boolean
   solid?: boolean
   icon?: React.ReactNode
-}) {
+} & React.ComponentPropsWithRef<'button'>) {
   return (
     <button
       type="button"
-      onClick={onClick}
-      disabled={disabled}
+      {...rest}
       className="inline-flex items-center gap-1.5 rounded-[4px] px-2.5 py-1 font-mono text-[10px] font-semibold uppercase tracking-[0.1em] transition-colors disabled:cursor-wait disabled:opacity-60"
       style={
         solid
