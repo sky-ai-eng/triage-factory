@@ -11,6 +11,12 @@ permissions:
   pull-requests: write
   checks: write
 
+# Single source for the allowlist — the CLA action input and the
+# failure-report step below must agree on it. GitHub App committers
+# appear under their "<app-slug>[bot]" login, so the suffix is required.
+env:
+  CLA_ALLOWLIST: "AidanAllchin,sky-ai-bot,triage-factory-sky-ai[bot],dependabot[bot],github-actions[bot],claude[bot],claude"
+
 jobs:
   cla:
     runs-on: ubuntu-latest
@@ -48,4 +54,59 @@ jobs:
           branch: "cla-signatures"
           remote-organization-name: "sky-ai-eng"
           remote-repository-name: "triage-factory"
-          allowlist: "AidanAllchin,sky-ai-bot,triage-factory-sky-ai,dependabot[bot],github-actions[bot],claude[bot],claude"
+          allowlist: ${{ env.CLA_ALLOWLIST }}
+
+      # The action's failure message names only the PR, never the person
+      # ("Committers of Pull Request number N have to sign the CLA"), which
+      # makes every allowlist gap a guessing game. Re-derive the unsigned set
+      # so the error annotation and step summary name the exact logins.
+      - name: Name the unsigned committers
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          committers=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/commits" \
+            --paginate --jq '.[] | .author.login // .commit.author.email' | sort -u)
+          signed=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/contents/signatures/cla.json?ref=cla-signatures" \
+            --jq '.content' 2>/dev/null | base64 -d | jq -r '.signedContributors[].name' || true)
+
+          # Same matching rules as contributor-assistant: exact match, with
+          # "*" as the only wildcard (so "[bot]" is literal, not a glob class).
+          is_allowed() {
+            local user="$1" pat regex
+            IFS=',' read -ra patterns <<<"$CLA_ALLOWLIST"
+            for pat in "${patterns[@]}"; do
+              pat="${pat// /}"
+              if [[ "$pat" == *'*'* ]]; then
+                regex="^$(printf '%s' "$pat" | sed -e 's/[][\.^$+?(){}|]/\\&/g' -e 's/\*/.*/g')$"
+                [[ "$user" =~ $regex ]] && return 0
+              elif [[ "$user" == "$pat" ]]; then
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          unsigned=()
+          for user in $committers; do
+            if is_allowed "$user" || grep -qxF "$user" <<<"$signed"; then
+              continue
+            fi
+            unsigned+=("$user")
+          done
+
+          if [[ ${#unsigned[@]} -gt 0 ]]; then
+            echo "::error::CLA check failed for committer(s): ${unsigned[*]} — sign the CLA or add them to the allowlist in .github/workflows/cla.yml"
+            {
+              echo "### CLA check failed"
+              echo ""
+              echo "Committers on PR #${PR_NUMBER} with no signature and no allowlist match:"
+              for user in "${unsigned[@]}"; do
+                echo "- \`${user}\`"
+              done
+            } >>"$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::CLA action failed, but every committer matches the allowlist or signature file — see the action step's own log for the cause."
+          fi
