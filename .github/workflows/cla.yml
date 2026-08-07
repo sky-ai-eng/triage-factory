@@ -48,4 +48,4 @@ jobs:
           branch: "cla-signatures"
           remote-organization-name: "sky-ai-eng"
           remote-repository-name: "triage-factory"
-          allowlist: "AidanAllchin,sky-ai-bot,dependabot[bot],github-actions[bot],claude[bot],claude"
+          allowlist: "AidanAllchin,sky-ai-bot,triage-factory-sky-ai,dependabot[bot],github-actions[bot],claude[bot],claude"
