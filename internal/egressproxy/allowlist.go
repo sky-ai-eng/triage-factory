@@ -21,9 +21,8 @@ import "strings"
 // the spawner; the proxy's shape doesn't change.
 func DefaultRegistryHosts() []string {
 	return []string{
-		// npm / pnpm / yarn
+		// npm / pnpm
 		"registry.npmjs.org",
-		"registry.yarnpkg.com",
 		// Go modules + checksum database
 		"proxy.golang.org",
 		"sum.golang.org",
