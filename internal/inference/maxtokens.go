@@ -4,6 +4,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/maximhq/bifrost/core/schemas"
 
@@ -48,12 +49,28 @@ const (
 	// versus observed cap hits.
 	DefaultBedrockMaxOutputTokens = 32768
 
-	// BedrockMaxOutputEnv overrides the Bedrock budget. An unparseable or
-	// non-positive value logs and falls back to the default.
+	// BedrockMaxOutputEnv overrides the Bedrock budget. A configured value is
+	// used as given — it is the deployment's quota being spent, and a knob
+	// that silently substitutes a different number is not a knob. The only
+	// bound applied to it is the model's own maximum, above which the API
+	// rejects the request outright. There is deliberately NO lower floor: a
+	// value small enough that a thinking-heavy turn exhausts it before acting
+	// will reproduce the failure the default guards against, and the engine's
+	// output-limit arm is what makes that legible rather than silent.
+	//
+	// An unparseable or non-positive value is not a configured value at all —
+	// it names no budget — so it warns once and falls back to the default.
 	BedrockMaxOutputEnv = "TF_BEDROCK_MAX_OUTPUT_TOKENS"
 )
 
 var maxTokensLog = logging.Component("inference")
+
+// badBedrockBudgetWarn keeps the invalid-value warning to one line per
+// process. The read below happens per provider call, so an unguarded warn
+// would log on every LLM call for the lifetime of a misconfigured deployment
+// — turning one configuration mistake into a permanent stream of identical
+// lines, which is how the line stops being read at all.
+var badBedrockBudgetWarn sync.Once
 
 // ModelMaxOutput returns the model's maximum completion length from the
 // vendored datasheet, with the same lookup rules as pricing and ModelWindow
@@ -89,8 +106,10 @@ func maxOutputTokens(provider schemas.ModelProvider, model string, bedrockBudget
 		if bedrockBudget <= 0 {
 			bedrockBudget = DefaultBedrockMaxOutputTokens
 		}
-		// The budget is what we ask for; the model's own maximum is what the
-		// API will accept. Asking above it is a 400, not a bigger answer.
+		// The budget is what we ask for, whatever the operator set it to; the
+		// model's own maximum is the one bound, because asking above it is a
+		// 400 rather than a bigger answer. Nothing raises a low budget — see
+		// BedrockMaxOutputEnv for why that is deliberate.
 		if known && ceiling < bedrockBudget {
 			return ceiling
 		}
@@ -114,8 +133,10 @@ func bedrockOutputBudget() int {
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {
-		maxTokensLog.Warn("invalid "+BedrockMaxOutputEnv+"; using the default Bedrock output budget",
-			"value", raw, "default", DefaultBedrockMaxOutputTokens)
+		badBedrockBudgetWarn.Do(func() {
+			maxTokensLog.Warn("invalid "+BedrockMaxOutputEnv+"; using the default Bedrock output budget",
+				"value", raw, "default", DefaultBedrockMaxOutputTokens)
+		})
 		return DefaultBedrockMaxOutputTokens
 	}
 	return n

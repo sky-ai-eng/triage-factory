@@ -3,6 +3,7 @@ package agentloop
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -422,6 +423,34 @@ func TestRun_EmptyLengthStopEscalationIsClampedToTheModel(t *testing.T) {
 	}
 	if p.requests[1].MaxTokens != 64000 {
 		t.Errorf("retry max_tokens = %d, want the model's own maximum 64000, not 80000", p.requests[1].MaxTokens)
+	}
+}
+
+// TestEscalateMaxTokens pins the clamp arithmetic directly, including the one
+// input the loop cannot produce but a caller can: an explicit cap large
+// enough that doubling it overflows int. A negative cap is not a clamped
+// request, it is a malformed one.
+func TestEscalateMaxTokens(t *testing.T) {
+	const sonnet = "claude-sonnet-4-5" // 64000 output tokens
+	cases := []struct {
+		name    string
+		current int
+		model   string
+		want    int
+	}{
+		{"doubles below the ceiling", 8000, sonnet, 16000},
+		{"clamps at the ceiling", 40000, sonnet, 64000},
+		{"exactly half the ceiling clamps rather than lands on it", 32000, sonnet, 64000},
+		{"an explicit cap already above the ceiling comes back at it", 200000, sonnet, 64000},
+		{"a cap that would overflow the double never goes negative", math.MaxInt, sonnet, 64000},
+		{"an unknown model has no ceiling to clamp against", 8000, "some-model-nobody-ships", 8000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := escalateMaxTokens(tc.current, tc.model); got != tc.want {
+				t.Errorf("escalateMaxTokens(%d, %q) = %d, want %d", tc.current, tc.model, got, tc.want)
+			}
+		})
 	}
 }
 

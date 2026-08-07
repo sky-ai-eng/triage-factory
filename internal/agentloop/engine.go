@@ -691,10 +691,14 @@ func escalateMaxTokens(current int, model string) int {
 	if !ok {
 		return current
 	}
-	if doubled := current * 2; doubled < ceiling {
-		return doubled
+	// Halve the ceiling rather than double the cap: the comparison has to
+	// happen before the multiply, because a caller that pinned an absurd
+	// explicit cap would overflow int and come back with a negative number —
+	// which is not a clamped cap, it is a malformed request.
+	if current >= ceiling/2 {
+		return ceiling
 	}
-	return ceiling
+	return current * 2
 }
 
 // toolSchemas assembles the call's tool list: the seven in-jail tools, plus
