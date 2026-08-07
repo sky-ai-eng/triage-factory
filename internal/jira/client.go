@@ -273,8 +273,13 @@ func ReachabilityURL(baseURL string) string {
 // Atlassian Document Format object and rejects a string outright, so the markup
 // is converted here (see adf.go) rather than shipped flat.
 //
-// Empty renders as JSON null on v3: ADF has no empty document, and null is what
-// clears a description. On v2 the empty string already means the same thing.
+// Empty renders as JSON null on v3 rather than as a document, because ADF has
+// no empty document and an empty content array is a schema violation Jira
+// rejects before it ever looks at the field. What an empty value then *means*
+// is the field's business, not this function's: on a description it clears the
+// field (as the v2 empty string does), while on a comment body Jira rejects it
+// on both versions. Nothing here makes an empty comment a valid operation — it
+// only keeps the resulting failure Jira's own.
 func (cfg Config) richTextValue(s string) any {
 	if cfg.APIVersion != APIv3 {
 		return s

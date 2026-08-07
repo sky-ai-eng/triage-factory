@@ -251,8 +251,10 @@ func TestWikiToADF_KeepsProse(t *testing.T) {
 
 // TestRichTextValue pins the version split at the seam every rich-text write
 // goes through: v2 ships the wiki-markup string untouched, v3 ships a document,
-// and an empty value clears the field rather than sending an empty document
-// (which is not valid ADF).
+// and an empty value renders as null rather than as an empty document, which
+// ADF has no valid form for. Only the encoding is asserted here — whether an
+// empty value is a legal operation belongs to the field, and the two disagree
+// (it clears a description; Jira rejects it on a comment body).
 func TestRichTextValue(t *testing.T) {
 	dc := DataCenterPAT("https://jira.example.com", "tok")
 	if got := dc.richTextValue("h2. Title"); got != "h2. Title" {
@@ -271,7 +273,7 @@ func TestRichTextValue(t *testing.T) {
 		t.Errorf("v3 doc root = {%q, %d}, want {\"doc\", 1}", doc.Type, doc.Version)
 	}
 	if got := cloud.richTextValue("  "); got != nil {
-		t.Errorf("v3 richTextValue(blank) = %#v, want nil so the field clears", got)
+		t.Errorf("v3 richTextValue(blank) = %#v, want nil rather than an empty document", got)
 	}
 }
 
