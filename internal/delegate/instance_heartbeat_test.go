@@ -37,7 +37,7 @@ func TestSetExecutorID_OverridesConstructorDefault(t *testing.T) {
 	}
 
 	seedRun(t, database, "run-stamp", "sess-1", "/tmp/wt-run-stamp")
-	s.stampExecutor(runmode.LocalDefaultOrgID, "run-stamp")
+	s.stampExecutor(runmode.LocalDefaultOrgID, "run-stamp", "")
 
 	var stored string
 	if err := database.QueryRow(`SELECT executor_id FROM claims WHERE conversation_id = ? AND released_at IS NULL`, "run-stamp").Scan(&stored); err != nil {

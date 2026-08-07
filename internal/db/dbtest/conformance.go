@@ -108,6 +108,64 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 		}
 	})
 
+	t.Run("ResetStaleScoring_recovers_crash_residue_only", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		residue := seed(t, 2)   // marked in_progress, then "the process died"
+		untouched := seed(t, 1) // still pending — never picked
+		done := seed(t, 1)      // scored — a completed cycle's output
+
+		if err := s.MarkScoring(ctx, orgID, residue); err != nil {
+			t.Fatalf("MarkScoring: %v", err)
+		}
+		if err := s.UpdateTaskScores(ctx, orgID, []domain.TaskScoreUpdate{{
+			ID:                  done[0],
+			PriorityScore:       0.7,
+			AutonomySuitability: 0.7,
+			Summary:             "already scored",
+			PriorityReasoning:   "already scored",
+		}}); err != nil {
+			t.Fatalf("UpdateTaskScores: %v", err)
+		}
+
+		n, err := s.ResetStaleScoring(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ResetStaleScoring: %v", err)
+		}
+		if n != len(residue) {
+			t.Errorf("ResetStaleScoring returned %d, want %d (only the in_progress rows)", n, len(residue))
+		}
+
+		unscored := map[string]bool{}
+		tasks, err := s.UnscoredTasks(ctx, orgID)
+		if err != nil {
+			t.Fatalf("UnscoredTasks after ResetStaleScoring: %v", err)
+		}
+		for _, task := range tasks {
+			unscored[task.ID] = true
+		}
+		for _, id := range residue {
+			if !unscored[id] {
+				t.Errorf("task %s still invisible to UnscoredTasks after ResetStaleScoring", id)
+			}
+		}
+		if !unscored[untouched[0]] {
+			t.Errorf("pending task %s dropped out of UnscoredTasks", untouched[0])
+		}
+		if unscored[done[0]] {
+			t.Errorf("scored task %s resurfaced in UnscoredTasks; ResetStaleScoring must not touch 'scored'", done[0])
+		}
+
+		// Idempotent: a second call has nothing left to move, which is
+		// also what every crash-free cycle sees.
+		again, err := s.ResetStaleScoring(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ResetStaleScoring (second call): %v", err)
+		}
+		if again != 0 {
+			t.Errorf("second ResetStaleScoring returned %d, want 0", again)
+		}
+	})
+
 	t.Run("UpdateTaskScores_applies_scores_and_marks_scored", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		ids := seed(t, 2)

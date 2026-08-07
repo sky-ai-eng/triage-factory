@@ -392,7 +392,11 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// finalizes). No in-process for-loop holds the sequencing — blueprint_runs
 	// does (current_step_index), so a crash mid-flight is recoverable. The
 	// blueprint_run was just committed (the replay fence point); if the enqueue
-	// fails, mark it failed so it doesn't strand non-terminal.
+	// fails, mark it failed so it doesn't strand non-terminal. A hard death in
+	// the same window can't run that write, and the parent it leaves behind has
+	// no child for any conversation-joining recovery arm to find it by — so the
+	// childless-parent shape is owned outside this path, by the boot reconcile
+	// and the leader reaper (domain.BlueprintAbortOrphanedAtMint).
 	if err := s.enqueueBlueprintStep(bgCtx, orgID, blueprintRunID, task, steps[0], stepModelOrInherit(stepPlan[0].Model, model), triggerType, triggerID, creatorUserID, brRow.ActorAgentID); err != nil {
 		if _, mErr := s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, domain.BlueprintRunStatusFailed, "enqueue first step: "+err.Error(), nil); mErr != nil {
 			delegateLog.Warn("mark blueprint_run failed after enqueue error", "blueprint_run", blueprintRunID, "error", mErr)
@@ -565,7 +569,10 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
 	}
 
-	if err := s.agentRuns.SetWorktreePathSystem(context.WithoutCancel(ctx), orgID, runID, wtPath); err != nil {
+	// Fence refusals are excluded here and at the two sibling setups below:
+	// setWorktreePath already logged the ownership loss, and this line's
+	// subject is a write that failed on a row this engagement still owns.
+	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, runID, claimID, wtPath); err != nil && !errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Warn("update worktree path for run failed", "run", runID, "error", err)
 	}
 
@@ -666,7 +673,7 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 // runs don't have a single "the worktree" the way GitHub PR runs do,
 // the run-root IS the agent's session cwd, which is the load-bearing
 // invariant for resume.
-func (s *Spawner) setupJira(ctx context.Context, orgID, runID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+func (s *Spawner) setupJira(ctx context.Context, orgID, runID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
 	// The run-root is a blueprint-run resource — shared across every step and
 	// rebuilt under the same key on a cold rehydrate — so it is keyed by rootKey
 	// (the blueprint run id), not this step's run id. runID still stamps the
@@ -675,7 +682,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID, rootKey string, t
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
-	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, runID, runRoot); err != nil {
+	if err := s.setWorktreePath(context.Background(), orgID, runID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Warn("set worktree_path for Jira run failed; resume will reject this run", "run", runID, "error", err)
 	}
 
@@ -710,7 +717,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID, rootKey string, t
 //     demand and then needs the gh verbs, the same reasoning as the Jira
 //     arm's GH+Jira composition. No registered reference is not an error:
 //     the run still works with base tools.
-func (s *Spawner) setupSlack(ctx context.Context, orgID, runID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+func (s *Spawner) setupSlack(ctx context.Context, orgID, runID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
 	// Keyed by rootKey (the blueprint run id), not this step's run id — the
 	// run-root is blueprint-scoped and cold-rehydrates under the same key. See
 	// setupJira.
@@ -718,7 +725,7 @@ func (s *Spawner) setupSlack(ctx context.Context, orgID, runID, rootKey string, 
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
-	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, runID, runRoot); err != nil {
+	if err := s.setWorktreePath(context.Background(), orgID, runID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Warn("set worktree_path for Slack run failed; resume will reject this run", "run", runID, "error", err)
 	}
 

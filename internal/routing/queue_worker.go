@@ -26,6 +26,28 @@ const maxEventAttempts = 5
 // when it clears).
 const claimErrorEscalateThreshold = 5
 
+// staleProcessingAfter is how long a row may sit 'processing' before the
+// floor scan reclaims it regardless of who claimed it. RunEventQueue's boot
+// reset is ownership-scoped, so it only ever recovers an owner that comes
+// back; a pod that is replaced rather than rebooted — scale-down, a fresh
+// instance id after the brain lease moves — leaves its claimed rows
+// unrouted forever without this.
+//
+// Ten minutes is three-plus orders of magnitude past a real unit: a routing
+// unit is milliseconds-to-seconds of DB writes and enqueues, never an
+// inline LLM call or an agent process. So this cannot plausibly steal live
+// work, and the double route it would cause if it did is absorbed by the
+// same fences that make a boot replay safe (the tasks dedup index, the
+// (event, trigger) replay fence, the one-active index). The asymmetry is
+// the whole argument: a lost event is unrecoverable — the tracker's
+// snapshot-diff is forward-only and will not re-emit it — while a duplicate
+// one is fenced.
+//
+// FIFO is not preserved across a reclaim (the row re-enters the queue with
+// its original id, ahead of rows enqueued since). Acceptable for the same
+// reason: ordering is a nicety the fences don't depend on.
+const staleProcessingAfter = 10 * time.Minute
+
 // Default cadences for RunEventQueue, exported so main can tune them and
 // tests can drive the loop fast. The floor scan is the correctness
 // backstop (a dropped wake only delays to the next tick); prune is the
@@ -86,9 +108,12 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 	// unlikely. Recovering a parked 'failed' row is a manual/admin
 	// affordance (a separate ticket); it matters because the tracker's
 	// snapshot-diff is forward-only and may not re-emit a parked event.
-	// Ownership-scoped (TFAC-578): only sweeps rows this router instance
+	// Ownership-scoped: only sweeps rows this router instance
 	// itself claimed during an earlier boot, never a live sibling's
-	// still-processing row — see EventQueueStore.ResetProcessing.
+	// still-processing row — see EventQueueStore.ResetProcessing. That
+	// scoping is also why it is only half the recovery: an owner replaced
+	// rather than rebooted never runs it, and the floor scan's
+	// sweepStaleProcessing is what reclaims what it leaves behind.
 	executorID, bootEpoch := r.executorIdentity()
 	if n, err := r.eventQueue.ResetProcessing(ctx, executorID, bootEpoch); err != nil {
 		routerLog.Error("event-queue boot recovery: reset processing rows failed", "error", err)
@@ -133,6 +158,12 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 		case <-wake:
 			drain()
 		case <-scan.C:
+			// The floor scan is the correctness tick, so the staleness
+			// backstop rides it rather than the wake channel (which is
+			// burst-driven and can fire many times a second). Sweeping
+			// before the drain means a row reclaimed here is claimed by
+			// the very next pass instead of waiting a full tick.
+			r.sweepStaleProcessing(ctx)
 			drain()
 		case <-prune.C:
 			if n, err := r.eventQueue.PruneDone(ctx, time.Now().Add(-pruneAge)); err != nil {
@@ -141,6 +172,25 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 				routerLog.Info("event-queue prune: removed done rows", "rows", n, "older_than", pruneAge)
 			}
 		}
+	}
+}
+
+// sweepStaleProcessing returns every row stuck 'processing' past
+// staleProcessingAfter to pending, whoever claimed it. Runs on the floor
+// scan of the drain loop, which the background-brain lease already makes
+// single-holder — so this is not a second claimant racing the drainer, it
+// is the same worker noticing that a row nobody is driving has been left
+// behind. Logged only when it finds something: a non-zero count means a
+// pod died holding claimed work, which is worth a line every time.
+func (r *Router) sweepStaleProcessing(ctx context.Context) {
+	n, err := r.eventQueue.RequeueStaleProcessing(ctx, staleProcessingAfter)
+	if err != nil {
+		routerLog.Error("event-queue: stale-processing sweep failed", "error", err)
+		return
+	}
+	if n > 0 {
+		routerLog.Warn("event-queue: requeued rows orphaned in 'processing' (owner replaced, not rebooted?)",
+			"rows", n, "older_than", staleProcessingAfter)
 	}
 }
 
@@ -199,13 +249,13 @@ func (r *Router) drainEventQueue(ctx context.Context) error {
 // mid-unit is not a cheaper stop, it is a worse one: the row is already
 // 'processing', ResetProcessing is ownership-scoped BOOT recovery, and a
 // demoted pod does not reboot — so an aborted unit leaves a half-routed
-// row stranded until that process happens to restart, which nothing else
-// sweeps. Running on is cheap and bounded: this unit is DB writes and
-// enqueues, never an inline LLM call or an agent process, and the lease
-// contract already tolerates last-writer-wins on in-flight work (the one
-// write that genuinely needs fencing, the tracker's snapshot RMW, carries
-// its own poll_seq CAS). drainEventQueue's between-rows gate is where a
-// demotion actually stops this worker.
+// row for the staleness backstop to reclaim minutes later, which is a long
+// detour to save nothing. Running on is cheap and bounded: this unit is DB
+// writes and enqueues, never an inline LLM call or an agent process, and
+// the lease contract already tolerates last-writer-wins on in-flight work
+// (the one write that genuinely needs fencing, the tracker's snapshot RMW,
+// carries its own poll_seq CAS). drainEventQueue's between-rows gate is
+// where a demotion actually stops this worker.
 //
 // Returns true when the row was requeued rather than resolved — the caller's
 // signal to end the pass and let the next scan tick own the retry.

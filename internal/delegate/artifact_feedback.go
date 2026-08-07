@@ -87,6 +87,12 @@ func (s *Spawner) deliverInjectionLive(orgID, runID, wrapped string) {
 // agent actually consumes. Recorded as role='user' (not agent activity), so it
 // never advances the artifact-change ledger watermark.
 //
+// Unfenced, like every other write an outside actor makes into a live run:
+// the caller is a resolve handler or an eventbus subscriber, holds no claim,
+// and is deliberately not gated on whoever is driving. The row's claim_id
+// resolves server-side to whichever engagement is active — which is the right
+// answer, because the note belongs to the turn that will read it.
+//
 // Subtype is "system_note" rather than blank, which is what a person's own
 // message carries: the row is a machine-composed record of a human action,
 // not the human's words. The transcript reads the distinction — a user row

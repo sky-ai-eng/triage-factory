@@ -71,7 +71,7 @@ func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, boot
 	// atomic; an empty queue matches no row and the scan reports
 	// ErrNoRows -> (nil, nil).
 	//
-	// executor_id + boot_epoch are stamped in this same statement (TFAC-578),
+	// executor_id + boot_epoch are stamped in this same statement,
 	// mirroring RunQueueStore.ClaimNextRun — see ResetProcessing.
 	row := s.conn.QueryRowContext(ctx, `
 		UPDATE public.event_queue
@@ -121,7 +121,7 @@ func (s *eventQueueStore) Requeue(ctx context.Context, orgID string, id int64, l
 }
 
 func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
-	// Ownership-scoped (TFAC-578), mirroring RunQueueStore.ResetProcessingRuns:
+	// Ownership-scoped, mirroring RunQueueStore.ResetProcessingRuns:
 	// only rows this instance itself claimed (executor_id = $1) during a
 	// strictly earlier boot (boot_epoch < $2) are reset. A live sibling's
 	// still-processing row carries a different executor_id and is never
@@ -139,6 +139,33 @@ func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string
 		  AND executor_id = $1
 		  AND (boot_epoch IS NULL OR boot_epoch < $2)
 	`, executorID, bootEpoch)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+func (s *eventQueueStore) RequeueStaleProcessing(ctx context.Context, olderThan time.Duration) (int, error) {
+	// The staleness backstop under ResetProcessing — see the interface doc
+	// for why it errs toward reclaiming. Unscoped by ownership on purpose:
+	// the row this exists for belongs to an instance id that is never coming
+	// back, so scoping it to any live identity would skip exactly the case
+	// it covers.
+	//
+	// The cutoff is computed from now() — the same server clock that stamped
+	// claimed_at — rather than from a caller-supplied timestamp, so pod clock
+	// skew can't turn a fresh claim into a stale one. A NULL claimed_at
+	// 'processing' row is reclaimed unconditionally (mirroring
+	// PendingFirings.RequeueStaleDraining): the claim stamps both columns in
+	// one statement so it should not exist, and if it somehow does it is
+	// stranded by every other predicate.
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE public.event_queue SET status = 'pending', last_error = $2, claimed_at = NULL,
+			executor_id = NULL, boot_epoch = NULL
+		WHERE status = 'processing'
+		  AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $1::double precision))
+	`, olderThan.Seconds(), db.StaleProcessingReclaimReason)
 	if err != nil {
 		return 0, err
 	}

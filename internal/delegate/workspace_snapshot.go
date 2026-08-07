@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
@@ -318,6 +319,12 @@ func (s *Spawner) gitHostBaseFor(ctx context.Context, orgID string) string {
 // the only frame that knows it: past here a warm tree and a reconstruction of
 // one are the same directory, and what the agent is told about its own prior
 // work turns on the difference.
+//
+// run.ClaimID is read, not just carried: a cold rebuild re-stamps
+// worktree_path, and that write is this engagement's to make only while it
+// still holds the conversation. Every caller is a claimed dispatch, so it is
+// populated at both — including the config the step builder synthesizes, which
+// copies it across for exactly this reason.
 func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain.Conversation, seed gitSeed) (_ string, prov domain.WorkspaceProvenance, err error) {
 	// The provenance IS the interesting part of this span: a warm reuse is a
 	// stat call and a cold rehydrate is a blob fetch plus a git rebuild, and
@@ -366,7 +373,14 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 		// run.WorktreePath stays stale, so the NEXT resume won't find the
 		// warm copy and will cold-rehydrate again (correct, just slower) — log
 		// it distinctly so unexpected repeat rehydrates are diagnosable.
-		if wErr := s.agentRuns.SetWorktreePathSystem(context.WithoutCancel(ctx), orgID, run.ID, wtDir); wErr != nil {
+		//
+		// A fence refusal is excluded because that diagnosis would be wrong
+		// twice over: the path is not stale, it is the successor's own, and
+		// the next resume is not this engagement's to predict. setWorktreePath
+		// has already logged the fact that actually happened — this executor
+		// lost the conversation — and saying anything further here would file
+		// a lost claim under slow rehydrates.
+		if wErr := s.setWorktreePath(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, wtDir); wErr != nil && !errors.Is(wErr, db.ErrClaimReleased) {
 			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "run", run.ID, "error", wErr)
 		}
 	}

@@ -425,6 +425,18 @@ func (s *agentRunStore) SetSessionSystem(ctx context.Context, orgID, runID, sess
 	return setRunSession(ctx, s.admin, orgID, runID, sessionID)
 }
 
+// SetSessionForClaimSystem is SetSessionSystem behind the fence. The write is
+// byte-identical; what the transaction adds is that a zombie's late init can no
+// longer land the successor's resume coordinate on a dead session.
+func (s *agentRunStore) SetSessionForClaimSystem(ctx context.Context, orgID, runID, claimID, sessionID string) error {
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
+			return err
+		}
+		return setRunSession(ctx, q, orgID, runID, sessionID)
+	})
+}
+
 func setRunSession(ctx context.Context, q queryer, orgID, runID, sessionID string) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE conversations SET sdk_session_id = $1 WHERE org_id = $2 AND id = $3
@@ -460,6 +472,22 @@ func (s *agentRunStore) SetExecutorSystem(ctx context.Context, orgID, runID, exe
 			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at)
 			VALUES ($1, $2, $3, $4, now())
 		`, orgID, runID, executorID, bootEpoch)
+		return err
+	})
+}
+
+// SetExecutorForClaimSystem writes the identity onto the NAMED claim rather
+// than whichever one is active, so the fence and the write cannot disagree
+// about their target. No mint arm — see the interface doc.
+func (s *agentRunStore) SetExecutorForClaimSystem(ctx context.Context, orgID, runID, claimID, executorID string, bootEpoch int64) error {
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `
+			UPDATE claims SET executor_id = $1, boot_epoch = $2
+			WHERE org_id = $3 AND id = $4 AND conversation_id = $5
+		`, executorID, bootEpoch, orgID, claimID, runID)
 		return err
 	})
 }
@@ -542,6 +570,18 @@ func (s *agentRunStore) SetWorktreePath(ctx context.Context, orgID, runID, path 
 
 func (s *agentRunStore) SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error {
 	return setRunWorktreePath(ctx, s.admin, orgID, runID, path)
+}
+
+// SetWorktreePathForClaimSystem is SetWorktreePathSystem behind the fence — the
+// workspace stamp an engagement writes once its setup or rehydrate resolves a
+// path, refused once a successor holds the conversation.
+func (s *agentRunStore) SetWorktreePathForClaimSystem(ctx context.Context, orgID, runID, claimID, path string) error {
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
+			return err
+		}
+		return setRunWorktreePath(ctx, q, orgID, runID, path)
+	})
 }
 
 func setRunWorktreePath(ctx context.Context, q queryer, orgID, runID, path string) error {
@@ -684,7 +724,7 @@ const pgDisplayStatusSQL = `COALESCE(
 // `attempts` here is the LIFETIME claim count — engagement history for a
 // human, matching the lifetime sums beside it. It is deliberately not the
 // same quantity ClaimNextRun returns under that name, which is the retry
-// budget's current-episode counter (episodeAttemptsSQL, run_queue.go). Two
+// budget's current-episode counter (EpisodeAttemptsSQL, run_queue.go). Two
 // questions, one field; see domain.Conversation.Attempts before carrying
 // either one somewhere new.
 const runClaimLateral = `

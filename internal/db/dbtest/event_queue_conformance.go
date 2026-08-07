@@ -24,12 +24,19 @@ type EventQueueSeeder struct {
 	// Entity inserts a fresh entity row and returns its id. Enqueue's
 	// events-audit row FKs to it (and the queue row denormalizes it).
 	Entity func(t *testing.T) string
+
+	// BackdateClaim rewinds a claimed row's claimed_at by age, standing in
+	// for a claim made that long ago. Raw SQL because the store interface
+	// deliberately offers no way to write the column — every other caller
+	// gets it stamped by ClaimNext — and the staleness sweep can only be
+	// exercised against a claim old enough to be stale.
+	BackdateClaim func(t *testing.T, queueID int64, age time.Duration)
 }
 
 // conformanceExecutorID/conformanceBootEpoch are the fixed ownership
 // identity every claim in this suite stamps a row with, except where a test
-// is specifically exercising the ownership-scoping predicate (TFAC-578) —
-// those pass their own values inline.
+// is specifically exercising the ownership-scoping predicate — those pass
+// their own values inline.
 const (
 	conformanceExecutorID = "conformance-executor"
 	conformanceBootEpoch  = int64(1)
@@ -299,8 +306,8 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		}
 	})
 
-	// TFAC-578: ResetProcessing must self-scope to (executor_id, boot_epoch)
-	// so a booting instance never resets a live sibling's claimed row.
+	// ResetProcessing must self-scope to (executor_id, boot_epoch) so a
+	// booting instance never resets a live sibling's claimed row.
 	t.Run("ResetProcessing_scoped_to_owner", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
@@ -344,7 +351,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		}
 	})
 
-	// TFAC-578: a boot must never reset rows claimed under its OWN current
+	// A boot must never reset rows claimed under its OWN current
 	// epoch — only strictly earlier boots of itself are orphans. Guards
 	// against a self-sweep treating its own in-flight claims as stale.
 	t.Run("ResetProcessing_never_resets_current_epoch", func(t *testing.T) {
@@ -374,6 +381,118 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 			t.Fatalf("ResetProcessing at epoch 6: %v", err)
 		} else if n != 1 {
 			t.Errorf("ResetProcessing at a later epoch reset %d rows, want 1", n)
+		}
+	})
+
+	// The staleness backstop under the ownership-scoped boot reset: a row
+	// whose owner was replaced rather than rebooted is never swept by
+	// ResetProcessing, so without this it stays 'processing' — and its event
+	// unrouted — forever.
+	t.Run("RequeueStaleProcessing_reclaims_regardless_of_owner", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		enqueueOn(t, ctx, s, orgID, entityID)
+
+		// Claimed by an instance id that never comes back, eleven minutes
+		// ago — past the ten-minute threshold the drain worker sweeps at.
+		claimed, err := s.ClaimNext(ctx, "vanished-executor", 1)
+		if err != nil || claimed == nil {
+			t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
+		}
+		seed.BackdateClaim(t, claimed.ID, 11*time.Minute)
+
+		n, err := s.RequeueStaleProcessing(ctx, 10*time.Minute)
+		if err != nil {
+			t.Fatalf("RequeueStaleProcessing: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("RequeueStaleProcessing reclaimed %d rows, want 1", n)
+		}
+
+		rows, _ := s.ListForEntity(ctx, orgID, entityID)
+		if len(rows) != 1 {
+			t.Fatalf("expected 1 row, got %d", len(rows))
+		}
+		if rows[0].Status != domain.QueuedEventStatusPending {
+			t.Errorf("status = %q, want pending after reclaim", rows[0].Status)
+		}
+		if rows[0].ClaimedAt != nil {
+			t.Errorf("claimed_at should be cleared on reclaim, got %v", rows[0].ClaimedAt)
+		}
+		if rows[0].LastError != db.StaleProcessingReclaimReason {
+			t.Errorf("last_error = %q, want %q", rows[0].LastError, db.StaleProcessingReclaimReason)
+		}
+		// attempts untouched: the claim already counted this try, so the
+		// retry budget still bounds a row that keeps reaching this sweep.
+		if rows[0].Attempts != 1 {
+			t.Errorf("attempts = %d, want 1 (the reclaim must not reset the budget)", rows[0].Attempts)
+		}
+		// Re-claimable by whoever drains next, budget still counting up.
+		again, err := s.ClaimNext(ctx, "successor-executor", 1)
+		if err != nil || again == nil {
+			t.Fatalf("re-claim after reclaim: got=%v err=%v", again, err)
+		}
+		if again.Attempts != 2 {
+			t.Errorf("attempts = %d on the re-claim, want 2", again.Attempts)
+		}
+	})
+
+	// The negative space is the whole safety argument: the sweep must be
+	// incapable of stealing a claim that is merely in progress.
+	t.Run("RequeueStaleProcessing_leaves_fresh_and_terminal_rows", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+
+		// An in-flight claim a minute old — well inside the threshold.
+		enqueueOn(t, ctx, s, orgID, entityID)
+		fresh, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		if err != nil || fresh == nil {
+			t.Fatalf("ClaimNext (fresh): got=%v err=%v", fresh, err)
+		}
+		seed.BackdateClaim(t, fresh.ID, time.Minute)
+		// A done row.
+		enqueueOn(t, ctx, s, orgID, entityID)
+		doneRow, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		if err := s.MarkDone(ctx, orgID, doneRow.ID); err != nil {
+			t.Fatalf("MarkDone: %v", err)
+		}
+		// A failed row.
+		enqueueOn(t, ctx, s, orgID, entityID)
+		failRow, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		if err := s.MarkFailed(ctx, orgID, failRow.ID, "boom"); err != nil {
+			t.Fatalf("MarkFailed: %v", err)
+		}
+		// A never-claimed pending row.
+		enqueueOn(t, ctx, s, orgID, entityID)
+
+		n, err := s.RequeueStaleProcessing(ctx, 10*time.Minute)
+		if err != nil {
+			t.Fatalf("RequeueStaleProcessing: %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("RequeueStaleProcessing reclaimed %d rows, want 0 (nothing is ten minutes stale)", n)
+		}
+
+		rows, _ := s.ListForEntity(ctx, orgID, entityID)
+		want := map[int64]string{
+			fresh.ID:   domain.QueuedEventStatusProcessing,
+			doneRow.ID: domain.QueuedEventStatusDone,
+			failRow.ID: domain.QueuedEventStatusFailed,
+		}
+		for _, r := range rows {
+			if w, ok := want[r.ID]; ok && r.Status != w {
+				t.Errorf("row %d status = %q, want %q (untouched by the sweep)", r.ID, r.Status, w)
+			}
+			if r.LastError == db.StaleProcessingReclaimReason {
+				t.Errorf("row %d was reclaimed by a sweep that should have matched nothing", r.ID)
+			}
+		}
+		// The fresh claim is still owned — the sweep left it claimable by
+		// nobody else.
+		if next, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch); err != nil {
+			t.Fatalf("ClaimNext after sweep: %v", err)
+		} else if next == nil || next.ID == fresh.ID {
+			t.Errorf("ClaimNext returned %v, want the never-claimed pending row, not the fresh in-flight one", next)
 		}
 	})
 

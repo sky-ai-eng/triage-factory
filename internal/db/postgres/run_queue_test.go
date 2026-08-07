@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -1019,5 +1020,84 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 				return got.Status
 			},
 		}
+	})
+}
+
+// TestRunQueueStore_Postgres_ReconcileOrphanedRunsConformance runs the shared
+// boot-reconcile conformance against the Postgres impl (admin pool, matching
+// production wiring). Each factory call resets the harness, so the suite's exact
+// healed counts are this subtest's alone.
+func TestRunQueueStore_Postgres_ReconcileOrphanedRunsConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	ctx := context.Background()
+
+	dbtest.RunReconcileOrphanedRunsConformance(t, func(t *testing.T) (db.RunQueueStore, dbtest.ReconcileOrphanSeeder) {
+		t.Helper()
+		h.Reset(t)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		orgID, userID := seedPgOrgForBlueprints(t, h)
+		brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+		bpID := pgBlueprintIDOfRun(t, h, brID)
+
+		nextStep := 0
+		// The fixture already minted one running blueprint_run; hand that one
+		// out first so the suite's exact counts aren't thrown off by a spare
+		// childless orphan sitting beside the one it staged.
+		spare := brID
+		seed := dbtest.ReconcileOrphanSeeder{
+			BlueprintRun: func(t *testing.T, age time.Duration) string {
+				t.Helper()
+				id := spare
+				if id == "" {
+					id = seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID)
+				}
+				spare = ""
+				if age > 0 {
+					pgtest.MustExec(t, h.AdminDB,
+						`UPDATE blueprint_runs SET started_at = now() - $2::interval WHERE id = $1`, id, age.String())
+				}
+				return id
+			},
+			EnqueueChild: func(t *testing.T, brID string) string {
+				t.Helper()
+				idx := nextStep
+				nextStep++
+				convID := uuid.New().String()
+				if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
+					ID: convID, TaskID: taskID, PromptID: promptID, Model: "m",
+					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
+				}); err != nil {
+					t.Fatalf("EnqueueRun: %v", err)
+				}
+				return convID
+			},
+			ForceBlueprintStatus: func(t *testing.T, brID, status, abortReason string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE blueprint_runs SET status = $2, abort_reason = NULLIF($3, '') WHERE id = $1`,
+					brID, status, abortReason)
+			},
+			BlueprintRunState: func(t *testing.T, brID string) (string, string, bool) {
+				t.Helper()
+				var status string
+				var reason sql.NullString
+				var completed bool
+				if err := h.AdminDB.QueryRow(
+					`SELECT status, abort_reason, completed_at IS NOT NULL FROM blueprint_runs WHERE id = $1`, brID,
+				).Scan(&status, &reason, &completed); err != nil {
+					t.Fatalf("read blueprint_run %s: %v", brID, err)
+				}
+				return status, reason.String, completed
+			},
+			ConversationStatus: func(t *testing.T, convID string) string {
+				t.Helper()
+				var status sql.NullString
+				if err := h.AdminDB.QueryRow(`SELECT status FROM conversations WHERE id = $1`, convID).Scan(&status); err != nil {
+					t.Fatalf("read conversation %s status: %v", convID, err)
+				}
+				return status.String
+			},
+		}
+		return stores.RunQueue, seed
 	})
 }

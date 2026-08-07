@@ -100,7 +100,7 @@ func TestStampExecutor_WritesExecutorID(t *testing.T) {
 
 	// Unwired: the empty id releases rather than mints, so no active claim
 	// may exist — an invented identity would show up here.
-	s.stampExecutor(runmode.LocalDefaultOrgID, "r-exec")
+	s.stampExecutor(runmode.LocalDefaultOrgID, "r-exec", "")
 	var active int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM claims WHERE conversation_id='r-exec' AND released_at IS NULL`).Scan(&active); err != nil {
 		t.Fatalf("count active claims: %v", err)
@@ -110,7 +110,7 @@ func TestStampExecutor_WritesExecutorID(t *testing.T) {
 	}
 
 	s.SetExecutorID("persistent-registry-id", 5)
-	s.stampExecutor(runmode.LocalDefaultOrgID, "r-exec")
+	s.stampExecutor(runmode.LocalDefaultOrgID, "r-exec", "")
 	var got string
 	if err := database.QueryRow(`SELECT executor_id FROM claims WHERE conversation_id='r-exec' AND released_at IS NULL`).Scan(&got); err != nil {
 		t.Fatalf("read active claim executor_id: %v", err)

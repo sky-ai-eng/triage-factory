@@ -272,8 +272,13 @@ const runQueueClaimSelect = `r.id, r.org_id,
 // speaking for itself: it concluded, it failed, it parked, it was stopped.
 const handedBackOutcomesSQL = `'requeued','reaped'`
 
-// episodeAttemptsSQL is the retry budget's unit: how many times THIS queue
-// episode has been attempted, the claim being minted included.
+// EpisodeAttemptsSQL renders the retry budget's unit: how many times THIS
+// queue episode has been attempted, the in-flight claim included — whether
+// that claim is being minted or handed back. Exported and alias-parameterized
+// (convAlias names the conversation in the enclosing query) because the
+// enclosing query is the only thing that varies: the counting rule below is a
+// decision about what an attempt IS, and a second copy of it would be a second
+// answer to that.
 //
 // An episode is the run of consecutive hand-backs at the tail of the
 // conversation's claim history. It ends at the most recent claim that recorded
@@ -294,8 +299,9 @@ const handedBackOutcomesSQL = `'requeued','reaped'`
 // conversation crash-loop the dispatcher forever — the one thing the lifetime
 // count did get right.
 //
-// The minted claim is excluded by construction rather than by the CTE snapshot
-// — it has no outcome yet, and both arms require one.
+// The in-flight claim is excluded from the COUNT by construction rather than
+// by the CTE snapshot — it has no outcome yet, and both arms require one. It
+// is what the +1 stands for.
 //
 // "Later than" is spelled against the hand-back's RELEASE, not its claim, and
 // non-strictly. Engagements on one conversation never overlap (the claim is
@@ -309,8 +315,9 @@ const handedBackOutcomesSQL = `'requeued','reaped'`
 // which costs at most one more round of retries. COALESCE covers a released
 // row that somehow carries an outcome without a release timestamp: it degrades
 // to comparing claims rather than silently never matching.
-const episodeAttemptsSQL = `(SELECT COUNT(*) + 1 FROM claims c2
-	WHERE c2.conversation_id = candidate.id
+func EpisodeAttemptsSQL(convAlias string) string {
+	return `(SELECT COUNT(*) + 1 FROM claims c2
+	WHERE c2.conversation_id = ` + convAlias + `.id
 	  AND c2.outcome IN (` + handedBackOutcomesSQL + `)
 	  AND NOT EXISTS (
 	      SELECT 1 FROM claims c3
@@ -318,21 +325,22 @@ const episodeAttemptsSQL = `(SELECT COUNT(*) + 1 FROM claims c2
 	        AND c3.outcome IS NOT NULL
 	        AND c3.outcome NOT IN (` + handedBackOutcomesSQL + `)
 	        AND c3.claimed_at >= COALESCE(c2.released_at, c2.claimed_at)))::int`
+}
 
 // runQueueClaimReturning is the outer-SELECT projection of ClaimNextRun. The
 // claim identity (executor/claim id/claimed_at/attempts) rides the same
 // statement: the id + claimed_at come from the freshly inserted claims row,
-// attempts from the current queue episode (see episodeAttemptsSQL). The
+// attempts from the current queue episode (see EpisodeAttemptsSQL). The
 // claim id is returned because the executor needs to name this engagement
 // later — at teardown, once it has been released and can no longer be found
 // by looking for the conversation's active claim.
-const runQueueClaimReturning = `candidate.id::text, candidate.org_id::text, candidate.type, candidate.task_id, candidate.prompt_id,
+var runQueueClaimReturning = `candidate.id::text, candidate.org_id::text, candidate.type, candidate.task_id, candidate.prompt_id,
 	candidate.model, candidate.runtime, candidate.worktree_path, candidate.sdk_session_id,
 	candidate.trigger_type, candidate.trigger_id, candidate.creator_user_id,
 	candidate.team_id, candidate.project_id,
 	candidate.blueprint_run_id, candidate.blueprint_step_index, candidate.turn_message_id,
 	minted.id::text AS claim_id, minted.claimed_at,
-	` + episodeAttemptsSQL + ` AS attempts`
+	` + EpisodeAttemptsSQL("candidate") + ` AS attempts`
 
 func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.Conversation, error) {
 	// One scan, every surface: the needs-driving predicate is type-agnostic
@@ -769,7 +777,17 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 		if err != nil {
 			return err
 		}
-		total = parked + released
+
+		// Mint-crash arm: the mirror of the park above, one level up. That arm
+		// heals a live child under a dead parent; this one heals a live parent
+		// with no child at all. Order between the two is immaterial — a parent
+		// this arm fails has no child for the park to owe anything to, which is
+		// the whole reason it needs its own arm.
+		orphaned, err := failBlueprintRunsOrphanedAtMint(ctx, q)
+		if err != nil {
+			return err
+		}
+		total = parked + released + orphaned
 		return nil
 	})
 	if err != nil {
@@ -803,6 +821,43 @@ func healClaimDesyncs(ctx context.Context, q queryer) (released int, err error) 
 		WHERE claims.conversation_id = c.id AND claims.released_at IS NULL
 		  AND c.status IN (`+runTerminalStatusesSQL+`)
 	`)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
+// failBlueprintRunsOrphanedAtMint terminal-fails every 'running' blueprint_run
+// that holds no child conversation and is older than the shared grace: the
+// firing path's mint→enqueue crash window, where the parent committed and its
+// first step never did. With no child there is no claim and no conversation, so
+// every other recovery arm — here, in ResetProcessingRuns, in the leader reaper
+// — joins straight past it while it keeps holding the one-active-auto-run index
+// against its task.
+//
+// Own DB time, and nothing but the parent row to write: no child to park, no
+// claim to release, and no task touch. Freeing the index is the point — the
+// task's already-queued firing intent then drains into a fresh, fully-minted
+// run, which is why this fails rather than trying to re-mint the step (that
+// would duplicate the firing path's config derivation inside a recovery path).
+//
+// The grace makes racing a live mint impossible rather than unlikely. Retention
+// can't manufacture a false positive either: nothing purges conversation rows,
+// and archival keeps the row.
+func failBlueprintRunsOrphanedAtMint(ctx context.Context, q queryer) (int, error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE blueprint_runs
+		SET status = 'failed', completed_at = now(), abort_reason = $2
+		WHERE status = 'running'
+		  AND started_at < now() - make_interval(secs => $1)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM conversations c WHERE c.blueprint_run_id = blueprint_runs.id
+		  )
+	`, domain.BlueprintOrphanedAtMintGrace.Seconds(), domain.BlueprintAbortOrphanedAtMint)
 	if err != nil {
 		return 0, err
 	}

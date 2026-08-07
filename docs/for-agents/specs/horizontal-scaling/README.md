@@ -529,9 +529,11 @@ claim → execute); three additions to the claim:
    one-time SQLite migration replays the old global reset once —
    without it, a run mid-flight at upgrade shutdown stayed `running`
    forever and a mid-processing event was lost permanently. One
-   sanctioned exception stays global: `ReconcileOrphanedRuns` (cancel
-   children under terminal blueprints) is a cross-instance heal whose
-   terminal-parent guard makes it safe. Fleet-wide orphan recovery
+   sanctioned exception stays global: `ReconcileOrphanedRuns` (park
+   children under terminal blueprints; fail `running` blueprints that
+   hold no child at all past a grace) is a cross-instance heal whose
+   arms are each guarded by state no live owner can be in — a terminal
+   parent, or a mint older than any mint takes. Fleet-wide orphan recovery
    moves to the **leader reaper**: runs whose executor's heartbeat is
    stale past a threshold are requeued (`attempts`-capped, then failed
    with `failure_kind='executor_lost'`).
@@ -553,7 +555,8 @@ claim → execute); three additions to the claim:
   A re-claimed *mid-flight* run restarts its step from the beginning on
   the new executor (fresh self-contained clone; the crashed attempt's
   session transcript died with the host). `attempts` caps this
-  (`TF_RUN_MAX_ATTEMPTS`, default 2). Residual risk, accepted and
+  (`TF_RUN_MAX_ATTEMPTS`, default 2 — consecutive losses, not
+  lifetime claims; decision 4). Residual risk, accepted and
   documented: a run that had already
   performed external writes (pushed a branch, posted a comment) before
   the crash will redo them — artifact upserts and branch-push semantics
@@ -1567,7 +1570,11 @@ pass (2026-07-08). Reopening conditions noted per entry.
    is removed (exact ties → unassigned), curator homes to executors —
    retiring the job-class endgame entirely rather than pulling it
    forward.
-4. **Executor-loss retry** — `TF_RUN_MAX_ATTEMPTS` default 2;
+4. **Executor-loss retry** — `TF_RUN_MAX_ATTEMPTS` default 2, counted
+   in *consecutive loss episodes* rather than lifetime claims (the
+   dispatcher's episode doctrine: any claim that recorded a real
+   outcome ends the episode, so a stopped-and-resumed conversation
+   meets its first executor death at 1);
    duplicate external writes on retry are accepted (upsert semantics
    absorb them; `failure_kind='executor_lost'` audits the rest); no
    compensation logic. Retried token spend is bounded by the attempt
@@ -1592,17 +1599,27 @@ pass (2026-07-08). Reopening conditions noted per entry.
    floor. Reopens only if the unit of scale ever became run-per-pod,
    which §2.2 rejects independently.
 9. **Crash recovery is matched to the work's lifetime, not
-   standardized** (settled 2026-07-08, the P0 review pass). Two
-   patterns coexist deliberately: **ownership-scoped self-sweep**
-   (runs, event_queue — long-lived owned work where a false requeue
-   duplicates an agent run's external writes, so only the owner may
-   sweep, and dead owners wait for the reaper) and **staleness-based
-   requeue** (pending_firings `'draining'` — a milliseconds-scale
-   claim whose redelivery is absorbed by the (event, trigger) fence
-   and the one-active index, so any process may recover it and no
-   reaper dependency exists). Deciding factor: cost of a wrong
-   recovery vs cost of a stalled one. Reopens if a queue appears
-   whose claims are both long-lived AND cheaply redeliverable.
+   standardized** (settled 2026-07-08, the P0 review pass; amended
+   2026-08-06, the durability audit). Two patterns coexist
+   deliberately: **ownership-scoped self-sweep** (runs — long-lived
+   owned work where a false requeue duplicates an agent run's
+   external writes, so only the owner may sweep, and dead owners wait
+   for the reaper) and **staleness-based requeue** (pending_firings
+   `'draining'` — a milliseconds-scale claim whose redelivery is
+   absorbed by the (event, trigger) fence and the one-active index,
+   so any process may recover it and no reaper dependency exists).
+   `event_queue` is ownership-scoped **with a staleness backstop**:
+   the owner's boot reset is the fast path, and an unscoped 10-minute
+   sweep on the drain worker's floor scan covers the owner that is
+   *replaced* rather than rebooted (scale-down, a fresh instance id
+   after the lease moves). The original entry classified it
+   ownership-scoped alone, on the assumption the owner always
+   reboots; it does not, there is no reaper arm for this queue, and a
+   routing claim is milliseconds-scale like a firing's — so the rows
+   were stranded, and their events permanently unrouted. Deciding
+   factor: cost of a wrong recovery vs cost of a stalled one.
+   Reopens if a queue appears whose claims are both long-lived AND
+   cheaply redeliverable.
 
 ## Related
 

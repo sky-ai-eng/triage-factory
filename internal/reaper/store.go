@@ -13,6 +13,9 @@ import (
 	"database/sql"
 	"strings"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // Counts is the outcome of one ReapDeadExecutors sweep — how many runs the
@@ -36,14 +39,23 @@ type Store interface {
 	// heartbeating executor is never touched: draining is not death, and
 	// the predicate only looks at heartbeat staleness.
 	//
+	// maxAttempts is counted in loss EPISODES, not lifetime claims: the run
+	// of consecutive handed-back claims at the tail of the conversation's
+	// history, the one being reaped here included. Any claim that recorded an
+	// outcome of its own ends the episode, so a conversation stopped and
+	// resumed four times meets its first executor death at 1, not 5 — the
+	// dispatcher's unit exactly (postgres.EpisodeAttemptsSQL, which this
+	// shares rather than re-derives).
+	//
 	// Three disjoint outcomes per candidate:
 	//   - blueprint_run.cancel_requested: finalize cancelled (run +
 	//     blueprint_run), regardless of attempts — the existing
 	//     cancel-finalization semantics, just with no live owner to signal.
-	//   - not cancel-requested, attempts < maxAttempts: requeue with the
-	//     same status/summary semantics as RunQueueStore.RequeueRun.
-	//     attempts is left untouched — the eventual re-claim bumps it.
-	//   - not cancel-requested, attempts >= maxAttempts: terminal-fail the
+	//   - not cancel-requested, episode below maxAttempts: requeue with the
+	//     same status/summary semantics as RunQueueStore.RequeueRun. The
+	//     'reaped' release below is what carries this attempt into the next
+	//     claim's count.
+	//   - not cancel-requested, episode at maxAttempts: terminal-fail the
 	//     run with failure_kind='executor_lost' and finalize the owning
 	//     blueprint_run failed.
 	ReapDeadExecutors(ctx context.Context, staleThreshold time.Duration, maxAttempts int) (Counts, error)
@@ -82,6 +94,26 @@ type Store interface {
 	// no longer a desync at all: a released claim on a mid-flight
 	// conversation IS the requeue.
 	HealClaimDesyncs(ctx context.Context) (released int, err error)
+
+	// FailBlueprintRunsOrphanedAtMint terminal-fails every 'running'
+	// blueprint_run that holds no child conversation at all and is older than
+	// grace, stamping abort_reason=domain.BlueprintAbortOrphanedAtMint. This
+	// is the one recovery shape no other arm can reach: every predicate above
+	// joins through conversations, and an orphan minted by a crash between the
+	// firing path's two commits has none — so it is invisible to them, keeps
+	// holding the one-active-auto-run index against its task, and livelocks
+	// the router's pending-firing drain (the busy gate reads conversations and
+	// sees idle, the index refuses the insert, forever).
+	//
+	// Own DB time (now() - make_interval), same discipline as
+	// ReapDeadExecutors. Failing rather than re-minting the step is what makes
+	// it self-healing: the terminal write frees the index, and the firing
+	// intent already queued for the task drains into a fresh, fully-minted
+	// run. The same arm runs at boot inside
+	// RunQueueStore.ReconcileOrphanedRuns (both dialects — local mode has the
+	// same crash window and no reaper); the periodic repeat here bounds an
+	// orphan's lifetime to a reaper tick instead of the next restart.
+	FailBlueprintRunsOrphanedAtMint(ctx context.Context, grace time.Duration) (int, error)
 }
 
 // pgStore is the Postgres implementation.
@@ -101,7 +133,7 @@ var _ Store = (*pgStore)(nil)
 // defensive) or older than the staleness threshold. The claim join is what
 // makes "a live process died" expressible: a parked or terminal
 // conversation has no engagement to have died. Each caller appends its own
-// cancel_requested/attempts predicate and SELECTs what it needs. $1 is
+// cancel_requested/episode predicate and SELECTs what it needs. $1 is
 // always the staleness threshold in seconds.
 const reapCandidateJoin = `
 	FROM conversations r
@@ -112,6 +144,14 @@ const reapCandidateJoin = `
 	  AND br.status = 'running'
 	  AND (i.id IS NULL OR i.last_heartbeat_at < now() - make_interval(secs => $1))
 `
+
+// reapEpisodeAttemptsSQL counts the loss episode the claim being reaped
+// belongs to, against this file's conversation alias. Imported from the
+// Postgres dialect package rather than restated here because it is the
+// dispatcher's budget unit and the two must agree by construction: a local
+// copy is how the reaper came to fail a conversation on its first executor
+// death for the crime of having been resumed twice.
+var reapEpisodeAttemptsSQL = postgres.EpisodeAttemptsSQL("r")
 
 // releaseReapedClaimsSQL releases the active claims of a just-swept
 // conversation set. The claim-level outcome is always 'reaped' — the
@@ -169,15 +209,17 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 		}
 	}
 
-	// 2. Not cancel-requested, attempts exhausted: terminal-fail.
+	// 2. Not cancel-requested, this loss episode exhausted: terminal-fail. The
+	// episode is what makes this a crash loop rather than a conversation with
+	// a long life behind it — see ReapDeadExecutors' contract.
 	failedBlueprintIDs, failedIDs, err := reapUpdateRuns(ctx, tx, staleSecs, &maxAttempts, `
 		UPDATE conversations SET status = 'failed', failure_kind = 'executor_lost', completed_at = now(),
 			stop_reason = 'executor_lost',
-			result_summary = 'Failed: executor lost and the attempt budget (TF_RUN_MAX_ATTEMPTS) is exhausted (reaper)'
+			result_summary = 'Failed: executor lost repeatedly and the retry budget (TF_RUN_MAX_ATTEMPTS) for this loss episode is exhausted (reaper)'
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`
 			  AND br.cancel_requested = false
-			  AND (SELECT count(*) FROM claims a WHERE a.conversation_id = r.id) >= $2
+			  AND `+reapEpisodeAttemptsSQL+` >= $2
 		)
 		RETURNING blueprint_run_id, id
 	`)
@@ -197,16 +239,18 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 		}
 	}
 
-	// 3. Not cancel-requested, attempts remaining: requeue. Same semantics as
-	// RunQueueStore.RequeueRun — releasing the claim (below) IS the requeue,
-	// since the conversation is mid-flight and re-enters the needs-driving
-	// predicate the moment it has no claim. attempts is left as-is; the
-	// eventual re-claim bumps it. preferred_executor_id is cleared: the
-	// reaper requeues precisely because the stamped executor is dead, so its
-	// stamp is the staler-than-a-dwell case the placement design calls out —
-	// NULL is "unowned, claimable by any live executor now" (no aging
-	// delay), which is the correct advisory answer here. Affinity is
-	// re-earned on the next enqueue, never carried toward a corpse.
+	// 3. Not cancel-requested, this loss episode has room left: requeue. Same
+	// semantics as RunQueueStore.RequeueRun — releasing the claim (below) IS
+	// the requeue, since the conversation is mid-flight and re-enters the
+	// needs-driving predicate the moment it has no claim. That release is also
+	// what keeps the episode open, so the next death counts this one.
+	//
+	// preferred_executor_id is cleared: the reaper requeues precisely because
+	// the stamped executor is dead, so its stamp is the staler-than-a-dwell
+	// case the placement design calls out — NULL is "unowned, claimable by any
+	// live executor now" (no aging delay), which is the correct advisory
+	// answer here. Affinity is re-earned on the next enqueue, never carried
+	// toward a corpse.
 	_, requeuedIDs, err := reapUpdateRuns(ctx, tx, staleSecs, &maxAttempts, `
 		UPDATE conversations SET
 			preferred_executor_id = NULL,
@@ -214,7 +258,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`
 			  AND br.cancel_requested = false
-			  AND (SELECT count(*) FROM claims a WHERE a.conversation_id = r.id) < $2
+			  AND `+reapEpisodeAttemptsSQL+` < $2
 		)
 		RETURNING blueprint_run_id, id
 	`)
@@ -273,9 +317,9 @@ func (s *pgStore) DeleteStaleInstances(ctx context.Context, staleAfter time.Dura
 }
 
 func (s *pgStore) HealClaimDesyncs(ctx context.Context) (int, error) {
-	// Duplicates internal/db/postgres's healClaimDesyncs SQL rather than
-	// importing it, keeping this package dialect-independent like the rest
-	// of the file (see pgUUIDArray's rationale).
+	// Restates internal/db/postgres's healClaimDesyncs SQL, which is
+	// unexported there — see pgUUIDArray on what this file shares and what
+	// it keeps its own copy of.
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE claims SET released_at = now(),
 		    outcome = CASE c.status
@@ -294,6 +338,32 @@ func (s *pgStore) HealClaimDesyncs(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return int(rel), nil
+}
+
+func (s *pgStore) FailBlueprintRunsOrphanedAtMint(ctx context.Context, grace time.Duration) (int, error) {
+	// One statement, no claim/conversation join to make: the absence of a
+	// child IS the predicate. Duplicates the boot reconcile's SQL rather than
+	// importing it, keeping this package dialect-independent like the rest of
+	// the file (see pgUUIDArray's rationale).
+	//
+	// No conversation to park and no claim to release — a run with no child
+	// has neither, which is exactly why nothing else recovers it. Nothing
+	// touches the task either: freeing the index is what lets the task's
+	// already-queued firing intent produce a fresh run on the next drain.
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE blueprint_runs
+		SET status = 'failed', completed_at = now(), abort_reason = $2
+		WHERE status = 'running'
+		  AND started_at < now() - make_interval(secs => $1)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM conversations c WHERE c.blueprint_run_id = blueprint_runs.id
+		  )
+	`, grace.Seconds(), domain.BlueprintAbortOrphanedAtMint)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
 }
 
 func (s *pgStore) CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error) {
@@ -328,13 +398,13 @@ func (s *pgStore) CancelStrandedCuratorTurns(ctx context.Context, staleThreshold
 
 // pgUUIDArray formats a Go string slice as a Postgres uuid[] literal for
 // binding through a single $N parameter — the pgx stdlib driver accepts the
-// textual array form for typed-array columns. Mirrors
-// internal/db/postgres's own unexported helper of the same name and
-// rationale; duplicated rather than imported to keep this package
-// independent of a specific dialect package (internal/lease follows the
-// same independence). Quoting rules: ids are uuid-shaped (no commas,
-// braces, or backslashes), so raw element values are safe to emit inside
-// the {…} envelope without escaping.
+// textual array form for typed-array columns. A local twin of
+// internal/db/postgres's unexported helper of the same name, kept rather
+// than shared because it is a formatting rule and not a decision: two
+// copies have nothing to disagree about. The episode counter above is
+// imported for the opposite reason. Quoting rules: ids are uuid-shaped
+// (no commas, braces, or backslashes), so raw element values are safe to
+// emit inside the {…} envelope without escaping.
 func pgUUIDArray(ids []string) string {
 	if len(ids) == 0 {
 		return "{}"

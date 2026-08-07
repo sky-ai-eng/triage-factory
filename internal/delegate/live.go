@@ -53,8 +53,10 @@ type liveParkContext struct {
 	triggerType   string
 	creatorUserID string
 	// claimID names the engagement writing the park, routing it through the
-	// claim fence. Empty keeps the unfenced write — the live driver's idle
-	// park has no claim in scope.
+	// claim fence. Every park a dispatched run writes carries one — the idle
+	// turn-end as much as the cancel, since a zombie's idle park would flip a
+	// conversation its successor is mid-turn on. Empty is the claimless
+	// caller's unfenced write, and a test fixture's.
 	claimID string
 	// reason is why: db.ParkIdle() for a turn that simply ended,
 	// db.ParkStopped(...) for a cancel. See ConversationStore.ParkOpen.
@@ -71,6 +73,10 @@ type liveParkContext struct {
 //   - hibernated true    → the live process went idle and was parked to
 //     open (snapshot written, status flipped); the caller returns dormant,
 //     keeping the warm worktree.
+//   - fenced true       → a park this driver tried to write was refused: the
+//     engagement's claim is gone and a successor owns the conversation. Not
+//     hibernated, because nothing was parked; the caller records nothing at
+//     all and leaves the workspace where it is.
 //   - err set, no result → the process errored / was cancelled before any
 //     terminal result, or the agent never corrected an invalid conclusion
 //     envelope within the bound; the caller routes through parkRunOpen /
@@ -80,6 +86,7 @@ type liveOutcome struct {
 	sessionID  string
 	stderr     string
 	hibernated bool
+	fenced     bool
 	err        error
 }
 
@@ -142,7 +149,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	defer s.deregisterProc(spec.park.runID)
 	// Stamp run→executor ownership now the process is live (N=1 instance id;
 	// the lease layer horizontal scaling adds builds on this column).
-	s.stampExecutor(spec.park.orgID, spec.park.runID)
+	s.stampExecutor(spec.park.orgID, spec.park.runID, spec.park.claimID)
 
 	out := s.driveLiveRun(ctx, spec.park, lr, results, activity, spec.idleTimeout)
 	// Capture the final session id / stderr off the (now-closed) process for
@@ -243,10 +250,18 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 					// Bounded resume: no idle timer will ever close the warm
 					// process — close it and park to a durable resume.
 					_ = proc.Close()
-					_ = s.parkRunOpen(ctx, park, proc.SessionID())
+					if s.parkRunOpen(ctx, park, proc.SessionID()) {
+						return liveOutcome{fenced: true}
+					}
 					return liveOutcome{hibernated: true}
 				}
-				_ = s.markRunOpen(ctx, park)
+				// A refused park means a successor is driving this conversation.
+				// Looping would keep a zombie agent producing turns against it,
+				// so close and hand the refusal back instead.
+				if s.markRunOpen(ctx, park) {
+					_ = proc.Close()
+					return liveOutcome{fenced: true}
+				}
 				resetIdleTimer(idle, idleTimeout)
 				continue
 			}
@@ -299,7 +314,14 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 				// reconcile correctly leaves alone (nothing to resume). No retry, no
 				// fail, no claim about why. Re-arm idle and loop; idle later closes
 				// the warm process (status stays open).
-				_ = s.markRunOpen(ctx, park)
+				//
+				// Unless the fence refuses it — then this engagement lost the
+				// conversation mid-turn, and the next loop would be a zombie
+				// taking another turn on a run somebody else is driving.
+				if s.markRunOpen(ctx, park) {
+					_ = proc.Close()
+					return liveOutcome{fenced: true}
+				}
 				resetIdleTimer(idle, idleTimeout)
 			}
 
@@ -311,7 +333,9 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 			// to a durable resume. The status flips to open here; whether a process
 			// was warm was never a status.
 			_ = proc.Close()
-			_ = s.parkRunOpen(ctx, park, proc.SessionID())
+			if s.parkRunOpen(ctx, park, proc.SessionID()) {
+				return liveOutcome{fenced: true}
+			}
 			return liveOutcome{hibernated: true}
 
 		case <-proc.Done():
@@ -345,9 +369,12 @@ func invalidEnvelopeCorrection() string {
 //
 // Routing has three arms, and which one a park takes says who is speaking. An
 // engagement parking its own run (claimID set) goes through the claim fence,
-// so a zombie executor cannot park a conversation its successor holds. A
-// manual run with no claim in scope writes under the creator's synthetic
-// claims. Everything else is a system write on the admin pool.
+// so a zombie executor cannot park a conversation its successor holds — and
+// every dispatched run reaches this with a claim, deliberate stop and idle
+// turn-end alike. The other two arms are what is left when there is no
+// engagement to name: a manual run with no claim writes under the creator's
+// synthetic claims, and everything else is a system write on the admin pool.
+// Neither is zombie-reachable, because a zombie by definition held a claim.
 //
 // Returns fenced: true when the fence refused the write because this
 // engagement's claim was released. Nothing was recorded or broadcast, and the

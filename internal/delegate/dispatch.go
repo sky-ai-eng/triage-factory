@@ -1193,9 +1193,9 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		case "github":
 			cfg, err = s.setupGitHub(ctx, orgID, run.ID, run.ClaimID, br.ID, task, gh, execSandbox)
 		case "jira":
-			cfg, err = s.setupJira(ctx, orgID, run.ID, br.ID, task, gh)
+			cfg, err = s.setupJira(ctx, orgID, run.ID, run.ClaimID, br.ID, task, gh)
 		case "slack":
-			cfg, err = s.setupSlack(ctx, orgID, run.ID, br.ID, task, gh)
+			cfg, err = s.setupSlack(ctx, orgID, run.ID, run.ClaimID, br.ID, task, gh)
 		default:
 			err = fmt.Errorf("unsupported task source: %s", task.EntitySource)
 		}
@@ -1216,7 +1216,9 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	// Later step (or crash re-claim): reconstruct config + ensure the shared
 	// worktree exists. ensureWorkspace warm-returns the on-disk path or cold-
 	// rebuilds it from the snapshot keyed by the blueprint_run id.
-	runForWS := &domain.Conversation{ID: run.ID, WorktreePath: br.WorktreePath, BlueprintRunID: br.ID}
+	// ClaimID travels with it: the rehydrate inside ensureWorkspace re-stamps
+	// worktree_path, and that stamp is a fenced engagement write.
+	runForWS := &domain.Conversation{ID: run.ID, ClaimID: run.ClaimID, WorktreePath: br.WorktreePath, BlueprintRunID: br.ID}
 	cfg := runConfig{orgID: orgID, projectID: lookupEntityProjectID(s.entities, orgID, task.EntityID)}
 	switch task.EntitySource {
 	case "github":
@@ -1273,7 +1275,12 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	// Idempotent, and correct on both workspace paths: a re-claim resolves the
 	// same warm path, and a cold rehydrate onto a fresh one writes the tree the
 	// resumed session will actually run in.
-	if err := s.agentRuns.SetWorktreePathSystem(context.WithoutCancel(ctx), orgID, run.ID, cfg.wtPath); err != nil {
+	// A fence refusal is not this warning's case: "a follow-up will be refused"
+	// describes a row left without a path, and a fenced-out engagement's row
+	// has whatever the successor put there. setWorktreePath logs the ownership
+	// loss itself; the consequence stated here would be a guess about a
+	// conversation this executor no longer has any standing to describe.
+	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, cfg.wtPath); err != nil && !errors.Is(err, db.ErrClaimReleased) {
 		dispatchLog.Warn("set worktree_path for blueprint step failed; a follow-up to this conversation will be refused",
 			"run", run.ID, "blueprint_run", br.ID, "error", err)
 	}

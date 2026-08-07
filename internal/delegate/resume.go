@@ -456,6 +456,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 				claudeCwd:     cwd,
 				triggerType:   triggerType,
 				creatorUserID: creatorUserID,
+				claimID:       opts.claimID,
 			},
 			opts:        baseOpts,
 			perms:       perms,
@@ -466,6 +467,13 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		out = s.runOneShot(ctx, baseOpts, sink)
 	}
 
+	// A fence trip on this path — the sink's refused insert, or the driver's
+	// refused park — surfaces as an outcome with no completion, and the caller
+	// routes that through failRun. That is the correct disposition and it is
+	// safe to reach: failRun's terminal is itself claim-fenced, so the refusal
+	// repeats there and nothing lands on the successor's row. No dedicated
+	// fenced field on ResumeOutcome, because there is no action it would
+	// unlock that isn't already refused one layer down.
 	outcome := &ResumeOutcome{}
 	outcome.Completion = out.result
 	outcome.StderrText = out.stderr

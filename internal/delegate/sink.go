@@ -69,20 +69,40 @@ func newRunSink(s *Spawner, orgID, runID, claimID, triggerType, creatorUserID st
 // SessionID. The "Take over" button is gated on session id presence;
 // without this nudge it stays hidden until the next status flip
 // (often "running" → terminal), which is too late to be useful.
+//
+// The three arms are OnMessage's, for the same reason: an engagement writes
+// as itself whatever the run's trigger type, and only a writer with no claim
+// falls back to the pool split. The fence matters more here than anywhere
+// else in this file. sdk_session_id is the resume coordinate, so a zombie's
+// late init lands on the successor's row and is not discovered until the next
+// resume tries to reconnect to a session that died with this process. A
+// refusal therefore DISCARDS this id — there is no unfenced retry, because
+// the write succeeding is precisely the harm.
 func (k *runSink) OnSession(sessionID string) error {
 	if k.sessionDelivered {
 		return nil
 	}
 	k.sessionDelivered = true
 	bgCtx := context.Background()
-	if k.triggerType == "manual" {
+	switch {
+	case k.claimID != "":
+		if err := k.spawner.agentRuns.SetSessionForClaimSystem(bgCtx, k.orgID, k.runID, k.claimID, sessionID); err != nil {
+			if errors.Is(err, db.ErrClaimReleased) {
+				k.tripFence(err)
+				return err
+			}
+			return fmt.Errorf("persist session_id: %w", err)
+		}
+	case k.triggerType == "manual":
 		if err := k.spawner.tx.SyntheticClaimsWithTx(bgCtx, k.orgID, k.creatorUserID, func(ts db.TxStores) error {
 			return ts.Conversations.SetSession(bgCtx, k.orgID, k.runID, sessionID)
 		}); err != nil {
 			return fmt.Errorf("persist session_id: %w", err)
 		}
-	} else if err := k.spawner.agentRuns.SetSessionSystem(bgCtx, k.orgID, k.runID, sessionID); err != nil {
-		return fmt.Errorf("persist session_id: %w", err)
+	default:
+		if err := k.spawner.agentRuns.SetSessionSystem(bgCtx, k.orgID, k.runID, sessionID); err != nil {
+			return fmt.Errorf("persist session_id: %w", err)
+		}
 	}
 	k.spawner.broadcastRunUpdate(k.orgID, k.runID, "running")
 	return nil

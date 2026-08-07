@@ -1,6 +1,7 @@
 package postgres_test
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -36,6 +37,55 @@ func TestScoreStore_Postgres(t *testing.T) {
 		}
 		return stores.Scores, orgID, seeder
 	})
+}
+
+// TestScoreStore_Postgres_ResetStaleScoring_OrgScoped pins the half of
+// the crash-recovery contract the conformance suite can't reach: SQLite
+// is N=1 so its harness only ever has one org, while in multi mode the
+// per-org runners fire concurrently. A reset that missed its org_id
+// predicate would strip the 'in_progress' claim out from under another
+// tenant's live cycle, whose tasks would then be scored twice and, worse,
+// re-picked while its LLM call was still in flight.
+func TestScoreStore_Postgres_ResetStaleScoring_OrgScoped(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	orgA, userA := seedPgOrgAndUser(t, h)
+	orgB, userB := seedPgOrgAndUser(t, h)
+	residueA := seedPgTasks(t, h.AdminDB, orgA, userA, 2)
+	inFlightB := seedPgTasks(t, h.AdminDB, orgB, userB, 3)
+
+	ctx := context.Background()
+	if err := stores.Scores.MarkScoring(ctx, orgA, residueA); err != nil {
+		t.Fatalf("MarkScoring orgA: %v", err)
+	}
+	if err := stores.Scores.MarkScoring(ctx, orgB, inFlightB); err != nil {
+		t.Fatalf("MarkScoring orgB: %v", err)
+	}
+
+	n, err := stores.Scores.ResetStaleScoring(ctx, orgA)
+	if err != nil {
+		t.Fatalf("ResetStaleScoring: %v", err)
+	}
+	if n != len(residueA) {
+		t.Errorf("ResetStaleScoring(orgA) = %d, want %d", n, len(residueA))
+	}
+
+	tasksB, err := stores.Scores.UnscoredTasks(ctx, orgB)
+	if err != nil {
+		t.Fatalf("UnscoredTasks orgB: %v", err)
+	}
+	if len(tasksB) != 0 {
+		t.Errorf("orgB has %d unscored tasks after orgA's reset, want 0 — its in-flight claims must be untouched", len(tasksB))
+	}
+	tasksA, err := stores.Scores.UnscoredTasks(ctx, orgA)
+	if err != nil {
+		t.Fatalf("UnscoredTasks orgA: %v", err)
+	}
+	if len(tasksA) != len(residueA) {
+		t.Errorf("orgA has %d unscored tasks, want %d", len(tasksA), len(residueA))
+	}
 }
 
 // seedPgOrgAndUser creates the org + auth.user + public.user +

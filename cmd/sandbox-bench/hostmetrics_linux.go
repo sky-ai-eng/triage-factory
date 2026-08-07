@@ -4,23 +4,20 @@ package main
 
 import (
 	"bufio"
-	"context"
-	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
 )
 
 func numCPU() int { return runtime.NumCPU() }
 
-// readMemAvailableMB reads host MemAvailable from /proc/meminfo.
-// Inside a container this is still the host-wide figure (no cgroup
-// memory limit is set on the TF service), which is exactly what the
-// guardrail wants.
+// readMemAvailableMB reads host MemAvailable from /proc/meminfo. Inside a
+// container this is still the host-wide figure (no cgroup memory limit is
+// set on the bench container), which is exactly what the guardrail wants.
 func readMemAvailableMB() int { return readMeminfoMB("MemAvailable:") }
+
+func readMemTotalMB() int { return readMeminfoMB("MemTotal:") }
 
 func readSwapUsedMB() int {
 	total := readMeminfoMB("SwapTotal:")
@@ -64,21 +61,10 @@ func readLoad1() float64 {
 	return l1
 }
 
-// sampleCPUPct measures whole-host CPU utilization over the window by
-// diffing /proc/stat aggregate counters.
-func sampleCPUPct(ctx context.Context, window time.Duration) float64 {
-	busy1, total1, ok := readCPUStat()
-	if !ok {
-		return -1
-	}
-	sleepCtx(ctx, window)
-	busy2, total2, ok := readCPUStat()
-	if !ok || total2 == total1 {
-		return -1
-	}
-	return 100 * float64(busy2-busy1) / float64(total2-total1)
-}
-
+// readCPUStat reads the whole-host aggregate CPU counters from /proc/stat;
+// the plateau sampler diffs two reads over its window. Whole-host on
+// purpose — the bench benchmarks hosts, and the per-jail attribution comes
+// from each run's cgroup, not from here.
 func readCPUStat() (busy, total uint64, ok bool) {
 	f, err := os.Open("/proc/stat")
 	if err != nil {
@@ -112,116 +98,4 @@ func readCPUStat() (busy, total uint64, ok bool) {
 		idle += vals[4] // iowait
 	}
 	return total - idle, total, true
-}
-
-// totalTreeRSSMB sums the RSS of every live sandbox's full process
-// tree (runsc parent + sentry + gofer + the sandboxed workload as
-// accounted by the sentry).
-//
-// Caution: sum-of-RSS overstates at high N — every sentry/gofer maps
-// the same static runsc binary, and RSS counts those shared text
-// pages once per process. totalTreePSSMB is the honest aggregate.
-func totalTreeRSSMB(live []*handle) int {
-	pageSize := os.Getpagesize()
-	var totalBytes int64
-	for _, h := range live {
-		pid := h.run.Pid()
-		if pid == 0 {
-			continue
-		}
-		for _, p := range descendantPIDs(pid) {
-			totalBytes += rssBytes(p, pageSize)
-		}
-	}
-	return int(totalBytes / (1024 * 1024))
-}
-
-// totalTreePSSMB sums PSS (proportional set size — shared pages
-// divided across their mappers) over every live sandbox tree. This is
-// the number to use for capacity planning.
-func totalTreePSSMB(live []*handle) int {
-	var totalKB int64
-	for _, h := range live {
-		pid := h.run.Pid()
-		if pid == 0 {
-			continue
-		}
-		for _, p := range descendantPIDs(pid) {
-			totalKB += pssKB(p)
-		}
-	}
-	return int(totalKB / 1024)
-}
-
-func pssKB(pid int) int64 {
-	f, err := os.Open(fmt.Sprintf("/proc/%d/smaps_rollup", pid))
-	if err != nil {
-		return 0
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "Pss:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				kb, _ := strconv.ParseInt(fields[1], 10, 64)
-				return kb
-			}
-		}
-	}
-	return 0
-}
-
-// descendantPIDs walks /proc/<pid>/task/*/children to collect the pid
-// and all its descendants. Races with exiting processes are fine —
-// missing entries are skipped.
-func descendantPIDs(root int) []int {
-	seen := map[int]bool{}
-	stack := []int{root}
-	var out []int
-	for len(stack) > 0 {
-		pid := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if seen[pid] {
-			continue
-		}
-		seen[pid] = true
-		out = append(out, pid)
-		taskDir := fmt.Sprintf("/proc/%d/task", pid)
-		tids, err := os.ReadDir(taskDir)
-		if err != nil {
-			continue
-		}
-		for _, tid := range tids {
-			data, err := os.ReadFile(filepath.Join(taskDir, tid.Name(), "children"))
-			if err != nil {
-				continue
-			}
-			for _, c := range strings.Fields(string(data)) {
-				if child, err := strconv.Atoi(c); err == nil {
-					stack = append(stack, child)
-				}
-			}
-		}
-	}
-	return out
-}
-
-func rssBytes(pid, pageSize int) int64 {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return 0
-	}
-	raw := string(data)
-	rpar := strings.LastIndexByte(raw, ')')
-	if rpar < 0 {
-		return 0
-	}
-	fields := strings.Fields(raw[rpar+2:])
-	if len(fields) < 22 {
-		return 0
-	}
-	rssPages, _ := strconv.ParseInt(fields[21], 10, 64)
-	return rssPages * int64(pageSize)
 }

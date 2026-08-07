@@ -287,8 +287,9 @@ instead of whichever replica DNS happened to answer with.
 
 Grafana's home page is the **Triage Factory — Overview** dashboard, provisioned
 from [`docker/observability/dashboards/`](../../docker/observability/dashboards/)
-the same way the data sources are. Three rows, answering "is TF healthy, and
-what is slow":
+the same way the data sources are. Five rows — three answering "is TF healthy,
+and what is slow", then one each for the two pipelines whose spans need reading
+rather than aggregating:
 
 - **Traces.** Five fixed TraceQL searches — GitHub and Jira poll cycles, system
   job cycles (scorer / profiler / classifier), API requests slower than 500 ms,
@@ -308,6 +309,27 @@ what is slow":
   requests by response status, goroutines, RSS, and the Slack ingest counters.
   Deliberately short: things you would act on, not a runtime-metrics museum.
   The Slack panel stays empty unless a Slack app is connected.
+- **Event pipeline.** One row per routed event, carrying the two things the RED
+  row structurally cannot show: `queue.wait_ms` (the enqueue→claim interval,
+  over before the consumer span starts) and the routing `disposition`. Both are
+  span *attributes*, and the `traces_spanmetrics_*` series carry only service,
+  span name, kind and status — so this is a span list you sort and filter, not
+  a series you graph, and that is a deliberate choice rather than a gap waiting
+  for a Tempo processor. Alongside it, the `route.delegate` rate: how much
+  auto-delegation a trigger's configuration is actually causing, which has no
+  other display anywhere. Note `error` there is a disposition, not a span error
+  status — the store call that failed carries the status on its own span.
+- **Delegated runs.** The engagement setup, claim to agent-live: a list of
+  attempts with their `outcome` and `claim.attempt`, the phase breakdown that
+  answers "why did that run take four minutes to start", the credential park
+  next to the control pod's seal, and every `capbroker.call` by `op` — which is
+  the *only* record the cap-broker's work has anywhere, since it exports no
+  spans of its own. An error rate over engagements has to read the `outcome`
+  attribute rather than the span status: `setup_failed` is the one outcome that
+  is also an error, so counting statuses would count every stopped run as a
+  failure. A local-mode run populates a subset of this row — there is no broker,
+  sidecar, or credential span there at all — and those empty panels are the path
+  not taken, not a fault.
 
 Everything the dashboard displays is span names, opaque IDs, and closed enums —
 never a repo name, username, or PR title — the same rule the spans and metrics

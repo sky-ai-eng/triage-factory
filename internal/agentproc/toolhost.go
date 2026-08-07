@@ -193,6 +193,22 @@ func (j *ToolHostJail) Close() error {
 	return nil
 }
 
+// OOMKilled reports whether the jail's memory-ceiling cgroup recorded an OOM
+// kill. Meaningful only once the tool host has exited (the same contract as
+// LaunchedRun.OOMKilled); false while it is still running or was never
+// launched.
+func (j *ToolHostJail) OOMKilled() bool {
+	if j == nil || j.run == nil || j.waitDone == nil {
+		return false
+	}
+	select {
+	case <-j.waitDone:
+		return j.run.OOMKilled()
+	default:
+		return false
+	}
+}
+
 // recordActualsOnce waits (briefly) for the watcher's Wait to return — the
 // point after which Actuals is valid — then stamps the claim. Best-effort at
 // every step, mirroring recordSandboxActuals on the SDK path: a jail that

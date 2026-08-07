@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -45,6 +46,22 @@ func enqueueCIFailed(t *testing.T, database *sql.DB, entityID string) {
 		MetadataJSON: `{"check_name":"build"}`,
 	}, ""); err != nil {
 		t.Fatalf("enqueue ci_check_failed for %s: %v", entityID, err)
+	}
+}
+
+// backdateClaim rewinds a claimed queue row's claimed_at, standing in for a
+// claim made that long ago. Raw SQL: nothing in the store writes the column
+// except ClaimNext, and the staleness sweep can only be exercised against a
+// claim old enough to be stale.
+func backdateClaim(t *testing.T, database *sql.DB, queueID int64, age time.Duration) {
+	t.Helper()
+	res, err := database.Exec(`UPDATE event_queue SET claimed_at = ? WHERE id = ?`,
+		time.Now().Add(-age), queueID)
+	if err != nil {
+		t.Fatalf("backdate claimed_at: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("backdate claimed_at touched %d rows, want 1", n)
 	}
 }
 
@@ -131,8 +148,8 @@ func TestEventQueue_SurvivesRestart(t *testing.T) {
 
 	// Restart: a fresh worker over the same DB. Boot recovery resets the
 	// in-flight row back to pending (the SAME persistent instance identity,
-	// a later boot epoch — TFAC-578's self-sweep); the drain then routes all
-	// three.
+	// a later boot epoch — the ownership self-sweep); the drain then routes
+	// all three.
 	r2 := newQueueWorkerRouter(t, database)
 	if n, err := st.EventQueue.ResetProcessing(context.Background(), "restart-instance", 2); err != nil {
 		t.Fatalf("boot recovery: %v", err)
@@ -152,6 +169,156 @@ func TestEventQueue_SurvivesRestart(t *testing.T) {
 		if len(active) != 1 {
 			t.Errorf("entity %s has %d tasks, want 1", eid, len(active))
 		}
+	}
+}
+
+// TestEventQueue_StaleProcessing_RoutesAfterOwnerReplaced is the acceptance
+// test for the pod-replacement hole. Boot recovery is ownership-scoped, so
+// it only ever recovers an owner that comes back; a pod that is replaced
+// rather than rebooted — scale-down, a fresh instance id after the brain
+// lease moves — leaves its claimed rows invisible to every later boot, and
+// their events never route. The floor scan's staleness sweep is what
+// reclaims them, and the replay is dedup-safe: exactly one task.
+func TestEventQueue_StaleProcessing_RoutesAfterOwnerReplaced(t *testing.T) {
+	database := newTestDB(t)
+	r := newQueueWorkerRouter(t, database)
+	st := sqlitestore.New(database)
+	ctx := context.Background()
+
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID,
+		"github", "owner/repo#stale", "pr", "PR", "https://example.com")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	enqueueCIFailed(t, database, entity.ID)
+
+	// A pod claims the row and never comes back under this identity.
+	claimed, err := st.EventQueue.ClaimNext(ctx, "vanished-pod", 1)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim as vanished-pod: qe=%v err=%v", claimed, err)
+	}
+	backdateClaim(t, database, claimed.ID, 11*time.Minute)
+
+	// The successor's boot reset is scoped to its own identity, so it finds
+	// nothing, and the drain only ever claims 'pending' — this is the
+	// stranding the backstop exists for.
+	if n, err := st.EventQueue.ResetProcessing(ctx, "successor-pod", 1); err != nil {
+		t.Fatalf("successor boot recovery: %v", err)
+	} else if n != 0 {
+		t.Fatalf("successor boot recovery reset %d rows, want 0 (it owns none of them)", n)
+	}
+	r.drainEventQueue(ctx)
+	if tasks := countRows(t, database, `SELECT COUNT(*) FROM tasks`); tasks != 0 {
+		t.Fatalf("tasks = %d before the sweep, want 0 (a processing row is not claimable)", tasks)
+	}
+
+	// The sweep on the floor scan unsticks it; the next drain routes it.
+	r.sweepStaleProcessing(ctx)
+	r.drainEventQueue(ctx)
+
+	if done := countRows(t, database, `SELECT COUNT(*) FROM event_queue WHERE status='done'`); done != 1 {
+		t.Errorf("done queue rows = %d, want 1 (the reclaimed row must route)", done)
+	}
+	active, err := testTaskStore(database).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
+	if err != nil {
+		t.Fatalf("list active tasks: %v", err)
+	}
+	if len(active) != 1 {
+		t.Errorf("entity has %d tasks, want exactly 1", len(active))
+	}
+}
+
+// TestEventQueue_StaleProcessing_LeavesFreshClaimsAlone is the negative
+// space of the sweep: a claim that is merely in progress must be untouchable,
+// or the backstop becomes a source of double routing rather than a guard
+// against loss. A routing unit is milliseconds of DB writes, so a minute-old
+// claim is already implausible — ten is the threshold precisely so no live
+// unit can reach it.
+func TestEventQueue_StaleProcessing_LeavesFreshClaimsAlone(t *testing.T) {
+	database := newTestDB(t)
+	r := newQueueWorkerRouter(t, database)
+	st := sqlitestore.New(database)
+	ctx := context.Background()
+
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID,
+		"github", "owner/repo#fresh", "pr", "PR", "https://example.com")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	enqueueCIFailed(t, database, entity.ID)
+
+	claimed, err := st.EventQueue.ClaimNext(ctx, "live-pod", 1)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim: qe=%v err=%v", claimed, err)
+	}
+	backdateClaim(t, database, claimed.ID, time.Minute)
+
+	r.sweepStaleProcessing(ctx)
+
+	if n := countRows(t, database, `SELECT COUNT(*) FROM event_queue WHERE status='processing'`); n != 1 {
+		t.Errorf("processing rows = %d, want 1 (a minute-old claim is live work)", n)
+	}
+	r.drainEventQueue(ctx)
+	if tasks := countRows(t, database, `SELECT COUNT(*) FROM tasks`); tasks != 0 {
+		t.Errorf("tasks = %d, want 0 — the live claim's row must not have been re-routed", tasks)
+	}
+}
+
+// TestEventQueue_StaleProcessing_KeepsAttemptBudget pins that the backstop
+// cannot turn a poison row into a permanent loop. The reclaim leaves
+// attempts alone (the claim already counted the try), so a row that has
+// burned its budget parks 'failed' on its next failure instead of being
+// reclaimed forever.
+func TestEventQueue_StaleProcessing_KeepsAttemptBudget(t *testing.T) {
+	database := newTestDB(t)
+	r := newQueueWorkerRouter(t, database)
+	st := sqlitestore.New(database)
+	ctx := context.Background()
+
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID,
+		"github", "owner/repo#poison", "pr", "PR", "https://example.com")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	enqueueCIFailed(t, database, entity.ID)
+
+	// Burn the retry budget the way repeated transient failures would.
+	for i := 0; i < maxEventAttempts; i++ {
+		qe, err := st.EventQueue.ClaimNext(ctx, "flaky-pod", 1)
+		if err != nil || qe == nil {
+			t.Fatalf("claim %d: qe=%v err=%v", i, qe, err)
+		}
+		if err := st.EventQueue.Requeue(ctx, qe.OrgID, qe.ID, "transient"); err != nil {
+			t.Fatalf("requeue %d: %v", i, err)
+		}
+	}
+
+	// One more claim, then the owner vanishes mid-unit.
+	claimed, err := st.EventQueue.ClaimNext(ctx, "flaky-pod", 1)
+	if err != nil || claimed == nil {
+		t.Fatalf("final claim: qe=%v err=%v", claimed, err)
+	}
+	backdateClaim(t, database, claimed.ID, 11*time.Minute)
+	r.sweepStaleProcessing(ctx)
+
+	reclaimed, err := st.EventQueue.ClaimNext(ctx, "successor-pod", 1)
+	if err != nil || reclaimed == nil {
+		t.Fatalf("claim after reclaim: qe=%v err=%v", reclaimed, err)
+	}
+	if reclaimed.Attempts <= maxEventAttempts {
+		t.Fatalf("attempts = %d after the reclaim, want > %d (the sweep must not reset the budget)",
+			reclaimed.Attempts, maxEventAttempts)
+	}
+
+	// Over budget, so the next failure parks rather than requeues.
+	r.parkOrRequeue(ctx, reclaimed, "still failing")
+	if n := countRows(t, database, `SELECT COUNT(*) FROM event_queue WHERE status='failed'`); n != 1 {
+		t.Errorf("failed rows = %d, want 1 (an over-budget row must park, not loop)", n)
+	}
+	// And a parked row is terminal — the sweep only ever touches 'processing'.
+	r.sweepStaleProcessing(ctx)
+	if n := countRows(t, database, `SELECT COUNT(*) FROM event_queue WHERE status='failed'`); n != 1 {
+		t.Errorf("failed rows = %d after a second sweep, want 1 (the sweep must not resurrect a parked row)", n)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
@@ -16,7 +17,9 @@ var reaperLog = logging.Component("reaper")
 // 4s < self-fence 15s < reaper staleness 30s. TF_RUN_MAX_ATTEMPTS defaults
 // to 2 (decision log #4) — distinct from delegate.maxRunAttempts (5), which
 // caps in-process workspace-setup retries on the SAME executor; this knob
-// caps executor-loss retries across a re-claim on a DIFFERENT executor.
+// caps executor-loss retries across a re-claim on a DIFFERENT executor. Two
+// budgets, two values, one unit: both count the current episode of
+// consecutive hand-backs, never the conversation's lifetime claims.
 const (
 	DefaultStaleThreshold = 30 * time.Second
 	DefaultMaxAttempts    = 2
@@ -113,6 +116,17 @@ func RunReaper(ctx context.Context, store Store, interval time.Duration, staleTh
 				reaperLog.Warn("claim-desync sweep failed; retrying next tick", "error", herr)
 			} else if released > 0 {
 				reaperLog.Info("healed run↔claim desyncs", "released_claims", released)
+			}
+			// Mint-crash orphans: a 'running' blueprint with no child
+			// conversation, which every arm above looks past because they all
+			// join through conversations. The grace is a property of the shape,
+			// not of this deployment, so it comes from the constant both
+			// recovery surfaces read rather than a knob.
+			if n, oerr := store.FailBlueprintRunsOrphanedAtMint(ctx, domain.BlueprintOrphanedAtMintGrace); oerr != nil {
+				reaperLog.Warn("orphaned-at-mint blueprint sweep failed; retrying next tick", "error", oerr)
+			} else if n > 0 {
+				reaperLog.Info("failed blueprint runs orphaned at mint", "count", n,
+					"grace", domain.BlueprintOrphanedAtMintGrace)
 			}
 		}
 	}
