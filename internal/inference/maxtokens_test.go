@@ -45,10 +45,8 @@ func TestPricing_ModelMaxOutputAnchors(t *testing.T) {
 }
 
 func TestMaxOutputTokens_PerProviderPolicy(t *testing.T) {
-	const bedrockBudget = 32768
-
 	t.Run("anthropic direct asks for the model's whole output", func(t *testing.T) {
-		if got := maxOutputTokens(ProviderAnthropic, "claude-opus-5", bedrockBudget); got != 128000 {
+		if got := MaxOutputTokens(ProviderAnthropic, "claude-opus-5"); got != 128000 {
 			t.Errorf("cap = %d, want the model maximum 128000 — a generous cap costs nothing on the direct API", got)
 		}
 	})
@@ -57,23 +55,26 @@ func TestMaxOutputTokens_PerProviderPolicy(t *testing.T) {
 		// The cap is reserved against the account's per-minute quota at
 		// admission, so the model's 128k maximum is exactly what must not be
 		// requested.
-		if got := maxOutputTokens(ProviderBedrock, "claude-opus-5", bedrockBudget); got != bedrockBudget {
-			t.Errorf("cap = %d, want the Bedrock budget %d", got, bedrockBudget)
+		if got := MaxOutputTokens(ProviderBedrock, "claude-opus-5"); got != bedrockMaxOutputTokens {
+			t.Errorf("cap = %d, want the Bedrock budget %d", got, bedrockMaxOutputTokens)
 		}
 	})
 
 	t.Run("bedrock never asks for more than the model can emit", func(t *testing.T) {
 		// A budget above the model's own maximum is a 400, not a bigger
-		// answer.
-		if got := maxOutputTokens(ProviderBedrock, "claude-haiku-4-5", 100000); got != 64000 {
+		// answer — so a model whose ceiling is under the budget pins there.
+		if bedrockMaxOutputTokens <= 64000 {
+			t.Skip("the Bedrock budget no longer exceeds any model's ceiling; nothing to clamp")
+		}
+		if got := MaxOutputTokens(ProviderBedrock, "claude-haiku-4-5"); got != 64000 {
 			t.Errorf("cap = %d, want the model maximum 64000", got)
 		}
 	})
 
 	t.Run("an unknown model falls back generously, never to a small constant", func(t *testing.T) {
-		got := maxOutputTokens(ProviderAnthropic, "some-model-nobody-ships", bedrockBudget)
-		if got != DefaultMaxOutputTokens {
-			t.Errorf("cap = %d, want %d", got, DefaultMaxOutputTokens)
+		got := MaxOutputTokens(ProviderAnthropic, "some-model-nobody-ships")
+		if got != defaultMaxOutputTokens {
+			t.Errorf("cap = %d, want %d", got, defaultMaxOutputTokens)
 		}
 		if got <= 4096 {
 			t.Errorf("cap = %d — the whole point is that a thinking turn never gets a 4096-token budget", got)
@@ -81,37 +82,16 @@ func TestMaxOutputTokens_PerProviderPolicy(t *testing.T) {
 	})
 
 	t.Run("an unknown model on bedrock still gets the budget", func(t *testing.T) {
-		if got := maxOutputTokens(ProviderBedrock, "some-model-nobody-ships", bedrockBudget); got != bedrockBudget {
-			t.Errorf("cap = %d, want the Bedrock budget %d", got, bedrockBudget)
-		}
-	})
-}
-
-func TestMaxOutputTokens_BedrockBudgetEnvOverride(t *testing.T) {
-	t.Run("default when unset", func(t *testing.T) {
-		t.Setenv(BedrockMaxOutputEnv, "")
-		if got := MaxOutputTokens(ProviderBedrock, "claude-opus-5"); got != DefaultBedrockMaxOutputTokens {
-			t.Errorf("cap = %d, want %d", got, DefaultBedrockMaxOutputTokens)
+		if got := MaxOutputTokens(ProviderBedrock, "some-model-nobody-ships"); got != bedrockMaxOutputTokens {
+			t.Errorf("cap = %d, want the Bedrock budget %d", got, bedrockMaxOutputTokens)
 		}
 	})
 
-	t.Run("honored when set", func(t *testing.T) {
-		t.Setenv(BedrockMaxOutputEnv, "8192")
-		if got := MaxOutputTokens(ProviderBedrock, "claude-opus-5"); got != 8192 {
-			t.Errorf("cap = %d, want the override 8192", got)
-		}
-		// Anthropic direct is a different budget and must not move with it.
-		if got := MaxOutputTokens(ProviderAnthropic, "claude-opus-5"); got != 128000 {
-			t.Errorf("direct cap = %d, want 128000 — the Bedrock override is Bedrock's alone", got)
-		}
-	})
-
-	t.Run("a junk value falls back rather than sending nonsense", func(t *testing.T) {
-		for _, raw := range []string{"lots", "0", "-1"} {
-			t.Setenv(BedrockMaxOutputEnv, raw)
-			if got := MaxOutputTokens(ProviderBedrock, "claude-opus-5"); got != DefaultBedrockMaxOutputTokens {
-				t.Errorf("%q: cap = %d, want the default %d", raw, got, DefaultBedrockMaxOutputTokens)
-			}
+	t.Run("the two providers are resolved independently", func(t *testing.T) {
+		// The whole reason this takes a provider: the same model asks for
+		// different amounts depending on who is admitting the request.
+		if MaxOutputTokens(ProviderAnthropic, "claude-opus-5") == MaxOutputTokens(ProviderBedrock, "claude-opus-5") {
+			t.Error("direct and Bedrock resolved to the same cap; the policy has collapsed to one number")
 		}
 	})
 }
@@ -141,7 +121,6 @@ func TestWire_MaxTokensAlwaysSent(t *testing.T) {
 	})
 
 	t.Run("the policy follows the provider the call routes to", func(t *testing.T) {
-		t.Setenv(BedrockMaxOutputEnv, "")
 		breq, err := buildChatRequest(Request{
 			Provider: ProviderBedrock, Model: "claude-opus-5",
 			Rows: singleUserRow(),
@@ -149,8 +128,8 @@ func TestWire_MaxTokensAlwaysSent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildChatRequest: %v", err)
 		}
-		if breq.Params.MaxCompletionTokens == nil || *breq.Params.MaxCompletionTokens != DefaultBedrockMaxOutputTokens {
-			t.Fatalf("max_tokens = %v, want the Bedrock budget %d", breq.Params.MaxCompletionTokens, DefaultBedrockMaxOutputTokens)
+		if breq.Params.MaxCompletionTokens == nil || *breq.Params.MaxCompletionTokens != bedrockMaxOutputTokens {
+			t.Fatalf("max_tokens = %v, want the Bedrock budget %d", breq.Params.MaxCompletionTokens, bedrockMaxOutputTokens)
 		}
 	})
 }

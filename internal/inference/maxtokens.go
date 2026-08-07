@@ -1,14 +1,7 @@
 package inference
 
 import (
-	"os"
-	"strconv"
-	"strings"
-	"sync"
-
 	"github.com/maximhq/bifrost/core/schemas"
-
-	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
 // The completion cap — `max_tokens` on the wire — is a per-provider budget,
@@ -24,10 +17,9 @@ import (
 // Bedrock charges for the ask. AWS deducts `input + max_tokens` from the
 // account's per-minute token quota at admission, adjusts during processing,
 // and replenishes at the end against the model's burndown multiplier (10x for
-// the current Claude generation) — so an oversized cap throttles requests that
-// would have fit and collapses effective concurrency. AWS's own guidance is to
-// "set max_tokens to approximate your expected completion size", which is what
-// the budget below is.
+// the current Claude generation). AWS's own guidance is to "set max_tokens to
+// approximate your expected completion size", which is what the Bedrock
+// constant below is.
 //
 // Both arms exist to make one thing unreachable: a cap nobody chose. An unset
 // cap is filled by the provider layer with a small constant, and a
@@ -35,42 +27,34 @@ import (
 // nothing — no text, no tool call, no work.
 
 const (
-	// DefaultMaxOutputTokens is the cap for a model the datasheet does not
+	// defaultMaxOutputTokens is the cap for a model the datasheet does not
 	// carry. It is deliberately large: Anthropic's own guidance for
 	// high-effort thinking is to allow at least this much, and the failure
 	// this constant exists to prevent is a turn whose whole budget went to
 	// reasoning. It is never the provider layer's small fallback.
-	DefaultMaxOutputTokens = 65536
+	defaultMaxOutputTokens = 65536
 
-	// DefaultBedrockMaxOutputTokens is the Bedrock budget: large enough that
-	// a thinking-heavy turn clears it, small enough that the admission
-	// reservation does not collapse concurrency at a 10x burndown. Tunable
-	// per deployment via BedrockMaxOutputEnv against observed throttling
-	// versus observed cap hits.
-	DefaultBedrockMaxOutputTokens = 32768
-
-	// BedrockMaxOutputEnv overrides the Bedrock budget. A configured value is
-	// used as given — it is the deployment's quota being spent, and a knob
-	// that silently substitutes a different number is not a knob. The only
-	// bound applied to it is the model's own maximum, above which the API
-	// rejects the request outright. There is deliberately NO lower floor: a
-	// value small enough that a thinking-heavy turn exhausts it before acting
-	// will reproduce the failure the default guards against, and the engine's
-	// output-limit arm is what makes that legible rather than silent.
+	// bedrockMaxOutputTokens is the Bedrock budget: large enough that a
+	// thinking-heavy turn clears it, small enough that the admission
+	// reservation is not the thing bounding concurrency.
 	//
-	// An unparseable or non-positive value is not a configured value at all —
-	// it names no budget — so it warns once and falls back to the default.
-	BedrockMaxOutputEnv = "TF_BEDROCK_MAX_OUTPUT_TOKENS"
+	// It is a constant and not a deployment knob, deliberately. On an agent
+	// loop the admission reservation is `input + max_tokens` and the input
+	// side dominates it — a turn carrying a 100k-token transcript reserves
+	// ~133k here versus ~108k at a quarter of this budget, so tuning it moves
+	// a secondary term by a fraction. What actually burns the quota is the
+	// settlement, `output × burndown`, and that is driven by tokens the model
+	// really generated, which this number does not control. A knob whose two
+	// failure directions are "throttled slightly sooner" and "every
+	// thinking-heavy turn wastes a call and retries" is not worth a line of
+	// deployment configuration.
+	//
+	// If a real Bedrock deployment does show ThrottlingExceptions traceable
+	// to the reservation, lowering this is a one-line change — and the
+	// evidence for what to lower it TO would arrive with the report, which is
+	// exactly the thing a knob invented in advance cannot have.
+	bedrockMaxOutputTokens = 32768
 )
-
-var maxTokensLog = logging.Component("inference")
-
-// badBedrockBudgetWarn keeps the invalid-value warning to one line per
-// process. The read below happens per provider call, so an unguarded warn
-// would log on every LLM call for the lifetime of a misconfigured deployment
-// — turning one configuration mistake into a permanent stream of identical
-// lines, which is how the line stops being read at all.
-var badBedrockBudgetWarn sync.Once
 
 // ModelMaxOutput returns the model's maximum completion length from the
 // vendored datasheet, with the same lookup rules as pricing and ModelWindow
@@ -94,50 +78,19 @@ func ModelMaxOutput(model string) (int, bool) {
 // call site shares — including the request builder's own backstop, which is
 // what makes the provider layer's default unreachable from TF.
 func MaxOutputTokens(provider schemas.ModelProvider, model string) int {
-	return maxOutputTokens(provider, model, bedrockOutputBudget())
-}
-
-// maxOutputTokens is the policy proper, with the deployment's Bedrock budget
-// as a parameter so both arms are testable without touching the environment.
-func maxOutputTokens(provider schemas.ModelProvider, model string, bedrockBudget int) int {
 	ceiling, known := ModelMaxOutput(model)
 
 	if provider == ProviderBedrock {
-		if bedrockBudget <= 0 {
-			bedrockBudget = DefaultBedrockMaxOutputTokens
-		}
-		// The budget is what we ask for, whatever the operator set it to; the
-		// model's own maximum is the one bound, because asking above it is a
-		// 400 rather than a bigger answer. Nothing raises a low budget — see
-		// BedrockMaxOutputEnv for why that is deliberate.
-		if known && ceiling < bedrockBudget {
+		// The budget is what we ask for; the model's own maximum is the one
+		// bound, because asking above it is a 400 rather than a bigger answer.
+		if known && ceiling < bedrockMaxOutputTokens {
 			return ceiling
 		}
-		return bedrockBudget
+		return bedrockMaxOutputTokens
 	}
 
 	if known {
 		return ceiling
 	}
-	return DefaultMaxOutputTokens
-}
-
-// bedrockOutputBudget reads the deployment's Bedrock budget. Read per call
-// rather than cached: it is one env lookup next to a provider round trip, and
-// caching it would make the value a process-lifetime fact that an operator
-// cannot correct without a restart.
-func bedrockOutputBudget() int {
-	raw := strings.TrimSpace(os.Getenv(BedrockMaxOutputEnv))
-	if raw == "" {
-		return DefaultBedrockMaxOutputTokens
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n <= 0 {
-		badBedrockBudgetWarn.Do(func() {
-			maxTokensLog.Warn("invalid "+BedrockMaxOutputEnv+"; using the default Bedrock output budget",
-				"value", raw, "default", DefaultBedrockMaxOutputTokens)
-		})
-		return DefaultBedrockMaxOutputTokens
-	}
-	return n
+	return defaultMaxOutputTokens
 }
