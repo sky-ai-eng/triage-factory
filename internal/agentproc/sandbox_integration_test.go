@@ -70,12 +70,20 @@ func TestBuildSandboxEnv_CarriesSandboxMarker(t *testing.T) {
 // regression rather than a visible failure — hence a pin rather than a
 // comment. Asserted across extraEnv variants because ExtraEnv is appended
 // verbatim: a caller contributing its own GOTOOLCHAIN would otherwise
-// duplicate the key, and which copy cmd/go reads is platform-dependent.
+// duplicate the key, and which copy cmd/go reads is platform-dependent. The
+// GOTOOLCHAIN=local cases are the ones that make the pin load-bearing rather
+// than decorative — that is the value the rootfs's own go.env carries, so it
+// is the one an inherited env is most likely to thread back in, and it is
+// precisely the value that re-breaks the builds this entry exists to fix.
 func TestBuildSandboxEnv_CarriesGoToolchainAuto(t *testing.T) {
 	const want = "GOTOOLCHAIN=auto"
 	for _, extra := range [][]string{
 		nil,
 		{"TRIAGE_FACTORY_CONVERSATION_ID=r1"},
+		{"GOTOOLCHAIN=local"},
+		{"TRIAGE_FACTORY_CONVERSATION_ID=r1", "GOTOOLCHAIN=local"},
+		{"GOTOOLCHAIN=auto"},
+		{"GOTOOLCHAIN=go1.21.0"},
 	} {
 		var got []string
 		for _, kv := range buildSandboxEnv(extra) {
