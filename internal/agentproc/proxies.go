@@ -634,11 +634,26 @@ func startModProxyForSandbox(hostVethIP string) ([]string, *modproxy.Server, err
 
 // sandboxModProxyEnv points the sandboxed cmd/go at this run's relay.
 //
-// No ",direct" fallback, deliberately. `direct` makes cmd/go fetch straight
-// from the VCS host on a proxy miss, which the jail cannot reach — so the
-// fallback could only ever convert a clean "module not found" into a
-// confusing connection failure. Failing closed at the relay is the honest
-// behavior.
+// The ",direct" fallback is deliberate, and it is about PRIVATE modules.
+// `direct` makes cmd/go fetch from the VCS host, and for a github.com module
+// path that is a git operation — which the sandbox's git config rewrites onto
+// the per-run git proxy, an authenticated path that already exists. So the
+// fallback reaches a working, credential-injecting route rather than an
+// unreachable host, and it adds no reach: the git proxy applies its own
+// per-repo authorization, and any other VCS host is simply not allowlisted.
+//
+// It matters even where the fetch is ultimately refused. A private dependency
+// that has not been materialized draws the git proxy's actionable denial
+// ("run 'workspace add <repo>' ... then retry"); dying at the relay instead
+// would surface as a bare "module not found", stranding an agent that had a
+// remedy available. A public module the relay legitimately 404s still fails,
+// just one hop later.
+//
+// Note "," not "|": cmd/go falls through only on 404/410, so a relay OUTAGE
+// is a hard error rather than a silent bypass to direct fetching.
+//
+// A module matched by the repo's own GOPRIVATE/GONOPROXY never consults
+// GOPROXY at all and takes that same git-proxy path regardless of this value.
 //
 // GOSUMDB is left at its default: the relay serves the /sumdb/ arm of the
 // GOPROXY protocol, so checksum verification flows through this same
@@ -650,7 +665,7 @@ func startModProxyForSandbox(hostVethIP string) ([]string, *modproxy.Server, err
 // upstream. Nothing secret crosses the local hop — the bytes are public
 // module data either way.
 func sandboxModProxyEnv(proxyAddr string) []string {
-	return []string{"GOPROXY=http://" + proxyAddr}
+	return []string{"GOPROXY=http://" + proxyAddr + ",direct"}
 }
 
 // sandboxEgressProxyEnv builds the proxy env entries that route the

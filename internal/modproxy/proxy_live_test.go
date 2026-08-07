@@ -170,12 +170,15 @@ func TestLiveGoCommand_DownloadsThroughRelay(t *testing.T) {
 
 	cmd := exec.Command("go", "mod", "download", "-x", "github.com/zalando/go-keyring@v0.2.8")
 	cmd.Dir = dir
-	// A pristine cache and GOPROXY pointed ONLY at the relay: no ",direct"
-	// fallback, so a routing bug cannot be masked by cmd/go quietly going
-	// around us. GONOSUMDB/GOPRIVATE are cleared so checksum verification
-	// stays on and actually exercises the /sumdb/ arm.
+	// The GOPROXY value production actually ships, ",direct" arm included,
+	// so this exercises what runs rather than a stripped-down variant. The
+	// fallback cannot mask a routing bug here: direct fetching needs the
+	// per-run git proxy that only exists inside a jail, so anything the
+	// relay mishandles fails outright rather than being quietly rescued.
+	// GONOSUMDB/GOPRIVATE are cleared so checksum verification stays on and
+	// actually exercises the /sumdb/ arm.
 	cmd.Env = append(os.Environ(),
-		"GOPROXY=http://"+addr,
+		"GOPROXY=http://"+addr+",direct",
 		"GOMODCACHE="+filepath.Join(dir, "modcache"),
 		"GOFLAGS=",
 		"GOPRIVATE=",

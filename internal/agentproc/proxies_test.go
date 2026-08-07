@@ -1449,24 +1449,30 @@ func TestStartProxiesForSandbox_EgressDenialReachesRecorder(t *testing.T) {
 	}
 }
 
-// TestSandboxModProxyEnv_NoDirectFallback pins the fail-closed GOPROXY.
+// TestSandboxModProxyEnv_KeepsDirectFallback pins the private-module path.
 //
-// A ",direct" fallback would make cmd/go fetch straight from the VCS host
-// when the relay returns a miss — a host the jail's allowlist does not
-// carry, so the only possible outcome is a confusing connection failure in
-// place of a clean "module not found". The relay is the single path out for
-// Go, and the value must say so.
-func TestSandboxModProxyEnv_NoDirectFallback(t *testing.T) {
+// A private dependency is never served by the public proxy, so it reaches
+// the VCS only through the ",direct" arm — and for a github.com module path
+// that is a git operation, which the sandbox's git config rewrites onto the
+// authenticated per-run git proxy. Dropping the fallback would strand those
+// fetches at the relay with a bare "module not found" instead of the git
+// proxy's actionable denial, so the arm is load-bearing rather than
+// decorative.
+//
+// The separator is asserted too: "," falls through on 404/410 only, whereas
+// "|" would fall through on ANY error and turn a relay outage into a silent
+// bypass to direct fetching.
+func TestSandboxModProxyEnv_KeepsDirectFallback(t *testing.T) {
 	env := sandboxModProxyEnv("10.42.1.1:9001")
 	if len(env) != 1 {
 		t.Fatalf("sandboxModProxyEnv emitted %d entries, want 1: %v", len(env), env)
 	}
-	const want = "GOPROXY=http://10.42.1.1:9001"
+	const want = "GOPROXY=http://10.42.1.1:9001,direct"
 	if env[0] != want {
 		t.Errorf("GOPROXY = %q, want %q", env[0], want)
 	}
-	if strings.Contains(env[0], ",") || strings.Contains(env[0], "|") {
-		t.Errorf("GOPROXY %q carries a fallback list; the relay must be the only path out", env[0])
+	if strings.Contains(env[0], "|") {
+		t.Errorf("GOPROXY %q uses the |-separator; a relay outage would silently bypass to direct fetching", env[0])
 	}
 }
 
