@@ -3,6 +3,8 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -21,9 +23,28 @@ import (
 // to call directly with an unpersisted event (step 1 records it first); that
 // path is used by tests.
 //
-// Processing is best-effort and idempotent w.r.t. re-delivery: the queue is
-// at-least-once (a crash mid-process replays the event), and the task dedup
-// index makes a replay a no-op rather than a double-create.
+// A non-nil error means this event's ROUTING OBLIGATION is unmet and the
+// caller must not consider the event handled. The obligation stages are entity
+// resolution, handler matching, the task upsert, and trigger firing (plus the
+// delegation tail behind it): each one is load-bearing for whether the right
+// task exists and the right run started, and none of them is recoverable by
+// any other path — the tracker's snapshot-diff is forward-only, so a dropped
+// event is simply never re-derived. The drain worker answers an error by
+// requeueing the row for another attempt (see parkOrRequeue), so an unmet
+// obligation is retried rather than silently consumed.
+//
+// The tails that hang off those stages stay log-and-continue and never reach
+// the return: the entity/task close phase, task visibility writes, Bump, the
+// task_events audit rows, the agent-claim stamp, and the scorer nudge. Each is
+// either repaired by the next event on the entity or cosmetic, and promoting
+// them would replay a whole event — re-running its stages and re-recording its
+// audit rows — to fix something that heals on its own.
+//
+// Replay is safe by construction, so an error asks for one freely: the task
+// upsert is a FindOrCreate under the tasks dedup partial index, and trigger
+// firing is fenced on (triggering_event_id, trigger_id) plus the one-active-
+// auto-run index, with ErrTaskBusy deferring onto pending_firings. The one
+// accepted cost is a duplicate 'bumped' task_events row per replay.
 //
 // ctx reaches every store call the routing of this one event makes. The drain
 // worker hands it a ctx that carries values but cannot be cancelled
@@ -35,15 +56,22 @@ import (
 // The body is a pipeline of named stages; each short-circuits the rest by
 // returning ok=false (or an empty result), setting disp.Disposition on its
 // way out so the deferred publish below still reports the outcome.
-func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) {
+func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
 	// Defensive: every upstream emitter (poller, per-org loop) tags
 	// events with evt.OrgID. A missing OrgID indicates an emitter bug — failing
 	// loud here prevents tenant-mixed writes that would silently land on the
 	// local sentinel. The check lives here at the single entry point;
 	// downstream helpers take orgID as a typed parameter and trust it.
+	//
+	// Unroutable is not the same as handled: this returns an error so the row
+	// parks with the reason on it rather than being consumed, which is the
+	// difference between an emitter bug someone can find later and one that
+	// leaves no trace. Production can't reach it through the queue — the row's
+	// org id is stamped onto the event at load — so the parked row is the
+	// evidence, not a cost.
 	if evt.OrgID == "" {
-		routerLog.Error("dropping event with no org id; emitter bug", "event_type", evt.EventType)
-		return
+		routerLog.Error("refusing to route event with no org id; emitter bug", "event_type", evt.EventType)
+		return fmt.Errorf("event %s has no org id", evt.EventType)
 	}
 	orgID := evt.OrgID
 
@@ -57,7 +85,7 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) {
 		id, err := r.events.RecordSystem(ctx, orgID, evt)
 		if err != nil {
 			routerLog.Error("failed to record event", "event_type", evt.EventType, "error", err)
-			return
+			return fmt.Errorf("record event: %w", err)
 		}
 		evt.ID = id
 	}
@@ -94,7 +122,7 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) {
 	// stragglers, and any future emitter that forgets to gate.
 	if !entitlements.EventTypeAllowed(orgID, evt.EventType) {
 		disp.Disposition = events.DispositionFrozen
-		return
+		return nil
 	}
 
 	// Entity-lifecycle gate — system events and already-closed entities create
@@ -104,11 +132,11 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) {
 	entityID, ok, err := r.routableEntity(ctx, orgID, evt)
 	if err != nil {
 		disp.Disposition = events.DispositionError
-		return
+		return fmt.Errorf("resolve entity: %w", err)
 	}
 	if !ok {
 		disp.Disposition = events.DispositionTasklessUnroutable
-		return
+		return nil
 	}
 	disp.EntityID = entityID
 
@@ -140,12 +168,12 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) {
 	matchedRules, matchedTriggers, err := r.matchHandlers(ctx, orgID, evt, scopeCache)
 	if err != nil {
 		disp.Disposition = events.DispositionError
-		return
+		return fmt.Errorf("match handlers: %w", err)
 	}
 	if len(matchedRules) == 0 && len(matchedTriggers) == 0 {
 		// Nothing matched — event is recorded but no task created.
 		disp.Disposition = events.DispositionTasklessNoHandler
-		return
+		return nil
 	}
 
 	// Resolve the task's owner team, visibility set, firing order, and
@@ -153,7 +181,7 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) {
 	routing, ok := r.resolveTeamRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
 	if !ok {
 		disp.Disposition = events.DispositionTasklessNoOwner
-		return
+		return nil
 	}
 	disp.OwnerTeamID = routing.ownerTeam
 
@@ -162,14 +190,14 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) {
 	task, created, err := r.upsertTaskForEvent(ctx, orgID, evt, entityID, routing)
 	if err != nil {
 		disp.Disposition = events.DispositionError
-		return
+		return fmt.Errorf("upsert task: %w", err)
 	}
 	if task == nil {
 		// became_atomic dedup suppression: an active task already covers
 		// the entity, so no new one was minted. Legitimate "no task,"
 		// not a failure — buckets with the other taskless outcomes.
 		disp.Disposition = events.DispositionTasklessUnroutable
-		return
+		return nil
 	}
 	disp.TaskID = task.ID
 	if created {
@@ -178,8 +206,17 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) {
 		disp.Disposition = events.DispositionTaskBumped
 	}
 
-	// Auto-delegate matching triggers in priority order.
-	disp.TriggersFired = r.fireMatchedTriggers(ctx, orgID, evt, entityID, task, routing)
+	// Auto-delegate matching triggers in priority order. The disposition stays
+	// task_created/task_bumped even when a trigger failed: the task really was
+	// minted, and that is what the sentinel's audience asked about. The
+	// returned error is the other audience — the worker, which retries the
+	// event so the trigger gets its second chance.
+	fired, err := r.fireMatchedTriggers(ctx, orgID, evt, entityID, task, routing)
+	disp.TriggersFired = fired
+	if err != nil {
+		return fmt.Errorf("fire triggers: %w", err)
+	}
+	return nil
 }
 
 // publishDisposition is HandleEvent's single deferred publish point for the
@@ -553,11 +590,18 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 // fire or a successful enqueue onto pending_firings) — deferred triggers and
 // every no-op skip inside tryAutoDelegate (already claimed by another team,
 // breaker tripped, agent unavailable, disabled for the team, etc.) don't count.
-func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) int {
+//
+// A dependency failure under one trigger does not cancel the others: the loop
+// collects and keeps going, so the triggers that can still commit do. The
+// joined error asks the caller for a replay, and the replay is fenced per
+// (event, trigger) — the siblings that already fired no-op the second time
+// through, leaving only the failed one to actually retry.
+func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) (int, error) {
 	ctx, span := tracer.Start(ctx, "route.triggers", trace.WithAttributes(telemetry.TaskID(task.ID)))
 	defer span.End()
 
 	fired := 0
+	var errs []error
 	for _, teamID := range routing.orderedTeams {
 		triggers := routing.teamTriggers[teamID]
 		if len(triggers) == 0 {
@@ -566,7 +610,16 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 		// Normalize the org-visible sentinel to the resolved owner team so the
 		// kill-switch / team_agents / claim all read a real team.
 		acting := effectiveActingTeam(teamID, teamIDValue(task))
-		if !r.autoDelegateEnabledForTeam(ctx, acting) {
+		enabled, err := r.autoDelegateEnabledForTeam(ctx, acting)
+		if err != nil {
+			// Unreadable is not disabled. The gate still refuses to fire on a
+			// team whose switch it couldn't read, but the event goes back on
+			// the queue rather than being consumed as if the user had turned
+			// automation off.
+			errs = append(errs, fmt.Errorf("auto-delegate gate for team %s: %w", acting, err))
+			continue
+		}
+		if !enabled {
 			// Diagnosable, not silent: a matched trigger that never fires because
 			// auto-delegate is off for the team is the "a task was created but no
 			// run started" surprise. One line at Info names the reason and the
@@ -579,11 +632,16 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 			if trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0 {
 				continue // deferred to post-scoring handler
 			}
-			if r.tryAutoDelegate(ctx, orgID, task, trigger, entityID, evt.ID, acting) {
+			committed, err := r.tryAutoDelegate(ctx, orgID, task, trigger, entityID, evt.ID, acting)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("trigger %s: %w", trigger.ID, err))
+				continue
+			}
+			if committed {
 				fired++
 			}
 		}
 	}
 	span.SetAttributes(telemetry.Count(fired))
-	return fired
+	return fired, errors.Join(errs...)
 }

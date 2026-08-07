@@ -2,6 +2,7 @@ package routing
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
@@ -238,20 +239,26 @@ func (r *Router) executorIdentity() (string, int64) {
 // settings row reads as false (the schema default; multi-mode's "new
 // teams require explicit opt-in" rule). The local-mode sentinel team's
 // baseline seed flips this to true, preserving the local-first
-// happy-path behavior. Nil teams store (test wiring) or store error
+// happy-path behavior. Nil teams store (test wiring) or empty team
 // degrades to false — safer than the prior "fail open and silently
 // auto-delegate" behavior the deleted internal/config had.
-func (r *Router) autoDelegateEnabledForTeam(ctx context.Context, teamID string) bool {
+//
+// A store failure returns (false, err) rather than a bare false. Both
+// callers still decline to fire — an unreadable switch is never treated as
+// permission — but they can tell "the user turned this off" from "we
+// couldn't find out," which is the difference between an event that is
+// finished and one that deserves another attempt.
+func (r *Router) autoDelegateEnabledForTeam(ctx context.Context, teamID string) (bool, error) {
 	if r.teams == nil || teamID == "" {
-		return false
+		return false, nil
 	}
 	settings, err := r.teams.GetSettingsSystem(ctx, teamID)
 	if err != nil {
-		routerLog.Warn("auto_delegate gate: team settings read failed, defaulting to disabled",
+		routerLog.Warn("auto_delegate gate: team settings read failed, declining to fire",
 			"team", teamID, "error", err)
-		return false
+		return false, fmt.Errorf("read team settings: %w", err)
 	}
-	return settings.AutoDelegateEnabled
+	return settings.AutoDelegateEnabled, nil
 }
 
 // taskDrainLock returns the per-task mutex used to serialize

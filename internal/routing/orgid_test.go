@@ -14,19 +14,23 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// TestHandleEvent_EmptyOrgID_Dropped pins the defensive early-return
+// TestHandleEvent_EmptyOrgID_Refused pins the defensive early-return
 // at the top of HandleEvent. An emitter that fails to tag evt.OrgID is
 // a bug — silently routing the event to the local sentinel would
 // produce tenant-mixed writes in multi mode. The check exists at the
 // single entry point so downstream helpers can trust their typed
 // orgID parameter.
 //
+// It returns an error rather than reporting the event handled, so a
+// queue row carrying one is parked with the reason on it instead of
+// being consumed without a trace.
+//
 // We swap log.Default's writer to a buffer for the duration of the
 // test so the assertion can pin the diagnostic without scraping
 // stdout. No side effects expected: events.RecordSystem must NOT
 // fire, entities.GetSystem must NOT fire — every downstream path is
 // gated behind the early return.
-func TestHandleEvent_EmptyOrgID_Dropped(t *testing.T) {
+func TestHandleEvent_EmptyOrgID_Refused(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
 	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seedHandlerFKTargets(t, database)); err != nil {
@@ -46,13 +50,16 @@ func TestHandleEvent_EmptyOrgID_Dropped(t *testing.T) {
 
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 
-	router.HandleEvent(context.Background(), domain.Event{
+	err = router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
 		DedupKey:     "build",
 		MetadataJSON: `{"check_name":"build"}`,
 		// OrgID intentionally omitted.
 	})
+	if err == nil {
+		t.Error("HandleEvent returned nil for an event with no org id; the worker would mark the row done and consume it")
+	}
 
 	// No event row recorded.
 	var n int
@@ -75,8 +82,8 @@ func TestHandleEvent_EmptyOrgID_Dropped(t *testing.T) {
 	// Diagnostic log line emitted so operators can spot the emitter
 	// bug. Substring match keeps the assertion robust to formatting
 	// tweaks.
-	if !strings.Contains(logBuf.String(), "dropping event") {
-		t.Errorf("expected 'dropping event' log line, got: %q", logBuf.String())
+	if !strings.Contains(logBuf.String(), "no org id") {
+		t.Errorf("expected a 'no org id' log line, got: %q", logBuf.String())
 	}
 }
 
