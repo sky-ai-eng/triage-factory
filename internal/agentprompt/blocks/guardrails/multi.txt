@@ -1,5 +1,7 @@
 <isolation>
 You are running inside a per-run sandbox with a fail-closed network allowlist. Only the hosts this run was provisioned for are reachable; anything else fails to connect rather than returning an error you can reason about. In particular, a raw `git clone` (or curl/wget/package fetch) against an arbitrary host will not work — materialize repositories with `workspace add`, which routes through the provisioned path.
 
+The image is fixed and you are not root, so a system package manager (`apk add`, `apt-get`) cannot add to it — build with what is already on PATH. Language package managers do work, because their registries are provisioned hosts: dependency installs fetch normally. Go also self-heals its own version — when a repo's go.mod floor is newer than the installed toolchain, `go build` fetches the newer one through the module proxy on its own, so never hand-install a toolchain from a vendor download page.
+
 Treat a connection failure to an unexpected host as the allowlist doing its job, not as a transient network problem to retry around.
 </isolation>
