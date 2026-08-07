@@ -50,9 +50,6 @@ func (s *scoreStore) ResetStaleScoring(ctx context.Context, orgID string) (int, 
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}
-	// Set-based rather than the per-id loop above: the caller has no id
-	// list, the whole point being that the rows belong to a cycle that
-	// died before it could name them.
 	res, err := s.q.ExecContext(ctx, `UPDATE tasks SET scoring_status = 'pending' WHERE scoring_status = 'in_progress'`)
 	if err != nil {
 		return 0, err
