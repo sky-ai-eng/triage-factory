@@ -205,6 +205,39 @@ func TestSetWorktreePath_RoutesByClaim(t *testing.T) {
 	}
 }
 
+// TestEnsureWorkspace_RehydrateFenceTripLeavesTheSuccessorsPathAlone: a cold
+// rehydrate that finishes after the claim moved on still returns its rebuilt
+// path to the caller (the agent has to run somewhere), but must not stamp it —
+// the row's path is the successor's, on whatever host it is running.
+func TestEnsureWorkspace_RehydrateFenceTripLeavesTheSuccessorsPathAlone(t *testing.T) {
+	s, database, runID, _ := setupAdvanceFixture(t, "fence-rehydrate")
+	stub := &worktreeFencedStore{ConversationStore: s.agentRuns}
+	s.agentRuns = stub
+
+	// The successor's stamp, standing where the fixture's seeded path was.
+	if _, err := database.Exec(`UPDATE conversations SET worktree_path = ? WHERE id = ?`,
+		"/tmp/triagefactory-runs/successors-host", runID); err != nil {
+		t.Fatalf("seed successor path: %v", err)
+	}
+
+	// The zombie's rebuild lands somewhere else and tries to record it.
+	err := s.setWorktreePath(context.Background(), runmode.LocalDefaultOrgID, runID, "claim-1", "/tmp/triagefactory-runs/zombies-host")
+	if !errors.Is(err, db.ErrClaimReleased) {
+		t.Fatalf("rehydrate stamp = %v, want ErrClaimReleased", err)
+	}
+	if stub.unfenced != 0 {
+		t.Errorf("refused rehydrate stamp fell back to the unfenced door %d times", stub.unfenced)
+	}
+
+	var path string
+	if err := database.QueryRow(`SELECT COALESCE(worktree_path, '') FROM conversations WHERE id = ?`, runID).Scan(&path); err != nil {
+		t.Fatalf("read worktree_path: %v", err)
+	}
+	if path != "/tmp/triagefactory-runs/successors-host" {
+		t.Errorf("worktree_path = %q, want the successor's host — a fenced-out rehydrate must not re-point the row", path)
+	}
+}
+
 // worktreeFencedStore refuses the claim-keyed workspace stamp and counts which
 // door each call came through.
 type worktreeFencedStore struct {

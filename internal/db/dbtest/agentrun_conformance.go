@@ -1719,6 +1719,66 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// The half of SetExecutorForClaimSystem's contract that is NOT the fence,
+	// so both dialects owe it: it writes the claim the caller named and mints
+	// nothing. Its unfenced twin does neither — it resolves the active claim
+	// and creates one when there is none — so a backend that reached for the
+	// twin would pass every refusal test (local has no refusals) while
+	// silently writing the wrong row.
+	//
+	// Asserted on the outcome rather than the error, because the two dialects
+	// legitimately disagree there: Postgres refuses a released claim,
+	// SQLite no-ops. What must not differ is the state left behind.
+	t.Run("SetExecutorForClaimSystem_WritesTheNamedClaimAndNeverMints", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		// A conversation with no claim at all: the twin would mint one here.
+		if err := store.SetExecutorForClaimSystem(ctx, orgID, runID, "6f1b7d3e-0000-4000-8000-000000000000", "exec-ghost", 1); err == nil {
+			t.Log("no error naming a claim that does not exist (local no-ops; Postgres refuses) — the row state below is what matters")
+		}
+		if claims := seed.ClaimRows(t, runID); len(claims) != 0 {
+			t.Fatalf("claims = %+v, want none — naming an absent claim must not mint ownership", claims)
+		}
+
+		// Now with a real engagement, plus a second one on another
+		// conversation to catch a write that resolves "active" instead of
+		// "named".
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-named", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, runID)[0].ID
+
+		otherRun := seedConversationForTest(t, orgID, seed, "running")
+		if err := store.SetExecutorSystem(ctx, orgID, otherRun, "exec-other", 2); err != nil {
+			t.Fatalf("SetExecutorSystem (other): %v", err)
+		}
+		otherClaim := seed.ClaimRows(t, otherRun)[0].ID
+
+		// A (conversation, claim) pair that does not agree writes neither row.
+		if err := store.SetExecutorForClaimSystem(ctx, orgID, runID, otherClaim, "exec-crossed", 9); err == nil {
+			t.Log("no error on a mis-threaded pair (local no-ops; Postgres refuses)")
+		}
+		if got := seed.ClaimRows(t, runID); len(got) != 1 || got[0].ExecutorID != "exec-named" {
+			t.Errorf("named conversation's claim = %+v, want exec-named untouched", got)
+		}
+		if got := seed.ClaimRows(t, otherRun); len(got) != 1 || got[0].ExecutorID != "exec-other" || got[0].BootEpoch != 2 {
+			t.Errorf("other conversation's claim = %+v, want exec-other/2 untouched", got)
+		}
+
+		// The matching pair writes, and writes only its own row.
+		if err := store.SetExecutorForClaimSystem(ctx, orgID, runID, claimID, "exec-named-live", 5); err != nil {
+			t.Fatalf("SetExecutorForClaimSystem: %v", err)
+		}
+		if got := seed.ClaimRows(t, runID); len(got) != 1 || got[0].ExecutorID != "exec-named-live" || got[0].BootEpoch != 5 {
+			t.Errorf("claim after the go-live stamp = %+v, want exec-named-live/5", got)
+		}
+		if got := seed.ClaimRows(t, otherRun); len(got) != 1 || got[0].ExecutorID != "exec-other" {
+			t.Errorf("other conversation's claim = %+v, want exec-other untouched", got)
+		}
+	})
+
 	t.Run("MarkFailedIfActiveForClaimSystem_FlipsAndReleasesLikeItsUnfencedTwin", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

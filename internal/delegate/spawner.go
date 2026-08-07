@@ -1158,10 +1158,18 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, runID, claimID, phase 
 // executor can have picked up yet: no successor can exist, so there is nothing
 // to assert ownership against.
 //
-// Returns the error so a caller that cares can distinguish a refusal from a
-// write failure. Both are non-fatal at every site today — a missing path costs
-// a cold rehydrate on the next resume, not the run — so all of them log; the
-// fence refusal logs louder because it means this executor is a zombie.
+// The fence refusal is logged HERE, once, and every call site then filters it
+// out of its own warning. That split is deliberate: each site's warning names
+// what a lost stamp costs it — a rejected follow-up, a repeat cold rehydrate —
+// and none of those consequences is true of a refusal. The row still has a
+// path; it is the successor's, put there by the engagement that owns the
+// conversation now. A caller that logged the refusal under its own message
+// would be filing a lost claim as a workspace problem.
+//
+// The error is still returned rather than swallowed, so a future caller that
+// wants to change course on losing ownership can, and so the two outcomes stay
+// distinguishable at the call site. No caller does today: a missing path costs
+// a cold rehydrate on the next resume, not the run.
 func (s *Spawner) setWorktreePath(ctx context.Context, orgID, runID, claimID, path string) error {
 	var err error
 	if claimID != "" {

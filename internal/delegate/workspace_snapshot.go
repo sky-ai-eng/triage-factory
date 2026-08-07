@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
@@ -372,7 +373,14 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 		// run.WorktreePath stays stale, so the NEXT resume won't find the
 		// warm copy and will cold-rehydrate again (correct, just slower) — log
 		// it distinctly so unexpected repeat rehydrates are diagnosable.
-		if wErr := s.setWorktreePath(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, wtDir); wErr != nil {
+		//
+		// A fence refusal is excluded because that diagnosis would be wrong
+		// twice over: the path is not stale, it is the successor's own, and
+		// the next resume is not this engagement's to predict. setWorktreePath
+		// has already logged the fact that actually happened — this executor
+		// lost the conversation — and saying anything further here would file
+		// a lost claim under slow rehydrates.
+		if wErr := s.setWorktreePath(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, wtDir); wErr != nil && !errors.Is(wErr, db.ErrClaimReleased) {
 			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "run", run.ID, "error", wErr)
 		}
 	}

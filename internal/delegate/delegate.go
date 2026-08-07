@@ -565,7 +565,10 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
 	}
 
-	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, runID, claimID, wtPath); err != nil {
+	// Fence refusals are excluded here and at the two sibling setups below:
+	// setWorktreePath already logged the ownership loss, and this line's
+	// subject is a write that failed on a row this engagement still owns.
+	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, runID, claimID, wtPath); err != nil && !errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Warn("update worktree path for run failed", "run", runID, "error", err)
 	}
 
@@ -675,7 +678,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID, claimID, rootKey 
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
-	if err := s.setWorktreePath(context.Background(), orgID, runID, claimID, runRoot); err != nil {
+	if err := s.setWorktreePath(context.Background(), orgID, runID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Warn("set worktree_path for Jira run failed; resume will reject this run", "run", runID, "error", err)
 	}
 
@@ -718,7 +721,7 @@ func (s *Spawner) setupSlack(ctx context.Context, orgID, runID, claimID, rootKey
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
-	if err := s.setWorktreePath(context.Background(), orgID, runID, claimID, runRoot); err != nil {
+	if err := s.setWorktreePath(context.Background(), orgID, runID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Warn("set worktree_path for Slack run failed; resume will reject this run", "run", runID, "error", err)
 	}
 

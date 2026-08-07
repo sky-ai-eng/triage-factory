@@ -1275,7 +1275,12 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	// Idempotent, and correct on both workspace paths: a re-claim resolves the
 	// same warm path, and a cold rehydrate onto a fresh one writes the tree the
 	// resumed session will actually run in.
-	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, cfg.wtPath); err != nil {
+	// A fence refusal is not this warning's case: "a follow-up will be refused"
+	// describes a row left without a path, and a fenced-out engagement's row
+	// has whatever the successor put there. setWorktreePath logs the ownership
+	// loss itself; the consequence stated here would be a guess about a
+	// conversation this executor no longer has any standing to describe.
+	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, cfg.wtPath); err != nil && !errors.Is(err, db.ErrClaimReleased) {
 		dispatchLog.Warn("set worktree_path for blueprint step failed; a follow-up to this conversation will be refused",
 			"run", run.ID, "blueprint_run", br.ID, "error", err)
 	}

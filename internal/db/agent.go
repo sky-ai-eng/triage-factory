@@ -586,11 +586,20 @@ type ConversationStore interface {
 	// process, so the corruption is silent until the reaper reads it and
 	// declares a live engagement's executor lost.
 	//
-	// So a caller that has lost the claim is refused rather than handed a
-	// fresh one, and that is the point: an engagement that holds a claim does
-	// not need a mint (ClaimNextRun made it atomically, in the same statement
-	// that reserved the row), and one that does not hold a claim is not
-	// entitled to invent ownership.
+	// Two properties, and only one of them is the fence.
+	//
+	// It writes the claim the caller NAMED and mints nothing — on both
+	// dialects, because that is contract rather than enforcement. An
+	// engagement holding a claim needs no mint (ClaimNextRun made it
+	// atomically, in the same statement that reserved the row), and one
+	// holding none is not entitled to invent ownership; a call naming a claim
+	// that isn't there must write nothing at all rather than conjure a row or
+	// land on whichever claim happens to be active.
+	//
+	// It REFUSES a released claim with ErrClaimReleased on Postgres. Local
+	// mode no-ops instead, under the standing N=1 exemption — the write is
+	// equally absent either way, and there is no rival executor for the error
+	// to protect anyone from.
 	SetExecutorForClaimSystem(ctx context.Context, orgID, runID, claimID, executorID string, bootEpoch int64) error
 
 	// SetWorktreePathForClaimSystem records where this engagement's workspace
