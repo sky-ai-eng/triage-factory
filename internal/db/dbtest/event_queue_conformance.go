@@ -35,8 +35,8 @@ type EventQueueSeeder struct {
 
 // conformanceExecutorID/conformanceBootEpoch are the fixed ownership
 // identity every claim in this suite stamps a row with, except where a test
-// is specifically exercising the ownership-scoping predicate (TFAC-578) —
-// those pass their own values inline.
+// is specifically exercising the ownership-scoping predicate — those pass
+// their own values inline.
 const (
 	conformanceExecutorID = "conformance-executor"
 	conformanceBootEpoch  = int64(1)
@@ -306,8 +306,8 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		}
 	})
 
-	// TFAC-578: ResetProcessing must self-scope to (executor_id, boot_epoch)
-	// so a booting instance never resets a live sibling's claimed row.
+	// ResetProcessing must self-scope to (executor_id, boot_epoch) so a
+	// booting instance never resets a live sibling's claimed row.
 	t.Run("ResetProcessing_scoped_to_owner", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t)
@@ -351,7 +351,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		}
 	})
 
-	// TFAC-578: a boot must never reset rows claimed under its OWN current
+	// A boot must never reset rows claimed under its OWN current
 	// epoch — only strictly earlier boots of itself are orphans. Guards
 	// against a self-sweep treating its own in-flight claims as stale.
 	t.Run("ResetProcessing_never_resets_current_epoch", func(t *testing.T) {

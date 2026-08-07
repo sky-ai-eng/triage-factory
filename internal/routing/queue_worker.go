@@ -108,7 +108,7 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 	// unlikely. Recovering a parked 'failed' row is a manual/admin
 	// affordance (a separate ticket); it matters because the tracker's
 	// snapshot-diff is forward-only and may not re-emit a parked event.
-	// Ownership-scoped (TFAC-578): only sweeps rows this router instance
+	// Ownership-scoped: only sweeps rows this router instance
 	// itself claimed during an earlier boot, never a live sibling's
 	// still-processing row — see EventQueueStore.ResetProcessing. That
 	// scoping is also why it is only half the recovery: an owner replaced

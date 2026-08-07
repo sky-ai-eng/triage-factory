@@ -148,8 +148,8 @@ func TestEventQueue_SurvivesRestart(t *testing.T) {
 
 	// Restart: a fresh worker over the same DB. Boot recovery resets the
 	// in-flight row back to pending (the SAME persistent instance identity,
-	// a later boot epoch — TFAC-578's self-sweep); the drain then routes all
-	// three.
+	// a later boot epoch — the ownership self-sweep); the drain then routes
+	// all three.
 	r2 := newQueueWorkerRouter(t, database)
 	if n, err := st.EventQueue.ResetProcessing(context.Background(), "restart-instance", 2); err != nil {
 		t.Fatalf("boot recovery: %v", err)

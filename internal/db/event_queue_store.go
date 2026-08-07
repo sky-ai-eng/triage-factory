@@ -57,10 +57,9 @@ type EventQueueStore interface {
 	// trace context back up. Returns (nil, nil) when the queue is empty.
 	//
 	// executorID/bootEpoch (the caller's persistent instance-registry
-	// identity, TFAC-577) are stamped atomically in the same claim
-	// statement, mirroring RunQueueStore.ClaimNextRun — so ResetProcessing
-	// (TFAC-578) can later self-sweep only this instance's own
-	// orphaned rows.
+	// identity) are stamped atomically in the same claim statement,
+	// mirroring RunQueueStore.ClaimNextRun — so ResetProcessing can later
+	// self-sweep only this instance's own orphaned rows.
 	//
 	// Cross-org by design: the drain worker is a single system service
 	// draining every tenant in insertion order, so this is one of the
@@ -92,7 +91,7 @@ type EventQueueStore interface {
 	// 'processing' row at startup means a crash mid-process, so it must be
 	// replayed.
 	//
-	// Ownership-scoped (TFAC-578), mirroring RunQueueStore.ResetProcessingRuns:
+	// Ownership-scoped, mirroring RunQueueStore.ResetProcessingRuns:
 	// only rows stamped executor_id = executorID AND boot_epoch < bootEpoch
 	// are reset — this instance's own orphans from a strictly earlier boot
 	// of itself. A live sibling's still-processing row (a different

@@ -71,7 +71,7 @@ func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, boot
 	// atomic; an empty queue matches no row and the scan reports
 	// ErrNoRows -> (nil, nil).
 	//
-	// executor_id + boot_epoch are stamped in this same statement (TFAC-578),
+	// executor_id + boot_epoch are stamped in this same statement,
 	// mirroring RunQueueStore.ClaimNextRun — see ResetProcessing.
 	row := s.conn.QueryRowContext(ctx, `
 		UPDATE public.event_queue
@@ -121,7 +121,7 @@ func (s *eventQueueStore) Requeue(ctx context.Context, orgID string, id int64, l
 }
 
 func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
-	// Ownership-scoped (TFAC-578), mirroring RunQueueStore.ResetProcessingRuns:
+	// Ownership-scoped, mirroring RunQueueStore.ResetProcessingRuns:
 	// only rows this instance itself claimed (executor_id = $1) during a
 	// strictly earlier boot (boot_epoch < $2) are reset. A live sibling's
 	// still-processing row carries a different executor_id and is never
