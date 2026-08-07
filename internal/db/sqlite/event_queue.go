@@ -149,11 +149,11 @@ func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string
 }
 
 func (s *eventQueueStore) RequeueStaleProcessing(ctx context.Context, olderThan time.Duration) (int, error) {
-	// The staleness backstop under ResetProcessing — see the interface doc.
-	// SQLite/local is N=1, so the case this covers (an owner replaced rather
-	// than rebooted) can't arise here; the method exists so both backends
-	// hold one contract and the local worker's sweep is a no-op rather than
-	// a branch. The cutoff is computed in Go because claimed_at is written
+	// SQLite/local is N=1, so the specific multi-mode case this covers
+	// (an owner replaced rather than rebooted) can't arise here; the method
+	// exists so both backends share one contract and the local worker can
+	// run the same sweep without branching. In local mode it mainly guards
+	// against pathological rows left 'processing' after a hard crash.
 	// from this same process's clock, so there is no second clock to skew
 	// against. A NULL claimed_at 'processing' row is reclaimed
 	// unconditionally, mirroring the Postgres impl.
