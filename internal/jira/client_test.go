@@ -63,23 +63,39 @@ func TestDataCenterPATConfig(t *testing.T) {
 }
 
 // TestProxyPlaceholderConfig pins the credential-proxy shape: a Bearer
-// placeholder over REST v2, with the proxy URL used as the base verbatim, for
-// both real deployments (the proxy swaps in the org's real auth upstream).
+// placeholder with the proxy URL used as the base verbatim, and a REST version
+// that follows the org's relayed deployment so the executor writes land in the
+// same shape the non-proxy path produces. An unrecognized deployment must
+// resolve to v2, which both backends serve.
 func TestProxyPlaceholderConfig(t *testing.T) {
-	cfg := ProxyPlaceholder("http://10.42.5.1:34567", "per-run-placeholder")
-	if cfg.APIVersion != APIv2 {
-		t.Errorf("APIVersion = %q, want %q (v2 is deliberate until ADF comment bodies land)", cfg.APIVersion, APIv2)
+	tests := []struct {
+		name       string
+		deployment Deployment
+		wantDeploy Deployment
+		wantPath   string
+	}{
+		{"cloud", DeploymentCloud, DeploymentCloud, "http://10.42.5.1:34567/rest/api/3/issue/PROJ-1"},
+		{"data center", DeploymentDataCenter, DeploymentDataCenter, "http://10.42.5.1:34567/rest/api/2/issue/PROJ-1"},
+		{"unset", "", DeploymentDataCenter, "http://10.42.5.1:34567/rest/api/2/issue/PROJ-1"},
+		{"garbage", Deployment("../../evil"), DeploymentDataCenter, "http://10.42.5.1:34567/rest/api/2/issue/PROJ-1"},
 	}
-	ba, ok := cfg.auth.(bearerAuth)
-	if !ok {
-		t.Fatalf("auth = %T, want bearerAuth", cfg.auth)
-	}
-	if ba.token != "per-run-placeholder" {
-		t.Errorf("bearer token = %q, want the placeholder", ba.token)
-	}
-	// The proxy URL is the base verbatim and v2 paths route through it.
-	if got, want := cfg.apiURL("issue/%s", "PROJ-1"), "http://10.42.5.1:34567/rest/api/2/issue/PROJ-1"; got != want {
-		t.Errorf("apiURL = %q, want %q", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ProxyPlaceholder("http://10.42.5.1:34567", "per-run-placeholder", tt.deployment)
+			if cfg.Deployment != tt.wantDeploy {
+				t.Errorf("Deployment = %q, want %q", cfg.Deployment, tt.wantDeploy)
+			}
+			ba, ok := cfg.auth.(bearerAuth)
+			if !ok {
+				t.Fatalf("auth = %T, want bearerAuth", cfg.auth)
+			}
+			if ba.token != "per-run-placeholder" {
+				t.Errorf("bearer token = %q, want the placeholder", ba.token)
+			}
+			if got := cfg.apiURL("issue/%s", "PROJ-1"); got != tt.wantPath {
+				t.Errorf("apiURL = %q, want %q", got, tt.wantPath)
+			}
+		})
 	}
 }
 

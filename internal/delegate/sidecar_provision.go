@@ -352,6 +352,7 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 		GitHubAPIToken: res.GitHubAPIToken,
 		JiraAPIURL:     res.JiraAPIURL,
 		JiraAPIToken:   res.JiraAPIToken,
+		JiraDeployment: res.JiraDeployment,
 		GitProxyURL:    res.GitProxyURL,
 		GitProxyToken:  res.GitProxyToken,
 	})

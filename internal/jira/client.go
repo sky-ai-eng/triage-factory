@@ -186,21 +186,30 @@ func DataCenterPAT(baseURL, pat string) Config {
 // credential (Property B). The placeholder is presented as a Bearer, which the
 // proxy authenticates regardless of the org's real auth scheme.
 //
-// REST v2 is deliberate and independent of the org's real deployment: the
-// operations the executor drives through this client (GetIssue, SearchIssues,
-// AddComment, TransitionTo) all work on v2 against both Cloud and Data Center,
-// and AddComment posts a plain-string body — the v2 shape a Cloud v3 endpoint
-// rejects in favor of ADF. Matching the org's real version (v3 for Cloud) is
-// therefore gated on ADF-aware comment bodies in this client, which also affect
-// the non-proxy Cloud path; until then v2 is the safe, uniform choice, so this
-// is NOT a Data Center assumption despite reusing that Deployment value.
-func ProxyPlaceholder(baseURL, placeholder string) Config {
+// deployment is the org's real backend, relayed non-secret from the sidecar
+// that holds the credential, so this client picks the same REST version the
+// non-proxy path would (v3 for Cloud, v2 for Data Center) and an agent's
+// writes land in the same shape whichever half of the split runs them. An
+// unrecognized value resolves Data Center / v2, which both backends serve.
+func ProxyPlaceholder(baseURL, placeholder string, deployment Deployment) Config {
+	if deployment != DeploymentCloud {
+		deployment = DeploymentDataCenter
+	}
 	return Config{
 		BaseURL:    baseURL,
-		Deployment: DeploymentDataCenter,
-		APIVersion: APIv2,
+		Deployment: deployment,
+		APIVersion: apiVersionFor(deployment),
 		auth:       bearerAuth{token: placeholder},
 	}
+}
+
+// apiVersionFor is the one place the deployment → REST version mapping lives:
+// Cloud speaks v3 (Atlassian Document Format for rich text), Data Center v2.
+func apiVersionFor(d Deployment) APIVersion {
+	if d == DeploymentCloud {
+		return APIv3
+	}
+	return APIv2
 }
 
 // CloudAPIToken builds a Config for an Atlassian Cloud API token: Basic auth
@@ -256,6 +265,29 @@ func (cfg Config) apiURL(format string, args ...any) string {
 // path shape stays owned by this package.
 func ReachabilityURL(baseURL string) string {
 	return fmt.Sprintf("%s/rest/api/2/serverInfo", strings.TrimRight(baseURL, "/"))
+}
+
+// richTextValue renders a rich-text field (a comment body, an issue
+// description) in the shape this backend's REST version accepts. v2 takes the
+// wiki-markup string as-is and parses it server-side; v3 takes only an
+// Atlassian Document Format object and rejects a string outright, so the markup
+// is converted here (see adf.go) rather than shipped flat.
+//
+// Empty renders as JSON null on v3 rather than as a document, because ADF has
+// no empty document and an empty content array is a schema violation Jira
+// rejects before it ever looks at the field. What an empty value then *means*
+// is the field's business, not this function's: on a description it clears the
+// field (as the v2 empty string does), while on a comment body Jira rejects it
+// on both versions. Nothing here makes an empty comment a valid operation — it
+// only keeps the resulting failure Jira's own.
+func (cfg Config) richTextValue(s string) any {
+	if cfg.APIVersion != APIv3 {
+		return s
+	}
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return wikiToADF(s)
 }
 
 // authorize applies the configured auth scheme to req. A Config built
@@ -695,7 +727,7 @@ func extractFieldID(field string) string {
 // only care about success can ignore the id.
 func (c *Client) AddComment(ctx context.Context, issueKey, body string) (string, error) {
 	url := c.apiURL("issue/%s/comment", issueKey)
-	respBody, err := c.postJSON(ctx, url, map[string]string{"body": body}, false)
+	respBody, err := c.postJSON(ctx, url, map[string]any{"body": c.cfg.richTextValue(body)}, false)
 	if err != nil {
 		return "", err
 	}
@@ -737,7 +769,7 @@ func (c *Client) CreateIssue(ctx context.Context, projectKey, issueType, summary
 		"summary":   summary,
 	}
 	if description != "" {
-		fields["description"] = description
+		fields["description"] = c.cfg.richTextValue(description)
 	}
 	if priority != "" {
 		fields["priority"] = map[string]string{"name": priority}
@@ -821,7 +853,7 @@ func (c *Client) UpdateIssue(ctx context.Context, issueKey string, f UpdateIssue
 		fields["summary"] = *f.Summary
 	}
 	if f.Description != nil {
-		fields["description"] = *f.Description
+		fields["description"] = c.cfg.richTextValue(*f.Description)
 	}
 	if f.Priority != nil {
 		fields["priority"] = map[string]string{"name": *f.Priority}

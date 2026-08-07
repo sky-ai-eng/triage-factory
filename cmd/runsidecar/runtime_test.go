@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
+	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -445,5 +446,84 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 		case <-deadline:
 			t.Fatal("a gh-channel REST write never reached the orchestrator's audit path")
 		}
+	}
+}
+
+// TestRuntime_JiraAPIProxyReportsDeployment pins the classification the
+// orchestrator cannot derive for itself: only this process opens the bundle
+// that names the org's Jira backend, and the orchestrator's proxy client needs
+// it to pick the REST version whose rich-text write shape the backend accepts.
+// The injected upstream auth is asserted alongside so the two stay consistent —
+// a Cloud bundle must produce both Basic auth and the Cloud classification.
+func TestRuntime_JiraAPIProxyReportsDeployment(t *testing.T) {
+	tests := []struct {
+		name           string
+		jira           *credbundle.JiraCreds
+		wantDeployment string
+		wantAuthPrefix string
+	}{
+		{
+			name:           "cloud api token",
+			jira:           &credbundle.JiraCreds{URL: "https://acme.atlassian.net", AuthMethod: "cloud", Email: "bot@acme.com", APIToken: "cloud-token"},
+			wantDeployment: string(jira.DeploymentCloud),
+			wantAuthPrefix: "Basic ",
+		},
+		{
+			name:           "data center pat",
+			jira:           &credbundle.JiraCreds{URL: "https://jira.acme.internal", AuthMethod: "datacenter", PAT: "dc-pat"},
+			wantDeployment: string(jira.DeploymentDataCenter),
+			wantAuthPrefix: "Bearer dc-pat",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotAuth := make(chan string, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth <- r.Header.Get("Authorization")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+
+			orch, rt := dialRuntime(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+
+			bundle := &credbundle.Bundle{
+				LLM:  map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
+				Jira: tt.jira,
+			}
+			if err := orch.Call(ctx, sidecarproto.KindSealedBundle, sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, bundle)}, nil); err != nil {
+				t.Fatalf("relay bundle: %v", err)
+			}
+
+			var res sidecarproto.StartProxiesResult
+			if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{
+				HostVethIP:      "127.0.0.1",
+				JiraAPIEnabled:  true,
+				JiraAPIUpstream: upstream.URL,
+			}, &res); err != nil {
+				t.Fatalf("start proxies: %v", err)
+			}
+			if res.JiraDeployment != tt.wantDeployment {
+				t.Errorf("JiraDeployment = %q, want %q", res.JiraDeployment, tt.wantDeployment)
+			}
+
+			req, _ := http.NewRequest("GET", res.JiraAPIURL+"/rest/api/3/issue/PROJ-1", nil)
+			req.Header.Set("Authorization", "Bearer "+res.JiraAPIToken)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("request through proxy: %v", err)
+			}
+			_ = resp.Body.Close()
+
+			select {
+			case auth := <-gotAuth:
+				if !strings.HasPrefix(auth, tt.wantAuthPrefix) {
+					t.Fatalf("upstream saw %q, want a value starting %q", auth, tt.wantAuthPrefix)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("upstream never received the proxied request")
+			}
+		})
 	}
 }

@@ -380,3 +380,76 @@ func TestJira_NotConfigured_BothModes(t *testing.T) {
 		}
 	})
 }
+
+// TestProxyJiraClient_FollowsRelayedDeployment pins the executor half of the
+// version fix: the sidecar is the only process that can read the org's Jira
+// deployment off the sealed bundle, so it relays the classification and the
+// proxy client must speak the REST version that classification implies —
+// otherwise a Cloud org's comment write leaves the executor in the v2 shape
+// v3 rejects. An absent or unrecognized value must stay on v2, which both
+// backends serve.
+func TestProxyJiraClient_FollowsRelayedDeployment(t *testing.T) {
+	tests := []struct {
+		name       string
+		deployment string
+		wantPath   string
+		wantBody   string
+	}{
+		{
+			name:       "cloud writes ADF over v3",
+			deployment: string(jiraclient.DeploymentCloud),
+			wantPath:   "/rest/api/3/issue/PROJ-1/comment",
+			wantBody:   `{"body":{"type":"doc","version":1,"content":[{"type":"paragraph","content":[{"type":"text","text":"looks good"}]}]}}`,
+		},
+		{
+			name:       "data center writes a string over v2",
+			deployment: string(jiraclient.DeploymentDataCenter),
+			wantPath:   "/rest/api/2/issue/PROJ-1/comment",
+			wantBody:   `{"body":"looks good"}`,
+		},
+		{
+			name:       "unset falls back to v2",
+			deployment: "",
+			wantPath:   "/rest/api/2/issue/PROJ-1/comment",
+			wantBody:   `{"body":"looks good"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var (
+				mu         sync.Mutex
+				path, body string
+			)
+			jira := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				path, body = r.URL.Path, string(raw)
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"1"}`)
+			}))
+			defer jira.Close()
+
+			client, err := proxyJiraClient(&ProxyCredentials{
+				JiraAPIURL:     jira.URL,
+				JiraAPIToken:   "run-placeholder",
+				JiraDeployment: tt.deployment,
+			})
+			if err != nil {
+				t.Fatalf("proxyJiraClient: %v", err)
+			}
+			if _, err := client.AddComment(context.Background(), "PROJ-1", "looks good"); err != nil {
+				t.Fatalf("AddComment: %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if path != tt.wantPath {
+				t.Errorf("path = %q, want %q", path, tt.wantPath)
+			}
+			if body != tt.wantBody {
+				t.Errorf("body = %s, want %s", body, tt.wantBody)
+			}
+		})
+	}
+}
