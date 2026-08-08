@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
@@ -42,15 +43,26 @@ func messageEvent(t *testing.T, orgID, channel string) domain.Event {
 
 func TestSlackChannelOwner_PrimaryTeamOwns(t *testing.T) {
 	bundle := &slackstore.Bundle{TeamChannels: &fakeTeamChannels{primaryTeam: "team-x"}}
-	owner, set := slackChannelOwner(bundle)(context.Background(), "org-1", messageEvent(t, "org-1", "C1"), "entity-1")
+	owner, set, err := slackChannelOwner(bundle)(context.Background(), "org-1", messageEvent(t, "org-1", "C1"), "entity-1")
+	if err != nil {
+		t.Fatalf("err = %v; want nil", err)
+	}
 	if owner != "team-x" || len(set) != 1 || set[0] != "team-x" {
 		t.Errorf("owner=%q set=%v; want owner=team-x set=[team-x]", owner, set)
 	}
 }
 
+// The three data states below resolve to ("", nil, nil): a retry cannot
+// produce a different answer, so the mention is recorded taskless and the
+// event consumed. They are the cases the error arm must NOT swallow along
+// with the real failure — the whole point of splitting them.
+
 func TestSlackChannelOwner_NoPrimary(t *testing.T) {
 	bundle := &slackstore.Bundle{TeamChannels: &fakeTeamChannels{primaryTeam: ""}}
-	owner, set := slackChannelOwner(bundle)(context.Background(), "org-1", messageEvent(t, "org-1", "C1"), "entity-1")
+	owner, set, err := slackChannelOwner(bundle)(context.Background(), "org-1", messageEvent(t, "org-1", "C1"), "entity-1")
+	if err != nil {
+		t.Fatalf("err = %v; want nil — a channel with no primary team is a resolved answer, not a failure", err)
+	}
 	if owner != "" || set != nil {
 		t.Errorf("owner=%q set=%v; want owner=\"\" set=nil (untracked/unclaimed)", owner, set)
 	}
@@ -59,7 +71,10 @@ func TestSlackChannelOwner_NoPrimary(t *testing.T) {
 func TestSlackChannelOwner_MalformedMetadata(t *testing.T) {
 	bundle := &slackstore.Bundle{TeamChannels: &fakeTeamChannels{primaryTeam: "team-x"}}
 	evt := domain.Event{OrgID: "org-1", EventType: domain.EventSlackMessage, MetadataJSON: `not json`}
-	owner, set := slackChannelOwner(bundle)(context.Background(), "org-1", evt, "entity-1")
+	owner, set, err := slackChannelOwner(bundle)(context.Background(), "org-1", evt, "entity-1")
+	if err != nil {
+		t.Fatalf("err = %v; want nil — unreadable metadata is a data state a replay would only repeat", err)
+	}
 	if owner != "" || set != nil {
 		t.Errorf("owner=%q set=%v; want owner=\"\" set=nil on malformed metadata", owner, set)
 	}
@@ -68,17 +83,32 @@ func TestSlackChannelOwner_MalformedMetadata(t *testing.T) {
 func TestSlackChannelOwner_EmptyChannelInMetadata(t *testing.T) {
 	bundle := &slackstore.Bundle{TeamChannels: &fakeTeamChannels{primaryTeam: "team-x"}}
 	evt := domain.Event{OrgID: "org-1", EventType: domain.EventSlackMessage, MetadataJSON: `{"channel":""}`}
-	owner, set := slackChannelOwner(bundle)(context.Background(), "org-1", evt, "entity-1")
+	owner, set, err := slackChannelOwner(bundle)(context.Background(), "org-1", evt, "entity-1")
+	if err != nil {
+		t.Fatalf("err = %v; want nil — a mention with no channel is a data state", err)
+	}
 	if owner != "" || set != nil {
 		t.Errorf("owner=%q set=%v; want owner=\"\" set=nil on empty channel", owner, set)
 	}
 }
 
-func TestSlackChannelOwner_StoreError(t *testing.T) {
+// TestSlackChannelOwner_StoreErrorPropagates is the one that changed: the
+// resolver stands in for the whole owner ladder, so a failed primary-team read
+// has nowhere else to be caught. Returning the empty owner here reads
+// downstream as "nobody owns this channel" — which either loses the mention
+// (Slack ingest has no snapshot-diff to re-derive it from) or lets an
+// applies_to_unowned watcher answer, and then own, another team's channel.
+func TestSlackChannelOwner_StoreErrorPropagates(t *testing.T) {
 	bundle := &slackstore.Bundle{TeamChannels: &fakeTeamChannels{primaryErr: errors.New("boom")}}
-	owner, set := slackChannelOwner(bundle)(context.Background(), "org-1", messageEvent(t, "org-1", "C1"), "entity-1")
+	owner, set, err := slackChannelOwner(bundle)(context.Background(), "org-1", messageEvent(t, "org-1", "C1"), "entity-1")
+	if err == nil {
+		t.Fatal("err = nil; want the store error propagated — a failed lookup is not a resolved no-owner")
+	}
+	if !strings.Contains(err.Error(), "C1") {
+		t.Errorf("err = %v; want it to name the channel whose lookup failed", err)
+	}
 	if owner != "" || set != nil {
-		t.Errorf("owner=%q set=%v; want owner=\"\" set=nil on store error", owner, set)
+		t.Errorf("owner=%q set=%v; want no partial owner alongside the error", owner, set)
 	}
 }
 
@@ -110,6 +140,33 @@ func TestSlackTeamTracksChannel_MalformedMetadataFailsOpen(t *testing.T) {
 	evt := domain.Event{OrgID: "org-1", EventType: domain.EventSlackMessage, MetadataJSON: `not json`}
 	if got := slackTeamTracksChannel(bundle)(context.Background(), evt, "team-x"); !got {
 		t.Error("got false; want true (malformed metadata fails open)")
+	}
+}
+
+// ---------- the posture split ----------
+
+// TestSlackHooks_StoreErrorPostureSplit pins both halves against ONE outage,
+// so the split can't erode by drift in either direction. The two hooks sit in
+// the same file, read the same store, and answer a store failure in opposite
+// ways — which is only defensible because of what each does with the answer.
+// ResolveOwner DECIDES the owner, and a wrong decision is a mention answered
+// by the wrong team, in public, permanently. TracksScope only NARROWS a set
+// someone else computed, so a briefly-too-wide gate is corrected by the next
+// message. Making either one match the other is the bug.
+func TestSlackHooks_StoreErrorPostureSplit(t *testing.T) {
+	down := &fakeTeamChannels{
+		primaryErr: errors.New("boom"),
+		tracks:     false, // what a healthy store would have said
+		tracksErr:  errors.New("boom"),
+	}
+	bundle := &slackstore.Bundle{TeamChannels: down}
+	evt := messageEvent(t, "org-1", "C1")
+
+	if _, _, err := slackChannelOwner(bundle)(context.Background(), "org-1", evt, "entity-1"); err == nil {
+		t.Error("ResolveOwner swallowed the store error; a hook that decides ownership must propagate")
+	}
+	if !slackTeamTracksChannel(bundle)(context.Background(), evt, "team-x") {
+		t.Error("TracksScope dropped the team on a store error; a gate that only narrows must fail open")
 	}
 }
 

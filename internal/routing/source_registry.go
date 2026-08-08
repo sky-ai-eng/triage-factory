@@ -20,22 +20,38 @@ import (
 // occurrence (ResolveOwner) and whether a team tracks the event's scope
 // (TracksScope).
 //
-// Hooks must fail OPEN on store errors (return the permissive result + log),
-// mirroring teamTracksEventRepo: dropping legitimate work on a transient DB
-// blip is worse than a briefly-wide gate.
+// The two hooks have OPPOSITE store-error postures, and the split is the same
+// one core's own routing draws between the owning-team ladder and
+// teamTracksEventRepo:
+//
+//   - ResolveOwner DECIDES the owner, so a failed read PROPAGATES: return the
+//     error and the router replays the event rather than routing it on a
+//     guess. Degrading to "nothing owns this" is indistinguishable from the
+//     real no-owner answer, and downstream that either loses the occurrence
+//     for good (nothing re-emits it) or hands it to an applies_to_unowned
+//     watcher, whose fire then consolidates ownership onto that watcher.
+//   - TracksScope only NARROWS a set someone else computed, so it must keep
+//     failing OPEN (return the permissive result + log), mirroring
+//     teamTracksEventRepo: a briefly-too-wide gate the next event corrects
+//     beats dropping legitimate work on a transient DB blip.
 type SourceHooks struct {
-	// ResolveOwner resolves (owner, ownerSet) for an Owned event — the
+	// ResolveOwner resolves (owner, ownerSet, err) for an Owned event — the
 	// analogue of authorCentricOwner's return contract (see its doc):
-	// owner=="" + ownerSet==nil means nothing resolved.
+	// ("", nil, nil) means RESOLVED, and nothing owns this occurrence. A
+	// non-nil error means the owner could NOT be resolved; resolveOwnedRouting
+	// propagates it and the event is replayed. A data state a retry cannot
+	// change — metadata this source can't read, a resource no team has
+	// claimed — is the former, never the latter.
 	// Required unconditionally, even for a source whose event types never
 	// declare OwnershipOwned: registration can't see what event types this
 	// source will add in the future, and dispatch calls this hook whenever a
 	// type's declared model is Owned — a nil here would be a drain-goroutine
 	// panic on the first Owned event instead of a boot failure. A pool-only
-	// source supplies a stub returning ("", nil).
-	ResolveOwner func(ctx context.Context, orgID string, evt domain.Event, entityID string) (owner string, ownerSet []string)
+	// source supplies a stub returning ("", nil, nil).
+	ResolveOwner func(ctx context.Context, orgID string, evt domain.Event, entityID string) (owner string, ownerSet []string, err error)
 	// TracksScope reports whether teamID tracks the event's scope (the
-	// stage-1 team↔resource gate). Required.
+	// stage-1 team↔resource gate). Fails open on a store error (see the
+	// posture split above). Required.
 	TracksScope func(ctx context.Context, evt domain.Event, teamID string) bool
 }
 

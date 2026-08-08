@@ -102,7 +102,7 @@ Rules the registries enforce (all panic at boot, never degrade at dispatch):
 - `events.Register` — no duplicate types; `OwnershipRequestedParty` is
   github-only (its resolver is native to the GitHub review-request path).
 - `routing.RegisterSource` — no empty/duplicate prefix; both hooks required
-  (a pool-only source supplies a `("", nil)` stub for `ResolveOwner`); the
+  (a pool-only source supplies a `("", nil, nil)` stub for `ResolveOwner`); the
   built-in prefixes `github`, `jira`, `system`, `webhook` are reserved and
   cannot be shadowed.
 
@@ -116,6 +116,26 @@ owner-ladder semantics — visibility unions, `applies_to_unowned` watch
 handlers, the member-over-watcher no-steal invariant, deterministic firing
 order. `SourceHooks.ResolveOwner` only answers "who owns this occurrence";
 everything downstream is shared machinery. Do not reimplement it.
+
+The two hooks answer a **store failure in opposite ways**, and a source must
+implement both postures deliberately:
+
+- `ResolveOwner` **decides** the owner, so a failed read **propagates**:
+  `("", nil, nil)` means _resolved, nothing owns this_, and a non-nil error
+  means _could not find out_ — the router requeues the event instead of
+  routing it on a guess. Degrading a failure to the empty owner is
+  indistinguishable from the real no-owner answer, and an ee source has no
+  snapshot-diff behind it to re-emit the occurrence: it is lost, or it is
+  handed to an `applies_to_unowned` watcher whose fire then consolidates
+  ownership onto that watcher.
+- `TracksScope` only **narrows** a set someone else computed, so it **fails
+  open** (permissive result + log), mirroring core's `teamTracksEventRepo`. A
+  briefly-too-wide gate that the next event corrects beats dropping legitimate
+  work on a transient DB blip.
+
+Data states a retry cannot change — metadata the source can't read, a
+resource no team has claimed — are the resolved answer in both hooks, never
+the error.
 
 `ExtensionAPI.PublishEvent` and `Bus()` are read-through and nil until app
 wiring completes: use them at request time (any mounted handler is safe),
