@@ -511,13 +511,15 @@ func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) eve
 // replayed rather than routed on a guess. The registered-source arm carries the
 // identical contract (see SourceHooks.ResolveOwner) — and needs it more, not
 // less: the hook stands in for the WHOLE ladder there, so a swallowed failure
-// has no lower tier left to be caught by.
+// has no lower tier left to be caught by. resolveSourceOwner is what makes that
+// contract a mechanism rather than a rule: a hook that returns empty without
+// claiming Unowned is refused, not believed.
 func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) (eventRouting, bool, error) {
 	var owner string
 	var ownerSet []string
 	var err error
 	if hooks, ok := sourceHooksFor(evt.EventType); ok {
-		owner, ownerSet, err = hooks.ResolveOwner(ctx, orgID, evt, entityID)
+		owner, ownerSet, err = resolveSourceOwner(ctx, hooks, eventSourcePrefix(evt.EventType), orgID, evt, entityID)
 	} else if isAuthorCentricGitHubEvent(evt.EventType) {
 		owner, ownerSet, err = r.authorCentricOwner(ctx, orgID, evt, entityID, scopeCache)
 	} else {

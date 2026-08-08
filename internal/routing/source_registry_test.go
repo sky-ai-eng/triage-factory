@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -104,8 +105,8 @@ func fakeSourceRouter(database *sql.DB) *Router {
 // declares OwnershipOwned once, in this file's init(), via events.Register.
 func fakeSourceHooks(teamID string, tracksScope bool) SourceHooks {
 	return SourceHooks{
-		ResolveOwner: func(ctx context.Context, orgID string, evt domain.Event, entityID string) (string, []string, error) {
-			return teamID, []string{teamID}, nil
+		ResolveOwner: func(ctx context.Context, orgID string, evt domain.Event, entityID string) (OwnerResolution, error) {
+			return OwnedBy(teamID), nil
 		},
 		TracksScope: func(ctx context.Context, evt domain.Event, teamID string) bool { return tracksScope },
 	}
@@ -125,23 +126,40 @@ const fakeSourceOwnerLookupFailure = "fake source: primary team for scope"
 // (fail open) throughout, which is the split under test.
 func outageSourceHooks(teamID string, o *outage) SourceHooks {
 	return SourceHooks{
-		ResolveOwner: func(ctx context.Context, orgID string, evt domain.Event, entityID string) (string, []string, error) {
+		ResolveOwner: func(ctx context.Context, orgID string, evt domain.Event, entityID string) (OwnerResolution, error) {
 			if o.down() {
-				return "", nil, fmt.Errorf("%s: %w", fakeSourceOwnerLookupFailure, errOutage)
+				return OwnerResolution{}, fmt.Errorf("%s: %w", fakeSourceOwnerLookupFailure, errOutage)
 			}
-			return teamID, []string{teamID}, nil
+			return OwnedBy(teamID), nil
+		},
+		TracksScope: func(ctx context.Context, evt domain.Event, teamID string) bool { return true },
+	}
+}
+
+// swallowingSourceHooks is the bug the OwnerResolution shape exists to catch:
+// a resolver that logs its failed read and returns early, which produces an
+// empty resolution that never claimed Unowned. Before the flag this was
+// byte-identical to the genuine no-owner answer; now the seam can tell them
+// apart without the source's cooperation.
+func swallowingSourceHooks(teamID string, o *outage) SourceHooks {
+	return SourceHooks{
+		ResolveOwner: func(ctx context.Context, orgID string, evt domain.Event, entityID string) (OwnerResolution, error) {
+			if o.down() {
+				return OwnerResolution{}, nil // the swallow
+			}
+			return OwnedBy(teamID), nil
 		},
 		TracksScope: func(ctx context.Context, evt domain.Event, teamID string) bool { return true },
 	}
 }
 
 // noOwnerSourceHooks resolves the genuine no-owner answer: a scope no team has
-// claimed. ("", nil, nil) is a RESOLVED result — the event is consumed, not
+// claimed. Unowned() is a RESOLVED result — the event is consumed, not
 // retried, because a retry cannot produce a different answer.
 func noOwnerSourceHooks() SourceHooks {
 	return SourceHooks{
-		ResolveOwner: func(ctx context.Context, orgID string, evt domain.Event, entityID string) (string, []string, error) {
-			return "", nil, nil
+		ResolveOwner: func(ctx context.Context, orgID string, evt domain.Event, entityID string) (OwnerResolution, error) {
+			return Unowned(), nil
 		},
 		TracksScope: func(ctx context.Context, evt domain.Event, teamID string) bool { return true },
 	}
@@ -388,6 +406,104 @@ func TestSourceRegistry_ResolvedNoOwner_ConsumesTheEvent(t *testing.T) {
 	if n := len(activeTasksOfType(t, database, entityID, fakeEventType)); n != 0 {
 		t.Errorf("tasks = %d, want 0 — nothing owns this scope and nothing watches it", n)
 	}
+}
+
+// TestSourceRegistry_SwallowedFailure_IsRefusedNotBelieved is the guardrail
+// under the contract. Every test above assumes a source that PROPAGATES; this
+// one assumes the opposite — a resolver that logs its failed read and returns
+// early, which is the single most likely way for the next registered source to
+// reintroduce the bug. The empty resolution never claimed Unowned, so the seam
+// refuses it instead of reading it as "nobody owns this": the event requeues
+// with the offending source named, and the watcher that would have captured it
+// never fires. A doc cannot do this; the flag can.
+func TestSourceRegistry_SwallowedFailure_IsRefusedNotBelieved(t *testing.T) {
+	database := newTestDB(t)
+	seedHandlerFKTargets(t, database)
+	seedFakeEventCatalog(t, database)
+
+	teamOwner := seedTeam(t, database, "owner-team")
+	teamWatcher := seedTeam(t, database, "watch-team")
+	seedFakeRule(t, database, teamOwner)
+	enableTeamAutoDelegate(t, database, teamWatcher)
+	seedImmediateWatchTrigger(t, database, teamWatcher, fakeEventType, "fake-swallow-watch")
+
+	t.Cleanup(ResetSources)
+	RegisterSource("fake", swallowingSourceHooks(teamOwner, &outage{remaining: 1}))
+
+	entityID := fakeEntity(t, database, "fake/thing#swallow")
+	enqueueRoutedEvent(t, database, entityID, fakeEventType, "", map[string]string{})
+
+	stub := &stubDelegator{db: database}
+	r := fakeSourceQueueRouter(database, stub)
+	if err := r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drainEventQueue: %v", err)
+	}
+
+	status, _, lastErr := queueRow(t, database)
+	if status != domain.QueuedEventStatusPending {
+		t.Errorf("row after the swallowed failure = %q, want pending — an unclaimed empty resolution is not an answer", status)
+	}
+	if !strings.Contains(lastErr, `source "fake"`) || !strings.Contains(lastErr, "Unowned") {
+		t.Errorf("last_error = %q, want it to name the offending source and the flag it failed to set", lastErr)
+	}
+	if n := len(activeTasksOfType(t, database, entityID, fakeEventType)); n != 0 {
+		t.Fatalf("tasks after the swallowed failure = %d, want 0", n)
+	}
+	if stub.calls != 0 {
+		t.Fatalf("the watcher fired %d time(s) on a resolution the source never actually made", stub.calls)
+	}
+
+	// The source's store recovers and the retry routes normally — the refusal
+	// costs a replay, not the event.
+	if err := r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drainEventQueue after recovery: %v", err)
+	}
+	tasks := activeTasksOfType(t, database, entityID, fakeEventType)
+	if len(tasks) != 1 {
+		t.Fatalf("tasks after recovery = %d, want exactly 1", len(tasks))
+	}
+	if owner := teamIDValue(&tasks[0]); owner != teamOwner {
+		t.Errorf("owner = %q, want %q", owner, teamOwner)
+	}
+}
+
+// TestResolveSourceOwner_ContractShapes pins the four answers the seam
+// distinguishes, at the unit the enforcement lives in. The fourth is the one
+// that only became expressible-and-detectable with OwnerResolution.
+func TestResolveSourceOwner_ContractShapes(t *testing.T) {
+	evt := domain.Event{EventType: fakeEventType, OrgID: runmode.LocalDefaultOrgID}
+	hooksReturning := func(res OwnerResolution, err error) SourceHooks {
+		return SourceHooks{
+			ResolveOwner: func(context.Context, string, domain.Event, string) (OwnerResolution, error) {
+				return res, err
+			},
+			TracksScope: func(context.Context, domain.Event, string) bool { return true },
+		}
+	}
+
+	t.Run("owned", func(t *testing.T) {
+		owner, set, err := resolveSourceOwner(t.Context(), hooksReturning(OwnedBy("team-x"), nil), "fake", runmode.LocalDefaultOrgID, evt, "e1")
+		if err != nil || owner != "team-x" || len(set) != 1 || set[0] != "team-x" {
+			t.Errorf("(owner, set, err) = (%q, %v, %v), want (team-x, [team-x], nil)", owner, set, err)
+		}
+	})
+	t.Run("resolved unowned", func(t *testing.T) {
+		owner, set, err := resolveSourceOwner(t.Context(), hooksReturning(Unowned(), nil), "fake", runmode.LocalDefaultOrgID, evt, "e1")
+		if err != nil || owner != "" || len(set) != 0 {
+			t.Errorf("(owner, set, err) = (%q, %v, %v), want (\"\", empty, nil) — a claimed no-owner is an answer", owner, set, err)
+		}
+	})
+	t.Run("unresolvable", func(t *testing.T) {
+		if _, _, err := resolveSourceOwner(t.Context(), hooksReturning(OwnerResolution{}, errOutage), "fake", runmode.LocalDefaultOrgID, evt, "e1"); !errors.Is(err, errOutage) {
+			t.Errorf("err = %v, want the hook's error propagated verbatim", err)
+		}
+	})
+	t.Run("empty and unclaimed", func(t *testing.T) {
+		_, _, err := resolveSourceOwner(t.Context(), hooksReturning(OwnerResolution{}, nil), "fake", runmode.LocalDefaultOrgID, evt, "e1")
+		if err == nil {
+			t.Fatal("err = nil; want the unclaimed empty resolution refused — believing it is the original bug")
+		}
+	})
 }
 
 // TestRouterBound pins the durability predicate internal/ingest gates its

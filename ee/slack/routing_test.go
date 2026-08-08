@@ -43,52 +43,60 @@ func messageEvent(t *testing.T, orgID, channel string) domain.Event {
 
 func TestSlackChannelOwner_PrimaryTeamOwns(t *testing.T) {
 	bundle := &slackstore.Bundle{TeamChannels: &fakeTeamChannels{primaryTeam: "team-x"}}
-	owner, set, err := slackChannelOwner(bundle)(context.Background(), "org-1", messageEvent(t, "org-1", "C1"), "entity-1")
+	res, err := slackChannelOwner(bundle)(context.Background(), "org-1", messageEvent(t, "org-1", "C1"), "entity-1")
 	if err != nil {
 		t.Fatalf("err = %v; want nil", err)
 	}
-	if owner != "team-x" || len(set) != 1 || set[0] != "team-x" {
-		t.Errorf("owner=%q set=%v; want owner=team-x set=[team-x]", owner, set)
+	if res.Owner != "team-x" || len(res.OwnerSet) != 1 || res.OwnerSet[0] != "team-x" {
+		t.Errorf("res = %+v; want owner=team-x set=[team-x]", res)
 	}
 }
 
-// The three data states below resolve to ("", nil, nil): a retry cannot
+// The three data states below resolve to routing.Unowned(): a retry cannot
 // produce a different answer, so the mention is recorded taskless and the
-// event consumed. They are the cases the error arm must NOT swallow along
-// with the real failure — the whole point of splitting them.
+// event consumed. Each must CLAIM the no-owner answer — an empty resolution
+// that didn't is refused at the seam as an unreported failure, which is
+// exactly the outcome these three must not get.
 
 func TestSlackChannelOwner_NoPrimary(t *testing.T) {
 	bundle := &slackstore.Bundle{TeamChannels: &fakeTeamChannels{primaryTeam: ""}}
-	owner, set, err := slackChannelOwner(bundle)(context.Background(), "org-1", messageEvent(t, "org-1", "C1"), "entity-1")
+	res, err := slackChannelOwner(bundle)(context.Background(), "org-1", messageEvent(t, "org-1", "C1"), "entity-1")
 	if err != nil {
 		t.Fatalf("err = %v; want nil — a channel with no primary team is a resolved answer, not a failure", err)
 	}
-	if owner != "" || set != nil {
-		t.Errorf("owner=%q set=%v; want owner=\"\" set=nil (untracked/unclaimed)", owner, set)
-	}
+	assertResolvedUnowned(t, res, "a channel with no primary team")
 }
 
 func TestSlackChannelOwner_MalformedMetadata(t *testing.T) {
 	bundle := &slackstore.Bundle{TeamChannels: &fakeTeamChannels{primaryTeam: "team-x"}}
 	evt := domain.Event{OrgID: "org-1", EventType: domain.EventSlackMessage, MetadataJSON: `not json`}
-	owner, set, err := slackChannelOwner(bundle)(context.Background(), "org-1", evt, "entity-1")
+	res, err := slackChannelOwner(bundle)(context.Background(), "org-1", evt, "entity-1")
 	if err != nil {
 		t.Fatalf("err = %v; want nil — unreadable metadata is a data state a replay would only repeat", err)
 	}
-	if owner != "" || set != nil {
-		t.Errorf("owner=%q set=%v; want owner=\"\" set=nil on malformed metadata", owner, set)
-	}
+	assertResolvedUnowned(t, res, "unreadable metadata")
 }
 
 func TestSlackChannelOwner_EmptyChannelInMetadata(t *testing.T) {
 	bundle := &slackstore.Bundle{TeamChannels: &fakeTeamChannels{primaryTeam: "team-x"}}
 	evt := domain.Event{OrgID: "org-1", EventType: domain.EventSlackMessage, MetadataJSON: `{"channel":""}`}
-	owner, set, err := slackChannelOwner(bundle)(context.Background(), "org-1", evt, "entity-1")
+	res, err := slackChannelOwner(bundle)(context.Background(), "org-1", evt, "entity-1")
 	if err != nil {
 		t.Fatalf("err = %v; want nil — a mention with no channel is a data state", err)
 	}
-	if owner != "" || set != nil {
-		t.Errorf("owner=%q set=%v; want owner=\"\" set=nil on empty channel", owner, set)
+	assertResolvedUnowned(t, res, "a mention with no channel")
+}
+
+// assertResolvedUnowned pins both halves of the no-owner answer: no owner, and
+// the resolution SAYS it resolved. The second half is what keeps these three
+// cases from landing in the seam's refusal arm alongside a swallowed failure.
+func assertResolvedUnowned(t *testing.T, res routing.OwnerResolution, what string) {
+	t.Helper()
+	if res.Owner != "" || len(res.OwnerSet) != 0 {
+		t.Errorf("res = %+v; want no owner for %s", res, what)
+	}
+	if !res.Unowned {
+		t.Errorf("res.Unowned = false for %s; an unclaimed empty resolution is refused as an unreported failure", what)
 	}
 }
 
@@ -100,15 +108,15 @@ func TestSlackChannelOwner_EmptyChannelInMetadata(t *testing.T) {
 // applies_to_unowned watcher answer, and then own, another team's channel.
 func TestSlackChannelOwner_StoreErrorPropagates(t *testing.T) {
 	bundle := &slackstore.Bundle{TeamChannels: &fakeTeamChannels{primaryErr: errors.New("boom")}}
-	owner, set, err := slackChannelOwner(bundle)(context.Background(), "org-1", messageEvent(t, "org-1", "C1"), "entity-1")
+	res, err := slackChannelOwner(bundle)(context.Background(), "org-1", messageEvent(t, "org-1", "C1"), "entity-1")
 	if err == nil {
 		t.Fatal("err = nil; want the store error propagated — a failed lookup is not a resolved no-owner")
 	}
 	if !strings.Contains(err.Error(), "C1") {
 		t.Errorf("err = %v; want it to name the channel whose lookup failed", err)
 	}
-	if owner != "" || set != nil {
-		t.Errorf("owner=%q set=%v; want no partial owner alongside the error", owner, set)
+	if res.Owner != "" || len(res.OwnerSet) != 0 || res.Unowned {
+		t.Errorf("res = %+v; want the zero resolution alongside the error — never a claimed answer", res)
 	}
 }
 
@@ -162,7 +170,7 @@ func TestSlackHooks_StoreErrorPostureSplit(t *testing.T) {
 	bundle := &slackstore.Bundle{TeamChannels: down}
 	evt := messageEvent(t, "org-1", "C1")
 
-	if _, _, err := slackChannelOwner(bundle)(context.Background(), "org-1", evt, "entity-1"); err == nil {
+	if _, err := slackChannelOwner(bundle)(context.Background(), "org-1", evt, "entity-1"); err == nil {
 		t.Error("ResolveOwner swallowed the store error; a hook that decides ownership must propagate")
 	}
 	if !slackTeamTracksChannel(bundle)(context.Background(), evt, "team-x") {

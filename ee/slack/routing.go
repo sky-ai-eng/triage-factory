@@ -12,6 +12,7 @@ import (
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/routing"
 )
 
 // slackChannelOwner builds routing.SourceHooks.ResolveOwner for the Slack
@@ -19,36 +20,39 @@ import (
 // TFAC-510's owner ladder — channel-primary owns, the mentioning sender is
 // audit-only).
 //
-// Three DATA states resolve to ("", nil, nil) — untracked/unclaimed, recorded
-// taskless, only an applies_to_unowned watcher can still fire: metadata this
-// package can't read (never expected from its own ingest, but the hook must
-// not panic the drain goroutine on it), a message carrying no channel, and a
-// channel with no primary team. A failed primary-team lookup is none of those
-// — it is "could not find out" — so it propagates and the mention is replayed.
-// Degrading that read to "nobody owns this" loses the mention outright (Slack
-// ingest has no snapshot-diff to re-derive it from), or hands it to a team
-// that merely watches the channel, which then answers — and owns — another
-// team's conversation.
-func slackChannelOwner(bundle *slackstore.Bundle) func(ctx context.Context, orgID string, evt domain.Event, entityID string) (string, []string, error) {
-	return func(ctx context.Context, orgID string, evt domain.Event, entityID string) (string, []string, error) {
+// Three DATA states resolve to routing.Unowned() — untracked/unclaimed,
+// recorded taskless, only an applies_to_unowned watcher can still fire:
+// metadata this package can't read (never expected from its own ingest, but
+// the hook must not panic the drain goroutine on it), a message carrying no
+// channel, and a channel with no primary team. Each SAYS it resolved rather
+// than returning the empty value, which is what lets the seam refuse the
+// fourth shape — an empty answer nobody claimed.
+//
+// A failed primary-team lookup is none of those — it is "could not find out" —
+// so it propagates and the mention is replayed. Degrading that read to "nobody
+// owns this" loses the mention outright (Slack ingest has no snapshot-diff to
+// re-derive it from), or hands it to a team that merely watches the channel,
+// which then answers — and owns — another team's conversation.
+func slackChannelOwner(bundle *slackstore.Bundle) func(ctx context.Context, orgID string, evt domain.Event, entityID string) (routing.OwnerResolution, error) {
+	return func(ctx context.Context, orgID string, evt domain.Event, entityID string) (routing.OwnerResolution, error) {
 		var meta SlackMessageMetadata
 		if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 			slackLog.Error("slack owner resolution: message metadata is not valid JSON", "org_id", orgID, "entity_id", entityID, "error", err)
-			return "", nil, nil
+			return routing.Unowned(), nil
 		}
 		if meta.Channel == "" {
 			slackLog.Error("slack owner resolution: message metadata missing channel", "org_id", orgID, "entity_id", entityID)
-			return "", nil, nil
+			return routing.Unowned(), nil
 		}
 		team, err := bundle.TeamChannels.PrimaryTeamForChannelSystem(ctx, orgID, meta.Channel)
 		if err != nil {
 			slackLog.Error("slack owner resolution: primary team lookup failed", "org_id", orgID, "channel", meta.Channel, "error", err)
-			return "", nil, fmt.Errorf("slack primary team for channel %s: %w", meta.Channel, err)
+			return routing.OwnerResolution{}, fmt.Errorf("slack primary team for channel %s: %w", meta.Channel, err)
 		}
 		if team == "" {
-			return "", nil, nil
+			return routing.Unowned(), nil
 		}
-		return team, []string{team}, nil
+		return routing.OwnedBy(team), nil
 	}
 }
 
