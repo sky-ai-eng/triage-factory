@@ -26,11 +26,12 @@ const fatalToolHostNotice = "This tool call was not executed: the tool host beca
 // it sets a terminal outcome, so a model that pairs `stop_blueprint` with real
 // work in one message gets the work done and keeps going rather than
 // silently losing the call it made alongside.
-func (e *Engine) dispatchBatch(ctx context.Context, params Params, calls []domain.ToolCall) (result Result, terminated bool, err error) {
+func (e *Engine) dispatchBatch(ctx context.Context, params Params, ownerID int, calls []domain.ToolCall) (result Result, terminated bool, err error) {
 	var terminal *Result
 	allTerminate := true
+	at := toolResultPositions(ownerID, len(calls))
 
-	for _, call := range calls {
+	for i, call := range calls {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return Result{}, false, ctxErr
 		}
@@ -39,7 +40,7 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, calls []domai
 		// sandbox. Its result row still lands, so the transcript stays legal
 		// and a later reader sees why the run ended.
 		if out, ok := resolveLoopSide(call, params.HasBlueprint); ok {
-			if err := e.insertToolResult(ctx, params, call, out.Content, out.IsError); err != nil {
+			if err := e.insertToolResult(ctx, params, call, out.Content, out.IsError, at(i)); err != nil {
 				return Result{}, false, err
 			}
 			if out.Terminal == "" {
@@ -67,7 +68,7 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, calls []domai
 		// strictly more useful than killing the run.
 		if e.Hooks.BeforeToolCall != nil {
 			if deny := e.Hooks.BeforeToolCall(ctx, call); deny != "" {
-				if err := e.insertToolResult(ctx, params, call, deny, true); err != nil {
+				if err := e.insertToolResult(ctx, params, call, deny, true, at(i)); err != nil {
 					return Result{}, false, err
 				}
 				continue
@@ -87,7 +88,7 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, calls []domai
 			if cause == nil {
 				cause = out.Protocol
 			}
-			if ferr := e.failRemainingCalls(ctx, params, calls, call.ID); ferr != nil {
+			if ferr := e.failRemainingCalls(ctx, params, calls, at, call.ID); ferr != nil {
 				return Result{}, false, ferr
 			}
 			return Result{}, false, fmt.Errorf("tool host is unusable: %w", cause)
@@ -98,19 +99,19 @@ func (e *Engine) dispatchBatch(ctx context.Context, params Params, calls []domai
 			// Survivable: an unknown tool, a malformed frame, an over-cap
 			// response. The model gets the message and the loop reads the
 			// next frame.
-			if err := e.insertToolResult(ctx, params, call, out.Protocol.Error(), true); err != nil {
+			if err := e.insertToolResult(ctx, params, call, out.Protocol.Error(), true, at(i)); err != nil {
 				return Result{}, false, err
 			}
 		case out.ToolError != "":
-			if err := e.insertToolResult(ctx, params, call, out.ToolError, true); err != nil {
+			if err := e.insertToolResult(ctx, params, call, out.ToolError, true, at(i)); err != nil {
 				return Result{}, false, err
 			}
 		case len(out.Images) > 0:
-			if err := e.insertToolResultWithImages(ctx, params, call, out.Content, out.Images); err != nil {
+			if err := e.insertToolResultWithImages(ctx, params, call, out.Content, out.Images, at(i)); err != nil {
 				return Result{}, false, err
 			}
 		default:
-			if err := e.insertToolResult(ctx, params, call, out.Content, false); err != nil {
+			if err := e.insertToolResult(ctx, params, call, out.Content, false, at(i)); err != nil {
 				return Result{}, false, err
 			}
 		}
@@ -136,9 +137,9 @@ func (e *Engine) callTool(ctx context.Context, call domain.ToolCall) (ToolOutcom
 // assistant message whose tool calls have no results — illegal on the next
 // assembly, and something the repair pass would then have to invent an
 // explanation for.
-func (e *Engine) failRemainingCalls(ctx context.Context, params Params, calls []domain.ToolCall, failedID string) error {
+func (e *Engine) failRemainingCalls(ctx context.Context, params Params, calls []domain.ToolCall, at func(int) *float64, failedID string) error {
 	reached := false
-	for _, call := range calls {
+	for i, call := range calls {
 		if call.ID == failedID {
 			reached = true
 		}
@@ -149,7 +150,7 @@ func (e *Engine) failRemainingCalls(ctx context.Context, params Params, calls []
 		// shutdown; a detached write here would race the claim release, so
 		// let the error propagate and leave the repair pass to finish the job
 		// on the next claim.
-		if err := e.insertToolResult(ctx, params, call, fatalToolHostNotice, true); err != nil {
+		if err := e.insertToolResult(ctx, params, call, fatalToolHostNotice, true, at(i)); err != nil {
 			return err
 		}
 	}

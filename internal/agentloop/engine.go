@@ -539,7 +539,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			// any of them.
 			if len(calls) > 0 {
 				emptyLengthStops = 0
-				if err := e.answerUndispatchedCalls(ctx, params, calls, truncatedBatchNotice); err != nil {
+				if err := e.answerUndispatchedCalls(ctx, params, assistantRow.ID, calls, truncatedBatchNotice); err != nil {
 					return e.failed(ctx, started, turn, err)
 				}
 				bareDrain = false
@@ -589,7 +589,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			// rejected on the wire, and this arm continues in-process, so no
 			// repair pass runs in between. The answers flip inactive with the
 			// rest of the span a moment later.
-			if err := e.answerUndispatchedCalls(ctx, params, calls, wallCutBatchNotice); err != nil {
+			if err := e.answerUndispatchedCalls(ctx, params, assistantRow.ID, calls, wallCutBatchNotice); err != nil {
 				return e.failed(ctx, started, turn, err)
 			}
 			windowWallStops++
@@ -620,7 +620,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			// other the loop declines to run: whatever the person does with
 			// this park, it must not begin by having the model told a call it
 			// never made was interrupted.
-			if err := e.answerUndispatchedCalls(ctx, params, calls, interruptedCallNotice); err != nil {
+			if err := e.answerUndispatchedCalls(ctx, params, assistantRow.ID, calls, interruptedCallNotice); err != nil {
 				return e.failed(ctx, started, turn, err)
 			}
 			return e.parkOnStop(ctx, params, started, turn, rows, declineParkNotice(completion.FinishReason))
@@ -629,7 +629,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			e.warn("provider reported an unrecognized finish reason; parking rather than concluding",
 				"conversation", params.ConversationID, "model", params.Model,
 				"finish_reason", completion.FinishReason)
-			if err := e.answerUndispatchedCalls(ctx, params, calls, interruptedCallNotice); err != nil {
+			if err := e.answerUndispatchedCalls(ctx, params, assistantRow.ID, calls, interruptedCallNotice); err != nil {
 				return e.failed(ctx, started, turn, err)
 			}
 			return e.parkOnStop(ctx, params, started, turn, rows, unrecognizedStopParkNotice(completion.FinishReason))
@@ -651,7 +651,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// 9. Dispatch. Flow-control calls resolve loop-side; everything
 		// else goes into the jail, serially, in call order.
 		if len(calls) > 0 {
-			outcome, terminated, err := e.dispatchBatch(ctx, params, calls)
+			outcome, terminated, err := e.dispatchBatch(ctx, params, assistantRow.ID, calls)
 			if err != nil {
 				return e.failed(ctx, started, turn, err)
 			}
@@ -851,9 +851,10 @@ func (e *Engine) checkGuards(ctx context.Context, params Params, budgetTurns, tu
 // interrupted execution on a restored workspace, and for these messages every
 // part of that is false. Nothing ran, nothing was restored, and there is no
 // state to go verify.
-func (e *Engine) answerUndispatchedCalls(ctx context.Context, params Params, calls []domain.ToolCall, notice string) error {
-	for _, call := range calls {
-		if err := e.insertToolResult(ctx, params, call, notice, true); err != nil {
+func (e *Engine) answerUndispatchedCalls(ctx context.Context, params Params, ownerID int, calls []domain.ToolCall, notice string) error {
+	at := toolResultPositions(ownerID, len(calls))
+	for i, call := range calls {
+		if err := e.insertToolResult(ctx, params, call, notice, true, at(i)); err != nil {
 			return err
 		}
 	}

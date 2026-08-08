@@ -1482,6 +1482,59 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// A synthetic row is sometimes written to a position rather than to the
+	// tail — the claim-start repair answers an interrupted tool call
+	// underneath the user rows that arrived after it, so the answer assembles
+	// adjacent to the call the provider requires it to follow. That placement
+	// only holds if the fenced write an engagement makes carries the caller's
+	// seq through to the column; an insert that dropped it would silently
+	// restore the tail-append order and reject the very next request.
+	t.Run("InsertMessageForClaimSystem_HonorsExplicitSeq", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-seq", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, runID)[0].ID
+		insert := func(msg domain.Message) int {
+			id, err := store.InsertMessageForClaimSystem(ctx, orgID, claimID, &msg)
+			if err != nil {
+				t.Fatalf("InsertMessageForClaimSystem: %v", err)
+			}
+			return int(id)
+		}
+
+		callID := insert(domain.Message{ConversationID: runID, Role: "assistant", Content: "calling",
+			ToolCalls: []domain.ToolCall{{ID: "t1", Name: "bash"}}})
+		followUpID := insert(domain.Message{ConversationID: runID, Role: "user", Content: "one more thing"})
+		anchored := float64(callID) + (float64(followUpID)-float64(callID))/2
+		resultID := insert(domain.Message{ConversationID: runID, Role: "tool", ToolCallID: "t1",
+			Content: "interrupted", IsError: true, Seq: &anchored})
+
+		window, err := store.ListForAssemblySystem(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("ListForAssemblySystem: %v", err)
+		}
+		var order []int
+		for _, m := range window {
+			order = append(order, m.ID)
+			if m.ID == resultID && (m.Seq == nil || *m.Seq != anchored) {
+				t.Errorf("result row seq = %v, want the caller's %v", m.Seq, anchored)
+			}
+		}
+		want := []int{callID, resultID, followUpID}
+		if len(order) != len(want) {
+			t.Fatalf("assembly window ids = %v, want %v (the newest row assembling in the middle)", order, want)
+		}
+		for i := range want {
+			if order[i] != want[i] {
+				t.Fatalf("assembly window ids = %v, want %v (the newest row assembling in the middle)", order, want)
+			}
+		}
+	})
+
 	t.Run("CompactForClaimSystem_CommitsResultFlipsSpanAndReseqsQueue", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
