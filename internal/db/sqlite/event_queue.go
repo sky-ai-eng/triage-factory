@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -181,6 +182,83 @@ func (s *eventQueueStore) PruneDone(ctx context.Context, before time.Time) (int,
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil
+}
+
+func (s *eventQueueStore) ListFailedEvents(ctx context.Context, orgID string, limit int) ([]domain.FailedEvent, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	// LEFT JOIN for the same reason as the Postgres impl: entity_id is
+	// nullable and a parked row must list whether or not its entity is still
+	// there. No org_id term on the join — local is N=1, so every row in both
+	// tables carries the one sentinel org and the extra predicate would only
+	// restate assertLocalOrg above.
+	//
+	// id DESC is enqueue order reversed: most recently dropped work first.
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT q.id, q.event_type,
+		       COALESCE(q.entity_id, ''), COALESCE(e.source, ''), COALESCE(e.source_id, ''), COALESCE(e.title, ''),
+		       q.attempts, COALESCE(q.last_error, ''), q.enqueued_at
+		FROM event_queue q
+		LEFT JOIN entities e ON e.id = q.entity_id
+		WHERE q.status = 'failed'
+		ORDER BY q.id DESC
+		LIMIT ?
+	`, db.NormalizeFailedEventsLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.FailedEvent{}
+	for rows.Next() {
+		var fe domain.FailedEvent
+		if err := rows.Scan(
+			&fe.ID, &fe.EventType,
+			&fe.EntityID, &fe.EntitySource, &fe.EntitySourceID, &fe.EntityTitle,
+			&fe.Attempts, &fe.LastError, &fe.EnqueuedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, fe)
+	}
+	return out, rows.Err()
+}
+
+func (s *eventQueueStore) RequeueFailedEvents(ctx context.Context, orgID string, ids []int64) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	// SQLite has no array bind, so the id set becomes a ?-placeholder IN list,
+	// chunked to stay inside the variable limit (inListChunkSize) the way
+	// every other caller-supplied id slice in this package is. Each id falls
+	// in exactly one chunk, so summing the per-chunk RowsAffected gives the
+	// same count Postgres returns from its single statement.
+	//
+	// status = 'failed' is both selector and guard, and last_error is
+	// untouched — see the interface doc.
+	total := 0
+	for start := 0; start < len(ids); start += inListChunkSize {
+		end := min(start+inListChunkSize, len(ids))
+		chunk := ids[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk))
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		res, err := s.conn.ExecContext(ctx, `
+			UPDATE event_queue
+			SET status = 'pending', attempts = 0, claimed_at = NULL, processed_at = NULL,
+				executor_id = NULL, boot_epoch = NULL
+			WHERE status = 'failed' AND id IN (`+strings.Join(placeholders, ", ")+`)
+		`, args...)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += int(n)
+	}
+	return total, nil
 }
 
 func (s *eventQueueStore) ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.QueuedEvent, error) {
