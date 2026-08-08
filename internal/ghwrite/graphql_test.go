@@ -641,6 +641,11 @@ func TestGraphQLTable_ActionsAreKnownVocabulary(t *testing.T) {
 		domain.ActionReviewSubmitted:    true,
 		domain.ActionReactionAdded:      true,
 		domain.ActionReactionRemoved:    true,
+		domain.ActionIssueCreated:       true,
+		domain.ActionIssueUpdated:       true,
+		domain.ActionIssueClosed:        true,
+		domain.ActionIssueReopened:      true,
+		domain.ActionIssueDeleted:       true,
 	}
 	for mutation, shape := range graphQLMutations {
 		if !known[shape.action] {

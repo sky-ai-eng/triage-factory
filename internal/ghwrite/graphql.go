@@ -131,6 +131,19 @@ var graphQLMutations = map[string]graphQLShape{
 	"submitPullRequestReview":       {action: domain.ActionReviewSubmitted, provenance: true},
 	"addReaction":                   {action: domain.ActionReactionAdded},
 	"removeReaction":                {action: domain.ActionReactionRemoved},
+
+	// The issue family. GitHub serves issue comments through addComment above,
+	// so only the lifecycle needs naming here.
+	"createIssue": {action: domain.ActionIssueCreated, creates: true, numberFromURL: true},
+	"updateIssue": {action: domain.ActionIssueUpdated},
+	"closeIssue":  {action: domain.ActionIssueClosed},
+	"reopenIssue": {action: domain.ActionIssueReopened},
+	"deleteIssue": {action: domain.ActionIssueDeleted},
+
+	// TODO(TFAC-788): enablePullRequestAutoMerge / disablePullRequestAutoMerge
+	// and addPullRequestReviewThread are named in that ticket's gated set and
+	// belong in this table before the gate can key on them. They are absent here
+	// because no pinned-gh porcelain path was observed emitting them.
 }
 
 // graphQLShape is one table entry: the act, and the flags the REST shapes carry

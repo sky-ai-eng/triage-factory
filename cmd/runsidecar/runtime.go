@@ -484,6 +484,9 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 					Unreadable: w.GraphQL.Unreadable,
 				}
 			}
+			// TODO(TFAC-790): this notify is fire-and-forget, so a failed relay
+			// hop loses the audit row with no trace anywhere. Needs the dropped-
+			// record counter before the loss can be noticed at all.
 			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
 		},
 	}

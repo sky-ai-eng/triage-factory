@@ -460,6 +460,10 @@ func (s *Server) captureGraphQLWrite(r *http.Request) (*ghwrite.GraphQLFacts, bo
 		// construction and worth a line an operator can alert on.
 		injectorLog.Warn("graphql request body unreadable; the write it performed cannot be named",
 			"run", s.cfg.RunID, "reason", unread, "content_length", r.ContentLength)
+		// TODO(TFAC-788): an unnameable write is recorded here but still
+		// transits. Once the gate keys on the classifier, it has to refuse this
+		// case too — a gate that fires on the act's name is walked straight
+		// through by anything that stops the act being named.
 		return &ghwrite.GraphQLFacts{Unreadable: unread}, true
 	}
 

@@ -205,7 +205,9 @@ func Resolve(obs Observation) (Shape, bool) {
 		s.ExternalID = obs.ExternalID
 	}
 	if s.NumberFromObjectURL {
-		_, _, number, parsed := ParsePullRequestURL(obs.URL)
+		// Either collection's url: a pull request and an issue are both
+		// addressed by the number their own link carries.
+		_, _, number, parsed := ParseObjectURL(obs.URL)
 		if !parsed {
 			s.ExternalID = ""
 			return s, true
@@ -399,6 +401,13 @@ func classifyPulls(s Shape, method string, rest []string) (Shape, bool) {
 		s.Action = domain.ActionCommentPosted
 		s.InReplyTo = reply
 		s.CreatesObject = true
+	case len(rest) == 2 && rest[1] == "requested_reviewers" && method == "POST":
+		// `gh pr edit --add-reviewer` sends this alongside its GraphQL edit, so a
+		// single user command legitimately produces two rows — two requests, two
+		// acts. Naming this one is what keeps the second from being anonymous.
+		s.Action = domain.ActionReviewRequested
+	case len(rest) == 2 && rest[1] == "requested_reviewers" && method == "DELETE":
+		s.Action = domain.ActionReviewRequestRemoved
 	default:
 		return Shape{}, false
 	}
@@ -409,8 +418,15 @@ func classifyPulls(s Shape, method string, rest []string) (Shape, bool) {
 // reactions. GitHub serves a pull request's conversation comments here too, so
 // this covers `gh api` posting on a PR as well as on an issue.
 func classifyIssues(s Shape, method string, rest []string) (Shape, bool) {
+	// The collection itself: opening an issue.
 	if len(rest) == 0 {
-		return Shape{}, false
+		if method != "POST" {
+			return Shape{}, false
+		}
+		s.Action = domain.ActionIssueCreated
+		s.CreatesObject = true
+		s.NumberFromObjectURL = true
+		return s, true
 	}
 
 	// Comments addressed by their own id: /issues/comments/{id}[/...].
@@ -440,6 +456,10 @@ func classifyIssues(s Shape, method string, rest []string) (Shape, bool) {
 	}
 	s.Number = n
 	switch {
+	case len(rest) == 1 && method == "PATCH":
+		// Like its pull-request twin: the URL says the issue changed, and
+		// whether that was a retitle or a close lives in a body nothing reads.
+		s.Action = domain.ActionIssueUpdated
 	case len(rest) == 2 && rest[1] == "comments" && method == "POST":
 		s.Action = domain.ActionCommentPosted
 		s.CreatesObject = true

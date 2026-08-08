@@ -167,12 +167,30 @@ const (
 	// server refused.
 	ActionGraphQLWrite = "graphql_write"
 
-	// Jira issue lifecycle + comments.
+	// Issue lifecycle + comments. The verb names the act; PROVIDER names the
+	// system it happened in, which is why a GitHub issue and a Jira issue share
+	// this vocabulary rather than each getting a parallel copy of it. Filtering
+	// the log for "issues created" across both is the useful default, and a
+	// caller that wants one system filters on provider as well.
+	//
+	// The transition/assignment pair is Jira-shaped (named statuses, a single
+	// assignee) and only the Jira writers use it. The open/closed pair below
+	// mirrors the pull-request family instead, because a GitHub issue has states
+	// rather than a workflow.
 	ActionIssueCreated       = "issue_created"
 	ActionIssueTransitioned  = "issue_transitioned"
 	ActionIssueAssigned      = "issue_assigned"
 	ActionIssueUpdated       = "issue_updated"
 	ActionIssueCommentPosted = "issue_comment_posted"
+	ActionIssueClosed        = "issue_closed"
+	ActionIssueReopened      = "issue_reopened"
+	ActionIssueDeleted       = "issue_deleted"
+
+	// GitHub review requests. Asking someone to review is an org-credential
+	// write that reaches a human, so it belongs in the log by name; it is not a
+	// review itself, which is why it sits apart from the review lifecycle above.
+	ActionReviewRequested      = "review_requested"
+	ActionReviewRequestRemoved = "review_request_removed"
 
 	// Slack messages (TFAC-596). Reads (thread/channel history, file
 	// download) are writes-only-by-charter exclusions — see external_actions'

@@ -296,3 +296,87 @@ func TestRepoPath_ExtractsOrDeclines(t *testing.T) {
 		}
 	}
 }
+
+// TestClassify_IssuesAndReviewRequests covers the shapes a coverage sweep
+// against the pinned gh turned up as unnamed: creating an issue, editing one,
+// and the review request `gh pr edit --add-reviewer` sends alongside its
+// GraphQL edit.
+func TestClassify_IssuesAndReviewRequests(t *testing.T) {
+	cases := []struct {
+		name    string
+		method  string
+		path    string
+		action  string
+		target  string
+		creates bool
+		fromURL bool
+	}{
+		{
+			name:    "issue create",
+			method:  "POST",
+			path:    "/repos/octo/repo/issues",
+			action:  domain.ActionIssueCreated,
+			target:  "octo/repo",
+			creates: true,
+			fromURL: true,
+		},
+		{
+			name:   "issue edit",
+			method: "PATCH",
+			path:   "/repos/octo/repo/issues/7",
+			action: domain.ActionIssueUpdated,
+			target: "octo/repo#7",
+		},
+		{
+			name:   "review requested",
+			method: "POST",
+			path:   "/repos/octo/repo/pulls/42/requested_reviewers",
+			action: domain.ActionReviewRequested,
+			target: "octo/repo#42",
+		},
+		{
+			name:   "review request removed",
+			method: "DELETE",
+			path:   "/repos/octo/repo/pulls/42/requested_reviewers",
+			action: domain.ActionReviewRequestRemoved,
+			target: "octo/repo#42",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shape, ok := Classify(tc.method, tc.path)
+			if !ok {
+				t.Fatalf("%s %s did not classify", tc.method, tc.path)
+			}
+			if shape.Action != tc.action {
+				t.Errorf("action = %q, want %q", shape.Action, tc.action)
+			}
+			if shape.Target() != tc.target {
+				t.Errorf("target = %q, want %q", shape.Target(), tc.target)
+			}
+			if shape.CreatesObject != tc.creates || shape.NumberFromObjectURL != tc.fromURL {
+				t.Errorf("creates=%v fromURL=%v, want %v/%v",
+					shape.CreatesObject, shape.NumberFromObjectURL, tc.creates, tc.fromURL)
+			}
+		})
+	}
+}
+
+// TestResolve_IssueCreateIsKeyedByItsNumber pins the widening that made an
+// issue create resolvable: the number comes off the created object's own url,
+// which for an issue sits under /issues/ rather than /pull/. Before this, an
+// issue create parsed as a pull request, found nothing, and dropped its id.
+func TestResolve_IssueCreateIsKeyedByItsNumber(t *testing.T) {
+	shape, ok := Resolve(Observation{
+		Method: "POST",
+		Path:   "/repos/octo/repo/issues",
+		Status: 201,
+		URL:    "https://github.com/octo/repo/issues/19",
+	})
+	if !ok {
+		t.Fatal("issue create did not resolve")
+	}
+	if shape.Target() != "octo/repo#19" || shape.ExternalID != "19" {
+		t.Errorf("shape = %+v, want octo/repo#19 keyed by 19", shape)
+	}
+}

@@ -191,7 +191,19 @@ React 19 + Vite + TypeScript + Tailwind v4. Router routes live in `frontend/src/
 - **Runtime mode flag.** `TF_MODE=local|multi` is read once at startup by `internal/runmode` (called from `main()` before the argv-dispatch switch). Default is `local`. Downstream packages branch on `runmode.Current()`: `internal/db` picks SQLite vs Postgres, `internal/paths` (forthcoming with SKY-248 D4b) resolves state-root paths, future auth + sandbox tickets gate multi-only behavior. `runmode.LocalDefaultOrgID` is the synthetic org-context value local-mode callers pass everywhere a real `orgID` is expected.
 - **Role flag.** `TF_ROLE=control|executor` is a **multi-mode-only input** naming which half of the split a process runs: `control` serves the API/WS and competes for the background-brain lease; `executor` runs the dispatcher + sandboxes and takes no inbound traffic. Multi requires it explicitly (unset, `all`, or a typo fails boot — every multi deployment is the control+executor split, so per-run credential isolation is structural, not a knob); **local mode ignores `TF_ROLE` entirely** — the single-process shape is gated on the mode, and `runmode.RoleAll` survives only as the internal name of local's resolved inventory (the everything-plan, the instance-registry stamp). Resolved via `internal/runmode`; the split is specified in `docs/for-agents/specs/horizontal-scaling/`.
 - **Branch naming.** Use `aa/TFAC-<NNN>` (uppercase ticket ID, no trailing slug) for ticketed work — e.g., `aa/TFAC-327`, NOT `aa/tfac-327-foo` or `aa/TFAC-327-handler-sweep`. Linear holds the descriptive title; the branch name's job is just to point back to the ticket. For un-ticketed work, `aa/<short-kebab-slug>` is fine. `aa/` is the user's initials (Aidan Allchin); the `codex/...` prefix that exists in the repo comes from a different agent (OpenAI Codex) — don't copy it.
-- **No ticket references in code comments.** Keep `TFAC-`/`SKY-` ids out of source comments — they belong in commit messages, PR bodies, and branch names only. Comments explain **why**; they never restate what the code does or assert what other code does.
+- **No ticket references in code comments — with exactly one exception.** Keep `TFAC-`/`SKY-` ids and issue numbers out of source comments; they belong in commit messages, PR bodies, and branch names. Comments explain **why**; they never restate what the code does or assert what other code does. The sole exception is the deferral marker below, and it is the only form in which a tracker id may appear in source.
+- **Deferred work is tracked in code or it does not exist.** Any work knowingly left undone — a case not handled, a shape not covered, a follow-up someone intends to do — is marked at the place it is missing, against whichever tracker holds it:
+
+  ```go
+  // TODO(TFAC-788): <what is missing, and what depends on it>
+  // TODO(#412): <the same, when a GitHub issue is the tracker>
+  ```
+
+  **Either form is fine, and one is enough.** Which you use follows from where the work is actually tracked: the Linear project is contributor-only, so an outside contributor cannot file there and a GitHub issue is their tracker. Don't mint a second id in the other system just to carry both — a duplicate that nobody updates is worse than a single live reference.
+
+  Two conditions, both required. The tracker must **already exist and already describe this specific gap** — pointing at something that doesn't mention it is how work gets lost twice, once in the code and once in the tracker. And the marker goes at the site of the gap, not in a summary somewhere: "I'll note it in the PR description" is not tracking, because PR bodies are not read again after merge.
+
+  The alternative to a marker is doing the work now. Choosing to defer is fine; leaving the deferral untracked is not, and neither is inventing an id to satisfy the format. If nothing covers it, file it first or say so and let the user decide — a `TODO` pointing somewhere that does not describe the gap is worse than no `TODO` at all, because it looks tracked.
 
 ## Reference docs
 

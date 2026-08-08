@@ -59,6 +59,13 @@ export const ACTION_META: Record<string, ActionMeta> = {
   review_started: { icon: Eye, label: 'Review started', text: 'text-snooze', tone: 'neutral' },
   review_submitted: { icon: Eye, label: 'Review submitted', text: 'text-snooze', tone: 'good' },
   review_dismissed: { icon: Eye, label: 'Review dismissed', text: 'text-snooze', tone: 'problem' },
+  review_requested: { icon: Eye, label: 'Review requested', text: 'text-snooze', tone: 'neutral' },
+  review_request_removed: {
+    icon: Eye,
+    label: 'Review request removed',
+    text: 'text-snooze',
+    tone: 'neutral',
+  },
   review_comment_edited: {
     icon: Eye,
     label: 'Review comment edited',
@@ -152,6 +159,14 @@ export const ACTION_META: Record<string, ActionMeta> = {
     tone: 'neutral',
   },
   issue_updated: { icon: CircleDot, label: 'Issue updated', text: 'text-accent', tone: 'neutral' },
+  issue_closed: { icon: CircleDot, label: 'Issue closed', text: 'text-accent', tone: 'problem' },
+  issue_reopened: {
+    icon: CircleDot,
+    label: 'Issue reopened',
+    text: 'text-accent',
+    tone: 'neutral',
+  },
+  issue_deleted: { icon: CircleDot, label: 'Issue deleted', text: 'text-accent', tone: 'problem' },
   issue_comment_posted: {
     icon: CircleDot,
     label: 'Issue comment posted',

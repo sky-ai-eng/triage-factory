@@ -2174,6 +2174,9 @@ func GHChannelWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
 // nothing but identifies the object exactly, and to the endpoint path when even
 // that was unreadable. Deliberately never a repo: a GraphQL request names no
 // repository, so any repo here would be invented.
+// TODO(TFAC-789): the mutation names and reason this builds into detail_json
+// are not rendered anywhere — the feed shows the action label only — so today
+// this row's most useful content is reachable only by querying the table.
 func graphQLFallbackWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
 	facts := obs.GraphQL
 	detail := map[string]any{"http_status": obs.Status}
