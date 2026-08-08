@@ -40,6 +40,15 @@ const (
 // is a hang.
 type CatalogEntry struct {
 	Config Config
+	// EnvKeys names every env KEY Env emits, without values. Declared
+	// separately because two consumers must reason about the keys before
+	// any relay has an address: buildSandboxEnv drops these keys from
+	// caller ExtraEnv (env duplicate resolution is first-wins on Linux
+	// and the relay's copy is appended last, so an inherited copy would
+	// win and point the tool at an unreachable host), and the broker env
+	// allowlist drift test checks each key is admitted. A catalog test
+	// pins EnvKeys and Env against each other so they cannot drift.
+	EnvKeys []string
 	// Env returns the env entries for a relay bound at addr
 	// (host:port). Keys emitted here must be on the broker's sandbox env
 	// allowlist (internal/sandbox launchspec_linux.go) — the agentproc
@@ -54,8 +63,20 @@ type CatalogEntry struct {
 // and needs no changes.
 func Catalog() []CatalogEntry {
 	return []CatalogEntry{
-		{Config: GoModules(), Env: GoModulesEnv},
+		{Config: GoModules(), EnvKeys: []string{"GOPROXY"}, Env: GoModulesEnv},
 	}
+}
+
+// CatalogEnvKeys returns every env key any catalog entry emits — the
+// authoritative drop-list for env assemblers that must keep an inherited
+// copy of a relay key from shadowing the relay's own (see
+// agentproc.buildSandboxEnv).
+func CatalogEnvKeys() []string {
+	var keys []string
+	for _, e := range Catalog() {
+		keys = append(keys, e.EnvKeys...)
+	}
+	return keys
 }
 
 // GoModules is the Go ecosystem's relay: the GOPROXY protocol surface,

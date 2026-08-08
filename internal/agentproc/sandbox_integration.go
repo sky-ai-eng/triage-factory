@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -270,14 +271,25 @@ func buildSandboxEnv(extraEnv []string) []string {
 	// passing it is confused, not dangerous, and the base entry above is
 	// already the right answer.
 	//
-	// GOTOOLCHAIN is filtered for the same reason, and the inherited value is
-	// the one that makes it matter: the host's own env very plausibly carries
-	// GOTOOLCHAIN=local (alpine's go.env sets it, so anything shelling out
-	// from the rootfs picks it up), and a caller threading that through
-	// ExtraEnv would re-break in-jail builds in exactly the way the base entry
-	// exists to prevent — silently, and only on the platforms whose duplicate
-	// resolution is last-wins. The base policy is authoritative.
-	out = append(out, filterEnv(extraEnv, []string{SandboxMarkerEnvVar, goToolchainEnvKey})...)
+	// GOTOOLCHAIN is filtered for the same reason: the host's own env very
+	// plausibly carries GOTOOLCHAIN=local (alpine's go.env sets it, so
+	// anything shelling out from the rootfs picks it up), and the base
+	// policy must be authoritative rather than merely positional.
+	//
+	// The relay catalog's env keys (GOPROXY today) are filtered on the
+	// OPPOSITE positional reasoning, and here the filter is load-bearing,
+	// not defensive. Duplicate env keys resolve FIRST-wins on Linux —
+	// getenv walks environ and returns the first match, and Go's runtime
+	// does the same (matching the GIT_CONFIG_COUNT note above) — and the
+	// relay's own copy is appended LAST, after this function's output
+	// (run.go appends opts.PrebuiltProxyEnv to the assembled env). So an
+	// inherited GOPROXY threaded through ExtraEnv would shadow the relay's
+	// and point the jail's cmd/go at a host the allowlist doesn't carry,
+	// presenting as a broken network. The keys come from the catalog
+	// (egressrelay.CatalogEnvKeys) so a future entry's key is protected the
+	// moment it exists, with no second list to update.
+	drop := append([]string{SandboxMarkerEnvVar, goToolchainEnvKey}, egressrelay.CatalogEnvKeys()...)
+	out = append(out, filterEnv(extraEnv, drop)...)
 	return out
 }
 

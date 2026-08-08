@@ -29,6 +29,41 @@ func TestCatalog_EveryEntryConstructsAndCarriesEnv(t *testing.T) {
 	}
 }
 
+// TestCatalog_EnvKeysMatchEnv pins each entry's declared EnvKeys to the
+// keys its Env actually emits. EnvKeys is the drop-list buildSandboxEnv
+// uses to keep an inherited copy of a relay key from shadowing the relay's
+// own (first-wins duplicate resolution, relay copy appended last), so a
+// key emitted but not declared would be exactly the unprotected asymmetry
+// the field exists to prevent — and a key declared but not emitted would
+// silently drop caller env for nothing.
+func TestCatalog_EnvKeysMatchEnv(t *testing.T) {
+	for _, e := range Catalog() {
+		declared := map[string]bool{}
+		for _, k := range e.EnvKeys {
+			declared[k] = true
+		}
+		emitted := map[string]bool{}
+		for _, kv := range e.Env("10.42.1.1:9001") {
+			i := strings.IndexByte(kv, '=')
+			if i < 0 {
+				t.Errorf("catalog entry %q Env emitted %q with no '='", e.Config.Name, kv)
+				continue
+			}
+			emitted[kv[:i]] = true
+		}
+		for k := range emitted {
+			if !declared[k] {
+				t.Errorf("catalog entry %q emits env key %q not declared in EnvKeys — buildSandboxEnv would not protect it from an inherited copy", e.Config.Name, k)
+			}
+		}
+		for k := range declared {
+			if !emitted[k] {
+				t.Errorf("catalog entry %q declares env key %q that Env never emits", e.Config.Name, k)
+			}
+		}
+	}
+}
+
 // TestGoModules_RouteShape pins the Go entry's load-bearing structure: the
 // synthetic sumdb probe, the sumdb relay targeting the checksum host (not
 // the module proxy), the fence keeping unknown sumdbs from falling
