@@ -30,6 +30,32 @@ import (
 // and an operator reading the column sees one string for one cause.
 const StaleProcessingReclaimReason = "stale processing reclaim"
 
+// Bounds on ListFailedEvents' page size, shared so the two impls can't
+// drift. The list is a diagnostics table an operator scans, not a feed:
+// a healthy deployment parks nothing, and a deployment parking more than
+// the ceiling has a systemic fault the first page already tells the
+// operator about.
+const (
+	DefaultFailedEventsLimit = 100
+	MaxFailedEventsLimit     = 500
+)
+
+// NormalizeFailedEventsLimit resolves a caller's requested page size to the
+// one both backends must apply: non-positive (the "unspecified" spelling)
+// means the default, and anything past the ceiling is clamped rather than
+// rejected — a limit is a display convenience, not an assertion worth
+// failing a diagnostics read over.
+func NormalizeFailedEventsLimit(limit int) int {
+	switch {
+	case limit <= 0:
+		return DefaultFailedEventsLimit
+	case limit > MaxFailedEventsLimit:
+		return MaxFailedEventsLimit
+	default:
+		return limit
+	}
+}
+
 type EventQueueStore interface {
 	// Enqueue atomically records the event (the durable audit row) AND
 	// its queue row in a single transaction, returning the generated
@@ -135,7 +161,56 @@ type EventQueueStore interface {
 	// orgs, returning the count removed. The retention sweep — done rows
 	// are kept for debuggability but bounded by age; failed rows are never
 	// pruned here. Cross-org system sweep.
+	//
+	// The 'done'-only predicate is load-bearing, not incidental: a parked
+	// row is the sole record of routing work that was dropped and will not
+	// re-emit, so it has to survive until an operator has seen it and
+	// decided (ListFailedEvents / RequeueFailedEvents below). Age-pruning
+	// failed rows would delete the evidence and the recovery path together.
 	PruneDone(ctx context.Context, before time.Time) (int, error)
+
+	// ListFailedEvents returns the org's parked 'failed' rows — the operator
+	// surface over routing work the queue dropped — newest first, capped at
+	// limit (resolved through NormalizeFailedEventsLimit, so a non-positive
+	// value means the default and an oversized one is clamped).
+	//
+	// The entity fields are outer-joined for display and read empty when the
+	// row carries no entity or the entity row is gone. That is deliberate: a
+	// queue row can outlive its entity by a cascade, and omitting it would
+	// hide a dropped event precisely because something unusual happened to it.
+	//
+	// Org-scoped by argument on the admin pool, like every other method here
+	// — the store is system-service wired, so the org-admin predicate in the
+	// handler is the authorization, not RLS.
+	ListFailedEvents(ctx context.Context, orgID string, limit int) ([]domain.FailedEvent, error)
+
+	// RequeueFailedEvents returns the named parked rows to 'pending' and
+	// grants each a fresh attempt budget (attempts = 0). The fresh budget is
+	// the point of an operator requeue: the rows parked because their budget
+	// ran out, so retaining the spent count would re-park every one of them
+	// on its first attempt. last_error is deliberately left in place until
+	// the next attempt overwrites it, so the reason a row parked survives
+	// long enough to correlate with what happens next; a row that parks
+	// again carries its new reason, not the stale one. claimed_at, the
+	// ownership stamp and processed_at are cleared — a pending row has no
+	// owner and has not been processed.
+	//
+	// Only rows currently 'failed' flip. An id that is pending, processing,
+	// done, belongs to another org, or does not exist at all is a silent
+	// no-op counted out of the return, so the count is "rows this call
+	// actually moved" and a second requeue of the same ids reports 0. That
+	// count is the operator's answer, so a backend that cannot report it
+	// errors rather than guessing. On error the count is what was confirmed
+	// moved before the failure — a backend that splits a large id set into
+	// several statements commits as it goes — so it is not necessarily 0.
+	//
+	// Replay safety is the same argument every other retry in this queue
+	// rests on: a requeued row re-enters the identical at-least-once path,
+	// where the tasks dedup index, the (triggering_event_id, trigger_id)
+	// replay fence and the one-active-run index collapse anything that
+	// already landed. Double-requeue, or requeue of an event whose task
+	// arrived by other means, converges to no-ops.
+	RequeueFailedEvents(ctx context.Context, orgID string, ids []int64) (int, error)
 
 	// ListForEntity returns every queue row for an entity in id order
 	// regardless of status. Debug/audit views and conformance assertions.

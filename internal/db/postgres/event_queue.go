@@ -184,6 +184,75 @@ func (s *eventQueueStore) PruneDone(ctx context.Context, before time.Time) (int,
 	return int(n), nil
 }
 
+func (s *eventQueueStore) ListFailedEvents(ctx context.Context, orgID string, limit int) ([]domain.FailedEvent, error) {
+	// LEFT JOIN, not JOIN: entity_id is nullable and a queue row can outlive
+	// the entity it named (the FK cascades, but a parked row read mid-cascade
+	// or one enqueued without an entity must still list). The join is bound on
+	// org_id as well as id — the composite FK means the pair is what
+	// identifies an entity, and binding only id would let a future
+	// cross-org id collision join the wrong title in.
+	//
+	// id DESC is enqueue order reversed: the most recently dropped work is
+	// what an operator is looking for, and id is monotonic per insert so the
+	// order is total and stable across pages.
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT q.id, q.event_type,
+		       COALESCE(q.entity_id::text, ''), COALESCE(e.source, ''), COALESCE(e.source_id, ''), COALESCE(e.title, ''),
+		       q.attempts, COALESCE(q.last_error, ''), q.enqueued_at
+		FROM public.event_queue q
+		LEFT JOIN public.entities e ON e.id = q.entity_id AND e.org_id = q.org_id
+		WHERE q.org_id = $1 AND q.status = 'failed'
+		ORDER BY q.id DESC
+		LIMIT $2
+	`, orgID, db.NormalizeFailedEventsLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.FailedEvent{}
+	for rows.Next() {
+		var fe domain.FailedEvent
+		if err := rows.Scan(
+			&fe.ID, &fe.EventType,
+			&fe.EntityID, &fe.EntitySource, &fe.EntitySourceID, &fe.EntityTitle,
+			&fe.Attempts, &fe.LastError, &fe.EnqueuedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, fe)
+	}
+	return out, rows.Err()
+}
+
+func (s *eventQueueStore) RequeueFailedEvents(ctx context.Context, orgID string, ids []int64) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	// status = 'failed' is both the selector and the guard: it makes the
+	// operation idempotent (a second requeue matches nothing) and keeps an
+	// operator from resetting the attempts of a row another worker is
+	// actively driving. last_error is untouched on purpose — see the
+	// interface doc.
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE public.event_queue
+		SET status = 'pending', attempts = 0, claimed_at = NULL, processed_at = NULL,
+			executor_id = NULL, boot_epoch = NULL
+		WHERE org_id = $1 AND status = 'failed' AND id = ANY($2)
+	`, orgID, ids)
+	if err != nil {
+		return 0, err
+	}
+	// Unlike the sweeps above, the count here is the operator's answer — "2 of
+	// the 3 you picked moved" — so a driver that cannot report it must say so
+	// rather than let a discarded error render as "nothing moved" over rows
+	// that did.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
 func (s *eventQueueStore) ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.QueuedEvent, error) {
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT id, org_id, event_id, entity_id, event_type,

@@ -105,9 +105,11 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 	// keeps the service healthy. The cost — an innocent event caught by an
 	// unrelated crash spends one of its five retries, and would need ~5
 	// such crashes on the same row to be wrongly parked — is mild and
-	// unlikely. Recovering a parked 'failed' row is a manual/admin
-	// affordance (a separate ticket); it matters because the tracker's
-	// snapshot-diff is forward-only and may not re-emit a parked event.
+	// unlikely. Recovering a parked 'failed' row is an operator affordance
+	// (EventQueueStore.ListFailedEvents / RequeueFailedEvents, behind the
+	// admin-gated /api/events/failed surface); nothing recovers one
+	// automatically, because the tracker's snapshot-diff is forward-only and
+	// will not re-emit a parked event.
 	// Ownership-scoped: only sweeps rows this router instance
 	// itself claimed during an earlier boot, never a live sibling's
 	// still-processing row — see EventQueueStore.ResetProcessing. That
@@ -327,6 +329,12 @@ func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent)
 // parkOrRequeue requeues a row for another attempt, or parks it failed
 // once it has burned through maxEventAttempts. Used for transient
 // failures and panics so one bad event can't wedge the queue.
+//
+// A park is a decision to stop, not a decision to discard: the row is
+// retained (PruneDone only collects 'done'), and an operator can put it back
+// through the admin-gated parked-events surface, which grants a fresh budget.
+// That is why the reason recorded here is worth composing carefully — it is
+// what a human reads when deciding whether requeueing will do any good.
 //
 // Returns true only when the row actually reached 'pending' again — the one
 // state where it is about to be re-claimed, so the caller must stop draining

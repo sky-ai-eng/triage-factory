@@ -1148,6 +1148,13 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/event-handlers/{id}/toggle", eh.handleEventHandlerToggle)
 	s.apiMutating("POST /api/event-handlers/{id}/promote", eh.handleEventHandlerPromote)
 	s.apiMutating("POST /api/event-handlers/{id}/retarget", eh.handleEventHandlerRetarget)
+	// Parked event_queue rows — the operator surface over routing work the
+	// queue gave up on, and the requeue that puts it back. Org-admin gated
+	// inside the handler; the store is the admin-pool EventQueueStore with
+	// org_id bound by argument, the same shape as the usage-ops read.
+	fe := &failedEventsHandler{az: s.az, queue: s.allStores.EventQueue}
+	s.api("GET /api/events/failed", fe.handleFailedEventsList)
+	s.apiMutating("POST /api/events/failed/requeue", fe.handleFailedEventsRequeue)
 	s.api("GET /api/prompts", ph.handlePromptsList)
 	s.apiMutating("POST /api/prompts", ph.handlePromptCreate)
 	s.api("GET /api/prompts/{id}", ph.handlePromptGet)
