@@ -264,8 +264,8 @@ func unionValues(byKey map[string][]string) []string {
 	return out
 }
 
-// jiraProjectKey extracts the project key from a Jira issue key ("SKY-123" →
-// "SKY"). Jira project keys contain no hyphen, so the first segment is the key.
+// jiraProjectKey extracts the project key from a Jira issue key ("PROJ-123" →
+// "PROJ"). Jira project keys contain no hyphen, so the first segment is the key.
 func jiraProjectKey(issueKey string) string {
 	if i := strings.IndexByte(issueKey, '-'); i >= 0 {
 		return issueKey[:i]

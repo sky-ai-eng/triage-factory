@@ -170,10 +170,10 @@ func TestReconcile_SecondPassIsANoOp(t *testing.T) {
 func TestReconcile_LeavesLiveWorkAlone(t *testing.T) {
 	database := newTestDB(t)
 	r := newReconcilerRouter(t, database)
-	// SKY calls "Shipped" done; OPS does not, and calls "Done" done.
+	// PROJ calls "Shipped" done; OPS does not, and calls "Done" done.
 	seedJiraDoneRules(t, database, runmode.LocalDefaultTeamID,
 		domain.JiraProjectStatusRules{
-			ProjectKey: "SKY", PickupMembers: []string{"To Do"},
+			ProjectKey: "PROJ", PickupMembers: []string{"To Do"},
 			InProgressMembers: []string{"In Progress"}, InProgressCanonical: "In Progress",
 			DoneMembers: []string{"Shipped"}, DoneCanonical: "Shipped",
 		},
@@ -186,13 +186,13 @@ func TestReconcile_LeavesLiveWorkAlone(t *testing.T) {
 
 	openPR, openTasks := seedDivergentEntity(t, database, "github", "owner/repo#live",
 		`{"state":"OPEN","merged":false}`, domain.EventGitHubPRCICheckFailed)
-	// "Shipped" is done in SKY but not in OPS — the flat union the store
+	// "Shipped" is done in PROJ but not in OPS — the flat union the store
 	// filters on surfaces this row, and the per-project recheck is what
 	// keeps it open.
 	crossProject, crossTasks := seedDivergentEntity(t, database, "jira", "OPS-7",
 		`{"key":"OPS-7","status":"Shipped"}`, domain.EventJiraIssueAssigned)
-	realDone, doneTasks := seedDivergentEntity(t, database, "jira", "SKY-7",
-		`{"key":"SKY-7","status":"Shipped"}`, domain.EventJiraIssueAssigned)
+	realDone, doneTasks := seedDivergentEntity(t, database, "jira", "PROJ-7",
+		`{"key":"PROJ-7","status":"Shipped"}`, domain.EventJiraIssueAssigned)
 
 	r.reconcileOrgTerminalEntities(context.Background(), runmode.LocalDefaultOrgID)
 
@@ -210,10 +210,10 @@ func TestReconcile_LeavesLiveWorkAlone(t *testing.T) {
 		}
 	}
 	if got := entityState(t, database, realDone); got != "closed" {
-		t.Errorf("a SKY issue in SKY's own done status: entity state = %q, want closed", got)
+		t.Errorf("a PROJ issue in PROJ's own done status: entity state = %q, want closed", got)
 	}
 	if status, _ := taskCloseReason(t, database, doneTasks[0]); status != "done" {
-		t.Errorf("a SKY issue in SKY's own done status: task status = %q, want done", status)
+		t.Errorf("a PROJ issue in PROJ's own done status: task status = %q, want done", status)
 	}
 }
 
