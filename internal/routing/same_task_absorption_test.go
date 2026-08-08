@@ -389,6 +389,44 @@ func TestTryAutoDelegate_SameTask_DeliveredRemoteHandledWithoutRecording(t *test
 	}
 }
 
+// TestTryAutoDelegate_SameTask_NoAgentSendsNoPartialClaim pins that an
+// unresolved agent produces no claim on the wire, team included. The inject
+// signal's payload marshals the claim's two fields as omitempty JSON, so a
+// stamp carrying an acting team but no agent would travel to the owning
+// executor as a lone claim_acting_team_id — describing a claim the router
+// never made, against a write that cannot happen (the team is consolidated
+// only *as part of* a successful claim). The router is the sole producer of a
+// populated stamp, so normalizing there is what keeps the payload honest.
+func TestTryAutoDelegate_SameTask_NoAgentSendsNoPartialClaim(t *testing.T) {
+	database := newTestDB(t)
+	entityID, task, trigger, _ := setupAbsorbScenario(t, database)
+
+	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType:    absorbTestEventType,
+		EntityID:     &entityID,
+		MetadataJSON: `{"mention":"second"}`,
+		CreatedAt:    time.Now(),
+		OrgID:        runmode.LocalDefaultOrgID,
+	})
+	if err != nil {
+		t.Fatalf("record second event: %v", err)
+	}
+
+	// newAbsorbTestRouter wires no agents store, so agentID resolves empty —
+	// the documented degrade. The acting team is real and non-empty, which is
+	// the combination that used to yield a team-only stamp.
+	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredRemote}
+	router := newAbsorbTestRouter(database, sqlitestore.New(database).Conversations, stub)
+	mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, runmode.LocalDefaultTeamID)
+
+	if len(stub.calls) != 1 {
+		t.Fatalf("expected 1 StageOrDeliverAdditiveEvent attempt, got %d", len(stub.calls))
+	}
+	if got := stub.calls[0].firing.TaskClaim; got != (db.AgentClaimStamp{}) {
+		t.Errorf("firing carried claim %+v with no agent resolved, want the zero stamp — a team without an agent names a claim nobody made", got)
+	}
+}
+
 // TestTryAutoDelegate_SiblingTask_FiresConcurrently: a firing whose own
 // task has no live run fires immediately, even while a DIFFERENT task on the
 // same entity is mid-run. Two tasks on one pull request are two different

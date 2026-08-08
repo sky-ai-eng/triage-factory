@@ -381,11 +381,21 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runI
 // claimStamp packages the claim the three commitment points hand to their
 // store call. agentID is the org agent resolved ONCE by tryAutoDelegate — the
 // same id frozen onto the run's blueprint_run actor — so the claim and the
-// run's execution attribution can't drift. Empty agentID (the seam between db
-// init and agent bootstrap, or test wiring with no agents store) yields the
-// zero stamp, which every store treats as "commit without claiming" rather
-// than as an error.
+// run's execution attribution can't drift.
+//
+// Empty agentID (the seam between db init and agent bootstrap, or test wiring
+// with no agents store) yields the zero stamp, team included. The team is
+// dropped rather than carried because ActingTeamID only ever means
+// "consolidate the owner as part of this claim" — with no agent there is no
+// claim to consolidate under, so a team-only value names a write that will
+// never happen. Every store would skip it either way; what a partial value
+// would actually cost is honesty on the cross-pod inject path, where the two
+// fields ride the signal payload as omitempty JSON and a lone
+// claim_acting_team_id would describe a claim the producer never made.
 func claimStamp(agentID, actingTeamID string) dbpkg.AgentClaimStamp {
+	if agentID == "" {
+		return dbpkg.AgentClaimStamp{}
+	}
 	return dbpkg.AgentClaimStamp{AgentID: agentID, ActingTeamID: actingTeamID}
 }
 

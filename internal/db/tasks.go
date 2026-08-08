@@ -30,7 +30,14 @@ import (
 //
 // ActingTeamID is the team whose trigger fired. On a successful stamp it
 // becomes the task's owning team, consolidating the card; empty leaves
-// team_id unchanged. Semantics are StampAgentClaimIfUnclaimed's exactly —
+// team_id unchanged. It is meaningful ONLY alongside a non-empty AgentID —
+// it names a consolidation that happens *as part of* the claim, so a
+// team-without-agent value describes a write that cannot occur. Producers
+// normalize to the zero value rather than carrying one; impls skip on
+// AgentID alone, so a partial value is inert but dishonest (it survives
+// serialization on the cross-pod inject path).
+//
+// Semantics are StampAgentClaimIfUnclaimed's exactly —
 // including its three-way refusal (a user claim wins, a same-agent rewrite
 // is a no-op, a terminal task refuses) — and a refusal never fails the
 // surrounding commitment: the claim race has a winner either way, and the

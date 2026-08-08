@@ -198,8 +198,10 @@ type injectPayload struct {
 	TriggeringEventID string `json:"triggering_event_id"`
 	// The agent claim to stamp alongside whichever durable write the owner
 	// ends up making — the 'injected' mark on delivery, the compensating
-	// pending_firing on "gone". Omitted (and skipped) when the router had no
-	// agent resolved. Older rows written before this field carry neither, and
+	// pending_firing on "gone". The two fields travel together or not at all:
+	// a claim with no agent is a write that cannot happen, so the producer
+	// normalizes it away (db.AgentClaimStamp) and BOTH keys are omitted when
+	// no agent was resolved. Rows written before this field existed likewise
 	// unmarshal to the zero "no stamp" value.
 	ClaimAgentID      string `json:"claim_agent_id,omitempty"`
 	ClaimActingTeamID string `json:"claim_acting_team_id,omitempty"`
