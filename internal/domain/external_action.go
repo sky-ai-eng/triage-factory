@@ -80,6 +80,7 @@ const (
 	ActionPRConvertedToDraft = "pr_converted_to_draft"
 	ActionPREdited           = "pr_edited"
 	ActionPRClosed           = "pr_closed"
+	ActionPRReopened         = "pr_reopened"
 	ActionPRMerged           = "pr_merged"
 
 	// GitHub review lifecycle. The review *draft* is staged TF-side and makes no
@@ -149,11 +150,21 @@ const (
 	// the semantic action a refused write was reaching for — a 404'd merge is
 	// an attempt, never a merge. Appended unconditionally (no dedup key): each
 	// attempt is its own event, exactly like ActionBranchPushFailed.
-	//
-	// GraphQL is deliberately out: gh's porcelain mutations and its ordinary
-	// reads are the same POST /api/graphql, separable only by parsing the
-	// request body, which the injector never does.
 	ActionGHChannelWrite = "gh_channel_write"
+
+	// The same fallback one transport over: a GraphQL write through that
+	// channel whose mutation the classifier could not name, or could not read at
+	// all. Most of what `gh`'s porcelain writes is GraphQL, so this is the
+	// transport where an unrecognized act is likeliest to appear.
+	//
+	// It is a separate action from the REST fallback because the two know
+	// different things. A REST fallback has a path, which is most of an act's
+	// identity; this one has whatever the request envelope disclosed, so
+	// detail_json carries {operation, mutations, http_status}, "unreadable"
+	// naming why no single act could be resolved (an over-cap body, a malformed
+	// document, an ambiguous operation, an unresolved fragment spread), and
+	// "attempted" for a recognized mutation the server refused.
+	ActionGraphQLWrite = "graphql_write"
 
 	// Jira issue lifecycle + comments.
 	ActionIssueCreated       = "issue_created"

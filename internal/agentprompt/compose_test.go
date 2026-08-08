@@ -287,3 +287,25 @@ func TestNativeBlocks_NameTheRealPaths(t *testing.T) {
 		t.Errorf("the native memory block does not name the write path %q", want)
 	}
 }
+
+// TestNativeGHBlock_ClaimsNoInvisibility guards a claim that used to be true
+// and is not any more: every write the native `gh` performs — REST or GraphQL —
+// now lands an audit row, so a prompt telling the agent otherwise is teaching it
+// something false about the harness it is in.
+//
+// The redirect it carries is unaffected and stays: the TF review verbs dominate
+// `gh pr review` on what they can do, which was always the load-bearing reason.
+// This pins only that the justification is not the retired one.
+func TestNativeGHBlock_ClaimsNoInvisibility(t *testing.T) {
+	body := block(blockHarnessNativeGH)
+	for _, claim := range []string{"invisible", "no trace", "not recorded", "unrecorded"} {
+		if strings.Contains(strings.ToLower(body), claim) {
+			t.Errorf("the native gh block still claims %q; gh-channel writes are audited on both transports", claim)
+		}
+	}
+	// The refusal is still a refusal — losing it would hand the agent a review
+	// path that produces nothing the product can stage or route.
+	if !strings.Contains(body, "`gh pr review` is refused") {
+		t.Error("the native gh block no longer refuses `gh pr review`")
+	}
+}

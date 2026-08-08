@@ -2135,16 +2135,17 @@ func (c *LocalClient) RecordEgressDenied(ctx context.Context, target, reason str
 	c.recordBotAction(ctx, egressDeniedAction(c.info.RunID, target, reason))
 }
 
-// GHChannelWriteAction builds the audit row for one mutating REST request the
-// real-`gh` channel forwarded. Exported because local mode records it without a
-// LocalClient in hand (the delegate holds stores + RunInfo and writes through
-// the shared funnel), while the sandbox path goes through RecordGHChannelWrite
-// below — one builder, so the row is identical either way.
+// GHChannelWriteAction builds the audit row for one mutating request the
+// real-`gh` channel forwarded, REST or GraphQL. Exported because local mode
+// records it without a LocalClient in hand (the delegate holds stores + RunInfo
+// and writes through the shared funnel), while the sandbox path goes through
+// RecordGHChannelWrite below — one builder, so the row is identical either way.
 //
 // Exactly one row per request, and which one is settled here: a classified
 // write the upstream accepted earns its semantic verb (a review-thread reply is
-// comment_posted, a merge is pr_merged), and everything else — an unrecognized
-// shape, or a recognized one that was refused — takes the opaque fallback.
+// comment_posted, a merge is pr_merged, whether it arrived as a REST path or a
+// GraphQL mutation), and everything else — an unrecognized shape, or a
+// recognized one that was refused — takes the fallback for its transport.
 //
 // Appended unconditionally (no dedup key): each attempt is its own event, so a
 // retried edit and a refused one both leave their own row.
@@ -2152,7 +2153,66 @@ func GHChannelWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
 	if shape, ok := ghwrite.Resolve(obs); ok && obs.Succeeded() {
 		return ghSemanticWriteAction(shape, obs)
 	}
+	if obs.GraphQL != nil {
+		return graphQLFallbackWriteAction(obs)
+	}
 	return ghFallbackWriteAction(obs)
+}
+
+// graphQLFallbackWriteAction builds the opaque row for a GraphQL write with no
+// semantic name — a mutation outside the table, one the server refused, or a
+// request the reader could not resolve to a single act at all.
+//
+// Its detail says as much as was actually learned, and no more. The REST
+// fallback records a path because a path is most of an act's identity; here the
+// path is only "/graphql", so what stands in its place is the operation name,
+// the mutation fields, and — when the request could not be read — why. Those
+// three are what someone auditing this row can act on: they name what to look
+// for on GitHub, and they say whether the gap was the agent's doing or ours.
+//
+// The target falls back to the node id the variables named, which locates
+// nothing but identifies the object exactly, and to the endpoint path when even
+// that was unreadable. Deliberately never a repo: a GraphQL request names no
+// repository, so any repo here would be invented.
+func graphQLFallbackWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
+	facts := obs.GraphQL
+	detail := map[string]any{"http_status": obs.Status}
+	if facts.Operation != "" {
+		detail["operation"] = facts.Operation
+	}
+	if len(facts.Fields) > 0 {
+		detail["mutations"] = facts.Fields
+	}
+	if facts.Unreadable != "" {
+		detail["unreadable"] = facts.Unreadable
+	}
+	// Two different admissions, kept apart: the server said no, or the response
+	// went unread and nobody knows. Both land here rather than on a verb.
+	if obs.Errored {
+		detail["errored"] = true
+	}
+	if obs.ResponseUnread {
+		detail["response_unread"] = true
+	}
+	// A recognized mutation lands here only because it was refused, and naming
+	// what it reached for is the difference between "a merge did not happen" and
+	// "something did not happen".
+	if shape, ok := obs.Classify(); ok {
+		detail["attempted"] = shape.Action
+	}
+	payload, _ := json.Marshal(detail)
+
+	target := facts.Subject
+	if target == "" {
+		target = obs.Path
+	}
+	return &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderGitHub,
+		Action:     domain.ActionGraphQLWrite,
+		Target:     target,
+		Credential: domain.CredentialGitHubApp,
+		DetailJSON: string(payload),
+	}
 }
 
 // ghSemanticWriteAction builds the row for a classified, accepted write from
@@ -2179,8 +2239,16 @@ func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation) *domain
 		detail["in_reply_to"] = shape.InReplyTo
 	}
 	if shape.CarriesProvenance {
-		detail["method"] = obs.Method
-		detail["path"] = obs.Path
+		// Which call performed the act, in whatever terms that transport has: a
+		// REST write is its method and path, a GraphQL one its mutation. The
+		// question the provenance answers — did this come through the governed
+		// verb path or a raw call — is the same either way.
+		if obs.GraphQL != nil {
+			detail["mutation"] = obs.GraphQL.Mutation()
+		} else {
+			detail["method"] = obs.Method
+			detail["path"] = obs.Path
+		}
 	}
 	if len(detail) > 0 {
 		payload, _ := json.Marshal(detail)

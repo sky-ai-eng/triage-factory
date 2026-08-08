@@ -99,17 +99,44 @@ type RecordEgressDenialArgs struct {
 }
 
 // RecordGHWriteArgs is record_gh_write's payload: the method, upstream path,
-// and response status of one mutating REST request the gh-channel injector
-// forwarded, plus the created object's id and link when the shape is one whose
-// RESPONSE names an object (a posted comment or reply). Nothing from the
-// request body — the injector never reads one. The orchestrator classifies
-// method+path into the semantic act; the sidecar only carries wire facts.
+// and response status of one write the gh-channel injector forwarded, plus the
+// created object's id and link when the shape is one whose RESPONSE names an
+// object (a posted comment or reply). The orchestrator classifies these into
+// the semantic act; the sidecar only carries wire facts.
+//
+// A REST write is fully named by method+path and carries no GraphQL member. A
+// GraphQL write's path says only "/graphql", so what names it rides in GraphQL
+// instead — read from the request envelope, which is the only place it appears.
 type RecordGHWriteArgs struct {
-	Method     string `json:"method"`
-	Path       string `json:"path"`
-	Status     int    `json:"status"`
-	ExternalID string `json:"external_id,omitempty"`
-	URL        string `json:"url,omitempty"`
+	Method         string             `json:"method"`
+	Path           string             `json:"path"`
+	Status         int                `json:"status"`
+	ExternalID     string             `json:"external_id,omitempty"`
+	URL            string             `json:"url,omitempty"`
+	Errored        bool               `json:"errored,omitempty"`
+	ResponseUnread bool               `json:"response_unread,omitempty"`
+	GraphQL        *GraphQLWriteFacts `json:"graphql,omitempty"`
+}
+
+// GraphQLWriteFacts mirrors ghwrite.GraphQLFacts across the wire. It is spelled
+// out here rather than imported so the relay protocol stays a description of
+// what crosses the socket, independent of the classifier's own types — the same
+// reason the REST members are flat fields and not a shared struct.
+//
+// Names and ids only. The request these come from also carried the comment
+// bodies and review text the agent composed, and none of it is extracted, so
+// none of it can cross this hop.
+type GraphQLWriteFacts struct {
+	// Operation is the operation name the document gave, empty if anonymous.
+	Operation string `json:"operation,omitempty"`
+	// Mutations are the top-level field names the mutation selected, aliases
+	// already resolved to the fields actually invoked.
+	Mutations []string `json:"mutations,omitempty"`
+	// Subject is the node id the variables named for the object acted on.
+	Subject string `json:"subject,omitempty"`
+	// Unreadable names why the request resolved to no single act, empty when it
+	// resolved cleanly.
+	Unreadable string `json:"unreadable,omitempty"`
 }
 
 // RecordPushArgs is record_push's payload: one branch ref a receive-pack

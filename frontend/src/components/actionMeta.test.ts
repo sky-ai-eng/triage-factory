@@ -24,6 +24,16 @@ describe('actionMeta', () => {
     expect(metaForAction('gh_channel_write')).not.toBe(FALLBACK_ACTION_META)
   })
 
+  it('labels what arrives over GraphQL, verbs and fallback alike', () => {
+    // Most of gh's porcelain writes are GraphQL, so these are not an exotic
+    // corner: an unlabelled graphql_write would leave the commonest unnamed
+    // write rendering as an anonymous action, which is the bug this row exists
+    // to close.
+    expect(metaForAction('pr_reopened').label).toBe('PR reopened')
+    expect(metaForAction('graphql_write')).not.toBe(FALLBACK_ACTION_META)
+    expect(metaForAction('graphql_write')).not.toBe(metaForAction('gh_channel_write'))
+  })
+
   it('surfaces slack in the Actions-lens provider filter', () => {
     expect(ACTION_PROVIDERS).toContain('slack')
   })

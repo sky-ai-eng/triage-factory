@@ -49,6 +49,12 @@ export const ACTION_META: Record<string, ActionMeta> = {
   },
   pr_edited: { icon: GitPullRequest, label: 'PR edited', text: 'text-delegate', tone: 'neutral' },
   pr_closed: { icon: GitPullRequest, label: 'PR closed', text: 'text-delegate', tone: 'problem' },
+  pr_reopened: {
+    icon: GitPullRequest,
+    label: 'PR reopened',
+    text: 'text-delegate',
+    tone: 'neutral',
+  },
   pr_merged: { icon: GitPullRequest, label: 'PR merged', text: 'text-delegate', tone: 'good' },
   review_started: { icon: Eye, label: 'Review started', text: 'text-snooze', tone: 'neutral' },
   review_submitted: { icon: Eye, label: 'Review submitted', text: 'text-snooze', tone: 'good' },
@@ -119,6 +125,16 @@ export const ACTION_META: Record<string, ActionMeta> = {
   gh_channel_write: {
     icon: Terminal,
     label: 'Raw gh write',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
+  // Its GraphQL sibling. Separate because the two rows know different things —
+  // this one's details carry the mutation names rather than a path — and
+  // because a run whose unnamed writes are all GraphQL is a different signal
+  // from one whose writes are raw REST calls.
+  graphql_write: {
+    icon: Terminal,
+    label: 'Raw gh GraphQL write',
     text: 'text-text-tertiary',
     tone: 'neutral',
   },

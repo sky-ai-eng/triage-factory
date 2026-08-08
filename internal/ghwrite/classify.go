@@ -43,6 +43,7 @@ package ghwrite
 import (
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -75,6 +76,12 @@ type Shape struct {
 	// for every other shape.
 	InReplyTo int
 
+	// Subject is the node id a GraphQL request named for the object it acted on,
+	// standing in for the coordinates a REST path would have carried. Empty for
+	// every REST shape, and for a GraphQL request whose response located the
+	// object properly (see resolveGraphQL).
+	Subject string
+
 	// CreatesObject marks a shape whose response body names an object that did
 	// not exist before the request — a posted comment or reply, an opened pull
 	// request. The sidecar parses those bodies for the new object's id and
@@ -104,9 +111,14 @@ type Shape struct {
 // the path carries a number, owner/repo otherwise. The '#N' form is what makes
 // a raw-gh write resolve to an entity (see domain.EntityRefForExternal), so it
 // is deliberately preferred wherever the path supplies one.
+//
+// A GraphQL write that disclosed only a node id falls back to it. That target
+// resolves to no entity and links to nothing, which is the honest rendering of
+// what such a request actually said about its object — better than a repo the
+// row would be guessing at.
 func (s Shape) Target() string {
 	if s.Owner == "" || s.Repo == "" {
-		return ""
+		return s.Subject
 	}
 	if s.Number > 0 {
 		return fmt.Sprintf("%s/%s#%d", s.Owner, s.Repo, s.Number)
@@ -136,11 +148,39 @@ type Observation struct {
 	// didn't parse — the act is still recorded, only its deep link degrades.
 	ExternalID string
 	URL        string
+
+	// GraphQL, when set, marks this as a write performed through the GraphQL
+	// endpoint and carries what the request envelope disclosed. Method and Path
+	// are still filled in, but they say only "a POST to /graphql" — the act is
+	// named in these facts instead, which is the whole reason the request is
+	// read at all.
+	GraphQL *GraphQLFacts
+
+	// Errored marks a response that reported the write failed even though the
+	// transport succeeded — GraphQL's convention, where a refused mutation is a
+	// 200 carrying an errors array. It is the GraphQL spelling of a non-2xx and
+	// folds into Succeeded for exactly that reason.
+	Errored bool
+
+	// ResponseUnread marks a GraphQL write whose response could not be read at
+	// all — past the buffering cap, or broken mid-stream. Kept separate from
+	// Errored because they are different facts: one says the server refused the
+	// write, the other says nobody knows. Both stop the row short of claiming a
+	// success, which is the safe direction — an act recorded as attempted when
+	// it landed understates the log, while the reverse asserts a write nothing
+	// observed.
+	ResponseUnread bool
 }
 
-// Classify resolves this observation's shape from its method and path alone.
-// Most callers want Resolve, which also folds in what the response said.
-func (o Observation) Classify() (Shape, bool) { return Classify(o.Method, o.Path) }
+// Classify resolves this observation's shape: from the request envelope for a
+// GraphQL write, from method and path for a REST one. Most callers want
+// Resolve, which also folds in what the response said.
+func (o Observation) Classify() (Shape, bool) {
+	if o.GraphQL != nil {
+		return classifyGraphQL(*o.GraphQL)
+	}
+	return Classify(o.Method, o.Path)
+}
 
 // Resolve is Classify completed against the response's own facts: the created
 // object's id, and — for a create that posts to a collection — the number
@@ -154,6 +194,9 @@ func (o Observation) Classify() (Shape, bool) { return Classify(o.Method, o.Path
 // shape) leaves the row on its repo with no id: the act is still recorded, and
 // nothing is asserted that wasn't seen.
 func Resolve(obs Observation) (Shape, bool) {
+	if obs.GraphQL != nil {
+		return resolveGraphQL(obs)
+	}
 	s, ok := Classify(obs.Method, obs.Path)
 	if !ok {
 		return Shape{}, false
@@ -174,8 +217,12 @@ func Resolve(obs Observation) (Shape, bool) {
 }
 
 // Succeeded reports whether the upstream accepted the write. Only a successful
-// write earns its semantic verb: a 404'd merge is not a merge.
-func (o Observation) Succeeded() bool { return o.Status >= 200 && o.Status < 300 }
+// write earns its semantic verb: a 404'd merge is not a merge, and neither is a
+// GraphQL merge the server answered 200 with an errors array — the two are the
+// same refusal spelled in different transports.
+func (o Observation) Succeeded() bool {
+	return o.Status >= 200 && o.Status < 300 && !o.Errored && !o.ResponseUnread
+}
 
 // reposSegment is the path anchor every repository-scoped REST endpoint carries.
 const reposSegment = "/repos/"
@@ -203,13 +250,30 @@ func RepoPath(path string) string {
 // the same url, and two parsers would eventually disagree about what a PR url
 // is.
 func ParsePullRequestURL(raw string) (owner, repo string, number int, ok bool) {
+	return parseObjectURL(raw, "pull")
+}
+
+// ParseObjectURL is ParsePullRequestURL widened to an issue's url as well. A
+// GraphQL write discloses its target only as whatever object url the response
+// happened to carry, and gh's comment mutations answer with one that may point
+// at either — a pull request and an issue share GitHub's comment machinery, and
+// nothing in the request says which was addressed.
+func ParseObjectURL(raw string) (owner, repo string, number int, ok bool) {
+	return parseObjectURL(raw, "pull", "issues")
+}
+
+// parseObjectURL scans for the first of the given collection segments with two
+// segments before it and a positive integer after it. Any fragment on the url
+// (a comment anchor, which is what several of these carry) is already split off
+// by url.Parse, so it never reaches the scan.
+func parseObjectURL(raw string, collections ...string) (owner, repo string, number int, ok bool) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", "", 0, false
 	}
 	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
 	for i, seg := range segs {
-		if seg != "pull" || i < 2 || i+1 >= len(segs) {
+		if !slices.Contains(collections, seg) || i < 2 || i+1 >= len(segs) {
 			continue
 		}
 		n, err := strconv.Atoi(segs[i+1])

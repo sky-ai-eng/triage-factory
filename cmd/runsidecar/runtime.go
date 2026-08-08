@@ -463,14 +463,27 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			// for the shapes that make one — this process is the only one that
 			// ever sees a response body, so nothing downstream could recover
 			// them.
-			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite,
-				agentproc.RecordGHWriteArgs{
-					Method:     w.Method,
-					Path:       w.Path,
-					Status:     w.Status,
-					ExternalID: w.ExternalID,
-					URL:        w.URL,
-				})
+			args := agentproc.RecordGHWriteArgs{
+				Method:         w.Method,
+				Path:           w.Path,
+				Status:         w.Status,
+				ExternalID:     w.ExternalID,
+				URL:            w.URL,
+				Errored:        w.Errored,
+				ResponseUnread: w.ResponseUnread,
+			}
+			if w.GraphQL != nil {
+				// A GraphQL write is named in its request, which only this
+				// process ever saw — the orchestrator receives the act's name or
+				// nothing.
+				args.GraphQL = &agentproc.GraphQLWriteFacts{
+					Operation:  w.GraphQL.Operation,
+					Mutations:  w.GraphQL.Fields,
+					Subject:    w.GraphQL.Subject,
+					Unreadable: w.GraphQL.Unreadable,
+				}
+			}
+			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
 		},
 	}
 }

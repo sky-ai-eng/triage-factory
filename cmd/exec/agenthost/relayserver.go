@@ -625,13 +625,24 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 		// vocabulary stays on the side that owns it.
 		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
 		defer cancel()
-		s.audit.RecordGHChannelWrite(recCtx, ghwrite.Observation{
-			Method:     a.Method,
-			Path:       a.Path,
-			Status:     a.Status,
-			ExternalID: a.ExternalID,
-			URL:        a.URL,
-		})
+		obs := ghwrite.Observation{
+			Method:         a.Method,
+			Path:           a.Path,
+			Status:         a.Status,
+			ExternalID:     a.ExternalID,
+			URL:            a.URL,
+			Errored:        a.Errored,
+			ResponseUnread: a.ResponseUnread,
+		}
+		if a.GraphQL != nil {
+			obs.GraphQL = &ghwrite.GraphQLFacts{
+				Operation:  a.GraphQL.Operation,
+				Fields:     a.GraphQL.Mutations,
+				Subject:    a.GraphQL.Subject,
+				Unreadable: a.GraphQL.Unreadable,
+			}
+		}
+		s.audit.RecordGHChannelWrite(recCtx, obs)
 
 	case agentproc.OpRecordPush:
 		var a agentproc.RecordPushArgs

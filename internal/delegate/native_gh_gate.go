@@ -5,8 +5,10 @@
 // review outside Triage Factory entirely. Both are intercepted here, and they
 // get different answers because the situations are not alike. A review posted
 // through `gh` can only be a top-level comment, lands no artifact and takes no
-// approval path, so it is permanently invisible to the product and the TF
-// review verbs strictly dominate it: that is a refusal with a redirect.
+// approval path, so the TF review verbs strictly dominate it: that is a refusal
+// with a redirect. (The injector does now audit such a review — it is a write
+// under the org credential like any other — but an audit row is a record of
+// what happened, not a substitute for the review object the product works on.)
 // Merging is something some missions are for, so refusing it would mean
 // deciding an intent the runtime cannot know: that gets a question, aimed at
 // the one artifact the model can actually check.
@@ -49,7 +51,7 @@ import (
 // two must stay in step, since a redirect to a command that does not exist is
 // worse than no redirect at all.
 const reviewRefusal = "This command was not run. `gh pr review` cannot attach comments to specific lines, " +
-	"and a review posted with it is invisible to Triage Factory — no artifact, no approval path. " +
+	"and it posts straight to GitHub — no artifact, no approval path. " +
 	"Use `tfac gh pr start-review`, then `add-review-comment` for each finding, then `finalize-review`."
 
 // mergeGateTag opens the merge question and is how a later call recognizes

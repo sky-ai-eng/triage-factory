@@ -703,3 +703,164 @@ func TestCapture_GHChannelReply_IsIndistinguishableFromTheVerbRow(t *testing.T) 
 		t.Error("the raw gh reply minted no entity touch")
 	}
 }
+
+// TestGHChannelWriteAction_GraphQLSemanticRow: a mutation the table knows, that
+// the endpoint accepted, earns the same verb its REST twin would. `gh pr
+// comment` and a hand-written `gh api …/comments` are one act, and the log has
+// to be filterable for it without the reader knowing which pipe was used.
+func TestGHChannelWriteAction_GraphQLSemanticRow(t *testing.T) {
+	act := GHChannelWriteAction(ghwrite.Observation{
+		Method: "POST",
+		Path:   "/graphql",
+		Status: 200,
+		URL:    "https://github.com/octo/repo/pull/1#issuecomment-7",
+		GraphQL: &ghwrite.GraphQLFacts{
+			Operation: "CommentCreate",
+			Fields:    []string{"addComment"},
+			Subject:   "PR_kwRow",
+		},
+	})
+	if act.Action != domain.ActionCommentPosted {
+		t.Errorf("action = %q, want comment_posted", act.Action)
+	}
+	// The response located an object the request named only by node id, so the
+	// row addresses it the way every other surface does.
+	if act.Target != "octo/repo#1" {
+		t.Errorf("target = %q, want octo/repo#1 from the response url", act.Target)
+	}
+	if act.URL != "https://github.com/octo/repo/pull/1#issuecomment-7" {
+		t.Errorf("url = %q, want the created comment's link", act.URL)
+	}
+	// A comment's row must read like the verb's: no provenance, because the
+	// question "which channel posted this" is not asked of comments.
+	if strings.Contains(act.DetailJSON, "mutation") {
+		t.Errorf("detail_json = %q, want no provenance on a comment row", act.DetailJSON)
+	}
+}
+
+// TestGHChannelWriteAction_GraphQLCarriesProvenanceWhereItIsAsked: a PR create
+// and a review submit each have a governed verb path, and whether one came
+// through it or through a raw call is the fact the policy work reads this log
+// to settle. On this transport that provenance is the mutation's name.
+func TestGHChannelWriteAction_GraphQLCarriesProvenanceWhereItIsAsked(t *testing.T) {
+	act := GHChannelWriteAction(ghwrite.Observation{
+		Method: "POST", Path: "/graphql", Status: 200,
+		URL: "https://github.com/octo/repo/pull/9",
+		GraphQL: &ghwrite.GraphQLFacts{
+			Operation: "PullRequestCreate",
+			Fields:    []string{"createPullRequest"},
+			Subject:   "R_kwRepo",
+		},
+	})
+	if act.Action != domain.ActionPRCreated || act.Target != "octo/repo#9" || act.ExternalID != "9" {
+		t.Errorf("row = %+v, want pr_created on octo/repo#9 keyed by number", act)
+	}
+	if !strings.Contains(act.DetailJSON, `"mutation":"createPullRequest"`) {
+		t.Errorf("detail_json = %q, want the mutation recorded as provenance", act.DetailJSON)
+	}
+}
+
+// TestGHChannelWriteAction_GraphQLRefusalIsAnAttempt: the endpoint answers a
+// refused mutation with 200 and an errors array, so without reading it a merge
+// that never happened would be logged as one that did.
+func TestGHChannelWriteAction_GraphQLRefusalIsAnAttempt(t *testing.T) {
+	act := GHChannelWriteAction(ghwrite.Observation{
+		Method: "POST", Path: "/graphql", Status: 200, Errored: true,
+		GraphQL: &ghwrite.GraphQLFacts{Fields: []string{"mergePullRequest"}, Subject: "PR_kwRefused"},
+	})
+	if act.Action != domain.ActionGraphQLWrite {
+		t.Errorf("action = %q, want the graphql fallback — a refused merge is not pr_merged", act.Action)
+	}
+	if !strings.Contains(act.DetailJSON, `"attempted":"pr_merged"`) {
+		t.Errorf("detail_json = %q, want the attempted act named", act.DetailJSON)
+	}
+	if !strings.Contains(act.DetailJSON, `"errored":true`) {
+		t.Errorf("detail_json = %q, want the errors array recorded", act.DetailJSON)
+	}
+	if act.Target != "PR_kwRefused" {
+		t.Errorf("target = %q, want the node id the request named", act.Target)
+	}
+}
+
+// TestGHChannelWriteAction_GraphQLFallback covers what the row says when no act
+// could be named: enough to go looking on GitHub, and an honest account of why
+// the name is missing.
+func TestGHChannelWriteAction_GraphQLFallback(t *testing.T) {
+	t.Run("unknown mutation", func(t *testing.T) {
+		act := GHChannelWriteAction(ghwrite.Observation{
+			Method: "POST", Path: "/graphql", Status: 200,
+			GraphQL: &ghwrite.GraphQLFacts{
+				Operation: "Labels",
+				Fields:    []string{"addLabelsToLabelable"},
+				Subject:   "PR_kwLabel",
+			},
+		})
+		if act.Action != domain.ActionGraphQLWrite {
+			t.Errorf("action = %q, want graphql_write", act.Action)
+		}
+		if !strings.Contains(act.DetailJSON, `"mutations":["addLabelsToLabelable"]`) {
+			t.Errorf("detail_json = %q, want the mutation name recorded verbatim", act.DetailJSON)
+		}
+		if strings.Contains(act.DetailJSON, "attempted") {
+			t.Errorf("detail_json = %q, want no attempted act for a shape the table cannot name", act.DetailJSON)
+		}
+	})
+
+	t.Run("over cap", func(t *testing.T) {
+		act := GHChannelWriteAction(ghwrite.Observation{
+			Method: "POST", Path: "/graphql", Status: 200,
+			GraphQL: &ghwrite.GraphQLFacts{Unreadable: ghwrite.GraphQLOverCap},
+		})
+		if act.Action != domain.ActionGraphQLWrite {
+			t.Errorf("action = %q, want graphql_write", act.Action)
+		}
+		if !strings.Contains(act.DetailJSON, `"unreadable":"over_cap"`) {
+			t.Errorf("detail_json = %q, want the reason recorded", act.DetailJSON)
+		}
+		// Nothing was readable, so the endpoint path is all the target can be —
+		// never an invented repo.
+		if act.Target != "/graphql" {
+			t.Errorf("target = %q, want the endpoint path", act.Target)
+		}
+	})
+
+	t.Run("several acts in one request", func(t *testing.T) {
+		act := GHChannelWriteAction(ghwrite.Observation{
+			Method: "POST", Path: "/graphql", Status: 200,
+			GraphQL: &ghwrite.GraphQLFacts{
+				Fields:  []string{"closePullRequest", "mergePullRequest"},
+				Subject: "PR_kwBoth",
+			},
+		})
+		if act.Action != domain.ActionGraphQLWrite {
+			t.Errorf("action = %q, want graphql_write — no one row can carry two acts", act.Action)
+		}
+		if !strings.Contains(act.DetailJSON, `"mutations":["closePullRequest","mergePullRequest"]`) {
+			t.Errorf("detail_json = %q, want both names recorded", act.DetailJSON)
+		}
+	})
+}
+
+// TestCapture_GraphQLWrite_RecordsOneRowPerRequest runs the GraphQL arm through
+// the real recording funnel, which is where "exactly one row" is actually
+// enforced.
+func TestCapture_GraphQLWrite_RecordsOneRowPerRequest(t *testing.T) {
+	ctx := context.Background()
+	_, stores, _, client := newGithubRecordingClientConn(t, "", true)
+
+	client.RecordGHChannelWrite(ctx, ghwrite.Observation{
+		Method: "POST", Path: "/graphql", Status: 200,
+		GraphQL: &ghwrite.GraphQLFacts{Fields: []string{"closePullRequest"}, Subject: "PR_kwOne"},
+	})
+
+	rows := listExternalActions(t, stores)
+	if len(rows) != 1 {
+		t.Fatalf("want exactly 1 row for one request, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Action != domain.ActionPRClosed || rows[0].Target != "PR_kwOne" {
+		t.Errorf("row = %+v, want pr_closed against the node id the request named", rows[0])
+	}
+	if rows[0].Credential != domain.CredentialGitHubApp {
+		t.Errorf("credential = %q, want the org credential the write actually spent", rows[0].Credential)
+	}
+}
