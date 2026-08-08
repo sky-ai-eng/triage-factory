@@ -31,6 +31,12 @@ type memTranscript struct {
 	// failInsert, when set, makes the next Insert fail — used to exercise
 	// the loop's error paths.
 	failInsert error
+	// failInsertAt, when non-zero, fails that Insert and lets the ones before
+	// it land — counting from the first write after the seed. The crash
+	// mid-way through a sequence of writes no transaction spans: a repair that
+	// answered one call and died before the next, most of all.
+	failInsertAt int
+	inserts      int
 	// failMarkDelivered, when set, fails the next MarkDelivered. A function
 	// rather than an error so a test can land something else inside the
 	// write it stands in for — a context kill, most of all, which is how a
@@ -43,6 +49,7 @@ func newMemTranscript(seed ...domain.Message) *memTranscript {
 	for _, r := range seed {
 		_, _ = t.Insert(context.Background(), "org", &r)
 	}
+	t.inserts = 0 // the seed is the fixture, not a write under test
 	return t
 }
 
@@ -96,6 +103,11 @@ func (t *memTranscript) Insert(_ context.Context, _ string, msg *domain.Message)
 		err := t.failInsert
 		t.failInsert = nil
 		return 0, err
+	}
+	t.inserts++
+	if t.failInsertAt == t.inserts {
+		t.failInsertAt = 0
+		return 0, fmt.Errorf("insert %d failed", t.inserts)
 	}
 	row := *msg
 	row.ID = t.next

@@ -228,6 +228,48 @@ func TestRepair_EachInterruptedTurnAnchorsToItsOwnCall(t *testing.T) {
 	assertToolResultsAreAdjacent(t, p.requests[0])
 }
 
+// TestRepair_ResumesFromAPartiallyWrittenRepair: the repair's inserts are
+// separate writes with no transaction around them, so a crash can land between
+// two answers to the same batch. The next claim must finish the job from the
+// rows alone — and it does, because the answer that landed is itself a tool row
+// at a position under the call, so it extends the anchor the remaining answer
+// measures from instead of confusing it.
+func TestRepair_ResumesFromAPartiallyWrittenRepair(t *testing.T) {
+	tr := newMemTranscript(
+		domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
+		domain.Message{ConversationID: "conv", Role: "assistant", ToolCalls: []domain.ToolCall{
+			{ID: "c1", Name: "bash"}, {ID: "c2", Name: "write"},
+		}},
+		pendingUser("also update the changelog"),
+	)
+	// Die on the second synthetic write: c1's answer lands, c2's does not.
+	tr.failInsertAt = 2
+	first := newTestEngine(tr, &scriptedProvider{}, newScriptedToolHost()).Run(context.Background(), testParams())
+	if first.Kind != ResultFailed {
+		t.Fatalf("first engagement disposition = %v, want failed on the interrupted repair", first.Kind)
+	}
+	if syntheticResultFor(tr, "c1") == nil || syntheticResultFor(tr, "c2") != nil {
+		t.Fatal("staging failed: want exactly c1 answered before the crash")
+	}
+
+	p := &scriptedProvider{turns: []scriptedTurn{{text: "recovered"}}}
+	if got := newTestEngine(tr, p, newScriptedToolHost()).Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("second engagement disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
+	}
+
+	c1, c2 := syntheticResultFor(tr, "c1"), syntheticResultFor(tr, "c2")
+	if c1 == nil || c2 == nil {
+		t.Fatalf("both calls need answers after the resume: c1=%v c2=%v", c1, c2)
+	}
+	if c1.Seq == nil || c2.Seq == nil || !(2 < *c1.Seq && *c1.Seq < *c2.Seq && *c2.Seq < 3) {
+		t.Fatalf("seqs = (%v, %v), want ascending strictly between the call (2) and the queued follow-up (3)", c1.Seq, c2.Seq)
+	}
+	if answers := len(tr.toolResults()); answers != 2 {
+		t.Fatalf("tool result rows = %d, want one per call and no duplicate of the answer that landed", answers)
+	}
+	assertToolResultsAreAdjacent(t, p.requests[0])
+}
+
 // TestRepair_HealthyTranscriptIsUntouched: the repair is a no-op when every
 // call has its result, seq included — a pass that quietly stamped positions on
 // a healthy transcript would invalidate a warm cache for nothing.
