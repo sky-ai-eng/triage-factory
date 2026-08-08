@@ -161,9 +161,10 @@ const (
 	// different things. A REST fallback has a path, which is most of an act's
 	// identity; this one has whatever the request envelope disclosed, so
 	// detail_json carries {operation, mutations, http_status}, "unreadable"
-	// naming why no single act could be resolved (an over-cap body, a malformed
-	// document, an ambiguous operation, an unresolved fragment spread), and
-	// "attempted" for a recognized mutation the server refused.
+	// naming why no single act could be resolved (an over-cap body, a request
+	// that stopped arriving, a malformed document, an ambiguous operation, an
+	// unresolved fragment spread), and "attempted" for a recognized mutation the
+	// server refused.
 	ActionGraphQLWrite = "graphql_write"
 
 	// Jira issue lifecycle + comments.

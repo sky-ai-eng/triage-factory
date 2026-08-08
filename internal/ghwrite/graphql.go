@@ -42,6 +42,12 @@ const mutationKeyword = "mutation"
 const (
 	// GraphQLOverCap: the request body was larger than the injector will buffer.
 	GraphQLOverCap = "over_cap"
+	// GraphQLRequestUnread: the request body's own read failed partway through,
+	// so there was never a whole document to look at. Distinct from over-cap,
+	// which is a limit this side chose: one says the caller did not finish
+	// sending, the other says we declined to hold it all. Reading them as the
+	// same fact would have an operational failure looking like a policy one.
+	GraphQLRequestUnread = "request_unread"
 	// GraphQLMalformed: the envelope or the query document did not parse.
 	GraphQLMalformed = "malformed"
 	// GraphQLAmbiguousOperation: several operations and no operationName to

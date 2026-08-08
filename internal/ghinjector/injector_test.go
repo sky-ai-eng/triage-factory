@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1035,9 +1036,9 @@ func TestInjector_GraphQLGetBodyIsReplayable(t *testing.T) {
 	// one, so clear it to model the real inbound shape.
 	req.GetBody = nil
 
-	buffered, whole := bufferRequest(req)
-	if !whole || string(buffered) != body {
-		t.Fatalf("bufferRequest returned %q (whole=%v), want the whole body", buffered, whole)
+	buffered, unread := bufferRequest(req)
+	if unread != "" || string(buffered) != body {
+		t.Fatalf("bufferRequest returned %q (unread=%q), want the whole body", buffered, unread)
 	}
 	if req.GetBody == nil {
 		t.Fatal("GetBody was not set for a buffered body")
@@ -1190,5 +1191,82 @@ func TestInjector_GraphQLUnreadResponseIsNotASuccess(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no audit record for a mutation with an unreadable response")
+	}
+}
+
+// failingBody delivers a prefix and then fails, modelling a client that dies
+// partway through sending its request.
+type failingBody struct {
+	prefix string
+	pos    int
+}
+
+func (b *failingBody) Read(p []byte) (int, error) {
+	if b.pos < len(b.prefix) {
+		n := copy(p, b.prefix[b.pos:])
+		b.pos += n
+		return n, nil
+	}
+	return 0, errors.New("connection reset mid-body")
+}
+
+func (b *failingBody) Close() error { return nil }
+
+// TestInjector_BufferRequestOnBrokenReadDropsNothing pins the weaker of the two
+// promises, which is worth a test precisely because it is weaker. A body whose
+// own read fails cannot be forwarded whole by anyone — but nothing this proxy
+// already consumed may go missing on top of that, so the prefix has to be
+// readable again through the re-presented body.
+func TestInjector_BufferRequestOnBrokenReadDropsNothing(t *testing.T) {
+	const prefix = `{"query":"mutation($input:MergePullRequestInput!){mergePullRequest`
+	req, err := http.NewRequest(http.MethodPost, "https://example.test/api/graphql", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Body = &failingBody{prefix: prefix}
+	// Unknown length, as a chunked or interrupted send has — otherwise the
+	// declared-length check settles it before any read happens.
+	req.ContentLength = -1
+
+	buffered, unread := bufferRequest(req)
+	if unread != ghwrite.GraphQLRequestUnread {
+		t.Fatalf("unread = %q, want %q — a caller that stopped sending is not a cap this side chose",
+			unread, ghwrite.GraphQLRequestUnread)
+	}
+	if buffered != nil {
+		t.Errorf("buffered = %q, want nil — a body that did not arrive names no act", buffered)
+	}
+
+	// Everything already consumed is still there to forward. The read fails
+	// again after it, which is the failure the caller brought with them.
+	got, err := io.ReadAll(req.Body)
+	if string(got) != prefix {
+		t.Errorf("re-presented body = %q, want the consumed prefix %q back in front", got, prefix)
+	}
+	if err == nil {
+		t.Error("reading past the prefix succeeded; the fixture no longer models a broken stream")
+	}
+}
+
+// TestInjector_BufferRequestOverCapKeepsTheStrongerPromise is the other arm: no
+// read error, so the stitch is exact and the body really does forward whole.
+func TestInjector_BufferRequestOverCapKeepsTheStrongerPromise(t *testing.T) {
+	body := strings.Repeat("x", maxRequestBody+512)
+	req, err := http.NewRequest(http.MethodPost, "https://example.test/api/graphql", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.ContentLength = -1
+
+	buffered, unread := bufferRequest(req)
+	if unread != ghwrite.GraphQLOverCap || buffered != nil {
+		t.Fatalf("bufferRequest = (%d bytes, unread=%q), want the over-cap refusal", len(buffered), unread)
+	}
+	got, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("re-presented body: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("re-presented body is %d bytes, want the original %d byte-for-byte", len(got), len(body))
 	}
 }

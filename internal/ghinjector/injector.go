@@ -20,8 +20,11 @@
 // # Requests are forwarded unaltered, and read in one place
 //
 // No request is ever ALTERED. rewrite touches the URL and the Authorization
-// header and nothing else; every byte of every body reaches GitHub exactly as
-// the agent sent it, including the bodies read below.
+// header and nothing else, and reading a body neither changes it nor consumes
+// it: what the agent sent is what is forwarded, byte for byte, including the
+// bodies read below. Buffering adds no loss of its own — which is the whole of
+// what it can promise, since a body whose own read fails mid-stream was never
+// going to arrive whole regardless of who was in the middle.
 //
 // Requests are READ in exactly one place: a POST to the GraphQL endpoint, whose
 // body is buffered under maxRequestBody and parsed for the name of the mutation
@@ -422,13 +425,16 @@ func (s *Server) captureGraphQLWrite(r *http.Request) (*ghwrite.GraphQLFacts, bo
 		return nil, false
 	}
 
-	body, whole := bufferRequest(r)
-	if !whole {
-		// The body is past the cap (or broke mid-read) and streams on untouched.
-		// Recorded rather than dropped: a write may well have happened, this is
-		// not the shape any read gh sends, and letting a large body buy silence
-		// is precisely how an audit gap becomes a technique.
-		return &ghwrite.GraphQLFacts{Unreadable: ghwrite.GraphQLOverCap}, true
+	body, unread := bufferRequest(r)
+	if unread != "" {
+		// No document to read, so the row says a write reached this endpoint and
+		// names the reason it could say no more. Recorded rather than dropped: a
+		// write may well have happened, neither shape is one a read gh sends,
+		// and letting an unreadable body buy silence is precisely how an audit
+		// gap becomes a technique. The reason travels verbatim because the two
+		// causes are not alike — a cap this side chose, against a caller that
+		// stopped sending.
+		return &ghwrite.GraphQLFacts{Unreadable: unread}, true
 	}
 
 	facts, ok := ghwrite.ParseGraphQLRequest(body)
@@ -445,35 +451,48 @@ func isGraphQLPath(path string) bool {
 }
 
 // bufferRequest reads a request body into memory and re-presents it, returning
-// the bytes. whole is false when the body is larger than the cap or the read
-// broke mid-stream; in both cases the body is restored to a readable state (the
-// consumed prefix stitched back in front of the untouched remainder) and
-// forwarded, so the agent's request always reaches GitHub byte-for-byte. Only
-// the audit degrades.
+// the bytes. unread is empty when the whole body was buffered; otherwise it
+// names why not, in the classifier's own vocabulary, and body is nil.
+//
+// The two reasons are kept apart because they are different facts and the
+// guarantee differs between them:
+//
+//   - Past the cap. The read itself was clean, so the consumed prefix is
+//     stitched back in front of an intact remainder and the request reaches
+//     GitHub byte-for-byte. Only the audit degrades. (A declared length over the
+//     cap settles this before any I/O, leaving the body untouched entirely.)
+//   - The read broke mid-stream. The prefix is stitched back the same way, so
+//     this proxy still drops nothing — but the remainder is a stream that has
+//     already failed and will most likely fail again on the forward. What can be
+//     promised here is only that buffering added no loss of its own; a body the
+//     caller could not deliver is not one anything downstream can make whole.
 //
 // On the whole-body path GetBody is set alongside, which is what the buffered
 // body owes the transport: an in-memory body may be replayed, and a request
 // that can be replayed is one net/http may safely retry on a stale connection
 // rather than failing the agent's call.
-func bufferRequest(r *http.Request) (body []byte, whole bool) {
+func bufferRequest(r *http.Request) (body []byte, unread string) {
 	if r.Body == nil {
-		return nil, true
+		return nil, ""
 	}
 	if r.ContentLength > maxRequestBody {
-		return nil, false
+		return nil, ghwrite.GraphQLOverCap
 	}
 	// One byte past the cap, so "over the cap" is distinguishable from "exactly
 	// the cap" — ReadAll on a LimitReader reports no error at the limit.
 	buf, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
 	if err != nil || len(buf) > maxRequestBody {
 		r.Body = &prefixedBody{r: io.MultiReader(bytes.NewReader(buf), r.Body), c: r.Body}
-		return nil, false
+		if err != nil {
+			return nil, ghwrite.GraphQLRequestUnread
+		}
+		return nil, ghwrite.GraphQLOverCap
 	}
 	// The original body is left for the server to close, as it always does — it
 	// is drained to EOF here, so nothing is holding the connection.
 	r.Body = io.NopCloser(bytes.NewReader(buf))
 	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(buf)), nil }
-	return buf, true
+	return buf, ""
 }
 
 // routesToGit decides which half of the shared origin owns this request.
@@ -758,9 +777,14 @@ func parseCreatedObject(body []byte) (externalID, url string) {
 // it to the caller, returning the buffered bytes. ok is false when the body is
 // larger than the injector will buffer or the read broke mid-stream; in both
 // cases the response is restored to a readable state (consumed prefix stitched
-// back in front of the untouched remainder, original body kept as the Closer)
-// and observation is skipped for it. The agent's response is always delivered
-// whole; observation is the only thing that degrades.
+// back in front of the remainder, original body kept as the Closer) and
+// observation is skipped for it.
+//
+// Past the cap, that restoration is exact and the agent's response is delivered
+// whole, with observation the only thing degraded. On a broken read the same
+// stitch happens and this proxy still drops nothing of its own, but the
+// remainder is a stream that already failed — an upstream body that cannot be
+// read is not one anything in the middle can deliver whole.
 func bufferForObservation(resp *http.Response) ([]byte, bool) {
 	// A declared length past the cap settles the outcome before any I/O: the
 	// body would be skipped anyway, so read none of it and leave it streaming
