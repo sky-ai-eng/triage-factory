@@ -62,6 +62,12 @@ type TaskCloseCancelIntentSeeder struct {
 // A conversation may legitimately be resumed under a closed task (a finished
 // blueprint's final step), and a close that reached back and stamped one would
 // kill work the user just asked for.
+//
+// Every subtest passes closeEventType and closingEventID as the pair the
+// callers do: an event-driven close names both, a non-event close names
+// neither. Splitting them would stamp close_event_type on a task with no
+// task_events row explaining it — a shape no caller produces, so a suite that
+// exercised it would be pinning behavior nothing relies on.
 func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -99,9 +105,10 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		// afterwards, and a stamp here would refuse that resume forever.
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
+		eventID := seed.Event(t, taskID)
 		brID, _ := seed.Run(t, taskID, "completed", "completed")
 
-		closed, runIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", "")
+		closed, runIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
 			t.Fatalf("CloseWithRunCancelIntentSystem: %v", err)
 		}
@@ -173,9 +180,10 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		// stamp has nothing to write and must not error trying.
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
+		eventID := seed.Event(t, taskID)
 		convID := seed.BareRun(t, taskID, "")
 
-		closed, runIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", "")
+		closed, runIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
 			t.Fatalf("CloseWithRunCancelIntentSystem: %v", err)
 		}
@@ -187,9 +195,10 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		}
 	})
 
-	t.Run("Empty_closing_event_writes_no_audit_row", func(t *testing.T) {
-		// The terminal reconciler's close: not event-driven, so there is no
-		// event to record and close_event_type stays NULL.
+	t.Run("Non_event_close_writes_no_audit_row", func(t *testing.T) {
+		// The terminal reconciler's close: nothing triggered it, so it names
+		// neither an event to record nor a close_event_type to record it
+		// under. The only shape in which either is empty.
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 

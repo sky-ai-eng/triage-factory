@@ -391,9 +391,11 @@ type TaskStore interface {
 	// kill work a user started after the fact. The audit row is written either
 	// way, matching CloseSystem+RecordEventSystem's INSERT-or-nothing shape.
 	//
-	// closingEventID may be empty for a non-event close (the terminal
-	// reconciler's), in which case no audit row is written and
-	// closeEventType stays NULL.
+	// closeEventType and closingEventID travel as a pair: an event-driven
+	// close passes both, a non-event close (the terminal reconciler's) passes
+	// neither, and an empty closingEventID writes no audit row. Passing one
+	// without the other stamps a close_event_type no task_events row accounts
+	// for — not rejected here, but no caller does it.
 	CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeRunIDs []string, err error)
 
 	SetStatusSystem(ctx context.Context, orgID, taskID, status string) error

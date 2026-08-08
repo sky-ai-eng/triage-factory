@@ -237,7 +237,8 @@ func TestCloseCancelIntent_ReplayedCloseStampsNothing(t *testing.T) {
 	doomed, closedFirst := live[0].ID, live[1].ID
 
 	// One task's close fails, so the entity stays active and the event
-	// requeues — TFAC-773's obligation retry, the real path a replay takes.
+	// requeues — the close phase's own obligation retry, which is the real
+	// path a replay takes rather than a re-enqueue staged by hand.
 	r.tasks = &taskCloseOutageStore{TaskStore: testTaskStore(database), failTaskID: doomed, o: &outage{remaining: 1}}
 	enqueueMerged(t, database, entity.ID)
 	if err := r.drainEventQueue(context.Background()); err != nil {
