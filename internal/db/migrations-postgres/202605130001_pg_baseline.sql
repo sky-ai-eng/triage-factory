@@ -1277,8 +1277,14 @@ CREATE TABLE public.messages (
     content_blocks jsonb,
     -- delivered=false marks a durable pending input (a steer, follow-up,
     -- staged injection, or curator context notice) not yet folded into any
-    -- context assembly. Consumers flip it exactly-once via
-    -- UPDATE … RETURNING; ordering among pending rows is insertion order.
+    -- context assembly. Ordering among pending rows is insertion order.
+    -- Two different mechanisms carry exactly-once consumption, and which
+    -- one applies is the consumer's, not this column's: the pending-input
+    -- flush claims its rows in a single UPDATE … RETURNING predicated on
+    -- delivered=false, so it is safe even against a racing claimant; the
+    -- native loop's drain names the ids it already assembled and is a
+    -- plain UPDATE behind the claim fence, resting on the
+    -- at-most-one-active-claim invariant rather than on the statement.
     delivered boolean DEFAULT true NOT NULL,
     -- window_state is app-validated: 'active' (default) | 'elided'
     -- (renders as a deterministic stub, content + is_error retained) |

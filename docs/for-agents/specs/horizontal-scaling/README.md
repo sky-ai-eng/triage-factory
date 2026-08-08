@@ -95,7 +95,7 @@ of what this design **reuses rather than builds**:
 | Cost/usage accounting + quotas | `llm_spend` view, `/api/usage/*`, daily + per-team caps, `system_llm_runs` | Built (TFAC-449). The **spend** layer of the dashboard exists; the **infrastructure** layer (this spec §8) does not. |
 | Re-seedable per-org disk state | `internal/paths` under `TF_STATE_ROOT`; bounded evictable bare/worktree cache (TFAC-60); shared-RO curator worktrees (TFAC-61) | Built per-pod. Durable copies live in Postgres + S3; everything on executor disk is cache. |
 | Readiness probe | `GET /readyz` (`internal/server/readyz_handler.go`, TFAC-573) | Built. Hard-fails DB/migrations/poller-alive → 503 for LB rotation; soft-reports poll staleness, GitHub rate budget, active runs. The split makes the poller hard-check **lease-conditional** (§8.3) — as shipped it would 503 every standby control pod. |
-| Budgeted, resumable poll cycles | TFAC-571 (GitHub) | Built. A mid-cycle leader handoff resumes from the durable cursor instead of restarting discovery (§3). |
+| Budgeted, resumable poll cycles | TFAC-571 (GitHub) | Built, with an **in-process** resume point. A cycle cut short by `ErrRateLimited` saves a round-robin repo cursor on the poller (`Manager.ghCursor`, `internal/poller/manager.go`), so the next cycle **on that same process** resumes at the first unrefreshed repo instead of starving the tail of a large tracked set. The cursor is in-memory by TFAC-571's explicit v1 allowance: a leader handoff (or a restart) loses it and the successor starts at the head. What makes that benign is the row above, not this one — the durable per-repo ETag state means a cold re-list is mostly free 304s (§3). |
 
 And the inverse — what at design time **assumed exactly one process**
 (the gap list this design closes; ✅ = closed by the shipped P0s,
@@ -362,11 +362,16 @@ leases (
   snapshot writes carry the `poll_seq` CAS (§5.4) — so a straggler
   ex-leader mid-cycle degrades to no-ops, not corruption.
 - Failover cost is bounded and benign: the new leader's poll schedule
-  starts cold (every org due), but poll cursors + ETags are in the DB,
-  so the catch-up cycle is mostly free 304s (`docs/benchmarks/poll-bench.md`) —
-  and GitHub cycles are budgeted/resumable (TFAC-571), so even a
-  mid-cycle handoff resumes from the durable cursor rather than
-  restarting discovery.
+  starts cold (every org due), and it starts cold in the stronger sense
+  too — TFAC-571's round-robin repo cursor lives on the poller process,
+  so a handoff mid-cycle drops the resume point and the successor
+  re-enumerates from the head of the repo list. The ETag state that
+  makes that cheap *is* durable, so the catch-up cycle is mostly free
+  304s (`docs/benchmarks/poll-bench.md`). Making the cursor itself
+  survive a handoff is the remaining work (§9, item 22) and is only a
+  fairness improvement: without it, a tracked set large enough to
+  exhaust the rate budget every cycle can keep re-refreshing its head
+  and starving its tail across a flapping leader.
 - **The brain includes EE background workers.** `ExtensionAPI.OnReady`
   fires unconditionally in every process today; under the split those
   workers (connection managers, adapters — e.g. the Slack liveness
@@ -1532,8 +1537,10 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
     §6.4 — budget admission, eligibility-constrained claim,
     `instance_variants` + rootfs-cache eviction budget, pool labels
     (TFAC-408 §§4–5). (L)
-22. Budgeted/resumable poll cycles — GitHub half shipped (TFAC-571);
-    Jira parity on demand. (S)
+22. Budgeted/resumable poll cycles — GitHub half shipped (TFAC-571),
+    minus a durable cursor: the resume point is per-process, so a
+    handoff restarts at the head of the repo list. Persisting it, and
+    Jira parity, on demand. (S)
 
 ---
 
