@@ -248,6 +248,19 @@ func (cfg Config) restURL(path string) string {
 	return fmt.Sprintf("%s/rest/api/%s/%s", strings.TrimRight(cfg.BaseURL, "/"), cfg.APIVersion, path)
 }
 
+// cloudSearchURL is the Cloud enhanced-search endpoint,
+// {BaseURL}/rest/api/3/search/jql.
+//
+// The version is pinned rather than read from APIVersion. v3 is the version
+// Atlassian's own removal notice points migrating callers at, and it is what
+// every Cloud Config already resolves to; whether a v2 alias of this endpoint
+// exists is not something the published material settles, so nothing here
+// depends on one. A hand-built Config that set APIVersion to v2 for a Cloud
+// site would otherwise aim this at an endpoint that may not answer.
+func (cfg Config) cloudSearchURL() string {
+	return fmt.Sprintf("%s/rest/api/%s/search/jql", strings.TrimRight(cfg.BaseURL, "/"), APIv3)
+}
+
 // apiURL builds a versioned REST URL from a fmt format string + args, e.g.
 // apiURL("issue/%s", key) → {BaseURL}/rest/api/{APIVersion}/issue/{key}.
 func (cfg Config) apiURL(format string, args ...any) string {
@@ -685,34 +698,149 @@ func walkADF(node map[string]any, sb *strings.Builder) {
 	}
 }
 
-// SearchIssues runs a JQL query and returns matching issues.
+// maxSearchPages bounds the round trips one SearchIssues call will make.
+// Both deployments' end-of-results signal comes from the server, so a backend
+// that keeps handing back a page token — or one that ignores startAt and
+// replays the same page — would otherwise spin here indefinitely. The budget
+// sits far above what any caller needs: the largest ask in the codebase is one
+// 100-key batch, which even a heavily clamped page size covers in a handful of
+// pages.
+const maxSearchPages = 50
+
+// cloudSearchMaxPageSize is the ceiling Jira Cloud documents for a single
+// enhanced-search page. Cloud clamps the requested page size server-side
+// anyway — tighter the more fields are asked for — so this only keeps an
+// oversized caller-supplied cap from being sent verbatim.
+const cloudSearchMaxPageSize = 5000
+
+// SearchIssues runs a JQL query and returns matching issues, following the
+// backend's pagination until maxResults is satisfied or the results run out.
 // If fields is nil, DefaultSearchFields is used. Pass []string{"*all"} for everything.
+//
+// The two deployments answer JQL at different endpoints. Atlassian removed
+// /rest/api/{2,3}/search from Cloud — it answers 410 Gone — in favour of the
+// enhanced /rest/api/3/search/jql, which pages on an opaque nextPageToken
+// instead of startAt offsets and reports no total. Data Center follows its own
+// lifecycle and still serves /search, so it keeps the request it has always
+// been sent. Callers see one signature and one issue slice either way.
 func (c *Client) SearchIssues(ctx context.Context, jql string, fields []string, maxResults int) ([]Issue, error) {
 	if fields == nil {
+		// More than a convenience on Cloud: the enhanced endpoint returns the
+		// issue id alone when fields is absent, rather than a full issue, so
+		// the default has to be filled in here and not left to the server.
 		fields = DefaultSearchFields
 	}
 	if maxResults <= 0 {
 		maxResults = 100
 	}
+	if c.cfg.Deployment == DeploymentCloud {
+		return c.searchCloud(ctx, jql, fields, maxResults)
+	}
+	return c.searchDataCenter(ctx, jql, fields, maxResults)
+}
 
+// searchPaged drives the page walk both deployments share: it calls fetch for
+// successive pages, stops as soon as the caller's cap is met or the backend
+// reports nothing further, and trims to the cap. fetch receives the number of
+// issues collected so far — the offset one deployment pages on, and what to
+// subtract from the outstanding ask on both — and reports whether another page
+// is worth asking for.
+func (c *Client) searchPaged(ctx context.Context, jql string, maxResults int, fetch func(collected int) ([]Issue, bool, error)) ([]Issue, error) {
+	var all []Issue
+	for page := 0; page < maxSearchPages; page++ {
+		issues, more, err := fetch(len(all))
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, issues...)
+		if !more || len(all) >= maxResults {
+			if len(all) > maxResults {
+				all = all[:maxResults]
+			}
+			return all, nil
+		}
+	}
+	// Exhausting the budget means the backend was still claiming more results.
+	// Say so — a silently short answer reads downstream as "the query matched
+	// this much", which is how a paging bug turns into entities that quietly
+	// stop moving.
+	jiraLog.WarnContext(ctx, "jira search stopped at page budget",
+		"pages", maxSearchPages, "collected", len(all), "requested", maxResults, "jql", jql)
+	return all, nil
+}
+
+// searchCloud runs the JQL through the enhanced endpoint, walking
+// nextPageToken until the caller's cap is met.
+func (c *Client) searchCloud(ctx context.Context, jql string, fields []string, maxResults int) ([]Issue, error) {
+	url := c.cfg.cloudSearchURL()
+	var token string
+	return c.searchPaged(ctx, jql, maxResults, func(collected int) ([]Issue, bool, error) {
+		payload := map[string]any{
+			"jql":        jql,
+			"maxResults": min(maxResults-collected, cloudSearchMaxPageSize),
+			"fields":     fields,
+		}
+		if token != "" {
+			payload["nextPageToken"] = token
+		}
+		respBody, err := c.postJSON(ctx, url, payload, true)
+		if err != nil {
+			return nil, false, err
+		}
+		var result struct {
+			Issues        []Issue `json:"issues"`
+			NextPageToken string  `json:"nextPageToken"`
+			IsLast        *bool   `json:"isLast"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, false, fmt.Errorf("parse search results: %w", err)
+		}
+		token = result.NextPageToken
+		// The token is the load-bearing signal: its absence is what Atlassian
+		// documents as "that was the last page", and isLast is not reliably
+		// present on every response. An explicit isLast:true still ends the
+		// walk, so a backend that sends both agrees with itself.
+		return result.Issues, token != "" && (result.IsLast == nil || !*result.IsLast), nil
+	})
+}
+
+// searchDataCenter runs the JQL through the classic endpoint, walking startAt
+// offsets until the caller's cap is met.
+func (c *Client) searchDataCenter(ctx context.Context, jql string, fields []string, maxResults int) ([]Issue, error) {
 	url := c.apiURL("search")
-	payload := map[string]any{
-		"jql":        jql,
-		"maxResults": maxResults,
-		"fields":     fields,
-	}
-	respBody, err := c.postJSON(ctx, url, payload, true)
-	if err != nil {
-		return nil, err
-	}
-
-	var result struct {
-		Issues []Issue `json:"issues"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("parse search results: %w", err)
-	}
-	return result.Issues, nil
+	return c.searchPaged(ctx, jql, maxResults, func(collected int) ([]Issue, bool, error) {
+		payload := map[string]any{
+			"jql":        jql,
+			"maxResults": maxResults - collected,
+			"fields":     fields,
+		}
+		// Omitted on the first page, so the request Data Center has always
+		// received is unchanged; an offset appears only once a second page is
+		// actually needed.
+		if collected > 0 {
+			payload["startAt"] = collected
+		}
+		respBody, err := c.postJSON(ctx, url, payload, true)
+		if err != nil {
+			return nil, false, err
+		}
+		var result struct {
+			Issues []Issue `json:"issues"`
+			Total  int     `json:"total"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, false, fmt.Errorf("parse search results: %w", err)
+		}
+		// The reported total is what licenses another page: this endpoint
+		// always carries one, so "the rows so far don't add up to the total"
+		// is both the cheapest end-of-results test (no round trip spent
+		// discovering an empty page) and the safe one. A response without a
+		// total is treated as complete — the behaviour this deployment has
+		// always had — rather than walked on an empty-page guess that a
+		// backend ignoring startAt would turn into a loop.
+		more := len(result.Issues) > 0 && collected+len(result.Issues) < result.Total
+		return result.Issues, more, nil
+	})
 }
 
 // extractFieldID pulls the numeric ID from a custom field name like "customfield_10008".

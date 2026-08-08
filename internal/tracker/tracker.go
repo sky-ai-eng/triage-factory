@@ -1321,7 +1321,40 @@ func (t *Tracker) batchFetchJira(ctx context.Context, client *jiraclient.Client,
 		}
 	}
 
+	// A tracked key that comes back in no page — deleted, moved to another
+	// key, or no longer visible to the service credential — is skipped by the
+	// diff loop, so the entity holds its last snapshot and emits nothing,
+	// indefinitely and silently. Nothing here retires it (a durable entity is
+	// the user's to dismiss, not a poller's to purge), but it is said out loud,
+	// because a truncated page would masquerade as exactly this: with the gap
+	// logged, a paging bug shows up as a log line rather than as entities that
+	// quietly stop moving.
+	if missing := missingJiraKeys(keys, results); len(missing) > 0 {
+		span.SetAttributes(telemetry.Outcome("partial"))
+		trackerLog.WarnContext(ctx, "jira batch fetch returned no row for tracked keys",
+			"missing", len(missing), "tracked", len(keys),
+			"keys", strings.Join(missing[:min(len(missing), jiraMissingKeySample)], ", "))
+	}
+
 	return results, nil
+}
+
+// jiraMissingKeySample bounds how many absent keys the gap warning names. The
+// count is the signal; the keys are there to start an investigation, and a
+// hundred of them in one line would bury it.
+const jiraMissingKeySample = 10
+
+// missingJiraKeys returns the requested keys that the batch fetch produced no
+// state for, in request order. A moved issue answers under its new key, so it
+// shows up here as absent rather than as a silent substitution.
+func missingJiraKeys(keys []string, results map[string]jiraIssueState) []string {
+	var missing []string
+	for _, k := range keys {
+		if _, ok := results[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	return missing
 }
 
 // jiraIssueState bundles the diff-scope snapshot with the bulk description
