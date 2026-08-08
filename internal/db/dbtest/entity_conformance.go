@@ -722,8 +722,8 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		closedState := seedSnap("owner/repo#tc-closed", "github", `{"state":"CLOSED","merged":false}`)
 		open := seedSnap("owner/repo#tc-open", "github", `{"state":"OPEN","merged":false}`)
 		noSnapshot := seedSnap("owner/repo#tc-bare", "github", "")
-		jiraDone := seedSnap("SKY-tc-done", "jira", `{"key":"SKY-tc-done","status":"Done"}`)
-		jiraLive := seedSnap("SKY-tc-live", "jira", `{"key":"SKY-tc-live","status":"In Progress"}`)
+		jiraDone := seedSnap("PROJ-tc-done", "jira", `{"key":"PROJ-tc-done","status":"Done"}`)
+		jiraLive := seedSnap("PROJ-tc-live", "jira", `{"key":"PROJ-tc-live","status":"In Progress"}`)
 		alreadyClosed := seedSnap("owner/repo#tc-gone", "github", `{"state":"MERGED","merged":true}`)
 		if err := s.MarkClosed(ctx, orgID, alreadyClosed); err != nil {
 			t.Fatalf("close: %v", err)
