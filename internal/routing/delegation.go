@@ -420,6 +420,14 @@ func (r *Router) claimCommitted(orgID string, task *domain.Task, actingTeamID, a
 		return
 	}
 	task.ClaimedByAgentID = agentID
+	// A landed stamp proves claimed_by_user_id was NULL at commit time — the
+	// store's guard requires it — so a non-empty user claim on this struct is
+	// a read that has since gone stale (a requeue between load and stamp).
+	// Leaving it would put both claim columns on one in-memory task, a state
+	// the DB's XOR forbids and the re-derive guard at rederive.go:70 reads as
+	// "someone owns this" for the wrong reason. syncClaimAfterCommit, the
+	// fire-path sibling, already lands both fields from its read-back.
+	task.ClaimedByUserID = ""
 	if actingTeamID != "" {
 		// Mirror the store's owner-consolidation so the shared task
 		// object reflects the new owning team for later iterations.

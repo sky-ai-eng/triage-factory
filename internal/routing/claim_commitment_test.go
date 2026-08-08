@@ -217,6 +217,60 @@ func TestDefer_ClaimCommitsWithTheQueuedFiring(t *testing.T) {
 	}
 }
 
+// TestDefer_CommittedClaimClearsTheStaleUserClaimInMemory pins the in-memory
+// half of the same commitment. The store's guard only lets a stamp land when
+// claimed_by_user_id IS NULL, so a landed stamp is proof the router's copy of
+// that field — read before the commit — is stale. Carrying it forward would
+// leave one task struct holding both claims at once, which the DB's XOR makes
+// unrepresentable and which reDeriveTask's "already claimed" guard
+// (rederive.go:70) would read as a user's ownership.
+func TestDefer_CommittedClaimClearsTheStaleUserClaimInMemory(t *testing.T) {
+	s := setupClaimScenario(t, "defer-stale-user")
+
+	// First fire takes the task's one auto-run slot, so the next trigger hits
+	// the busy gate and defers.
+	if fired := mustAutoDelegate(t, s.router, s.task, s.trigger, s.entity, s.event, runmode.LocalDefaultTeamID); !fired {
+		t.Fatal("expected the first trigger to fire")
+	}
+	if ok, err := sqlitestore.New(s.db).Swipes.RequeueTask(t.Context(), runmode.LocalDefaultOrgID, s.task.ID); err != nil || !ok {
+		t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
+	}
+	s.task.ClaimedByAgentID = ""
+	// The stale read: a user claim the router loaded before the requeue that
+	// cleared it. The DB row has no user claim, so the deferral's stamp lands.
+	s.task.ClaimedByUserID = runmode.LocalDefaultUserID
+
+	createTestPrompt(t, s.db, domain.Prompt{ID: "p-stale-2", Name: "P2", Body: "x", Source: "user"})
+	second := domain.EventHandler{
+		ID:                     "trig-stale-2",
+		Kind:                   domain.EventHandlerKindTrigger,
+		BlueprintID:            "p-stale-2",
+		TriggerType:            domain.TriggerTypeEvent,
+		EventType:              domain.EventGitHubPRCICheckFailed,
+		BreakerThreshold:       intPtr(4),
+		MinAutonomySuitability: floatPtr(0),
+		Enabled:                true,
+	}
+	createTriggerForTestRouting(t, s.db, second)
+	secondEvent, err := sqlitestore.New(s.db).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &s.entity, DedupKey: "build",
+	})
+	if err != nil {
+		t.Fatalf("record second event: %v", err)
+	}
+
+	if fired := mustAutoDelegate(t, s.router, s.task, second, s.entity, secondEvent, runmode.LocalDefaultTeamID); !fired {
+		t.Fatal("expected the busy-gate deferral to report a committed firing")
+	}
+	if agent, user := s.claim(t); agent != runmode.LocalDefaultAgentID || user != "" {
+		t.Fatalf("row claim = (agent=%q, user=%q), want the bot's claim written with the queued firing", agent, user)
+	}
+	if s.task.ClaimedByAgentID != runmode.LocalDefaultAgentID || s.task.ClaimedByUserID != "" {
+		t.Errorf("in-memory claim = (agent=%q, user=%q), want the committed bot claim with the stale user claim dropped",
+			s.task.ClaimedByAgentID, s.task.ClaimedByUserID)
+	}
+}
+
 // TestDrain_DoesNotReStampAClearedClaim is the constraint that rules out the
 // obvious fixes, pinned as behavior: a user requeue with a live run is a
 // legitimate state, and the drain path must never quietly put the bot's claim
