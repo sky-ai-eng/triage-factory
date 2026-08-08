@@ -2149,38 +2149,42 @@ func (c *LocalClient) RecordEgressDenied(ctx context.Context, target, reason str
 // Appended unconditionally (no dedup key): each attempt is its own event, so a
 // retried edit and a refused one both leave their own row.
 func GHChannelWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
-	if shape, ok := obs.Classify(); ok && obs.Succeeded() {
+	if shape, ok := ghwrite.Resolve(obs); ok && obs.Succeeded() {
 		return ghSemanticWriteAction(shape, obs)
 	}
 	return ghFallbackWriteAction(obs)
 }
 
-// ghSemanticWriteAction builds the row for a classified, accepted write. It
-// carries what the equivalent exec verb's row carries and nothing more: the
-// method and path add nothing once the act has a name, and parity with the verb
-// row is the whole point — the same reply made two ways must read the same way
-// in the log.
+// ghSemanticWriteAction builds the row for a classified, accepted write from
+// the shape the classifier resolved — which has already reconciled the path's
+// coordinates with what the response said, so a created object's id and number
+// are settled before this sees them.
 //
-// The object's id and link come from the response when the shape creates one
-// (the path can't know an id that didn't exist yet) and from the path when it
-// addresses an existing object. A create whose body was past the injector's cap
-// or didn't parse still lands its row, minus the deep link.
+// detail_json carries the act's own context (the thread a reply answers) and,
+// for the shapes that ask for it, the raw method and path. That is the whole of
+// the difference between these rows and the exec verbs': a reply is required to
+// read identically to `gh pr comment-reply`'s row, while a PR create or a
+// review submit is required to say which channel it came through.
 func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation) *domain.ExternalAction {
-	externalID := shape.ExternalID
-	if obs.ExternalID != "" {
-		externalID = obs.ExternalID
-	}
 	act := &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderGitHub,
 		Action:     shape.Action,
 		Target:     shape.Target(),
-		ExternalID: externalID,
+		ExternalID: shape.ExternalID,
 		URL:        obs.URL,
 		Credential: domain.CredentialGitHubApp,
 	}
+	detail := map[string]any{}
 	if shape.InReplyTo > 0 {
-		detail, _ := json.Marshal(map[string]any{"in_reply_to": shape.InReplyTo})
-		act.DetailJSON = string(detail)
+		detail["in_reply_to"] = shape.InReplyTo
+	}
+	if shape.CarriesProvenance {
+		detail["method"] = obs.Method
+		detail["path"] = obs.Path
+	}
+	if len(detail) > 0 {
+		payload, _ := json.Marshal(detail)
+		act.DetailJSON = string(payload)
 	}
 	return act
 }

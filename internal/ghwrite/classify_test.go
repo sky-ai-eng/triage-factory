@@ -120,9 +120,28 @@ func TestClassify_TableShapes(t *testing.T) {
 			want:   Shape{Action: domain.ActionWorkflowRunCancelled, Owner: "acme", Repo: "widgets", ExternalID: "12345"},
 		},
 
+		{
+			// The number is GitHub's to assign, so the path cannot carry it —
+			// Resolve fills it from the created PR's url (see the test below).
+			name:   "pull request create",
+			method: "POST",
+			path:   "/repos/acme/widgets/pulls",
+			want: Shape{
+				Action: domain.ActionPRCreated, Owner: "acme", Repo: "widgets",
+				CreatesObject: true, NumberFromObjectURL: true, CarriesProvenance: true,
+			},
+		},
+		{
+			name:   "review post",
+			method: "POST",
+			path:   "/repos/acme/widgets/pulls/841/reviews",
+			want: Shape{
+				Action: domain.ActionReviewSubmitted, Owner: "acme", Repo: "widgets",
+				Number: 841, CreatesObject: true, CarriesProvenance: true,
+			},
+		},
+
 		// Deliberately unclassified.
-		{name: "PR create keeps the fallback", method: "POST", path: "/repos/acme/widgets/pulls", wantErr: true},
-		{name: "review post keeps the fallback", method: "POST", path: "/repos/acme/widgets/pulls/841/reviews", wantErr: true},
 		{name: "org-level endpoint", method: "POST", path: "/orgs/acme/repos", wantErr: true},
 		{name: "unmodeled repo endpoint", method: "PUT", path: "/repos/acme/widgets/topics", wantErr: true},
 		{name: "wrong method for the shape", method: "POST", path: "/repos/acme/widgets/pulls/841/merge", wantErr: true},
@@ -178,6 +197,74 @@ func TestShapeTarget_PrefersTheEntityForm(t *testing.T) {
 	}
 	if got := (Shape{}).Target(); got != "" {
 		t.Errorf("empty shape target = %q, want empty", got)
+	}
+}
+
+// TestResolve_CompletesACreateFromItsResponse pins the half of a create's
+// identity that the request cannot carry. A pull request is the sharp case: its
+// response id is the REST database id, while the product addresses a PR by its
+// number everywhere else, so the number comes off the object's url and the
+// database id is dropped rather than filed under a field that means something
+// different.
+func TestResolve_CompletesACreateFromItsResponse(t *testing.T) {
+	created := Observation{
+		Method:     "POST",
+		Path:       "/repos/acme/widgets/pulls",
+		Status:     201,
+		ExternalID: "2314567890", // GitHub's database id, not the number
+		URL:        "https://github.com/acme/widgets/pull/42",
+	}
+	got, ok := Resolve(created)
+	if !ok {
+		t.Fatal("a PR create resolved to no shape")
+	}
+	if got.Number != 42 || got.ExternalID != "42" || got.Target() != "acme/widgets#42" {
+		t.Errorf("resolved = %+v (target %q), want the PR's number everywhere", got, got.Target())
+	}
+
+	// A url that never arrived (a body past the cap) must not leave the
+	// database id standing in for a number.
+	noURL := created
+	noURL.URL = ""
+	got, ok = Resolve(noURL)
+	if !ok {
+		t.Fatal("a PR create with no url resolved to no shape")
+	}
+	if got.ExternalID != "" || got.Number != 0 || got.Target() != "acme/widgets" {
+		t.Errorf("resolved = %+v (target %q), want the act on its repo and no invented id", got, got.Target())
+	}
+
+	// A review's response id IS its addressable id, so it rides through.
+	review, ok := Resolve(Observation{
+		Method: "POST", Path: "/repos/acme/widgets/pulls/841/reviews", Status: 200,
+		ExternalID: "999", URL: "https://github.com/acme/widgets/pull/841#pullrequestreview-999",
+	})
+	if !ok || review.ExternalID != "999" || review.Target() != "acme/widgets#841" {
+		t.Errorf("resolved review = %+v, want the review id on acme/widgets#841", review)
+	}
+
+	if _, ok := Resolve(Observation{Method: "POST", Path: "/user/repos", Status: 201}); ok {
+		t.Error("an unclassified shape resolved to a shape")
+	}
+}
+
+// TestParsePullRequestURL_TakesTheRealSegment pins the parser both the write
+// classifier and the injector's GraphQL observation read PR identity through.
+func TestParsePullRequestURL_TakesTheRealSegment(t *testing.T) {
+	owner, repo, number, ok := ParsePullRequestURL("https://ghe.corp/acme/widgets/pull/7")
+	if !ok || owner != "acme" || repo != "widgets" || number != 7 {
+		t.Errorf("GHES url = (%q, %q, %d, %v), want acme/widgets#7", owner, repo, number, ok)
+	}
+	// A repository literally named "pull" still resolves — the scan needs two
+	// segments before the marker and a positive integer after it.
+	owner, repo, number, ok = ParsePullRequestURL("https://github.com/acme/pull/pull/9")
+	if !ok || owner != "acme" || repo != "pull" || number != 9 {
+		t.Errorf("repo named pull = (%q, %q, %d, %v), want acme/pull#9", owner, repo, number, ok)
+	}
+	for _, raw := range []string{"", "https://github.com/acme/widgets", "https://github.com/acme/widgets/pull/x", "://"} {
+		if _, _, _, ok := ParsePullRequestURL(raw); ok {
+			t.Errorf("ParsePullRequestURL(%q) parsed, want a decline", raw)
+		}
 	}
 }
 

@@ -186,6 +186,52 @@ func TestRelayServer_GHWriteWritesAuditRow(t *testing.T) {
 	}
 }
 
+// TestRelayServer_PRCreateLandsOneArtifactAndOneAction pins the two halves of a
+// raw PR create staying in their own lanes. The injector reports it twice — once
+// as an artifact-bearing mutation, once as a write — and the two must produce
+// exactly one artifact and exactly one action: an artifact says the pull request
+// exists, an action says this run opened it, and neither answers for the other.
+//
+// The action's id is the PR NUMBER, matching what the verb path records and what
+// every other surface addresses a PR by — not the database id the response's own
+// `id` field carries.
+func TestRelayServer_PRCreateLandsOneArtifactAndOneAction(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	s := NewRelayServer(stores, info, nil)
+	ctx := context.Background()
+
+	const prURL = "https://github.com/acme/widgets/pull/42"
+	obsArgs, _ := json.Marshal(agentproc.RecordObservationArgs{
+		Kind: domain.ArtifactKindPullRequest, Owner: "acme", Repo: "widgets", Number: 42,
+		NodeID: "PR_kwx", URL: prURL, Title: "Fix it", Draft: true,
+	})
+	s.DispatchNotify(ctx, agentproc.RelayNamespaceCore, agentproc.OpRecordObservation, obsArgs)
+
+	writeArgs, _ := json.Marshal(agentproc.RecordGHWriteArgs{
+		Method: "POST", Path: "/repos/acme/widgets/pulls", Status: 201,
+		ExternalID: "2314567890", URL: prURL,
+	})
+	s.DispatchNotify(ctx, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, writeArgs)
+
+	arts := listRunArtifacts(t, stores, info.RunID)
+	if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindPullRequest {
+		t.Fatalf("want 1 pull_request artifact, got %d: %+v", len(arts), arts)
+	}
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want exactly 1 action for one create, got %d: %+v", len(acts), acts)
+	}
+	a := acts[0]
+	if a.Action != domain.ActionPRCreated || a.Target != "acme/widgets#42" ||
+		a.ExternalID != "42" || a.URL != prURL {
+		t.Errorf("pr create row = %+v, want pr_created on acme/widgets#42 keyed on the number", a)
+	}
+	if !strings.Contains(a.DetailJSON, `"path":"/repos/acme/widgets/pulls"`) ||
+		!strings.Contains(a.DetailJSON, `"method":"POST"`) {
+		t.Errorf("detail_json = %q, want the raw method + path that distinguish this from a verb-path create", a.DetailJSON)
+	}
+}
+
 // TestRelayServer_GHWriteClassifiesTheCreate pins the relayed half of the
 // incident fix: the sidecar carries the wire facts it alone can see — the
 // created reply's id and link, read off the response — and the semantic row is

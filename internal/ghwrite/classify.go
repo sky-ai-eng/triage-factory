@@ -20,6 +20,14 @@
 // fallback rather than guessed at. A wrong verb in an audit log is worse than
 // an honest "a write happened here".
 //
+// The fallback is for shapes this table does not know, and for nothing else.
+// Recording what happened is unconditional and separate from deciding what may
+// happen: an act nobody has yet decided the policy for still lands its verb the
+// moment it succeeds, and when a policy does arrive it arrives through the gate
+// machinery, which reads this same table. A shape held out of the table because
+// its governance is unsettled would leave the log unable to answer the very
+// question that governance is being decided from.
+//
 // # Method and path only
 //
 // The classifier never sees a request body, because the injector never reads
@@ -34,6 +42,7 @@ package ghwrite
 
 import (
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -67,11 +76,28 @@ type Shape struct {
 	InReplyTo int
 
 	// CreatesObject marks a shape whose response body names an object that did
-	// not exist before the request — a posted comment or reply. The sidecar
-	// parses those bodies for the new object's id and html_url so the audit row
-	// reaches parity with the equivalent exec verb's row; every other shape is
-	// fully described by its path and needs no body at all.
+	// not exist before the request — a posted comment or reply, an opened pull
+	// request. The sidecar parses those bodies for the new object's id and
+	// html_url so the audit row reaches parity with the equivalent exec verb's
+	// row; every other shape is fully described by its path and needs no body
+	// at all.
 	CreatesObject bool
+
+	// NumberFromObjectURL marks a create that posts to a collection, so the
+	// number it will be addressed by is assigned by GitHub and appears only in
+	// the response. Resolve fills Number from the created object's own url.
+	NumberFromObjectURL bool
+
+	// CarriesProvenance marks a shape whose audit row keeps the raw method and
+	// path in its detail. It is set where "which channel performed this act" is
+	// itself a fact the reader needs: opening a pull request and submitting a
+	// review both have a governed verb path, and whether an autonomously-opened
+	// PR came through that path or a hand-written `gh api` call is exactly the
+	// question the policy work downstream of this table has to answer. The
+	// reply and comment shapes leave it clear on purpose — their rows are
+	// required to read identically to their verb's, and their detail carries
+	// the act's own context instead.
+	CarriesProvenance bool
 }
 
 // Target renders the shape's resource key for the audit row: owner/repo#N when
@@ -112,8 +138,40 @@ type Observation struct {
 	URL        string
 }
 
-// Classify resolves this observation's shape.
+// Classify resolves this observation's shape from its method and path alone.
+// Most callers want Resolve, which also folds in what the response said.
 func (o Observation) Classify() (Shape, bool) { return Classify(o.Method, o.Path) }
+
+// Resolve is Classify completed against the response's own facts: the created
+// object's id, and — for a create that posts to a collection — the number
+// GitHub assigned it, which no part of the request could have known.
+//
+// A pull request is the awkward case and the reason this exists. Its response
+// id is the REST database id, while every surface in the product addresses a PR
+// by its NUMBER, so the number is taken from the created object's url and the
+// database id is dropped rather than filed under a field that means something
+// else. A url that didn't parse (a body past the injector's cap, an unexpected
+// shape) leaves the row on its repo with no id: the act is still recorded, and
+// nothing is asserted that wasn't seen.
+func Resolve(obs Observation) (Shape, bool) {
+	s, ok := Classify(obs.Method, obs.Path)
+	if !ok {
+		return Shape{}, false
+	}
+	if obs.ExternalID != "" {
+		s.ExternalID = obs.ExternalID
+	}
+	if s.NumberFromObjectURL {
+		_, _, number, parsed := ParsePullRequestURL(obs.URL)
+		if !parsed {
+			s.ExternalID = ""
+			return s, true
+		}
+		s.Number = number
+		s.ExternalID = strconv.Itoa(number)
+	}
+	return s, true
+}
 
 // Succeeded reports whether the upstream accepted the write. Only a successful
 // write earns its semantic verb: a 404'd merge is not a merge.
@@ -132,6 +190,35 @@ func RepoPath(path string) string {
 		return ""
 	}
 	return owner + "/" + repo
+}
+
+// ParsePullRequestURL pulls the coordinates out of a pull request's html url,
+// whose shape is {scheme}://{host}/{owner}/{repo}/pull/{n} on dotcom and GHES
+// alike. The scan takes the first "pull" segment with two segments before it
+// and a positive integer after it, so a repository literally named "pull" still
+// resolves.
+//
+// It lives here rather than beside either caller because both the write
+// classifier and the injector's GraphQL observation read a PR's identity out of
+// the same url, and two parsers would eventually disagree about what a PR url
+// is.
+func ParsePullRequestURL(raw string) (owner, repo string, number int, ok bool) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", 0, false
+	}
+	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+	for i, seg := range segs {
+		if seg != "pull" || i < 2 || i+1 >= len(segs) {
+			continue
+		}
+		n, err := strconv.Atoi(segs[i+1])
+		if err != nil || n <= 0 || segs[i-2] == "" || segs[i-1] == "" {
+			continue
+		}
+		return segs[i-2], segs[i-1], n, true
+	}
+	return "", "", 0, false
 }
 
 // splitRepoPath separates a repository-scoped path into its owner, repo, and
@@ -175,16 +262,29 @@ func Classify(method, path string) (Shape, bool) {
 	return Shape{}, false
 }
 
-// classifyPulls handles /repos/{o}/{r}/pulls/... — the pull request itself, and
-// the review comments addressed under it.
+// classifyPulls handles /repos/{o}/{r}/pulls/... — the pull request itself, the
+// review comments addressed under it, and the two creates that also produce an
+// artifact.
 //
-// A PR create (POST .../pulls) is deliberately absent: it already produces a
-// pull_request artifact through the injector's separate observation path, and
-// what an autonomously-opened PR should record beyond that is a governance
-// decision of its own. It keeps the fallback row until that decision lands.
+// Those two are here for the same reason merge is: recording what happened is
+// unconditional, and whether the act should have been permitted is a separate
+// decision made by a separate mechanism reading this same table. An artifact
+// answers "what exists", which is not the question the actions log answers — a
+// PR create that landed a pull_request artifact and an opaque audit row is
+// invisible to anyone filtering the log for PR creations, which is precisely
+// the asymmetry between the verb path and the raw path this table exists to
+// remove.
 func classifyPulls(s Shape, method string, rest []string) (Shape, bool) {
+	// The collection itself: opening a pull request.
 	if len(rest) == 0 {
-		return Shape{}, false
+		if method != "POST" {
+			return Shape{}, false
+		}
+		s.Action = domain.ActionPRCreated
+		s.CreatesObject = true
+		s.NumberFromObjectURL = true
+		s.CarriesProvenance = true
+		return s, true
 	}
 
 	// Review comments addressed by their own id: /pulls/comments/{id}[/...].
@@ -221,6 +321,12 @@ func classifyPulls(s Shape, method string, rest []string) (Shape, bool) {
 		s.Action = domain.ActionPREdited
 	case len(rest) == 2 && rest[1] == "merge" && method == "PUT":
 		s.Action = domain.ActionPRMerged
+	case len(rest) == 2 && rest[1] == "reviews" && method == "POST":
+		// Also the only way inline review comments reach GitHub by hand: they
+		// ride the review's own body.
+		s.Action = domain.ActionReviewSubmitted
+		s.CreatesObject = true
+		s.CarriesProvenance = true
 	case len(rest) == 4 && rest[1] == "comments" && rest[3] == "replies" && method == "POST":
 		reply, err := strconv.Atoi(rest[2])
 		if err != nil || reply <= 0 {

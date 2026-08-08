@@ -553,6 +553,36 @@ func TestCapture_GHChannelWrite_RecordsEveryAttempt(t *testing.T) {
 	}
 }
 
+// TestGHChannelWriteAction_ReviewSubmit pins the raw review post: the same
+// review_submitted verb the governed path records, on the PR the request path
+// named, keyed on the review id the response returned — plus the raw method and
+// path, so a reader can tell this review did not come through the verbs.
+func TestGHChannelWriteAction_ReviewSubmit(t *testing.T) {
+	const reviewURL = "https://github.com/acme/widgets/pull/841#pullrequestreview-999"
+	act := GHChannelWriteAction(ghwrite.Observation{
+		Method:     "POST",
+		Path:       "/repos/acme/widgets/pulls/841/reviews",
+		Status:     200,
+		ExternalID: "999",
+		URL:        reviewURL,
+	})
+	if act.Action != domain.ActionReviewSubmitted || act.Target != "acme/widgets#841" ||
+		act.ExternalID != "999" || act.URL != reviewURL {
+		t.Errorf("review submit row = %+v, want review_submitted on acme/widgets#841", act)
+	}
+	if !strings.Contains(act.DetailJSON, `"path":"/repos/acme/widgets/pulls/841/reviews"`) {
+		t.Errorf("detail_json = %q, want the raw path", act.DetailJSON)
+	}
+	// A refused submit is an attempt, exactly like a refused merge.
+	refused := GHChannelWriteAction(ghwrite.Observation{
+		Method: "POST", Path: "/repos/acme/widgets/pulls/841/reviews", Status: 422,
+	})
+	if refused.Action != domain.ActionGHChannelWrite ||
+		!strings.Contains(refused.DetailJSON, `"attempted":"review_submitted"`) {
+		t.Errorf("refused submit = %+v, want the attempt row naming the act", refused)
+	}
+}
+
 // TestGHChannelWriteAction_UnclassifiedKeepsTheFallback pins what survives of
 // the old opaque row: a shape the table doesn't model records that a write
 // happened and refuses to name it, and a path naming no repo doesn't invent one.

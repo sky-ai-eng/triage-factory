@@ -222,8 +222,9 @@ type Config struct {
 	// ObserveWrite, when non-nil, is called for every mutating REST request the
 	// injector forwarded, whatever the outcome — the audit-parity callback, as
 	// opposed to Observe's artifact-parity one. Both fire for a successful REST
-	// PR create: they answer different questions (what exists vs what was
-	// attempted), the same way branch_pushed and branch_push_failed coexist.
+	// PR create, and neither is redundant with the other: an artifact says the
+	// pull request exists, an action says this run opened it, and a reader
+	// asking either question is not served by the other's answer.
 	// Called inline on the response path, so the callback must not block.
 	ObserveWrite func(ctx context.Context, w ObservedWrite)
 
@@ -556,10 +557,11 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 
 	// The audit runs whatever the buffering produced — it covers the outcomes
 	// observation drops, a refused write and every mutating method that makes no
-	// artifact — but it is handed a body only for a create. Another shape's body
-	// may have been buffered for artifact observation, and reading a PR out of
-	// that one here would hang the PR's coordinates on a row with no use for
-	// them.
+	// artifact — but it is handed a body only when the classifier said this
+	// shape's response names a created object. The two conditions overlap for a
+	// REST create and diverge elsewhere, and handing over a body buffered for
+	// some other reason would hang whatever it happens to contain on a row with
+	// no use for it.
 	createdBody := buf
 	if !auditingCreate {
 		createdBody = nil
@@ -700,7 +702,7 @@ func parseGraphQLObservation(body []byte) (ObservedMutation, bool) {
 		return ObservedMutation{}, false
 	}
 	pr := payload.Data.CreatePullRequest.PullRequest
-	owner, repo, number, ok := parsePullRequestURL(pr.URL)
+	owner, repo, number, ok := ghwrite.ParsePullRequestURL(pr.URL)
 	if !ok {
 		return ObservedMutation{}, false
 	}
@@ -712,30 +714,6 @@ func parseGraphQLObservation(body []byte) (ObservedMutation, bool) {
 		NodeID: pr.ID,
 		URL:    pr.URL,
 	}, true
-}
-
-// parsePullRequestURL pulls the coordinates out of a PR's html url, whose shape
-// is {scheme}://{host}/{owner}/{repo}/pull/{n} on dotcom and GHES alike. The
-// scan takes the first "pull" segment with two segments before it and a
-// positive integer after it, so a repository literally named "pull" still
-// resolves.
-func parsePullRequestURL(raw string) (owner, repo string, number int, ok bool) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", "", 0, false
-	}
-	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
-	for i, seg := range segs {
-		if seg != "pull" || i < 2 || i+1 >= len(segs) {
-			continue
-		}
-		n, err := strconv.Atoi(segs[i+1])
-		if err != nil || n <= 0 || segs[i-2] == "" || segs[i-1] == "" {
-			continue
-		}
-		return segs[i-2], segs[i-1], n, true
-	}
-	return "", "", 0, false
 }
 
 // parseObservation extracts the created object's coordinates from a mutation's
