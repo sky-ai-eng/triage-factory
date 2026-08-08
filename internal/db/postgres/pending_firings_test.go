@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sync"
 	"testing"
@@ -27,8 +28,8 @@ func TestPendingFiringsStore_Postgres(t *testing.T) {
 	dbtest.RunPendingFiringsStoreConformance(t, func(t *testing.T) (db.PendingFiringsStore, string, dbtest.PendingFiringsSeeder) {
 		t.Helper()
 		h.Reset(t)
-		orgID, userID, _ := seedPgPendingFiringsOrg(t, h)
-		return stores.PendingFirings, orgID, newPgPendingFiringsSeeder(h, orgID, userID)
+		orgID, userID, agentID := seedPgPendingFiringsOrg(t, h)
+		return stores.PendingFirings, orgID, newPgPendingFiringsSeeder(h, orgID, userID, agentID)
 	})
 }
 
@@ -43,16 +44,16 @@ func TestPendingFiringsStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	orgA, userA, _ := seedPgPendingFiringsOrg(t, h)
-	seedA := newPgPendingFiringsSeeder(h, orgA, userA)
+	orgA, userA, agentA := seedPgPendingFiringsOrg(t, h)
+	seedA := newPgPendingFiringsSeeder(h, orgA, userA, agentA)
 	tupA := seedA.Tuple(t)
 
-	orgB, userB, _ := seedPgPendingFiringsOrg(t, h)
-	seedB := newPgPendingFiringsSeeder(h, orgB, userB)
+	orgB, userB, agentB := seedPgPendingFiringsOrg(t, h)
+	seedB := newPgPendingFiringsSeeder(h, orgB, userB, agentB)
 	tupB := seedB.Tuple(t)
 
 	// Seed a pending firing in orgA only.
-	if _, err := stores.PendingFirings.Enqueue(ctx, orgA, userA, tupA.EntityID, tupA.TaskID, tupA.TriggerID, tupA.EventID); err != nil {
+	if _, _, err := stores.PendingFirings.Enqueue(ctx, orgA, userA, tupA.EntityID, tupA.TaskID, tupA.TriggerID, tupA.EventID, db.AgentClaimStamp{}); err != nil {
 		t.Fatalf("Enqueue orgA: %v", err)
 	}
 
@@ -114,12 +115,12 @@ func TestPendingFiringsStore_Postgres_EnqueueWithLocalSentinelUser(t *testing.T)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	orgID, ownerUserID, _ := seedPgPendingFiringsOrg(t, h)
-	tup := newPgPendingFiringsSeeder(h, orgID, ownerUserID).Tuple(t)
+	orgID, ownerUserID, agentID := seedPgPendingFiringsOrg(t, h)
+	tup := newPgPendingFiringsSeeder(h, orgID, ownerUserID, agentID).Tuple(t)
 
 	// Caller passes the SQLite-only sentinel rather than ownerUserID.
-	inserted, err := stores.PendingFirings.Enqueue(ctx, orgID, runmode.LocalDefaultUserID,
-		tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID)
+	inserted, _, err := stores.PendingFirings.Enqueue(ctx, orgID, runmode.LocalDefaultUserID,
+		tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{})
 	if err != nil {
 		t.Fatalf("Enqueue with LocalDefaultUserID sentinel: %v (FK would trip if sentinel weren't filtered)", err)
 	}
@@ -154,8 +155,8 @@ func TestPendingFiringsStore_Postgres_ConcurrentPopNeverDoublePops(t *testing.T)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	orgID, userID, _ := seedPgPendingFiringsOrg(t, h)
-	seed := newPgPendingFiringsSeeder(h, orgID, userID)
+	orgID, userID, agentID := seedPgPendingFiringsOrg(t, h)
+	seed := newPgPendingFiringsSeeder(h, orgID, userID, agentID)
 
 	// Every row on ONE task (distinct triggers), since the queue the drain
 	// pops from is the task's.
@@ -166,7 +167,7 @@ func TestPendingFiringsStore_Postgres_ConcurrentPopNeverDoublePops(t *testing.T)
 		if i == 0 {
 			entityID, taskID = tup.EntityID, tup.TaskID
 		}
-		if _, err := stores.PendingFirings.Enqueue(ctx, orgID, tup.UserID, entityID, taskID, tup.TriggerID, tup.EventID); err != nil {
+		if _, _, err := stores.PendingFirings.Enqueue(ctx, orgID, tup.UserID, entityID, taskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue %d: %v", i, err)
 		}
 	}
@@ -278,7 +279,7 @@ func seedPgPendingFiringsOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, ag
 // raw inserts bypass RLS. Every Tuple call creates a fresh chain
 // (entity → prompt → event → task → event_handler[trigger]) so dedup
 // keys stay distinct across subtests.
-func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.PendingFiringsSeeder {
+func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID, agentID string) dbtest.PendingFiringsSeeder {
 	conn := h.AdminDB
 	var teamID string
 	if err := conn.QueryRow(
@@ -375,8 +376,31 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.P
 		return brID
 	}
 
+	taskClaim := func(t *testing.T, taskID string) (string, string) {
+		t.Helper()
+		var agent, user sql.NullString
+		if err := conn.QueryRow(
+			`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = $1`, taskID,
+		).Scan(&agent, &user); err != nil {
+			t.Fatalf("read task claim: %v", err)
+		}
+		return agent.String, user.String
+	}
+
+	claimTaskForUser := func(t *testing.T, taskID string) {
+		t.Helper()
+		if _, err := conn.Exec(`
+			UPDATE tasks SET claimed_by_user_id = $1, claimed_by_agent_id = NULL WHERE id = $2
+		`, userID, taskID); err != nil {
+			t.Fatalf("claim task for user: %v", err)
+		}
+	}
+
 	return dbtest.PendingFiringsSeeder{
-		Tuple:      tuple,
-		RunForTask: runForTask,
+		Tuple:            tuple,
+		RunForTask:       runForTask,
+		AgentID:          agentID,
+		TaskClaim:        taskClaim,
+		ClaimTaskForUser: claimTaskForUser,
 	}
 }

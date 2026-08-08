@@ -50,7 +50,15 @@ type PendingFiringsStore interface {
 	// a later milestone retrofits the call site to pass the request user
 	// once handler-level claims are wired. SQLite impl ignores
 	// userID — the local schema has no creator column.
-	Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string) (bool, error)
+	//
+	// claim rides the same transaction as the insert: a queued firing is a
+	// real commitment (the bot has taken the task, the run just hasn't
+	// started), so the claim lands with the row or not at all — see
+	// AgentClaimStamp. It is skipped on the collapse path, where the
+	// already-queued duplicate's own enqueue stamped it. Returns
+	// claimed=true only when the stamp actually moved the claim; a refusal
+	// commits the firing anyway.
+	Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string, claim AgentClaimStamp) (inserted, claimed bool, err error)
 
 	// PopForTask is a CLAIMING pop: it atomically flips the
 	// oldest 'pending' row for the task to 'draining' (stamping

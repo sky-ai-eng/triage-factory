@@ -393,8 +393,9 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	}
 	// Resolve-once invariant: the actor frozen on the fired blueprint_run is the
 	// SAME agent the task claim got stamped with. The router resolves the agent a
-	// single time and feeds both the run (via DelegateOpts → blueprint_runs.actor_agent_id)
-	// and the claim, so they can't drift — no second lookup, no transaction needed.
+	// single time and feeds both the run and the claim through one DelegateOpts,
+	// which the fenced insert writes in a single transaction — no second lookup,
+	// and no window where one exists without the other.
 	var brActor string
 	if err := database.QueryRow(`SELECT COALESCE(actor_agent_id, '') FROM blueprint_runs WHERE task_id = ?`, task.ID).Scan(&brActor); err != nil {
 		t.Fatalf("read blueprint_run actor: %v", err)

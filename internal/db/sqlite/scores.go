@@ -111,13 +111,17 @@ func applyScoresChunk(ctx context.Context, q queryer, chunk []domain.TaskScoreUp
 		rowExprs = append(rowExprs, "(?, ?, ?, ?, ?)")
 		args = append(args, u.ID, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning)
 	}
+	// rederive_owed rides the same statement as the scores it is owed for:
+	// one write, so no crash can commit a score whose deferred triggers
+	// nothing is on the hook to evaluate.
 	query := `
 		UPDATE tasks
 		SET priority_score = v.priority_score,
 		    autonomy_suitability = v.autonomy_suitability,
 		    ai_summary = v.ai_summary,
 		    priority_reasoning = v.priority_reasoning,
-		    scoring_status = 'scored'
+		    scoring_status = 'scored',
+		    rederive_owed = 1
 		FROM (
 			SELECT column1 AS id,
 			       column2 AS priority_score,
@@ -130,6 +134,44 @@ func applyScoresChunk(ctx context.Context, q queryer, chunk []domain.TaskScoreUp
 	`
 	_, err := q.ExecContext(ctx, query, args...)
 	return err
+}
+
+func (s *scoreStore) TasksOwedReDerive(ctx context.Context, orgID string) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx,
+		`SELECT id FROM tasks WHERE rederive_owed = 1 ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *scoreStore) ClearReDeriveOwed(ctx context.Context, orgID string, taskIDs []string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	// Per-id, unwrapped, like MarkScoring's loop: a failure partway leaves
+	// the rest owed, and an owed task is only ever re-evaluated — never
+	// double-fired, since firing sits behind the replay fence and the
+	// one-active-auto-run index.
+	for _, id := range taskIDs {
+		if _, err := s.q.ExecContext(ctx, `UPDATE tasks SET rederive_owed = 0 WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *scoreStore) UnscoredTasks(ctx context.Context, orgID string) ([]domain.Task, error) {

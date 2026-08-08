@@ -26,25 +26,43 @@ func newPendingFiringsStore(q queryer) db.PendingFiringsStore {
 
 var _ db.PendingFiringsStore = (*pendingFiringsStore)(nil)
 
-func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string) (bool, error) {
+// Enqueue inserts the firing and stamps the task's agent claim in one
+// transaction — see db.AgentClaimStamp for why the two writes are
+// inseparable. A stamp refusal is not an error and leaves the firing
+// committed.
+func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string, claim db.AgentClaimStamp) (bool, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
+		return false, false, err
 	}
 	_ = userID // ignored in local mode
-	// The dedup target includes 'draining': a firing mid-drain is still
-	// queued intent for (task, trigger), and a duplicate enqueued during
-	// the drain window would fire a second run for the same intent as
-	// soon as the first one's run terminates.
-	res, err := s.q.ExecContext(ctx, `
-		INSERT INTO pending_firings (entity_id, task_id, trigger_id, triggering_event_id, status, queued_at)
-		VALUES (?, ?, ?, ?, 'pending', ?)
-		ON CONFLICT (task_id, trigger_id) WHERE status IN ('pending', 'draining') DO NOTHING
-	`, entityID, taskID, triggerID, triggeringEventID, time.Now())
+	inserted, claimed := false, false
+	err := inTx(ctx, s.q, func(q queryer) error {
+		// The dedup target includes 'draining': a firing mid-drain is still
+		// queued intent for (task, trigger), and a duplicate enqueued during
+		// the drain window would fire a second run for the same intent as
+		// soon as the first one's run terminates.
+		res, err := q.ExecContext(ctx, `
+			INSERT INTO pending_firings (entity_id, task_id, trigger_id, triggering_event_id, status, queued_at)
+			VALUES (?, ?, ?, ?, 'pending', ?)
+			ON CONFLICT (task_id, trigger_id) WHERE status IN ('pending', 'draining') DO NOTHING
+		`, entityID, taskID, triggerID, triggeringEventID, time.Now())
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		inserted = n > 0
+		// Nothing was committed on the collapse path — the duplicate already
+		// queued carries the commitment, and its own enqueue stamped the claim.
+		if !inserted || claim.AgentID == "" {
+			return nil
+		}
+		claimed, err = stampAgentClaimIfUnclaimed(ctx, q, taskID, claim.AgentID, claim.ActingTeamID)
+		return err
+	})
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	return inserted, claimed, nil
 }
 
 // PopForTask is a claiming pop, mirroring the Postgres impl's shape:

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -67,15 +68,16 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 	// Resolve the org's agent ONCE here. It's the single source for three
 	// consumers that must agree: the bot-disabled-team gate, the run's actor
 	// (frozen onto blueprint_runs.actor_agent_id via DelegateOpts), and the
-	// task's claim (stampAgentClaim). Resolving once — instead of re-deriving in
-	// stampAgentClaim as before — guarantees runs.actor_agent_id and
-	// tasks.claimed_by_agent_id are the same id with no second lookup to drift,
-	// and it's available at step-0 enqueue even though the claim isn't stamped
-	// until after fireDelegate returns.
+	// task's claim (the AgentClaimStamp each commitment carries). Resolving
+	// once guarantees runs.actor_agent_id and tasks.claimed_by_agent_id are the
+	// same id with no second lookup to drift, and it's available at step-0
+	// enqueue — which is what lets the claim ride the run insert's own
+	// transaction instead of following it as a separate write.
 	//
 	// Nil r.agents is pre-D-Claims test wiring: skip the gate, leave agentID
-	// empty (the run records no actor, stampAgentClaim no-ops) — preserving the
-	// "proceed with auto-fire" degrade. Production always wires it.
+	// empty (the run records no actor, the claim stamp is the zero value and
+	// every store skips it) — preserving the "proceed with auto-fire" degrade.
+	// Production always wires it.
 	var agentID string
 	if r.agents != nil {
 		a, err := r.agents.GetForOrgSystem(ctx, orgID)
@@ -197,15 +199,14 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 		// Only a firing with no live run to fold into (hasPending with the
 		// run already gone) still defers.
 		if hasActive {
-			if r.tryAdditiveInjection(ctx, orgID, entityID, activeRunID, task, trigger, triggeringEventID) {
-				// Commit the claim on this task exactly like the deferral
-				// path does post-Enqueue: the bot has taken responsibility
-				// by folding the event into the live run. The run belongs to
-				// this same task, so the standing claim is already the bot's
-				// and this is a race-safe no-op in the common case (it
-				// re-stamps only if the task was user-requeued while its run
-				// stayed live).
-				r.stampAgentClaim(ctx, orgID, task, actingTeamID, agentID)
+			// The claim rides whichever durable write the injection makes —
+			// folding an event into the live run is the bot taking
+			// responsibility for this task exactly as a fresh fire or a
+			// deferral is. The run belongs to this same task, so the standing
+			// claim is normally already the bot's and the stamp is a race-safe
+			// no-op; it moves only when the task was user-requeued while its
+			// run stayed live, which this new event re-commits.
+			if r.tryAdditiveInjection(ctx, orgID, entityID, activeRunID, task, trigger, triggeringEventID, claimStamp(agentID, actingTeamID)) {
 				return false, nil
 			}
 			// The run went terminal between the gate read and the injection
@@ -218,11 +219,11 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 
 	// Consolidate the owner team to the acting team BEFORE firing. An
 	// auto-fired run inherits runs.team_id from tasks.team_id at insert,
-	// and the claim (which also consolidates the owner) lands only after
-	// the fire succeeds — so without this, a run fired by a team other
-	// than the creation-time owner (e.g. the owner had auto-delegation
-	// disabled and a lower-priority team is firing) would be attributed
-	// to the stale owner. Owner-only update, no claim touch: if the fire
+	// and the claim (which also consolidates the owner) lands inside that
+	// same insert — so without this, a run fired by a team other than the
+	// creation-time owner (e.g. the owner had auto-delegation disabled and
+	// a lower-priority team is firing) would read the stale owner as it
+	// writes its own row. Owner-only update, no claim touch: if the fire
 	// fails the task is owned by the team that tried, unclaimed — not a
 	// phantom claim. Skipped when the acting team already is the owner
 	// (the common path, and same-team multi-prompt where an active run
@@ -234,7 +235,13 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 			task.TeamID = teamIDPtr(actingTeamID)
 		}
 	}
-	if _, err := r.fireDelegate(ctx, orgID, task, trigger, triggeringEventID, agentID); err != nil {
+	// The claim rides the fenced run insert's transaction (see
+	// db.AgentClaimStamp): the run row and "the bot owns this task" are one
+	// durable write, so there is no window where the run is live and the board
+	// still shows the task free. A stamp refusal — a user claiming mid-fire —
+	// does not roll the run back; the human wins the claim, the run still runs,
+	// and the drain path's claim_changed guard keeps later firings off it.
+	if _, err := r.fireDelegate(ctx, orgID, task, trigger, triggeringEventID, agentID, claimStamp(agentID, actingTeamID)); err != nil {
 		// A replayed event (at-least-once queue) whose first run
 		// already committed hits the (event, trigger) fence and comes back
 		// as ErrAlreadyFired. Clean skip — the original run + its claim
@@ -257,17 +264,9 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 		routerLog.Error("fire failed", "task_id", task.ID, "trigger", trigger.ID, "error", err)
 		return false, fmt.Errorf("fire delegate: %w", err)
 	}
-	// fireDelegate succeeded (run inserted + spawner
-	// goroutine launched) — stamp the agent claim. Done AFTER success
-	// so a fireDelegate that fails + reverts to status='queued'
-	// doesn't leave a phantom bot claim on a task that's back in the
-	// human-triage queue.
-	//
-	// The stamp stays best-effort even though the fire is not: the run is
-	// already committed, so a replay would find the (event, trigger) fence
-	// closed and skip before ever reaching this line — there is no retry that
-	// repairs the claim, only one that costs an attempt.
-	r.stampAgentClaim(ctx, orgID, task, actingTeamID, agentID)
+	// The run and its claim are committed. Sync what the router still holds in
+	// memory from the row itself, and broadcast if the claim moved.
+	r.syncClaimAfterCommit(ctx, orgID, task, agentID)
 	return true, nil
 }
 
@@ -288,7 +287,13 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 	// owner fallback (creator_user_id is NOT NULL but the table
 	// has no separate "actor" column); SQLite ignores the column
 	// entirely.
-	inserted, err := r.firings.Enqueue(ctx, orgID, "", entityID, task.ID, trigger.ID, triggeringEventID)
+	//
+	// The claim rides the insert's transaction: a queued firing commits the
+	// bot to this task just as a fired run does, so a failed enqueue leaves no
+	// phantom claim and a landed one is never claim-less. The store skips the
+	// stamp on the collapse path, where the already-queued duplicate's own
+	// enqueue made the commitment.
+	inserted, claimed, err := r.firings.Enqueue(ctx, orgID, "", entityID, task.ID, trigger.ID, triggeringEventID, claimStamp(agentID, actingTeamID))
 	if err != nil {
 		routerLog.Error("enqueue firing failed",
 			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "error", err)
@@ -301,11 +306,7 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 	}
 	routerLog.Info("queued firing, task busy",
 		"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
-	// Pending firing landed in the queue, commit the task to the
-	// org's agent. Stamp here (after EnqueuePendingFiring
-	// succeeded) so a failed enqueue doesn't leave a phantom claim
-	// on an otherwise queued task.
-	r.stampAgentClaim(ctx, orgID, task, actingTeamID, agentID)
+	r.claimCommitted(orgID, task, actingTeamID, agentID, claimed)
 	return true, nil
 }
 
@@ -328,8 +329,13 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 // live remote executor now owns recording task_events 'injected' (or
 // compensating with a pending_firing enqueue if the run turns out dead by
 // apply time) — this method must NOT record it here, or a slow/failed
-// remote apply could leave a duplicate or premature bookkeeping row.
-func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string) bool {
+// remote apply could leave a duplicate or premature bookkeeping row. The
+// claim travels with the signal for the same reason: the owner stamps it
+// inside whichever of those two writes it makes. The stamp this method does
+// on that branch is the immediate, broadcast-carrying half — if it fails,
+// the owner's coupled write is what makes the claim durable, so the
+// commitment can no longer outlive it.
+func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string, claim dbpkg.AgentClaimStamp) bool {
 	// Best-effort: an empty metadataJSON still renders a body naming the
 	// event type alone, so a lookup failure degrades rather than drops the
 	// injection.
@@ -344,6 +350,7 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runI
 		TaskID:            task.ID,
 		TriggerID:         trigger.ID,
 		TriggeringEventID: triggeringEventID,
+		TaskClaim:         claim,
 	})
 	switch outcome {
 	case delegate.InjectNotDelivered:
@@ -351,10 +358,19 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runI
 	case delegate.InjectDeliveredRemote:
 		routerLog.Info("handed additive event to a live remote executor via conversation_signals",
 			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
+		r.stampAgentClaim(ctx, orgID, task, claim)
 		return true
 	default: // InjectDeliveredLocal, InjectStagedResumable
-		if err := r.tasks.MarkEventInjectedSystem(ctx, orgID, task.ID, triggeringEventID); err != nil {
+		// The mark and the claim are one durable step, so a failure loses both
+		// together rather than committing the fold against a task the board
+		// still shows as free. The injection itself is already delivered
+		// (or durably staged), so this stays a handled outcome either way —
+		// falling through to the deferral would fire a second run for an event
+		// the agent has already been handed.
+		if claimed, err := r.tasks.MarkEventInjectedSystem(ctx, orgID, task.ID, triggeringEventID, claim); err != nil {
 			routerLog.Error("failed to mark injected task_event", "task_id", task.ID, "run_id", runID, "error", err)
+		} else {
+			r.claimCommitted(orgID, task, claim.ActingTeamID, claim.AgentID, claimed)
 		}
 		routerLog.Info("injected additive event into active run",
 			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
@@ -362,57 +378,56 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runI
 	}
 }
 
-// stampAgentClaim writes claimed_by_agent_id on a task AND broadcasts the
-// task_claimed event so listeners (Board) can re-render the
-// per-claim lanes. Called from the three commitment points in
-// tryAutoDelegate (post-fireDelegate success, post-EnqueuePendingFiring
-// success, post-tryAdditiveInjection success). All three converge on "the
-// bot has committed to this task." In the same-task absorption case the run
-// the event folded into belongs to this same task (the same-task gate
-// guarantees it), so the claim is normally already the bot's and the stamp
-// is a race-safe no-op — kept for the edge where the task was user-requeued
-// while its run stayed live.
+// claimStamp packages the claim the three commitment points hand to their
+// store call. agentID is the org agent resolved ONCE by tryAutoDelegate — the
+// same id frozen onto the run's blueprint_run actor — so the claim and the
+// run's execution attribution can't drift.
 //
-// agentID is the org agent resolved ONCE by the caller (tryAutoDelegate) — the
-// same id frozen onto the run's blueprint_run actor — so the claim and the run's
-// execution attribution can't drift. Empty agentID (pre-bootstrap / test wiring
-// with no agents store) leaves the claim unstamped rather than crashing, matching
-// the "transient seam between db init and agent bootstrap" case in §4 of the spec.
-//
-// Uses StampAgentClaimIfUnclaimed (race-safe variant) instead of the
-// unconditional setter: if a user claims the same task while the
-// trigger is mid-fire, the user-claim wins and the bot silently
-// loses the race. The drain path's claim_changed guard then skips
-// any pending firing for this task on the next pop — so the auto-
-// trigger commitment never lands, which is the right outcome when
-// the human said "I'll handle this." Same-agent rewrites also
-// short-circuit here, avoiding redundant task_claimed broadcasts on
-// flows that call stampAgentClaim twice in quick succession.
-func (r *Router) stampAgentClaim(ctx context.Context, orgID string, task *domain.Task, actingTeamID, agentID string) {
+// Empty agentID (the seam between db init and agent bootstrap, or test wiring
+// with no agents store) yields the zero stamp, team included. The team is
+// dropped rather than carried because ActingTeamID only ever means
+// "consolidate the owner as part of this claim" — with no agent there is no
+// claim to consolidate under, so a team-only value names a write that will
+// never happen. Every store would skip it either way; what a partial value
+// would actually cost is honesty on the cross-pod inject path, where the two
+// fields ride the signal payload as omitempty JSON and a lone
+// claim_acting_team_id would describe a claim the producer never made.
+func claimStamp(agentID, actingTeamID string) dbpkg.AgentClaimStamp {
 	if agentID == "" {
-		return
+		return dbpkg.AgentClaimStamp{}
 	}
-	ok, err := r.tasks.StampAgentClaimIfUnclaimedSystem(ctx, orgID, task.ID, agentID, actingTeamID)
-	if err != nil {
-		routerLog.Error("failed to stamp agent claim", "task_id", task.ID, "error", err)
-		return
-	}
-	if !ok {
-		// StampAgentClaimIfUnclaimed returns ok=false for any of
-		// three reasons: a user beat the bot to the claim (don't
-		// steal), the bot already owns it (idempotent no-op), or
-		// the task is terminal (done/dismissed — sticky claim past
-		// close, refuse new mutations). All three legitimately
-		// produce "skip the broadcast"; we don't disambiguate at
-		// the log level because the helper doesn't surface the
-		// reason and re-reading just to log is wasted I/O. If a
-		// future debug session needs the breakdown, the helper can
-		// grow a tri-state return or the caller can re-read the
-		// task — neither is load-bearing for correctness.
-		routerLog.Debug("agent claim stamp was a no-op (user owns it, bot already owns it, or task is terminal)", "task_id", task.ID)
+	return dbpkg.AgentClaimStamp{AgentID: agentID, ActingTeamID: actingTeamID}
+}
+
+// claimCommitted reconciles the router with a claim stamp that has already
+// committed inside its engagement's transaction: it updates the in-memory
+// task — the cross-team guard reads ClaimedByAgentID when this same event's
+// next matched trigger comes round — and broadcasts task_claimed so the Board
+// re-renders its per-claim lanes.
+//
+// claimed=false is the store's three-way refusal: a user beat the bot to the
+// claim (don't steal), the bot already owns it (idempotent no-op), or the task
+// is terminal (sticky claim past close). All three mean "nothing moved", so
+// both the in-memory write and the broadcast are correctly skipped; the
+// commitment they rode still stands. We don't disambiguate at the log level —
+// the store doesn't surface which guard tripped, and re-reading just to log it
+// is wasted I/O.
+func (r *Router) claimCommitted(orgID string, task *domain.Task, actingTeamID, agentID string, claimed bool) {
+	if !claimed {
+		if agentID != "" {
+			routerLog.Debug("agent claim stamp was a no-op (user owns it, bot already owns it, or task is terminal)", "task_id", task.ID)
+		}
 		return
 	}
 	task.ClaimedByAgentID = agentID
+	// A landed stamp proves claimed_by_user_id was NULL at commit time — the
+	// store's guard requires it — so a non-empty user claim on this struct is
+	// a read that has since gone stale (a requeue between load and stamp).
+	// Leaving it would put both claim columns on one in-memory task, a state
+	// the DB's XOR forbids and the re-derive guard at rederive.go:70 reads as
+	// "someone owns this" for the wrong reason. syncClaimAfterCommit, the
+	// fire-path sibling, already lands both fields from its read-back.
+	task.ClaimedByUserID = ""
 	if actingTeamID != "" {
 		// Mirror the store's owner-consolidation so the shared task
 		// object reflects the new owning team for later iterations.
@@ -427,6 +442,62 @@ func (r *Router) stampAgentClaim(ctx context.Context, orgID string, task *domain
 			"claimed_by_user_id":  "",
 		},
 	})
+}
+
+// syncClaimAfterCommit reads back the claim that rode the fenced run insert.
+// The fire path is the one commitment whose store call the router doesn't make
+// itself — it goes through the spawner — so the outcome comes from the row
+// rather than a return value. This is a read of the claim column, not a
+// derivation from run liveness: a user who won the race mid-fire reads back as
+// the owner and neither the in-memory task nor the Board is told otherwise.
+//
+// Best-effort. A failed read leaves the router's in-memory copy stale for the
+// rest of this event's trigger loop, which is what a failed stamp used to do
+// on every fire; the committed row is already correct either way.
+func (r *Router) syncClaimAfterCommit(ctx context.Context, orgID string, task *domain.Task, agentID string) {
+	if agentID == "" {
+		return
+	}
+	fresh, err := r.tasks.GetSystem(ctx, orgID, task.ID)
+	if err != nil || fresh == nil {
+		routerLog.Warn("could not read back the task claim committed with the run", "task_id", task.ID, "error", err)
+		return
+	}
+	moved := task.ClaimedByAgentID != agentID && fresh.ClaimedByAgentID == agentID
+	task.ClaimedByAgentID = fresh.ClaimedByAgentID
+	task.ClaimedByUserID = fresh.ClaimedByUserID
+	task.TeamID = fresh.TeamID
+	if moved {
+		r.ws.Broadcast(websocket.Event{
+			Type:  "task_claimed",
+			OrgID: orgID,
+			Data: map[string]any{
+				"task_id":             task.ID,
+				"claimed_by_agent_id": agentID,
+				"claimed_by_user_id":  "",
+			},
+		})
+	}
+}
+
+// stampAgentClaim is the standalone claim write, now reduced to the one
+// commitment the router cannot ride a transaction with: an additive event
+// handed to a live REMOTE executor. That pod owns the durable write (the
+// 'injected' mark, or the compensating pending_firing if the run is gone by
+// apply time) and stamps the claim inside it — the signal payload carries the
+// claim for exactly that. This call is the local, immediate half, so the Board
+// sees the claim now instead of one cross-pod hop later; if it fails, the
+// owner's coupled write still makes it durable.
+func (r *Router) stampAgentClaim(ctx context.Context, orgID string, task *domain.Task, claim dbpkg.AgentClaimStamp) {
+	if claim.AgentID == "" {
+		return
+	}
+	ok, err := r.tasks.StampAgentClaimIfUnclaimedSystem(ctx, orgID, task.ID, claim.AgentID, claim.ActingTeamID)
+	if err != nil {
+		routerLog.Error("failed to stamp agent claim", "task_id", task.ID, "error", err)
+		return
+	}
+	r.claimCommitted(orgID, task, claim.ActingTeamID, claim.AgentID, ok)
 }
 
 // fireDelegate transitions the task to delegated status, broadcasts the
@@ -444,7 +515,15 @@ func (r *Router) stampAgentClaim(ctx context.Context, orgID string, task *domain
 // path passes the agent it resolved up front (and stamps the same id as the
 // claim); the drain path passes the firing's already-stamped task claim. It's
 // frozen onto blueprint_runs.actor_agent_id at mint and inherited by every step.
-func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID, actorAgentID string) (string, error) {
+//
+// claim is the task claim to write inside the run insert's own transaction,
+// and is deliberately NOT derived from actorAgentID. The immediate path passes
+// one: this fire is the commitment, so the claim must land with it. The drain
+// path passes the zero stamp: its firing's claim was committed by the enqueue
+// that queued it, and attemptDrainOne has just re-validated that the claim is
+// still the bot's — re-stamping here would silently re-impose a claim a user
+// cleared by requeueing in the interim.
+func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID, actorAgentID string, claim dbpkg.AgentClaimStamp) (string, error) {
 	// The handoff point, and the last thing this trace can see: what the
 	// spawner enqueues is claimed minutes later, by another process, and up
 	// to five times — so the engagement gets its own root and the
@@ -459,13 +538,13 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 
 	// No status flip here. Previously we transitioned to
 	// status='delegated' for UI feedback + dedup. Now the
-	// responsibility axis is the claim columns: stampAgentClaim
-	// (called by the caller on fireDelegate success) writes
-	// claimed_by_agent_id and broadcasts task_claimed, which is what
-	// the Board now listens for. Status stays 'queued' until a
-	// genuine lifecycle move (done / dismissed / snoozed). Dedup is
-	// unaffected — the partial unique index gates on status NOT IN
-	// ('done', 'dismissed'), so a queued+claimed task still matches.
+	// responsibility axis is the claim columns: the run insert writes
+	// claimed_by_agent_id in its own transaction and the caller
+	// broadcasts task_claimed, which is what the Board now listens
+	// for. Status stays 'queued' until a genuine lifecycle move (done
+	// / dismissed / snoozed). Dedup is unaffected — the partial unique
+	// index gates on status NOT IN ('done', 'dismissed'), so a
+	// queued+claimed task still matches.
 	routerLog.Info("auto-delegating task",
 		"task_id", task.ID, "trigger", trigger.ID, "blueprint", trigger.BlueprintID)
 
@@ -485,11 +564,12 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 		TriggerID:           trigger.ID,
 		TriggeringEventID:   triggeringEventID,
 		ActorAgentID:        actorAgentID,
+		TaskClaim:           claim,
 	})
 	if err != nil {
 		// Post-B+: nothing to revert status-wise (status stayed 'queued').
-		// stampAgentClaim hasn't run yet either — the caller only calls
-		// it after fireDelegate returns nil. So this failure leaves the
+		// The claim didn't land either — it rides the run insert, so a failure
+		// that never committed a run never committed a claim. This leaves the
 		// task in a clean unclaimed-queued state, which is correct.
 		//
 		// The two anticipated refusals — a replay hitting the fence, a task
@@ -803,8 +883,11 @@ func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *doma
 
 	// The actor is the agent that already claimed this task (guaranteed non-empty
 	// by the claim guard above) — the drain re-fires the same bot's commitment, so
-	// the new blueprint_run's frozen actor matches the standing task claim.
-	id, err := r.fireDelegate(ctx, orgID, task, *trigger, firing.TriggeringEventID, task.ClaimedByAgentID)
+	// the new blueprint_run's frozen actor matches the standing task claim. No
+	// claim stamp rides this insert: the claim is already the bot's (the guard
+	// above just read it), and re-writing it would be the one shape that turns a
+	// user's requeue-with-a-live-run back into a bot claim.
+	id, err := r.fireDelegate(ctx, orgID, task, *trigger, firing.TriggeringEventID, task.ClaimedByAgentID, dbpkg.AgentClaimStamp{})
 	if err != nil {
 		// The run for this (event, trigger) already exists — a
 		// prior drain attempt fired it (process died before MarkFired), or

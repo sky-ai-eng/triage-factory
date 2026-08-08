@@ -426,7 +426,15 @@ type BlueprintStore interface {
 	// both are part of the fence key, and an empty value binds NULL (which the
 	// partial index treats as distinct, silently skipping the fence). Impls
 	// reject that with ErrBlueprintRunFenceRequiresEventAndTrigger.
-	CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun) (inserted bool, err error)
+	//
+	// claim rides the same transaction as the run row: this insert IS the
+	// commitment point of a delegation, so the task's agent claim is written
+	// with it or not at all (see AgentClaimStamp). Skipped on the fenced
+	// no-op — a replay must not re-stamp a claim the original firing already
+	// settled, and may not steal one the user has since taken. Returns
+	// claimed=true only when the stamp actually moved the claim; a refusal
+	// still commits the run.
+	CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim AgentClaimStamp) (inserted, claimed bool, err error)
 
 	// SetRunWorktreePathSystem fills in a blueprint_run's worktree_path after
 	// the shared worktree is built. The row is created up front (before setup,

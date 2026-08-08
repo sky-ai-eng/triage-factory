@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -41,7 +42,7 @@ func TestPendingFiringsStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	const bogusOrg = "11111111-1111-1111-1111-111111111111"
 	ctx := t.Context()
 
-	if _, err := stores.PendingFirings.Enqueue(ctx, bogusOrg, runmode.LocalDefaultUserID, "e", "t", "tr", "ev"); err == nil {
+	if _, _, err := stores.PendingFirings.Enqueue(ctx, bogusOrg, runmode.LocalDefaultUserID, "e", "t", "tr", "ev", db.AgentClaimStamp{}); err == nil {
 		t.Errorf("Enqueue with non-local orgID should error")
 	}
 	if _, err := stores.PendingFirings.PopForTask(ctx, bogusOrg, "t"); err == nil {
@@ -185,8 +186,47 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB) dbtest.PendingFiringsSeeder {
 		return brID
 	}
 
+	// The claim-coupling subtests stamp a real agents row — tasks
+	// .claimed_by_agent_id FKs agents(id), so a synthetic id wouldn't insert.
+	// agents is UNIQUE (org_id), and local bootstrap already mints the org's
+	// one bot, so adopt that row rather than racing its uniqueness.
+	agentID := "agent-pf-" + uuid.New().String()[:8]
+	if err := conn.QueryRow(`SELECT id FROM agents WHERE org_id = ?`, runmode.LocalDefaultOrgID).Scan(&agentID); err == sql.ErrNoRows {
+		if _, err := conn.Exec(
+			`INSERT INTO agents (id, org_id, display_name) VALUES (?, ?, 'PendingFirings Bot')`,
+			agentID, runmode.LocalDefaultOrgID,
+		); err != nil {
+			panic(fmt.Sprintf("newSQLitePendingFiringsSeeder: seed agent: %v", err))
+		}
+	} else if err != nil {
+		panic(fmt.Sprintf("newSQLitePendingFiringsSeeder: lookup agent: %v", err))
+	}
+
+	taskClaim := func(t *testing.T, taskID string) (string, string) {
+		t.Helper()
+		var agent, user sql.NullString
+		if err := conn.QueryRow(
+			`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = ?`, taskID,
+		).Scan(&agent, &user); err != nil {
+			t.Fatalf("read task claim: %v", err)
+		}
+		return agent.String, user.String
+	}
+
+	claimTaskForUser := func(t *testing.T, taskID string) {
+		t.Helper()
+		if _, err := conn.Exec(`
+			UPDATE tasks SET claimed_by_user_id = ?, claimed_by_agent_id = NULL WHERE id = ?
+		`, runmode.LocalDefaultUserID, taskID); err != nil {
+			t.Fatalf("claim task for user: %v", err)
+		}
+	}
+
 	return dbtest.PendingFiringsSeeder{
-		Tuple:      tuple,
-		RunForTask: runForTask,
+		Tuple:            tuple,
+		RunForTask:       runForTask,
+		AgentID:          agentID,
+		TaskClaim:        taskClaim,
+		ClaimTaskForUser: claimTaskForUser,
 	}
 }

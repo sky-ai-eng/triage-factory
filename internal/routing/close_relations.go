@@ -408,59 +408,68 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 
 // --- shared close helpers (used by the driver) ------------------------------
 
-// cancelActiveRunsForTask asks the spawner to stop any non-terminal runs on
-// the task and cancel the blueprints behind them. Called before a task
-// transitions to done/dismissed so the agent stops work on a task the system
-// has decided is resolved. The blueprint half rides along because this is the
-// task's own disposition: nothing will resume these conversations, so leaving
-// their blueprints frozen 'running' would hold worktrees for finished work.
+// stopRunsOnClosedTask asks the spawner to stop the runs the close just ended
+// and cancel the blueprints behind them: the stop note on the transcript, the
+// kill signal, and the park. runIDs is the then-active set the close
+// transaction read and stamped, so this acts on exactly what closed rather
+// than on a second, later read.
 //
-// Errors are logged and swallowed. "no active run" from the spawner is expected
-// when a run races us to natural completion between the DB lookup and the
-// call — the run ends up terminal either way and the task close still
-// lands. Teardown is fire-and-forget; the run's own goroutine parks it
-// asynchronously.
+// The blueprint half rides along because this is the task's own disposition:
+// nothing will resume these conversations, so leaving their blueprints frozen
+// 'running' would hold worktrees for finished work. Its `cancel_requested`
+// write lands on a flag the tx already set — an idempotent re-set, which
+// RequestRunCancelSystem's `cancel_requested = false` guard turns into a
+// no-op that reports changed=false, and every caller of it already treats
+// that as "already called off" rather than a failure.
 //
-// Deliberately EXCLUDED from the close phase's routing obligation, unlike the
-// task close it precedes: a replay is only a repair for work the replay can
-// still reach, and this cascade is reachable exactly once. If the stop fails
-// after the task closed, the replayed event finds no active task of that type
-// and never walks back here — so returning the error would buy a re-run of the
-// whole event that repairs nothing, while costing a duplicate audit row. The
-// same retry-unrepairable class as the agent-claim stamp; a run left churning
-// on a resolved task is bounded by its own turn budget.
-func (r *Router) cancelActiveRunsForTask(ctx context.Context, orgID, taskID string) {
+// Errors are logged and swallowed, and this is the best-effort HALF of a split
+// the close transaction owns the other side of. The intent is durable before
+// this runs, so a kill that never lands no longer forgets the run: the claim
+// gate refuses to drive a cancel-requested blueprint, and the reaper's cancel
+// arm finalizes it once its executor is gone. What is lost is only promptness
+// — a live agent may finish the turn it is on. "no active run" from the
+// spawner is expected when a run races us to natural completion; the run ends
+// up terminal either way.
+//
+// So this stays OUT of the close phase's routing obligation, but for a
+// narrower reason than before: a replay could not repair it anyway (a replayed
+// close finds no active task and never walks back here), and now there is
+// nothing left for it to repair.
+func (r *Router) stopRunsOnClosedTask(orgID, taskID string, runIDs []string) {
 	if r.spawner == nil {
 		return
 	}
-	ids, err := r.agentRuns.ActiveIDsForTaskSystem(ctx, orgID, taskID)
-	if err != nil {
-		routerLog.Error("active-run lookup for task failed", "task_id", taskID, "error", err)
-		return
-	}
-	for _, id := range ids {
+	for _, id := range runIDs {
 		if err := r.spawner.StopAndCancelBlueprint(orgID, id, "", delegate.StopCauseTaskClosed); err != nil {
 			routerLog.Error("stop run on task close failed", "run_id", id, "task_id", taskID, "error", err)
 		}
 	}
 }
 
-// closeTaskWithAudit closes a task and records the closing event in task_events
-// so the full close timeline is reconstructable. Every close goes through here
-// (including the entity-wide terminating close), so cancellation + audit are
-// uniform.
+// closeTaskWithAudit closes a task, records the closing event in task_events,
+// and stops the runs working on it. Every close goes through here (including
+// the entity-wide terminating close), so cancellation + audit are uniform.
 //
-// It cancels any in-flight run on the task first — task state is the
-// authoritative invalidation surface, so runs and queued firings derive from
-// it. Without the cancel, closing a task mid-run would leave the agent churning
-// on work the system already considers resolved.
+// The first three writes — the task's terminal flip, the audit row, and
+// `cancel_requested` on the blueprints behind the task's then-active runs —
+// are one transaction. Task state is the authoritative invalidation surface,
+// and the intent to stop what it invalidates has to be as durable as the
+// invalidation itself: the kill below is reachable exactly once, so a close
+// that committed without the intent could leave a run the system has forgotten
+// it meant to stop, with no replay able to reach it.
+//
+// The kill then follows, post-commit and best-effort. Only a close this call
+// actually performed cascades: an already-terminal task returns no run ids, so
+// a replayed close neither stamps nor stops — the run under it may be one a
+// user resumed after the close, which the resume ladder deliberately allows.
 func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingEventID, closeReason, closeEventType string) error {
-	r.cancelActiveRunsForTask(ctx, orgID, taskID)
-	if err := r.tasks.CloseSystem(ctx, orgID, taskID, closeReason, closeEventType); err != nil {
+	closed, activeRunIDs, err := r.tasks.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
+	if err != nil {
 		return err
 	}
-	if closingEventID != "" {
-		_ = r.tasks.RecordEventSystem(ctx, orgID, taskID, closingEventID, "closed")
+	if !closed {
+		return nil
 	}
+	r.stopRunsOnClosedTask(orgID, taskID, activeRunIDs)
 	return nil
 }

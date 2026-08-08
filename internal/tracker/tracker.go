@@ -1166,6 +1166,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 	ctx, diffSpan := tracer.Start(ctx, "tracker.jira.diff_emit")
 
 	eventsEmitted := 0
+	staleReads := 0
 	for _, e := range entities {
 		newState, ok := refreshed[e.SourceID]
 		if !ok {
@@ -1211,6 +1212,22 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 			}
 		}
 
+		// Drop a read that predates what we already hold, before it can reach
+		// either the diff or the snapshot write. Jira only ever moves
+		// `updated` forward, so a backwards read is the search index serving
+		// state we have already superseded — never news. Warn rather than
+		// Debug because that claim is the whole justification for
+		// suppressing: if a read that WAS news ever gets dropped here, this
+		// line is the bug report.
+		if storedAt, fetchedAt, stale := jiraReadIsStale(prevSnap, newSnap); stale {
+			staleReads++
+			trackerLog.WarnContext(ctx, "jira read predates stored snapshot; suppressing this cycle's diff and snapshot write",
+				"source_id", e.SourceID, "entity_id", e.ID,
+				"stored_updated", storedAt.Format(time.RFC3339Nano),
+				"fetched_updated", fetchedAt.Format(time.RFC3339Nano))
+			continue
+		}
+
 		// Per-project Done.Members for this entity's project_key. Falls
 		// back to the union across all projects when the entity is in
 		// a project that's no longer configured (defensive — terminal
@@ -1251,9 +1268,15 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 	}
 
 	diffSpan.SetAttributes(telemetry.Count(eventsEmitted))
+	if staleReads > 0 {
+		// A disposition rather than an error status: the cycle worked, it
+		// declined to act on part of its input. Without it a cycle that
+		// suppressed everything is indistinguishable from a quiet one.
+		diffSpan.SetAttributes(telemetry.Disposition("stale_read_suppressed"))
+	}
 	diffSpan.End()
 
-	trackerLog.InfoContext(ctx, "jira refresh", "discovered", len(discovered), "entities", len(entities), "refreshed", len(refreshed), "events", eventsEmitted)
+	trackerLog.InfoContext(ctx, "jira refresh", "discovered", len(discovered), "entities", len(entities), "refreshed", len(refreshed), "events", eventsEmitted, "stale_reads", staleReads)
 
 	// Always fire the sentinel — it means "a poll cycle completed," not "a
 	// poll produced work." Carry-over readiness depends on this firing even
@@ -1262,6 +1285,36 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 	t.EmitPollComplete(ctx, "jira", startedAt, len(entities), eventsEmitted)
 
 	return eventsEmitted, nil
+}
+
+// jiraReadIsStale reports whether a freshly fetched snapshot is older than the
+// one already stored, handing back both parsed timestamps so the caller can
+// name them.
+//
+// The refresh reads tracked issues out of Jira's search index, which is
+// eventually consistent on both deployments — a page can answer with state a
+// previous page already superseded. The cost of acting on one is not
+// lateness but fabrication: the diff would emit the transition backwards and
+// then persist the older read as the baseline, so the next cycle's fresh page
+// emits the same transition forwards again. Since the snapshot-diff is the
+// sole re-emit prevention, it has no way to recognize its own input
+// regressing, and the defence has to sit in front of it. One real status
+// change arriving out of order that way mints two tasks, because the new
+// status name is the dedup key; one assignment change reaches auto-delegation
+// twice.
+//
+// Strictly older, because Jira's `updated` is millisecond-resolution and two
+// edits landing inside one millisecond must still diff. An absent or
+// unparseable timestamp on either side is not evidence of anything, so it
+// falls through to the diff unchanged — snapshots written before the field
+// existed carry none.
+func jiraReadIsStale(stored, fetched domain.JiraSnapshot) (storedAt, fetchedAt time.Time, stale bool) {
+	storedAt, storedOK := domain.ParseExternalTime(stored.UpdatedAt)
+	fetchedAt, fetchedOK := domain.ParseExternalTime(fetched.UpdatedAt)
+	if !storedOK || !fetchedOK {
+		return storedAt, fetchedAt, false
+	}
+	return storedAt, fetchedAt, fetchedAt.Before(storedAt)
 }
 
 // discoverJira runs JQL queries to find new issues. Each project gets

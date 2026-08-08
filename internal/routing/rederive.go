@@ -9,33 +9,73 @@ import (
 
 // ReDeriveAfterScoring re-checks deferred triggers for tasks that just
 // received AI scores. Triggers with MinAutonomySuitability > 0 are skipped
-// during HandleEvent and deferred to this callback, which fires from the
-// scorer's OnScoringCompleted hook. orgID is the scoring context — the
-// scorer batches per-org so every task in the slice belongs to the same
-// tenant. Per-team auto_delegate_enabled is checked inside reDeriveTask
-// after the task's team_id is resolved.
+// during HandleEvent and deferred to this pass. orgID is the scoring
+// context — the scorer batches per-org so every task in the slice belongs
+// to the same tenant. Per-team auto_delegate_enabled is checked inside
+// reDeriveTask after the task's team_id is resolved.
+//
+// Two callers drive it, both from the scorer: the OnScoringCompleted hook
+// right after the scores commit (the fast path), and the cycle-start drain
+// of tasks.rederive_owed (the crash backstop, for scores whose callback
+// never got to run). Both hand it the same work, so the pass discharges the
+// owed mark itself — per pass, after the evaluations it covers.
 //
 // ctx is the scoring cycle's, minus its cancellation (the caller applies
 // context.WithoutCancel): this runs asynchronously and outlives the cycle
 // that scheduled it, and firing half a deferred trigger — a run inserted,
 // its claim unstamped — is worse than one that lands late.
 func (r *Router) ReDeriveAfterScoring(ctx context.Context, orgID string, taskIDs []string) {
+	evaluated := make([]string, 0, len(taskIDs))
 	for _, taskID := range taskIDs {
-		r.reDeriveTask(ctx, orgID, taskID)
+		if r.reDeriveTask(ctx, orgID, taskID) {
+			evaluated = append(evaluated, taskID)
+		}
+	}
+	r.clearReDeriveOwed(ctx, orgID, evaluated)
+}
+
+// clearReDeriveOwed discharges the owed mark for the tasks this pass
+// actually evaluated. Batched at the end of the pass rather than per task:
+// the ordering rule is only that a task is never cleared before its own
+// evaluation, and a crash before the batch lands just leaves the whole set
+// owed for the next cycle to redo — which is safe, because re-deriving a
+// task twice fires at most once (the (triggering_event_id, trigger_id)
+// replay fence and the one-active-auto-run index).
+//
+// A clear failure is logged and dropped for the same reason: the cost is a
+// redundant re-derive next cycle.
+func (r *Router) clearReDeriveOwed(ctx context.Context, orgID string, taskIDs []string) {
+	if r.scores == nil || len(taskIDs) == 0 {
+		return
+	}
+	if err := r.scores.ClearReDeriveOwed(ctx, orgID, taskIDs); err != nil {
+		routerLog.Error("re-derive: failed to clear the owed mark", "org", orgID, "count", len(taskIDs), "error", err)
 	}
 }
 
-func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) {
+// reDeriveTask evaluates one task's deferred triggers. It reports whether
+// the evaluation ran to a conclusion — true for every decided outcome,
+// including the many "nothing to fire" ones, and false only when a store
+// read bailed out before the task could be decided. Only a true discharges
+// the owed mark; a bail keeps it, so the next cycle's drain retries rather
+// than silently swallowing the deferral the same way a crash used to.
+func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) bool {
 	task, err := r.tasks.GetSystem(ctx, orgID, taskID)
-	if err != nil || task == nil {
-		return
+	if err != nil {
+		routerLog.Error("re-derive: failed to load task", "task_id", taskID, "error", err)
+		return false
+	}
+	// A task that no longer exists is decided, not deferred — there is
+	// nothing left to evaluate and nothing left to owe.
+	if task == nil {
+		return true
 	}
 
 	// Entitlement gate (TFAC-524) — a task on a now-gated-off event type
 	// fires nothing during the post-scoring deferred-trigger pass, mirroring
 	// HandleEvent's freeze.
 	if !entitlements.EventTypeAllowed(orgID, task.EventType) {
-		return
+		return true
 	}
 
 	// Only re-derive queued tasks. The lifecycle axis
@@ -45,7 +85,7 @@ func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) {
 	// should not bypass that signal). done/dismissed naturally fall
 	// out of the != "queued" check.
 	if task.Status != "queued" {
-		return
+		return true
 	}
 
 	// The per-team auto_delegate kill switch is checked per firing team
@@ -68,12 +108,14 @@ func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) {
 	// commitment is real and the lifecycle event that ends the
 	// commitment will arrive via its own path."
 	if task.ClaimedByAgentID != "" || task.ClaimedByUserID != "" {
-		return
+		return true
 	}
 
-	// No score landed — nothing to gate against.
+	// No score landed — nothing to gate against. Decided, not deferred: a
+	// task with no score has nothing for a later pass to do differently, and
+	// keeping it owed would re-derive it every cycle forever.
 	if task.AutonomySuitability == nil {
-		return
+		return true
 	}
 
 	// Fetch handlers for this event type — same call HandleEvent uses,
@@ -81,14 +123,14 @@ func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) {
 	handlers, err := r.handlers.GetEnabledForEventSystem(ctx, orgID, task.EventType)
 	if err != nil {
 		routerLog.Error("re-derive: failed to query event_handlers", "event_type", task.EventType, "error", err)
-		return
+		return false
 	}
 
 	// Fetch the primary event's metadata for predicate matching.
 	metadata, err := r.events.GetMetadataSystem(ctx, orgID, task.PrimaryEventID)
 	if err != nil {
 		routerLog.Error("re-derive: failed to fetch event metadata", "event_id", task.PrimaryEventID, "error", err)
-		return
+		return false
 	}
 
 	// The task's recorded visibility set — the teams whose handlers
@@ -101,7 +143,7 @@ func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) {
 	visibleTeams, err := r.tasks.VisibilityTeamsSystem(ctx, orgID, taskID)
 	if err != nil {
 		routerLog.Error("re-derive: failed to fetch visibility teams for task", "task_id", taskID, "error", err)
-		return
+		return false
 	}
 	visibleSet := map[string]struct{}{}
 	if owner := teamIDValue(task); owner != "" {
@@ -116,6 +158,12 @@ func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) {
 	// and a NULL owner fires nothing. Other event types keep the visibility-set
 	// gate so a matched team's deferred trigger fires against the shared task.
 	authorCentric := isAuthorCentricGitHubEvent(task.EventType)
+
+	// Set false by a per-trigger read that couldn't reach a verdict, so the
+	// task keeps its owed mark and the next cycle's drain revisits it. A
+	// trigger that was evaluated and declined — or fired and failed — is a
+	// verdict; only "couldn't find out" defers.
+	decided := true
 
 	for _, trigger := range handlers {
 		if trigger.Kind != domain.EventHandlerKindTrigger {
@@ -132,12 +180,16 @@ func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) {
 		} else if _, visible := visibleSet[firingTeam]; !visible {
 			continue
 		}
-		// The kill-switch read and the firing below are best-effort here, in
-		// contrast to the routed path: this pass hangs off a scoring cycle
-		// with no queue row to requeue, so a failure has nowhere to be
-		// returned to. The next score on the task re-runs it.
+		// An unreadable kill switch is never treated as permission, but it is
+		// also not a decision: the task keeps its owed mark so the next
+		// cycle's drain asks again. A switch that reads false is a decision
+		// and needs no retry.
 		enabled, err := r.autoDelegateEnabledForTeam(ctx, firingTeam)
-		if err != nil || !enabled {
+		if err != nil {
+			decided = false
+			continue
+		}
+		if !enabled {
 			continue
 		}
 		minAutonomy := derefFloatDefault(trigger.MinAutonomySuitability, 0)
@@ -171,10 +223,15 @@ func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) {
 		// event — that's the one whose match scored autonomously above
 		// threshold. Real-event provenance keeps the audit trail honest
 		// when a re-derived firing ends up enqueued.
+		// A firing that errors is still a decision this pass reached: the
+		// task is now the firing machinery's business (the replay fence, the
+		// pending-firings queue, the breaker), and re-deriving it every
+		// subsequent cycle would just retry the same call forever.
 		if _, err := r.tryAutoDelegate(ctx, orgID, task, trigger, task.EntityID, task.PrimaryEventID, firingTeam); err != nil {
 			routerLog.Error("re-derive: deferred trigger failed to fire", "task_id", taskID, "trigger_id", trigger.ID, "error", err)
 		}
 	}
+	return decided
 }
 
 // derefIntDefault unwraps a *int with a default if nil. Used on

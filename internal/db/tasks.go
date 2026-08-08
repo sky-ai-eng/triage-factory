@@ -9,6 +9,44 @@ import (
 
 //go:generate go run github.com/vektra/mockery/v2 --name=TaskStore --output=./mocks --case=underscore --with-expecter
 
+// AgentClaimStamp is the guarded task-claim write that rides *inside*
+// another store method's transaction — the bot taking responsibility for a
+// task, written in the same durable step as the engagement that commits it
+// (a fenced run insert, a queued firing, an event folded into a live run).
+//
+// It is a parameter type rather than a call of its own because the two
+// writes must not be separable. A commitment that lands while its stamp
+// silently fails leaves the board showing a free task under a live agent
+// run, and the firing fences (the (triggering_event_id, trigger_id) replay
+// fence, the pending-unique) mean a replay of the event skips before it
+// could ever re-stamp — so nothing repairs it. Coupling them is what makes
+// "unclaimed with a live run" mean only what the requeue path intends.
+//
+// A zero value (empty AgentID) means "no stamp": the commitment writes
+// alone. That is the honest degrade for the seam between DB init and agent
+// bootstrap where no org agent resolves, and for the drain path, whose
+// claim was already stamped by the enqueue that queued the firing (and
+// whose task the drain re-validates as still bot-claimed before firing).
+//
+// ActingTeamID is the team whose trigger fired. On a successful stamp it
+// becomes the task's owning team, consolidating the card; empty leaves
+// team_id unchanged. It is meaningful ONLY alongside a non-empty AgentID —
+// it names a consolidation that happens *as part of* the claim, so a
+// team-without-agent value describes a write that cannot occur. Producers
+// normalize to the zero value rather than carrying one; impls skip on
+// AgentID alone, so a partial value is inert but dishonest (it survives
+// serialization on the cross-pod inject path).
+//
+// Semantics are StampAgentClaimIfUnclaimed's exactly —
+// including its three-way refusal (a user claim wins, a same-agent rewrite
+// is a no-op, a terminal task refuses) — and a refusal never fails the
+// surrounding commitment: the claim race has a winner either way, and the
+// run insert (or firing row) must still stand.
+type AgentClaimStamp struct {
+	AgentID      string
+	ActingTeamID string
+}
+
 // TaskStore owns the tasks table — lifecycle, claims, dedup,
 // swipe-triggered transitions, plus the run-history queries that
 // power the auto-delegate breaker.
@@ -363,6 +401,41 @@ type TaskStore interface {
 	SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) error
 	BumpSystem(ctx context.Context, orgID, taskID, eventID string) error
 	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
+
+	// CloseWithRunCancelIntentSystem is the close the router performs: the
+	// task's terminal flip, its task_events audit row, and the durable STOP
+	// INTENT for the runs the close ends — one transaction, three tables.
+	//
+	// The intent is `cancel_requested` on the blueprint runs behind the task's
+	// then-active conversations, and it is transactional because the kill that
+	// follows the commit is not reachable twice. A close whose cascade failed
+	// afterwards leaves no active task for a replay to find, so nothing walks
+	// back to the runs; stamping here means the system cannot forget it meant
+	// to stop them. From the flag alone the rest finishes on its own — the
+	// claim gate refuses to drive a cancel-requested run, and the reaper's
+	// cancel arm finalizes it once its executor is gone.
+	//
+	// The returned run ids are that same then-active set, read inside the tx:
+	// every non-terminal conversation on the task, blueprint-parented or not,
+	// which is the selection the caller's post-commit stop cascade targets.
+	// Conversations with no blueprint parent are returned (they still get
+	// stopped) but stamp nothing — there is no blueprint to call off.
+	//
+	// closed reports whether THIS call performed the transition. False means
+	// the task was already terminal, and then nothing is stamped and no ids
+	// are returned: a task that closed earlier may since have had a run
+	// legitimately resumed under it (a finished blueprint's final step, which
+	// the resume ladder allows), and a replayed close must not reach back and
+	// kill work a user started after the fact. The audit row is written either
+	// way, matching CloseSystem+RecordEventSystem's INSERT-or-nothing shape.
+	//
+	// closeEventType and closingEventID travel as a pair: an event-driven
+	// close passes both, a non-event close (the terminal reconciler's) passes
+	// neither, and an empty closingEventID writes no audit row. Passing one
+	// without the other stamps a close_event_type no task_events row accounts
+	// for — not rejected here, but no caller does it.
+	CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeRunIDs []string, err error)
+
 	SetStatusSystem(ctx context.Context, orgID, taskID, status string) error
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
 
@@ -372,7 +445,12 @@ type TaskStore interface {
 	// row RecordEventSystem/upsertTaskForEvent already wrote for that same
 	// (task, event) pair (RecordEventSystem itself is INSERT-only and would
 	// silently no-op on that PK collision). No-op if the row is absent.
-	MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string) error
+	//
+	// claim rides the same transaction: folding an event into a live run is
+	// the bot committing to that task, so the claim is written with the fold
+	// or not at all (see AgentClaimStamp). Returns claimed=true only when the
+	// stamp actually moved the claim — a refusal commits the fold anyway.
+	MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string, claim AgentClaimStamp) (claimed bool, err error)
 	CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
 	StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error)
 
