@@ -80,8 +80,11 @@ func (a *App) startBrain(term int64) {
 	go a.router.RunEventQueue(brainCtx, a.eventWake, routing.DefaultEventScanInterval, routing.DefaultEventPruneInterval, routing.DefaultEventPruneAge)
 	// Poll schedule: RestartAll's initial synchronous cycle plus its
 	// ticking loop. A fresh acquisition always starts cold (every org
-	// due) — bounded/benign per the spec (mostly free 304s; GitHub cycles
-	// are budgeted/resumable from the durable cursor, TFAC-571).
+	// due) — bounded/benign per the spec, because the per-repo ETag state
+	// the catch-up cycle re-lists against is durable, so it costs mostly
+	// free 304s. The GitHub round-robin resume cursor is not: it lives on
+	// the poller process, so this acquisition also restarts at the head of
+	// each org's repo list rather than where its predecessor stopped.
 	a.reloader.initialPoll()
 	// Brain-bound sentinel relay LISTEN (tf_bus): "only the brain LISTENs
 	// on tf_bus" (spec §5.3) is enforced by SUBSCRIPTION scope — the

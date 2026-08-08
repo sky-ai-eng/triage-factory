@@ -43,7 +43,9 @@ import (
 // A false return is not necessarily a staged injection: the live gate may have raced a
 // closing process, or (when the caller chose to stage) the append may have failed.
 // Callers that need the durable guarantee check the store error; HandlePRNewCommits
-// treats a drop as acceptable (the next poll re-diffs the head).
+// tolerates a drop because its news is self-renewing — the next head advance is a
+// fresh transition carrying a fresh injection. Nothing re-delivers THIS one, so a
+// producer whose news does not recur must not copy that posture.
 func (s *Spawner) StageOrDeliverInjection(orgID, runID, producer, body string) (delivered bool) {
 	delivered, _, _ = s.stageOrDeliverInjection(orgID, runID, producer, body)
 	return delivered
