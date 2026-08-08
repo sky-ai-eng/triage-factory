@@ -261,9 +261,33 @@ func newPgEventQueueSeeder(h *pgtest.Harness, orgID string) dbtest.EventQueueSee
 			t.Fatalf("clear entity_id touched %d rows, want 1", n)
 		}
 	}
+	entitySnapshot := func(t *testing.T, entityID string) (string, int64) {
+		t.Helper()
+		var snap string
+		var seq int64
+		if err := conn.QueryRow(
+			`SELECT COALESCE(snapshot_json::text, ''), poll_seq FROM entities WHERE id = $1 AND org_id = $2`,
+			entityID, orgID,
+		).Scan(&snap, &seq); err != nil {
+			t.Fatalf("read entity snapshot: %v", err)
+		}
+		return snap, seq
+	}
+	countEventRows := func(t *testing.T, entityID string) int {
+		t.Helper()
+		var n int
+		if err := conn.QueryRow(
+			`SELECT COUNT(*) FROM events WHERE entity_id = $1 AND org_id = $2`, entityID, orgID,
+		).Scan(&n); err != nil {
+			t.Fatalf("count events: %v", err)
+		}
+		return n
+	}
 	return dbtest.EventQueueSeeder{
 		Entity:         entity,
 		BackdateClaim:  backdateClaim,
 		ClearEntityRef: clearEntityRef,
+		EntitySnapshot: entitySnapshot,
+		CountEventRows: countEventRows,
 	}
 }

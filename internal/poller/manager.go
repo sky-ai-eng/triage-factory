@@ -29,8 +29,13 @@ type Manager struct {
 	// because each poll cycle constructs one Tracker per active org —
 	// orgID is a per-tracker construction parameter, not a per-call
 	// argument. See the per-org loops in runGitHubCycle / runJiraCycle.
-	tasks        db.TaskStore
-	entities     db.EntityStore
+	tasks    db.TaskStore
+	entities db.EntityStore
+	// eventQueue is the durable outbox the tracker's diff arms write
+	// their transitions to, in the same transaction as the snapshot CAS
+	// those transitions were diffed against. Held here only to construct
+	// the per-org Tracker — the poller itself never touches the queue.
+	eventQueue   db.EventQueueStore
 	users        db.UsersStore            // source of the local user's host-scoped GitHub identity
 	repos        db.RepoStore             // configured-repo names for GitHub poller startup
 	orgs         db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
@@ -98,12 +103,13 @@ type Manager struct {
 	lastJiraSuccess   map[string]time.Time
 }
 
-func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
+func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
 	return &Manager{
 		database:     database,
 		pub:          pub,
 		tasks:        tasks,
 		entities:     entities,
+		eventQueue:   eventQueue,
 		users:        users,
 		repos:        repos,
 		orgs:         orgs,
@@ -122,7 +128,7 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 // (struct of method holders + store references) so per-cycle
 // allocation is fine.
 func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
-	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, orgID)
+	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.eventQueue, orgID)
 }
 
 // reviewerResolver builds the per-cycle TF-known reviewer resolver.

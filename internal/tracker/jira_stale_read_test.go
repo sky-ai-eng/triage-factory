@@ -78,7 +78,7 @@ func jiraRefreshFixture(t *testing.T, srv *httptest.Server) (*Tracker, *recordin
 		t.Fatalf("seed stub: %v", err)
 	}
 	pub := &recordingPublisher{}
-	return New(database, pub, stores.Tasks, stores.Entities, stores.Repos, org), pub, stores
+	return New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org), pub, stores
 }
 
 // storedJiraStatus reads back the status the entity's snapshot currently holds.

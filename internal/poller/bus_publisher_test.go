@@ -15,3 +15,8 @@ import (
 type busPublisher struct{ bus *eventbus.Bus }
 
 func (p busPublisher) Publish(_ context.Context, evt domain.Event) { p.bus.Publish(evt) }
+
+// PublishPreEnqueued is the tracker's post-commit fan-out for events it
+// enqueued itself; with no durable queue behind this adapter there is
+// nothing to skip, so it is the same bus publish.
+func (p busPublisher) PublishPreEnqueued(_ context.Context, evt domain.Event) { p.bus.Publish(evt) }

@@ -34,6 +34,13 @@ import (
 // adapter instead.
 type Publisher interface {
 	Publish(ctx context.Context, evt domain.Event)
+
+	// PublishPreEnqueued forwards an event the caller already committed to
+	// the durable outbox — the bus fan-out and the drain-worker nudge
+	// without a second enqueue. The tracker's diffed transitions take this
+	// path because they ride the snapshot CAS's transaction (see
+	// emitWithSnapshotCAS).
+	PublishPreEnqueued(ctx context.Context, evt domain.Event)
 }
 
 const (
@@ -61,6 +68,13 @@ type Tracker struct {
 	tasks    db.TaskStore   // tracker creates review_requested tasks during discovery + reconciles stale ones
 	entities db.EntityStore // entity lifecycle (find/create, snapshot, title/description, close/reactivate)
 	repos    db.RepoStore   // per-repo conditional-request (ETag) state for GitHub open-PR discovery
+	// queue is the durable outbox, held directly rather than reached
+	// through pub because the diff arms need the ONE write that carries
+	// both halves of a cycle's result: the snapshot advance and the
+	// transitions diffed against it (EnqueueBatchWithSnapshotCAS). Every
+	// other emit the tracker makes — discovery backfills, poll-complete
+	// sentinels — has no snapshot to pair with and goes through pub.
+	queue db.EventQueueStore
 	// orgID is the tenant this tracker emits events and reads/writes
 	// entities for. Set at construction and stable for the Tracker's
 	// lifetime; the poller's per-org loop constructs a fresh Tracker
@@ -78,8 +92,8 @@ type Tracker struct {
 // loop calls this once per active org per cycle; the resulting
 // Tracker handles all event-emission for that org and stamps every
 // published event with the tenant via publish() below.
-func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, orgID string) *Tracker {
-	return &Tracker{database: database, pub: pub, tasks: tasks, entities: entities, repos: repos, orgID: orgID}
+func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, queue db.EventQueueStore, orgID string) *Tracker {
+	return &Tracker{database: database, pub: pub, tasks: tasks, entities: entities, repos: repos, queue: queue, orgID: orgID}
 }
 
 // publish stamps evt.OrgID with the tracker's configured tenant before
@@ -92,6 +106,83 @@ func (t *Tracker) publish(ctx context.Context, evt domain.Event) {
 		evt.OrgID = t.orgID
 	}
 	t.pub.Publish(ctx, evt)
+}
+
+// emitWithSnapshotCAS commits a diffed cycle's result for one entity: the
+// snapshot advance under its poll_seq CAS, and the transitions diffed
+// against that snapshot, in a single transaction. Reports ok=false when the
+// CAS lost, in which case nothing was written at all.
+//
+// The pairing is the point. The snapshot-diff is the sole re-emit
+// prevention, so a snapshot that advances without its transitions retires
+// them permanently — the next cycle diffs new-against-new and finds
+// nothing. Committing both together means a failure before commit leaves
+// the entity exactly where the next cycle expects it, and a CAS miss (a
+// straggler ex-leader, stale by the time it lands) writes neither half.
+//
+// evts may be empty: a refreshed entity with no transitions is a pure
+// snapshot advance, and takes this same path rather than a second one.
+//
+// Unlike the tracker's other persistence calls this takes the CYCLE's ctx,
+// not context.Background(). Those keep Background because a cancellation
+// mid-sequence can strand them half-applied; this one cannot — its two
+// writes are one transaction, so a cancelled emit commits nothing and the
+// next cycle re-diffs from the surviving snapshot. And the enqueue needs a
+// real ctx to carry: the producer trace context every queue row it writes
+// is stamped with comes from here.
+func (t *Tracker) emitWithSnapshotCAS(ctx context.Context, orgID, entityID, snapshotJSON string, expectedPollSeq int64, evts []domain.Event) (bool, error) {
+	if len(evts) == 0 {
+		ok, _, err := t.queue.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, snapshotJSON, expectedPollSeq, nil, nil)
+		return ok, err
+	}
+
+	// One producer span per emitted batch — the trace context every row in
+	// it carries, so each event's later routing links back to the cycle
+	// that found it. Started around the enqueue, not the whole diff, for
+	// the same reason the ingest seam starts one around Enqueue: the link
+	// has to answer "which emit was mine", and a poll cycle makes many.
+	// The empty-batch path above starts none: nothing is enqueued, so
+	// there is nothing to link to it.
+	ctx, span := tracer.Start(ctx, "tracker.emit_batch",
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(telemetry.EntityID(entityID), telemetry.OrgID(orgID), telemetry.Count(len(evts))))
+	defer span.End()
+
+	traceparents := make([]string, len(evts))
+	if tp := telemetry.TraceparentFrom(ctx); tp != "" {
+		for i := range traceparents {
+			traceparents[i] = tp
+		}
+	}
+	// Stamp the tenant these rows commit under — orgID, the argument the
+	// enqueue binds, not the tracker's field, and unconditionally rather
+	// than publish()'s "leave a pre-set OrgID intact". The two are the same
+	// value today; making the copy read from the same place the write does
+	// is what keeps them the same value. A bus event naming a tenant its
+	// own durable row doesn't belong to is a live update no subscriber
+	// could correlate.
+	for i := range evts {
+		evts[i].OrgID = orgID
+	}
+
+	ok, ids, err := t.queue.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, snapshotJSON, expectedPollSeq, evts, traceparents)
+	if err != nil {
+		span.SetStatus(codes.Error, "enqueue batch")
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+
+	// Committed. The bus fan-out below is the cosmetic half — the live WS
+	// push and the scorer's idempotent nudge — and dying between the commit
+	// and it costs only that: the router consumes the queue, not the bus,
+	// so these events still route on the drain worker's schedule.
+	for i, evt := range evts {
+		evt.ID = ids[i] // the id the enqueue minted, so bus and queue agree
+		t.pub.PublishPreEnqueued(ctx, evt)
+	}
+	return true, nil
 }
 
 // --- GitHub ---
@@ -109,7 +200,7 @@ func (t *Tracker) publish(ctx context.Context, evt domain.Event) {
 // mode there's one Tracker for the single synthetic tenant.
 //
 // ctx is the poll cycle's context, threaded through every GitHub API call this
-// cycle makes — open-PR listing, discovery, and batch refresh (TFAC-475).
+// cycle makes — open-PR listing, discovery, and batch refresh.
 // IMPORTANT: the root is currently context.Background() (poller.runGitHubCycle),
 // which is never cancelled, so an in-flight cycle still runs to completion
 // today; close(ghStop) only stops *new* cycles from starting. This threading is
@@ -121,9 +212,12 @@ func (t *Tracker) publish(ctx context.Context, evt domain.Event) {
 // must complete even once the cycle ctx becomes cancellable (a half-seeded
 // create→snapshot pair would not be re-seeded, since the next cycle's
 // FindOrCreate returns created=false). Threading cancellation into those
-// persistence calls is a separate concern, out of scope here.
-// The third return, resumeFrom, is TFAC-571's round-robin resume point —
-// see discoverGitHub. It is only ever non-empty alongside a non-nil error
+// persistence calls is a separate concern, out of scope here. The one
+// exception is Phase 3's snapshot+events commit (emitWithSnapshotCAS),
+// which takes the cycle ctx precisely because it CAN'T half-apply — see
+// its doc.
+// The third return, resumeFrom, is the round-robin resume point — see
+// discoverGitHub. It is only ever non-empty alongside a non-nil error
 // (the rate-limited discovery-interruption path); every other return path
 // (success, or a non-rate-limit failure in Phase 2/3 reached only once Phase
 // 1 already covered every entry in repos) reports "" — a full wrap of the
@@ -466,35 +560,34 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// Diff against previous snapshot.
 		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver)
 
-		// Update entity snapshot + title. CAS against item.entity.PollSeq
-		// (the value this cycle's diff was read against) — and the snapshot
-		// write MUST land before the diffed transitions may publish. The
-		// snapshot-diff is the sole re-emit prevention: events published
-		// off a snapshot that didn't win would be re-derived next cycle
-		// under fresh event ids (the event/trigger fence can't collapse
-		// them → duplicate tasks/runs). A CAS miss is a straggler
-		// ex-leader losing to the current one; a write error means this
-		// cycle's view didn't commit. Either way the winning writer's next
-		// cycle re-diffs and emits the transition, so suppression loses
-		// nothing (TFAC-579).
+		// Commit the snapshot advance and the transitions diffed against it
+		// together, CAS'd on item.entity.PollSeq (the value this cycle's
+		// diff was read against). Neither half is durable without the
+		// other: events written off a snapshot that didn't win would
+		// re-derive next cycle under fresh event ids (the event/trigger
+		// fence can't collapse them → duplicate tasks/runs), and a snapshot
+		// that advanced without its events retires them permanently. A CAS
+		// miss is a straggler ex-leader losing to the current one; an error
+		// means this cycle's view didn't commit. Either way nothing was
+		// written and the winning writer's next cycle re-diffs and emits
+		// the transition, so suppression loses nothing.
 		snapJSON, _ := json.Marshal(newSnap)
-		ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq)
+		ok, err := t.emitWithSnapshotCAS(ctx, orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq, events)
 		if err != nil {
-			trackerLog.ErrorContext(ctx, "update snapshot failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", item.entity.SourceID, "error", err)
+			trackerLog.ErrorContext(ctx, "snapshot+events commit failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", item.entity.SourceID, "error", err)
 			continue
 		}
 		if !ok {
-			trackerLog.WarnContext(ctx, "update snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", item.entity.SourceID)
+			trackerLog.WarnContext(ctx, "snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", item.entity.SourceID)
 			continue
 		}
+		eventsEmitted += len(events)
+
+		// Best-effort, outside the transaction: the title is display-only
+		// mirroring, so a failure here costs a stale string until the next
+		// cycle, never an event.
 		if item.entity.Title != newSnap.Title {
 			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
-		}
-
-		// Publish events to bus. Recording + routing happens downstream.
-		for _, evt := range events {
-			t.publish(ctx, evt)
-			eventsEmitted++
 		}
 	}
 
@@ -1141,26 +1234,28 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		// detection still works for previously-known done statuses).
 		events := DiffJiraSnapshots(prevSnap, newSnap, e.ID, projects.doneMembersForKey(newSnap.Key))
 
-		// CAS against e.PollSeq (the value this cycle's diff was read
-		// against) — the snapshot write MUST land before the diffed
-		// transitions may publish, because the snapshot-diff is the sole
-		// re-emit prevention: events published off a snapshot that didn't
-		// win would re-derive next cycle under fresh event ids (the
-		// event/trigger fence can't collapse them → duplicate tasks/runs).
-		// A CAS miss is a straggler ex-leader losing to the current one; a
-		// write error just means this cycle's view didn't commit. Either
-		// way the winner's next cycle re-diffs and emits the transition —
-		// suppression here loses nothing (TFAC-579).
+		// Snapshot advance + the transitions diffed against it, one
+		// transaction, CAS'd on e.PollSeq (the value this cycle's diff was
+		// read against) — the GitHub arm's contract, same reasoning: the
+		// snapshot-diff is the sole re-emit prevention, so half of this
+		// landing is either a duplicate task (events off a snapshot that
+		// didn't win) or a lost one (a snapshot that retired transitions
+		// nobody recorded). On a miss or an error nothing was written and
+		// the winner's next cycle re-diffs, so suppression loses nothing.
 		snapJSON, _ := json.Marshal(newSnap)
-		ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq)
+		ok, err := t.emitWithSnapshotCAS(ctx, orgID, e.ID, string(snapJSON), e.PollSeq, events)
 		if err != nil {
-			trackerLog.Error("update jira snapshot failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", e.SourceID, "error", err)
+			trackerLog.Error("jira snapshot+events commit failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", e.SourceID, "error", err)
 			continue
 		}
 		if !ok {
-			trackerLog.Warn("update jira snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", e.SourceID)
+			trackerLog.Warn("jira snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", e.SourceID)
 			continue
 		}
+		eventsEmitted += len(events)
+
+		// Best-effort, outside the transaction: display-only mirroring, so
+		// a failure costs a stale title until the next cycle, never an event.
 		if e.Title != newSnap.Summary {
 			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
 		}
@@ -1170,11 +1265,6 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		// field and writing it back would wipe the stored value. Description
 		// is seeded and refreshed by phase 1 (discoverJira), which is the
 		// only place that actually carries the field in the response.
-
-		for _, evt := range events {
-			t.publish(ctx, evt)
-			eventsEmitted++
-		}
 	}
 
 	diffSpan.SetAttributes(telemetry.Count(eventsEmitted))

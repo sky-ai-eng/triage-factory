@@ -432,7 +432,16 @@ func (s *entityStore) UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSO
 // newer snapshot. poll_seq bumps by 1 on every successful write so the
 // caller's next-read-then-write cycle has a fresh value to CAS against.
 func (s *entityStore) UpdateSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (bool, error) {
-	res, err := s.admin.ExecContext(ctx, `
+	return updateSnapshotCAS(ctx, s.admin, orgID, id, snapshotJSON, expectedPollSeq)
+}
+
+// updateSnapshotCAS is the CAS statement itself, shared with the event
+// queue's EnqueueBatchWithSnapshotCAS — which runs it against its own
+// transaction so the snapshot advance and the transitions diffed against
+// it commit together. One copy of the SQL so the two callers cannot drift
+// on what "the CAS" means.
+func updateSnapshotCAS(ctx context.Context, q queryer, orgID, id, snapshotJSON string, expectedPollSeq int64) (bool, error) {
+	res, err := q.ExecContext(ctx, `
 		UPDATE entities
 		SET snapshot_json = $1::jsonb, last_polled_at = $2, poll_seq = poll_seq + 1
 		WHERE org_id = $3 AND id = $4 AND poll_seq = $5

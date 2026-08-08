@@ -12,9 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -36,8 +34,9 @@ import (
 // System events (system:poll:*, etc.) are bus-only — coalesced signals,
 // not durable work.
 //
-// Implements tracker.Publisher via Publish, so it drops in wherever the
-// tracker previously took a *eventbus.Bus.
+// Implements tracker.Publisher via Publish and PublishPreEnqueued — the
+// latter for the tracker's snapshot-CAS emit, which owns its own
+// transaction and so arrives here already durable.
 type Ingestor struct {
 	bus   *eventbus.Bus
 	queue db.EventQueueStore
@@ -85,6 +84,23 @@ func (i *Ingestor) Publish(ctx context.Context, evt domain.Event) {
 	i.bus.Publish(evt)
 }
 
+// PublishPreEnqueued is Publish for an event the caller ALREADY committed
+// to the outbox itself: it nudges the drain worker and fans the event out
+// to the bus, and deliberately does not enqueue. The tracker is the caller
+// — it enqueues its diffed transitions inside the same transaction as the
+// snapshot CAS they were diffed against (EnqueueBatchWithSnapshotCAS), so
+// routing them through Publish would write a second queue row for an event
+// already queued.
+//
+// evt.ID must be the id that enqueue minted, so the WS feed and the queue
+// row agree the way they do on the ordinary path.
+func (i *Ingestor) PublishPreEnqueued(ctx context.Context, evt domain.Event) {
+	if i.wake != nil {
+		i.wake()
+	}
+	i.bus.Publish(evt)
+}
+
 // enqueue is the durable half, wrapped in the producer span whose context
 // travels on the queue row. The span is started BEFORE the traceparent is
 // rendered, so the consumer links to this enqueue rather than to whatever
@@ -100,21 +116,11 @@ func (i *Ingestor) enqueue(ctx context.Context, evt domain.Event) (string, error
 		trace.WithAttributes(telemetry.EventType(evt.EventType), telemetry.OrgID(evt.OrgID)))
 	defer span.End()
 
-	id, err := i.queue.Enqueue(ctx, evt.OrgID, evt, traceparentFrom(ctx))
+	id, err := i.queue.Enqueue(ctx, evt.OrgID, evt, telemetry.TraceparentFrom(ctx))
 	if err != nil {
 		span.SetStatus(codes.Error, "enqueue")
 		return "", err
 	}
 	span.SetAttributes(telemetry.EventID(id))
 	return id, nil
-}
-
-// traceparentFrom renders ctx's active span as the W3C traceparent the
-// queue row carries. Empty when nothing is active — tracing disabled (the
-// global propagator is a no-op), or a producer nobody has instrumented
-// yet — which stores as NULL and costs the consumer only its link.
-func traceparentFrom(ctx context.Context) string {
-	carrier := propagation.MapCarrier{}
-	otel.GetTextMapPropagator().Inject(ctx, carrier)
-	return carrier["traceparent"]
 }

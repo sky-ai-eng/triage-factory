@@ -318,7 +318,7 @@ func TestRefreshGitHub_RateLimitStopsFanOutAndPropagatesDistinctly(t *testing.T)
 		t.Fatalf("SetConfigured: %v", err)
 	}
 
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, org)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	_, _, err := tr.RefreshGitHub(ctx, client, "", repos, nil)
@@ -385,7 +385,7 @@ func TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping(t *tes
 		t.Fatalf("SetConfigured: %v", err)
 	}
 
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, org)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	_, _, err := tr.RefreshGitHub(ctx, client, "", repos, nil)

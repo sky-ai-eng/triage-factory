@@ -56,6 +56,18 @@ func NormalizeFailedEventsLimit(limit int) int {
 	}
 }
 
+// TraceparentAt reads the i-th entry of a batch's parallel traceparent
+// slice, returning "" (stored as NULL) when the slice doesn't cover i.
+// Shared by both dialects' EnqueueBatchWithSnapshotCAS so a nil or short
+// slice means the same thing in each: those events enqueue untraced, the
+// way every untraced producer's row does.
+func TraceparentAt(traceparents []string, i int) string {
+	if i < len(traceparents) {
+		return traceparents[i]
+	}
+	return ""
+}
+
 type EventQueueStore interface {
 	// Enqueue atomically records the event (the durable audit row) AND
 	// its queue row in a single transaction, returning the generated
@@ -75,6 +87,37 @@ type EventQueueStore interface {
 	// hand over a literal. Empty — the normal case, with tracing off or an
 	// untraced producer — is stored as NULL.
 	Enqueue(ctx context.Context, orgID string, evt domain.Event, traceparent string) (eventID string, err error)
+
+	// EnqueueBatchWithSnapshotCAS is the tracker's emit: the entity
+	// snapshot advance and the durable enqueue of the transitions diffed
+	// against it, in ONE transaction.
+	//
+	// It exists because those two writes are the same fact. The
+	// snapshot-diff is the sole re-emit prevention, so the snapshot must
+	// not advance ahead of the transitions it retires: a process that dies
+	// between a won CAS and the enqueue loses them permanently (the next
+	// cycle diffs new-against-new and produces nothing). One transaction
+	// deletes that window — either both land or neither does.
+	//
+	// The CAS itself is UpdateSnapshotCASSystem's, semantics unchanged: the
+	// UPDATE pins expectedPollSeq alongside org_id/id and bumps poll_seq by
+	// 1 on success. A miss (a straggler ex-leader, stale by the time it
+	// lands) matches zero rows, and then the whole transaction commits
+	// NOTHING — ok=false, no events rows, no queue rows — so a losing
+	// writer is invisible in the log rather than half-applied.
+	//
+	// events is the batch to enqueue on a won CAS: same writes Enqueue
+	// makes, one events audit row + one queue row per event, and the
+	// returned eventIDs are parallel to it (ids the caller stamps onto the
+	// copies it forwards to the bus). traceparents is parallel too; a nil
+	// or short slice stores NULL for the entries it doesn't cover, matching
+	// Enqueue's empty-traceparent case. An EMPTY batch is a pure CAS, so
+	// the tracker keeps one call path whether or not its diff produced
+	// events.
+	//
+	// System-scoped like the CAS it subsumes: the tracker is a background
+	// job with no JWT claims, and org_id is bound by argument.
+	EnqueueBatchWithSnapshotCAS(ctx context.Context, orgID, entityID, snapshotJSON string, expectedPollSeq int64, events []domain.Event, traceparents []string) (ok bool, eventIDs []string, err error)
 
 	// ClaimNext claims the globally-oldest pending row (FIFO by id),
 	// flips it pending -> processing, stamps claimed_at + executor_id +
