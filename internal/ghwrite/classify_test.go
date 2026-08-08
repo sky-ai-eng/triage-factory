@@ -100,6 +100,14 @@ func TestClassify_TableShapes(t *testing.T) {
 			want:   Shape{Action: domain.ActionReactionRemoved, Owner: "acme", Repo: "widgets", ExternalID: "5"},
 		},
 		{
+			// The issue-level removal addresses the object by number, so it is
+			// the one reaction shape whose target carries a '#N'.
+			name:   "reaction removed from an issue",
+			method: "DELETE",
+			path:   "/repos/acme/widgets/issues/7/reactions/99",
+			want:   Shape{Action: domain.ActionReactionRemoved, Owner: "acme", Repo: "widgets", Number: 7},
+		},
+		{
 			name:   "workflow dispatch",
 			method: "POST",
 			path:   "/repos/acme/widgets/actions/workflows/ci.yml/dispatches",
