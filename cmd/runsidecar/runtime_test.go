@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -348,8 +349,11 @@ func TestRuntime_EgressDenialRelaysToOrchestrator(t *testing.T) {
 
 // TestRuntime_GHInjectorRelaysWriteAudit pins the gh channel's second audit
 // half: a mutating REST call through the injector relays a record_gh_write
-// carrying method, path, and the upstream's status — including a non-2xx,
-// which the artifact observation path drops entirely.
+// carrying method, path, and the upstream's status — including a non-2xx, which
+// the artifact observation path drops entirely — plus, for a shape whose
+// response names a created object, that object's id and link. This process is
+// the only one that ever sees a response body, so what it declines to carry is
+// unrecoverable downstream.
 //
 // It drives the injector built from the production config (ghInjectorConfig)
 // rather than through startGHInjector, whose cert write lands under the
@@ -357,95 +361,130 @@ func TestRuntime_EgressDenialRelaysToOrchestrator(t *testing.T) {
 // The wiring under test is the config's, so this is the whole of it: a missing
 // ObserveWrite fails here.
 func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		// An off-scope write masked as a not-found: the outcome that used to
-		// leave no trace at all.
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer upstream.Close()
-
-	notifies := make(chan sidecarproto.RelayCallBody, 4)
-	handler := sidecarproto.HandlerFunc(func(_ context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {
-		if kind != sidecarproto.KindRelayNotify {
-			return nil, nil
-		}
-		var rc sidecarproto.RelayCallBody
-		if err := json.Unmarshal(body, &rc); err != nil {
-			return nil, err
-		}
-		notifies <- rc
-		return nil, nil
-	})
-	orch, rt := dialRuntimeWithHandler(t, handler)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	bundle := &credbundle.Bundle{
-		LLM: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
-		GitHub: &credbundle.GitHubCreds{
-			Mode:     "app",
-			CLIToken: &credbundle.RepoToken{Token: "ghs_REALCLITOKEN"},
+	const replyURL = "https://github.com/acme/widgets/pull/841#discussion_r777"
+	cases := []struct {
+		name    string
+		method  string
+		path    string
+		status  int
+		body    string
+		wantID  string
+		wantURL string
+	}{
+		{
+			// An off-scope write masked as a not-found: the outcome that used to
+			// leave no trace at all.
+			name:   "refused edit",
+			method: http.MethodPatch,
+			path:   "/api/v3/repos/acme/widgets/pulls/7",
+			status: http.StatusNotFound,
+		},
+		{
+			name:    "posted review-thread reply",
+			method:  http.MethodPost,
+			path:    "/api/v3/repos/acme/widgets/pulls/841/comments/555/replies",
+			status:  http.StatusCreated,
+			body:    `{"id":777,"html_url":"` + replyURL + `"}`,
+			wantID:  "777",
+			wantURL: replyURL,
 		},
 	}
-	if err := orch.Call(ctx, sidecarproto.KindSealedBundle,
-		sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, bundle)}, nil); err != nil {
-		t.Fatalf("relay bundle: %v", err)
-	}
 
-	cert, certPEM, err := ghinjector.GenerateCert("127.0.0.1")
-	if err != nil {
-		t.Fatalf("GenerateCert: %v", err)
-	}
-	const placeholder = "per-run-placeholder"
-	srv, err := ghinjector.New(rt.ghInjectorConfig(upstream.URL, cert, placeholder, nil))
-	if err != nil {
-		t.Fatalf("construct injector: %v", err)
-	}
-	host, err := srv.Start("127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("start injector: %v", err)
-	}
-	t.Cleanup(func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
-		defer shutdownCancel()
-		_ = srv.Shutdown(shutdownCtx)
-	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer upstream.Close()
 
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(certPEM) {
-		t.Fatal("append injector cert to pool failed")
-	}
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
-	req, _ := http.NewRequest(http.MethodPatch, "https://"+host+"/api/v3/repos/acme/widgets/pulls/7", nil)
-	req.Header.Set("Authorization", "token "+placeholder)
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("request through injector: %v", err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("caller saw %d, want the upstream's 404 (a 502 means the bundle token never resolved)", resp.StatusCode)
-	}
+			notifies := make(chan sidecarproto.RelayCallBody, 4)
+			handler := sidecarproto.HandlerFunc(func(_ context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {
+				if kind != sidecarproto.KindRelayNotify {
+					return nil, nil
+				}
+				var rc sidecarproto.RelayCallBody
+				if err := json.Unmarshal(body, &rc); err != nil {
+					return nil, err
+				}
+				notifies <- rc
+				return nil, nil
+			})
+			orch, rt := dialRuntimeWithHandler(t, handler)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 
-	deadline := time.After(4 * time.Second)
-	for {
-		select {
-		case got := <-notifies:
-			if got.Op != agentproc.OpRecordGHWrite {
-				continue
+			bundle := &credbundle.Bundle{
+				LLM: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
+				GitHub: &credbundle.GitHubCreds{
+					Mode:     "app",
+					CLIToken: &credbundle.RepoToken{Token: "ghs_REALCLITOKEN"},
+				},
 			}
-			var a agentproc.RecordGHWriteArgs
-			if err := json.Unmarshal(got.Args, &a); err != nil {
-				t.Fatalf("unmarshal relayed gh write: %v", err)
+			if err := orch.Call(ctx, sidecarproto.KindSealedBundle,
+				sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, bundle)}, nil); err != nil {
+				t.Fatalf("relay bundle: %v", err)
 			}
-			if a.Method != http.MethodPatch || a.Status != http.StatusNotFound ||
-				!strings.Contains(a.Path, "/repos/acme/widgets/pulls/7") {
-				t.Fatalf("relayed write = %+v, want the PATCH, its path, and the 404", a)
+
+			cert, certPEM, err := ghinjector.GenerateCert("127.0.0.1")
+			if err != nil {
+				t.Fatalf("GenerateCert: %v", err)
 			}
-			return
-		case <-deadline:
-			t.Fatal("a gh-channel REST write never reached the orchestrator's audit path")
-		}
+			const placeholder = "per-run-placeholder"
+			srv, err := ghinjector.New(rt.ghInjectorConfig(upstream.URL, cert, placeholder, nil))
+			if err != nil {
+				t.Fatalf("construct injector: %v", err)
+			}
+			host, err := srv.Start("127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("start injector: %v", err)
+			}
+			t.Cleanup(func() {
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+				defer shutdownCancel()
+				_ = srv.Shutdown(shutdownCtx)
+			})
+
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(certPEM) {
+				t.Fatal("append injector cert to pool failed")
+			}
+			client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+			req, _ := http.NewRequest(tc.method, "https://"+host+tc.path, nil)
+			req.Header.Set("Authorization", "token "+placeholder)
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("request through injector: %v", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != tc.status {
+				t.Fatalf("caller saw %d, want the upstream's %d (a 502 means the bundle token never resolved)", resp.StatusCode, tc.status)
+			}
+
+			deadline := time.After(4 * time.Second)
+			for {
+				select {
+				case got := <-notifies:
+					if got.Op != agentproc.OpRecordGHWrite {
+						continue
+					}
+					var a agentproc.RecordGHWriteArgs
+					if err := json.Unmarshal(got.Args, &a); err != nil {
+						t.Fatalf("unmarshal relayed gh write: %v", err)
+					}
+					if a.Method != tc.method || a.Status != tc.status ||
+						!strings.HasSuffix(tc.path, a.Path) {
+						t.Fatalf("relayed write = %+v, want the %s, its path, and the %d", a, tc.method, tc.status)
+					}
+					if a.ExternalID != tc.wantID || a.URL != tc.wantURL {
+						t.Fatalf("relayed write = %+v, want created object (%q, %q)", a, tc.wantID, tc.wantURL)
+					}
+					return
+				case <-deadline:
+					t.Fatal("a gh-channel REST write never reached the orchestrator's audit path")
+				}
+			}
+		})
 	}
 }
 

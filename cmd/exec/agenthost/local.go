@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/review"
@@ -2134,55 +2135,99 @@ func (c *LocalClient) RecordEgressDenied(ctx context.Context, target, reason str
 	c.recordBotAction(ctx, egressDeniedAction(c.info.RunID, target, reason))
 }
 
-// GHChannelWriteAction builds the `gh_channel_write` audit row for one mutating
-// REST request the real-`gh` channel forwarded. Exported because local mode
-// records it without a LocalClient in hand (the delegate holds stores + RunInfo
-// and writes through the shared funnel), while the sandbox path goes through
-// RecordGHChannelWrite below — one builder, so the row is identical either way.
+// GHChannelWriteAction builds the audit row for one mutating REST request the
+// real-`gh` channel forwarded. Exported because local mode records it without a
+// LocalClient in hand (the delegate holds stores + RunInfo and writes through
+// the shared funnel), while the sandbox path goes through RecordGHChannelWrite
+// below — one builder, so the row is identical either way.
+//
+// Exactly one row per request, and which one is settled here: a classified
+// write the upstream accepted earns its semantic verb (a review-thread reply is
+// comment_posted, a merge is pr_merged), and everything else — an unrecognized
+// shape, or a recognized one that was refused — takes the opaque fallback.
 //
 // Appended unconditionally (no dedup key): each attempt is its own event, so a
-// retried edit and a refused one both leave their own row. status is recorded
-// verbatim — an off-scope write masked as a 404 is precisely the outcome this
-// row exists to make visible. Target is the repo the path names, so the row
-// files alongside the rest of that repo's activity; a path naming no repo (a
-// user- or org-level endpoint) falls back to the path itself rather than
-// claiming a repo it never touched.
-func GHChannelWriteAction(method, path string, status int) *domain.ExternalAction {
-	detail, _ := json.Marshal(map[string]any{"method": method, "path": path, "http_status": status})
-	target := ghWriteTargetRepo(path)
+// retried edit and a refused one both leave their own row.
+func GHChannelWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
+	if shape, ok := ghwrite.Resolve(obs); ok && obs.Succeeded() {
+		return ghSemanticWriteAction(shape, obs)
+	}
+	return ghFallbackWriteAction(obs)
+}
+
+// ghSemanticWriteAction builds the row for a classified, accepted write from
+// the shape the classifier resolved — which has already reconciled the path's
+// coordinates with what the response said, so a created object's id and number
+// are settled before this sees them.
+//
+// detail_json carries the act's own context (the thread a reply answers) and,
+// for the shapes that ask for it, the raw method and path. That is the whole of
+// the difference between these rows and the exec verbs': a reply is required to
+// read identically to `gh pr comment-reply`'s row, while a PR create or a
+// review submit is required to say which channel it came through.
+func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation) *domain.ExternalAction {
+	act := &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderGitHub,
+		Action:     shape.Action,
+		Target:     shape.Target(),
+		ExternalID: shape.ExternalID,
+		URL:        obs.URL,
+		Credential: domain.CredentialGitHubApp,
+	}
+	detail := map[string]any{}
+	if shape.InReplyTo > 0 {
+		detail["in_reply_to"] = shape.InReplyTo
+	}
+	if shape.CarriesProvenance {
+		detail["method"] = obs.Method
+		detail["path"] = obs.Path
+	}
+	if len(detail) > 0 {
+		payload, _ := json.Marshal(detail)
+		act.DetailJSON = string(payload)
+	}
+	return act
+}
+
+// ghFallbackWriteAction builds the opaque row for a write with no semantic name
+// — an unclassified shape, or a classified one the upstream refused. status is
+// recorded verbatim: an off-scope write masked as a 404 is precisely the
+// outcome this row exists to make visible, and "attempted" names the act that
+// did not happen so a refusal reads as loudly as a success.
+//
+// Target stays at the repo the path names — never owner/repo#N, even when the
+// path carries a number. A refused write is the one case where the path's
+// coordinates are not evidence the object exists (404 is also how an off-scope
+// repo is masked), and an entity-shaped target would mint an entity stub for
+// something this run was never allowed to see. The full path is in detail_json
+// either way. A path naming no repo (a user- or org-level endpoint) falls back
+// to the path itself rather than claiming a repo it never touched.
+func ghFallbackWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
+	detail := map[string]any{"method": obs.Method, "path": obs.Path, "http_status": obs.Status}
+	if shape, ok := obs.Classify(); ok {
+		detail["attempted"] = shape.Action
+	}
+	payload, _ := json.Marshal(detail)
+	target := ghwrite.RepoPath(obs.Path)
 	if target == "" {
-		target = path
+		target = obs.Path
 	}
 	return &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderGitHub,
 		Action:     domain.ActionGHChannelWrite,
 		Target:     target,
 		Credential: domain.CredentialGitHubApp,
-		DetailJSON: string(detail),
+		DetailJSON: string(payload),
 	}
 }
 
-// ghWriteTargetRepo pulls "owner/repo" out of a REST path shaped
-// .../repos/{owner}/{repo}/..., or returns empty when the path names no repo.
-func ghWriteTargetRepo(path string) string {
-	i := strings.Index(path, "/repos/")
-	if i < 0 {
-		return ""
-	}
-	segs := strings.Split(strings.Trim(path[i+len("/repos/"):], "/"), "/")
-	if len(segs) < 2 || segs[0] == "" || segs[1] == "" {
-		return ""
-	}
-	return segs[0] + "/" + segs[1]
-}
-
-// RecordGHChannelWrite appends the gh_channel_write audit row for one write the
-// agent made through the real-`gh` channel. Host-side only: the injector that
-// observes it runs outside the jail. The artifact recorder covers the two
-// creates that produce an object; this covers every attempt, so an edit, a
-// merge, a close, and a refusal are all in the log. Best-effort.
-func (c *LocalClient) RecordGHChannelWrite(ctx context.Context, method, path string, status int) {
-	c.recordBotAction(ctx, GHChannelWriteAction(method, path, status))
+// RecordGHChannelWrite appends the audit row for one write the agent made
+// through the real-`gh` channel. Host-side only: the injector that observes it
+// runs outside the jail. The artifact recorder covers the two creates that
+// produce a lifecycle object; this covers every attempt, so an edit, a merge, a
+// close, and a refusal are all in the log. Best-effort.
+func (c *LocalClient) RecordGHChannelWrite(ctx context.Context, obs ghwrite.Observation) {
+	c.recordBotAction(ctx, GHChannelWriteAction(obs))
 }
 
 // RecordGitPushFailed records one `branch_push_failed` external-action audit

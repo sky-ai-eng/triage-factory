@@ -80,6 +80,7 @@ const (
 	ActionPRConvertedToDraft = "pr_converted_to_draft"
 	ActionPREdited           = "pr_edited"
 	ActionPRClosed           = "pr_closed"
+	ActionPRMerged           = "pr_merged"
 
 	// GitHub review lifecycle. The review *draft* is staged TF-side and makes no
 	// GitHub write until the atomic submit at approval (TFAC-494), so the only
@@ -96,6 +97,17 @@ const (
 	ActionCommentPosted  = "comment_posted"
 	ActionCommentEdited  = "comment_edited"
 	ActionCommentDeleted = "comment_deleted"
+
+	// GitHub reactions. The target is the object the reaction lands on (a
+	// comment, an issue, a PR), never the reaction row itself — an emoji is
+	// only interesting as something done TO something.
+	ActionReactionAdded   = "reaction_added"
+	ActionReactionRemoved = "reaction_removed"
+
+	// GitHub Actions. Both spend CI capacity under the org credential, which is
+	// why they are audited alongside the content writes.
+	ActionWorkflowDispatched   = "workflow_dispatched"
+	ActionWorkflowRunCancelled = "workflow_run_cancelled"
 
 	// Git branch push (the one double-capture case — see BranchPushDedupKey).
 	ActionBranchPushed = "branch_pushed"
@@ -126,11 +138,18 @@ const (
 	// refused a destination at all, not how many times it retried.
 	ActionEgressDenied = "egress_denied"
 
-	// A write the agent made through the real-`gh` credential channel: a REST
-	// request whose method mutates, recorded with its upstream outcome so a
-	// refused write is as visible as a successful one. detail_json carries
-	// {method, path, http_status}. Appended unconditionally (no dedup key) —
-	// each attempt is its own event, exactly like ActionBranchPushFailed.
+	// The fallback for a write the agent made through the real-`gh` credential
+	// channel — a mutating REST request whose method+path the shared classifier
+	// (internal/ghwrite) does not recognize, or a recognized one the upstream
+	// refused. A classified success carries its own semantic action instead (a
+	// reply is comment_posted, a merge is pr_merged), so this row means exactly
+	// "a write happened here and it has no better name yet".
+	//
+	// detail_json carries {method, path, http_status}, plus "attempted" naming
+	// the semantic action a refused write was reaching for — a 404'd merge is
+	// an attempt, never a merge. Appended unconditionally (no dedup key): each
+	// attempt is its own event, exactly like ActionBranchPushFailed.
+	//
 	// GraphQL is deliberately out: gh's porcelain mutations and its ordinary
 	// reads are the same POST /api/graphql, separable only by parsing the
 	// request body, which the injector never does.

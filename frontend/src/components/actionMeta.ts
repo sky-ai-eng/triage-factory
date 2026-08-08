@@ -4,7 +4,9 @@ import {
   GitPullRequest,
   MessageCircle,
   MessageSquare,
+  Play,
   SmilePlus,
+  Terminal,
   Eye,
   type LucideIcon,
 } from 'lucide-react'
@@ -47,6 +49,7 @@ export const ACTION_META: Record<string, ActionMeta> = {
   },
   pr_edited: { icon: GitPullRequest, label: 'PR edited', text: 'text-delegate', tone: 'neutral' },
   pr_closed: { icon: GitPullRequest, label: 'PR closed', text: 'text-delegate', tone: 'problem' },
+  pr_merged: { icon: GitPullRequest, label: 'PR merged', text: 'text-delegate', tone: 'good' },
   review_started: { icon: Eye, label: 'Review started', text: 'text-snooze', tone: 'neutral' },
   review_submitted: { icon: Eye, label: 'Review submitted', text: 'text-snooze', tone: 'good' },
   review_dismissed: { icon: Eye, label: 'Review dismissed', text: 'text-snooze', tone: 'problem' },
@@ -80,11 +83,44 @@ export const ACTION_META: Record<string, ActionMeta> = {
     text: 'text-text-tertiary',
     tone: 'problem',
   },
+  reaction_added: {
+    icon: SmilePlus,
+    label: 'Reaction added',
+    text: 'text-text-tertiary',
+    tone: 'good',
+  },
+  reaction_removed: {
+    icon: SmilePlus,
+    label: 'Reaction removed',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
+  workflow_dispatched: {
+    icon: Play,
+    label: 'Workflow dispatched',
+    text: 'text-delegate',
+    tone: 'good',
+  },
+  workflow_run_cancelled: {
+    icon: Play,
+    label: 'Workflow run cancelled',
+    text: 'text-delegate',
+    tone: 'problem',
+  },
   branch_pushed: {
     icon: GitBranch,
     label: 'Branch pushed',
     text: 'text-text-tertiary',
     tone: 'good',
+  },
+  // The unclassified gh-channel write. It has no verb precisely because the
+  // shared classifier didn't recognize the shape, so the label says what is
+  // actually known and the details carry the method and path.
+  gh_channel_write: {
+    icon: Terminal,
+    label: 'Raw gh write',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
   },
   issue_created: { icon: CircleDot, label: 'Issue created', text: 'text-accent', tone: 'good' },
   issue_transitioned: {
