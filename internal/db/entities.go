@@ -223,6 +223,39 @@ type EntityStore interface {
 	// app pool.
 	GetBySourceSystem(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error)
 	ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error)
+
+	// ListActiveTerminalCandidatesSystem returns active entities whose
+	// STORED snapshot already reads terminal — the divergence the routing
+	// package's terminal-state reconciliation sweep repairs (a merged PR
+	// whose entity row never flipped, so it is polled forever and its
+	// tasks never clear). Normal operation returns nothing: the snapshot
+	// and the state flip land together, so a row here means the close
+	// write was lost.
+	//
+	// The two sources answer "is this snapshot terminal?" differently, so
+	// the filter is exact for one and a superset for the other:
+	//
+	//   - github: exact. Terminality is self-contained in the snapshot
+	//     (merged, or state CLOSED/MERGED), the same predicate the tracker
+	//     applies at discovery.
+	//   - jira: a superset. Terminality is per-project configuration —
+	//     jira_project_status_rules' done statuses — so this filters on
+	//     jiraDoneStatuses, the caller's FLAT UNION across projects, and
+	//     the caller re-checks each row against its own project's set.
+	//     Union membership alone would over-close (a status that is done in
+	//     one project but live in another), which is why the decision stays
+	//     with the caller and this is only a narrowing read. An empty
+	//     jiraDoneStatuses excludes Jira entirely.
+	//
+	// Rows with no stored snapshot never match — an unseeded stub has said
+	// nothing about whether its subject is finished. limit caps the batch
+	// (<= 0 means no cap); ordering is created_at ASC, so a capped sweep
+	// works through the oldest divergences first and reaches the rest on
+	// later passes. System-only (admin pool): the sweep is a background
+	// job with no JWT claims, and the invariant it enforces is org-wide.
+	// org_id stays in the WHERE clause as defense in depth.
+	ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDoneStatuses []string, limit int) ([]domain.Entity, error)
+
 	ListUnclassifiedSystem(ctx context.Context, orgID string) ([]domain.Entity, error)
 	FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
 

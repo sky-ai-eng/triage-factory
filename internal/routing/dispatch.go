@@ -11,7 +11,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -25,27 +24,37 @@ import (
 //
 // A non-nil error means this event's ROUTING OBLIGATION is unmet and the
 // caller must not consider the event handled. The obligation stages are entity
-// resolution, handler matching, owner resolution, the task upsert, and trigger
-// firing (plus the delegation tail behind it): each one is load-bearing for
-// whether the right task exists, on the right team, and the right run started,
-// and none of them is recoverable by any other path — the tracker's
-// snapshot-diff is forward-only, so a dropped event is simply never re-derived.
-// The drain worker answers an error by requeueing the row for another attempt
-// (see parkOrRequeue), so an unmet obligation is retried rather than silently
+// resolution, the close phase (the tasks this event resolves plus the entity
+// flip a terminating event performs), handler matching, owner resolution, the
+// task upsert, and trigger firing (plus the delegation tail behind it): each one
+// is load-bearing for whether the right task exists, on the right team, whether
+// the ones this event resolved are gone, and whether the right run started —
+// and none of them is recoverable by any other path in time. The tracker's
+// snapshot-diff is forward-only, so a dropped event is simply never re-derived;
+// a lost close is worse still, since a terminating transition emits exactly once
+// and nothing else reconciles an entity whose close write failed (only the
+// periodic terminal reconciler does, and at sweep latency). The drain worker
+// answers an error by requeueing the row for another attempt (see
+// parkOrRequeue), so an unmet obligation is retried rather than silently
 // consumed.
 //
 // The tails that hang off those stages stay log-and-continue and never reach
-// the return: the entity/task close phase, task visibility writes, Bump, the
-// task_events audit rows, the agent-claim stamp, and the scorer nudge. Each is
-// either repaired by the next event on the entity or cosmetic, and promoting
-// them would replay a whole event — re-running its stages and re-recording its
-// audit rows — to fix something that heals on its own.
+// the return: task visibility writes, Bump, the task_events audit rows, the
+// run-stop cascade on a closed task, the agent-claim stamp, and the scorer
+// nudge. Each is either repaired by the next event on the entity, unreachable
+// by a replay anyway (the run-stop cascade — see cancelActiveRunsForTask), or
+// cosmetic, and promoting them would replay a whole event — re-running its
+// stages and re-recording its audit rows — to fix something that heals on its
+// own or that the replay cannot touch.
 //
 // Replay is safe by construction, so an error asks for one freely: the task
 // upsert is a FindOrCreate under the tasks dedup partial index, and trigger
 // firing is fenced on (triggering_event_id, trigger_id) plus the one-active-
-// auto-run index, with ErrTaskBusy deferring onto pending_firings. The one
-// accepted cost is a duplicate 'bumped' task_events row per replay.
+// auto-run index, with ErrTaskBusy deferring onto pending_firings. The close
+// phase re-attempts only what is still open — its task list read returns active
+// rows only, and both the task close and the entity close are guarded
+// transitions that no-op on an already-closed row. The one accepted cost is a
+// duplicate 'bumped' task_events row per replay.
 //
 // ctx reaches every store call the routing of this one event makes. The drain
 // worker hands it a ctx that carries values but cannot be cancelled
@@ -148,14 +157,26 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
 	// should flip closed. Closing and routing are orthogonal: the same event
 	// goes on to create/fire its own task below (the close runs first, so a
 	// terminating event clears prior work before minting its riding task).
-	closedAny, terminate := r.runCloses(ctx, orgID, evt, entityID)
+	closedAny, terminate, closeErr := r.runCloses(ctx, orgID, evt, entityID)
+	if closedAny {
+		r.broadcastTasksUpdated(orgID)
+	}
+	if closeErr != nil {
+		// Bail BEFORE flipping the entity, not just because the pass failed.
+		// routableEntity gates the replay on state='active', so an entity
+		// closed here would make the replayed event drop at that gate — the
+		// close phase would never run again and whatever tasks are still open
+		// would stay open with nothing left to close them. Leaving the entity
+		// active is what keeps the retry able to finish the job.
+		disp.Disposition = events.DispositionError
+		return fmt.Errorf("close phase: %w", closeErr)
+	}
 	if terminate {
 		if err := r.entities.CloseSystem(ctx, orgID, entityID); err != nil {
 			lifecycleLog.Error("entity close failed", "entity_id", entityID, "error", err)
+			disp.Disposition = events.DispositionError
+			return fmt.Errorf("close entity: %w", err)
 		}
-	}
-	if closedAny {
-		r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
 	}
 
 	// One team↔scope cache for the whole event: the per-handler scope gate
@@ -623,7 +644,7 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 	// Enqueue AI scoring (always — produces UI metadata regardless) and
 	// broadcast the task update to the frontend.
 	r.scorer.Trigger(orgID)
-	r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
+	r.broadcastTasksUpdated(orgID)
 	span.SetAttributes(telemetry.TaskID(task.ID))
 	return task, created, nil
 }

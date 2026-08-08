@@ -383,6 +383,63 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 	return s.ListActive(ctx, orgID, source)
 }
 
+// ListActiveTerminalCandidatesSystem selects active entities whose stored
+// snapshot already reads terminal. json_valid guards the extraction so a
+// legacy ” / malformed snapshot is skipped rather than failing the scan —
+// an entity that never stored a snapshot has said nothing about whether its
+// subject finished. json_extract returns 1 for a JSON true, hence the
+// integer comparison on $.merged.
+func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDoneStatuses []string, limit int) ([]domain.Entity, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	args := []any{}
+	// The Jira arm is omitted rather than emitted empty: `IN ()` is a
+	// syntax error, and "no configured done status" genuinely means no Jira
+	// entity can be terminal.
+	jiraArm := ""
+	if len(jiraDoneStatuses) > 0 {
+		placeholders := make([]string, len(jiraDoneStatuses))
+		for i, status := range jiraDoneStatuses {
+			placeholders[i] = "?"
+			args = append(args, status)
+		}
+		jiraArm = ` OR (source = 'jira' AND json_extract(snapshot_json, '$.status') IN (` +
+			strings.Join(placeholders, ", ") + `))`
+	}
+	limitClause := ""
+	if limit > 0 {
+		limitClause = " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+entitySelectCols+`
+		FROM entities
+		WHERE state = 'active'
+		  AND json_valid(NULLIF(snapshot_json, ''))
+		  AND (
+		    (source = 'github' AND (
+		       json_extract(snapshot_json, '$.merged') = 1
+		       OR upper(COALESCE(json_extract(snapshot_json, '$.state'), '')) IN ('CLOSED', 'MERGED')
+		    ))`+jiraArm+`
+		  )
+		ORDER BY created_at ASC`+limitClause, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []domain.Entity{}
+	for rows.Next() {
+		e, err := scanEntityFromRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *e)
+	}
+	return out, rows.Err()
+}
+
 func (s *entityStore) ListUnclassifiedSystem(ctx context.Context, orgID string) ([]domain.Entity, error) {
 	return s.ListUnclassified(ctx, orgID)
 }

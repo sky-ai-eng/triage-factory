@@ -215,6 +215,51 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 	return listActiveEntities(ctx, s.admin, orgID, source)
 }
 
+// ListActiveTerminalCandidatesSystem selects active entities whose stored
+// snapshot already reads terminal. Admin pool: the reconciliation sweep is a
+// background job with no JWT claims. snapshot_json is jsonb, so `->>` yields
+// NULL for a missing key or an empty object — COALESCE makes those a plain
+// non-match rather than a NULL-propagating predicate, and the IS NOT NULL
+// guard skips rows that never stored a snapshot at all.
+func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDoneStatuses []string, limit int) ([]domain.Entity, error) {
+	args := []any{orgID}
+	// The Jira arm is omitted rather than emitted empty: `IN ()` is a
+	// syntax error, and "no configured done status" genuinely means no Jira
+	// entity can be terminal. Statuses are free-form user-configured text,
+	// so they bind as placeholders rather than riding an array literal.
+	jiraArm := ""
+	if len(jiraDoneStatuses) > 0 {
+		placeholders := make([]string, len(jiraDoneStatuses))
+		for i, status := range jiraDoneStatuses {
+			args = append(args, status)
+			placeholders[i] = "$" + strconv.Itoa(len(args))
+		}
+		jiraArm = ` OR (source = 'jira' AND snapshot_json->>'status' IN (` +
+			strings.Join(placeholders, ", ") + `))`
+	}
+	limitClause := ""
+	if limit > 0 {
+		args = append(args, limit)
+		limitClause = " LIMIT $" + strconv.Itoa(len(args))
+	}
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+pgEntitySelectCols+`
+		FROM entities
+		WHERE org_id = $1 AND state = 'active' AND snapshot_json IS NOT NULL
+		  AND (
+		    (source = 'github' AND (
+		       snapshot_json->>'merged' = 'true'
+		       OR upper(COALESCE(snapshot_json->>'state', '')) IN ('CLOSED', 'MERGED')
+		    ))`+jiraArm+`
+		  )
+		ORDER BY created_at ASC`+limitClause, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEntityList(rows)
+}
+
 func listActiveEntities(ctx context.Context, q queryer, orgID, source string) ([]domain.Entity, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+pgEntitySelectCols+`

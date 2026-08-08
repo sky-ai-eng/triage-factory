@@ -66,6 +66,13 @@ func (a *App) startBrain(term int64) {
 
 	// Drain sweeper: safety net for queues stuck on transient fire errors.
 	go a.router.RunDrainSweeper(brainCtx, 30*time.Second)
+	// Terminal-state reconciler: the invariant backstop for entities whose
+	// stored snapshot is terminal but whose row never flipped closed. Reaches
+	// the close losses the event queue cannot — a transition the tracker
+	// diffed but never published, a parked row, a row orphaned by a replaced
+	// pod — none of which leave anything to retry. Minutes-cadence: it is a
+	// rare-divergence sweep, not a hot path.
+	go a.router.RunTerminalReconciler(brainCtx, routing.DefaultReconcileInterval)
 	// Durable event-queue drain worker: claims github:/jira: events the
 	// ingestor enqueued, routes them, and marks them done. Single worker,
 	// global FIFO — exactly one process may run this at a time, which is
