@@ -10,6 +10,13 @@ import "strings"
 // doesn't ship (cargo, rubygems, ...) stay off the list until a
 // rootfs variant adds their toolchain.
 //
+// One exception to the consumer rule: an entry whose traffic has moved
+// to the fetch-relay lane (internal/egressrelay) may stay here, marked
+// VESTIGIAL in its comment, as a deliberate one-release degraded path
+// before removal — the Go entries below are the current case. Don't
+// delete a vestigial entry under the consumer rule; its comment names
+// when it goes.
+//
 // Deliberately absent:
 //   - github.com / codeload.github.com — git egress goes through the
 //     authenticated per-run git proxy with its Authorize gate; an
