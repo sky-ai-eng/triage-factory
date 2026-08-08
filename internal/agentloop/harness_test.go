@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -237,9 +238,13 @@ type scriptedTurn struct {
 	reasoning string
 	calls     []domain.ToolCall
 	finish    string
-	usage     inference.Usage
-	model     string
-	err       error
+	// noFinishReason makes the turn report no stop reason at all — the stream
+	// anomaly. It needs a field of its own because an unset `finish` already
+	// means "the script didn't say", which the harness fills in below.
+	noFinishReason bool
+	usage          inference.Usage
+	model          string
+	err            error
 	// rawArgs overrides the rendered argument JSON for the call at that
 	// index — for truncation tests, where the wire carries a fragment no
 	// Input map can express.
@@ -306,7 +311,7 @@ func (p *scriptedProvider) Stream(_ context.Context, req inference.Request) (*in
 		}}
 	}
 	finish := turn.finish
-	if finish == "" {
+	if finish == "" && !turn.noFinishReason {
 		if len(turn.calls) > 0 {
 			finish = "tool_calls"
 		} else {
@@ -375,6 +380,38 @@ func (h *scriptedToolHost) calls() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]string(nil), h.observed...)
+}
+
+// recordingLogger captures what the engine logged. Needed where the log IS
+// the deliverable: a shape the loop deliberately tolerates leaves no row
+// behind, so the warn is the only evidence it was noticed at all.
+type recordingLogger struct {
+	mu    sync.Mutex
+	warns []string
+	infos []string
+}
+
+func (l *recordingLogger) Warn(msg string, _ ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warns = append(l.warns, msg)
+}
+
+func (l *recordingLogger) Info(msg string, _ ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.infos = append(l.infos, msg)
+}
+
+func (l *recordingLogger) warned(substr string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, w := range l.warns {
+		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 // newTestEngine wires an engine whose retry never sleeps, so a retry test

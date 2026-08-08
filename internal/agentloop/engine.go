@@ -177,8 +177,10 @@ const (
 	// ResultConcluded — the model finished: an assistant message with
 	// no tool calls, or a flow-control tool. Outcome carries which.
 	ResultConcluded ResultKind = iota
-	// ResultParked — a guard tripped. The conversation is `open` with
-	// a notice row; the next claim continues it.
+	// ResultParked — the engagement stopped short of concluding: a guard
+	// tripped before a call, or the provider stopped for a reason the loop
+	// will not act on and only a person can resolve. The conversation is
+	// `open` with a notice row; the next claim continues it.
 	ResultParked
 	// ResultFailed — the engagement could not continue (retry
 	// exhaustion, a fatal tool-host error) with its context still live.
@@ -349,6 +351,13 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 	emptyLengthStops := 0
 	escalatedMaxTokens := 0
 
+	// windowWallStops counts CONSECUTIVE turns the provider cut at the
+	// context window wall, licensing one compaction-and-retry between them.
+	// Loop-local for the same reason as the two above; a re-claim starting
+	// the count over reads a transcript the first wall already compacted,
+	// which is a different experiment from the one that just failed.
+	windowWallStops := 0
+
 	// reactiveCompacted licenses at most one overflow-triggered compaction
 	// per provider call: a second overflow immediately after compacting
 	// means compaction cannot make this request fit, and retrying is a
@@ -462,7 +471,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			// this call exactly once.
 			if errors.Is(err, inference.ErrContextOverflow) && !reactiveCompacted {
 				reactiveCompacted = true
-				if cerr := e.compactAfterOverflow(ctx, params); cerr == nil {
+				if cerr := e.compactWindowFull(ctx, params); cerr == nil {
 					continue
 				} else if ctx.Err() != nil {
 					return e.cancelled(ctx, started, turn)
@@ -480,14 +489,22 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		turn++
 		reactiveCompacted = false
 
-		// 7. Persist — one row, priced, display columns populated. Under a
-		// `length` stop the cut usually lands mid-arguments, leaving the
-		// final tool call's JSON unparseable; stub those arguments empty —
-		// under that stop reason only — so the row persists and step 8 can
-		// answer the batch. Everywhere else malformed arguments stay a loud
-		// persist failure: with no truncation to blame they are a provider
-		// bug, not something to paper over.
-		if isLengthStop(completion.FinishReason) {
+		// 7. Persist — one row, priced, display columns populated. A message
+		// the provider ended rather than the model finishing usually lands
+		// mid-arguments, leaving the final tool call's JSON unparseable; stub
+		// those arguments empty — under those stop reasons only — so the row
+		// persists and step 8 can answer the batch. Everywhere else malformed
+		// arguments stay a loud persist failure: with nothing to blame for
+		// the damage they are a provider bug, not something to paper over.
+		class := classifyStop(completion.FinishReason)
+		if completion.FinishReason == "" {
+			// Read as an ordinary stop, per classifyStop. The warn is the only
+			// trace it leaves, since an absent reason is deliberately not
+			// stored — "unknown" and "not reported" stay the same thing.
+			e.warn("provider reported no finish reason; reading the turn as an ordinary stop",
+				"conversation", params.ConversationID, "model", params.Model)
+		}
+		if class.interrupted() {
 			stubTruncatedToolArgs(completion)
 		}
 		assistantRow, err := e.persistAssistant(ctx, params, completion, msSince(callStarted))
@@ -497,31 +514,45 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		lastText = assistantRow.Content
 		calls := assistantRow.ToolCalls
 
-		// 8. Stop-reason handling. A `length` stop with tool calls present
-		// is a truncated batch. The cut call's arguments were stubbed above,
-		// and even a call whose JSON parsed may be silently missing the tail
-		// of what the model meant to write — so no call in the message is
-		// safe to run. Answer every one with an instructive error instead of
-		// executing any of them.
-		if isLengthStop(completion.FinishReason) && len(calls) > 0 {
+		// 8. Stop-reason handling, as an allowlist: only an end-of-turn stop
+		// reaches the would-stop path at step 10, and every other reason
+		// takes a named arm right here. See stopreason.go for why the default
+		// has to be "park", never "conclude".
+		//
+		// Both consecutive-stop counters bound a provider repeating itself,
+		// so any other outcome in between clears them — one healthy turn
+		// means the loop is making progress again.
+		if class != stopLength {
 			emptyLengthStops = 0
-			for _, call := range calls {
-				if err := e.insertToolResult(ctx, params, call, truncatedBatchNotice, true); err != nil {
-					return e.failed(ctx, started, turn, err)
-				}
-			}
-			bareDrain = false
-			continue
+		}
+		if class != stopWindowWall {
+			windowWallStops = 0
 		}
 
-		// 8b. The same stop with an EMPTY batch: the cut landed before the
-		// model produced any text or any tool call, which on a thinking model
-		// means the whole cap went to reasoning. There is no batch to answer
-		// and — the bug this arm exists for — nothing to conclude from
-		// either. Falling through to the would-stop path would read a turn
-		// that produced literally nothing as the step being finished, and
-		// advance a blueprint on it.
-		if isLengthStop(completion.FinishReason) {
+		switch class {
+		case stopLength:
+			// A length stop with tool calls present is a truncated batch. The
+			// cut call's arguments were stubbed above, and even a call whose
+			// JSON parsed may be silently missing the tail of what the model
+			// meant to write — so no call in the message is safe to run.
+			// Answer every one with an instructive error instead of executing
+			// any of them.
+			if len(calls) > 0 {
+				emptyLengthStops = 0
+				if err := e.answerUndispatchedCalls(ctx, params, calls, truncatedBatchNotice); err != nil {
+					return e.failed(ctx, started, turn, err)
+				}
+				bareDrain = false
+				continue
+			}
+
+			// The same stop with an EMPTY batch: the cut landed before the
+			// model produced any text or any tool call, which on a thinking
+			// model means the whole cap went to reasoning. There is no batch
+			// to answer and — the bug this arm exists for — nothing to
+			// conclude from either. Concluding here would read a turn that
+			// produced literally nothing as the step being finished, and
+			// advance a blueprint on it.
 			emptyLengthStops++
 			if emptyLengthStops >= maxEmptyLengthStops {
 				// Twice in a row means the cap is not the obstacle — the
@@ -544,8 +575,78 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			// when the cut landed, so input arriving now is a steer.
 			bareDrain = false
 			continue
+
+		case stopWindowWall:
+			// The window is genuinely full — the same event the reactive arm
+			// answers when it arrives as a rejection, arriving instead as a
+			// 200 with a half-written message. So it gets the same remedy:
+			// rewind to a valid prefix and compact. Escalating the cap, the
+			// length arm's answer, would make the wall arrive sooner.
+			//
+			// No call in a wall-cut message is ever dispatched. Answering
+			// them before compacting is what keeps the transcript legal for
+			// the summarize call about to read it — an unanswered tool_use is
+			// rejected on the wire, and this arm continues in-process, so no
+			// repair pass runs in between. The answers flip inactive with the
+			// rest of the span a moment later.
+			if err := e.answerUndispatchedCalls(ctx, params, calls, wallCutBatchNotice); err != nil {
+				return e.failed(ctx, started, turn, err)
+			}
+			windowWallStops++
+			if windowWallStops >= maxWindowWallStops {
+				e.insertNotice(ctx, params, windowWallFailureNotice)
+				return e.failed(ctx, started, turn, errors.New(
+					"the model context window was exhausted mid-reply again on the call immediately after compacting"))
+			}
+			e.warn("model call stopped at the context window wall; compacting",
+				"conversation", params.ConversationID, "model", params.Model, "max_tokens", maxTokens)
+			if err := e.compactWindowFull(ctx, params); err != nil {
+				if ctx.Err() != nil {
+					return e.cancelled(ctx, started, turn)
+				}
+				e.insertNotice(ctx, params, "Compacting this conversation failed: "+err.Error())
+				return e.failed(ctx, started, turn, fmt.Errorf("compact after context window wall: %w", err))
+			}
+			bareDrain = false
+			continue
+
+		case stopDecline:
+			// A person decides what happens next. Retrying a refusal
+			// reproduces it, and the loop has nothing to change about the ask.
+			//
+			// A decline can land after a tool call has begun streaming — a
+			// guardrail scanning output intervenes when it sees something,
+			// not before the model starts. Those calls are answered like any
+			// other the loop declines to run: whatever the person does with
+			// this park, it must not begin by having the model told a call it
+			// never made was interrupted.
+			if err := e.answerUndispatchedCalls(ctx, params, calls, interruptedCallNotice); err != nil {
+				return e.failed(ctx, started, turn, err)
+			}
+			return e.parkOnStop(ctx, params, started, turn, rows, declineParkNotice(completion.FinishReason))
+
+		case stopUnknown:
+			e.warn("provider reported an unrecognized finish reason; parking rather than concluding",
+				"conversation", params.ConversationID, "model", params.Model,
+				"finish_reason", completion.FinishReason)
+			if err := e.answerUndispatchedCalls(ctx, params, calls, interruptedCallNotice); err != nil {
+				return e.failed(ctx, started, turn, err)
+			}
+			return e.parkOnStop(ctx, params, started, turn, rows, unrecognizedStopParkNotice(completion.FinishReason))
+
+		case stopToolCalls:
+			// The provider said it stopped to call a tool. If it called none,
+			// the message contradicts its own stop reason — dispatch has
+			// nothing to run and there is no completed turn to conclude from.
+			if len(calls) == 0 {
+				return e.parkOnStop(ctx, params, started, turn, rows, emptyToolBatchParkNotice)
+			}
+
+		case stopEndTurn:
+			// The one class that may conclude — at step 10, and only after
+			// dispatch, since a message carrying tool calls has work to
+			// answer whatever the provider called the stop.
 		}
-		emptyLengthStops = 0
 
 		// 9. Dispatch. Flow-control calls resolve loop-side; everything
 		// else goes into the jail, serially, in call order.
@@ -740,18 +841,48 @@ func (e *Engine) checkGuards(ctx context.Context, params Params, budgetTurns, tu
 	return ""
 }
 
-// isLengthStop recognizes the provider's truncation stop reason across the
-// two spellings the neutral layer surfaces.
-func isLengthStop(reason string) bool {
-	return reason == "length" || reason == "max_tokens"
+// answerUndispatchedCalls writes an is_error result for every call in a
+// message no arm will run, so a call is either dispatched or answered within
+// the turn it arrived in — never left standing.
+//
+// Leaving them to the next claim's repair pass would keep the transcript
+// legal, since repair runs unconditionally and answers anything dangling. It
+// would not keep it honest: repair's synthetic result describes an
+// interrupted execution on a restored workspace, and for these messages every
+// part of that is false. Nothing ran, nothing was restored, and there is no
+// state to go verify.
+func (e *Engine) answerUndispatchedCalls(ctx context.Context, params Params, calls []domain.ToolCall, notice string) error {
+	for _, call := range calls {
+		if err := e.insertToolResult(ctx, params, call, notice, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// parkOnStop parks the engagement `open` with a notice — the disposition
+// every stop reason the loop will not act on shares. Same shape as a guard
+// park: the conversation is resumable, the next user message wakes it, and
+// the notice is deduped against the window since the last human input so a
+// re-claim that stops the same way does not restate it.
+func (e *Engine) parkOnStop(ctx context.Context, params Params, started time.Time, turn int, rows []domain.Message, notice string) Result {
+	if !HasNoticeSince(rows, notice) {
+		e.insertNotice(ctx, params, notice)
+	}
+	return Result{
+		Kind:       ResultParked,
+		ParkNotice: notice,
+		NumTurns:   turn,
+		DurationMs: msSince(started),
+	}
 }
 
 // stubTruncatedToolArgs blanks any tool-call arguments in the completion that
-// do not parse as JSON. Licensed only under a length stop, where the provider
-// cut the stream mid-arguments and the concatenated fragments cannot form a
-// whole document; the strict parse stays in force on every other path. The
-// stubbed call still persists and is answered with truncatedBatchNotice, so
-// nothing runs on the partial input.
+// do not parse as JSON. Licensed only under a stop that cut the message
+// mid-generation, where the concatenated fragments cannot form a whole
+// document; the strict parse stays in force on every other path. The stubbed
+// call still persists and is answered with an instructive error, so nothing
+// runs on the partial input.
 func stubTruncatedToolArgs(completion *inference.Completion) {
 	assistant := completion.Message.ChatAssistantMessage
 	if assistant == nil {
@@ -764,42 +895,6 @@ func stubTruncatedToolArgs(completion *inference.Completion) {
 		}
 		assistant.ToolCalls[i].Function.Arguments = "{}"
 	}
-}
-
-// truncatedBatchNotice is the instructive result every call in a
-// length-truncated assistant message receives. It names the cause and the
-// remedy, because the model cannot otherwise tell a truncated argument
-// object from one it wrote badly.
-const truncatedBatchNotice = "This tool call was not executed: the model's response hit the output length limit, " +
-	"so the tool arguments in that message may be silently truncated and are not safe to run. " +
-	"Re-issue the call you intended, with smaller arguments or fewer calls in one message."
-
-// maxEmptyLengthStops bounds consecutive turns cut at the output limit that
-// produced nothing. Two: the first buys a notice and a larger cap, and if the
-// larger cap produces nothing either, a third identical call is not a
-// different experiment.
-const maxEmptyLengthStops = 2
-
-// outputLimitNotice tells the model what the transcript cannot show it — the
-// turn it just took is not in the window, because the whole cap went to
-// reasoning and nothing replayable came out. Without this the model sees its
-// own message vanish and has no account of why.
-const outputLimitNotice = "<system-note>\n" +
-	"Your last reply reached the output token limit while still reasoning, before it produced any text " +
-	"or any tool call, so nothing from it was recorded and no work happened. That turn is not in this " +
-	"conversation — this note is what took its place.\n" +
-	"Continue from where you were, and get to the action sooner: reason more briefly and take the next " +
-	"concrete step in this reply rather than planning the whole remainder first.\n" +
-	"</system-note>"
-
-// outputLimitFailureNotice is the transcript's record of the engagement
-// ending on the second such turn. It names the cap, because the number is
-// what an operator needs to decide whether to raise a budget or shorten the
-// work.
-func outputLimitFailureNotice(maxTokens int) string {
-	return fmt.Sprintf("<system-note>\nThis run stopped: two consecutive model replies reached the %d-token output "+
-		"limit while still reasoning, producing no text and no tool call either time. The work so far is intact — "+
-		"send a message to pick it back up.\n</system-note>", maxTokens)
 }
 
 // failed is every exit that could not continue — and the single place the
