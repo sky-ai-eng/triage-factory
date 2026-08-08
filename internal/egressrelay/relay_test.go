@@ -385,6 +385,12 @@ func TestNew_RejectsMalformedConfig(t *testing.T) {
 		"upstream bad scheme": {Name: "t", Routes: []Route{{Prefix: "/", Upstream: "ftp://example.com"}}},
 		"upstream no host":    {Name: "t", Routes: []Route{{Prefix: "/", Upstream: "https://"}}},
 		"upstream no scheme":  {Name: "t", Routes: []Route{{Prefix: "/", Upstream: "example.com"}}},
+		// url.Parse puts everything after the last "@" into Host, so an
+		// upstream that reads as one host would dial another.
+		"upstream with userinfo": {Name: "t", Routes: []Route{{Prefix: "/", Upstream: "https://proxy.golang.org@evil.com"}}},
+		// WriteHeader panics outside 100-999, and the panic would be
+		// per-request rather than at construction.
+		"synthetic status out of range": {Name: "t", Routes: []Route{{Prefix: "/s", Exact: true, SyntheticStatus: 20}}},
 		"synthetic and upstream": {Name: "t", Routes: []Route{
 			{Prefix: "/", Upstream: "https://example.com", SyntheticStatus: 200},
 		}},

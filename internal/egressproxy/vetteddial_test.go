@@ -7,7 +7,7 @@ import (
 )
 
 // TestVettedDialContext_RefusesInternalTargets pins the gate host-side
-// fetchers depend on. modproxy follows redirects with the HOST's network
+// fetchers depend on. egressrelay follows redirects with the HOST's network
 // reach, so the addresses below are exactly what a hostile or compromised
 // upstream would redirect at: the cloud metadata endpoint that hands out the
 // host's identity, the operator's private network, the sandbox pool, and the

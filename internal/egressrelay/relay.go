@@ -113,10 +113,6 @@ type Config struct {
 	// "go-modules". Required.
 	Name string
 
-	// RunID is the run this relay serves. Carried for observability; the
-	// relay does not branch on it.
-	RunID string
-
 	// Routes is the ordered route table. Required, non-empty.
 	Routes []Route
 
@@ -169,6 +165,15 @@ func New(cfg Config) (*Server, error) {
 		if r.SyntheticStatus != 0 && r.Upstream != "" {
 			return nil, fmt.Errorf("egressrelay: %s: route %d sets both SyntheticStatus and Upstream", cfg.Name, i)
 		}
+		// Range-checked here because ServeHTTP hands the value straight to
+		// WriteHeader, which panics outside 100-999 — and that panic is
+		// per-REQUEST (net/http recovers it per connection), so a typo'd
+		// status would pass construction and then kill every request to
+		// the route with a bare EOF. Every other malformed-config mistake
+		// fails loudly at New; this one must too.
+		if r.SyntheticStatus != 0 && (r.SyntheticStatus < 100 || r.SyntheticStatus > 999) {
+			return nil, fmt.Errorf("egressrelay: %s: route %d synthetic status %d is not a valid HTTP status", cfg.Name, i, r.SyntheticStatus)
+		}
 		compiled := route{Route: r}
 		if r.Upstream != "" {
 			u, err := parseUpstream(cfg.Name, r.Upstream)
@@ -192,7 +197,13 @@ func New(cfg Config) (*Server, error) {
 			Transport: &http.Transport{
 				DialContext:           dial,
 				ResponseHeaderTimeout: responseHeaderTimeout,
-				ForceAttemptHTTP2:     true,
+				// A hand-built Transport has NO idle timeout (unlike
+				// http.DefaultTransport's 90s), so idle upstream
+				// connections — and their goroutine pairs — would live
+				// until the upstream drops them. Shutdown closes them
+				// explicitly; this bounds them while the relay is up.
+				IdleConnTimeout:   90 * time.Second,
+				ForceAttemptHTTP2: true,
 			},
 			// Redirects are followed HERE, host-side — the reason this
 			// lane exists. The per-hop denylist check rides on DialContext
@@ -232,6 +243,17 @@ func parseUpstream(name, raw string) (*url.URL, error) {
 	}
 	if u.Path != "" && u.Path != "/" || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("egressrelay: %s: upstream %q must be scheme://host only (no path, query, or fragment)", name, raw)
+	}
+	// Userinfo is rejected because url.Parse puts everything before the
+	// last "@" into User and everything after into Host — so an upstream
+	// that READS as one host dials another ("https://proxy.golang.org@evil.com"
+	// dials evil.com). Today every upstream is a compile-time catalog
+	// constant, but this validator is the only check between an upstream
+	// string and a host the relay fetches from with the host's network
+	// reach, and per-profile rules (TFAC-408) will eventually feed it
+	// non-source-code strings.
+	if u.User != nil {
+		return nil, fmt.Errorf("egressrelay: %s: upstream %q must not carry userinfo (everything after its last @ would be dialed as the host)", name, raw)
 	}
 	u.Path = ""
 	return u, nil
@@ -320,7 +342,7 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, target *url.URL, 
 		// A denylisted redirect target lands here. Log it — this is the
 		// confused-deputy gate firing, which is worth seeing — but keep
 		// the client-visible body generic.
-		relayLog.Info("upstream fetch failed", "relay", s.cfg.Name, "run_id", s.cfg.RunID, "url", outURL.Redacted(), "err", err)
+		relayLog.Info("upstream fetch failed", "relay", s.cfg.Name, "url", outURL.Redacted(), "err", err)
 		http.Error(w, "egressrelay: upstream fetch failed", http.StatusBadGateway)
 		return
 	}
@@ -342,7 +364,7 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request, target *url.URL, 
 	// in the executor log on every build for something working as
 	// intended.
 	if _, err := io.Copy(w, resp.Body); err != nil && !errors.Is(err, context.Canceled) {
-		relayLog.Info("relay body truncated", "relay", s.cfg.Name, "run_id", s.cfg.RunID, "url", outURL.Redacted(), "err", err)
+		relayLog.Info("relay body truncated", "relay", s.cfg.Name, "url", outURL.Redacted(), "err", err)
 	}
 }
 
@@ -429,7 +451,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s == nil || s.httpSrv == nil {
 		return nil
 	}
-	if err := s.httpSrv.Shutdown(ctx); err != nil {
+	err := s.httpSrv.Shutdown(ctx)
+	// The listener is the server half; the client Transport's pooled
+	// upstream connections are the other half, and nothing else ever
+	// closes them. Without this, every relay a long-lived process starts
+	// leaves its idle sockets and read/write goroutines behind until the
+	// UPSTREAM drops them — Shutdown means "this relay is done", not
+	// "this relay's listener is done".
+	s.client.CloseIdleConnections()
+	if err != nil {
 		return fmt.Errorf("egressrelay: %s: shutdown: %w", s.cfg.Name, err)
 	}
 	return nil
