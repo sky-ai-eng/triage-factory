@@ -29,18 +29,22 @@ func jiraIssuePage(status, updated string) string {
 	]}`
 }
 
-// jiraPageServer serves one prepared search page per refresh cycle, in order,
-// and fails the test if a cycle asks for a page that wasn't scripted — which is
-// how a guard that skipped a fetch (rather than skipping the diff behind it)
-// would show up.
+// jiraPageServer serves one prepared search page per refresh cycle, in order.
+//
+// Every other request is a test failure rather than an empty 200. A permissive
+// fallback would let these tests pass while the refresh made calls they never
+// modelled — a second search for the same cycle, a paging follow-up, a
+// per-issue GET — and the whole claim here is about which reads reach the diff
+// and in what order. An unscripted page is the same failure from the other
+// end: it means a cycle fetched when the assertions expected it not to.
 func jiraPageServer(t *testing.T, pages []string) *httptest.Server {
 	t.Helper()
 	var mu sync.Mutex
 	call := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if !strings.HasSuffix(r.URL.Path, "/search") {
-			_, _ = w.Write([]byte(`{}`))
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/search") {
+			t.Errorf("unexpected jira request: %s %s (only the batch-refresh search is modelled)", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusNotFound)
 			return
 		}
 		mu.Lock()
@@ -52,6 +56,7 @@ func jiraPageServer(t *testing.T, pages []string) *httptest.Server {
 		}
 		body := pages[call]
 		call++
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
