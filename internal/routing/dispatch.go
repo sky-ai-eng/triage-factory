@@ -25,13 +25,14 @@ import (
 //
 // A non-nil error means this event's ROUTING OBLIGATION is unmet and the
 // caller must not consider the event handled. The obligation stages are entity
-// resolution, handler matching, the task upsert, and trigger firing (plus the
-// delegation tail behind it): each one is load-bearing for whether the right
-// task exists and the right run started, and none of them is recoverable by
-// any other path — the tracker's snapshot-diff is forward-only, so a dropped
-// event is simply never re-derived. The drain worker answers an error by
-// requeueing the row for another attempt (see parkOrRequeue), so an unmet
-// obligation is retried rather than silently consumed.
+// resolution, handler matching, owner resolution, the task upsert, and trigger
+// firing (plus the delegation tail behind it): each one is load-bearing for
+// whether the right task exists, on the right team, and the right run started,
+// and none of them is recoverable by any other path — the tracker's
+// snapshot-diff is forward-only, so a dropped event is simply never re-derived.
+// The drain worker answers an error by requeueing the row for another attempt
+// (see parkOrRequeue), so an unmet obligation is retried rather than silently
+// consumed.
 //
 // The tails that hang off those stages stay log-and-continue and never reach
 // the return: the entity/task close phase, task visibility writes, Bump, the
@@ -177,8 +178,14 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
 	}
 
 	// Resolve the task's owner team, visibility set, firing order, and
-	// creation-seed priority.
-	routing, ok := r.resolveTeamRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
+	// creation-seed priority. An error here is "could not find out who owns
+	// this" — distinct from the resolved no-owner outcome below, which is a
+	// real answer and consumes the event.
+	routing, ok, err := r.resolveTeamRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
+	if err != nil {
+		disp.Disposition = events.DispositionError
+		return fmt.Errorf("resolve owner: %w", err)
+	}
 	if !ok {
 		disp.Disposition = events.DispositionTasklessNoOwner
 		return nil
@@ -359,6 +366,15 @@ type eventRouting struct {
 // mapped reviewer team; an owner-ladder event from an external identity with no
 // team watching).
 //
+// (ok=false, err=nil) is a RESOLVED answer and consumes the event; err != nil
+// means the resolution could not be completed and the caller must replay. The
+// two used to be one value, and that made every store failure beneath here
+// indistinguishable from a genuinely external author — no task at all, or worse,
+// a task on a watching team that then anchors every future event on the entity
+// to itself. The identity and prior-owner reads propagate for that reason; the
+// team↔repo / team↔project tracking gates deliberately still fail open (see
+// teamTracksEventRepo), since they only narrow a set someone else computed.
+//
 // It dispatches on the event's ownership model (ownershipModelForEvent), the
 // one explicit classification of every event type. Each model resolves its
 // own (visibility, owner, firing order, priority); teamTriggers and the
@@ -379,59 +395,60 @@ type eventRouting struct {
 //
 // The matched handlers still gate whether a task is created and supply the
 // priority; the model only decides the team set + owner.
-func (r *Router) resolveTeamRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) (eventRouting, bool) {
+func (r *Router) resolveTeamRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) (eventRouting, bool, error) {
 	ctx, span := tracer.Start(ctx, "route.own")
 	defer span.End()
 
 	// teamTriggers is model-independent: a team fires its matched triggers iff it
-	// lands in the model's orderedTeams. Grouped once, threaded through unchanged.
-	// Org-visibility handlers (team_id NULL) route to LocalDefaultTeamID via
-	// handlerTeamID; the Postgres store resolves that sentinel to the org's team.
+	// lands in the model's orderedTeams. Grouped once, folded into whichever
+	// model resolved. Org-visibility handlers (team_id NULL) route to
+	// LocalDefaultTeamID via handlerTeamID; the Postgres store resolves that
+	// sentinel to the org's team.
 	teamTriggers := map[string][]domain.EventHandler{}
 	for _, h := range matchedTriggers {
 		teamTriggers[handlerTeamID(h)] = append(teamTriggers[handlerTeamID(h)], h)
 	}
 
 	var (
-		visibleTeams, orderedTeams []string
-		ownerTeam                  string
-		taskPriority               float64
-		ok                         bool
+		routing eventRouting
+		ok      bool
+		err     error
 	)
 	switch ownershipModelForEvent(evt.EventType) {
 	case events.OwnershipOwned:
-		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveOwnedRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
+		routing, ok, err = r.resolveOwnedRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
 	case events.OwnershipRequestedParty:
-		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveRequestedPartyRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers)
+		routing, ok, err = r.resolveRequestedPartyRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers)
 	default: // events.OwnershipPool, events.OwnershipUnrouted
-		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = resolvePoolRouting(matchedRules, matchedTriggers)
+		routing, ok = resolvePoolRouting(matchedRules, matchedTriggers), true
+	}
+	if err != nil {
+		span.SetStatus(codes.Error, "resolve owner")
+		return eventRouting{}, false, err
 	}
 	if !ok {
 		span.SetAttributes(telemetry.Outcome("no_owner"))
-		return eventRouting{}, false
+		return eventRouting{}, false, nil
 	}
-	if ownerTeam != "" {
-		span.SetAttributes(telemetry.TeamID(ownerTeam))
-	}
-	span.SetAttributes(telemetry.Count(len(visibleTeams)))
 
-	return eventRouting{
-		ownerTeam:    ownerTeam,
-		visibleTeams: visibleTeams,
-		orderedTeams: orderedTeams,
-		teamTriggers: teamTriggers,
-		taskPriority: taskPriority,
-	}, true
+	routing.teamTriggers = teamTriggers
+	if routing.ownerTeam != "" {
+		span.SetAttributes(telemetry.TeamID(routing.ownerTeam))
+	}
+	span.SetAttributes(telemetry.Count(len(routing.visibleTeams)))
+	return routing, true, nil
 }
 
 // resolvePoolRouting is the handler-team grouping (OwnershipPool): every team with a
 // matched handler is a participant, the highest-priority team is the eagerly-
 // stamped owner, and triggers fire in priority-desc / id-asc order. Used for
 // unassigned team-pool events (jira:issue:available) and as the
-// requested-party fallback. Always ok=true — resolveTeamRouting is only reached
-// with ≥1 matched handler, so the participant set is non-empty. A team with only
-// triggers contributes the 0.5 trigger-fallback priority via teamRulePriorityScores.
-func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) (visibleTeams []string, ownerTeam string, orderedTeams []string, taskPriority float64, ok bool) {
+// requested-party fallback. It always resolves — resolveTeamRouting is only
+// reached with ≥1 matched handler, so the participant set is non-empty, and it
+// reads no store so it cannot fail. A team with only triggers contributes the
+// 0.5 trigger-fallback priority via teamRulePriorityScores. teamTriggers is
+// filled in by the caller.
+func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) eventRouting {
 	seen := map[string]struct{}{}
 	for _, h := range matchedRules {
 		seen[handlerTeamID(h)] = struct{}{}
@@ -441,9 +458,14 @@ func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) (vi
 	}
 	allTeams := sortedKeys(seen)
 	scores := teamRulePriorityScores(seen, matchedRules)
-	orderedTeams = orderTeamsByScores(allTeams, scores)
-	ownerTeam = orderedTeams[0]
-	return allTeams, ownerTeam, orderedTeams, scores[ownerTeam], true
+	orderedTeams := orderTeamsByScores(allTeams, scores)
+	ownerTeam := orderedTeams[0]
+	return eventRouting{
+		ownerTeam:    ownerTeam,
+		visibleTeams: allTeams,
+		orderedTeams: orderedTeams,
+		taskPriority: scores[ownerTeam],
+	}
 }
 
 // resolveOwnedRouting routes an owner-ladder event to the entity's owning team.
@@ -455,17 +477,32 @@ func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) (vi
 // no-steal invariant — lives in ownerLadderRouting, and registered sources
 // inherit all of it unchanged (do NOT reimplement it here). ok=false →
 // external identity, no watching handler → no task.
-func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) ([]string, string, []string, float64, bool) {
+//
+// A non-nil error means the built-in ladder could not resolve the owner and the
+// event must be replayed rather than routed on a guess. Registered sources have
+// no error arm: SourceHooks.ResolveOwner is contractually fail-open (see its
+// doc), so a source that wants a retry has to grow that contract first.
+func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) (eventRouting, bool, error) {
 	var owner string
 	var ownerSet []string
+	var err error
 	if hooks, ok := sourceHooksFor(evt.EventType); ok {
 		owner, ownerSet = hooks.ResolveOwner(ctx, orgID, evt, entityID)
 	} else if isAuthorCentricGitHubEvent(evt.EventType) {
-		owner, ownerSet = r.authorCentricOwner(ctx, orgID, evt, entityID, scopeCache)
+		owner, ownerSet, err = r.authorCentricOwner(ctx, orgID, evt, entityID, scopeCache)
 	} else {
-		owner, ownerSet = r.assigneeCentricJiraOwner(ctx, orgID, evt, entityID, scopeCache)
+		owner, ownerSet, err = r.assigneeCentricJiraOwner(ctx, orgID, evt, entityID, scopeCache)
 	}
-	return ownerLadderRouting(owner, ownerSet, matchedRules, matchedTriggers)
+	if err != nil {
+		return eventRouting{}, false, err
+	}
+	vis, ownerTeam, ordered, priority, ok := ownerLadderRouting(owner, ownerSet, matchedRules, matchedTriggers)
+	return eventRouting{
+		ownerTeam:    ownerTeam,
+		visibleTeams: vis,
+		orderedTeams: ordered,
+		taskPriority: priority,
+	}, ok, nil
 }
 
 // resolveRequestedPartyRouting routes review_requested to the requested
@@ -477,16 +514,28 @@ func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt doma
 // every reviewer team (already id-sorted by the helper); fireMatchedTriggers
 // walks them and the first whose pr-review trigger wins the exclusive claim
 // consolidates ownership onto itself, else the first human claim does.
-func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) ([]string, string, []string, float64, bool) {
-	reqTeams, scoped := r.reviewRequestVisibilityTeams(ctx, orgID, evt)
+//
+// An unresolvable identity read errors instead of falling into either arm: the
+// scoped-and-empty drop is the answer for a reviewer who really maps to no
+// team, and letting a failed lookup borrow it would consume the event with no
+// task at all.
+func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) (eventRouting, bool, error) {
+	reqTeams, scoped, err := r.reviewRequestVisibilityTeams(ctx, orgID, evt)
+	if err != nil {
+		return eventRouting{}, false, err
+	}
 	if !scoped {
-		return resolvePoolRouting(matchedRules, matchedTriggers)
+		return resolvePoolRouting(matchedRules, matchedTriggers), true, nil
 	}
 	if len(reqTeams) == 0 {
 		routerLog.Warn("review_requested: requested identity maps to no tf team, recording event but no task", "entity_id", entityID)
-		return nil, "", nil, 0, false
+		return eventRouting{}, false, nil
 	}
-	return reqTeams, "", reqTeams, maxRuleDefaultPriority(matchedRules), true
+	return eventRouting{
+		visibleTeams: reqTeams,
+		orderedTeams: reqTeams,
+		taskPriority: maxRuleDefaultPriority(matchedRules),
+	}, true, nil
 }
 
 // upsertTaskForEvent finds or creates the single task for this (entity,
