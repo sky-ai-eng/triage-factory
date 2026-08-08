@@ -146,7 +146,7 @@ func (e *Engine) repairDanglingToolCalls(ctx context.Context, params Params, row
 	e.info("repairing interrupted tool calls on claim",
 		"conversation", params.ConversationID, "count", len(repairs))
 	for _, rep := range repairs {
-		if err := e.insertToolResultAt(ctx, params, rep.call, interruptedToolResult, true, rep.seq); err != nil {
+		if err := e.insertToolResult(ctx, params, rep.call, interruptedToolResult, true, rep.seq); err != nil {
 			return fmt.Errorf("insert synthetic result for %s: %w", rep.call.ID, err)
 		}
 	}

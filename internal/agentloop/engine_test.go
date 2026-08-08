@@ -311,6 +311,42 @@ func TestRun_RepairIsIdempotentAcrossClaims(t *testing.T) {
 	}
 }
 
+// TestRun_ToolResultAssemblesUnderItsCallWhenInputRacesTheDispatch: a person
+// typing a follow-up while a tool runs is ordinary use, and it takes the row id
+// between the call and its answer. The result still has to assemble in the
+// message immediately after the call — a tail append would put the follow-up
+// between them, and the provider rejects that shape non-retryably, failing
+// every later call on the conversation rather than just this one.
+func TestRun_ToolResultAssemblesUnderItsCallWhenInputRacesTheDispatch(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	host := &racingToolHost{scriptedToolHost: newScriptedToolHost(), transcript: tr,
+		arrive: pendingUser("also update the changelog")}
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{calls: []domain.ToolCall{{ID: "c1", Name: "bash"}}},
+		{text: "done"},
+	}}
+
+	if got := newTestEngine(tr, p, host).Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
+	}
+
+	call := tr.find(func(m domain.Message) bool { return len(m.ToolCalls) == 1 && m.ToolCalls[0].ID == "c1" })
+	result := tr.find(func(m domain.Message) bool { return m.Role == "tool" && m.ToolCallID == "c1" })
+	followUp := tr.find(func(m domain.Message) bool { return strings.Contains(m.Content, "changelog") })
+	if call == nil || result == nil || followUp == nil {
+		t.Fatalf("staging failed: call=%v result=%v followUp=%v", call, result, followUp)
+	}
+	if result.ID <= followUp.ID {
+		t.Fatalf("staging failed: the result (id %d) must be written after the follow-up (id %d)", result.ID, followUp.ID)
+	}
+	if result.Seq == nil || *result.Seq <= float64(call.ID) || *result.Seq >= float64(followUp.ID) {
+		t.Fatalf("result seq = %v, want a position between its call (%d) and the racing follow-up (%d)",
+			result.Seq, call.ID, followUp.ID)
+	}
+	// The turn after the drain is the one that reads the delivered follow-up.
+	assertToolResultsAreAdjacent(t, p.requests[len(p.requests)-1])
+}
+
 func TestRun_LengthStopErrorsEveryCallInTheBatchWithoutExecuting(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
 	host := newScriptedToolHost()

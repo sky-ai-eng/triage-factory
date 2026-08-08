@@ -470,10 +470,11 @@ type Message struct {
 	WindowState MessageWindowState
 
 	// Seq overrides assembly order: the effective sort key is
-	// COALESCE(Seq, ID). nil for every normally-appended row — no backfill,
-	// no insert-time dance. Only a synthetic insertion (a compaction result)
-	// sets a value, to land between two existing rows without renumbering
-	// either of them.
+	// COALESCE(Seq, ID). nil for a row whose arrival order IS its position —
+	// no backfill, no insert-time dance. A value places the row between two
+	// existing ones without renumbering either: a compaction result ahead of
+	// the tail it excludes, and every tool result, which belongs under the
+	// call it answers no matter what else took an id in between.
 	Seq *float64
 }
 

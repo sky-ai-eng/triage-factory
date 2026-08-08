@@ -2,86 +2,18 @@ package agentloop
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/maximhq/bifrost/core/schemas"
-
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/inference"
 )
 
-// The claim-start repair's placement contract. What these assert is the
-// provider's own rule — a tool_use is answered in the message immediately
-// after the one that made it — held against transcripts where rows arrived
-// between the call and the repair that closes it. Asserting on row order
-// alone would miss it: the rows can be in the right sequence in the table and
-// still assemble into a request the API rejects.
-
-// assertToolResultsAreAdjacent applies the adjacency rule to a request as the
-// model will see it. Every tool_use id an assistant message carries must be
-// answered within the run of tool messages that immediately follows it — the
-// exact condition behind Anthropic's "tool_use ids were found without
-// tool_result blocks immediately after".
-func assertToolResultsAreAdjacent(t *testing.T, req inference.Request) {
-	t.Helper()
-	msgs, err := inference.RowsToMessages(req.Rows, inference.AssemblyOptions{})
-	if err != nil {
-		t.Fatalf("assemble request: %v", err)
-	}
-	for i, m := range msgs {
-		if m.Role != schemas.ChatMessageRoleAssistant || m.ChatAssistantMessage == nil {
-			continue
-		}
-		unanswered := map[string]struct{}{}
-		for _, call := range m.ToolCalls {
-			if call.ID != nil && *call.ID != "" {
-				unanswered[*call.ID] = struct{}{}
-			}
-		}
-		if len(unanswered) == 0 {
-			continue
-		}
-		for j := i + 1; j < len(msgs) && msgs[j].Role == schemas.ChatMessageRoleTool; j++ {
-			if msgs[j].ChatToolMessage == nil || msgs[j].ToolCallID == nil {
-				continue
-			}
-			delete(unanswered, *msgs[j].ToolCallID)
-		}
-		if len(unanswered) > 0 {
-			var ids []string
-			for id := range unanswered {
-				ids = append(ids, id)
-			}
-			t.Fatalf("assistant message %d's calls %v are not answered in the messages immediately after it; assembled: %s",
-				i, ids, describeAssembly(msgs))
-		}
-	}
-}
-
-// describeAssembly renders an assembled request as a role sequence, so a
-// failure names the shape that broke rather than dumping every message.
-func describeAssembly(msgs []schemas.ChatMessage) string {
-	parts := make([]string, 0, len(msgs))
-	for _, m := range msgs {
-		switch {
-		case m.ChatAssistantMessage != nil && len(m.ToolCalls) > 0:
-			var ids []string
-			for _, c := range m.ToolCalls {
-				if c.ID != nil {
-					ids = append(ids, *c.ID)
-				}
-			}
-			parts = append(parts, fmt.Sprintf("assistant(tool_use:%s)", strings.Join(ids, ",")))
-		case m.ChatToolMessage != nil && m.ToolCallID != nil:
-			parts = append(parts, fmt.Sprintf("tool(%s)", *m.ToolCallID))
-		default:
-			parts = append(parts, string(m.Role))
-		}
-	}
-	return strings.Join(parts, " → ")
-}
+// The claim-start repair's half of the placement contract: a tool_use is
+// answered in the message immediately after the one that made it, held against
+// transcripts where rows arrived between the call and the repair that closes
+// it. Asserting on row order alone would miss it — rows can be in the right
+// sequence in the table and still assemble into a request the API rejects,
+// which is why these end at assertToolResultsAreAdjacent.
 
 // syntheticResultFor returns the repair's row for a call id, or nil.
 func syntheticResultFor(tr *memTranscript, callID string) *domain.Message {
