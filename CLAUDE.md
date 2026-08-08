@@ -132,7 +132,7 @@ Any one of those alone is fine. The danger is one process holding all three, bec
 
 **The orchestrator** is the main Triage Factory server — the API, the dispatcher, the database. It has **zero** machine powers; they are dropped at exec via `setpriv` (Go can't drop reliably in-process) and cannot be picked back up. It holds no per-run agent credentials, and it does not parse the agent's output. It is the process with the broadest *data* access and the narrowest *power*.
 
-**The credential sidecar** (`cmd/runsidecar`) is one process per running agent, and it holds exactly one run's secrets. No machine powers, and **no database handle** — it reaches persistence only through narrow, validated relay calls the orchestrator answers (`cmd/exec/agenthost/relayserver.go`). It runs the little proxies the agent's traffic flows through (LLM, git, egress, the `gh` credential injector) plus the agenthost socket the agent's `tfac exec` verbs dial. Its per-run uid (the `SidecarUID` band, `20000+`) is the isolation boundary between concurrent runs' credentials.
+**The credential sidecar** (`cmd/runsidecar`) is one process per running agent, and it holds exactly one run's secrets. No machine powers, and **no database handle** — it reaches persistence only through narrow, validated relay calls the orchestrator answers (`cmd/exec/agenthost/relayserver.go`). It runs the little proxies the agent's traffic flows through (LLM, git, egress, the fetch relays, the `gh` credential injector) plus the agenthost socket the agent's `tfac exec` verbs dial. Egress specifically has three lanes — CONNECT tunnel (`internal/egressproxy`), fetch relay (`internal/egressrelay`), credential proxies — with a probe-first procedure for adding ecosystem support; see `docs/security/sandbox-egress.md` and the CLAUDE.md in each lane's package before touching any of them. Its per-run uid (the `SidecarUID` band, `20000+`) is the isolation boundary between concurrent runs' credentials.
 
 **The sandbox** is the gVisor jail where the agent actually runs. It holds nothing: no powers, no real credentials, just placeholder tokens pointing at its own sidecar (**Property B** — no real credential ever enters the jail's env, argv, or any file; the real one is attached on the upstream hop). It is the one thing deliberately exposed to hostile input, because reading PR bodies is its job. Per-run fail-closed egress allowlist.
 
@@ -198,5 +198,5 @@ React 19 + Vite + TypeScript + Tailwind v4. Router routes live in `frontend/src/
 - `docs/concepts/tracked-events.md` — GitHub/Jira event taxonomy + snapshot field list.
 - `docs/local-mode/` — local-mode usage: CLI flags, configuration, secret storage, headless, polling.
 - `docs/self-hosting/` — multi-mode operator guides (install, scaling, SSO, monitoring).
-- `docs/security/` — isolation tiers, security overview, privilege separation, seccomp, release verification.
+- `docs/security/` — isolation tiers, security overview, privilege separation, sandbox egress lanes, seccomp, release verification.
 - `docs/for-agents/auto-delegation-briefing.md` — briefing for delegated agents.

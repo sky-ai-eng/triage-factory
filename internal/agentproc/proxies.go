@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
@@ -95,6 +96,7 @@ type runProxies struct {
 	llm    *llmproxy.Server
 	git    *gitproxy.Server
 	egress *egressproxy.Server
+	relays []*egressrelay.Server
 
 	// gitProxyURL / gitProxyToken are the git proxy's own address and per-run
 	// placeholder token, surfaced so the orchestrator's pre-sandbox clone can
@@ -125,6 +127,11 @@ func (p *runProxies) Shutdown(ctx context.Context) error {
 	if p.egress != nil {
 		if err := p.egress.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("egress proxy shutdown: %w", err))
+		}
+	}
+	for _, rel := range p.relays {
+		if err := rel.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("%s relay shutdown: %w", rel.Name(), err))
 		}
 	}
 	return errors.Join(errs...)
@@ -428,6 +435,24 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	bundle.egress = egressSrv
 	env = append(env, egressEnv...)
 
+	// Fetch relays: one per egressrelay catalog entry, each on its own
+	// port of hostVethIP. The relays exist for registries that serve
+	// artifacts via redirects into shared multi-tenant storage hostnames
+	// (proxy.golang.org → storage.googleapis.com), which the CONNECT-only
+	// egress proxy above can never admit — see internal/egressrelay's
+	// package doc and CLAUDE.md. Which ecosystems get a relay, their route
+	// tables, and their env pointing are all catalog data; this wiring is
+	// ecosystem-blind.
+	relayEnv, relaySrvs, err := startFetchRelaysForSandbox(hostVethIP)
+	if err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = bundle.Shutdown(shutdownCtx)
+		return nil, nil, err
+	}
+	bundle.relays = relaySrvs
+	env = append(env, relayEnv...)
+
 	// Assemble the single GIT_CONFIG_* block for the sandboxed git. It
 	// always carries core.hooksPath (F2, TFAC-456) so the TF hooks fire
 	// for every repo the agent touches — including subdir clones in a
@@ -582,6 +607,52 @@ func startEgressProxyForSandbox(hostVethIP string, recordDenial func(ctx context
 		return nil, nil, fmt.Errorf("agentproc: start egress proxy on %s: %w", hostVethIP, err)
 	}
 	return sandboxEgressProxyEnv(addr, hostVethIP, incoming), srv, nil
+}
+
+// startFetchRelaysForSandbox starts every egressrelay catalog entry on a
+// free port of hostVethIP and returns the combined env entries plus the
+// servers for the shutdown bundle. Ecosystem-blind by design: adding a
+// relay is a catalog edit (internal/egressrelay/catalog.go), never a
+// change here.
+//
+// Every relay starts for every sandbox run, like the egress proxy: a run
+// that never uses the ecosystem never dials it, and an idle listener is
+// cheaper than a wiring path conditioned on guessing the repo's language.
+//
+// Unlike the LLM and git proxies, relays mint no per-run token. They hold
+// no credential to steal, the relayed tools have no clean way to present
+// one, and cross-run reach is already denied at L3 — see the egressrelay
+// package doc.
+//
+// Self-contained on failure: any relays already started are shut down
+// here, so the caller never receives a half-started set alongside an
+// error.
+func startFetchRelaysForSandbox(hostVethIP string) ([]string, []*egressrelay.Server, error) {
+	var env []string
+	var servers []*egressrelay.Server
+	fail := func(err error) ([]string, []*egressrelay.Server, error) {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, srv := range servers {
+			_ = srv.Shutdown(shutdownCtx)
+		}
+		return nil, nil, err
+	}
+	for _, entry := range egressrelay.Catalog() {
+		cfg := entry.Config
+		cfg.AllowNonLoopback = true
+		srv, err := egressrelay.New(cfg)
+		if err != nil {
+			return fail(fmt.Errorf("agentproc: construct %s relay: %w", entry.Config.Name, err))
+		}
+		addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
+		if err != nil {
+			return fail(fmt.Errorf("agentproc: start %s relay on %s: %w", entry.Config.Name, hostVethIP, err))
+		}
+		servers = append(servers, srv)
+		env = append(env, entry.Env(addr)...)
+	}
+	return env, servers, nil
 }
 
 // sandboxEgressProxyEnv builds the proxy env entries that route the

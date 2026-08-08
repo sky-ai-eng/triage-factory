@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -39,6 +40,15 @@ func TestSandboxEnvAllowlistCoversEveryProducer(t *testing.T) {
 
 	// Egress proxy routing.
 	add(sandboxEgressProxyEnv("10.42.1.1:9000", "10.42.1.1", "run-token"))
+
+	// Fetch-relay routing (GOPROXY today). Iterating the catalog makes
+	// this guard automatic for future entries: a contributor adding a
+	// relay whose env key is missing from the broker allowlist fails HERE,
+	// with the key's name, instead of having every privsep-on run rejected
+	// at launch.
+	for _, entry := range egressrelay.Catalog() {
+		add(entry.Env("10.42.1.1:9001"))
+	}
 
 	// LLM proxy placeholders — every provider variant, since each emits a
 	// different key set (Anthropic vs. Bedrock bearer vs. Bedrock SigV4).

@@ -13,6 +13,7 @@ self-host (Tier 3), and local (Tier 4) — so they live here rather than under
 ## Mechanisms
 
 - [Privilege separation: process model](privilege-separation.md) — the cap-broker / orchestrator / sandbox split, and how to verify it against a running deployment
+- [Sandbox egress lanes](sandbox-egress.md) — the tunnel / fetch-relay / credential-proxy taxonomy, and how contributors add ecosystem support to each
 - [Tailored seccomp profile](seccomp-profile.md) — the host-level default-deny allowlist and how to regenerate it
 - [Verifying releases](verifying-releases.md) — cosign keyless signatures, SBOM, and SLSA provenance
 

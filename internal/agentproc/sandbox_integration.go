@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -175,6 +176,16 @@ const (
 	SandboxMarkerEnvValue = "1"
 )
 
+// goToolchainEnvKey / goToolchainEnvValue are the Go toolchain policy
+// buildSandboxEnv pins onto every sandboxed process. Pulled out as consts
+// (rather than inlined) so the assembler can filter a caller-supplied copy
+// by the same name before appending its own — the same shape jscJITEnvKey
+// uses on the direct path.
+const (
+	goToolchainEnvKey   = "GOTOOLCHAIN"
+	goToolchainEnvValue = "auto"
+)
+
 // buildSandboxEnv constructs the *base* env exposed to the
 // sandboxed agent — the slice the sandbox's ConfigureProxies hook
 // then appends ANTHROPIC_BASE_URL / placeholder credentials onto
@@ -208,6 +219,19 @@ func buildSandboxEnv(extraEnv []string) []string {
 		"PATH=/opt/tf/bin:/usr/local/bin:/usr/bin:/bin",
 		"HOME=/work",
 		"TERM=xterm",
+		// The rootfs installs Go from alpine's apk, and a distro Go ships
+		// GOTOOLCHAIN=local baked into its go.env so a distro build never
+		// silently swaps toolchains. That default is wrong for us: a repo
+		// whose go.mod floor is newer than the packaged Go then fails to
+		// build at all, with no path forward the agent can take — it is not
+		// root, so it cannot install a package, and the egress allowlist
+		// carries no vendor download host. Restoring the upstream default
+		// makes the version floor self-healing: cmd/go fetches the toolchain
+		// as an ordinary module (golang.org/toolchain) from the module proxy,
+		// which is already an allowlisted registry and is checksum-verified
+		// like any other module. No new host, no new capability — the same
+		// fetch-and-run reach `go build` has for every dependency.
+		goToolchainEnvKey + "=" + goToolchainEnvValue,
 		// The sandbox's egress is a fail-closed allowlist of package registries
 		// (egressproxy.DefaultRegistryHosts); the SDK's non-essential hosts —
 		// telemetry, error reporting, the auto-updater, Statsig feature gates —
@@ -246,7 +270,26 @@ func buildSandboxEnv(extraEnv []string) []string {
 	// assembler put me in a jail". Dropped rather than rejected — a caller
 	// passing it is confused, not dangerous, and the base entry above is
 	// already the right answer.
-	out = append(out, filterEnv(extraEnv, []string{SandboxMarkerEnvVar})...)
+	//
+	// GOTOOLCHAIN is filtered for the same reason: the host's own env very
+	// plausibly carries GOTOOLCHAIN=local (alpine's go.env sets it, so
+	// anything shelling out from the rootfs picks it up), and the base
+	// policy must be authoritative rather than merely positional.
+	//
+	// The relay catalog's env keys (GOPROXY today) are filtered on the
+	// OPPOSITE positional reasoning, and here the filter is load-bearing,
+	// not defensive. Duplicate env keys resolve FIRST-wins on Linux —
+	// getenv walks environ and returns the first match, and Go's runtime
+	// does the same (matching the GIT_CONFIG_COUNT note above) — and the
+	// relay's own copy is appended LAST, after this function's output
+	// (run.go appends opts.PrebuiltProxyEnv to the assembled env). So an
+	// inherited GOPROXY threaded through ExtraEnv would shadow the relay's
+	// and point the jail's cmd/go at a host the allowlist doesn't carry,
+	// presenting as a broken network. The keys come from the catalog
+	// (egressrelay.CatalogEnvKeys) so a future entry's key is protected the
+	// moment it exists, with no second list to update.
+	drop := append([]string{SandboxMarkerEnvVar, goToolchainEnvKey}, egressrelay.CatalogEnvKeys()...)
+	out = append(out, filterEnv(extraEnv, drop)...)
 	return out
 }
 
