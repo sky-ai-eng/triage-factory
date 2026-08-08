@@ -864,3 +864,68 @@ func TestCapture_GraphQLWrite_RecordsOneRowPerRequest(t *testing.T) {
 		t.Errorf("credential = %q, want the org credential the write actually spent", rows[0].Credential)
 	}
 }
+
+// TestCapture_GraphQLOverCapStillLandsAnAttributedRow is the anti-evasion
+// property, asserted where it actually matters: in the store, not at the
+// injector.
+//
+// A body past the buffering cap costs the row its verb — nothing read the
+// document, so nothing can name the act. What it must not cost is the row. If
+// an oversized payload bought silence, padding a request past the cap would be
+// the way to write under the org credential without appearing in the log at
+// all, and the size threshold would be the exploit rather than the safeguard.
+//
+// So the write still lands a row, still attributed to the conversation that
+// made it, still carrying the reason it could say no more. That is also why the
+// injector logs this case: the row rides a fire-and-forget relay, and this is
+// the one outcome whose loss would erase the only trace of a write nobody could
+// name.
+func TestCapture_GraphQLOverCapStillLandsAnAttributedRow(t *testing.T) {
+	ctx := context.Background()
+	_, stores, info, client := newGithubRecordingClientConn(t, "", true)
+
+	client.RecordGHChannelWrite(ctx, ghwrite.Observation{
+		Method:  "POST",
+		Path:    "/graphql",
+		Status:  200,
+		GraphQL: &ghwrite.GraphQLFacts{Unreadable: ghwrite.GraphQLOverCap},
+	})
+
+	rows := listExternalActions(t, stores)
+	if len(rows) != 1 {
+		t.Fatalf("want exactly 1 row for an over-cap write, got %d: %+v", len(rows), rows)
+	}
+	row := rows[0]
+	if row.Action != domain.ActionGraphQLWrite {
+		t.Errorf("action = %q, want graphql_write — the act is unknown, the write is not", row.Action)
+	}
+	if row.ConversationID != info.RunID {
+		t.Errorf("conversation = %q, want the run that made the write %q", row.ConversationID, info.RunID)
+	}
+	if row.Credential != domain.CredentialGitHubApp {
+		t.Errorf("credential = %q, want the org credential it spent", row.Credential)
+	}
+	if !strings.Contains(row.DetailJSON, `"unreadable":"over_cap"`) {
+		t.Errorf("detail_json = %q, want the reason the act went unnamed", row.DetailJSON)
+	}
+
+	// A body that stopped arriving is a different fact and keeps its own name,
+	// so an operational failure never reads as someone hitting our cap.
+	client.RecordGHChannelWrite(ctx, ghwrite.Observation{
+		Method:  "POST",
+		Path:    "/graphql",
+		Status:  200,
+		GraphQL: &ghwrite.GraphQLFacts{Unreadable: ghwrite.GraphQLRequestUnread},
+	})
+	rows = listExternalActions(t, stores)
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows after a second write, got %d", len(rows))
+	}
+	var reasons []string
+	for _, r := range rows {
+		reasons = append(reasons, r.DetailJSON)
+	}
+	if strings.Count(strings.Join(reasons, " "), `"unreadable":"request_unread"`) != 1 {
+		t.Errorf("rows = %v, want the broken-read reason recorded distinctly", reasons)
+	}
+}

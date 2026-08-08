@@ -158,6 +158,7 @@ func Start(cfg Config) (*Channel, error) {
 		Upstream:      upstream,
 		IncomingToken: token,
 		Cert:          cert,
+		RunID:         cfg.RunID,
 		TokenSource:   cfg.TokenSource,
 		Observe:       cfg.Observe,
 		ObserveWrite:  cfg.ObserveWrite,

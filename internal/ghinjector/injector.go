@@ -160,6 +160,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
 // restPrefix is the GHE REST path prefix gh emits; graphqlPath is the GraphQL
@@ -179,6 +180,12 @@ const (
 // front of the untouched remainder. The agent's response is always delivered
 // whole; observation is the only thing that degrades.
 const maxObserveBody = 1 << 20
+
+// injectorLog carries the one thing this package says out loud. Everything else
+// it observes travels as a relayed audit row, which is the durable record; this
+// exists for the case where a request defeats that record's ability to name what
+// it did, since a log line is written here and owes nothing to the relay hop.
+var injectorLog = logging.Component("ghinjector")
 
 // maxRequestBody caps how much of a GraphQL request body the injector will
 // buffer to name the act it performs. It is sized to clear anything real:
@@ -263,6 +270,12 @@ type Config struct {
 	// asking either question is not served by the other's answer.
 	// Called inline on the response path, so the callback must not block.
 	ObserveWrite func(ctx context.Context, w ObservedWrite)
+
+	// RunID names the run this injector serves, for log attribution only. It is
+	// never sent upstream and never reaches an audit row — those are attributed
+	// by the orchestrator from its own run identity, never from anything the
+	// sidecar names. Empty is fine; it costs a log line its run.
+	RunID string
 
 	// AllowNonLoopback opts into binding a non-loopback address (the veth IP the
 	// sandbox reaches). Loopback-only by default, exactly like the sibling
@@ -434,6 +447,16 @@ func (s *Server) captureGraphQLWrite(r *http.Request) (*ghwrite.GraphQLFacts, bo
 		// gap becomes a technique. The reason travels verbatim because the two
 		// causes are not alike — a cap this side chose, against a caller that
 		// stopped sending.
+		//
+		// Logged as well as recorded, which no other outcome here is. The row is
+		// the durable record but it rides a fire-and-forget relay, and this is
+		// the one case where losing it would erase the only trace of a write
+		// whose act was already unknowable. It is also the one case that cannot
+		// happen by accident: gh's largest document is a few KB against a
+		// megabyte cap, so anything reaching this line is anomalous by
+		// construction and worth a line an operator can alert on.
+		injectorLog.Warn("graphql request body unreadable; the write it performed cannot be named",
+			"run", s.cfg.RunID, "reason", unread, "content_length", r.ContentLength)
 		return &ghwrite.GraphQLFacts{Unreadable: unread}, true
 	}
 

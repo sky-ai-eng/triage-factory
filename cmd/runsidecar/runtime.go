@@ -390,7 +390,7 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string, gitHan
 	if err != nil {
 		return "", "", err
 	}
-	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token, gitHandler))
+	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token, runID, gitHandler))
 	if err != nil {
 		return "", "", fmt.Errorf("runsidecar: construct gh injector: %w", err)
 	}
@@ -417,11 +417,12 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string, gitHan
 //
 // Split from startGHInjector so a test can assert on the wiring alone, without
 // the listener bring-up around it.
-func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, token string, gitHandler http.Handler) ghinjector.Config {
+func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, token, runID string, gitHandler http.Handler) ghinjector.Config {
 	return ghinjector.Config{
 		Upstream:         upstream,
 		IncomingToken:    token,
 		Cert:             cert,
+		RunID:            runID,
 		AllowNonLoopback: true,
 		// The run's git proxy, re-homed behind this listener so the API and git
 		// share one origin. Same handler as the standalone git-proxy listener:
