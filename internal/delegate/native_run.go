@@ -582,9 +582,10 @@ func (s *Spawner) recordNativeResult(
 		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, reason, result.FailureKind)
 
 	case agentloop.ResultParked:
-		// A guard stopped the engagement before a call. The conversation is
-		// resumable, so the snapshot must exist by the time the status
-		// commits — parkRunOpen owns that ordering.
+		// The engagement stopped without concluding — a guard before a call,
+		// or a stop reason only a person can resolve. The conversation is
+		// resumable either way, so the snapshot must exist by the time the
+		// status commits — parkRunOpen owns that ordering.
 		_ = s.parkRunOpen(ctx, liveParkContext{
 			orgID:         orgID,
 			runID:         runID,

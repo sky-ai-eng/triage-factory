@@ -137,9 +137,15 @@ func (e *Engine) compactOnResume(ctx context.Context, params Params) error {
 	return e.compactCold(ctx, params)
 }
 
-// compactAfterOverflow is the reactive arm's dispatcher: warm semantics
-// while the prior call's cache is live, forced-shape otherwise.
-func (e *Engine) compactAfterOverflow(ctx context.Context, params Params) error {
+// compactWindowFull is the reactive arm's dispatcher: warm semantics while
+// the prior call's cache is live, forced-shape otherwise.
+//
+// It serves both ways a full window announces itself — the provider rejecting
+// the request outright, and the provider accepting it and stopping
+// mid-generation at the wall. The two differ only in whether a partial
+// message came back with the news; what they say about the transcript, and
+// therefore the remedy, is identical.
+func (e *Engine) compactWindowFull(ctx context.Context, params Params) error {
 	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {
 		return err

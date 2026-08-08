@@ -353,13 +353,24 @@ func keepReviewRequestRemoved(evt domain.Event, _ closeContext, t domain.Task) b
 // member-aware skip and applies the Server/DC display-name fallback: when the
 // issue is still assigned to the local user (no accountId), skip the whole
 // close so a re-emit doesn't retire that user's own task.
-func prepareJiraReassign(ctx context.Context, r *Router, orgID string, evt domain.Event, _ string) (closeContext, bool) {
+//
+// An unreadable assignee identity skips the relation rather than proceeding
+// with an empty team set: empty means "the new assignee is on none of our
+// teams," which retires every owned task on the issue. The close phase has no
+// error channel of its own yet — promoting it is its own ticket — so declining
+// to close is how this one refuses to act on an answer it doesn't have.
+func prepareJiraReassign(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool) {
 	var meta events.JiraIssueAssignedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		return nil, false
 	}
+	assigneeTeams, err := r.assigneeTeams(ctx, orgID, evt)
+	if err != nil {
+		lifecycleLog.Error("jira reassign close: assignee team lookup failed, skipping the close", "entity_id", entityID, "error", err)
+		return nil, false
+	}
 	newOwnerTeams := map[string]struct{}{}
-	for _, tid := range r.assigneeTeams(ctx, orgID, evt) {
+	for _, tid := range assigneeTeams {
 		newOwnerTeams[tid] = struct{}{}
 	}
 	if r.users != nil && meta.AssigneeAccountID == "" && meta.Assignee != "" {

@@ -29,16 +29,7 @@ func (e *Engine) persistAssistant(ctx context.Context, params Params, completion
 	row.Model = modelForRow(completion, params)
 	stampUsage(&row, completion.Usage)
 	stampFinishReason(&row, completion.FinishReason)
-	if truncatedEmptyTurn(row, completion.FinishReason) {
-		// The cut landed before the model wrote anything replayable: no text,
-		// no tool call, nothing but reasoning. Such a row is born inactive
-		// rather than flipped a moment later, because there is no moment in
-		// between where it would be legal — the API strips a non-final
-		// thinking block on replay, and an assistant message with empty
-		// content is rejected, so any assembly that saw it active would 400.
-		// Inactive keeps the row in the ledger and in the display (its cost
-		// and tokens are as real as any other call's) while keeping it out of
-		// every future request.
+	if unreplayableTurn(row) {
 		row.WindowState = domain.MessageWindowInactive
 	}
 	// Wall time from request to complete message, retries included — the
@@ -95,15 +86,25 @@ func stampFinishReason(row *domain.Message, reason string) {
 	row.Metadata[metadataFinishReason] = reason
 }
 
-// truncatedEmptyTurn reports an assistant row the provider cut at the output
-// limit before it produced anything a later request could replay — no text,
-// no tool call, no content block. Reasoning alone does not count: the provider
-// keeps the canonical chain of thought and strips non-final blocks on replay,
-// so what reaches the wire from such a row is an empty assistant message.
-func truncatedEmptyTurn(row domain.Message, finishReason string) bool {
-	if !isLengthStop(finishReason) {
-		return false
-	}
+// unreplayableTurn reports an assistant row with nothing a later request
+// could replay — no text, no tool call, no content block. Reasoning alone
+// does not count: the provider keeps the canonical chain of thought and
+// strips non-final blocks on replay, so what reaches the wire from such a row
+// is an empty assistant message, which the API rejects.
+//
+// Such a row is born inactive rather than flipped a moment later, because
+// there is no moment in between where it would be legal: any assembly that
+// saw it active would 400. Inactive keeps it in the ledger and in the display
+// (its cost and tokens are as real as any other call's) while keeping it out
+// of every future request.
+//
+// Deliberately blind to the stop reason. What makes the row unreplayable is
+// that nothing came out of it, not what stopped it: a turn whose whole output
+// cap went to reasoning is the common producer, but a wall-cut turn is one
+// too — and that one is read by the summarize call moments later — and so is
+// a decline that returns no content, which would otherwise brick the very
+// park it earns.
+func unreplayableTurn(row domain.Message) bool {
 	return row.Content == "" && len(row.ToolCalls) == 0 && len(row.ContentBlocks) == 0
 }
 
