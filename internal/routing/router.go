@@ -50,6 +50,16 @@ type Delegator interface {
 	StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome
 }
 
+// ReDeriveLedger is the one write the post-scoring re-derive owns on the
+// scoring pipeline's own columns: marking the tasks it evaluated as no
+// longer owing a pass. The scorer's write side (UpdateTaskScores raises the
+// mark in the same statement as the scores) stays where it is; this is
+// deliberately the clear half alone, so the column keeps exactly two
+// writers. Satisfied by db.ScoreStore.
+type ReDeriveLedger interface {
+	ClearReDeriveOwed(ctx context.Context, orgID string, taskIDs []string) error
+}
+
 // EventPublisher is the bus-publish seam the router uses to mirror the
 // per-event routing disposition sentinel (TFAC-593) onto the event bus, so
 // an async event source (e.g. Slack) can learn synchronously-unavailable
@@ -91,6 +101,7 @@ type Router struct {
 	teamRepos    dbpkg.TeamGitHubReposStore  // team↔repo tracking gate; nil-safe — gate is skipped (no filtering) when unset
 	jiraRules    dbpkg.JiraStatusRulesStore  // team↔project tracking gate; nil-safe — Jira gate skipped when unset
 	githubGroups dbpkg.TeamGitHubGroupsStore // github-team→TF-team mapping; resolves review_requested team visibility. nil-safe — review routing degrades to handler-team visibility when unset
+	scores       ReDeriveLedger              // discharges tasks.rederive_owed after a re-derive pass; set post-construction via SetReDeriveLedger (nil → the pass runs, nothing is cleared)
 	spawner      Delegator
 	scorer       Scorer
 	ws           *websocket.Hub
@@ -210,6 +221,17 @@ func (r *Router) SetEventQueue(q dbpkg.EventQueueStore) {
 // mirror entirely — routing behavior is unaffected either way.
 func (r *Router) SetEventPublisher(p EventPublisher) {
 	r.publisher = p
+}
+
+// SetReDeriveLedger wires the store the post-scoring re-derive discharges
+// tasks.rederive_owed through, same post-construction injection as
+// SetEventQueue. Kept off NewRouter's signature for the same reason: only
+// the re-derive pass needs it, and a nil ledger degrades to the pre-column
+// behavior (the pass still runs and still fires — the mark just isn't
+// cleared, which costs a redundant re-derive next cycle, never a missed
+// one).
+func (r *Router) SetReDeriveLedger(s ReDeriveLedger) {
+	r.scores = s
 }
 
 // SetExecutorID wires this router's persistent instance-registry identity

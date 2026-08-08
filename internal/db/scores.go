@@ -57,7 +57,34 @@ type ScoreStore interface {
 	// tasks and sets scoring_status = 'scored'. Atomic across the
 	// whole batch (single tx); a partial-application failure rolls
 	// back so the runner sees an all-or-nothing outcome.
+	//
+	// It also raises rederive_owed in the same statement. The scores and
+	// the obligation they create — evaluate this task's deferred triggers
+	// against the new autonomy_suitability — are one write, so no crash can
+	// land the scores without the debt.
 	UpdateTaskScores(ctx context.Context, orgID string, updates []domain.TaskScoreUpdate) error
+
+	// TasksOwedReDerive returns the org's task IDs whose scores committed
+	// but whose post-scoring re-derive has not been recorded as done. The
+	// runner drains it at the top of a cycle, which is the crash backstop
+	// behind the OnScoringCompleted fast path: the callback runs after the
+	// scores commit, so a process killed in between leaves tasks 'scored'
+	// (invisible to UnscoredTasks forever) with their deferred triggers
+	// never evaluated.
+	//
+	// Empty on every crash-free cycle. Oldest first, so a backlog drains in
+	// the order it accrued.
+	TasksOwedReDerive(ctx context.Context, orgID string) ([]string, error)
+
+	// ClearReDeriveOwed discharges the obligation for tasks the re-derive
+	// pass has evaluated. Called by that pass and by nothing else: clearing
+	// before the evaluation would recreate the very window the column
+	// exists to close, and clearing on a bail (a store error mid-evaluation)
+	// would drop work the next cycle should retry.
+	//
+	// Re-clearing an already-clear task is a no-op, which is what a drain
+	// that races the callback sees.
+	ClearReDeriveOwed(ctx context.Context, orgID string, taskIDs []string) error
 
 	// UnscoredTasks returns queued tasks that haven't been scored
 	// yet (status='queued' AND scoring_status='pending'), joined to

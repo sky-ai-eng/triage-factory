@@ -196,6 +196,135 @@ func RunScoreStoreConformance(t *testing.T, mk ScoreStoreFactory) {
 		}
 	})
 
+	t.Run("UpdateTaskScores_owes_a_rederive", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		ids := seed(t, 2)
+
+		owed, err := s.TasksOwedReDerive(ctx, orgID)
+		if err != nil {
+			t.Fatalf("TasksOwedReDerive (before scoring): %v", err)
+		}
+		if len(owed) != 0 {
+			t.Fatalf("TasksOwedReDerive before any scores = %v, want none — an unscored task owes nothing", owed)
+		}
+
+		updates := make([]domain.TaskScoreUpdate, len(ids))
+		for i, id := range ids {
+			updates[i] = domain.TaskScoreUpdate{ID: id, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r"}
+		}
+		if err := s.UpdateTaskScores(ctx, orgID, updates); err != nil {
+			t.Fatalf("UpdateTaskScores: %v", err)
+		}
+
+		owed, err = s.TasksOwedReDerive(ctx, orgID)
+		if err != nil {
+			t.Fatalf("TasksOwedReDerive: %v", err)
+		}
+		gotOwed := map[string]bool{}
+		for _, id := range owed {
+			gotOwed[id] = true
+		}
+		for _, id := range ids {
+			if !gotOwed[id] {
+				t.Errorf("task %s scored but owes no re-derive; the mark must ride the same write as the scores", id)
+			}
+		}
+	})
+
+	t.Run("ClearReDeriveOwed_discharges_only_the_named_tasks", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		ids := seed(t, 3)
+		updates := make([]domain.TaskScoreUpdate, len(ids))
+		for i, id := range ids {
+			updates[i] = domain.TaskScoreUpdate{ID: id, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r"}
+		}
+		if err := s.UpdateTaskScores(ctx, orgID, updates); err != nil {
+			t.Fatalf("UpdateTaskScores: %v", err)
+		}
+
+		// The re-derive pass evaluated the first task and bailed on the rest.
+		if err := s.ClearReDeriveOwed(ctx, orgID, ids[:1]); err != nil {
+			t.Fatalf("ClearReDeriveOwed: %v", err)
+		}
+		owed, err := s.TasksOwedReDerive(ctx, orgID)
+		if err != nil {
+			t.Fatalf("TasksOwedReDerive: %v", err)
+		}
+		if len(owed) != 2 {
+			t.Fatalf("TasksOwedReDerive after clearing 1 of 3 = %v, want the other 2", owed)
+		}
+		for _, id := range owed {
+			if id == ids[0] {
+				t.Errorf("task %s still owed after its clear", id)
+			}
+		}
+
+		// Idempotent: the pass runs again on the same set (a drain racing the
+		// completion callback) and finds nothing left to discharge.
+		if err := s.ClearReDeriveOwed(ctx, orgID, ids); err != nil {
+			t.Fatalf("ClearReDeriveOwed (second call): %v", err)
+		}
+		owed, err = s.TasksOwedReDerive(ctx, orgID)
+		if err != nil {
+			t.Fatalf("TasksOwedReDerive (after full clear): %v", err)
+		}
+		if len(owed) != 0 {
+			t.Errorf("TasksOwedReDerive after clearing every task = %v, want none", owed)
+		}
+	})
+
+	t.Run("ReDeriveOwed_survives_the_scoring_status_writes", func(t *testing.T) {
+		// The mark has exactly two writers: the scores write raises it, the
+		// re-derive pass clears it. A task may legitimately be back to
+		// 'pending' for a re-score while still owing a re-derive from the
+		// last one, so the scoring-status writes must leave it alone — and
+		// owing one must not hide the task from the cycle that re-scores it.
+		s, orgID, seed := mk(t)
+		ids := seed(t, 1)
+		if err := s.UpdateTaskScores(ctx, orgID, []domain.TaskScoreUpdate{{
+			ID: ids[0], PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r",
+		}}); err != nil {
+			t.Fatalf("UpdateTaskScores: %v", err)
+		}
+
+		for _, step := range []struct {
+			name string
+			run  func() error
+		}{
+			{"MarkScoring", func() error { return s.MarkScoring(ctx, orgID, ids) }},
+			{"ResetStaleScoring", func() error { _, err := s.ResetStaleScoring(ctx, orgID); return err }},
+			{"MarkScoring (again)", func() error { return s.MarkScoring(ctx, orgID, ids) }},
+			{"ResetScoringToPending", func() error { return s.ResetScoringToPending(ctx, orgID, ids) }},
+		} {
+			if err := step.run(); err != nil {
+				t.Fatalf("%s: %v", step.name, err)
+			}
+			owed, err := s.TasksOwedReDerive(ctx, orgID)
+			if err != nil {
+				t.Fatalf("TasksOwedReDerive after %s: %v", step.name, err)
+			}
+			if len(owed) != 1 || owed[0] != ids[0] {
+				t.Fatalf("TasksOwedReDerive after %s = %v, want [%s] — only the re-derive pass may discharge the mark", step.name, owed, ids[0])
+			}
+		}
+
+		// ...and the mark never gates scoring itself.
+		tasks, err := s.UnscoredTasks(ctx, orgID)
+		if err != nil {
+			t.Fatalf("UnscoredTasks: %v", err)
+		}
+		if len(tasks) != 1 || tasks[0].ID != ids[0] {
+			t.Errorf("UnscoredTasks = %v, want the owed-but-pending task %s", tasks, ids[0])
+		}
+	})
+
+	t.Run("ClearReDeriveOwed_empty_slice_is_noop", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		if err := s.ClearReDeriveOwed(ctx, orgID, nil); err != nil {
+			t.Errorf("ClearReDeriveOwed(nil): %v", err)
+		}
+	})
+
 	t.Run("MarkScoring_empty_slice_is_noop", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 		if err := s.MarkScoring(ctx, orgID, nil); err != nil {

@@ -99,6 +99,17 @@ func (a *App) buildAI() {
 				go a.router.ReDeriveAfterScoring(context.WithoutCancel(ctx), orgID, taskIDs)
 			}
 		},
+		OnReDeriveOwed: func(ctx context.Context, orgID string, taskIDs []string) {
+			// The crash backstop for the callback above: tasks whose scores
+			// committed while the process died before their re-derive ran.
+			// Same pass, same WithoutCancel reasoning — a half-fired deferred
+			// trigger is worse than a late one — but synchronous, because the
+			// cycle must not start writing fresh scores while this decides
+			// whether to clear the marks the last one left.
+			if a.router != nil {
+				a.router.ReDeriveAfterScoring(context.WithoutCancel(ctx), orgID, taskIDs)
+			}
+		},
 		OnTasksSkipped: func(orgID string, skipped, total int) {
 			toast.Warning(a.wsHub, orgID, fmt.Sprintf("AI scoring: %d of %d tasks skipped this cycle", skipped, total))
 		},
@@ -583,6 +594,10 @@ func (a *App) buildRouting() {
 	// event_queue (not the bus); the ingestor enqueues there at emit time.
 	a.router = routing.NewRouter(a.stores.Prompts, a.stores.Blueprints, a.stores.EventHandlers, a.stores.Agents, a.stores.TeamAgents, a.stores.Users, a.stores.Tasks, a.stores.Conversations, a.stores.Entities, a.stores.PendingFirings, a.stores.Events, a.stores.Orgs, a.stores.Teams, a.stores.TeamGitHubRepos, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.spawner, a.scorer, a.wsHub)
 	a.router.SetEventQueue(a.stores.EventQueue)
+	// The post-scoring re-derive discharges tasks.rederive_owed through the
+	// score store — the clear half of the mark UpdateTaskScores raises with
+	// every scores write.
+	a.router.SetReDeriveLedger(a.stores.Scores)
 	// Mirror the per-event routing disposition sentinel onto the bus
 	// (TFAC-593) so an async event source (e.g. Slack) can learn
 	// synchronously-unavailable routing outcomes. The bus is built in

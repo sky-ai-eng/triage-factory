@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // TestScoreStore_Postgres runs the shared conformance suite against
@@ -85,6 +86,68 @@ func TestScoreStore_Postgres_ResetStaleScoring_OrgScoped(t *testing.T) {
 	}
 	if len(tasksA) != len(residueA) {
 		t.Errorf("orgA has %d unscored tasks, want %d", len(tasksA), len(residueA))
+	}
+}
+
+// TestScoreStore_Postgres_ReDeriveOwed_OrgScoped is the multi-tenant half
+// of the owed-re-derive contract, which SQLite's N=1 harness can't express:
+// the per-org scoring runners drain concurrently, so one org's list must not
+// surface another's debts and one org's clear must not discharge them. An
+// unscoped clear is the dangerous direction — it would mark another tenant's
+// tasks as re-derived by a pass that never looked at them, which is exactly
+// the silent never-fires this column exists to prevent.
+func TestScoreStore_Postgres_ReDeriveOwed_OrgScoped(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	orgA, userA := seedPgOrgAndUser(t, h)
+	orgB, userB := seedPgOrgAndUser(t, h)
+	tasksA := seedPgTasks(t, h.AdminDB, orgA, userA, 2)
+	tasksB := seedPgTasks(t, h.AdminDB, orgB, userB, 2)
+
+	ctx := context.Background()
+	score := func(orgID string, ids []string) {
+		t.Helper()
+		updates := make([]domain.TaskScoreUpdate, len(ids))
+		for i, id := range ids {
+			updates[i] = domain.TaskScoreUpdate{ID: id, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r"}
+		}
+		if err := stores.Scores.UpdateTaskScores(ctx, orgID, updates); err != nil {
+			t.Fatalf("UpdateTaskScores(%s): %v", orgID, err)
+		}
+	}
+	score(orgA, tasksA)
+	score(orgB, tasksB)
+
+	owedA, err := stores.Scores.TasksOwedReDerive(ctx, orgA)
+	if err != nil {
+		t.Fatalf("TasksOwedReDerive(orgA): %v", err)
+	}
+	if len(owedA) != len(tasksA) {
+		t.Errorf("TasksOwedReDerive(orgA) returned %d ids, want %d — org B's debts must not appear", len(owedA), len(tasksA))
+	}
+
+	// orgA's re-derive pass runs and discharges its own set, naming orgB's
+	// task IDs too (what a confused caller or a cross-tenant ID mixup would
+	// produce). The org predicate has to reject them.
+	if err := stores.Scores.ClearReDeriveOwed(ctx, orgA, append(append([]string{}, tasksA...), tasksB...)); err != nil {
+		t.Fatalf("ClearReDeriveOwed(orgA): %v", err)
+	}
+
+	owedA, err = stores.Scores.TasksOwedReDerive(ctx, orgA)
+	if err != nil {
+		t.Fatalf("TasksOwedReDerive(orgA) after clear: %v", err)
+	}
+	if len(owedA) != 0 {
+		t.Errorf("orgA still owes %d re-derives after its own clear, want 0", len(owedA))
+	}
+	owedB, err := stores.Scores.TasksOwedReDerive(ctx, orgB)
+	if err != nil {
+		t.Fatalf("TasksOwedReDerive(orgB): %v", err)
+	}
+	if len(owedB) != len(tasksB) {
+		t.Errorf("orgB owes %d re-derives after orgA's clear, want %d — its tasks were never evaluated by that pass", len(owedB), len(tasksB))
 	}
 }
 
