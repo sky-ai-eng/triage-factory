@@ -196,6 +196,13 @@ type injectPayload struct {
 	TaskID            string `json:"task_id"`
 	TriggerID         string `json:"trigger_id"`
 	TriggeringEventID string `json:"triggering_event_id"`
+	// The agent claim to stamp alongside whichever durable write the owner
+	// ends up making — the 'injected' mark on delivery, the compensating
+	// pending_firing on "gone". Omitted (and skipped) when the router had no
+	// agent resolved. Older rows written before this field carry neither, and
+	// unmarshal to the zero "no stamp" value.
+	ClaimAgentID      string `json:"claim_agent_id,omitempty"`
+	ClaimActingTeamID string `json:"claim_acting_team_id,omitempty"`
 }
 
 // ctlNotification is the tf_ctl NOTIFY payload envelope — a pure doorbell
@@ -445,11 +452,18 @@ const (
 // identity an inject signal's payload needs so the OWNER can compensate
 // with a pending_firing enqueue if the run turns out dead by apply time
 // (the ticket's "gone ack enqueues the pending_firing itself" decision).
+//
+// TaskClaim rides along for the same reason: whichever of the owner's two
+// durable outcomes lands — the 'injected' mark or the compensating firing —
+// is the commitment, and the claim is written in that same transaction (see
+// db.AgentClaimStamp). Without it the compensating firing would be queued
+// against a task the drain then skips as claim_changed.
 type AdditiveFiringRef struct {
 	EntityID          string
 	TaskID            string
 	TriggerID         string
 	TriggeringEventID string
+	TaskClaim         db.AgentClaimStamp
 }
 
 // StageOrDeliverAdditiveEvent is StageOrDeliverInjectionResult's cross-pod-
@@ -480,6 +494,7 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID,
 				Producer: producer, Body: body,
 				EntityID: firing.EntityID, TaskID: firing.TaskID,
 				TriggerID: firing.TriggerID, TriggeringEventID: firing.TriggeringEventID,
+				ClaimAgentID: firing.TaskClaim.AgentID, ClaimActingTeamID: firing.TaskClaim.ActingTeamID,
 			})
 			if merr != nil {
 				delegateLog.Warn("marshal inject payload failed; falling back to the staged queue", "run", runID, "error", merr)
@@ -694,9 +709,13 @@ func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.RunSignal)
 		delegateLog.Warn("apply inject signal: malformed payload", "signal_id", sig.ID, "error", err)
 		return domain.RunSignalAckStale
 	}
+	// Either outcome below is a commitment the control pod is no longer in a
+	// position to record, so the claim the payload carried rides whichever
+	// durable write this pod makes — see db.AgentClaimStamp.
+	claim := db.AgentClaimStamp{AgentID: p.ClaimAgentID, ActingTeamID: p.ClaimActingTeamID}
 	if s.getProc(sig.RunID) == nil {
 		if s.pendingFirings != nil && p.EntityID != "" && p.TaskID != "" && p.TriggerID != "" && p.TriggeringEventID != "" {
-			if _, err := s.pendingFirings.Enqueue(ctx, sig.OrgID, "", p.EntityID, p.TaskID, p.TriggerID, p.TriggeringEventID); err != nil {
+			if _, _, err := s.pendingFirings.Enqueue(ctx, sig.OrgID, "", p.EntityID, p.TaskID, p.TriggerID, p.TriggeringEventID, claim); err != nil {
 				delegateLog.Error("inject signal gone-compensation: enqueue pending_firing failed", "run", sig.RunID, "task_id", p.TaskID, "error", err)
 			}
 		}
@@ -704,7 +723,7 @@ func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.RunSignal)
 	}
 	s.deliverInjectionLive(sig.OrgID, sig.RunID, domain.WrapSystemNote(p.Body))
 	if s.tasks != nil && p.TaskID != "" && p.TriggeringEventID != "" {
-		if err := s.tasks.MarkEventInjectedSystem(ctx, sig.OrgID, p.TaskID, p.TriggeringEventID); err != nil {
+		if _, err := s.tasks.MarkEventInjectedSystem(ctx, sig.OrgID, p.TaskID, p.TriggeringEventID, claim); err != nil {
 			delegateLog.Error("mark injected task_event for cross-pod inject failed", "task_id", p.TaskID, "run_id", sig.RunID, "error", err)
 		}
 	}

@@ -570,14 +570,32 @@ func (s *taskStore) RecordEvent(ctx context.Context, orgID, taskID, eventID, kin
 	return err
 }
 
-func (s *taskStore) MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string) error {
+// MarkEventInjectedSystem flips the timeline row AND stamps the task's
+// agent claim in one transaction — see db.AgentClaimStamp for why the two
+// writes are inseparable. A stamp refusal (user owns it, bot already owns
+// it, task terminal) is not an error and leaves the mark committed.
+func (s *taskStore) MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string, claim db.AgentClaimStamp) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return false, err
 	}
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE task_events SET kind = 'injected' WHERE task_id = ? AND event_id = ?
-	`, taskID, eventID)
-	return err
+	claimed := false
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if _, err := q.ExecContext(ctx, `
+			UPDATE task_events SET kind = 'injected' WHERE task_id = ? AND event_id = ?
+		`, taskID, eventID); err != nil {
+			return err
+		}
+		if claim.AgentID == "" {
+			return nil
+		}
+		var err error
+		claimed, err = stampAgentClaimIfUnclaimed(ctx, q, taskID, claim.AgentID, claim.ActingTeamID)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return claimed, nil
 }
 
 func (s *taskStore) SetVisibilityTeams(ctx context.Context, orgID, taskID string, teamIDs []string) error {
@@ -688,13 +706,22 @@ func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskI
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
+	return stampAgentClaimIfUnclaimed(ctx, s.q, taskID, agentID, actingTeamID)
+}
+
+// stampAgentClaimIfUnclaimed is the guarded claim write itself, taking the
+// queryer so the commitment-coupled callers (the fenced run insert, the
+// pending-firing enqueue, the injection mark) can run it on their own
+// transaction rather than as a second, separately-failing write. Mirrors
+// the Postgres helper of the same name.
+func stampAgentClaimIfUnclaimed(ctx context.Context, q queryer, taskID, agentID, actingTeamID string) (bool, error) {
 	if agentID == "" {
 		return false, fmt.Errorf("StampAgentClaimIfUnclaimed: empty agentID")
 	}
 	// actingTeamID is the firing trigger's team; on a successful claim
 	// it consolidates the card to that owning team. Empty leaves
 	// team_id unchanged.
-	res, err := s.q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_agent_id = ?,
 		       team_id = COALESCE(NULLIF(?, ''), team_id),

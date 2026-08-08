@@ -41,6 +41,21 @@ type PendingFiringsSeeder struct {
 	// returns the IDs Enqueue needs.
 	Tuple func(t *testing.T) PendingFiringsTuple
 
+	// AgentID is an agents row in the harness's org, usable as the
+	// AgentClaimStamp agent for the claim-coupling subtests (tasks
+	// .claimed_by_agent_id FKs agents(id) in both dialects).
+	AgentID string
+
+	// TaskClaim reads a task's two claim columns so the harness can
+	// assert what the coupled stamp did without knowing either
+	// backend's schema. Empty strings for NULL.
+	TaskClaim func(t *testing.T, taskID string) (agentID, userID string)
+
+	// ClaimTaskForUser stamps a user claim on the task, so the harness
+	// can exercise the stamp's no-steal refusal against a real
+	// competing claim rather than a synthetic one.
+	ClaimTaskForUser func(t *testing.T, taskID string)
+
 	// RunForTask inserts a run against the taskID and returns the
 	// runID. Used by MarkFired tests to satisfy fired_run_id's FK to
 	// runs(id). Status / trigger_type aren't load-bearing here —
@@ -84,7 +99,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 	t.Run("Enqueue_inserts_pending_row", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
-		inserted, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID)
+		inserted, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{})
 		if err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
@@ -112,10 +127,10 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 	t.Run("Enqueue_collapses_duplicate", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
-		if inserted, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil || !inserted {
+		if inserted, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil || !inserted {
 			t.Fatalf("first Enqueue: inserted=%v err=%v", inserted, err)
 		}
-		inserted, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID)
+		inserted, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{})
 		if err != nil {
 			t.Fatalf("duplicate Enqueue: %v", err)
 		}
@@ -128,6 +143,74 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 
+	// The claim rides the insert's transaction — a queued firing is a real
+	// commitment, so the board must never show the task free while the
+	// firing waits to drain. These three subtests pin the whole contract:
+	// the stamp lands with the row, it is skipped when nothing was
+	// committed, and a refusal never costs the commitment.
+	t.Run("Enqueue_stamps_the_claim_with_the_row", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		inserted, claimed, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{AgentID: seed.AgentID})
+		if err != nil {
+			t.Fatalf("Enqueue with claim: %v", err)
+		}
+		if !inserted || !claimed {
+			t.Fatalf("Enqueue with claim = (inserted=%v, claimed=%v), want (true, true)", inserted, claimed)
+		}
+		if agentID, _ := seed.TaskClaim(t, tup.TaskID); agentID != seed.AgentID {
+			t.Errorf("task claimed_by_agent_id = %q, want %q — the firing landed without its claim", agentID, seed.AgentID)
+		}
+	})
+
+	t.Run("Enqueue_collapse_leaves_the_claim_alone", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		if _, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{AgentID: seed.AgentID}); err != nil {
+			t.Fatalf("first Enqueue: %v", err)
+		}
+		// A user takes the task over between the two enqueues. The duplicate
+		// commits nothing (the queued firing already carries the intent), so
+		// it must not re-stamp over them.
+		seed.ClaimTaskForUser(t, tup.TaskID)
+		inserted, claimed, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{AgentID: seed.AgentID})
+		if err != nil {
+			t.Fatalf("duplicate Enqueue: %v", err)
+		}
+		if inserted || claimed {
+			t.Errorf("collapsed Enqueue = (inserted=%v, claimed=%v), want (false, false)", inserted, claimed)
+		}
+		if agentID, userID := seed.TaskClaim(t, tup.TaskID); agentID != "" || userID == "" {
+			t.Errorf("claim after collapse = (agent=%q, user=%q), want the user's claim intact", agentID, userID)
+		}
+	})
+
+	t.Run("Enqueue_commits_even_when_the_stamp_is_refused", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		tup := seed.Tuple(t)
+		// A user owns the task, so the stamp must refuse rather than steal —
+		// and the firing must still be queued, because refusing a claim race
+		// is not a reason to lose the intent.
+		seed.ClaimTaskForUser(t, tup.TaskID)
+		inserted, claimed, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{AgentID: seed.AgentID})
+		if err != nil {
+			t.Fatalf("Enqueue against a user-claimed task: %v", err)
+		}
+		if !inserted {
+			t.Error("a refused stamp must not roll back the firing insert")
+		}
+		if claimed {
+			t.Error("claimed=true on a user-claimed task — the stamp stole the claim")
+		}
+		if agentID, userID := seed.TaskClaim(t, tup.TaskID); agentID != "" || userID == "" {
+			t.Errorf("claim = (agent=%q, user=%q), want the user's claim untouched", agentID, userID)
+		}
+		rows, _ := s.ListForEntity(ctx, orgID, tup.EntityID)
+		if len(rows) != 1 {
+			t.Errorf("expected the firing to be queued, got %d rows", len(rows))
+		}
+	})
+
 	t.Run("PopForTask_claims_oldest_pending", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup1 := seed.Tuple(t)
@@ -136,10 +219,10 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		// task, so a second task's firing lives in its own queue and is not
 		// what this orders against. The dedup index is (task_id, trigger_id)
 		// while pending, so two triggers on one task are two rows.
-		if _, err := s.Enqueue(ctx, orgID, tup1.UserID, tup1.EntityID, tup1.TaskID, tup1.TriggerID, tup1.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tup1.UserID, tup1.EntityID, tup1.TaskID, tup1.TriggerID, tup1.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("first Enqueue: %v", err)
 		}
-		if _, err := s.Enqueue(ctx, orgID, tup2.UserID, tup1.EntityID, tup1.TaskID, tup2.TriggerID, tup2.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tup2.UserID, tup1.EntityID, tup1.TaskID, tup2.TriggerID, tup2.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("second Enqueue: %v", err)
 		}
 		got, err := s.PopForTask(ctx, orgID, tup1.TaskID)
@@ -192,10 +275,10 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		s, orgID, seed := mk(t)
 		tupA := seed.Tuple(t)
 		tupB := seed.Tuple(t)
-		if _, err := s.Enqueue(ctx, orgID, tupA.UserID, tupA.EntityID, tupA.TaskID, tupA.TriggerID, tupA.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tupA.UserID, tupA.EntityID, tupA.TaskID, tupA.TriggerID, tupA.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue tupA: %v", err)
 		}
-		if _, err := s.Enqueue(ctx, orgID, tupB.UserID, tupA.EntityID, tupB.TaskID, tupB.TriggerID, tupB.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tupB.UserID, tupA.EntityID, tupB.TaskID, tupB.TriggerID, tupB.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue tupB on the same entity: %v", err)
 		}
 		got, err := s.PopForTask(ctx, orgID, tupB.TaskID)
@@ -214,7 +297,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 	t.Run("Release_reverts_draining_to_pending", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
-		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
 		row, err := s.PopForTask(ctx, orgID, tup.TaskID)
@@ -263,7 +346,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 	t.Run("PopForTask_ignores_non_pending", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
-		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
 		row, err := s.PopForTask(ctx, orgID, tup.TaskID)
@@ -285,7 +368,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 	t.Run("MarkFired_transitions_with_run_id", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
-		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
 		row, _ := s.PopForTask(ctx, orgID, tup.TaskID)
@@ -313,7 +396,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 	t.Run("MarkFired_no_op_on_terminal", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
-		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
 		row, _ := s.PopForTask(ctx, orgID, tup.TaskID)
@@ -334,7 +417,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 	t.Run("MarkSkipped_records_reason", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
-		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
 		row, _ := s.PopForTask(ctx, orgID, tup.TaskID)
@@ -357,7 +440,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if has {
 			t.Errorf("empty queue should not report pending")
 		}
-		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
 		has, _ = s.HasPendingForTask(ctx, orgID, tup.TaskID)
@@ -382,7 +465,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 	t.Run("Enqueue_collapses_against_draining", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
-		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
 		if row, err := s.PopForTask(ctx, orgID, tup.TaskID); err != nil || row == nil {
@@ -391,7 +474,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		// While the drain is mid-flight ('draining'), a duplicate
 		// (task, trigger) enqueue must collapse exactly as it would
 		// against a 'pending' row — the intent is already queued.
-		inserted, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID)
+		inserted, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{})
 		if err != nil {
 			t.Fatalf("duplicate Enqueue during drain: %v", err)
 		}
@@ -406,7 +489,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 	t.Run("RequeueStaleDraining_recovers_orphaned_claims", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
-		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
 		if row, err := s.PopForTask(ctx, orgID, tup.TaskID); err != nil || row == nil {
@@ -457,10 +540,10 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		// Two pending rows on tupA's task (distinct triggers), one on tupB's
 		// — the sweeper's work list is one entry per task with queued
 		// intent, not one per row.
-		if _, err := s.Enqueue(ctx, orgID, tupA.UserID, tupA.EntityID, tupA.TaskID, tupA.TriggerID, tupA.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tupA.UserID, tupA.EntityID, tupA.TaskID, tupA.TriggerID, tupA.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue tupA: %v", err)
 		}
-		if _, err := s.Enqueue(ctx, orgID, tupB.UserID, tupA.EntityID, tupA.TaskID, tupB.TriggerID, tupB.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tupB.UserID, tupA.EntityID, tupA.TaskID, tupB.TriggerID, tupB.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue second on tupA task: %v", err)
 		}
 
@@ -478,10 +561,10 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		tup1 := seed.Tuple(t)
 		tup2 := seed.Tuple(t)
 		// Two rows on the same entity in known order.
-		if _, err := s.Enqueue(ctx, orgID, tup1.UserID, tup1.EntityID, tup1.TaskID, tup1.TriggerID, tup1.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tup1.UserID, tup1.EntityID, tup1.TaskID, tup1.TriggerID, tup1.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue first: %v", err)
 		}
-		if _, err := s.Enqueue(ctx, orgID, tup2.UserID, tup1.EntityID, tup2.TaskID, tup2.TriggerID, tup2.EventID); err != nil {
+		if _, _, err := s.Enqueue(ctx, orgID, tup2.UserID, tup1.EntityID, tup2.TaskID, tup2.TriggerID, tup2.EventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("Enqueue second: %v", err)
 		}
 		rows, err := s.ListForEntity(ctx, orgID, tup1.EntityID)

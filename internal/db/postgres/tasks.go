@@ -687,12 +687,30 @@ func recordTaskEvent(ctx context.Context, q queryer, orgID, taskID, eventID, kin
 	return err
 }
 
-func (s *taskStore) MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string) error {
-	_, err := s.admin.ExecContext(ctx, `
-		UPDATE task_events SET kind = 'injected'
-		 WHERE org_id = $1 AND task_id = $2 AND event_id = $3
-	`, orgID, taskID, eventID)
-	return err
+// MarkEventInjectedSystem flips the timeline row AND stamps the task's
+// agent claim in one transaction — see db.AgentClaimStamp for why the two
+// writes are inseparable. A stamp refusal (user owns it, bot already owns
+// it, task terminal) is not an error and leaves the mark committed.
+func (s *taskStore) MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string, claim db.AgentClaimStamp) (bool, error) {
+	claimed := false
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if _, err := q.ExecContext(ctx, `
+			UPDATE task_events SET kind = 'injected'
+			 WHERE org_id = $1 AND task_id = $2 AND event_id = $3
+		`, orgID, taskID, eventID); err != nil {
+			return err
+		}
+		if claim.AgentID == "" {
+			return nil
+		}
+		var err error
+		claimed, err = stampAgentClaimIfUnclaimed(ctx, q, orgID, taskID, claim.AgentID, claim.ActingTeamID)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return claimed, nil
 }
 
 // --- Claim mutations ---

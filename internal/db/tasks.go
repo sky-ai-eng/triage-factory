@@ -9,6 +9,37 @@ import (
 
 //go:generate go run github.com/vektra/mockery/v2 --name=TaskStore --output=./mocks --case=underscore --with-expecter
 
+// AgentClaimStamp is the guarded task-claim write that rides *inside*
+// another store method's transaction — the bot taking responsibility for a
+// task, written in the same durable step as the engagement that commits it
+// (a fenced run insert, a queued firing, an event folded into a live run).
+//
+// It is a parameter type rather than a call of its own because the two
+// writes must not be separable. A commitment that lands while its stamp
+// silently fails leaves the board showing a free task under a live agent
+// run, and the firing fences (the (triggering_event_id, trigger_id) replay
+// fence, the pending-unique) mean a replay of the event skips before it
+// could ever re-stamp — so nothing repairs it. Coupling them is what makes
+// "unclaimed with a live run" mean only what the requeue path intends.
+//
+// A zero value (empty AgentID) means "no stamp": the commitment writes
+// alone. That is the honest degrade for the seam between DB init and agent
+// bootstrap where no org agent resolves, and for the drain path, whose
+// claim was already stamped by the enqueue that queued the firing (and
+// whose task the drain re-validates as still bot-claimed before firing).
+//
+// ActingTeamID is the team whose trigger fired. On a successful stamp it
+// becomes the task's owning team, consolidating the card; empty leaves
+// team_id unchanged. Semantics are StampAgentClaimIfUnclaimed's exactly —
+// including its three-way refusal (a user claim wins, a same-agent rewrite
+// is a no-op, a terminal task refuses) — and a refusal never fails the
+// surrounding commitment: the claim race has a winner either way, and the
+// run insert (or firing row) must still stand.
+type AgentClaimStamp struct {
+	AgentID      string
+	ActingTeamID string
+}
+
 // TaskStore owns the tasks table — lifecycle, claims, dedup,
 // swipe-triggered transitions, plus the run-history queries that
 // power the auto-delegate breaker.
@@ -372,7 +403,12 @@ type TaskStore interface {
 	// row RecordEventSystem/upsertTaskForEvent already wrote for that same
 	// (task, event) pair (RecordEventSystem itself is INSERT-only and would
 	// silently no-op on that PK collision). No-op if the row is absent.
-	MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string) error
+	//
+	// claim rides the same transaction: folding an event into a live run is
+	// the bot committing to that task, so the claim is written with the fold
+	// or not at all (see AgentClaimStamp). Returns claimed=true only when the
+	// stamp actually moved the claim — a refusal commits the fold anyway.
+	MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string, claim AgentClaimStamp) (claimed bool, err error)
 	CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
 	StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error)
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -216,7 +217,7 @@ func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 		t.Fatalf("resolve blueprint id: %v", err)
 	}
 	priorBlueprintRunID := uuid.New().String()
-	inserted, err := sqlitestore.New(database).Blueprints.CreateRunIfNotFiredSystem(t.Context(), runmode.LocalDefaultOrgID, domain.BlueprintRun{
+	inserted, _, err := sqlitestore.New(database).Blueprints.CreateRunIfNotFiredSystem(t.Context(), runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:                priorBlueprintRunID,
 		BlueprintID:       blueprintID,
 		TaskID:            taskID,
@@ -225,7 +226,7 @@ func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 		TriggeringEventID: eventID,
 		Status:            domain.BlueprintRunStatusRunning,
 		WorktreePath:      "/tmp/wt-prior",
-	})
+	}, dbpkg.AgentClaimStamp{})
 	if err != nil || !inserted {
 		t.Fatalf("seed prior blueprint_run: inserted=%v err=%v", inserted, err)
 	}
@@ -242,7 +243,7 @@ func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	})
 
 	// Queue a firing carrying the same triggering event.
-	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
+	if _, _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID, dbpkg.AgentClaimStamp{}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 

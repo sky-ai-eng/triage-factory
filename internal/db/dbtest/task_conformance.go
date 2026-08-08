@@ -532,6 +532,59 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
+	// Folding an event into a live run is the bot committing to the task, so
+	// the 'injected' mark and the claim are one durable step: either both land
+	// or neither does, and the board can never show the task free under the
+	// run the event was folded into.
+	t.Run("MarkEventInjectedSystem_stamps_the_claim_with_the_mark", func(t *testing.T) {
+		s, orgID, _, agentID, _, seed, _ := mk(t)
+		_, eventID, taskID := seed(t, "inject-claim")
+		if err := s.RecordEventSystem(ctx, orgID, taskID, eventID, "bumped"); err != nil {
+			t.Fatalf("seed bumped row: %v", err)
+		}
+		claimed, err := s.MarkEventInjectedSystem(ctx, orgID, taskID, eventID, db.AgentClaimStamp{AgentID: agentID})
+		if err != nil {
+			t.Fatalf("MarkEventInjectedSystem with claim: %v", err)
+		}
+		if !claimed {
+			t.Error("claimed=false stamping an unclaimed task")
+		}
+		task, err := s.Get(ctx, orgID, taskID)
+		if err != nil || task == nil {
+			t.Fatalf("Get after mark: (%v, %v)", task, err)
+		}
+		if task.ClaimedByAgentID != agentID {
+			t.Errorf("claimed_by_agent_id = %q, want %q — the fold landed without its claim", task.ClaimedByAgentID, agentID)
+		}
+	})
+
+	t.Run("MarkEventInjectedSystem_marks_even_when_the_stamp_is_refused", func(t *testing.T) {
+		s, orgID, _, agentID, userID, seed, _ := mk(t)
+		_, eventID, taskID := seed(t, "inject-refused")
+		if err := s.RecordEventSystem(ctx, orgID, taskID, eventID, "bumped"); err != nil {
+			t.Fatalf("seed bumped row: %v", err)
+		}
+		// A user owns the task: the stamp must refuse rather than steal, and
+		// the fold must still be recorded — the injection already happened.
+		if err := s.SetClaimedByUser(ctx, orgID, taskID, userID); err != nil {
+			t.Fatalf("SetClaimedByUser: %v", err)
+		}
+		claimed, err := s.MarkEventInjectedSystem(ctx, orgID, taskID, eventID, db.AgentClaimStamp{AgentID: agentID})
+		if err != nil {
+			t.Fatalf("MarkEventInjectedSystem against a user-claimed task: %v", err)
+		}
+		if claimed {
+			t.Error("claimed=true on a user-claimed task — the stamp stole the claim")
+		}
+		task, err := s.Get(ctx, orgID, taskID)
+		if err != nil || task == nil {
+			t.Fatalf("Get after mark: (%v, %v)", task, err)
+		}
+		if task.ClaimedByAgentID != "" || task.ClaimedByUserID != userID {
+			t.Errorf("claim = (agent=%q, user=%q), want the user's claim untouched", task.ClaimedByAgentID, task.ClaimedByUserID)
+		}
+	})
+
 	t.Run("HandoffAgentClaim_three_outcomes", func(t *testing.T) {
 		s, orgID, _, agentID, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "handoff")

@@ -785,7 +785,7 @@ func (fx *orphanFixture) mintOrphan(t *testing.T, h *pgtest.Harness, age time.Du
 	ctx := context.Background()
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	br := fx.firing(t, h)
-	inserted, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, br)
+	inserted, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, br, db.AgentClaimStamp{})
 	if err != nil || !inserted {
 		t.Fatalf("CreateRunIfNotFiredSystem = (%v, %v), want (true, nil)", inserted, err)
 	}
@@ -969,7 +969,7 @@ func TestFailBlueprintRunsOrphanedAtMint_UnblocksTheOneActiveIndex(t *testing.T)
 	// The livelock: a NEW (event, trigger) firing on the same task — a fresh
 	// intent, not a replay — is refused by the index the orphan is holding.
 	blocked := fx.firing(t, h)
-	if _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, blocked); !errors.Is(err, db.ErrTaskBusyActiveAutoRun) {
+	if _, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, blocked, db.AgentClaimStamp{}); !errors.Is(err, db.ErrTaskBusyActiveAutoRun) {
 		t.Fatalf("re-fire under the orphan = %v, want ErrTaskBusyActiveAutoRun", err)
 	}
 
@@ -981,7 +981,7 @@ func TestFailBlueprintRunsOrphanedAtMint_UnblocksTheOneActiveIndex(t *testing.T)
 	// The same firing now lands, and its step conversation with it: the task is
 	// working again, on a run that has an owner.
 	fresh := fx.firing(t, h)
-	inserted, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, fresh)
+	inserted, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, fresh, db.AgentClaimStamp{})
 	if err != nil || !inserted {
 		t.Fatalf("re-fire after sweep = (%v, %v), want (true, nil) — the index is still held", inserted, err)
 	}
