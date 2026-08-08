@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -502,6 +503,41 @@ func TestResolveSourceOwner_ContractShapes(t *testing.T) {
 		_, _, err := resolveSourceOwner(t.Context(), hooksReturning(OwnerResolution{}, nil), "fake", runmode.LocalDefaultOrgID, evt, "e1")
 		if err == nil {
 			t.Fatal("err = nil; want the unclaimed empty resolution refused — believing it is the original bug")
+		}
+	})
+	// The two invariants get opposite treatments, and the reason is whether
+	// there is anything to interpret. An unclaimed empty resolution could mean
+	// either of two things and only the source knows which, so it is refused.
+	// An owner outside its own set has one possible reading, so it is repaired
+	// — and left alone it is destructive out of proportion: ownerLadderRouting
+	// builds visibility from ownerSet alone, so the owning team gets a card it
+	// cannot see, or (no watcher to keep the set non-empty) no task at all.
+	t.Run("owner missing from its own set is repaired", func(t *testing.T) {
+		owner, set, err := resolveSourceOwner(t.Context(), hooksReturning(OwnerResolution{Owner: "team-x"}, nil), "fake", runmode.LocalDefaultOrgID, evt, "e1")
+		if err != nil {
+			t.Fatalf("err = %v; want nil — an owner outside its own set is a typo with one reading, not a failure", err)
+		}
+		if owner != "team-x" || len(set) != 1 || set[0] != "team-x" {
+			t.Errorf("(owner, set) = (%q, %v), want (team-x, [team-x]) — an owner absent from the set owns a card its team cannot see", owner, set)
+		}
+	})
+	t.Run("owner appended to an ambiguous set it was missing from", func(t *testing.T) {
+		res := OwnerResolution{Owner: "team-x", OwnerSet: []string{"team-y"}}
+		_, set, err := resolveSourceOwner(t.Context(), hooksReturning(res, nil), "fake", runmode.LocalDefaultOrgID, evt, "e1")
+		if err != nil {
+			t.Fatalf("err = %v; want nil", err)
+		}
+		if len(set) != 2 || !slices.Contains(set, "team-x") || !slices.Contains(set, "team-y") {
+			t.Errorf("set = %v, want both teams — repairing the owner in must not drop the rest of the set", set)
+		}
+		if len(res.OwnerSet) != 1 {
+			t.Errorf("the hook's own slice grew to %v; the repair must not append into the caller's backing array", res.OwnerSet)
+		}
+	})
+	t.Run("owner already in an ambiguous set is untouched", func(t *testing.T) {
+		owner, set, err := resolveSourceOwner(t.Context(), hooksReturning(OwnerResolution{Owner: "team-x", OwnerSet: []string{"team-x", "team-y"}}, nil), "fake", runmode.LocalDefaultOrgID, evt, "e1")
+		if err != nil || owner != "team-x" || len(set) != 2 {
+			t.Errorf("(owner, set, err) = (%q, %v, %v), want (team-x, both teams, nil) — no duplicate, no reorder", owner, set, err)
 		}
 	})
 }

@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -75,6 +76,11 @@ type OwnerResolution struct {
 	Owner string
 	// OwnerSet is every team with an ownership claim on the occurrence —
 	// usually just Owner, wider when the source resolves an ambiguous set.
+	// Owner is a MEMBER of it: an owner holds a claim by definition, and the
+	// shared tail reads visibility from this field alone, so an owner left out
+	// of it owns a card its own team cannot see. Prefer the constructors; a
+	// hand-built resolution that omits it is repaired by resolveSourceOwner
+	// rather than believed.
 	OwnerSet []string
 	// Unowned asserts the resolved no-owner answer: the source looked, and
 	// nothing owns this occurrence. The event is recorded taskless and
@@ -95,14 +101,29 @@ func Unowned() OwnerResolution {
 	return OwnerResolution{Unowned: true}
 }
 
-// resolveSourceOwner calls a registered source's ResolveOwner and enforces the
-// half of the contract the signature cannot. An empty resolution that did not
-// claim Unowned is the shape of a swallowed store error — the `if err != nil {
-// log; return }` every resolver is tempted to write — so it is refused here
-// instead of being read as "nobody owns this". The event replays and parks with
-// the source named on it: a bug someone can find, rather than a mention that
-// silently never happened or a watcher that silently answered another team's
-// channel.
+// resolveSourceOwner calls a registered source's ResolveOwner and reconciles
+// the answer with the two invariants the signature cannot carry. The hook is
+// out-of-tree code core cannot see or test, so this is the only place either
+// can be checked — and they get opposite treatments, because they fail in
+// opposite ways:
+//
+// REFUSED — an empty resolution that did not claim Unowned. That is the shape
+// of a swallowed store error (the `if err != nil { log; return }` every
+// resolver is tempted to write), and nothing here can tell it apart from a
+// genuine no-owner answer: only the source knows which it meant. Ambiguity is
+// not repairable, so the event replays and parks with the source named on it —
+// a bug someone can find, rather than a mention that silently never happened
+// or a watcher that silently answered another team's channel.
+//
+// REPAIRED — an owner missing from its own OwnerSet. That one is not
+// ambiguous, it is incoherent: an owner holds an ownership claim by
+// definition, so the state has exactly one possible reading. Left alone it is
+// destructive out of proportion to the typo, because ownerLadderRouting builds
+// visibility from ownerSet alone — the owning team gets a card it cannot see,
+// or, with no watcher to keep the visibility set non-empty, no task at all.
+// The built-in ladders hold this invariant at every return site by writing the
+// pair on one line; a hand-built OwnerResolution{Owner: team} is the shape that
+// doesn't, and it is now the shape an ee author is most likely to write.
 func resolveSourceOwner(ctx context.Context, hooks SourceHooks, source, orgID string, evt domain.Event, entityID string) (owner string, ownerSet []string, err error) {
 	res, err := hooks.ResolveOwner(ctx, orgID, evt, entityID)
 	if err != nil {
@@ -113,7 +134,11 @@ func resolveSourceOwner(ctx context.Context, hooks SourceHooks, source, orgID st
 			"source", source, "event_type", evt.EventType, "entity_id", entityID)
 		return "", nil, fmt.Errorf("source %q returned an empty OwnerResolution without Unowned: a resolved no-owner must set it, a failed read must return an error", source)
 	}
-	return res.Owner, res.OwnerSet, nil
+	ownerSet = res.OwnerSet
+	if res.Owner != "" && !slices.Contains(ownerSet, res.Owner) {
+		ownerSet = append(slices.Clone(ownerSet), res.Owner) // clone: never append into the hook's own slice
+	}
+	return res.Owner, ownerSet, nil
 }
 
 // sourceRegistry is the process-global map of registered event-source
