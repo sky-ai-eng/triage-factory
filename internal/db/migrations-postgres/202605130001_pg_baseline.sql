@@ -2741,8 +2741,10 @@ CREATE INDEX idx_tasks_org_status_priority ON public.tasks USING btree (org_id, 
 
 -- Partial: the scorer reads this set once per cycle per org and it is empty
 -- in every crash-free cycle, so the index spans only the rare owed rows
--- rather than the whole board.
-CREATE INDEX idx_tasks_rederive_owed ON public.tasks USING btree (org_id) WHERE rederive_owed;
+-- rather than the whole board. created_at trails org_id because the drain
+-- reads the set oldest-first — without it the predicate is served from the
+-- index and the ordering still costs a sort.
+CREATE INDEX idx_tasks_rederive_owed ON public.tasks USING btree (org_id, created_at) WHERE rederive_owed;
 
 
 --

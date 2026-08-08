@@ -62,6 +62,7 @@ func (r *Router) clearReDeriveOwed(ctx context.Context, orgID string, taskIDs []
 func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) bool {
 	task, err := r.tasks.GetSystem(ctx, orgID, taskID)
 	if err != nil {
+		routerLog.Error("re-derive: failed to load task", "task_id", taskID, "error", err)
 		return false
 	}
 	// A task that no longer exists is decided, not deferred — there is

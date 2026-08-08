@@ -23,8 +23,10 @@ ALTER TABLE tasks ADD COLUMN rederive_owed BOOLEAN NOT NULL DEFAULT 0;
 
 -- Partial index: the drain reads this set once per scoring cycle and it is
 -- empty in every crash-free cycle, so the index spans only the rare owed
--- rows rather than the whole board.
-CREATE INDEX IF NOT EXISTS idx_tasks_rederive_owed ON tasks(id) WHERE rederive_owed = 1;
+-- rows rather than the whole board. Keyed on created_at because the drain
+-- reads the set oldest-first — an index on id alone would satisfy the
+-- predicate and then sort, which is exactly the cost a backlog can't afford.
+CREATE INDEX IF NOT EXISTS idx_tasks_rederive_owed ON tasks(created_at) WHERE rederive_owed = 1;
 
 -- +goose Down
 SELECT 'down not supported';
