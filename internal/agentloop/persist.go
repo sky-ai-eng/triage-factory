@@ -128,12 +128,23 @@ func stampUsage(row *domain.Message, usage inference.Usage) {
 // denial, a truncated batch — so a tool_use always has exactly one matching
 // row and its is_error flag is set the same way regardless of origin.
 func (e *Engine) insertToolResult(ctx context.Context, params Params, call domain.ToolCall, content string, isErr bool) error {
+	return e.insertToolResultAt(ctx, params, call, content, isErr, nil)
+}
+
+// insertToolResultAt is insertToolResult with an explicit assembly position.
+// A non-nil seq lands the row where its call's answer belongs rather than at
+// the transcript's tail — the placement the claim-start repair needs when
+// input arrived between a tool call and the result that closes it. Every
+// result a live dispatch writes is already at the tail, so it passes nil and
+// the column stays NULL.
+func (e *Engine) insertToolResultAt(ctx context.Context, params Params, call domain.ToolCall, content string, isErr bool, seq *float64) error {
 	row := &domain.Message{
 		ConversationID: params.ConversationID,
 		Role:           "tool",
 		ToolCallID:     call.ID,
 		Content:        sanitizeForStore(content),
 		IsError:        isErr,
+		Seq:            seq,
 	}
 	id, err := e.Transcript.Insert(ctx, params.OrgID, row)
 	if err != nil {

@@ -3,6 +3,7 @@ package agentloop
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -87,19 +88,37 @@ func (e *Engine) repairTranscript(ctx context.Context, params Params) error {
 // already pushed a branch or opened a pull request; running it again would
 // duplicate an external side effect that the transcript cannot see and the
 // restored workspace may not record.
+//
+// Each synthetic result is placed at the assembly position its call's answer
+// belongs at, not at the transcript's tail. The two coincide after a bare
+// crash, but rows can legally arrive between a tool call and the repair that
+// closes it — a queued follow-up, the note a stop writes — and a tail append
+// would then assemble the answer BEHIND them. The provider requires the
+// result in the message immediately after the call and rejects anything else
+// deterministically, so the whole conversation would fail on its first call
+// of every subsequent claim.
 func (e *Engine) repairDanglingToolCalls(ctx context.Context, params Params, rows []domain.Message) error {
+	// Placement is read off adjacency, so the order this walks in is
+	// load-bearing. The store already returns assembly order; sorting here
+	// keeps the repair correct on its own terms, the same way the drain
+	// re-sorts the rows whose flush order it decides.
+	ordered := make([]domain.Message, len(rows))
+	copy(ordered, rows)
+	sort.SliceStable(ordered, func(i, j int) bool { return assemblyKey(ordered[i]) < assemblyKey(ordered[j]) })
+
 	answered := make(map[string]struct{})
-	for _, r := range rows {
+	for _, r := range ordered {
 		if r.Role == "tool" && r.ToolCallID != "" {
 			answered[r.ToolCallID] = struct{}{}
 		}
 	}
 
-	var missing []domain.ToolCall
-	for _, r := range rows {
+	var repairs []toolResultPlacement
+	for i, r := range ordered {
 		if r.Role != "assistant" {
 			continue
 		}
+		var missing []domain.ToolCall
 		for _, call := range r.ToolCalls {
 			if call.ID == "" {
 				continue
@@ -115,19 +134,75 @@ func (e *Engine) repairDanglingToolCalls(ctx context.Context, params Params, row
 			missing = append(missing, call)
 			answered[call.ID] = struct{}{} // guard against a duplicated id in the log
 		}
+		// Every interrupted assistant turn anchors to its own call, so a
+		// transcript carrying several of them (crash, resume, crash again)
+		// repairs each in place instead of stacking every answer at one point.
+		repairs = append(repairs, placeAfterAnswers(ordered, i, missing)...)
 	}
-	if len(missing) == 0 {
+	if len(repairs) == 0 {
 		return nil
 	}
 
 	e.info("repairing interrupted tool calls on claim",
-		"conversation", params.ConversationID, "count", len(missing))
-	for _, call := range missing {
-		if err := e.insertToolResult(ctx, params, call, interruptedToolResult, true); err != nil {
-			return fmt.Errorf("insert synthetic result for %s: %w", call.ID, err)
+		"conversation", params.ConversationID, "count", len(repairs))
+	for _, rep := range repairs {
+		if err := e.insertToolResultAt(ctx, params, rep.call, interruptedToolResult, true, rep.seq); err != nil {
+			return fmt.Errorf("insert synthetic result for %s: %w", rep.call.ID, err)
 		}
 	}
 	return nil
+}
+
+// toolResultPlacement is one synthetic result and where it assembles: a
+// fractional seq, or nil for an ordinary tail append.
+type toolResultPlacement struct {
+	call domain.ToolCall
+	seq  *float64
+}
+
+// placeAfterAnswers positions one assistant row's synthetic results directly
+// behind the answers its batch already has.
+//
+// The anchor is the end of the run of tool rows following the owner, not the
+// owner itself: a partially answered batch keeps its real results first, and
+// the synthetics fill in after them in call order. Only the synthetics are
+// positioned — the user rows that arrived in the meantime keep their own
+// places, because their order is the record of what the user actually said
+// and when.
+//
+// A nil seq (the owner's answer block is the transcript's tail) is an
+// ordinary append. That is the plain crash: the anchor and the tail are the
+// same row, so the placement adds nothing and the column stays NULL rather
+// than carrying a fraction no ordering needs.
+//
+// The fractions divide effective positions rather than ids, so a repair
+// landing among rows a compaction already re-seqed works on the same terms as
+// one landing among freshly appended ones. There is always room to divide:
+// every seq any writer mints — the compaction commit's, these — is strictly
+// between two ids, so two adjacent rows never share a position.
+func placeAfterAnswers(rows []domain.Message, owner int, missing []domain.ToolCall) []toolResultPlacement {
+	if len(missing) == 0 {
+		return nil
+	}
+	anchor := owner
+	for j := owner + 1; j < len(rows) && rows[j].Role == "tool"; j++ {
+		anchor = j
+	}
+
+	out := make([]toolResultPlacement, 0, len(missing))
+	if anchor == len(rows)-1 {
+		for _, call := range missing {
+			out = append(out, toolResultPlacement{call: call})
+		}
+		return out
+	}
+
+	lo, hi := assemblyKey(rows[anchor]), assemblyKey(rows[anchor+1])
+	for i, call := range missing {
+		seq := lo + (hi-lo)*float64(i+1)/float64(len(missing)+1)
+		out = append(out, toolResultPlacement{call: call, seq: &seq})
+	}
+	return out
 }
 
 // noticeWorkspaceRebuilt queues the workspace notice when this engagement
