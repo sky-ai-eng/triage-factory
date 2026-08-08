@@ -261,6 +261,15 @@ func (r *Router) autoDelegateEnabledForTeam(ctx context.Context, teamID string) 
 	return settings.AutoDelegateEnabled, nil
 }
 
+// broadcastTasksUpdated pushes the frontend's "re-read the board" nudge for an
+// org. The payload is empty by design — the hub carries the fact that
+// something changed, and the client re-fetches — so every producer of a task
+// change (the close phase, the task upsert, the terminal reconciler) sends the
+// identical event rather than each spelling out the same literal.
+func (r *Router) broadcastTasksUpdated(orgID string) {
+	r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
+}
+
 // taskDrainLock returns the per-task mutex used to serialize
 // DrainTask calls. Lazily created on first use; never evicted.
 func (r *Router) taskDrainLock(taskID string) *sync.Mutex {

@@ -3,6 +3,8 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 
@@ -187,13 +189,23 @@ func jiraIssueTerminalCloseTypes() []string {
 // closedAny drives the tasks_updated broadcast; terminate drives the entity
 // state flip. A terminating relation sets terminate even when no tasks exist to
 // close (a merged PR with no live tasks still closes its entity).
-func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, entityID string) (closedAny, terminate bool) {
+//
+// The returned error is the close phase's routing obligation: a task this event
+// resolves that is still open is work nothing else re-derives, because the
+// tracker's snapshot-diff emits a merged/closed transition exactly once. The
+// caller propagates it so the queue worker replays the event instead of
+// consuming it. Failures are COLLECTED rather than fatal — one unreadable task
+// list or one bad close must not stop the siblings from closing, and the replay
+// only re-attempts what is still active (the list read returns active tasks
+// only, and a task close is a no-op on a terminal row).
+func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, entityID string) (closedAny, terminate bool, err error) {
 	ctx, span := tracer.Start(ctx, "route.close", trace.WithAttributes(telemetry.EntityID(entityID)))
 	defer span.End()
 
 	closed := 0
 	defer func() { span.SetAttributes(telemetry.Count(closed)) }()
 
+	var errs []error
 	for ri := range closeRelations {
 		rel := &closeRelations[ri]
 		if !slices.Contains(rel.onEvents, evt.EventType) {
@@ -208,6 +220,7 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 			ts, err := r.tasks.FindActiveByEntityAndTypeSystem(ctx, orgID, entityID, tt)
 			if err != nil {
 				routerLog.Error("close: list tasks failed", "on_event", evt.EventType, "target_type", tt, "error", err)
+				errs = append(errs, fmt.Errorf("list active %s tasks: %w", tt, err))
 				continue
 			}
 			targets = append(targets, ts...)
@@ -241,6 +254,7 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 			}
 			if err := r.closeTaskWithAudit(ctx, orgID, t.ID, evt.ID, reason, evt.EventType); err != nil {
 				routerLog.Error("close: failed to close task", "task_id", t.ID, "on_event", evt.EventType, "error", err)
+				errs = append(errs, fmt.Errorf("close task %s: %w", t.ID, err))
 				continue
 			}
 			routerLog.InfoContext(ctx, "closed task", "task_id", t.ID, "on_event", evt.EventType, "reason", reason)
@@ -248,7 +262,7 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 			closed++
 		}
 	}
-	return closedAny, terminate
+	return closedAny, terminate, errors.Join(errs...)
 }
 
 // --- relation hooks ---------------------------------------------------------
@@ -395,6 +409,15 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 // call — the run ends up terminal either way and the task close still
 // lands. Teardown is fire-and-forget; the run's own goroutine parks it
 // asynchronously.
+//
+// Deliberately EXCLUDED from the close phase's routing obligation, unlike the
+// task close it precedes: a replay is only a repair for work the replay can
+// still reach, and this cascade is reachable exactly once. If the stop fails
+// after the task closed, the replayed event finds no active task of that type
+// and never walks back here — so returning the error would buy a re-run of the
+// whole event that repairs nothing, while costing a duplicate audit row. The
+// same retry-unrepairable class as the agent-claim stamp; a run left churning
+// on a resolved task is bounded by its own turn budget.
 func (r *Router) cancelActiveRunsForTask(ctx context.Context, orgID, taskID string) {
 	if r.spawner == nil {
 		return

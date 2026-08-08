@@ -48,6 +48,9 @@ type EntitySeeder struct {
 //     sql.ErrNoRows when the entity id doesn't exist.
 //   - ListUnclassified / ListActive / ListProjectPanel filter on the
 //     documented predicates.
+//   - ListActiveTerminalCandidatesSystem surfaces active entities whose
+//     stored snapshot reads terminal (github exactly, jira against the
+//     caller's done-status union) and nothing else.
 //   - Descriptions dedupes the input id list and only returns ids
 //     whose description is non-empty.
 //   - ClassificationStatusSystem reports (classified, exists) keyed on
@@ -692,6 +695,91 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 		if ghIDs[ghClosed.ID] {
 			t.Errorf("closed github entity %s leaked into active list", ghClosed.ID)
+		}
+	})
+
+	t.Run("ListActiveTerminalCandidatesSystem_selects_terminal_snapshots_only", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+
+		// The whole matrix the reconciliation sweep depends on: each
+		// shape of terminal snapshot, each shape of non-terminal one,
+		// and the two states that must never surface (already-closed,
+		// no snapshot at all).
+		seedSnap := func(sourceID, source, snapshot string) string {
+			t.Helper()
+			e, _, err := s.FindOrCreate(ctx, orgID, source, sourceID, "pr", sourceID, "")
+			if err != nil {
+				t.Fatalf("create %s: %v", sourceID, err)
+			}
+			if snapshot != "" {
+				if err := s.UpdateSnapshot(ctx, orgID, e.ID, snapshot); err != nil {
+					t.Fatalf("snapshot %s: %v", sourceID, err)
+				}
+			}
+			return e.ID
+		}
+		merged := seedSnap("owner/repo#tc-merged", "github", `{"state":"MERGED","merged":true}`)
+		closedState := seedSnap("owner/repo#tc-closed", "github", `{"state":"CLOSED","merged":false}`)
+		open := seedSnap("owner/repo#tc-open", "github", `{"state":"OPEN","merged":false}`)
+		noSnapshot := seedSnap("owner/repo#tc-bare", "github", "")
+		jiraDone := seedSnap("SKY-tc-done", "jira", `{"key":"SKY-tc-done","status":"Done"}`)
+		jiraLive := seedSnap("SKY-tc-live", "jira", `{"key":"SKY-tc-live","status":"In Progress"}`)
+		alreadyClosed := seedSnap("owner/repo#tc-gone", "github", `{"state":"MERGED","merged":true}`)
+		if err := s.MarkClosed(ctx, orgID, alreadyClosed); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		got, err := s.ListActiveTerminalCandidatesSystem(ctx, orgID, []string{"Done", "Won't Do"}, 0)
+		if err != nil {
+			t.Fatalf("ListActiveTerminalCandidatesSystem: %v", err)
+		}
+		ids := map[string]bool{}
+		for _, e := range got {
+			ids[e.ID] = true
+		}
+		for _, want := range []struct {
+			id, why string
+		}{
+			{merged, "a merged PR"},
+			{closedState, "a CLOSED PR"},
+			{jiraDone, "a Jira issue in a done status"},
+		} {
+			if !ids[want.id] {
+				t.Errorf("%s is missing; its entity row is stranded active and nothing else repairs it", want.why)
+			}
+		}
+		for _, skip := range []struct {
+			id, why string
+		}{
+			{open, "an open PR"},
+			{noSnapshot, "an entity with no stored snapshot"},
+			{jiraLive, "a Jira issue in a live status"},
+			{alreadyClosed, "an entity already closed"},
+		} {
+			if ids[skip.id] {
+				t.Errorf("%s surfaced as a terminal candidate; the sweep would close live work", skip.why)
+			}
+		}
+
+		// No configured done statuses means no Jira row can be terminal —
+		// and must not become a syntax error on the way to saying so.
+		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, nil, 0)
+		if err != nil {
+			t.Fatalf("ListActiveTerminalCandidatesSystem(no jira statuses): %v", err)
+		}
+		for _, e := range got {
+			if e.Source == "jira" {
+				t.Errorf("jira entity %s surfaced with no configured done statuses", e.ID)
+			}
+		}
+
+		// The limit bounds the batch; the rest is reached on later passes.
+		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, []string{"Done"}, 1)
+		if err != nil {
+			t.Fatalf("ListActiveTerminalCandidatesSystem(limit): %v", err)
+		}
+		if len(got) != 1 {
+			t.Errorf("limit 1 returned %d rows, want 1", len(got))
 		}
 	})
 
