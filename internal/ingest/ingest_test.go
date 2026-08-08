@@ -226,6 +226,12 @@ func (failingEnqueueQueue) PruneDone(context.Context, time.Time) (int, error) { 
 func (failingEnqueueQueue) ListForEntity(context.Context, string, string) ([]domain.QueuedEvent, error) {
 	return nil, nil
 }
+func (failingEnqueueQueue) ListFailedEvents(context.Context, string, int) ([]domain.FailedEvent, error) {
+	return nil, nil
+}
+func (failingEnqueueQueue) RequeueFailedEvents(context.Context, string, []int64) (int, error) {
+	return 0, nil
+}
 
 var _ db.EventQueueStore = failingEnqueueQueue{}
 

@@ -65,6 +65,8 @@ import { ChoiceCards } from '../../setup/parts'
 import GitHubAccessControl from './GitHubAccessControl'
 import SSOSettings from './SSOSettings'
 import SettingsSection from './SettingsSection'
+import FailedEventsPanel from '../FailedEventsPanel'
+import { useFailedEvents, type UseFailedEvents } from '../../../hooks/useFailedEvents'
 import { useEntitlements, FeatureSSO, FeatureSlack } from '../../../hooks/useEntitlements'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
@@ -88,6 +90,13 @@ export default function OrgSettings({
   // intent ("I want to retype this"), and it has to survive the fields being
   // blank, which is the state it starts in.
   const [jiraRebinding, setJiraRebinding] = useState(false)
+
+  // Parked event_queue rows. Fetched at this level, not inside the panel,
+  // because the collapsed section's badge has to show the count before the
+  // body mounts — a diagnostics surface nobody opens is a diagnostics surface
+  // nobody sees. Enabled unconditionally: OrgSettings only renders for an org
+  // admin (multi) or N=1 (local), which is exactly the API's own gate.
+  const failedEvents = useFailedEvents(true)
 
   // EE SSO / Slack entitlements — dark until the probe resolves, matching the
   // backend's 404-and-hide at every /api/sso/* and /api/slack/* seam.
@@ -942,10 +951,38 @@ export default function OrgSettings({
         </div>
       </SettingsSection>
 
+      {/* ── Parked events ── The operator surface over routing work the event
+          queue gave up on. Sits with the other operational sections rather
+          than in the danger zone: requeueing is a recovery, not a destructive
+          act. The summary carries the count so a non-zero population is
+          visible without expanding — the whole point of a diagnostics panel
+          is that you notice it before you go looking. */}
+      <SettingsSection title="Parked events" summary={<ParkedEventsBadge state={failedEvents} />}>
+        <FailedEventsPanel state={failedEvents} />
+      </SettingsSection>
+
       <SettingsSection title="Danger zone" summary="Clear stored tokens">
         <DangerZone />
       </SettingsSection>
     </div>
+  )
+}
+
+// ParkedEventsBadge is the Parked events section's collapsed summary. Zero is
+// the healthy state and reads as plain text; anything above zero gets a
+// warning-toned count pill, because a parked row is work that was silently
+// dropped and will not come back on its own.
+function ParkedEventsBadge({ state }: { state: UseFailedEvents }) {
+  if (state.loading || state.error) return <>Dropped events</>
+  const n = state.events.length
+  if (n === 0) return <>None parked</>
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="rounded-full bg-dismiss/10 px-2 py-0.5 text-[11px] font-medium text-dismiss">
+        {n}
+      </span>
+      never routed
+    </span>
   )
 }
 

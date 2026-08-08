@@ -56,3 +56,35 @@ const (
 	QueuedEventStatusDone       = "done"
 	QueuedEventStatusFailed     = "failed"
 )
+
+// FailedEvent is one parked 'failed' queue row as the operator surface
+// renders it: enough to recognize what was dropped and decide whether to
+// put it back, and nothing more.
+//
+// A parked row is not a retry still in flight. The event is durably
+// recorded — its audit row committed in the same transaction as the queue
+// row — but the routing obligations it carried (task mint/bump, owner
+// resolution, trigger firing, close processing) burned the whole attempt
+// budget and will never run on their own. Nothing re-drives it: the
+// tracker's snapshot advanced when the event was minted, so the transition
+// that produced it does not re-emit. An operator requeue is the only path
+// back, which is why these rows are retained rather than pruned.
+type FailedEvent struct {
+	ID        int64  `json:"id"`
+	EventType string `json:"event_type"`
+	// Entity* denormalize the entity the event was about, for display —
+	// "PR owner/repo#18" reads as something an operator can act on where a
+	// bare uuid does not. All four are empty when the row carries no
+	// entity, or when the entity row is gone: a diagnostics list that
+	// dropped a row because its entity vanished would hide exactly the
+	// case worth looking at.
+	EntityID       string `json:"entity_id,omitempty"`
+	EntitySource   string `json:"entity_source,omitempty"`
+	EntitySourceID string `json:"entity_source_id,omitempty"`
+	EntityTitle    string `json:"entity_title,omitempty"`
+	// Attempts is the budget the row burned before parking, and LastError
+	// the reason its final attempt gave.
+	Attempts   int       `json:"attempts"`
+	LastError  string    `json:"last_error,omitempty"`
+	EnqueuedAt time.Time `json:"enqueued_at"`
+}

@@ -33,6 +33,15 @@ type EventQueueSeeder struct {
 	// exercised against a claim old enough to be stale.
 	BackdateClaim func(t *testing.T, queueID int64, age time.Duration)
 
+	// ClearEntityRef NULLs a queue row's entity_id, standing in for a row
+	// the display join finds no entity for. Raw SQL because Enqueue is the
+	// only writer of the column and it never writes NULL for a
+	// router-bound event. This is the nullable column's reachable state at
+	// read time: an actually-deleted entity cascades the queue row away
+	// with it, so what a list can encounter is the empty reference, not a
+	// dangling one.
+	ClearEntityRef func(t *testing.T, queueID int64)
+
 	// EntitySnapshot reads an entity's stored snapshot_json and poll_seq.
 	// The CAS half of EnqueueBatchWithSnapshotCAS is a write to a table
 	// this store doesn't otherwise touch, so the assertions need a way to
@@ -84,6 +93,24 @@ func enqueueTracedOn(t *testing.T, ctx context.Context, s db.EventQueueStore, or
 	return id
 }
 
+// parkOn drives one event all the way to the 'failed' terminal — enqueue,
+// claim, MarkFailed — and returns the claimed row so the caller has its
+// queue id. The park is the only way a row enters the operator surface, so
+// every case below that needs a parked row builds it this way rather than
+// writing the status directly.
+func parkOn(t *testing.T, ctx context.Context, s db.EventQueueStore, orgID, entityID, reason string) *domain.QueuedEvent {
+	t.Helper()
+	enqueueOn(t, ctx, s, orgID, entityID)
+	claimed, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+	if err != nil || claimed == nil {
+		t.Fatalf("ClaimNext while parking a row: got=%v err=%v", claimed, err)
+	}
+	if err := s.MarkFailed(ctx, orgID, claimed.ID, reason); err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+	return claimed
+}
+
 // RunEventQueueStoreConformance covers the durable-queue contract every
 // backend impl must hold:
 //
@@ -103,6 +130,11 @@ func enqueueTracedOn(t *testing.T, ctx context.Context, s db.EventQueueStore, or
 //     crash recovery).
 //   - PruneDone deletes done rows older than the cutoff; failed rows
 //     are retained.
+//   - ListFailedEvents surfaces parked rows (with their entity, attempts
+//     and last_error) newest-first, and nothing else.
+//   - RequeueFailedEvents flips only 'failed' rows, grants a fresh
+//     attempt budget, keeps last_error until the next attempt, and
+//     counts out every id it did not move.
 //   - ListForEntity orders by id.
 //   - traceparent round-trips through the claim: what the producer stamped
 //     is what the consumer reads back, and an untraced producer reads back
@@ -718,6 +750,271 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		rows, _ := s.ListForEntity(ctx, orgID, entityID)
 		if len(rows) != 1 || rows[0].Status != domain.QueuedEventStatusFailed {
 			t.Errorf("after prune, only the failed row should remain, got %+v", rows)
+		}
+	})
+
+	// ── The parked-row operator surface ──
+	//
+	// A 'failed' row is routing work that was dropped and will not re-emit,
+	// so these two methods are the only way it ever moves again. parkOn below
+	// is the shared fixture: enqueue, claim, MarkFailed.
+
+	t.Run("ListFailedEvents_lists_parked_rows_with_entity", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		parked := parkOn(t, ctx, s, orgID, entityID, "route: store unavailable")
+
+		got, err := s.ListFailedEvents(ctx, orgID, 0)
+		if err != nil {
+			t.Fatalf("ListFailedEvents: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("expected 1 parked row, got %d (%+v)", len(got), got)
+		}
+		fe := got[0]
+		if fe.ID != parked.ID {
+			t.Errorf("id = %d, want %d", fe.ID, parked.ID)
+		}
+		if fe.EventType != domain.EventGitHubPRCICheckFailed {
+			t.Errorf("event_type = %q, want %q", fe.EventType, domain.EventGitHubPRCICheckFailed)
+		}
+		if fe.EntityID != entityID {
+			t.Errorf("entity_id = %q, want %q", fe.EntityID, entityID)
+		}
+		// The entity fields are what makes the row identifiable to a human;
+		// a list of bare uuids is not an operator surface.
+		if fe.EntitySource != "github" || fe.EntitySourceID == "" || fe.EntityTitle == "" {
+			t.Errorf("entity display fields = {%q %q %q}, want all populated from the joined entity",
+				fe.EntitySource, fe.EntitySourceID, fe.EntityTitle)
+		}
+		if fe.Attempts != 1 {
+			t.Errorf("attempts = %d, want 1 (the claim that parked it)", fe.Attempts)
+		}
+		if fe.LastError != "route: store unavailable" {
+			t.Errorf("last_error = %q, want the park reason", fe.LastError)
+		}
+		if fe.EnqueuedAt.IsZero() {
+			t.Errorf("enqueued_at is zero; the list has no age to show")
+		}
+	})
+
+	// Only parked rows, and newest first — an operator scanning the table is
+	// looking for what just broke.
+	t.Run("ListFailedEvents_excludes_live_rows_and_orders_newest_first", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+
+		first := parkOn(t, ctx, s, orgID, entityID, "first")
+		second := parkOn(t, ctx, s, orgID, entityID, "second")
+		// A done row, an in-flight claim, and a never-claimed pending row —
+		// none of them is dropped work.
+		enqueueOn(t, ctx, s, orgID, entityID)
+		doneRow, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		if err := s.MarkDone(ctx, orgID, doneRow.ID); err != nil {
+			t.Fatalf("MarkDone: %v", err)
+		}
+		enqueueOn(t, ctx, s, orgID, entityID)
+		if _, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch); err != nil {
+			t.Fatalf("claim the in-flight row: %v", err)
+		}
+		enqueueOn(t, ctx, s, orgID, entityID)
+
+		got, err := s.ListFailedEvents(ctx, orgID, 0)
+		if err != nil {
+			t.Fatalf("ListFailedEvents: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("expected exactly the 2 parked rows, got %d (%+v)", len(got), got)
+		}
+		if got[0].ID != second.ID || got[1].ID != first.ID {
+			t.Errorf("order = [%d %d], want newest-first [%d %d]", got[0].ID, got[1].ID, second.ID, first.ID)
+		}
+
+		// limit truncates from the newest end.
+		capped, err := s.ListFailedEvents(ctx, orgID, 1)
+		if err != nil {
+			t.Fatalf("ListFailedEvents(limit=1): %v", err)
+		}
+		if len(capped) != 1 || capped[0].ID != second.ID {
+			t.Errorf("limit=1 returned %+v, want just the newest row %d", capped, second.ID)
+		}
+	})
+
+	// entity_id is nullable, so the join can miss. Listing must still show the
+	// row — it is the only record that the event was dropped, and a list that
+	// hid it would hide the odd case specifically.
+	t.Run("ListFailedEvents_survives_a_missing_entity", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		parked := parkOn(t, ctx, s, orgID, entityID, "boom")
+		seed.ClearEntityRef(t, parked.ID)
+
+		got, err := s.ListFailedEvents(ctx, orgID, 0)
+		if err != nil {
+			t.Fatalf("ListFailedEvents: %v", err)
+		}
+		if len(got) != 1 || got[0].ID != parked.ID {
+			t.Fatalf("expected the entity-less parked row, got %+v", got)
+		}
+		if got[0].EntitySource != "" || got[0].EntityTitle != "" {
+			t.Errorf("entity display fields = {%q %q}, want empty for a row with no entity",
+				got[0].EntitySource, got[0].EntityTitle)
+		}
+	})
+
+	// The retention contract the operator surface depends on: a parked row
+	// has to still be there when someone comes looking, however long that
+	// takes. PruneDone is the only sweep that deletes from this table.
+	t.Run("ListFailedEvents_survives_a_prune_pass", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		parked := parkOn(t, ctx, s, orgID, entityID, "parked before the sweep")
+
+		// A cutoff in the future makes every processed row older than it, so
+		// this is the most aggressive prune the retention sweep can run.
+		if _, err := s.PruneDone(ctx, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("PruneDone: %v", err)
+		}
+
+		got, err := s.ListFailedEvents(ctx, orgID, 0)
+		if err != nil {
+			t.Fatalf("ListFailedEvents after prune: %v", err)
+		}
+		if len(got) != 1 || got[0].ID != parked.ID {
+			t.Fatalf("parked row did not survive the prune: %+v", got)
+		}
+		if got[0].LastError != "parked before the sweep" {
+			t.Errorf("last_error = %q, want the park reason intact", got[0].LastError)
+		}
+	})
+
+	t.Run("RequeueFailedEvents_grants_a_fresh_budget", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		parked := parkOn(t, ctx, s, orgID, entityID, "route: store unavailable")
+
+		n, err := s.RequeueFailedEvents(ctx, orgID, []int64{parked.ID})
+		if err != nil {
+			t.Fatalf("RequeueFailedEvents: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("RequeueFailedEvents moved %d rows, want 1", n)
+		}
+		if left, _ := s.ListFailedEvents(ctx, orgID, 0); len(left) != 0 {
+			t.Errorf("requeued row still lists as parked: %+v", left)
+		}
+
+		rows, _ := s.ListForEntity(ctx, orgID, entityID)
+		if len(rows) != 1 {
+			t.Fatalf("expected 1 row, got %d", len(rows))
+		}
+		if rows[0].Status != domain.QueuedEventStatusPending {
+			t.Errorf("status = %q, want pending", rows[0].Status)
+		}
+		// The whole point of the operator requeue: the row parked because its
+		// budget ran out, so it needs the budget back or it re-parks on the
+		// first attempt.
+		if rows[0].Attempts != 0 {
+			t.Errorf("attempts = %d, want 0 — an operator requeue grants a fresh budget", rows[0].Attempts)
+		}
+		if rows[0].ProcessedAt != nil || rows[0].ClaimedAt != nil {
+			t.Errorf("claimed_at/processed_at should be cleared on requeue: %+v", rows[0])
+		}
+		// last_error survives until the next attempt writes over it, so the
+		// reason it parked is still correlatable with whatever happens next.
+		if rows[0].LastError != "route: store unavailable" {
+			t.Errorf("last_error = %q, want the park reason retained until the next attempt", rows[0].LastError)
+		}
+
+		// Claimable again, counting from one.
+		again, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		if err != nil || again == nil {
+			t.Fatalf("re-claim after requeue: got=%v err=%v", again, err)
+		}
+		if again.ID != parked.ID || again.Attempts != 1 {
+			t.Errorf("re-claim = id %d attempts %d, want id %d attempts 1", again.ID, again.Attempts, parked.ID)
+		}
+
+		// Parking it a second time keeps the NEW reason.
+		if err := s.MarkFailed(ctx, orgID, again.ID, "route: still unavailable"); err != nil {
+			t.Fatalf("second MarkFailed: %v", err)
+		}
+		reparked, _ := s.ListFailedEvents(ctx, orgID, 0)
+		if len(reparked) != 1 || reparked[0].LastError != "route: still unavailable" {
+			t.Errorf("re-parked row = %+v, want the second park's reason", reparked)
+		}
+	})
+
+	// The mixed-batch contract: an operator selecting rows from a stale page
+	// may name ids that have since moved on. Those are no-ops, counted out.
+	t.Run("RequeueFailedEvents_moves_only_failed_rows", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+
+		parkedA := parkOn(t, ctx, s, orgID, entityID, "a")
+		parkedB := parkOn(t, ctx, s, orgID, entityID, "b")
+		enqueueOn(t, ctx, s, orgID, entityID)
+		doneRow, _ := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		if err := s.MarkDone(ctx, orgID, doneRow.ID); err != nil {
+			t.Fatalf("MarkDone: %v", err)
+		}
+
+		n, err := s.RequeueFailedEvents(ctx, orgID, []int64{parkedA.ID, doneRow.ID, parkedB.ID})
+		if err != nil {
+			t.Fatalf("RequeueFailedEvents: %v", err)
+		}
+		if n != 2 {
+			t.Fatalf("RequeueFailedEvents returned %d, want 2 (the done id is counted out)", n)
+		}
+
+		rows, _ := s.ListForEntity(ctx, orgID, entityID)
+		for _, r := range rows {
+			switch r.ID {
+			case parkedA.ID, parkedB.ID:
+				if r.Status != domain.QueuedEventStatusPending {
+					t.Errorf("row %d status = %q, want pending", r.ID, r.Status)
+				}
+			case doneRow.ID:
+				if r.Status != domain.QueuedEventStatusDone {
+					t.Errorf("done row %d status = %q, want done (untouched)", r.ID, r.Status)
+				}
+				if r.ProcessedAt == nil {
+					t.Errorf("done row %d lost its processed_at to a requeue that should not have matched it", r.ID)
+				}
+			}
+		}
+	})
+
+	// Idempotence: the second call finds nothing left to move. This is what
+	// makes a double-click on the panel's Requeue button harmless.
+	t.Run("RequeueFailedEvents_double_requeue_is_a_noop", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		parked := parkOn(t, ctx, s, orgID, entityID, "boom")
+
+		if n, err := s.RequeueFailedEvents(ctx, orgID, []int64{parked.ID}); err != nil || n != 1 {
+			t.Fatalf("first requeue: n=%d err=%v", n, err)
+		}
+		n, err := s.RequeueFailedEvents(ctx, orgID, []int64{parked.ID})
+		if err != nil {
+			t.Fatalf("second requeue: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("second requeue moved %d rows, want 0", n)
+		}
+		rows, _ := s.ListForEntity(ctx, orgID, entityID)
+		if rows[0].Status != domain.QueuedEventStatusPending || rows[0].Attempts != 0 {
+			t.Errorf("row after the double requeue = %+v, want pending with a fresh budget", rows[0])
+		}
+	})
+
+	t.Run("RequeueFailedEvents_empty_and_unknown_ids", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		if n, err := s.RequeueFailedEvents(ctx, orgID, nil); err != nil || n != 0 {
+			t.Errorf("requeue of no ids = (%d, %v), want (0, nil)", n, err)
+		}
+		if n, err := s.RequeueFailedEvents(ctx, orgID, []int64{987654}); err != nil || n != 0 {
+			t.Errorf("requeue of an unknown id = (%d, %v), want (0, nil)", n, err)
 		}
 	})
 

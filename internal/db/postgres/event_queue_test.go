@@ -75,8 +75,38 @@ func TestEventQueueStore_Postgres_CrossOrg(t *testing.T) {
 		t.Errorf("orgB ListForEntity returned %d rows for orgA's entity", len(rowsB))
 	}
 
-	// The correctly-scoped MarkDone still works.
-	if err := stores.EventQueue.MarkDone(ctx, orgA, claimed.ID); err != nil {
+	// The operator surface is org-scoped on the same admin pool, so its
+	// org_id bind is the only thing between one tenant's admin and another
+	// tenant's dropped work. Park orgA's row and prove orgB can neither see
+	// nor move it.
+	if err := stores.EventQueue.MarkFailed(ctx, orgA, claimed.ID, "boom"); err != nil {
+		t.Fatalf("MarkFailed orgA: %v", err)
+	}
+	if parkedB, err := stores.EventQueue.ListFailedEvents(ctx, orgB, 0); err != nil {
+		t.Fatalf("ListFailedEvents orgB: %v", err)
+	} else if len(parkedB) != 0 {
+		t.Errorf("orgB ListFailedEvents returned %d of orgA's parked rows", len(parkedB))
+	}
+	if n, err := stores.EventQueue.RequeueFailedEvents(ctx, orgB, []int64{claimed.ID}); err != nil {
+		t.Fatalf("RequeueFailedEvents orgB: %v", err)
+	} else if n != 0 {
+		t.Errorf("orgB requeued %d of orgA's parked rows, want 0", n)
+	}
+	parkedA, _ := stores.EventQueue.ListFailedEvents(ctx, orgA, 0)
+	if len(parkedA) != 1 || parkedA[0].ID != claimed.ID {
+		t.Fatalf("orgA's parked row = %+v, want the row it parked, untouched", parkedA)
+	}
+
+	// The correctly-scoped requeue puts it back, and the correctly-scoped
+	// MarkDone still drives it to a terminal.
+	if n, err := stores.EventQueue.RequeueFailedEvents(ctx, orgA, []int64{claimed.ID}); err != nil || n != 1 {
+		t.Fatalf("RequeueFailedEvents orgA: n=%d err=%v", n, err)
+	}
+	reclaimed, err := stores.EventQueue.ClaimNext(ctx, "cross-org-executor", 1)
+	if err != nil || reclaimed == nil {
+		t.Fatalf("re-claim after requeue: got=%v err=%v", reclaimed, err)
+	}
+	if err := stores.EventQueue.MarkDone(ctx, orgA, reclaimed.ID); err != nil {
 		t.Fatalf("MarkDone orgA: %v", err)
 	}
 	rowsA, _ = stores.EventQueue.ListForEntity(ctx, orgA, entityA)
@@ -221,6 +251,16 @@ func newPgEventQueueSeeder(h *pgtest.Harness, orgID string) dbtest.EventQueueSee
 			t.Fatalf("backdate claimed_at touched %d rows, want 1", n)
 		}
 	}
+	clearEntityRef := func(t *testing.T, queueID int64) {
+		t.Helper()
+		res, err := conn.Exec(`UPDATE event_queue SET entity_id = NULL WHERE id = $1`, queueID)
+		if err != nil {
+			t.Fatalf("clear entity_id: %v", err)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			t.Fatalf("clear entity_id touched %d rows, want 1", n)
+		}
+	}
 	entitySnapshot := func(t *testing.T, entityID string) (string, int64) {
 		t.Helper()
 		var snap string
@@ -246,6 +286,7 @@ func newPgEventQueueSeeder(h *pgtest.Harness, orgID string) dbtest.EventQueueSee
 	return dbtest.EventQueueSeeder{
 		Entity:         entity,
 		BackdateClaim:  backdateClaim,
+		ClearEntityRef: clearEntityRef,
 		EntitySnapshot: entitySnapshot,
 		CountEventRows: countEventRows,
 	}

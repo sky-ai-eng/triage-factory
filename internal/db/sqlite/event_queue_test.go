@@ -58,6 +58,14 @@ func TestEventQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.EventQueue.ListForEntity(ctx, bogusOrg, "e"); err == nil {
 		t.Errorf("ListForEntity with non-local orgID should error")
 	}
+	if _, err := stores.EventQueue.ListFailedEvents(ctx, bogusOrg, 0); err == nil {
+		t.Errorf("ListFailedEvents with non-local orgID should error")
+	}
+	// Non-empty ids: the guard must run before the early "nothing to do"
+	// return, or a cross-org requeue would pass by looking like a no-op.
+	if _, err := stores.EventQueue.RequeueFailedEvents(ctx, bogusOrg, []int64{1}); err == nil {
+		t.Errorf("RequeueFailedEvents with non-local orgID should error")
+	}
 }
 
 func newSQLiteForEventQueueTest(t *testing.T) *sql.DB {
@@ -104,6 +112,16 @@ func newSQLiteEventQueueSeeder(conn *sql.DB) dbtest.EventQueueSeeder {
 			t.Fatalf("backdate claimed_at touched %d rows, want 1", n)
 		}
 	}
+	clearEntityRef := func(t *testing.T, queueID int64) {
+		t.Helper()
+		res, err := conn.Exec(`UPDATE event_queue SET entity_id = NULL WHERE id = ?`, queueID)
+		if err != nil {
+			t.Fatalf("clear entity_id: %v", err)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			t.Fatalf("clear entity_id touched %d rows, want 1", n)
+		}
+	}
 	entitySnapshot := func(t *testing.T, entityID string) (string, int64) {
 		t.Helper()
 		var snap sql.NullString
@@ -125,6 +143,7 @@ func newSQLiteEventQueueSeeder(conn *sql.DB) dbtest.EventQueueSeeder {
 	return dbtest.EventQueueSeeder{
 		Entity:         entity,
 		BackdateClaim:  backdateClaim,
+		ClearEntityRef: clearEntityRef,
 		EntitySnapshot: entitySnapshot,
 		CountEventRows: countEventRows,
 	}

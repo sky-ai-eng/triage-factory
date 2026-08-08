@@ -15,6 +15,7 @@ var (
 	entitiesLog        = logging.Component("entities")
 	eventHandlersLog   = logging.Component("event_handlers")
 	externalActionLog  = logging.Component("external-action")
+	failedEventsLog    = logging.Component("failed-events")
 	factoryLog         = logging.Component("factory")
 	githubAccessLog    = logging.Component("github-access")
 	githubAppLog       = logging.Component("github-app")
