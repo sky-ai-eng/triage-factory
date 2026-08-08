@@ -806,6 +806,10 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 			Stores: stores,
 			OrgID:  org,
 			UserID: runmode.LocalDefaultUserID,
+			// Local drives every delegation through the SDK, so nothing is
+			// retired here — the empty value is what makes the shared suite
+			// assert the unchanged predicate rather than the refusal.
+			RetiredDelegationRuntime: "",
 			EnqueueDelegation: func(t *testing.T, runtime string) string {
 				t.Helper()
 				idx := nextStep

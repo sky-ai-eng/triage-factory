@@ -89,7 +89,11 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversation
 	identity := s.resolveCommitIdentity(ctx, orgID, "manual", userID)
 
 	params := agentproc.SidecarBringUpParams{
-		HostVethIP:    net.HostIP,
+		HostVethIP: net.HostIP,
+		// A curator turn is an SDK engagement whose loop runs inside the jail,
+		// so its jail keeps the LLM proxy — the run surface's engine moved out,
+		// this one's has not.
+		SandboxLLM:    true,
 		Git:           git,
 		Relay:         agenthost.NewRelayServer(stores, info, git),
 		IdentityPairs: githooks.IdentityConfigPairs(identity.Name, identity.Email),

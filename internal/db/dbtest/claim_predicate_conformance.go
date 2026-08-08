@@ -63,6 +63,18 @@ type ClaimPredicateHarness struct {
 	// projection — what the wire actually carries.
 	DisplayStatus func(t *testing.T, convID string) string
 
+	// RetiredDelegationRuntime names the delegation engine this dialect no
+	// longer drives, or "" when it drives both. It is a property of the
+	// dialect because the dialect is the mode: multi's delegations are all
+	// native, so a delegation row still stamped with the other engine is a
+	// transcript to keep readable rather than work to claim; local drives
+	// every delegation through the SDK and retires nothing.
+	//
+	// The suite reads it twice — to stop asserting claimability for the
+	// retired engine, and to assert the refusal itself — so one backend
+	// still covers both answers.
+	RetiredDelegationRuntime string
+
 	// CollapseClaimTimestamps rewrites every one of a conversation's claim
 	// timestamps to a single identical value — the worst case a coarse clock
 	// could produce, which no production writer reaches (they all bind a
@@ -118,6 +130,14 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			t.Fatalf("release claim: %v", err)
 		}
 	}
+	queuedDepth := func(t *testing.T, h ClaimPredicateHarness) int {
+		t.Helper()
+		n, err := h.Stores.RunQueue.CountQueuedSystem(ctx)
+		if err != nil {
+			t.Fatalf("CountQueuedSystem: %v", err)
+		}
+		return n
+	}
 	userRow := func(content string, delivered bool) domain.Message {
 		d := delivered
 		return domain.Message{Role: "user", Content: content, Subtype: "", Delivered: &d, WindowState: domain.MessageWindowActive}
@@ -125,6 +145,14 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 
 	for _, runtime := range []string{domain.ConversationRuntimeSDK, domain.ConversationRuntimeNative} {
 		t.Run("runtime="+runtime, func(t *testing.T) {
+			// Every arm below asserts that a delegation conversation is
+			// claimable and stays claimable through its recovery states. A
+			// retired engine's rows are none of those things, so this dialect
+			// answers for them in RetiredDelegationRuntimeIsNeverClaimable
+			// instead of here.
+			if mk(t).RetiredDelegationRuntime == runtime {
+				t.Skip("this dialect retired the " + runtime + " delegation engine")
+			}
 			t.Run("FreshMint_IsClaimableThroughTheNullArm", func(t *testing.T) {
 				h := mk(t)
 				convID := h.EnqueueDelegation(t, runtime)
@@ -554,6 +582,37 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			})
 		})
 	}
+
+	// The retirement gate, from both sides of the dialect split: the dialect
+	// that retired an engine never offers its delegations to a claimant and
+	// never counts them as depth, and the dialect that retired nothing is
+	// proven unchanged by the same assertions read the other way.
+	t.Run("RetiredDelegationRuntimeIsNeverClaimable", func(t *testing.T) {
+		h := mk(t)
+		retired := h.RetiredDelegationRuntime
+		if retired == "" {
+			// Nothing is retired here, so the assertion worth making is that
+			// the OTHER dialect's retired engine is still driven: a fresh SDK
+			// delegation is claimable and counts as queue depth, unchanged.
+			convID := h.EnqueueDelegation(t, domain.ConversationRuntimeSDK)
+			if n := queuedDepth(t, h); n != 1 {
+				t.Errorf("queue depth = %d, want 1 — this dialect retires no engine", n)
+			}
+			mustClaim(t, h, convID)
+			return
+		}
+		h.EnqueueDelegation(t, retired)
+		mustNotClaim(t, h)
+		// Depth and claimability are one answer, not two: a row nothing can
+		// take must not sit in a gauge as work waiting for an executor.
+		if n := queuedDepth(t, h); n != 0 {
+			t.Errorf("queue depth = %d, want 0 — a retired delegation is not waiting to be driven", n)
+		}
+		// The gate is type-scoped: an engine retired for delegations is not
+		// retired for every surface that still runs on it.
+		live := h.EnqueueDelegation(t, domain.ConversationRuntimeNative)
+		mustClaim(t, h, live)
+	})
 
 	// Runtime-independent: the mint refuses what the gate could never admit.
 	t.Run("BlueprintConversationWithoutAStepIndexIsRefusedAtTheMint", func(t *testing.T) {

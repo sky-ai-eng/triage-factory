@@ -1,12 +1,12 @@
-Slack interactions use `triagefactory exec slack`. Your stdout is NOT visible to anyone in Slack — the ONLY human-visible channel you have is `exec slack send`. If you don't send a message, the user never learns what you did.
+Slack interactions use `triagefactory exec slack`. Your stdout is NOT visible to anyone in Slack — the ONLY human-visible channel you have is `triagefactory exec slack send`. If you don't send a message, the user never learns what you did.
 
 Verbs:
-- `exec slack send --channel <C> [--thread-ts <TS>] (--body <md> | --body-file <path|->) [--attach-file <path|->]` — post a message. Body is optional when `--attach-file` is given (a file-only message is fine); at least one of the two is required. `--thread-ts` replies into an existing thread; omit it to post a new channel-root message. Returns `{"channel":..., "ts":...}` — keep the `ts` if you'll `edit`/`react` on this message later.
-- `exec slack edit --channel <C> --ts <TS> (--body <md> | --body-file <path|->)` — edit a message YOU posted (Slack's chat.update only works on the bot's own messages — editing someone else's message fails with Slack's own error).
-- `exec slack react --channel <C> --ts <TS> --emoji <name>` — add an emoji reaction (name only, no colons — `thumbsup` not `:thumbsup:`).
-- `exec slack read thread --channel <C> --ts <TS> [--limit <N>]` — read a thread's replies (conversations.replies), oldest first.
-- `exec slack read channel --channel <C> [--ts <TS> --num-prior <N> --num-following <N> | --limit <N>]` — read channel history: either the latest `--limit` messages, or a window around an anchor `--ts` (`--num-prior`/`--num-following`, either alone is fine). The two forms are mutually exclusive.
-- `exec slack download --id <file_id> [--out <path>]` — download a file referenced in a read result's `files` array into the run's working directory (or `--out`), and print `{"path":...}`.
+- `triagefactory exec slack send --channel <C> [--thread-ts <TS>] (--body <md> | --body-file <path|->) [--attach-file <path|->]` — post a message. Body is optional when `--attach-file` is given (a file-only message is fine); at least one of the two is required. `--thread-ts` replies into an existing thread; omit it to post a new channel-root message. Returns `{"channel":..., "ts":...}` — keep the `ts` if you'll `edit`/`react` on this message later.
+- `triagefactory exec slack edit --channel <C> --ts <TS> (--body <md> | --body-file <path|->)` — edit a message YOU posted (Slack's chat.update only works on the bot's own messages — editing someone else's message fails with Slack's own error).
+- `triagefactory exec slack react --channel <C> --ts <TS> --emoji <name>` — add an emoji reaction (name only, no colons — `thumbsup` not `:thumbsup:`).
+- `triagefactory exec slack read thread --channel <C> --ts <TS> [--limit <N>]` — read a thread's replies (conversations.replies), oldest first.
+- `triagefactory exec slack read channel --channel <C> [--ts <TS> --num-prior <N> --num-following <N> | --limit <N>]` — read channel history: either the latest `--limit` messages, or a window around an anchor `--ts` (`--num-prior`/`--num-following`, either alone is fine). The two forms are mutually exclusive.
+- `triagefactory exec slack download --id <file_id> [--out <path>]` — download a file referenced in a read result's `files` array into the run's working directory (or `--out`), and print `{"path":...}`.
 
 Both reads return a JSON array of `{ts, thread_ts, sender_id, sender_name, text, files:[{id,name}]}` per message; `sender_name` is best-effort (empty when it couldn't be resolved) — never fails the read.
 

@@ -262,11 +262,11 @@ type Spawner struct {
 	modelFor   func(context.Context, string, string) string // per-(org, team) default-model resolver (prompt.Model still overrides per delegation)
 	// llmResolver is the shared LLM-credential resolver (internal/llmcred,
 	// TFAC-616) — role-mode Bedrock orgs mint short-lived STS session creds
-	// through it. Used only off the executor bundle path (all/local, where a
-	// delegated run resolves in-process): the RunOptions.LLMResolver it feeds
-	// is ignored when a sealed bundle is on ctx (the executor), whose live
-	// LLM material comes from bundleLLMSourceFor instead. nil in local mode
-	// (ambient) and in tests. Wired post-construction via SetLLMResolver.
+	// through it. Used only where a run resolves its own credentials in
+	// process (local): the RunOptions.LLMResolver it feeds is never consulted
+	// on an executor, whose agent launches into a prebuilt cell whose
+	// credentials the sidecar unsealed. nil in local mode (ambient) and in
+	// tests. Wired post-construction via SetLLMResolver.
 	llmResolver bundleLLMResolver
 	// jiraResolver routes the TFAC-300 board→Jira mirror under the org's
 	// system/bot credential (ForSystem). Wired post-construction via

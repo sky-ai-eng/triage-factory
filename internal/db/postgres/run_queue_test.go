@@ -938,9 +938,10 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 
 		nextStep := 0
 		return dbtest.ClaimPredicateHarness{
-			Stores: stores,
-			OrgID:  orgID,
-			UserID: userID,
+			Stores:                   stores,
+			OrgID:                    orgID,
+			UserID:                   userID,
+			RetiredDelegationRuntime: domain.ConversationRuntimeSDK,
 			EnqueueDelegation: func(t *testing.T, runtime string) string {
 				t.Helper()
 				idx := nextStep

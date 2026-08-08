@@ -256,6 +256,17 @@ describe('resumeBlockedCopy', () => {
     )
   })
 
+  it('says a retired runtime keeps its history readable, not that the run is gone', () => {
+    // The distinction the copy has to carry: nothing was lost, and no amount
+    // of waiting or retrying brings the composer back.
+    const retired = resumeBlockedCopy(base({ resume_blocked_reason: 'runtime_retired' }))
+    expect(retired).toMatch(/retired/i)
+    expect(retired).toMatch(/history/i)
+    expect(retired).not.toBe(
+      resumeBlockedCopy(base({ resume_blocked_reason: 'workspace_expired' })),
+    )
+  })
+
   it('says something true for a reason this build does not know', () => {
     expect(resumeBlockedCopy(base({ resume_blocked_reason: 'reason_from_the_future' }))).toMatch(
       /follow-up/i,

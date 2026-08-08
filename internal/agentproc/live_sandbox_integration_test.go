@@ -97,7 +97,7 @@ func prebuiltRunHarness(t *testing.T, secrets SecretsReader, orgID, runID string
 	if err != nil {
 		t.Fatalf("SetupRunNetwork: %v", err)
 	}
-	proxies, env, err := startProxiesForSandbox(ctx, net.HostIP, creds, nil, nil, nil)
+	proxies, env, err := startProxiesForSandbox(ctx, net.HostIP, creds, true, nil, nil, nil)
 	if err != nil {
 		_ = net.Close()
 		t.Fatalf("startProxiesForSandbox: %v", err)

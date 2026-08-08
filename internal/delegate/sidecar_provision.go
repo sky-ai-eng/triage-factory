@@ -143,14 +143,27 @@ func (e *executorSandbox) nudgeCredentialRelay(ctx context.Context) error {
 	}
 }
 
-// proxyEnv is the non-secret sandbox env the sidecar's proxies produced (LLM /
-// git / egress URLs + placeholders + the single GIT_CONFIG_* block), threaded
-// into agentproc.RunOptions.PrebuiltProxyEnv. nil-safe.
+// proxyEnv is the non-secret sandbox env the sidecar's proxies produced (git /
+// egress URLs + placeholders + the single GIT_CONFIG_* block, and the LLM proxy
+// for an engagement that dials it from inside the jail), threaded into
+// agentproc.RunOptions.PrebuiltProxyEnv. nil-safe.
 func (e *executorSandbox) proxyEnv() []string {
 	if e == nil || e.res == nil {
 		return nil
 	}
 	return e.res.Env
+}
+
+// llmEnv is this engagement's provider coordinates for an engine that runs in
+// THIS process: the sidecar's LLM proxy address plus the per-run placeholder.
+// Read separately from proxyEnv because the two answer different questions —
+// what the jail is pointed at versus what the executor dials — and a native
+// engagement's jail is deliberately pointed at nothing. nil-safe.
+func (e *executorSandbox) llmEnv() []string {
+	if e == nil || e.res == nil {
+		return nil
+	}
+	return e.res.LLMEnv
 }
 
 // runNetwork is the prebuilt network handed to agentproc.RunOptions.PrebuiltNetwork.
@@ -298,6 +311,12 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 	relaySrv := agenthost.NewRelayServer(stores, info, git)
 	params := agentproc.SidecarBringUpParams{
 		HostVethIP: net.HostIP,
+		// Who makes this engagement's model calls decides whether its jail is
+		// pointed at a provider at all. The SDK's loop runs inside the jail and
+		// has to reach one; the native engine runs here, so its cell is built
+		// with no LLM channel — nothing to dial, nothing to authenticate with,
+		// and one fewer thing for hostile text in that jail to aim at.
+		SandboxLLM: run.Runtime != domain.ConversationRuntimeNative,
 		Git:        git,
 		// The org-bound op server the sidecar's relay envelope dispatches to:
 		// the git proxy's push authz/audit (backed by the same git gate) plus

@@ -20,6 +20,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // ErrRunNotSteerable is returned by SendMessage when a conversation can take no
@@ -28,6 +29,13 @@ import (
 // Callers map it to 409 Conflict so the client refreshes and re-reads the run's
 // state.
 var ErrRunNotSteerable = errors.New("run is not steerable")
+
+// ErrRuntimeRetired is returned when a conversation's engine no longer drives
+// its surface in this deployment. Its transcript stays readable; there is
+// simply nothing left that could take a turn on it. Callers map it to 409
+// Conflict alongside the other permanent refusals — the client surfaces the
+// text rather than prompting a refresh, because no re-read changes it.
+var ErrRuntimeRetired = errors.New("this conversation's agent runtime has been retired; its history stays readable but it cannot be continued")
 
 // The SDK-only resume preconditions, as errors rather than formatted strings so
 // the one ladder can hand them back by name. Each is a row that cannot be
@@ -70,6 +78,11 @@ const (
 	// not reacted yet. The one rung about TIMING rather than about the
 	// conversation: a beat later the answer changes.
 	ResumeBlockedStepHandedOff = "step_handed_off"
+	// ResumeBlockedRuntimeRetired — the engine that produced this transcript
+	// no longer drives conversations of its kind in this deployment. The most
+	// permanent rung there is: it is not about this row's state at all, and
+	// nothing a person or a later release does to the row changes the answer.
+	ResumeBlockedRuntimeRetired = "runtime_retired"
 )
 
 // resumableState reports whether a run with no warm process can be woken by a
@@ -426,6 +439,15 @@ func drainsUndeliveredInput(run domain.Conversation) bool {
 // reaches walks the refusal ladder, and one that is not resting there takes a
 // message only if something is already draining its queue.
 func (s *Spawner) followUpBlock(ctx context.Context, orgID string, run *domain.Conversation) string {
+	// Asked before anything about state, because it is the only refusal that
+	// state cannot argue with: a retired engine drives no turn on this
+	// conversation whatever it is resting on, so every other rung below would
+	// be answering a question that no longer arises. It is also the only rung
+	// that would otherwise be reported as `not_steerable` — true, but a
+	// description of the symptom rather than of the cause.
+	if runtimeRetired(*run) {
+		return ResumeBlockedRuntimeRetired
+	}
 	if !resumableState(run.Status, run.Outcome) {
 		if drainsUndeliveredInput(*run) {
 			return ""
@@ -433,6 +455,22 @@ func (s *Spawner) followUpBlock(ctx context.Context, orgID string, run *domain.C
 		return ResumeBlockedNotSteerable
 	}
 	return s.unwakeableFollowUpBlock(ctx, orgID, run)
+}
+
+// runtimeRetired reports whether this conversation's engine still drives its
+// surface in this deployment. The Go mirror of the claim scan's own
+// retirement gate (internal/db/postgres drivableRuntimeSQL), and the two have
+// to agree: this one decides whether a wake is offered, that one whether the
+// woken row is ever taken, and a wake nothing will claim strands the
+// conversation exactly the way the blueprint gate exists to prevent.
+//
+// Mode-gated because the SQL is dialect-gated and the dialect IS the mode:
+// local runs every delegation through the SDK and retires nothing.
+func runtimeRetired(run domain.Conversation) bool {
+	if runmode.Current() != runmode.ModeMulti {
+		return false
+	}
+	return run.Type == domain.ConversationTypeDelegation && run.Runtime != domain.ConversationRuntimeNative
 }
 
 // blockedFollowUpError is the error a refusal reaches the HTTP layer as.
@@ -455,6 +493,8 @@ func blockedFollowUpError(block string) error {
 		return ErrConversationConcluded
 	case ResumeBlockedStepHandedOff:
 		return ErrStepHandedOff
+	case ResumeBlockedRuntimeRetired:
+		return ErrRuntimeRetired
 	default:
 		return ErrRunNotSteerable
 	}

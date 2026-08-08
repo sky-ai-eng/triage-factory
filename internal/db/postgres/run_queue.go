@@ -55,8 +55,9 @@ const runTerminalStatusesSQL = `'completed','failed'`
 // 'native' here and 'sdk' in the SQLite sibling: the dialect IS the mode
 // (Postgres is multi-only, SQLite is local-only), so the split lands where
 // the row is written rather than as a caller-passed knob. The stamp is a
-// one-way ratchet — a conversation already carrying 'sdk' keeps running
-// through the SDK path regardless of what new rows mint.
+// one-way ratchet — no conversation ever changes engines — which on this
+// dialect makes a delegation row still carrying 'sdk' unclaimable rather
+// than convertible (see drivableRuntimeSQL).
 func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.Conversation) error {
 	if err := db.AssertBlueprintStepIndexed(run); err != nil {
 		return err
@@ -176,6 +177,25 @@ const needsDrivingSQL = `r.archived_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `))`
 
+// drivableRuntimeSQL is the retirement gate: the SDK engine drives no
+// delegation conversation on this dialect. The dialect IS the mode
+// (Postgres is multi-only), so a delegation row still carrying the SDK
+// stamp predates the mint's flip to native — and the ratchet forbids
+// continuing it under the other engine, so the only honest answer is to
+// stop offering it to a claimant. Its transcript and artifacts stay
+// readable; the resumability ladder answers a follow-up with the rung that
+// names this.
+//
+// Type-scoped rather than blanket, because the two surfaces retire on
+// different schedules: a curator conversation is still an SDK engagement
+// inside its own jail, so it must stay claimable under the same stamp.
+//
+// It lives in the eligibility predicate, not the claim statement alone, so
+// the queue-depth counters agree with the claim: a row nothing will ever
+// take is not work waiting to be driven, and reporting it as such would
+// leave every fleet gauge holding a backlog that can never drain.
+const drivableRuntimeSQL = `NOT (r.type = 'delegation' AND r.runtime = 'sdk')`
+
 // curatorNeedsTurnSQL is the first half of the curator type-conditional
 // gate: a curator conversation has no autonomous work — its only unit of
 // work is a user turn — so "mid-flight with nothing queued" is a finished
@@ -200,7 +220,8 @@ const curatorHomedHereSQL = `(r.type <> 'curator' OR
 // placement/home/blueprint gates that decide WHICH executor may take it.
 // This is the queue-depth answer the fleet counters and the display
 // projection's derived `queued` rung read.
-const eligibleForDrivingSQL = needsDrivingSQL + ` AND ` + curatorNeedsTurnSQL
+const eligibleForDrivingSQL = needsDrivingSQL + ` AND ` + curatorNeedsTurnSQL +
+	` AND ` + drivableRuntimeSQL
 
 // blueprintDrivableSQL is the delegation arm's gate, applied as a LEFT JOIN
 // rather than an inner one: a conversation with no blueprint parent — curator

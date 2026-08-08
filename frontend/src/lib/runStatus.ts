@@ -217,6 +217,8 @@ export function resumeBlockedCopy(run: Conversation): string {
       return 'This blueprint has moved past this step — only the step it’s on takes follow-ups.'
     case 'step_handed_off':
       return 'This step just handed off — follow up on the blueprint’s latest step.'
+    case 'runtime_retired':
+      return 'The agent runtime that ran this conversation has been retired — its history stays readable, but it can’t be continued.'
     case 'session_missing':
     case 'worktree_missing':
     case 'model_missing':

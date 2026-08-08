@@ -40,7 +40,7 @@ process inside the sandbox):
 | | Threat | Defense |
 | --- | --- | --- |
 | **T1** | Credential exfiltration | Property B (§5): no credential ever enters the sandbox environment. |
-| **T2** | In-run credential misuse | Strongly bounded: no credential is raw in the sandbox, and each is reachable only through a constrained interface (GitHub token injected only on git fetch/push to the authorized repo; Jira/GitHub API are fixed host-side `exec` verbs; LLM key is provider-only via the proxy). Residual: within its granted scope the agent still acts with the run's authority (push to the authorized repo, spend the org's LLM tokens), bounded by run wall-clock. |
+| **T2** | In-run credential misuse | Strongly bounded: no credential is raw in the sandbox, and each is reachable only through a constrained interface (GitHub token injected only on git fetch/push to the authorized repo; Jira/GitHub API are fixed host-side `exec` verbs; LLM key is provider-only via the proxy, and under the native runtime the sandbox is given no LLM channel at all). Residual: within its granted scope the agent still acts with the run's authority (push to the authorized repo, spend the org's LLM tokens), bounded by run wall-clock. |
 | **T3** | RCE in the agent SDK escaping the SDK process | gVisor + in-sandbox hardening (non-root uid, empty caps, seccomp, no-new-privs). |
 | **T4** | RCE escaping gVisor to the host kernel | gVisor's user-mode-kernel architecture. |
 
@@ -144,7 +144,12 @@ it holds and the *hostile input* it is exposed to never overlap:
   tenant's material, exposed only to that run's own traffic, freed when the run's
   process exits (§5).
 - **sandbox** — the gVisor jail running the agent. No capabilities, no
-  credentials (Property B).
+  credentials (Property B). What it is *pointed at* narrows further with the
+  runtime: a jail whose agent loop runs outside it — the native runtime, where
+  the loop lives in the executor process and only tool execution is jailed — is
+  built with no LLM proxy address and no placeholder to present at one, so it
+  has no provider channel to reach for at all rather than a channel carrying a
+  per-run placeholder.
 
 ### 4.1 Why this bounds a compromise
 

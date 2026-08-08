@@ -454,7 +454,7 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, fa
 // questions, one field; see domain.Conversation.Attempts before carrying
 // either one somewhere new.
 const sqliteRunColumns = `
-	r.id, COALESCE(r.task_id, ''), COALESCE(r.runtime, ''),
+	r.id, COALESCE(r.task_id, ''), COALESCE(r.runtime, ''), COALESCE(r.type, ''),
 	` + sqliteDisplayStatusSQL + `,
 	r.model, r.started_at, r.queued_at,
 	(SELECT MAX(cl.claimed_at) FROM claims cl WHERE cl.conversation_id = r.id) AS claimed_at,
@@ -1491,7 +1491,7 @@ func scanConversation(row *sql.Row, r *domain.Conversation) error {
 	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := row.Scan(
-		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Runtime, &r.Type, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
@@ -1511,7 +1511,7 @@ func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
 	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := rows.Scan(
-		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Runtime, &r.Type, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,

@@ -329,3 +329,79 @@ func TestDispatchClaimedRun_FinishedBlueprintWithoutAMessageParks(t *testing.T) 
 		t.Errorf("blueprint = (%q, %d), want it untouched at (completed, 0)", gotStatus, gotStep)
 	}
 }
+
+// TestRuntimeRetired_RefusesTheFollowUpAndTheComposer is the wire-level
+// acceptance for the retirement rung. It asserts the two answers together
+// because they are one walk: the reason the run read hands the composer and
+// the error a send is refused with must be the same rung, or the UI offers an
+// input the server will reject.
+//
+// Mode-scoped on purpose. The same conversation is resumable in local mode and
+// refused in multi — which is the whole claim the rung makes, since it is the
+// deployment's engine inventory that changed and not anything about the row.
+func TestRuntimeRetired_RefusesTheFollowUpAndTheComposer(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-retired", "sess-retired", t.TempDir())
+	if _, err := database.Exec(
+		`UPDATE conversations SET status='completed', outcome='finish', runtime='sdk' WHERE id='r-retired'`,
+	); err != nil {
+		t.Fatalf("settle conversation: %v", err)
+	}
+	bpr := blueprintRunIDForRun(t, database, "r-retired")
+	finishBlueprint(t, database, bpr, "completed", 0)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	ctx := context.Background()
+
+	run, err := s.agentRuns.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-retired")
+	if err != nil || run == nil {
+		t.Fatalf("load conversation: %v", err)
+	}
+
+	// Local drives every delegation through the SDK, so the same row is
+	// resumable here — the control that keeps this test about the mode.
+	runmode.SetForTest(t, runmode.ModeLocal)
+	if ok, reason := s.ResumabilityFor(ctx, runmode.LocalDefaultOrgID, run); !ok {
+		t.Fatalf("local resumability = false (%s), want true — local retires nothing", reason)
+	}
+
+	runmode.SetForTest(t, runmode.ModeMulti)
+	ok, reason := s.ResumabilityFor(ctx, runmode.LocalDefaultOrgID, run)
+	if ok || reason != ResumeBlockedRuntimeRetired {
+		t.Fatalf("multi resumability = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedRuntimeRetired)
+	}
+	if err := s.SendMessage(ctx, runmode.LocalDefaultOrgID, "r-retired", runmode.LocalDefaultUserID, "keep going"); !errors.Is(err, ErrRuntimeRetired) {
+		t.Fatalf("SendMessage = %v, want ErrRuntimeRetired", err)
+	}
+	// Refused before anything was written: a queued row nothing will ever
+	// deliver is the failure this rung exists to prevent.
+	if _, _, pending, err := s.pendingInput.Consume(ctx, runmode.LocalDefaultOrgID, "r-retired"); err != nil || pending {
+		t.Errorf("the refused send queued a message anyway: pending=%v err=%v", pending, err)
+	}
+}
+
+// TestRuntimeRetired_LeavesTheNativeSurfaceAlone pins the gate's scope: the
+// retirement is about which engine drives a delegation, so the engine that
+// does must be untouched by it in the same mode.
+func TestRuntimeRetired_LeavesTheNativeSurfaceAlone(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-native", "", t.TempDir())
+	if _, err := database.Exec(
+		`UPDATE conversations SET status='completed', outcome='finish', runtime='native' WHERE id='r-native'`,
+	); err != nil {
+		t.Fatalf("settle conversation: %v", err)
+	}
+	finishBlueprint(t, database, blueprintRunIDForRun(t, database, "r-native"), "completed", 0)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	ctx := context.Background()
+
+	run, err := s.agentRuns.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-native")
+	if err != nil || run == nil {
+		t.Fatalf("load conversation: %v", err)
+	}
+	runmode.SetForTest(t, runmode.ModeMulti)
+	if ok, reason := s.ResumabilityFor(ctx, runmode.LocalDefaultOrgID, run); !ok {
+		t.Fatalf("native resumability = false (%s), want true", reason)
+	}
+}

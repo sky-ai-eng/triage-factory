@@ -1,10 +1,10 @@
 Jira interactions use `triagefactory exec jira`. Run `triagefactory exec jira --help` for the full command list, and `--help` on any subcommand for details.
 
 Workflows:
-- Inspect an issue: `exec jira ticket view <KEY>`, `exec jira ticket list-children <KEY>`, `exec jira ticket list-transitions <KEY>`.
-- Mutate an issue: `exec jira ticket transition`, `exec jira ticket assign`, `exec jira ticket comment`, `exec jira ticket set-priority`.
-- Create issues: `exec jira ticket create`. Use `--parent` to create sub-issues.
-- Search: `exec jira ticket search --jql "<query>"`. JQL is passed through directly.
+- Inspect an issue: `triagefactory exec jira ticket view <KEY>`, `triagefactory exec jira ticket list-children <KEY>`, `triagefactory exec jira ticket list-transitions <KEY>`.
+- Mutate an issue: `triagefactory exec jira ticket transition`, `triagefactory exec jira ticket assign`, `triagefactory exec jira ticket comment`, `triagefactory exec jira ticket set-priority`.
+- Create issues: `triagefactory exec jira ticket create`. Use `--parent` to create sub-issues.
+- Search: `triagefactory exec jira ticket search --jql "<query>"`. JQL is passed through directly.
 
 Gotchas:
 - Server/DC vs Cloud differences (parent linking, description format) are handled internally — you don't need to worry about them.

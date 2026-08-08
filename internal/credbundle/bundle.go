@@ -1,21 +1,20 @@
-// Package credbundle defines the sealed per-run credential bundle content
-// (TFAC-614) and the context-threading helper that carries an unsealed
-// bundle from the executor's awaiting-credentials wait down to the
-// existing credential seams (agentproc.SecretsReader, gitproxy.TokenSource,
-// the jira/github resolvers) without changing any of their signatures —
-// every one of them already takes a context.Context.
+// Package credbundle defines the sealed per-claim credential bundle content:
+// the fully-resolved credential material for exactly one engagement — the LLM
+// auth env map, repo-scoped GitHub installation tokens (or a PAT) for the
+// engagement's authorized repo set, the org's Jira service credential, and any
+// first-class provider's own opaque set.
 //
-// A Bundle is the fully-resolved credential material for exactly one run:
-// the same shape agentproc.resolveCredentials produces for LLM auth, plus
-// repo-scoped GitHub installation tokens (or a PAT) for the run's
-// authorized repo set, plus the org's Jira service credential. It is what
-// the brain seals (credseal.Seal) to the claiming executor's public key and
-// writes to run_credentials; the executor unseals it once and threads it
-// through ctx for the remainder of that run's setup and execution.
+// This package defines the CONTENT and nothing about its custody. The control
+// plane resolves and seals a bundle (credseal.Seal) to the claim's published
+// sidecar key; the per-run credential sidecar is the only process that opens
+// one, and the only one that ever holds the plaintext. Everything else — the
+// orchestrator included — holds ciphertext or a per-run placeholder pointing at
+// one of that sidecar's proxies. A helper that handed the plaintext to another
+// process would be a hole in exactly that arrangement, which is why there is
+// none.
 package credbundle
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -134,27 +133,4 @@ func Unmarshal(data []byte) (*Bundle, error) {
 		return nil, fmt.Errorf("credbundle: unmarshal: %w", err)
 	}
 	return &b, nil
-}
-
-// contextKey is unexported so no other package can collide with it or
-// forge a bundle into a context it doesn't own.
-type contextKey struct{}
-
-// WithBundle returns a copy of ctx carrying bundle. Called once, at the top
-// of the executor's per-run dispatch after the awaiting-credentials wait
-// unseals it — every credential seam invoked for the rest of that run's
-// setup and execution reads it back via FromContext.
-func WithBundle(ctx context.Context, bundle *Bundle) context.Context {
-	return context.WithValue(ctx, contextKey{}, bundle)
-}
-
-// FromContext returns the bundle carried on ctx, if any. Every executor-
-// role credential seam (resolveCredentials, the git proxy TokenSource, the
-// GitHub/Jira resolvers' on-executor call sites) checks this first; ok is
-// false on TF_ROLE=all, local mode, and the control role, where credentials
-// resolve directly against the live secret store exactly as before —
-// nothing in this package changes that path.
-func FromContext(ctx context.Context) (*Bundle, bool) {
-	b, ok := ctx.Value(contextKey{}).(*Bundle)
-	return b, ok && b != nil
 }

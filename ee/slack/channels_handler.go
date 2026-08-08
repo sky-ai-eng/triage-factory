@@ -657,11 +657,11 @@ const (
 	slackMessagePromptBody = "A teammate reached out to the agent in a Slack thread. The task's entity is the " +
 		"thread. Parse the channel, thread_ts, sender, and message text out of the raw event metadata in " +
 		"the task context above.\n\n" +
-		"Read the thread (`exec slack read thread --channel <channel> --ts <thread_ts>`, or `--ts <ts>` when " +
+		"Read the thread (`triagefactory exec slack read thread --channel <channel> --ts <thread_ts>`, or `--ts <ts>` when " +
 		"thread_ts is empty — the triggering message itself started the thread) to see the full request in " +
 		"context, gather what you need from the linked entity and any referenced repos/issues, do the work using " +
 		"the triagefactory exec subcommands available to you, and reply in that same thread with " +
-		"`exec slack send` — your stdout is not visible to the user, so the send is the only way they see your " +
+		"`triagefactory exec slack send` — your stdout is not visible to the user, so the send is the only way they see your " +
 		"answer."
 )
 
