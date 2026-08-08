@@ -15,6 +15,15 @@ describe('actionMeta', () => {
     expect(metaForAction('slack_channel_archived')).toBe(FALLBACK_ACTION_META)
   })
 
+  it('labels the gh-channel verbs, including the unclassified fallback row', () => {
+    expect(metaForAction('pr_merged').label).toBe('PR merged')
+    expect(metaForAction('reaction_added').label).toBe('Reaction added')
+    expect(metaForAction('workflow_dispatched').label).toBe('Workflow dispatched')
+    // The opaque row is the one the incident showed rendering as an anonymous
+    // "action" — it still has no verb, but it must at least say what it is.
+    expect(metaForAction('gh_channel_write')).not.toBe(FALLBACK_ACTION_META)
+  })
+
   it('surfaces slack in the Actions-lens provider filter', () => {
     expect(ACTION_PROVIDERS).toContain('slack')
   })

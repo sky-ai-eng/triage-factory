@@ -100,11 +100,16 @@ type RecordEgressDenialArgs struct {
 
 // RecordGHWriteArgs is record_gh_write's payload: the method, upstream path,
 // and response status of one mutating REST request the gh-channel injector
-// forwarded. Nothing from the request body — the injector never reads one.
+// forwarded, plus the created object's id and link when the shape is one whose
+// RESPONSE names an object (a posted comment or reply). Nothing from the
+// request body — the injector never reads one. The orchestrator classifies
+// method+path into the semantic act; the sidecar only carries wire facts.
 type RecordGHWriteArgs struct {
-	Method string `json:"method"`
-	Path   string `json:"path"`
-	Status int    `json:"status"`
+	Method     string `json:"method"`
+	Path       string `json:"path"`
+	Status     int    `json:"status"`
+	ExternalID string `json:"external_id,omitempty"`
+	URL        string `json:"url,omitempty"`
 }
 
 // RecordPushArgs is record_push's payload: one branch ref a receive-pack

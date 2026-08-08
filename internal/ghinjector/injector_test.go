@@ -718,3 +718,110 @@ func TestInjector_WriteAuditCoexistsWithObservation(t *testing.T) {
 		t.Fatal("no write audit for a successful PR create")
 	}
 }
+
+// TestInjector_WriteAuditReadsCreatedObject pins the incident fix's injector
+// half: for a shape the shared classifier calls a create, the response body is
+// parsed for the new object's id and link so the audit row can name what was
+// made — while the caller still receives that body whole, and the request still
+// reaches the upstream untouched.
+func TestInjector_WriteAuditReadsCreatedObject(t *testing.T) {
+	const replyURL = "https://github.com/acme/widgets/pull/841#discussion_r777"
+	const respBody = `{"id":777,"in_reply_to_id":555,"html_url":"` + replyURL + `"}`
+	const reqBody = `{"body":"good catch"}`
+	gotReq := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotReq <- string(b)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer upstream.Close()
+
+	writes := make(chan ObservedWrite, 2)
+	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+		func(_ context.Context, w ObservedWrite) { writes <- w })
+
+	req, _ := http.NewRequest(http.MethodPost,
+		"https://"+host+"/api/v3/repos/acme/widgets/pulls/841/comments/555/replies",
+		strings.NewReader(reqBody))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if string(body) != respBody {
+		t.Errorf("caller saw body %q, want the upstream's %q — buffering must be invisible", body, respBody)
+	}
+	select {
+	case b := <-gotReq:
+		if b != reqBody {
+			t.Errorf("upstream saw request body %q, want %q verbatim (requests are never inspected)", b, reqBody)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream never received the request")
+	}
+
+	select {
+	case w := <-writes:
+		if w.ExternalID != "777" || w.URL != replyURL {
+			t.Errorf("write audit = %+v, want the created reply's id and discussion link", w)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no write audit for a posted review-thread reply")
+	}
+}
+
+// TestInjector_WriteAuditSkipsBodyOffTheCreatePath pins the cost boundary: a
+// shape that creates nothing — an edit, a merge, a refused create — is fully
+// described by its path, so its body is never buffered and the audit carries no
+// object coordinates. A declared length past the cap proves it: buffering would
+// have to skip it, and the row is unaffected either way.
+func TestInjector_WriteAuditSkipsBodyOffTheCreatePath(t *testing.T) {
+	huge := strings.Repeat("x", maxObserveBody+2048)
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		status int
+	}{
+		{"an edit names its object in the path", http.MethodPatch, "/api/v3/repos/acme/widgets/pulls/841", http.StatusOK},
+		{"a refused create creates nothing", http.MethodPost, "/api/v3/repos/acme/widgets/issues/7/comments", http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{"id":777,"pad":"` + huge + `"}`))
+			}))
+			defer upstream.Close()
+
+			writes := make(chan ObservedWrite, 2)
+			client, host := newInjectorWithWrites(t, upstream.URL, nil,
+				func(_ context.Context, w ObservedWrite) { writes <- w })
+
+			req, _ := http.NewRequest(tc.method, "https://"+host+tc.path, nil)
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			got, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if len(got) < maxObserveBody {
+				t.Errorf("caller received %d bytes, want the whole oversized body", len(got))
+			}
+
+			select {
+			case w := <-writes:
+				if w.Status != tc.status {
+					t.Errorf("write audit = %+v, want status %d", w, tc.status)
+				}
+				if w.ExternalID != "" || w.URL != "" {
+					t.Errorf("write audit = %+v, want no object coordinates off the create path", w)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("no write audit recorded")
+			}
+		})
+	}
+}

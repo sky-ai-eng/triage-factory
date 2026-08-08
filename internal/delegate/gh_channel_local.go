@@ -97,8 +97,11 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, runID, owner s
 			if !storesSet {
 				return
 			}
+			// Same builder the relayed (multi) path calls, on the same
+			// observation type, so a write audited here is byte-identical to one
+			// audited from a sandbox.
 			agenthost.RecordExternalWrite(ctx, stores, info, nil,
-				agenthost.GHChannelWriteAction(w.Method, w.Path, w.Status))
+				agenthost.GHChannelWriteAction(w))
 		},
 	})
 	if err != nil {

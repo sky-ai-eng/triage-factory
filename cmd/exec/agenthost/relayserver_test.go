@@ -159,15 +159,15 @@ func TestRelayServer_EgressDenialWritesAuditRow(t *testing.T) {
 	}
 }
 
-// TestRelayServer_GHWriteWritesAuditRow pins the same for the gh channel: the
-// relayed method/path/status become a gh_channel_write row attributed to this
-// run, including a refused write.
+// TestRelayServer_GHWriteWritesAuditRow pins the same for the gh channel: a
+// refused write relays into the opaque attempt row — never the verb it was
+// reaching for — attributed to this run.
 func TestRelayServer_GHWriteWritesAuditRow(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	s := NewRelayServer(stores, info, nil)
 
 	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{
-		Method: "PATCH", Path: "/repos/octo/repo/pulls/7", Status: 404,
+		Method: "PUT", Path: "/repos/octo/repo/pulls/7/merge", Status: 404,
 	})
 	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
 
@@ -180,7 +180,40 @@ func TestRelayServer_GHWriteWritesAuditRow(t *testing.T) {
 		a.ConversationID != info.RunID {
 		t.Errorf("relayed gh write row mismatch: %+v", a)
 	}
-	if !strings.Contains(a.DetailJSON, `"http_status":404`) {
-		t.Errorf("detail_json = %q, want the refused status recorded", a.DetailJSON)
+	if !strings.Contains(a.DetailJSON, `"http_status":404`) ||
+		!strings.Contains(a.DetailJSON, `"attempted":"pr_merged"`) {
+		t.Errorf("detail_json = %q, want the refused status and the attempted act", a.DetailJSON)
+	}
+}
+
+// TestRelayServer_GHWriteClassifiesTheCreate pins the relayed half of the
+// incident fix: the sidecar carries the wire facts it alone can see — the
+// created reply's id and link, read off the response — and the semantic row is
+// built HERE, on the side that owns the vocabulary. One request, one row.
+func TestRelayServer_GHWriteClassifiesTheCreate(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	s := NewRelayServer(stores, info, nil)
+
+	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{
+		Method:     "POST",
+		Path:       "/repos/acme/widgets/pulls/841/comments/555/replies",
+		Status:     201,
+		ExternalID: "777",
+		URL:        "https://github.com/acme/widgets/pull/841#discussion_r777",
+	})
+	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want exactly 1 row for one request, got %d: %+v", len(acts), acts)
+	}
+	a := acts[0]
+	if a.Action != domain.ActionCommentPosted || a.Target != "acme/widgets#841" ||
+		a.ExternalID != "777" || a.URL != "https://github.com/acme/widgets/pull/841#discussion_r777" ||
+		a.ConversationID != info.RunID {
+		t.Errorf("relayed reply row mismatch: %+v", a)
+	}
+	if !strings.Contains(a.DetailJSON, `"in_reply_to":555`) {
+		t.Errorf("detail_json = %q, want the thread the reply landed on", a.DetailJSON)
 	}
 }

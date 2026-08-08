@@ -38,7 +38,7 @@ A good response to a review reads as a coherent argument, not a checklist of mic
 4. Implement the AGREE and PARTIAL fixes. Group related changes into the smallest number of meaningful commits — usually one. Run the tests that exist for the touched code.
 5. Commit with a message that names the review's concerns, not just the file changes. "Address review: tighten validation in handleX; add regression test for Y" beats "fix bug".
 6. Push to the PR branch.
-7. Reply to every DISAGREE thread and every PARTIAL thread (explaining what you did and didn't), plus post a short summary reply to the review as a whole. AGREE threads usually don't need a reply — the commit speaks for itself. Do not submit your own review in response -- you should be using the comment tools instead.
+7. Reply to every DISAGREE thread and every PARTIAL thread (explaining what you did and didn't), plus post a short summary reply to the review as a whole. AGREE threads usually don't need a reply — the commit speaks for itself. Do not submit your own review in response: a reply belongs on the thread it answers, whichever way this run posts comments.
 </process>
 
 <reply_discipline>

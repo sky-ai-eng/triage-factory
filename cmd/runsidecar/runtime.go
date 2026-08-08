@@ -459,9 +459,18 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			// Fire-and-forget beside Observe: the request already transited, and
 			// the orchestrator holds the DB that turns it into an audit row.
 			// Every mutating REST call rides this, including the refused ones the
-			// artifact path drops.
+			// artifact path drops. The created object's coordinates ride along
+			// for the shapes that make one — this process is the only one that
+			// ever sees a response body, so nothing downstream could recover
+			// them.
 			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite,
-				agentproc.RecordGHWriteArgs{Method: w.Method, Path: w.Path, Status: w.Status})
+				agentproc.RecordGHWriteArgs{
+					Method:     w.Method,
+					Path:       w.Path,
+					Status:     w.Status,
+					ExternalID: w.ExternalID,
+					URL:        w.URL,
+				})
 		},
 	}
 }

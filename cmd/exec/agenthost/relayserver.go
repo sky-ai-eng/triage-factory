@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -619,10 +620,18 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 			return
 		}
 		// The request already transited; recording it is best-effort and capped
-		// like the other audit ops.
+		// like the other audit ops. Classification happens here rather than in
+		// the sidecar, so the wire carries only what was observed and the row's
+		// vocabulary stays on the side that owns it.
 		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
 		defer cancel()
-		s.audit.RecordGHChannelWrite(recCtx, a.Method, a.Path, a.Status)
+		s.audit.RecordGHChannelWrite(recCtx, ghwrite.Observation{
+			Method:     a.Method,
+			Path:       a.Path,
+			Status:     a.Status,
+			ExternalID: a.ExternalID,
+			URL:        a.URL,
+		})
 
 	case agentproc.OpRecordPush:
 		var a agentproc.RecordPushArgs

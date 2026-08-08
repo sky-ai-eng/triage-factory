@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -15,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -505,18 +507,20 @@ func TestCapture_EgressDenied_RecordsOneRowPerConversationAndHost(t *testing.T) 
 
 // TestCapture_GHChannelWrite_RecordsEveryAttempt pins the gh-channel write
 // audit: each mutating REST call is its own row (no dedup — a retried edit and a
-// refused one are distinct events), a repo path files under owner/repo, and a
-// non-2xx is recorded exactly like a success. The refused write is the whole
-// point: the artifact path drops it, so without this row an off-scope write
-// leaves no trace at all.
+// refused one are distinct events), and a non-2xx is recorded exactly like a
+// success. The refused write is the whole point: the artifact path drops it, so
+// without this row an off-scope write leaves no trace at all.
 func TestCapture_GHChannelWrite_RecordsEveryAttempt(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	client := NewLocal(stores, info)
 	ctx := context.Background()
 
-	client.RecordGHChannelWrite(ctx, "PATCH", "/repos/octo/repo/pulls/7", 200)
-	client.RecordGHChannelWrite(ctx, "PATCH", "/repos/octo/repo/pulls/7", 200)
-	client.RecordGHChannelWrite(ctx, "PATCH", "/repos/other/repo/pulls/1", 404)
+	edit := ghwrite.Observation{Method: "PATCH", Path: "/repos/octo/repo/pulls/7", Status: 200}
+	client.RecordGHChannelWrite(ctx, edit)
+	client.RecordGHChannelWrite(ctx, edit)
+	client.RecordGHChannelWrite(ctx, ghwrite.Observation{
+		Method: "PATCH", Path: "/repos/other/repo/pulls/1", Status: 404,
+	})
 
 	acts := listExternalActions(t, stores)
 	if len(acts) != 3 {
@@ -524,8 +528,7 @@ func TestCapture_GHChannelWrite_RecordsEveryAttempt(t *testing.T) {
 	}
 	var refused domain.ExternalAction
 	for _, a := range acts {
-		if a.Action != domain.ActionGHChannelWrite || a.Provider != domain.ArtifactProviderGitHub ||
-			a.Credential != domain.CredentialGitHubApp {
+		if a.Provider != domain.ArtifactProviderGitHub || a.Credential != domain.CredentialGitHubApp {
 			t.Errorf("gh channel row mismatch: %+v", a)
 		}
 		if a.ConversationID != info.RunID {
@@ -533,25 +536,140 @@ func TestCapture_GHChannelWrite_RecordsEveryAttempt(t *testing.T) {
 		}
 		if strings.Contains(a.DetailJSON, "404") {
 			refused = a
+		} else if a.Action != domain.ActionPREdited || a.Target != "octo/repo#7" {
+			t.Errorf("accepted PR edit = %+v, want pr_edited on octo/repo#7", a)
 		}
 	}
-	if refused.Target != "other/repo" {
-		t.Errorf("refused write target = %q, want the repo the path names", refused.Target)
+	// The refusal keeps the opaque row: nothing was edited, so nothing may claim
+	// the verb — and the target stays repo-level, since a 404 is also how an
+	// off-scope repo is masked and #1 there may not exist at all.
+	if refused.Action != domain.ActionGHChannelWrite || refused.Target != "other/repo" {
+		t.Errorf("refused write = %+v, want the fallback action on the repo the path names", refused)
 	}
 	if !strings.Contains(refused.DetailJSON, `"method":"PATCH"`) ||
-		!strings.Contains(refused.DetailJSON, "/repos/other/repo/pulls/1") {
-		t.Errorf("detail_json = %q, want method + path + status", refused.DetailJSON)
+		!strings.Contains(refused.DetailJSON, "/repos/other/repo/pulls/1") ||
+		!strings.Contains(refused.DetailJSON, `"attempted":"pr_edited"`) {
+		t.Errorf("detail_json = %q, want method + path + status + the attempted act", refused.DetailJSON)
 	}
 }
 
-// TestGHChannelWriteAction_TargetFallsBackToPath pins the non-repo case: a
-// user- or org-level write names no repo, so the row must not invent one.
-func TestGHChannelWriteAction_TargetFallsBackToPath(t *testing.T) {
-	act := GHChannelWriteAction("POST", "/user/repos", 201)
-	if act.Target != "/user/repos" {
-		t.Errorf("target = %q, want the path when it names no repo", act.Target)
+// TestGHChannelWriteAction_UnclassifiedKeepsTheFallback pins what survives of
+// the old opaque row: a shape the table doesn't model records that a write
+// happened and refuses to name it, and a path naming no repo doesn't invent one.
+func TestGHChannelWriteAction_UnclassifiedKeepsTheFallback(t *testing.T) {
+	act := GHChannelWriteAction(ghwrite.Observation{Method: "POST", Path: "/user/repos", Status: 201})
+	if act.Action != domain.ActionGHChannelWrite || act.Target != "/user/repos" {
+		t.Errorf("org-level write = %+v, want the fallback keyed on the path", act)
 	}
-	if got := GHChannelWriteAction("DELETE", "/repos/octo/repo/issues/comments/5", 204); got.Target != "octo/repo" {
-		t.Errorf("target = %q, want octo/repo", got.Target)
+	if strings.Contains(act.DetailJSON, "attempted") {
+		t.Errorf("detail_json = %q, want no attempted act on an unclassified shape", act.DetailJSON)
+	}
+	// A classified shape's 2xx is the other half of the same decision.
+	del := GHChannelWriteAction(ghwrite.Observation{
+		Method: "DELETE", Path: "/repos/octo/repo/issues/comments/5", Status: 204,
+	})
+	if del.Action != domain.ActionCommentDeleted || del.Target != "octo/repo" || del.ExternalID != "5" {
+		t.Errorf("comment delete = %+v, want comment_deleted on octo/repo naming comment 5", del)
+	}
+}
+
+// TestCapture_ExecVerbsRideTheAPIProxyNotTheGHChannel pins why the row above
+// can never be written twice for one act. A verb write and a raw write are
+// audited by different observers — the verb self-reports, the injector observes
+// — so double-counting is only possible if a verb's traffic could transit the
+// injector. It cannot: the exec client is built against the credential proxy's
+// address and holds no other, and the gh channel's listener exists only for the
+// jail's own `gh`. Structural, and pinned here so it stays that way.
+func TestCapture_ExecVerbsRideTheAPIProxyNotTheGHChannel(t *testing.T) {
+	var apiProxyHits, ghChannelHits atomic.Int32
+	apiProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apiProxyHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":777}`)
+	}))
+	defer apiProxy.Close()
+	ghChannel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		ghChannelHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":778}`)
+	}))
+	defer ghChannel.Close()
+
+	client, _, err := proxyRepoClient(
+		&ProxyCredentials{GitHubAPIURL: apiProxy.URL, GitHubAPIToken: "run-placeholder"}, "octo", "repo")
+	if err != nil {
+		t.Fatalf("proxyRepoClient: %v", err)
+	}
+	if _, err := client.ReplyToComment(context.Background(), "octo", "repo", 1, 555, "thanks"); err != nil {
+		t.Fatalf("ReplyToComment: %v", err)
+	}
+	if got := apiProxyHits.Load(); got != 1 {
+		t.Errorf("credential proxy saw %d requests, want the verb's 1", got)
+	}
+	if got := ghChannelHits.Load(); got != 0 {
+		t.Errorf("the gh channel saw %d verb requests, want 0 — a verb write must never reach the injector", got)
+	}
+}
+
+// TestCapture_GHChannelReply_IsIndistinguishableFromTheVerbRow is the incident's
+// acceptance: the raw `gh api .../comments/{id}/replies` an agent reached for
+// must leave the same audit row as `exec gh pr comment-reply`, down to the
+// external id, the discussion deep link, and the in_reply_to detail — and it
+// must mint the same entity touch, which a repo-level target could not.
+func TestCapture_GHChannelReply_IsIndistinguishableFromTheVerbRow(t *testing.T) {
+	ctx := context.Background()
+
+	// Each half runs against its own store, so the row and the touch below are
+	// unambiguously that half's work rather than a leftover of the other's.
+	gh := startFakeGitHubComments(t)
+	_, verbStores, _, verbClient := newGithubRecordingClientConn(t, gh.URL, true)
+	if _, err := verbClient.GithubReplyToComment(ctx, "octo", "repo", 1, 555, "thanks for the catch"); err != nil {
+		t.Fatalf("GithubReplyToComment: %v", err)
+	}
+	verbRows := listExternalActions(t, verbStores)
+	if len(verbRows) != 1 {
+		t.Fatalf("want 1 verb row, got %d: %+v", len(verbRows), verbRows)
+	}
+
+	// The same reply, made by hand through the gh channel: the injector saw the
+	// method and path, and read the created reply's id + link off the response.
+	conn, stores, info, client := newGithubRecordingClientConn(t, gh.URL, true)
+	client.RecordGHChannelWrite(ctx, ghwrite.Observation{
+		Method:     "POST",
+		Path:       "/repos/octo/repo/pulls/1/comments/555/replies",
+		Status:     201,
+		ExternalID: "777",
+		URL:        "https://github.com/octo/repo/pull/1#discussion_r777",
+	})
+	rows := listExternalActions(t, stores)
+	if len(rows) != 1 {
+		t.Fatalf("want exactly 1 row for one request, got %d: %+v", len(rows), rows)
+	}
+
+	raw, verb := rows[0], verbRows[0]
+	if raw.Action != verb.Action || raw.Provider != verb.Provider || raw.Credential != verb.Credential ||
+		raw.Target != verb.Target || raw.ExternalID != verb.ExternalID || raw.URL != verb.URL ||
+		raw.DetailJSON != verb.DetailJSON || raw.ConversationID != verb.ConversationID {
+		t.Errorf("raw gh reply row\n  %+v\ndiffers from the verb's\n  %+v", raw, verb)
+	}
+	if raw.Target != "octo/repo#1" || raw.ExternalID != "777" {
+		t.Errorf("raw row = %+v, want the PR-shaped target and the reply id", raw)
+	}
+
+	// The PR-shaped target is what re-enables the touch; a repo-level one is
+	// skipped by the touch rule, which is why this write used to leave none.
+	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#1")
+	if err != nil || ent == nil {
+		t.Fatalf("GetBySource(github, octo/repo#1): ent=%v err=%v", ent, err)
+	}
+	var touches int
+	if err := conn.QueryRow(
+		`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ? AND role = 'touched'`,
+		info.RunID, ent.ID,
+	).Scan(&touches); err != nil {
+		t.Fatalf("count touches: %v", err)
+	}
+	if touches == 0 {
+		t.Error("the raw gh reply minted no entity touch")
 	}
 }

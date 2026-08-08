@@ -99,11 +99,20 @@
 // merge, a close, and every refused write used to leave no trace at all. The
 // second callback (ObserveWrite) closes that gap for the REST surface: each
 // mutating method is reported with its path and the upstream's status, success
-// and failure alike. It reads three fields the response already carries —
-// method, path, status — so no request is read and no body is buffered on
-// either side; the invariant above is untouched. GraphQL is deliberately excluded:
-// a porcelain mutation and an ordinary `gh pr view` are both POST
-// /api/graphql, and telling them apart means parsing the request body.
+// and failure alike. Method, path, and status come off the response's own
+// request record, so no request is read and the invariant above is untouched.
+//
+// The shapes the shared classifier (internal/ghwrite) marks as creates — a
+// posted comment, a review-thread reply — additionally have their RESPONSE body
+// parsed for the new object's id and link, through the same cap-and-stitch
+// machinery artifact observation uses, so the audit row reaches parity with the
+// equivalent exec verb's. That is a response-side read, which this package
+// already does; requests remain untouched. Every other shape is fully described
+// by its path and costs no buffering at all.
+//
+// GraphQL is deliberately excluded: a porcelain mutation and an ordinary
+// `gh pr view` are both POST /api/graphql, and telling them apart means parsing
+// the request body.
 package ghinjector
 
 import (
@@ -124,6 +133,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 )
 
@@ -179,18 +189,11 @@ type ObservedMutation struct {
 }
 
 // ObservedWrite is one mutating REST request the injector forwarded, with the
-// outcome the upstream returned. Every field comes off the response's own
-// request record — no body is read on either side.
-type ObservedWrite struct {
-	// Method is the HTTP method, one of the mutating set (POST/PATCH/PUT/DELETE).
-	Method string
-	// Path is the upstream request path the injector forwarded to (post-rewrite,
-	// so the GHE /api/v3 prefix is already resolved to the org's real API shape).
-	Path string
-	// Status is the upstream response code. Non-2xx is recorded too: a refused
-	// write is exactly the outcome the audit log must not omit.
-	Status int
-}
+// outcome the upstream returned. It is the classifier package's Observation
+// under this package's name: the sidecar relays it and the orchestrator turns
+// it into an audit row, and one type across that hop is what keeps the two ends
+// from drifting.
+type ObservedWrite = ghwrite.Observation
 
 // Config bundles the per-run injector inputs. One Server per run.
 type Config struct {
@@ -476,64 +479,96 @@ var writeMethods = map[string]bool{
 // auditWrite reports one mutating REST request to the write-audit callback,
 // whatever the upstream returned. GraphQL is skipped by the caller's flag: its
 // mutations are indistinguishable from its reads without the request body.
-// Reads three already-parsed fields and nothing else — no body on either side
-// of the hop is touched, so the package's never-inspect-requests invariant is
-// unaffected.
-func (s *Server) auditWrite(resp *http.Response, graphql bool) {
+//
+// Method, path, and status are already-parsed fields of the response's request
+// record, so the package's never-inspect-requests invariant is unaffected. body
+// is the buffered RESPONSE body, non-nil only when the caller determined this
+// shape creates an object worth naming; an empty or unparseable one costs the
+// row its id and link, never the row itself.
+func (s *Server) auditWrite(resp *http.Response, graphql bool, body []byte) {
 	if s.cfg.ObserveWrite == nil || graphql || !writeMethods[resp.Request.Method] {
 		return
 	}
-	s.cfg.ObserveWrite(context.Background(), ObservedWrite{
+	w := ObservedWrite{
 		Method: resp.Request.Method,
 		Path:   resp.Request.URL.Path,
 		Status: resp.StatusCode,
-	})
+	}
+	if len(body) > 0 {
+		w.ExternalID, w.URL = parseCreatedObject(body)
+	}
+	s.cfg.ObserveWrite(context.Background(), w)
+}
+
+// auditWantsBody reports whether the write audit needs this response's body:
+// the callback is wired, the request was a REST write the upstream accepted,
+// and the classifier says the response names an object that did not exist
+// before it. Everything else is described by its path alone.
+func (s *Server) auditWantsBody(resp *http.Response, graphql bool) bool {
+	if s.cfg.ObserveWrite == nil || graphql || !writeMethods[resp.Request.Method] {
+		return false
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	shape, ok := ghwrite.Classify(resp.Request.Method, resp.Request.URL.Path)
+	return ok && shape.CreatesObject
+}
+
+// observationCandidate reports whether this response is one of the
+// artifact-bearing mutations, with the coordinates the path supplies. GraphQL
+// is a candidate on shape alone — the operation is named in the request, which
+// is off limits, so its body has to say what it was.
+func (s *Server) observationCandidate(resp *http.Response, graphql bool) (kind, owner, repo string, number int, ok bool) {
+	if s.cfg.Observe == nil || resp.Request.Method != http.MethodPost ||
+		resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", "", "", 0, false
+	}
+	if graphql {
+		return "", "", "", 0, true
+	}
+	return classifyMutationPath(resp.Request.URL.Path)
 }
 
 // modifyResponse bumps the request counter, reports every mutating REST request
-// to the write audit, and, for the observable mutation shapes, buffers+parses
-// the response body to emit an observation before streaming it on unchanged.
-// Never returns an error (that would 502 the agent on a successful upstream
-// write) — observation failures are silently dropped and left to the
-// reconciler backstop.
+// to the write audit, and, for the shapes whose response names an object,
+// buffers+parses the body before streaming it on unchanged. Never returns an
+// error (that would 502 the agent on a successful upstream write) — observation
+// failures are silently dropped and left to the reconciler backstop.
+//
+// The body is buffered at most once and shared by both consumers: they read
+// different objects out of it, but a response has one body and reading it twice
+// is not a thing that can be made to work.
 func (s *Server) modifyResponse(resp *http.Response) error {
 	s.requestCount.Add(1)
 	if resp.Request == nil {
 		return nil
 	}
-
-	// Every GraphQL POST is a candidate — the operation is named in the request,
-	// which is off limits, so the response itself has to say what it was. REST
-	// candidates are recognized from the path alone.
 	graphql := resp.Request.URL.Path == s.graphqlURL.Path
 
-	// Write audit first, and before the success/method filters below, so it also
-	// covers the outcomes observation drops: a refused write, and every mutating
-	// method that creates no artifact.
-	s.auditWrite(resp, graphql)
+	kind, owner, repo, number, observing := s.observationCandidate(resp, graphql)
+	auditingCreate := s.auditWantsBody(resp, graphql)
 
-	if s.cfg.Observe == nil || resp.Request.Method != http.MethodPost ||
-		resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	var buf []byte
+	if observing || auditingCreate {
+		buf, _ = bufferForObservation(resp)
+	}
+
+	// The audit runs whatever the buffering produced — it covers the outcomes
+	// observation drops, a refused write and every mutating method that makes no
+	// artifact — but it is handed a body only for a create. Another shape's body
+	// may have been buffered for artifact observation, and reading a PR out of
+	// that one here would hang the PR's coordinates on a row with no use for
+	// them.
+	createdBody := buf
+	if !auditingCreate {
+		createdBody = nil
+	}
+	s.auditWrite(resp, graphql, createdBody)
+
+	if !observing || buf == nil {
 		return nil
 	}
-
-	var (
-		kind, owner, repo string
-		number            int
-	)
-	if !graphql {
-		var ok bool
-		kind, owner, repo, number, ok = classifyMutationPath(resp.Request.URL.Path)
-		if !ok {
-			return nil
-		}
-	}
-
-	buf, ok := bufferForObservation(resp)
-	if !ok {
-		return nil
-	}
-
 	var (
 		m      ObservedMutation
 		parsed bool
@@ -547,6 +582,21 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		s.cfg.Observe(context.Background(), m)
 	}
 	return nil
+}
+
+// parseCreatedObject reads the id and html url of the object a create response
+// names. Both empty when the body doesn't parse or carries no id — a 2xx
+// without a recognizable object still happened, so the caller records the act
+// and lets the deep link degrade.
+func parseCreatedObject(body []byte) (externalID, url string) {
+	var o struct {
+		ID      int64  `json:"id"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.Unmarshal(body, &o); err != nil || o.ID == 0 {
+		return "", ""
+	}
+	return strconv.FormatInt(o.ID, 10), o.HTMLURL
 }
 
 // bufferForObservation reads the whole response body into memory and re-presents
