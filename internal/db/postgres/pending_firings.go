@@ -31,7 +31,11 @@ func newPendingFiringsStore(q queryer) db.PendingFiringsStore {
 
 var _ db.PendingFiringsStore = (*pendingFiringsStore)(nil)
 
-func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string) (bool, error) {
+// Enqueue inserts the firing and stamps the task's agent claim in one
+// transaction — see db.AgentClaimStamp for why the two writes are
+// inseparable. A stamp refusal is not an error and leaves the firing
+// committed.
+func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string, claim db.AgentClaimStamp) (bool, bool, error) {
 	// creator_user_id is NOT NULL in the Postgres schema. Resolution
 	// mirrors ConversationStore.createManual: prefer the caller-supplied
 	// userID, fall back to the org owner. tf.current_user_id() is
@@ -55,26 +59,40 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 	if creatorBind == runmode.LocalDefaultUserID {
 		creatorBind = ""
 	}
-	// The dedup target includes 'draining': a firing mid-drain is still
-	// queued intent for (task, trigger), and a duplicate enqueued during
-	// the drain window would fire a second run for the same intent as
-	// soon as the first one's run terminates. The predicate must stay
-	// textually equivalent to idx_pending_firings_dedup for conflict
-	// inference.
-	res, err := s.q.ExecContext(ctx, `
-		INSERT INTO pending_firings
-		  (org_id, creator_user_id, entity_id, task_id, trigger_id, triggering_event_id, status)
-		VALUES
-		  ($1,
-		   COALESCE(NULLIF($2, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $1)),
-		   $3, $4, $5, $6, 'pending')
-		ON CONFLICT (task_id, trigger_id) WHERE status IN ('pending', 'draining') DO NOTHING
-	`, orgID, creatorBind, entityID, taskID, triggerID, triggeringEventID)
+	inserted, claimed := false, false
+	err := inTx(ctx, s.q, func(q queryer) error {
+		// The dedup target includes 'draining': a firing mid-drain is still
+		// queued intent for (task, trigger), and a duplicate enqueued during
+		// the drain window would fire a second run for the same intent as
+		// soon as the first one's run terminates. The predicate must stay
+		// textually equivalent to idx_pending_firings_dedup for conflict
+		// inference.
+		res, err := q.ExecContext(ctx, `
+			INSERT INTO pending_firings
+			  (org_id, creator_user_id, entity_id, task_id, trigger_id, triggering_event_id, status)
+			VALUES
+			  ($1,
+			   COALESCE(NULLIF($2, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $1)),
+			   $3, $4, $5, $6, 'pending')
+			ON CONFLICT (task_id, trigger_id) WHERE status IN ('pending', 'draining') DO NOTHING
+		`, orgID, creatorBind, entityID, taskID, triggerID, triggeringEventID)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		inserted = n > 0
+		// Nothing was committed on the collapse path — the duplicate already
+		// queued carries the commitment, and its own enqueue stamped the claim.
+		if !inserted || claim.AgentID == "" {
+			return nil
+		}
+		claimed, err = stampAgentClaimIfUnclaimed(ctx, q, orgID, taskID, claim.AgentID, claim.ActingTeamID)
+		return err
+	})
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	return inserted, claimed, nil
 }
 
 // PopForTask is a claiming pop: the subquery locks the oldest pending row

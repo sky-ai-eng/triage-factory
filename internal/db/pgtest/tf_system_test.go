@@ -313,7 +313,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	t.Run("pending_firings", func(t *testing.T) {
 		evtID := seedEventForEntity(t, h, orgID, entityID, "github:pr:opened")
 		triggerID := seedTrigger(t, h, orgID, userID, teamID, blueprintID)
-		if _, err := stores.PendingFirings.Enqueue(ctx, orgID, userID, entityID, taskID, triggerID, evtID); err != nil {
+		if _, _, err := stores.PendingFirings.Enqueue(ctx, orgID, userID, entityID, taskID, triggerID, evtID, db.AgentClaimStamp{}); err != nil {
 			t.Errorf("PendingFirings.Enqueue (inject signal gone-compensation): %v", err)
 		}
 	})

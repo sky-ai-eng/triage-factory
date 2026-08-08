@@ -193,6 +193,22 @@ type DelegateOpts struct {
 	// execution attribution never depends on re-reading a task claim that may
 	// not be written yet at step 0.
 	ActorAgentID string
+
+	// TaskClaim rides the task's agent claim into the same transaction as the
+	// fenced run insert, which is this delegation's commitment point: the
+	// board can then never show a task free under a run that is already live,
+	// because the two facts are one durable write. Event path only — manual
+	// delegations claim the task in their handler before they get here, and
+	// the fenced insert is the only insert the claim can ride.
+	//
+	// Distinct from ActorAgentID even though the immediate auto-fire path
+	// sets both to the same agent: the actor is who executes this run, the
+	// claim is who owns the task. The drain path proves they diverge — it
+	// passes the actor but leaves this zero, because the enqueue that queued
+	// the firing already stamped the claim, and a user who requeued the task
+	// in between must not have it silently re-imposed. Zero value (empty
+	// AgentID) means "commit the run alone".
+	TaskClaim db.AgentClaimStamp
 }
 
 // Delegate kicks off an async agent run for any task type.
@@ -374,7 +390,12 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 			return "", fmt.Errorf("create blueprint run: %w", err)
 		}
 	} else {
-		inserted, err := s.blueprints.CreateRunIfNotFiredSystem(bgCtx, orgID, brRow)
+		// opts.TaskClaim rides this insert's transaction: the fenced insert is
+		// the commitment point, so the task's claim commits with the run or
+		// not at all. A claim *refusal* (a user won the race, the bot already
+		// owns it, the task went terminal) leaves the run committed — the
+		// claim race has a winner either way and the run must still stand.
+		inserted, _, err := s.blueprints.CreateRunIfNotFiredSystem(bgCtx, orgID, brRow, opts.TaskClaim)
 		if err != nil {
 			if errors.Is(err, db.ErrTaskBusyActiveAutoRun) {
 				return "", ErrTaskBusy

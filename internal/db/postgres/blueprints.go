@@ -737,9 +737,14 @@ const blueprintRunsOneActivePerTaskConstraint = "blueprint_runs_one_active_auto_
 //     translated to db.ErrTaskBusyActiveAutoRun. NOT the inserted=false
 //     contract: a replay is permanently satisfied, task-busy is a
 //     deferral — the caller must queue the intent, not drop it.
-func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun) (bool, error) {
+//
+// The run row and the task's agent claim commit together — see
+// db.AgentClaimStamp for why they are inseparable. A stamp refusal is not an
+// error and leaves the run committed; a stamp *failure* rolls the run back,
+// so the firing path retries the pair rather than committing half of it.
+func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim db.AgentClaimStamp) (bool, bool, error) {
 	if br.TriggeringEventID == "" || br.TriggerID == "" {
-		return false, db.ErrBlueprintRunFenceRequiresEventAndTrigger
+		return false, false, db.ErrBlueprintRunFenceRequiresEventAndTrigger
 	}
 	if br.ID == "" {
 		br.ID = uuid.New().String()
@@ -749,32 +754,47 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 	}
 	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
 	if err != nil {
-		return false, fmt.Errorf("marshal step plan: %w", err)
+		return false, false, fmt.Errorf("marshal step plan: %w", err)
 	}
-	res, err := s.admin.ExecContext(ctx, `
-		INSERT INTO blueprint_runs
-			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
-			 actor_agent_id, status, worktree_path, started_at, step_plan, entity_id)
-		VALUES (
-			$1, $2, NULL,
-			$3, $4, 'event', $5, $6,
-			$7, $8, $9, now(), $10,
-			(SELECT entity_id FROM tasks WHERE id = $4 AND org_id = $2)
-		)
-		ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
-	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blueprintRunsOneActivePerTaskConstraint {
-			return false, db.ErrTaskBusyActiveAutoRun
+	inserted, claimed := false, false
+	err = inTx(ctx, s.admin, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			INSERT INTO blueprint_runs
+				(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
+				 actor_agent_id, status, worktree_path, started_at, step_plan, entity_id)
+			VALUES (
+				$1, $2, NULL,
+				$3, $4, 'event', $5, $6,
+				$7, $8, $9, now(), $10,
+				(SELECT entity_id FROM tasks WHERE id = $4 AND org_id = $2)
+			)
+			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
+		`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blueprintRunsOneActivePerTaskConstraint {
+				return db.ErrTaskBusyActiveAutoRun
+			}
+			return fmt.Errorf("insert blueprint_run (fenced): %w", err)
 		}
-		return false, fmt.Errorf("insert blueprint_run (fenced): %w", err)
-	}
-	n, err := res.RowsAffected()
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		inserted = n > 0
+		// The fence closed: the original firing already stamped whatever claim
+		// this event was going to make, so a replay must not re-stamp one the
+		// user may have deliberately cleared since.
+		if !inserted || claim.AgentID == "" {
+			return nil
+		}
+		claimed, err = stampAgentClaimIfUnclaimed(ctx, q, orgID, br.TaskID, claim.AgentID, claim.ActingTeamID)
+		return err
+	})
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	return n > 0, nil
+	return inserted, claimed, nil
 }
 
 func (s *blueprintStore) SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) error {

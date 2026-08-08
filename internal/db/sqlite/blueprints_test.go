@@ -305,11 +305,11 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 	`, domain.EventGitHubPRCICheckFailed, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 		t.Fatalf("seed trigger: %v", err)
 	}
-	if inserted, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, org, domain.BlueprintRun{
+	if inserted, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, org, domain.BlueprintRun{
 		ID: "actor-bpr-ev", BlueprintID: "actor-bp", TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerEvent, TriggerID: "actor-trig", TriggeringEventID: eventID,
 		Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-actor-ev", ActorAgentID: agentID,
-	}); err != nil || !inserted {
+	}, db.AgentClaimStamp{}); err != nil || !inserted {
 		t.Fatalf("CreateRunIfNotFiredSystem = (%v, %v), want (true, nil)", inserted, err)
 	}
 	ev, err := stores.Blueprints.GetRun(ctx, org, "actor-bpr-ev")
@@ -335,6 +335,139 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 	if none.ActorAgentID != "" {
 		t.Errorf("no-actor round-trip = %q, want empty", none.ActorAgentID)
 	}
+}
+
+// TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim pins the coupling
+// that makes "unclaimed with a live run" mean only what a user requeue
+// intends: the fenced insert is a delegation's commitment point, so the task's
+// agent claim commits in the same transaction as the run row. Three arms —
+// the stamp lands with the run, a refused stamp does NOT roll the run back,
+// and a fenced replay re-stamps nothing.
+func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	agentID, err := stores.Agents.Create(ctx, org, domain.Agent{DisplayName: "Bot"})
+	if err != nil {
+		t.Fatalf("Agents.Create: %v", err)
+	}
+	// event_handlers.blueprint_id is UNIQUE — one trigger per blueprint — so
+	// each arm gets its own pair.
+	seedTrigger := func(t *testing.T, suffix string) {
+		t.Helper()
+		insertBlueprintForTest(t, conn, "claim-bp-"+suffix, "Claim BP "+suffix)
+		if _, err := conn.Exec(`
+			INSERT INTO event_handlers (id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability, enabled, source, creator_user_id, team_id)
+			VALUES (?, 'trigger', ?, ?, 4, 0, 1, 'user', ?, ?)
+		`, "trig-"+suffix, domain.EventGitHubPRCICheckFailed, "claim-bp-"+suffix, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
+			t.Fatalf("seed trigger: %v", err)
+		}
+	}
+
+	// fire mints an (entity, event, task) chain plus its trigger, then runs the
+	// fenced insert with the given claim. Returns the task id and the insert's
+	// two flags.
+	fire := func(t *testing.T, suffix string, claim db.AgentClaimStamp, prep func(taskID string)) (string, bool, bool) {
+		t.Helper()
+		task := seedEntityEventTask(t, conn, suffix)
+		var eventID string
+		if err := conn.QueryRow(`SELECT primary_event_id FROM tasks WHERE id = ?`, task.ID).Scan(&eventID); err != nil {
+			t.Fatalf("read task event id: %v", err)
+		}
+		seedTrigger(t, suffix)
+		if prep != nil {
+			prep(task.ID)
+		}
+		inserted, claimed, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, org, domain.BlueprintRun{
+			ID: "bpr-" + suffix, BlueprintID: "claim-bp-" + suffix, TaskID: task.ID,
+			TriggerType: domain.BlueprintTriggerEvent, TriggerID: "trig-" + suffix, TriggeringEventID: eventID,
+			Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-" + suffix, ActorAgentID: claim.AgentID,
+		}, claim)
+		if err != nil {
+			t.Fatalf("CreateRunIfNotFiredSystem(%s): %v", suffix, err)
+		}
+		return task.ID, inserted, claimed
+	}
+
+	readClaim := func(t *testing.T, taskID string) (string, string) {
+		t.Helper()
+		var agent, user sql.NullString
+		if err := conn.QueryRow(
+			`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = ?`, taskID,
+		).Scan(&agent, &user); err != nil {
+			t.Fatalf("read task claim: %v", err)
+		}
+		return agent.String, user.String
+	}
+
+	t.Run("stamps_with_the_run", func(t *testing.T) {
+		taskID, inserted, claimed := fire(t, "claim-ok", db.AgentClaimStamp{AgentID: agentID}, nil)
+		if !inserted || !claimed {
+			t.Fatalf("(inserted=%v, claimed=%v), want (true, true)", inserted, claimed)
+		}
+		if agent, _ := readClaim(t, taskID); agent != agentID {
+			t.Errorf("claimed_by_agent_id = %q, want %q — the run committed without its claim", agent, agentID)
+		}
+	})
+
+	t.Run("refused_stamp_does_not_roll_back_the_run", func(t *testing.T) {
+		taskID, inserted, claimed := fire(t, "claim-race", db.AgentClaimStamp{AgentID: agentID}, func(taskID string) {
+			// The user claims the task in the window before the insert. They
+			// win the claim; the run must still be committed.
+			if err := stores.Tasks.SetClaimedByUser(ctx, org, taskID, runmode.LocalDefaultUserID); err != nil {
+				t.Fatalf("SetClaimedByUser: %v", err)
+			}
+		})
+		if !inserted {
+			t.Error("a refused stamp rolled the run insert back")
+		}
+		if claimed {
+			t.Error("claimed=true on a user-claimed task — the stamp stole the claim")
+		}
+		if agent, user := readClaim(t, taskID); agent != "" || user == "" {
+			t.Errorf("claim = (agent=%q, user=%q), want the user's claim untouched", agent, user)
+		}
+		if run, err := stores.Blueprints.GetRun(ctx, org, "bpr-claim-race"); err != nil || run == nil {
+			t.Fatalf("the run must exist after a refused stamp: (%v, %v)", run, err)
+		}
+	})
+
+	t.Run("fenced_replay_re_stamps_nothing", func(t *testing.T) {
+		task := seedEntityEventTask(t, conn, "claim-replay")
+		var eventID string
+		if err := conn.QueryRow(`SELECT primary_event_id FROM tasks WHERE id = ?`, task.ID).Scan(&eventID); err != nil {
+			t.Fatalf("read task event id: %v", err)
+		}
+		seedTrigger(t, "claim-replay")
+		row := func(id string) domain.BlueprintRun {
+			return domain.BlueprintRun{
+				ID: id, BlueprintID: "claim-bp-claim-replay", TaskID: task.ID,
+				TriggerType: domain.BlueprintTriggerEvent, TriggerID: "trig-claim-replay", TriggeringEventID: eventID,
+				Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-replay", ActorAgentID: agentID,
+			}
+		}
+		if inserted, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, org, row("bpr-replay-1"), db.AgentClaimStamp{AgentID: agentID}); err != nil || !inserted {
+			t.Fatalf("first fire: inserted=%v err=%v", inserted, err)
+		}
+		// The user requeues the task while the run stays live — the documented,
+		// deliberate "unclaimed with a live run" state. A replayed event must
+		// not quietly put the bot's claim back.
+		if ok, err := stores.Swipes.RequeueTask(ctx, org, task.ID); err != nil || !ok {
+			t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
+		}
+		inserted, claimed, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, org, row("bpr-replay-2"), db.AgentClaimStamp{AgentID: agentID})
+		if err != nil {
+			t.Fatalf("replay fire: %v", err)
+		}
+		if inserted || claimed {
+			t.Errorf("replay = (inserted=%v, claimed=%v), want (false, false)", inserted, claimed)
+		}
+		if agent, user := readClaim(t, task.ID); agent != "" || user != "" {
+			t.Errorf("claim after replay = (agent=%q, user=%q), want the requeue's cleared claim to hold", agent, user)
+		}
+	})
 }
 
 // TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome pins the channel

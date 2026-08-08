@@ -501,7 +501,7 @@ func TestTaskStore_Postgres_MarkEventInjectedSystem(t *testing.T) {
 		if err := stores.Tasks.RecordEventSystem(ctx, orgID, taskID, eventID, "bumped"); err != nil {
 			t.Fatalf("seed bumped row: %v", err)
 		}
-		if err := stores.Tasks.MarkEventInjectedSystem(ctx, orgID, taskID, eventID); err != nil {
+		if _, err := stores.Tasks.MarkEventInjectedSystem(ctx, orgID, taskID, eventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("MarkEventInjectedSystem: %v", err)
 		}
 		kind, found := readKind(t, taskID, eventID)
@@ -516,7 +516,7 @@ func TestTaskStore_Postgres_MarkEventInjectedSystem(t *testing.T) {
 	t.Run("absent_row_is_noop", func(t *testing.T) {
 		_, eventID, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userA, "mark-injected-absent")
 		// No RecordEventSystem seed at all — (taskID, eventID) has no row.
-		if err := stores.Tasks.MarkEventInjectedSystem(ctx, orgID, taskID, eventID); err != nil {
+		if _, err := stores.Tasks.MarkEventInjectedSystem(ctx, orgID, taskID, eventID, db.AgentClaimStamp{}); err != nil {
 			t.Fatalf("MarkEventInjectedSystem on absent row: %v", err)
 		}
 		if _, found := readKind(t, taskID, eventID); found {

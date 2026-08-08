@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -69,7 +70,10 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 		WorktreePath: "/tmp/wt-" + brID,
 	}
 	if opts.TriggerType == "event" {
-		inserted, err := store.Blueprints.CreateRunIfNotFiredSystem(context.Background(), runmode.LocalDefaultOrgID, br)
+		// Pass opts.TaskClaim through exactly as production does: the claim
+		// commits inside this insert's transaction, so a stub that dropped it
+		// would hide the very coupling the router now depends on.
+		inserted, _, err := store.Blueprints.CreateRunIfNotFiredSystem(context.Background(), runmode.LocalDefaultOrgID, br, opts.TaskClaim)
 		if err != nil {
 			return "", err
 		}
@@ -173,7 +177,7 @@ func TestDrainTask_ClosedTask(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
-	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
+	if _, _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID, dbpkg.AgentClaimStamp{}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -256,7 +260,7 @@ func TestDrainTask_SnoozedTask(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
-	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
+	if _, _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID, dbpkg.AgentClaimStamp{}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -298,7 +302,7 @@ func TestDrainTask_DisabledTrigger(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
-	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
+	if _, _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID, dbpkg.AgentClaimStamp{}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -346,7 +350,7 @@ func TestDrainTask_MultipleStaleFirings(t *testing.T) {
 			BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0),
 			Enabled: true,
 		})
-		if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, trigID, eventID); err != nil {
+		if _, _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, trigID, eventID, dbpkg.AgentClaimStamp{}); err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
 		}
 	}
@@ -411,7 +415,7 @@ func TestDrainTask_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
-	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
+	if _, _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID, dbpkg.AgentClaimStamp{}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -464,7 +468,7 @@ func TestRunDrainSweeper_PicksUpStuckFiring(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
-	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
+	if _, _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID, dbpkg.AgentClaimStamp{}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 

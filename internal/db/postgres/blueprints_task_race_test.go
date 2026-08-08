@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"testing"
@@ -23,8 +24,13 @@ import (
 type raceFixture struct {
 	orgID    string
 	entityID string
-	newTask  func(t *testing.T) string
-	firing   func(t *testing.T, taskID string) domain.BlueprintRun
+	// userID + agentID back the claim-coupling test below: the fenced insert
+	// carries the task's agent claim, so its assertions need a real agents row
+	// to stamp and a real user to lose the claim race to.
+	userID  string
+	agentID string
+	newTask func(t *testing.T) string
+	firing  func(t *testing.T, taskID string) domain.BlueprintRun
 }
 
 func newRaceFixture(t *testing.T, h *pgtest.Harness) raceFixture {
@@ -84,7 +90,13 @@ func newRaceFixture(t *testing.T, h *pgtest.Harness) raceFixture {
 			StepPlan:          []domain.BlueprintPlanStep{{StepIndex: 0, PromptID: "p", PromptName: "p", PromptBody: "b"}},
 		}
 	}
-	return raceFixture{orgID: orgID, entityID: entityID, newTask: newTask, firing: firing}
+	agentID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO agents (id, org_id, display_name) VALUES ($1, $2, 'Race Bot')`, agentID, orgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	return raceFixture{orgID: orgID, entityID: entityID, userID: userID, agentID: agentID, newTask: newTask, firing: firing}
 }
 
 // TestBlueprintStore_Postgres_OneActiveAutoRunPerTask: the task gate
@@ -128,7 +140,7 @@ func TestBlueprintStore_Postgres_OneActiveAutoRunPerTask(t *testing.T) {
 			defer wg.Done()
 			ready.Done()
 			<-start
-			insertedFlags[i], errs[i] = stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, firings[i])
+			insertedFlags[i], _, errs[i] = stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, firings[i], db.AgentClaimStamp{})
 		}(i)
 	}
 	ready.Wait()
@@ -171,7 +183,7 @@ func TestBlueprintStore_Postgres_OneActiveAutoRunPerTask(t *testing.T) {
 	`, fx.orgID, taskID); err != nil {
 		t.Fatalf("complete winning run: %v", err)
 	}
-	insertedNext, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, fx.firing(t, taskID))
+	insertedNext, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, fx.firing(t, taskID), db.AgentClaimStamp{})
 	if err != nil {
 		t.Fatalf("CreateRunIfNotFiredSystem after termination: %v", err)
 	}
@@ -198,7 +210,7 @@ func TestBlueprintStore_Postgres_SiblingTasksOnOneEntityBothFire(t *testing.T) {
 		name   string
 		taskID string
 	}{{"first task", taskA}, {"sibling task", taskB}} {
-		inserted, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, fx.firing(t, tc.taskID))
+		inserted, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, fx.firing(t, tc.taskID), db.AgentClaimStamp{})
 		if err != nil {
 			t.Fatalf("%s: CreateRunIfNotFiredSystem: %v", tc.name, err)
 		}
@@ -217,4 +229,99 @@ func TestBlueprintStore_Postgres_SiblingTasksOnOneEntityBothFire(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("expected 2 concurrent auto runs on the entity (one per task), got %d", count)
 	}
+}
+
+// TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim is the Postgres
+// twin of the SQLite test of the same shape: the fenced insert is a
+// delegation's commitment point, so the task's agent claim commits in the same
+// transaction as the run row. Without that, a failed stamp leaves the board
+// showing a free task under a live run and no replay can repair it — the
+// (triggering_event_id, trigger_id) fence closes first.
+func TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+	fx := newRaceFixture(t, h)
+
+	readClaim := func(t *testing.T, taskID string) (string, string) {
+		t.Helper()
+		var agent, user sql.NullString
+		if err := h.AdminDB.QueryRow(
+			`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = $1`, taskID,
+		).Scan(&agent, &user); err != nil {
+			t.Fatalf("read task claim: %v", err)
+		}
+		return agent.String, user.String
+	}
+
+	t.Run("stamps_with_the_run", func(t *testing.T) {
+		taskID := fx.newTask(t)
+		inserted, claimed, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, fx.firing(t, taskID), db.AgentClaimStamp{AgentID: fx.agentID})
+		if err != nil {
+			t.Fatalf("CreateRunIfNotFiredSystem: %v", err)
+		}
+		if !inserted || !claimed {
+			t.Fatalf("(inserted=%v, claimed=%v), want (true, true)", inserted, claimed)
+		}
+		if agent, _ := readClaim(t, taskID); agent != fx.agentID {
+			t.Errorf("claimed_by_agent_id = %q, want %q — the run committed without its claim", agent, fx.agentID)
+		}
+	})
+
+	t.Run("refused_stamp_does_not_roll_back_the_run", func(t *testing.T) {
+		taskID := fx.newTask(t)
+		// The user claims the task in the window before the insert: they win
+		// the claim, and the run must still commit.
+		if err := stores.Tasks.SetClaimedByUser(ctx, fx.orgID, taskID, fx.userID); err != nil {
+			t.Fatalf("SetClaimedByUser: %v", err)
+		}
+		br := fx.firing(t, taskID)
+		inserted, claimed, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, br, db.AgentClaimStamp{AgentID: fx.agentID})
+		if err != nil {
+			t.Fatalf("CreateRunIfNotFiredSystem against a user-claimed task: %v", err)
+		}
+		if !inserted {
+			t.Error("a refused stamp rolled the run insert back")
+		}
+		if claimed {
+			t.Error("claimed=true on a user-claimed task — the stamp stole the claim")
+		}
+		if agent, user := readClaim(t, taskID); agent != "" || user == "" {
+			t.Errorf("claim = (agent=%q, user=%q), want the user's claim untouched", agent, user)
+		}
+		var runs int
+		if err := h.AdminDB.QueryRow(`SELECT count(*) FROM blueprint_runs WHERE task_id = $1`, taskID).Scan(&runs); err != nil {
+			t.Fatalf("count runs: %v", err)
+		}
+		if runs != 1 {
+			t.Errorf("blueprint_runs for the task = %d, want 1 (the refused stamp must not undo the run)", runs)
+		}
+	})
+
+	t.Run("fenced_replay_re_stamps_nothing", func(t *testing.T) {
+		taskID := fx.newTask(t)
+		br := fx.firing(t, taskID)
+		if inserted, _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, br, db.AgentClaimStamp{AgentID: fx.agentID}); err != nil || !inserted {
+			t.Fatalf("first fire: inserted=%v err=%v", inserted, err)
+		}
+		// The user requeues while the run stays live — the deliberate
+		// "unclaimed with a live run" state. A replayed event must not put the
+		// bot's claim back.
+		if ok, err := stores.Swipes.RequeueTask(ctx, fx.orgID, taskID); err != nil || !ok {
+			t.Fatalf("RequeueTask: ok=%v err=%v", ok, err)
+		}
+		replay := br
+		replay.ID = ""
+		inserted, claimed, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, replay, db.AgentClaimStamp{AgentID: fx.agentID})
+		if err != nil {
+			t.Fatalf("replay fire: %v", err)
+		}
+		if inserted || claimed {
+			t.Errorf("replay = (inserted=%v, claimed=%v), want (false, false)", inserted, claimed)
+		}
+		if agent, user := readClaim(t, taskID); agent != "" || user != "" {
+			t.Errorf("claim after replay = (agent=%q, user=%q), want the requeue's cleared claim to hold", agent, user)
+		}
+	})
 }
