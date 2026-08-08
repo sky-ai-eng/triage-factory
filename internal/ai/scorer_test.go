@@ -161,6 +161,12 @@ func (s *stubScoreStore) ResetStaleScoring(_ context.Context, _ string) (int, er
 func (s *stubScoreStore) UpdateTaskScores(_ context.Context, _ string, _ []domain.TaskScoreUpdate) error {
 	return nil
 }
+func (s *stubScoreStore) TasksOwedReDerive(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+func (s *stubScoreStore) ClearReDeriveOwed(_ context.Context, _ string, _ []string) error {
+	return nil
+}
 
 // TestRun_OnScoringCompletedReceivesOnlyFreshlyScored pins that Runner.run
 // passes only the IDs of tasks that actually received fresh scores to

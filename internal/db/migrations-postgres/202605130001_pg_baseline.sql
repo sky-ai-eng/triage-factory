@@ -1559,6 +1559,22 @@ CREATE TABLE public.tasks (
     autonomy_suitability real,
     priority_reasoning text,
     scoring_status text DEFAULT 'pending'::text NOT NULL,
+    -- The post-scoring re-derive, owed as a row rather than promised by a
+    -- live process. The event-time trigger pass skips every deferred
+    -- (min_autonomy_suitability > 0) trigger on the promise that the
+    -- re-derive fires it once a score exists; the re-derive runs as a
+    -- post-commit callback, so a crash between the scores committing and
+    -- the callback finishing left the task 'scored' — never revisited by a
+    -- future cycle — with those triggers never evaluated.
+    --
+    -- Set in the same statement that writes the scores, so the debt and the
+    -- scores are never separable; cleared only by a re-derive pass that
+    -- actually evaluated the task. The scorer drains the owed set at cycle
+    -- start, the crash backstop behind the callback's fast path. Exactly
+    -- two writers, and nothing else may touch it — a task may legitimately
+    -- be pending for a re-score while still owing a re-derive from the last
+    -- one.
+    rederive_owed boolean DEFAULT false NOT NULL,
     severity text,
     relevance_reason text,
     source_status text,
@@ -2717,6 +2733,18 @@ CREATE INDEX idx_tasks_org_status ON public.tasks USING btree (org_id, status);
 --
 
 CREATE INDEX idx_tasks_org_status_priority ON public.tasks USING btree (org_id, status, priority_score DESC);
+
+
+--
+-- Name: idx_tasks_rederive_owed; Type: INDEX; Schema: public; Owner: -
+--
+
+-- Partial: the scorer reads this set once per cycle per org and it is empty
+-- in every crash-free cycle, so the index spans only the rare owed rows
+-- rather than the whole board. created_at trails org_id because the drain
+-- reads the set oldest-first — without it the predicate is served from the
+-- index and the ordering still costs a sort.
+CREATE INDEX idx_tasks_rederive_owed ON public.tasks USING btree (org_id, created_at) WHERE rederive_owed;
 
 
 --

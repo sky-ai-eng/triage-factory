@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -131,6 +132,175 @@ func TestRun_ResetFailureStillScores(t *testing.T) {
 	}
 }
 
+// TestRun_DrainsOwedReDerivesAtCycleStart is the far-side sibling of the
+// residue case above: the scores committed, and the process died before the
+// post-scoring re-derive ran. The task is 'scored', so no future cycle
+// re-picks it and its deferred triggers would never be evaluated — unless
+// the cycle drains the debt the scores write recorded.
+func TestRun_DrainsOwedReDerivesAtCycleStart(t *testing.T) {
+	ctx := context.Background()
+	database := newScoringTestDB(t)
+	stores := sqlitestore.New(database)
+
+	crashed := seedScoringTasks(t, database, 1)[0]
+
+	// The crash: scores committed (which owes a re-derive), callback never
+	// ran. Written through the store so the owed mark comes from the same
+	// statement production uses, not a hand-set column.
+	if err := stores.Scores.UpdateTaskScores(ctx, runmode.LocalDefaultOrgID, []domain.TaskScoreUpdate{{
+		ID: crashed, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r",
+	}}); err != nil {
+		t.Fatalf("UpdateTaskScores (simulated crashed cycle): %v", err)
+	}
+
+	// The re-derive pass, as the router implements it: evaluate, then
+	// discharge what was evaluated.
+	var drained [][]string
+	r := NewRunner(stores.Scores, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, RunnerCallbacks{
+		OnReDeriveOwed: func(ctx context.Context, orgID string, ids []string) {
+			drained = append(drained, ids)
+			if err := stores.Scores.ClearReDeriveOwed(ctx, orgID, ids); err != nil {
+				t.Errorf("ClearReDeriveOwed: %v", err)
+			}
+		},
+	})
+	r.scoreFn = stubScoreFn(0.8)
+
+	r.run(ctx)
+
+	if len(drained) != 1 || len(drained[0]) != 1 || drained[0][0] != crashed {
+		t.Fatalf("cycle drained %v, want one pass over [%s] — the crashed task's deferred triggers are only reachable through it", drained, crashed)
+	}
+
+	// The debt is discharged, so the next cycle is a no-op rather than a
+	// re-derive of the same task forever.
+	r.run(ctx)
+	if len(drained) != 1 {
+		t.Errorf("second cycle drained again (%v); a discharged debt must not re-fire", drained)
+	}
+}
+
+// TestRun_OwedDrainPrecedesThisCyclesScores pins the ordering that keeps the
+// drain's clear from racing the cycle's own scores write: the scorer is
+// single-flight per org, so draining before MarkScoring means no fresh mark
+// can be raised on a task while the drain is deciding to clear its old one.
+// Reversed, the drain could discharge a debt created by scores it never saw.
+func TestRun_OwedDrainPrecedesThisCyclesScores(t *testing.T) {
+	ctx := context.Background()
+	database := newScoringTestDB(t)
+	stores := sqlitestore.New(database)
+	seedScoringTasks(t, database, 2)
+
+	rec := &callOrderScoreStore{ScoreStore: stores.Scores}
+	r := NewRunner(rec, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, RunnerCallbacks{
+		OnReDeriveOwed: func(context.Context, string, []string) {},
+	})
+	r.scoreFn = stubScoreFn(0.8)
+
+	r.run(ctx)
+
+	calls := rec.recorded()
+	drainAt, markAt := -1, -1
+	for i, c := range calls {
+		if c == "TasksOwedReDerive" && drainAt < 0 {
+			drainAt = i
+		}
+		if c == "MarkScoring" && markAt < 0 {
+			markAt = i
+		}
+	}
+	if drainAt < 0 {
+		t.Fatalf("cycle call order = %v; the owed-re-derive drain never ran", calls)
+	}
+	if markAt >= 0 && drainAt > markAt {
+		t.Errorf("cycle call order = %v; the drain ran after MarkScoring and could clear a mark this cycle raised", calls)
+	}
+}
+
+// TestRun_StaleScoringAndOwedReDeriveCoexist covers a task carrying both
+// halves of the epic's scoring-crash damage at once: claimed by a cycle that
+// died mid-scoring, and still owing a re-derive from the cycle before that.
+// The two sweeps are independent — one keys on scoring_status, the other on
+// the owed mark — and one cycle has to discharge both.
+func TestRun_StaleScoringAndOwedReDeriveCoexist(t *testing.T) {
+	ctx := context.Background()
+	database := newScoringTestDB(t)
+	stores := sqlitestore.New(database)
+	taskID := seedScoringTasks(t, database, 1)[0]
+
+	// Cycle 1 scored it (owing a re-derive) and its callback never ran.
+	if err := stores.Scores.UpdateTaskScores(ctx, runmode.LocalDefaultOrgID, []domain.TaskScoreUpdate{{
+		ID: taskID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "s", PriorityReasoning: "r",
+	}}); err != nil {
+		t.Fatalf("UpdateTaskScores: %v", err)
+	}
+	// A later event put it back in the queue; cycle 2 claimed it and died.
+	if _, err := database.Exec(`UPDATE tasks SET scoring_status = 'pending' WHERE id = ?`, taskID); err != nil {
+		t.Fatalf("re-queue for scoring: %v", err)
+	}
+	if err := stores.Scores.MarkScoring(ctx, runmode.LocalDefaultOrgID, []string{taskID}); err != nil {
+		t.Fatalf("MarkScoring (simulated crashed cycle): %v", err)
+	}
+
+	var drained []string
+	var scoredInCycle []string
+	r := NewRunner(stores.Scores, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, RunnerCallbacks{
+		OnReDeriveOwed: func(ctx context.Context, orgID string, ids []string) {
+			drained = append(drained, ids...)
+			if err := stores.Scores.ClearReDeriveOwed(ctx, orgID, ids); err != nil {
+				t.Errorf("ClearReDeriveOwed: %v", err)
+			}
+		},
+		OnScoringCompleted: func(_ context.Context, _ string, ids []string) { scoredInCycle = ids },
+	})
+	r.scoreFn = stubScoreFn(0.8)
+
+	r.run(ctx)
+
+	if len(drained) != 1 || drained[0] != taskID {
+		t.Errorf("drained %v, want [%s] — the stale-scoring reset must not swallow the outstanding re-derive", drained, taskID)
+	}
+	if len(scoredInCycle) != 1 || scoredInCycle[0] != taskID {
+		t.Errorf("freshly scored = %v, want [%s] — the owed mark must not hide the task from the reset that re-queues it", scoredInCycle, taskID)
+	}
+	// The fresh scores raise a fresh mark for the completion callback to
+	// discharge; the drain cleared only the debt it evaluated.
+	owed, err := stores.Scores.TasksOwedReDerive(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("TasksOwedReDerive: %v", err)
+	}
+	if len(owed) != 1 || owed[0] != taskID {
+		t.Errorf("owed after the cycle = %v, want [%s] — this cycle's own scores owe their own re-derive", owed, taskID)
+	}
+}
+
+// TestRun_OwedDrainFailureStillScores mirrors the stale-reset posture: the
+// drain is recovery layered on top of a cycle, so a store error leaves the
+// debt for the next cycle rather than costing this one the tasks it can
+// still score.
+func TestRun_OwedDrainFailureStillScores(t *testing.T) {
+	ctx := context.Background()
+	database := newScoringTestDB(t)
+	stores := sqlitestore.New(database)
+	ids := seedScoringTasks(t, database, 1)
+
+	rec := &callOrderScoreStore{ScoreStore: stores.Scores, owedErr: fmt.Errorf("simulated store failure")}
+	drained := false
+	r := NewRunner(rec, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, RunnerCallbacks{
+		OnReDeriveOwed: func(context.Context, string, []string) { drained = true },
+	})
+	r.scoreFn = stubScoreFn(0.8)
+
+	r.run(ctx)
+
+	if drained {
+		t.Error("the re-derive pass ran on an unreadable owed set; a failed list must produce no work, not an empty pass")
+	}
+	if status, _ := readScoringState(t, database, ids[0]); status != "scored" {
+		t.Errorf("scoring_status = %q, want scored — a failed owed-set read must not abort the cycle", status)
+	}
+}
+
 // stubScoreFn returns a batch scorer that scores every input with the
 // given autonomy suitability. No subprocess, no model call.
 func stubScoreFn(autonomy float64) batchScoreFn {
@@ -155,6 +325,7 @@ func stubScoreFn(autonomy float64) batchScoreFn {
 type callOrderScoreStore struct {
 	db.ScoreStore
 	resetErr error
+	owedErr  error
 
 	mu    sync.Mutex
 	calls []string
@@ -188,6 +359,14 @@ func (s *callOrderScoreStore) MarkScoring(ctx context.Context, orgID string, tas
 func (s *callOrderScoreStore) ResetScoringToPending(ctx context.Context, orgID string, taskIDs []string) error {
 	s.record("ResetScoringToPending")
 	return s.ScoreStore.ResetScoringToPending(ctx, orgID, taskIDs)
+}
+
+func (s *callOrderScoreStore) TasksOwedReDerive(ctx context.Context, orgID string) ([]string, error) {
+	s.record("TasksOwedReDerive")
+	if s.owedErr != nil {
+		return nil, s.owedErr
+	}
+	return s.ScoreStore.TasksOwedReDerive(ctx, orgID)
 }
 
 // newScoringTestDB opens an in-memory SQLite with the full schema.
