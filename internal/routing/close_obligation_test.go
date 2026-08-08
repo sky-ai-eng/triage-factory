@@ -72,18 +72,20 @@ func (s entityCloseOutageStore) CloseSystem(ctx context.Context, orgID, id strin
 }
 
 // taskCloseOutageStore fails ONE named task's close, so a test can watch its
-// siblings close on the same pass instead of being cancelled by it.
+// siblings close on the same pass instead of being cancelled by it. The close
+// the router performs is the combined one — task flip, audit row, and stop
+// intent in a single transaction — so that is what this intercepts.
 type taskCloseOutageStore struct {
 	dbpkg.TaskStore
 	failTaskID string
 	o          *outage
 }
 
-func (s *taskCloseOutageStore) CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error {
+func (s *taskCloseOutageStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
 	if taskID == s.failTaskID && s.o.down() {
-		return errOutage
+		return false, nil, errOutage
 	}
-	return s.TaskStore.CloseSystem(ctx, orgID, taskID, closeReason, closeEventType)
+	return s.TaskStore.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
 }
 
 func closeAuditCount(t *testing.T, database *sql.DB, taskID string) int {

@@ -271,8 +271,8 @@ type ConversationStore interface {
 	HasActiveAutoRunForTask(ctx context.Context, orgID, taskID string) (bool, error)
 
 	// ActiveIDsForTask returns the IDs of runs on the task that
-	// haven't reached a terminal state. Used by the task-close
-	// → run-cancel cascade.
+	// haven't reached a terminal state. Used by the swipe handler's
+	// disposition cascade to enumerate the runs to stop.
 	ActiveIDsForTask(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// ListParkedWorktreePathsSystem returns the worktree_path of every run
@@ -303,8 +303,13 @@ type ConversationStore interface {
 	ActiveAutoRunIDForTaskSystem(ctx context.Context, orgID, taskID string) (runID string, err error)
 
 	// ActiveIDsForTaskSystem mirrors ActiveIDsForTask but routes through
-	// the admin pool in Postgres. The router's task-close cascade uses
-	// this to enumerate runs to cancel from its background goroutine.
+	// the admin pool in Postgres, for a claims-less background caller.
+	//
+	// No production caller today: the router's task-close cascade used to
+	// enumerate here, and now takes the same set from the close transaction
+	// itself (TaskStore.CloseWithRunCancelIntentSystem) so the runs it stops
+	// are the runs it stamped. Kept as the admin-pool arm of a pair whose
+	// app-pool half is live, and covered by the store conformance.
 	ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// ActiveIDsForTeamSystem returns the IDs of every active run owned by the
