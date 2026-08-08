@@ -198,7 +198,11 @@ type EventQueueStore interface {
 	// Only rows currently 'failed' flip. An id that is pending, processing,
 	// done, belongs to another org, or does not exist at all is a silent
 	// no-op counted out of the return, so the count is "rows this call
-	// actually moved" and a second requeue of the same ids reports 0.
+	// actually moved" and a second requeue of the same ids reports 0. That
+	// count is the operator's answer, so a backend that cannot report it
+	// errors rather than guessing. On error the count is what was confirmed
+	// moved before the failure — a backend that splits a large id set into
+	// several statements commits as it goes — so it is not necessarily 0.
 	//
 	// Replay safety is the same argument every other retry in this queue
 	// rests on: a requeued row re-enters the identical at-least-once path,

@@ -242,7 +242,14 @@ func (s *eventQueueStore) RequeueFailedEvents(ctx context.Context, orgID string,
 	if err != nil {
 		return 0, err
 	}
-	n, _ := res.RowsAffected()
+	// Unlike the sweeps above, the count here is the operator's answer — "2 of
+	// the 3 you picked moved" — so a driver that cannot report it must say so
+	// rather than let a discarded error render as "nothing moved" over rows
+	// that did.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
 	return int(n), nil
 }
 

@@ -27,9 +27,10 @@ import { httpErrorMessage } from '../../lib/apiClient'
 import { timeAgo } from '../../lib/relativeTime'
 import type { FailedEvent, UseFailedEvents } from '../../hooks/useFailedEvents'
 
-// entityLabel renders the row's entity the way an operator recognizes it:
-// the source id ("owner/repo#18", "SKY-123") with the title as context. Both
-// can be absent — a queue row can carry no entity — so the id is the floor.
+// entityLabel renders the row's entity the way an operator recognizes it: the
+// source id (a GitHub "owner/repo#18", a Jira issue key) with the title as
+// context. Both can be absent — a queue row can carry no entity — so the
+// source id is the floor and the raw entity id the fallback under it.
 function entityLabel(e: FailedEvent): string {
   if (e.entity_source_id) return e.entity_source_id
   if (e.entity_id) return e.entity_id

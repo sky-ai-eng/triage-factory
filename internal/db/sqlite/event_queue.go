@@ -255,7 +255,16 @@ func (s *eventQueueStore) RequeueFailedEvents(ctx context.Context, orgID string,
 		if err != nil {
 			return total, err
 		}
-		n, _ := res.RowsAffected()
+		// Unlike the sweeps above, the count here is the operator's answer —
+		// "2 of the 3 you picked moved" — so a driver that cannot report it
+		// must say so rather than let a discarded error render as "nothing
+		// moved" over rows that did. The partial total rides along with the
+		// error: earlier chunks committed, and a caller logging the failure
+		// should see that they did.
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
 		total += int(n)
 	}
 	return total, nil
