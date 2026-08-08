@@ -16,10 +16,11 @@ import (
 // read out of the request.
 //
 // That is a real widening of what the injector does, and it is scoped as
-// narrowly as the job allows: the envelope's three known members, the query
-// document's top level, and a node id out of the variables. Nothing walks the
-// arguments, and no text an agent or a stranger wrote is ever interpreted —
-// see gqldoc.go for what the reader refuses to look at.
+// narrowly as the job allows: the envelope's three known members, the top level
+// of the operation that runs (plus the fragments that operation spreads into
+// it), and a node id out of the variables. Nothing walks the arguments, and no
+// text an agent or a stranger wrote is ever interpreted — see gqldoc.go for what
+// the reader refuses to look at.
 //
 // The mutation names below are the vocabulary GitHub's schema defines, mapped
 // onto the same domain actions the REST shapes produce. One act, one name,
@@ -54,9 +55,11 @@ const (
 	// choose between them, or an operationName naming none of them. The server
 	// rejects both, but which one it rejected is not knowable from here.
 	GraphQLAmbiguousOperation = "ambiguous_operation"
-	// GraphQLUnresolvedFragment: the mutation's top-level selection includes a
-	// fragment spread or inline fragment, so its real field names live in a
-	// definition this reader does not follow.
+	// GraphQLUnresolvedFragment: the mutation's selection reached a fragment the
+	// reader could not account for — one the document never defines, or one
+	// conditioned on a type other than the mutation root. Spreads it CAN follow
+	// are followed, so this now means a genuine dead end rather than a
+	// construction declined on sight.
 	GraphQLUnresolvedFragment = "unresolved_fragment"
 )
 
@@ -168,7 +171,7 @@ func ParseGraphQLRequest(body []byte) (GraphQLFacts, bool) {
 	}
 	subject := subjectFromVariables(envelope.Variables)
 
-	ops, parsed := parseOperations(envelope.Query)
+	document, parsed := parseDocument(envelope.Query)
 	if !parsed {
 		return GraphQLFacts{
 			Operation:  envelope.OperationName,
@@ -177,13 +180,13 @@ func ParseGraphQLRequest(body []byte) (GraphQLFacts, bool) {
 		}, true
 	}
 
-	op, selected := selectOperation(ops, envelope.OperationName)
+	op, selected := selectOperation(document.ops, envelope.OperationName)
 	if !selected {
 		// Nothing ran — the server rejects a document it cannot resolve to one
 		// operation — but a mutation was reached for, and the attempt is the
 		// thing the log is for. A document with no mutation in it at all is an
 		// ordinary read that happened to be ambiguous, and stays silent.
-		if !containsMutation(ops) {
+		if !containsMutation(document.ops) {
 			return GraphQLFacts{}, false
 		}
 		return GraphQLFacts{
@@ -196,11 +199,17 @@ func ParseGraphQLRequest(body []byte) (GraphQLFacts, bool) {
 		return GraphQLFacts{}, false
 	}
 
-	facts := GraphQLFacts{Operation: op.name, Fields: op.fields, Subject: subject}
+	fields, resolved := resolveTopLevelFields(op.sel, document.fragments)
+	facts := GraphQLFacts{Operation: op.name, Fields: fields, Subject: subject}
 	switch {
-	case op.spread:
+	case !resolved:
+		// Some part of the selection could not be accounted for, so the fields
+		// that WERE read are not the whole act. They still ride the row — naming
+		// what was seen beats naming nothing — but the act stays unclassified,
+		// because a partial reading is exactly how a mutation gets labelled as
+		// something smaller than it was.
 		facts.Unreadable = GraphQLUnresolvedFragment
-	case len(op.fields) == 0:
+	case len(fields) == 0:
 		// A selection set has to select something, so this document is invalid
 		// and the server runs none of it. It is still recorded — a mutation was
 		// reached for — but with no field to name, the reason has to stand in

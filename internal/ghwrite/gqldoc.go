@@ -6,17 +6,31 @@ import "strings"
 // does this request's mutation select? — and refuses to answer anything else.
 //
 // It is not a GraphQL implementation and must not grow into one. Everything
-// below the operation's own selection set is skipped as balanced punctuation:
-// argument values, nested selections, directives, and every string in them are
-// counted past without being interpreted. That bound is the point. This code
-// runs in the process holding the run's live GitHub credential, on a document
-// an agent composed from text the internet wrote, so the smaller its idea of
-// the grammar, the smaller the surface that hostile input can reach.
+// below a top-level selection set is skipped as balanced punctuation: argument
+// values, nested selections, directives, and every string in them are counted
+// past without being interpreted. That bound is the point. This code runs in the
+// process holding the run's live GitHub credential, on a document an agent
+// composed from text the internet wrote, so the smaller its idea of the grammar,
+// the smaller the surface that hostile input can reach.
 //
-// What it does need to be exact about is the field NAME, because an alias
-// (`x: mergePullRequest(...)`) is the one evasion the response side cannot
-// catch — a response keyed under `x` names nothing recognizable. So aliases are
-// resolved here, at the only place the real name is still visible.
+// Two constructions are read exactly rather than skipped, because each is a way
+// a request can perform an act under a name the reader would otherwise miss —
+// and a mutation nobody can name is one the audit log cannot attribute:
+//
+//   - ALIASES. `x: mergePullRequest(...)` answers under `x`, so the response
+//     side has nothing recognizable to key on. The request is the only place the
+//     real field name still exists.
+//   - FRAGMENTS. A top-level spread moves the field names into another
+//     definition, and an inline fragment moves them one brace deeper. Both are
+//     ordinary GraphQL that gh never emits and a hand-written call may. So a
+//     top-level spread is followed into its definition, an inline fragment's
+//     selections are read at the level they belong to, and what neither can
+//     account for stays honestly unresolved.
+//
+// Following a spread does NOT widen what is interpreted: a fragment's top level
+// is read exactly like an operation's — names only, everything under it skipped
+// — and resolution touches each definition at most once, so a document cannot
+// spend this process's time by nesting or by pointing fragments at each other.
 
 // gqlOperationType names the three operation keywords. Only mutations are
 // audited; the other two are recognized so a document that mixes them can still
@@ -33,28 +47,110 @@ const (
 // would only pad an audit row's detail.
 const maxTopLevelFields = 16
 
+// gqlSelection is one top-level selection set as the reader could see it.
+type gqlSelection struct {
+	// fields are the field names selected directly here, aliases resolved. An
+	// inline fragment's selections land here too: it introduces no new level of
+	// selection, only a type condition, so its fields are this level's fields.
+	fields []string
+	// spreads names the fragments spread at this level, for the resolver to
+	// follow.
+	spreads []string
+	// unresolvable marks a selection this reader will not account for, whatever
+	// else it found: an inline fragment conditioned on a type other than the
+	// mutation root. Collecting those fields would name an act from a branch the
+	// server never executes.
+	unresolvable bool
+}
+
 // gqlOperation is one operation definition as the reader could see it.
 type gqlOperation struct {
 	// typ is the operation keyword; an anonymous shorthand document is a query.
 	typ string
 	// name is the operation's name, empty when anonymous.
 	name string
-	// fields are the top-level selection's field names, aliases resolved.
-	fields []string
-	// spread marks a top-level fragment spread or inline fragment. The fields it
-	// would contribute live in another definition (or in none, for a spread of a
-	// fragment the document never defines), and this reader deliberately does not
-	// follow them — so an operation carrying one is never fully described by its
-	// fields alone.
-	spread bool
+	// sel is the operation's own top-level selection, before any spread it names
+	// has been followed.
+	sel gqlSelection
 }
 
-// parseOperations reads a document's top level. ok is false for anything it
-// cannot walk exactly: an unknown definition keyword, an unterminated string, a
-// selection set that never closes. A false here means "recorded as
-// unclassified", never "assumed harmless".
-func parseOperations(doc string) (ops []gqlOperation, ok bool) {
+// gqlFragment is one fragment definition: what it selects, and what it is
+// conditioned on.
+type gqlFragment struct {
+	// on is the type condition. Only a fragment on the mutation root can
+	// contribute fields to a mutation's top level; anything else spread there is
+	// a document the server rejects, and reading its fields would name an act
+	// that never ran.
+	on  string
+	sel gqlSelection
+}
+
+// gqlDocument is a parsed document: its operations, and the fragments they may
+// spread.
+type gqlDocument struct {
+	ops       []gqlOperation
+	fragments map[string]gqlFragment
+}
+
+// mutationRootType is the type a fragment must be conditioned on to contribute
+// fields to a mutation's top level. GitHub's schema uses the spec's default
+// name.
+const mutationRootType = "Mutation"
+
+// maxInlineFragmentDepth bounds how deep inline fragments may nest before the
+// reader stops accounting for them. Real documents use one level; the bound is
+// what keeps a crafted document from driving the read arbitrarily deep.
+const maxInlineFragmentDepth = 8
+
+// resolveTopLevelFields expands an operation's selection into the field names it
+// actually invokes, following each spread into its definition. resolved is false
+// when anything could not be accounted for — a spread naming a fragment the
+// document never defines, a fragment conditioned on the wrong type, an inline
+// fragment the reader declined — in which case the caller records the mutation
+// as unresolved rather than describing it from a partial reading.
+//
+// Each fragment is followed at most once. That is what makes the work linear in
+// the document rather than exponential in its nesting, and it is also why a
+// cycle terminates: the second visit is skipped, not recursed into.
+func resolveTopLevelFields(sel gqlSelection, fragments map[string]gqlFragment) (fields []string, resolved bool) {
+	visited := make(map[string]bool)
+	queue := []gqlSelection{sel}
+	resolved = true
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if current.unresolvable {
+			resolved = false
+		}
+		for _, field := range current.fields {
+			if len(fields) < maxTopLevelFields {
+				fields = append(fields, field)
+			}
+		}
+		for _, name := range current.spreads {
+			if visited[name] {
+				continue
+			}
+			visited[name] = true
+			fragment, defined := fragments[name]
+			if !defined || fragment.on != mutationRootType {
+				resolved = false
+				continue
+			}
+			queue = append(queue, fragment.sel)
+		}
+	}
+	return fields, resolved
+}
+
+// parseDocument reads a document's top level: its operations, and the fragments
+// they may spread. ok is false for anything it cannot walk exactly — an unknown
+// definition keyword, an unterminated string, a selection set that never closes.
+// A false here means "recorded as unclassified", never "assumed harmless".
+func parseDocument(doc string) (gqlDocument, bool) {
 	sc := &gqlScanner{src: doc}
+	parsed := gqlDocument{fragments: map[string]gqlFragment{}}
 	for {
 		tok, more := sc.next()
 		if !more {
@@ -65,27 +161,34 @@ func parseOperations(doc string) (ops []gqlOperation, ok bool) {
 			// Shorthand: a bare selection set is a query by the spec, which is
 			// exactly why the mutation keyword is a reliable prescreen.
 			if !sc.skipBalanced("{", "}") {
-				return nil, false
+				return gqlDocument{}, false
 			}
-			ops = append(ops, gqlOperation{typ: gqlOperationQuery})
+			parsed.ops = append(parsed.ops, gqlOperation{typ: gqlOperationQuery})
 		case tok.name("fragment"):
-			if !skipFragmentDefinition(sc) {
-				return nil, false
+			name, fragment, walked := parseFragmentDefinition(sc)
+			if !walked {
+				return gqlDocument{}, false
+			}
+			// A redefined fragment is an invalid document the server rejects.
+			// Keeping the first is arbitrary either way; what matters is that the
+			// operation referencing it still resolves to something recorded.
+			if _, seen := parsed.fragments[name]; !seen {
+				parsed.fragments[name] = fragment
 			}
 		case tok.name(gqlOperationQuery), tok.name(gqlOperationMutation), tok.name(gqlOperationSubscription):
-			op, parsed := parseOperation(sc, tok.text)
-			if !parsed {
-				return nil, false
+			op, walked := parseOperation(sc, tok.text)
+			if !walked {
+				return gqlDocument{}, false
 			}
-			ops = append(ops, op)
+			parsed.ops = append(parsed.ops, op)
 		default:
-			return nil, false
+			return gqlDocument{}, false
 		}
 	}
 	if sc.bad {
-		return nil, false
+		return gqlDocument{}, false
 	}
-	return ops, true
+	return parsed, true
 }
 
 // parseOperation reads one operation definition with its keyword already
@@ -110,33 +213,34 @@ func parseOperation(sc *gqlScanner, typ string) (gqlOperation, bool) {
 	if !ok || !tok.punct("{") {
 		return op, false
 	}
-	fields, spread, parsed := selectionFields(sc)
-	op.fields, op.spread = fields, spread
+	sel, parsed := selectionFields(sc, 0)
+	op.sel = sel
 	return op, parsed
 }
 
-// selectionFields collects the field names of a selection set whose opening
-// brace is already consumed, stopping at the matching close. Each selection is
-// read only as far as its name: arguments, directives, and any nested selection
-// are skipped whole.
-func selectionFields(sc *gqlScanner) (fields []string, spread bool, ok bool) {
+// selectionFields collects a selection set whose opening brace is already
+// consumed, stopping at the matching close. Each field is read only as far as
+// its name: arguments, directives, and any nested selection are skipped whole.
+//
+// depth counts inline fragments already entered, since those recurse at the same
+// selection level rather than under it.
+func selectionFields(sc *gqlScanner, depth int) (sel gqlSelection, ok bool) {
 	for {
 		tok, more := sc.next()
 		if !more {
-			return fields, spread, false
+			return sel, false
 		}
 		if tok.punct("}") {
-			return fields, spread, true
+			return sel, true
 		}
 		if tok.punct("...") {
-			spread = true
-			if !skipFragmentSelection(sc) {
-				return fields, spread, false
+			if !sel.readFragmentSelection(sc, depth) {
+				return sel, false
 			}
 			continue
 		}
 		if tok.kind != gqlKindName {
-			return fields, spread, false
+			return sel, false
 		}
 
 		field := tok.text
@@ -146,79 +250,117 @@ func selectionFields(sc *gqlScanner) (fields []string, spread bool, ok bool) {
 			sc.next()
 			real, more := sc.next()
 			if !more || real.kind != gqlKindName {
-				return fields, spread, false
+				return sel, false
 			}
 			field = real.text
 		}
-		if len(fields) < maxTopLevelFields {
-			fields = append(fields, field)
+		if len(sel.fields) < maxTopLevelFields {
+			sel.fields = append(sel.fields, field)
 		}
 
 		if next, more := sc.peek(); more && next.punct("(") {
 			sc.next()
 			if !sc.skipBalanced("(", ")") {
-				return fields, spread, false
+				return sel, false
 			}
 		}
 		if !skipDirectives(sc) {
-			return fields, spread, false
+			return sel, false
 		}
 		if next, more := sc.peek(); more && next.punct("{") {
 			sc.next()
 			if !sc.skipBalanced("{", "}") {
-				return fields, spread, false
+				return sel, false
 			}
 		}
 	}
 }
 
-// skipFragmentSelection consumes what follows a `...` inside a selection set —
-// a named spread, or an inline fragment with or without a type condition.
-func skipFragmentSelection(sc *gqlScanner) bool {
+// readFragmentSelection consumes what follows a `...` inside a selection set: a
+// named spread, which is recorded for the resolver to follow, or an inline
+// fragment, whose selections belong to THIS level and are read into it.
+//
+// An inline fragment conditioned on anything but the mutation root is marked
+// unresolvable rather than read. Its fields would name an act on a branch the
+// server never takes, and a wrong verb in an audit log is worse than an honest
+// refusal to name one.
+func (sel *gqlSelection) readFragmentSelection(sc *gqlScanner, depth int) bool {
+	condition := ""
 	if tok, ok := sc.peek(); ok && tok.name("on") {
 		sc.next()
 		cond, more := sc.next()
 		if !more || cond.kind != gqlKindName {
 			return false
 		}
+		condition = cond.text
 	} else if ok && tok.kind == gqlKindName {
+		// A named spread. Its fields live in a definition the resolver follows.
 		sc.next()
+		sel.spreads = append(sel.spreads, tok.text)
+		return skipDirectives(sc)
 	}
 	if !skipDirectives(sc) {
 		return false
 	}
-	if tok, ok := sc.peek(); ok && tok.punct("{") {
-		sc.next()
+	tok, ok := sc.peek()
+	if !ok || !tok.punct("{") {
+		// A type condition with no selection set: invalid, and nothing to read.
+		return true
+	}
+	sc.next()
+
+	if depth >= maxInlineFragmentDepth || (condition != "" && condition != mutationRootType) {
+		sel.unresolvable = true
 		return sc.skipBalanced("{", "}")
 	}
+	inner, walked := selectionFields(sc, depth+1)
+	if !walked {
+		return false
+	}
+	sel.merge(inner)
 	return true
 }
 
-// skipFragmentDefinition consumes a top-level `fragment Name on Type { … }`
-// with the keyword already read. Its selections are never collected: a
-// definition is not an operation, and this reader does not resolve the spreads
-// that would pull it into one.
-func skipFragmentDefinition(sc *gqlScanner) bool {
-	name, ok := sc.next()
-	if !ok || name.kind != gqlKindName {
-		return false
+// merge folds an inline fragment's selection into the level that contains it.
+func (sel *gqlSelection) merge(inner gqlSelection) {
+	for _, field := range inner.fields {
+		if len(sel.fields) < maxTopLevelFields {
+			sel.fields = append(sel.fields, field)
+		}
 	}
-	on, ok := sc.next()
-	if !ok || !on.name("on") {
-		return false
+	sel.spreads = append(sel.spreads, inner.spreads...)
+	sel.unresolvable = sel.unresolvable || inner.unresolvable
+}
+
+// parseFragmentDefinition reads a top-level `fragment Name on Type { … }` with
+// the keyword already consumed. Unlike an operation's, its selection is kept:
+// an operation that spreads it is invoking these fields, and following that
+// spread is the only way to name what such a request actually did.
+func parseFragmentDefinition(sc *gqlScanner) (name string, fragment gqlFragment, ok bool) {
+	ident, more := sc.next()
+	if !more || ident.kind != gqlKindName {
+		return "", fragment, false
 	}
-	cond, ok := sc.next()
-	if !ok || cond.kind != gqlKindName {
-		return false
+	on, more := sc.next()
+	if !more || !on.name("on") {
+		return "", fragment, false
+	}
+	cond, more := sc.next()
+	if !more || cond.kind != gqlKindName {
+		return "", fragment, false
 	}
 	if !skipDirectives(sc) {
-		return false
+		return "", fragment, false
 	}
-	brace, ok := sc.next()
-	if !ok || !brace.punct("{") {
-		return false
+	brace, more := sc.next()
+	if !more || !brace.punct("{") {
+		return "", fragment, false
 	}
-	return sc.skipBalanced("{", "}")
+	sel, walked := selectionFields(sc, 0)
+	if !walked {
+		return "", fragment, false
+	}
+	return ident.text, gqlFragment{on: cond.text, sel: sel}, true
 }
 
 // skipDirectives consumes any run of `@name(args)`. Directives can appear at

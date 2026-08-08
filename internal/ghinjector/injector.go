@@ -38,10 +38,13 @@
 // close, a merge, a review — is a POST to /api/graphql, indistinguishable on
 // the wire from `gh pr view`. Excluding it did not make those writes safe, only
 // unlogged. What bounds the cost is the shape of the read: the envelope's three
-// known members, the query document's top level, and a node id from the
-// variables. No argument value and no free text is interpreted (internal/ghwrite
-// gqldoc.go states what the reader refuses to look at), and a document that
-// does not parse is recorded as unreadable rather than guessed at.
+// known members, the top level of the operation that runs — including the
+// fragments it spreads into that top level, since moving a mutation behind one
+// would otherwise be the cheapest way to perform a write nothing could name —
+// and a node id from the variables. No argument value and no free text is
+// interpreted (internal/ghwrite gqldoc.go states what the reader refuses to look
+// at), and a document that does not parse is recorded as unreadable rather than
+// guessed at.
 //
 // Anything beyond that shape still has to re-derive the cost. REST request
 // bodies remain unread — a REST path already names its act — so the classifier

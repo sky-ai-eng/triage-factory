@@ -2,8 +2,10 @@ package ghwrite
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -220,31 +222,188 @@ func TestParseGraphQLRequest_OperationNameSelects(t *testing.T) {
 	})
 }
 
-// TestParseGraphQLRequest_FragmentsAreNotResolved pins the honest limit: a
-// top-level spread's fields live in a definition this reader does not follow,
-// so the mutation is recorded as unreadable rather than described from the
-// fields that happen to sit beside it.
-func TestParseGraphQLRequest_FragmentsAreNotResolved(t *testing.T) {
+// TestParseGraphQLRequest_FragmentsAreResolved closes the cheapest way to
+// perform a write the log cannot name. Moving a mutation behind a fragment is a
+// few hundred bytes of ordinary GraphQL that `gh` never emits and a hand-written
+// call may, and leaving it unresolved made an unnamed row free to obtain — a far
+// easier evasion than padding a request past the buffering cap.
+//
+// So a top-level spread is followed into its definition and an inline fragment's
+// selections are read at the level they belong to, and the act comes out named
+// either way.
+func TestParseGraphQLRequest_FragmentsAreResolved(t *testing.T) {
+	cases := map[string]struct {
+		query    string
+		mutation string
+		action   string
+	}{
+		"named spread": {
+			query: `mutation M($input:MergePullRequestInput!){...Merge}
+				fragment Merge on Mutation{mergePullRequest(input:$input){clientMutationId}}`,
+			mutation: "mergePullRequest",
+			action:   domain.ActionPRMerged,
+		},
+		"inline fragment": {
+			query:    `mutation M($input:MergePullRequestInput!){... on Mutation{mergePullRequest(input:$input){clientMutationId}}}`,
+			mutation: "mergePullRequest",
+			action:   domain.ActionPRMerged,
+		},
+		"inline fragment with no type condition": {
+			query:    `mutation M($input:MergePullRequestInput!){...{mergePullRequest(input:$input){clientMutationId}}}`,
+			mutation: "mergePullRequest",
+			action:   domain.ActionPRMerged,
+		},
+		"spread through a chain": {
+			query: `mutation M($input:MergePullRequestInput!){...A}
+				fragment A on Mutation{...B}
+				fragment B on Mutation{mergePullRequest(input:$input){clientMutationId}}`,
+			mutation: "mergePullRequest",
+			action:   domain.ActionPRMerged,
+		},
+		"aliased inside a fragment": {
+			query: `mutation M($input:MergePullRequestInput!){...Merge}
+				fragment Merge on Mutation{x:mergePullRequest(input:$input){clientMutationId}}`,
+			mutation: "mergePullRequest",
+			action:   domain.ActionPRMerged,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			facts, ok := ParseGraphQLRequest(envelope(t, tc.query, "", nil))
+			if !ok {
+				t.Fatal("a mutation behind a fragment produced no facts; it is still a write")
+			}
+			if facts.Unreadable != "" {
+				t.Fatalf("facts = %+v, want the spread followed rather than given up on", facts)
+			}
+			if got := facts.Mutation(); got != tc.mutation {
+				t.Errorf("mutation = %q, want %q", got, tc.mutation)
+			}
+			shape, classified := classifyGraphQL(facts)
+			if !classified || shape.Action != tc.action {
+				t.Errorf("classified %+v (ok=%v), want %q", shape, classified, tc.action)
+			}
+		})
+	}
+
+	t.Run("spread beside a field is two acts", func(t *testing.T) {
+		// Both are real, so both are named, and one row cannot claim to be
+		// either — the same rule a request naming two mutations directly gets.
+		query := `mutation M($input:AddCommentInput!){addComment(input:$input){clientMutationId} ...Extra}
+			fragment Extra on Mutation{mergePullRequest(input:$input){clientMutationId}}`
+		facts, ok := ParseGraphQLRequest(envelope(t, query, "", nil))
+		if !ok {
+			t.Fatal("no facts for a mutation selecting a field and a spread")
+		}
+		if len(facts.Fields) != 2 || facts.Fields[0] != "addComment" || facts.Fields[1] != "mergePullRequest" {
+			t.Errorf("fields = %v, want both acts named", facts.Fields)
+		}
+		if _, classified := classifyGraphQL(facts); classified {
+			t.Error("a two-act request classified as one")
+		}
+	})
+}
+
+// TestParseGraphQLRequest_FragmentsThatCannotBeFollowed pins the other half:
+// resolution that cannot complete degrades to the honest unresolved record it
+// always produced, never to a partial reading. A document that defeats the
+// resolver must not thereby get itself a smaller-sounding name.
+func TestParseGraphQLRequest_FragmentsThatCannotBeFollowed(t *testing.T) {
 	cases := map[string]string{
-		"named spread": `mutation M($input:MergePullRequestInput!){...Merge}
-			fragment Merge on Mutation{mergePullRequest(input:$input){clientMutationId}}`,
-		"inline fragment": `mutation M($input:MergePullRequestInput!){... on Mutation{mergePullRequest(input:$input){clientMutationId}}}`,
-		"spread beside a field": `mutation M($input:AddCommentInput!){addComment(input:$input){clientMutationId} ...Extra}
-			fragment Extra on Mutation{mergePullRequest(input:$input){clientMutationId}}`,
+		// The fragment is never defined, so the server rejects the document —
+		// but a mutation was reached for and the reach is what is recorded.
+		"undefined fragment": `mutation M{...Missing}`,
+		// Conditioned on a type that is not the mutation root: the server never
+		// takes this branch, so reading its fields would name an act that did
+		// not happen.
+		"fragment on the wrong type": `mutation M($input:MergePullRequestInput!){...Wrong}
+			fragment Wrong on Repository{mergePullRequest(input:$input){clientMutationId}}`,
+		"inline fragment on the wrong type": `mutation M($input:MergePullRequestInput!){... on Repository{mergePullRequest(input:$input){clientMutationId}}}`,
 	}
 	for name, query := range cases {
 		t.Run(name, func(t *testing.T) {
 			facts, ok := ParseGraphQLRequest(envelope(t, query, "", nil))
 			if !ok {
-				t.Fatal("a mutation with a top-level spread produced no facts; it is still a write")
+				t.Fatal("an unfollowable spread produced no facts; a write was still reached for")
 			}
 			if facts.Unreadable != GraphQLUnresolvedFragment {
 				t.Errorf("unreadable = %q, want %q", facts.Unreadable, GraphQLUnresolvedFragment)
 			}
 			if _, classified := classifyGraphQL(facts); classified {
-				t.Error("an unresolved document classified anyway; its fields were never fully read")
+				t.Error("a document the resolver could not finish classified anyway")
 			}
 		})
+	}
+}
+
+// TestParseGraphQLRequest_CyclicFragmentsTerminate covers the shape valid
+// GraphQL forbids and a hostile document is not bound by. The resolver visits
+// each definition once, so a cycle ends rather than being chased.
+//
+// It comes out labelled malformed rather than unresolved, and that is the more
+// accurate of the two: a document whose fragments form a cycle is invalid by the
+// spec and the server runs none of it, so "this document was not well-formed"
+// says more than "a spread went unfollowed". What matters either way is that no
+// verb is claimed for a request that never executed.
+func TestParseGraphQLRequest_CyclicFragmentsTerminate(t *testing.T) {
+	cycles := map[string]string{
+		"mutual": `mutation M{...A}
+			fragment A on Mutation{...B}
+			fragment B on Mutation{...A}`,
+		"self-referential": `mutation M{...A}
+			fragment A on Mutation{...A}`,
+	}
+	for name, query := range cycles {
+		t.Run(name, func(t *testing.T) {
+			done := make(chan GraphQLFacts, 1)
+			go func() {
+				facts, _ := ParseGraphQLRequest(envelope(t, query, "", nil))
+				done <- facts
+			}()
+			select {
+			case facts := <-done:
+				if facts.Unreadable != GraphQLMalformed {
+					t.Errorf("unreadable = %q, want %q for a document the spec rejects",
+						facts.Unreadable, GraphQLMalformed)
+				}
+				if _, classified := classifyGraphQL(facts); classified {
+					t.Error("a cyclic document classified; the server executes none of it")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("fragment resolution did not terminate on a cycle")
+			}
+		})
+	}
+}
+
+// TestParseGraphQLRequest_FragmentResolutionIsBounded is the reason following
+// spreads does not hand a hostile document a lever on this process. Each
+// definition is visited at most once, so a fan-out that would expand
+// exponentially under naive substitution stays linear in the document.
+func TestParseGraphQLRequest_FragmentResolutionIsBounded(t *testing.T) {
+	// Each fragment spreads the next twice: naive expansion is 2^depth.
+	const depth = 40
+	var doc strings.Builder
+	doc.WriteString("mutation M{...F0}")
+	for i := range depth {
+		fmt.Fprintf(&doc, " fragment F%d on Mutation{...F%d ...F%d}", i, i+1, i+1)
+	}
+	fmt.Fprintf(&doc, " fragment F%d on Mutation{mergePullRequest(input:{}){clientMutationId}}", depth)
+
+	done := make(chan GraphQLFacts, 1)
+	go func() {
+		facts, _ := ParseGraphQLRequest(envelope(t, doc.String(), "", nil))
+		done <- facts
+	}()
+	select {
+	case facts := <-done:
+		// Correctness rides along: visiting once still reaches the leaf, so the
+		// act at the bottom of the chain is named.
+		if got := facts.Mutation(); got != "mergePullRequest" {
+			t.Errorf("mutation = %q, want mergePullRequest through the fan-out", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fragment resolution did not terminate on a fan-out document")
 	}
 }
 
