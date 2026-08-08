@@ -109,7 +109,7 @@ func TestRefreshGitHub_EnrichesSnapshotlessStub(t *testing.T) {
 			}
 
 			pub := &recordingPublisher{}
-			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, org)
+			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 			client := ghclient.NewClient(srv.URL, "tok")
 
 			// repos=nil → no discovery; the stub is reached only via Phase-2.
@@ -197,7 +197,7 @@ func TestRefreshJira_EnrichesSnapshotlessStub(t *testing.T) {
 			}
 
 			pub := &recordingPublisher{}
-			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, org)
+			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 			client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 
 			if _, err := tr.RefreshJira(context.Background(), client, srv.URL, tc.projects); err != nil {
@@ -277,7 +277,7 @@ func TestRefreshGitHub_StubExitsSeedModeAndDiffsNextCycle(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	// Cycle 1: quiet seed — no events, and the snapshot now carries the node_id.

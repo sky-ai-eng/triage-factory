@@ -457,7 +457,16 @@ func (s *entityStore) UpdateSnapshotCASSystem(ctx context.Context, orgID, id, sn
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	res, err := s.q.ExecContext(ctx, `
+	return updateSnapshotCAS(ctx, s.q, id, snapshotJSON, expectedPollSeq)
+}
+
+// updateSnapshotCAS is the CAS statement itself, shared with the event
+// queue's EnqueueBatchWithSnapshotCAS — which runs it against its own
+// transaction so the snapshot advance and the transitions diffed against
+// it commit together. One copy of the SQL so the two callers cannot drift
+// on what "the CAS" means. The caller asserts the local org.
+func updateSnapshotCAS(ctx context.Context, q queryer, id, snapshotJSON string, expectedPollSeq int64) (bool, error) {
+	res, err := q.ExecContext(ctx, `
 		UPDATE entities
 		SET snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1
 		WHERE id = ? AND poll_seq = ?

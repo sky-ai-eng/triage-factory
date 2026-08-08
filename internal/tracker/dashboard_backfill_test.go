@@ -29,6 +29,13 @@ func (p *recordingPublisher) Publish(_ context.Context, evt domain.Event) {
 	p.events = append(p.events, evt)
 }
 
+// PublishPreEnqueued records the diff arms' post-commit fan-out. Same
+// list as Publish: a test asking "what did this cycle emit" doesn't care
+// which side of the durable write an event arrived on.
+func (p *recordingPublisher) PublishPreEnqueued(ctx context.Context, evt domain.Event) {
+	p.Publish(ctx, evt)
+}
+
 func (p *recordingPublisher) count() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -69,7 +76,7 @@ func TestBackfillDashboardHistory_SeedsTerminalEntity_NoEvents(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	n, err := tr.BackfillDashboardHistory(ctx, client, "octocat", []string{"octo/repo"})
@@ -135,7 +142,7 @@ func TestBackfillDashboardHistory_HonorsContextCancellation(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -207,6 +207,9 @@ type failingEnqueueQueue struct{ err error }
 func (q failingEnqueueQueue) Enqueue(context.Context, string, domain.Event, string) (string, error) {
 	return "", q.err
 }
+func (q failingEnqueueQueue) EnqueueBatchWithSnapshotCAS(context.Context, string, string, string, int64, []domain.Event, []string) (bool, []string, error) {
+	return false, nil, q.err
+}
 func (failingEnqueueQueue) ClaimNext(context.Context, string, int64) (*domain.QueuedEvent, error) {
 	return nil, nil
 }
@@ -320,5 +323,42 @@ func TestIngestor_UnregisteredSource_BusOnly(t *testing.T) {
 	}
 	if e := awaitEvent(t, got); e.EventType != "unregistered-fake:x" {
 		t.Errorf("bus event type = %q, want unregistered-fake:x", e.EventType)
+	}
+}
+
+// TestIngestor_PublishPreEnqueued_FansOutWithoutEnqueueing pins the
+// tracker's post-commit path: the event reaches the bus and the drainer is
+// woken, but nothing is written — the caller already committed the queue
+// row itself, inside the transaction that advanced the entity snapshot, so
+// a second enqueue here would be a duplicate row for the same event.
+func TestIngestor_PublishPreEnqueued_FansOutWithoutEnqueueing(t *testing.T) {
+	conn := newIngestTestDB(t)
+	entityID := seedIngestEntity(t, conn)
+	queue := sqlitestore.New(conn).EventQueue
+	bus, got := captureBus(t)
+
+	var wakes int32
+	ing := ingest.New(bus, queue, func() { atomic.AddInt32(&wakes, 1) })
+
+	eid := entityID
+	ing.PublishPreEnqueued(context.Background(), domain.Event{
+		ID:        "already-minted-id",
+		OrgID:     runmode.LocalDefaultOrgID,
+		EntityID:  &eid,
+		EventType: domain.EventGitHubPRCICheckFailed,
+	})
+
+	if n := countEventQueue(t, conn); n != 0 {
+		t.Errorf("event_queue has %d rows, want 0 — a pre-enqueued event must not be enqueued again", n)
+	}
+	e := awaitEvent(t, got)
+	if e.EventType != domain.EventGitHubPRCICheckFailed {
+		t.Errorf("bus event type = %q, want ci_check_failed", e.EventType)
+	}
+	if e.ID != "already-minted-id" {
+		t.Errorf("bus event id = %q, want the id the caller's enqueue minted", e.ID)
+	}
+	if n := atomic.LoadInt32(&wakes); n != 1 {
+		t.Errorf("wake called %d times, want 1 — the committed row still needs draining", n)
 	}
 }

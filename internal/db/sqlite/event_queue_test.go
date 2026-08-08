@@ -43,6 +43,9 @@ func TestEventQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.EventQueue.Enqueue(ctx, bogusOrg, domain.Event{}, ""); err == nil {
 		t.Errorf("Enqueue with non-local orgID should error")
 	}
+	if _, _, err := stores.EventQueue.EnqueueBatchWithSnapshotCAS(ctx, bogusOrg, "e", "{}", 0, nil, nil); err == nil {
+		t.Errorf("EnqueueBatchWithSnapshotCAS with non-local orgID should error")
+	}
 	if err := stores.EventQueue.MarkDone(ctx, bogusOrg, 1); err == nil {
 		t.Errorf("MarkDone with non-local orgID should error")
 	}
@@ -101,5 +104,28 @@ func newSQLiteEventQueueSeeder(conn *sql.DB) dbtest.EventQueueSeeder {
 			t.Fatalf("backdate claimed_at touched %d rows, want 1", n)
 		}
 	}
-	return dbtest.EventQueueSeeder{Entity: entity, BackdateClaim: backdateClaim}
+	entitySnapshot := func(t *testing.T, entityID string) (string, int64) {
+		t.Helper()
+		var snap sql.NullString
+		var seq int64
+		if err := conn.QueryRow(`SELECT snapshot_json, poll_seq FROM entities WHERE id = ?`, entityID).
+			Scan(&snap, &seq); err != nil {
+			t.Fatalf("read entity snapshot: %v", err)
+		}
+		return snap.String, seq
+	}
+	countEventRows := func(t *testing.T, entityID string) int {
+		t.Helper()
+		var n int
+		if err := conn.QueryRow(`SELECT COUNT(*) FROM events WHERE entity_id = ?`, entityID).Scan(&n); err != nil {
+			t.Fatalf("count events: %v", err)
+		}
+		return n
+	}
+	return dbtest.EventQueueSeeder{
+		Entity:         entity,
+		BackdateClaim:  backdateClaim,
+		EntitySnapshot: entitySnapshot,
+		CountEventRows: countEventRows,
+	}
 }

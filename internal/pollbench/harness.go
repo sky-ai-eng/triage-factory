@@ -102,6 +102,14 @@ func (p *countingPublisher) Publish(_ context.Context, evt domain.Event) {
 	p.mu.Unlock()
 }
 
+// PublishPreEnqueued is the tracker's post-commit fan-out for the events
+// it enqueued itself (the diff arms' snapshot-CAS emit). Counted the same
+// way — from the bench's perspective an emitted event is an emitted event,
+// whichever side of the durable write it arrives on.
+func (p *countingPublisher) PublishPreEnqueued(ctx context.Context, evt domain.Event) {
+	p.Publish(ctx, evt)
+}
+
 func (p *countingPublisher) snapshot() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -192,7 +200,7 @@ func Run(cfg RunConfig) (*Result, error) {
 		base:   srv.URL(),
 	}
 	mgr := poller.NewManager(database, pub,
-		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Orgs,
+		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, stores.Orgs,
 		stores.JiraStatusRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps,
 		resolver)
 

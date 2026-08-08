@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,19 @@ type EventQueueSeeder struct {
 	// gets it stamped by ClaimNext — and the staleness sweep can only be
 	// exercised against a claim old enough to be stale.
 	BackdateClaim func(t *testing.T, queueID int64, age time.Duration)
+
+	// EntitySnapshot reads an entity's stored snapshot_json and poll_seq.
+	// The CAS half of EnqueueBatchWithSnapshotCAS is a write to a table
+	// this store doesn't otherwise touch, so the assertions need a way to
+	// see it — both that a winner advanced it and that a loser left it
+	// exactly as it was.
+	EntitySnapshot func(t *testing.T, entityID string) (snapshotJSON string, pollSeq int64)
+
+	// CountEventRows counts the events audit rows for an entity. The queue
+	// row's event_id FK proves an audit row landed, but nothing proves the
+	// reverse — a rolled-back batch must leave neither, and only this can
+	// say so.
+	CountEventRows func(t *testing.T, entityID string) int
 }
 
 // conformanceExecutorID/conformanceBootEpoch are the fixed ownership
@@ -93,9 +107,25 @@ func enqueueTracedOn(t *testing.T, ctx context.Context, s db.EventQueueStore, or
 //   - traceparent round-trips through the claim: what the producer stamped
 //     is what the consumer reads back, and an untraced producer reads back
 //     empty rather than as anything a link could be built from.
+//   - EnqueueBatchWithSnapshotCAS is all-or-nothing across BOTH tables: a
+//     won CAS advances the snapshot and queues every event in the batch; a
+//     lost CAS writes nothing; a failed insert mid-batch rolls the snapshot
+//     back with it. An empty batch is a pure CAS.
 func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
+
+	// batchEvent builds one diffed-transition event for the batch cases.
+	// ci_check_failed is a seeded catalog entry, so the events.event_type
+	// FK is satisfied; dedupKey keeps sibling events in a batch distinct
+	// the way a real check-name discriminator does.
+	batchEvent := func(entityID, dedupKey string) domain.Event {
+		return domain.Event{
+			EntityID:  &entityID,
+			EventType: domain.EventGitHubPRCICheckFailed,
+			DedupKey:  dedupKey,
+		}
+	}
 
 	t.Run("Enqueue_persists_pending_row", func(t *testing.T) {
 		s, orgID, seed := mk(t)
@@ -141,6 +171,169 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		rows, _ := s.ListForEntity(ctx, orgID, entityID)
 		if len(rows) != 2 {
 			t.Errorf("expected 2 distinct queue rows, got %d", len(rows))
+		}
+	})
+
+	t.Run("EnqueueBatchWithSnapshotCAS_commits_snapshot_and_batch", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		_, pollSeq := seed.EntitySnapshot(t, entityID)
+
+		evts := []domain.Event{batchEvent(entityID, "build"), batchEvent(entityID, "lint")}
+		ok, ids, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"cas":"won"}`, pollSeq,
+			evts, []string{"00-11111111111111111111111111111111-2222222222222222-01", ""})
+		if err != nil {
+			t.Fatalf("EnqueueBatchWithSnapshotCAS: %v", err)
+		}
+		if !ok {
+			t.Fatal("ok = false against the entity's current poll_seq, want the CAS to win")
+		}
+		if len(ids) != len(evts) {
+			t.Fatalf("returned %d event ids for a batch of %d", len(ids), len(evts))
+		}
+		if ids[0] == ids[1] {
+			t.Errorf("batch minted the same event id twice: %q", ids[0])
+		}
+
+		snap, seq := seed.EntitySnapshot(t, entityID)
+		if !strings.Contains(snap, `"cas"`) {
+			t.Errorf("snapshot_json = %q, want the CAS'd write", snap)
+		}
+		if seq != pollSeq+1 {
+			t.Errorf("poll_seq = %d, want %d (bumped exactly once)", seq, pollSeq+1)
+		}
+
+		rows, err := s.ListForEntity(ctx, orgID, entityID)
+		if err != nil {
+			t.Fatalf("ListForEntity: %v", err)
+		}
+		if len(rows) != len(evts) {
+			t.Fatalf("expected %d queue rows, got %d", len(evts), len(rows))
+		}
+		for i, r := range rows {
+			if r.EventID != ids[i] {
+				t.Errorf("row %d event_id = %q, want %q (ids are parallel to the batch)", i, r.EventID, ids[i])
+			}
+			if r.Status != domain.QueuedEventStatusPending {
+				t.Errorf("row %d status = %q, want pending", i, r.Status)
+			}
+			if r.EntityID != entityID {
+				t.Errorf("row %d entity_id = %q, want %q", i, r.EntityID, entityID)
+			}
+		}
+		// traceparents are parallel too: the first event carries the
+		// producer's context, the second was handed "" and reads back empty.
+		if rows[0].Traceparent == "" || rows[1].Traceparent != "" {
+			t.Errorf("traceparents = [%q, %q], want the batch's parallel entries", rows[0].Traceparent, rows[1].Traceparent)
+		}
+		if n := seed.CountEventRows(t, entityID); n != len(evts) {
+			t.Errorf("events rows = %d, want %d (one audit row per queued event)", n, len(evts))
+		}
+	})
+
+	t.Run("EnqueueBatchWithSnapshotCAS_lost_cas_writes_nothing", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		_, pollSeq := seed.EntitySnapshot(t, entityID)
+
+		// The current holder's write lands first and bumps poll_seq.
+		if ok, _, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"winner":true}`, pollSeq, nil, nil); err != nil || !ok {
+			t.Fatalf("priming write: ok=%v err=%v", ok, err)
+		}
+		won, wonSeq := seed.EntitySnapshot(t, entityID)
+
+		// The straggler still holds the pre-bump poll_seq. Its CAS matches
+		// zero rows, so its whole batch — snapshot AND events — must be
+		// discarded rather than half-applied.
+		ok, ids, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"straggler":true}`, pollSeq,
+			[]domain.Event{batchEvent(entityID, "build"), batchEvent(entityID, "lint")}, nil)
+		if err != nil {
+			t.Fatalf("straggler batch: unexpected error %v", err)
+		}
+		if ok {
+			t.Fatal("ok = true for a stale poll_seq, want the CAS to lose")
+		}
+		if len(ids) != 0 {
+			t.Errorf("a losing batch returned %d event ids, want none", len(ids))
+		}
+
+		snap, seq := seed.EntitySnapshot(t, entityID)
+		if snap != won || seq != wonSeq {
+			t.Errorf("a lost CAS moved the snapshot: (%q, %d), want the winner's (%q, %d)", snap, seq, won, wonSeq)
+		}
+		if rows, err := s.ListForEntity(ctx, orgID, entityID); err != nil {
+			t.Fatalf("ListForEntity: %v", err)
+		} else if len(rows) != 0 {
+			t.Errorf("a losing writer wrote %d event_queue rows, want 0", len(rows))
+		}
+		if n := seed.CountEventRows(t, entityID); n != 0 {
+			t.Errorf("a losing writer wrote %d events rows, want 0", n)
+		}
+	})
+
+	t.Run("EnqueueBatchWithSnapshotCAS_failed_insert_rolls_back_the_cas", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		before, pollSeq := seed.EntitySnapshot(t, entityID)
+
+		// Second event carries an event_type no catalog row backs, so its
+		// audit-row insert violates the FK — an enqueue failure arriving
+		// mid-batch, after the CAS already matched. The whole transaction
+		// must roll back, snapshot included, or the next cycle would diff
+		// against a snapshot whose transitions were never recorded.
+		ok, _, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"doomed":true}`, pollSeq,
+			[]domain.Event{
+				batchEvent(entityID, "build"),
+				{EntityID: &entityID, EventType: "github:pr:no_such_event_type"},
+			}, nil)
+		if err == nil {
+			t.Fatal("a batch containing an unqueueable event should error")
+		}
+		if ok {
+			t.Error("ok = true for a batch that did not commit")
+		}
+
+		snap, seq := seed.EntitySnapshot(t, entityID)
+		if snap != before || seq != pollSeq {
+			t.Errorf("snapshot advanced despite the failed batch: (%q, %d), want (%q, %d)", snap, seq, before, pollSeq)
+		}
+		if rows, err := s.ListForEntity(ctx, orgID, entityID); err != nil {
+			t.Fatalf("ListForEntity: %v", err)
+		} else if len(rows) != 0 {
+			t.Errorf("failed batch left %d event_queue rows, want 0 (including the event that inserted cleanly)", len(rows))
+		}
+		if n := seed.CountEventRows(t, entityID); n != 0 {
+			t.Errorf("failed batch left %d events rows, want 0", n)
+		}
+	})
+
+	t.Run("EnqueueBatchWithSnapshotCAS_empty_batch_is_a_pure_cas", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		_, pollSeq := seed.EntitySnapshot(t, entityID)
+
+		// A cycle that refreshed an entity and diffed no transitions takes
+		// this same call, so it has to behave like the CAS it replaces.
+		ok, ids, err := s.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, `{"quiet":true}`, pollSeq, nil, nil)
+		if err != nil {
+			t.Fatalf("EnqueueBatchWithSnapshotCAS: %v", err)
+		}
+		if !ok {
+			t.Fatal("ok = false for an empty batch against the current poll_seq")
+		}
+		if len(ids) != 0 {
+			t.Errorf("empty batch returned %d event ids, want none", len(ids))
+		}
+
+		snap, seq := seed.EntitySnapshot(t, entityID)
+		if !strings.Contains(snap, `"quiet"`) || seq != pollSeq+1 {
+			t.Errorf("snapshot = (%q, %d), want the write landed at seq %d", snap, seq, pollSeq+1)
+		}
+		if rows, _ := s.ListForEntity(ctx, orgID, entityID); len(rows) != 0 {
+			t.Errorf("empty batch wrote %d queue rows, want 0", len(rows))
+		}
+		if n := seed.CountEventRows(t, entityID); n != 0 {
+			t.Errorf("empty batch wrote %d events rows, want 0", n)
 		}
 	})
 
