@@ -401,6 +401,41 @@ type TaskStore interface {
 	SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) error
 	BumpSystem(ctx context.Context, orgID, taskID, eventID string) error
 	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
+
+	// CloseWithRunCancelIntentSystem is the close the router performs: the
+	// task's terminal flip, its task_events audit row, and the durable STOP
+	// INTENT for the runs the close ends — one transaction, three tables.
+	//
+	// The intent is `cancel_requested` on the blueprint runs behind the task's
+	// then-active conversations, and it is transactional because the kill that
+	// follows the commit is not reachable twice. A close whose cascade failed
+	// afterwards leaves no active task for a replay to find, so nothing walks
+	// back to the runs; stamping here means the system cannot forget it meant
+	// to stop them. From the flag alone the rest finishes on its own — the
+	// claim gate refuses to drive a cancel-requested run, and the reaper's
+	// cancel arm finalizes it once its executor is gone.
+	//
+	// The returned run ids are that same then-active set, read inside the tx:
+	// every non-terminal conversation on the task, blueprint-parented or not,
+	// which is the selection the caller's post-commit stop cascade targets.
+	// Conversations with no blueprint parent are returned (they still get
+	// stopped) but stamp nothing — there is no blueprint to call off.
+	//
+	// closed reports whether THIS call performed the transition. False means
+	// the task was already terminal, and then nothing is stamped and no ids
+	// are returned: a task that closed earlier may since have had a run
+	// legitimately resumed under it (a finished blueprint's final step, which
+	// the resume ladder allows), and a replayed close must not reach back and
+	// kill work a user started after the fact. The audit row is written either
+	// way, matching CloseSystem+RecordEventSystem's INSERT-or-nothing shape.
+	//
+	// closeEventType and closingEventID travel as a pair: an event-driven
+	// close passes both, a non-event close (the terminal reconciler's) passes
+	// neither, and an empty closingEventID writes no audit row. Passing one
+	// without the other stamps a close_event_type no task_events row accounts
+	// for — not rejected here, but no caller does it.
+	CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeRunIDs []string, err error)
+
 	SetStatusSystem(ctx context.Context, orgID, taskID, status string) error
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
 

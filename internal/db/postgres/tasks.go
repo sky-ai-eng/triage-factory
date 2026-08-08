@@ -619,16 +619,93 @@ func (s *taskStore) CloseSystem(ctx context.Context, orgID, taskID, closeReason,
 }
 
 func closeTask(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType string) error {
+	_, err := closeTaskRows(ctx, q, orgID, taskID, closeReason, closeEventType)
+	return err
+}
+
+// closeTaskRows is closeTask reporting whether it actually transitioned a row.
+// The guard is the same one that makes a replayed close a no-op; the caller
+// that stamps stop intent needs to know which side of it this call landed on.
+func closeTaskRows(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType string) (int64, error) {
 	var cet any
 	if closeEventType != "" {
 		cet = closeEventType
 	}
-	_, err := q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		UPDATE tasks SET status = 'done', close_reason = $1, close_event_type = $2,
 		                 closed_at = NOW()
 		WHERE org_id = $3 AND id = $4 AND status NOT IN ('done', 'dismissed')
 	`, closeReason, cet, orgID, taskID)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
+	var (
+		closed bool
+		runIDs []string
+	)
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		n, err := closeTaskRows(ctx, q, orgID, taskID, closeReason, closeEventType)
+		if err != nil {
+			return fmt.Errorf("close task: %w", err)
+		}
+		closed = n > 0
+
+		if closingEventID != "" {
+			if err := recordTaskEvent(ctx, q, orgID, taskID, closingEventID, "closed"); err != nil {
+				return fmt.Errorf("record close audit: %w", err)
+			}
+		}
+		if !closed {
+			return nil
+		}
+
+		rows, err := q.QueryContext(ctx, `
+			SELECT id FROM conversations
+			WHERE org_id = $1 AND task_id = $2
+			  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
+		`, orgID, taskID)
+		if err != nil {
+			return fmt.Errorf("list active runs: %w", err)
+		}
+		// Drained and closed (scanIDs closes) before the UPDATE below rather
+		// than on a defer: both ride the one connection this tx holds, and an
+		// open cursor is the kind of thing a driver is entitled to refuse to
+		// write around.
+		if runIDs, err = scanIDs(rows, "conversations.id"); err != nil {
+			return fmt.Errorf("list active runs: %w", err)
+		}
+
+		// The same predicate one join further out, rather than a stamp keyed on
+		// the ids just scanned: the set is decided by the tx's own snapshot
+		// either way, and expressing it as SQL keeps the two from drifting.
+		// `status = 'running' AND cancel_requested = false` is
+		// RequestRunCancelSystem's guard verbatim — a blueprint that already
+		// finished is not a blueprint this close is entitled to call off.
+		if _, err := q.ExecContext(ctx, `
+			UPDATE blueprint_runs br SET cancel_requested = true
+			WHERE br.org_id = $1
+			  AND br.status = 'running'
+			  AND br.cancel_requested = false
+			  AND EXISTS (
+			      SELECT 1 FROM conversations c
+			      WHERE c.org_id = br.org_id
+			        AND c.task_id = $2
+			        AND c.blueprint_run_id = br.id
+			        AND (c.status IS NULL OR c.status NOT IN (`+runTerminalStatusesSQL+`))
+			  )
+		`, orgID, taskID); err != nil {
+			return fmt.Errorf("stamp run cancel intent: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, nil, err
+	}
+	return closed, runIDs, nil
 }
 
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) error {
