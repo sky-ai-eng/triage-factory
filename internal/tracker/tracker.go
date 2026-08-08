@@ -200,7 +200,7 @@ func (t *Tracker) emitWithSnapshotCAS(ctx context.Context, orgID, entityID, snap
 // mode there's one Tracker for the single synthetic tenant.
 //
 // ctx is the poll cycle's context, threaded through every GitHub API call this
-// cycle makes — open-PR listing, discovery, and batch refresh (TFAC-475).
+// cycle makes — open-PR listing, discovery, and batch refresh.
 // IMPORTANT: the root is currently context.Background() (poller.runGitHubCycle),
 // which is never cancelled, so an in-flight cycle still runs to completion
 // today; close(ghStop) only stops *new* cycles from starting. This threading is
@@ -216,8 +216,8 @@ func (t *Tracker) emitWithSnapshotCAS(ctx context.Context, orgID, entityID, snap
 // exception is Phase 3's snapshot+events commit (emitWithSnapshotCAS),
 // which takes the cycle ctx precisely because it CAN'T half-apply — see
 // its doc.
-// The third return, resumeFrom, is TFAC-571's round-robin resume point —
-// see discoverGitHub. It is only ever non-empty alongside a non-nil error
+// The third return, resumeFrom, is the round-robin resume point — see
+// discoverGitHub. It is only ever non-empty alongside a non-nil error
 // (the rate-limited discovery-interruption path); every other return path
 // (success, or a non-rate-limit failure in Phase 2/3 reached only once Phase
 // 1 already covered every entry in repos) reports "" — a full wrap of the
