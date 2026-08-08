@@ -181,6 +181,10 @@ func TestRefreshGitHub_FailedCommitSuppressesTransitions(t *testing.T) {
 				t.Errorf("queued event_id = %q but the bus event carries %q — the published copy must carry the id the enqueue minted",
 					rows[0].EventID, evts[0].ID)
 			}
+			if evts[0].OrgID != rows[0].OrgID {
+				t.Errorf("published event org = %q but its queue row committed under %q — the copy must name the tenant it was written under",
+					evts[0].OrgID, rows[0].OrgID)
+			}
 			if rows[0].Status != domain.QueuedEventStatusPending {
 				t.Errorf("queue row status = %q, want pending", rows[0].Status)
 			}

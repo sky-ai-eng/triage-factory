@@ -154,10 +154,15 @@ func (t *Tracker) emitWithSnapshotCAS(ctx context.Context, orgID, entityID, snap
 			traceparents[i] = tp
 		}
 	}
+	// Stamp the tenant these rows commit under — orgID, the argument the
+	// enqueue binds, not the tracker's field, and unconditionally rather
+	// than publish()'s "leave a pre-set OrgID intact". The two are the same
+	// value today; making the copy read from the same place the write does
+	// is what keeps them the same value. A bus event naming a tenant its
+	// own durable row doesn't belong to is a live update no subscriber
+	// could correlate.
 	for i := range evts {
-		if evts[i].OrgID == "" {
-			evts[i].OrgID = t.orgID
-		}
+		evts[i].OrgID = orgID
 	}
 
 	ok, ids, err := t.queue.EnqueueBatchWithSnapshotCAS(ctx, orgID, entityID, snapshotJSON, expectedPollSeq, evts, traceparents)
