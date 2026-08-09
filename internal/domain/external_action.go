@@ -125,9 +125,8 @@ const (
 
 	// Labels applied to or taken off a pull request or an issue — ordinary triage
 	// work, and one verb pair for both families because GitHub serves both
-	// through the issue endpoint. Defining the repository's label SET is a
-	// different thing (repo configuration, not triage) and deliberately has no
-	// verb here.
+	// through the issue endpoint. Changing which labels the repository OFFERS is
+	// a different act on a different object, and has its own verbs below.
 	ActionLabelAdded   = "label_added"
 	ActionLabelRemoved = "label_removed"
 
@@ -236,6 +235,47 @@ const (
 	// review itself, which is why it sits apart from the review lifecycle above.
 	ActionReviewRequested      = "review_requested"
 	ActionReviewRequestRemoved = "review_request_removed"
+
+	// Repository configuration: acts that change the repository itself rather
+	// than anything being triaged inside it. They are not triage work and an org
+	// may well decide an agent should never perform them — which is the reason
+	// they are named rather than left anonymous. That decision gets made by
+	// reading this log, and a log that files an archived repository under "some
+	// GraphQL write happened" cannot inform it.
+	//
+	// repo_edited spans every settings change the porcelain makes, including the
+	// topic replacement it sends to a separate endpoint: what varies between
+	// them lives in a request body nothing on this path reads, so one verb is
+	// all the URL supports and a finer one would be invented rather than
+	// observed.
+	ActionRepoCreated    = "repo_created"
+	ActionRepoEdited     = "repo_edited"
+	ActionRepoDeleted    = "repo_deleted"
+	ActionRepoForked     = "repo_forked"
+	ActionRepoArchived   = "repo_archived"
+	ActionRepoUnarchived = "repo_unarchived"
+
+	// The repository's label SET — which labels exist at all, not which ones are
+	// on a given issue. Deliberately worded apart from label_added/label_removed
+	// above: deleting a label definition strips it from every issue carrying it,
+	// so the two must never read as variants of one another in the log.
+	ActionLabelDefined           = "label_defined"
+	ActionLabelDefinitionEdited  = "label_definition_edited"
+	ActionLabelDefinitionDeleted = "label_definition_deleted"
+
+	// Releases. A published release is the most outward-facing thing on this
+	// list — it is what consumers of the repository actually fetch — so it is
+	// named even though the run that makes one is doing something well outside
+	// triage.
+	//
+	// Uploading and deleting a release's ASSETS have no verbs, because they are
+	// unobservable here rather than unnamed: gh follows the absolute upload url
+	// out of the release payload, which points at GitHub directly and never at
+	// this channel's base. Naming an act nothing can see would promise coverage
+	// that does not exist.
+	ActionReleaseCreated = "release_created"
+	ActionReleaseEdited  = "release_edited"
+	ActionReleaseDeleted = "release_deleted"
 
 	// Slack messages (TFAC-596). Reads (thread/channel history, file
 	// download) are writes-only-by-charter exclusions — see external_actions'

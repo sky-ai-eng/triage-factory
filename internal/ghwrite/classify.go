@@ -264,6 +264,27 @@ func ParseObjectURL(raw string) (owner, repo string, number int, ok bool) {
 	return parseObjectURL(raw, "pull", "issues")
 }
 
+// ParseRepoURL pulls owner and repo out of a repository's own html url, whose
+// whole path is the two segments. Separate from ParseObjectURL because a
+// repository is located by having nothing under it — there is no collection
+// segment to anchor on, so the shape is "exactly two segments" and a url with a
+// third is some object inside the repository rather than the repository itself.
+//
+// Only the repository-family mutations use it, and only for the two that create:
+// every other mutation names its target in the request, while a repository that
+// did not exist when the request was sent can be located only by what came back.
+func ParseRepoURL(raw string) (owner, repo string, ok bool) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", false
+	}
+	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(segs) != 2 || segs[0] == "" || segs[1] == "" {
+		return "", "", false
+	}
+	return segs[0], segs[1], true
+}
+
 // parseObjectURL scans for the first of the given collection segments with two
 // segments before it and a positive integer after it. Any fragment on the url
 // (a comment anchor, which is what several of these carry) is already split off
@@ -312,10 +333,26 @@ func splitRepoPath(path string) (owner, repo string, rest []string, ok bool) {
 // position, never by guessing which of two segments is numeric.
 func Classify(method, path string) (Shape, bool) {
 	owner, repo, rest, ok := splitRepoPath(path)
-	if !ok || len(rest) == 0 {
+	if !ok {
 		return Shape{}, false
 	}
 	s := Shape{Owner: owner, Repo: repo}
+
+	// The repository itself, with nothing addressed under it. Like its pull
+	// request and issue twins, the URL says only that the object changed — a
+	// rename, a visibility flip, and a description edit are one shape with
+	// different bodies — so the verb goes no finer than the path does.
+	if len(rest) == 0 {
+		switch method {
+		case "PATCH":
+			s.Action = domain.ActionRepoEdited
+		case "DELETE":
+			s.Action = domain.ActionRepoDeleted
+		default:
+			return Shape{}, false
+		}
+		return s, true
+	}
 
 	switch rest[0] {
 	case "pulls":
@@ -324,6 +361,29 @@ func Classify(method, path string) (Shape, bool) {
 		return classifyIssues(s, method, rest[1:])
 	case "actions":
 		return classifyActions(s, method, rest[1:])
+	case "labels":
+		return classifyLabels(s, method, rest[1:])
+	case "releases":
+		return classifyReleases(s, method, rest[1:])
+	case "forks":
+		if method == "POST" && len(rest) == 1 {
+			// The path names the repository that was COPIED, so that is the row's
+			// target — the act was performed on it. Where the copy landed is in
+			// the response and deliberately not lifted out: the fact worth
+			// recording is that the org credential forked this repository, and
+			// the copy is reachable from there.
+			s.Action = domain.ActionRepoForked
+			return s, true
+		}
+	case "topics":
+		if method == "PUT" && len(rest) == 1 {
+			// Topics are repository settings that happen to have their own
+			// endpoint, which `gh repo edit --add-topic` writes to alongside the
+			// ordinary settings mutation. Same act, so the same verb: a reader
+			// filtering for repository edits wants both.
+			s.Action = domain.ActionRepoEdited
+			return s, true
+		}
 	}
 	return Shape{}, false
 }
@@ -483,6 +543,80 @@ func classifyIssues(s Shape, method string, rest []string) (Shape, bool) {
 		s.Action = domain.ActionConversationLocked
 	case len(rest) == 2 && rest[1] == "lock" && method == "DELETE":
 		s.Action = domain.ActionConversationUnlocked
+	default:
+		return Shape{}, false
+	}
+	return s, true
+}
+
+// classifyLabels handles /repos/{o}/{r}/labels/... — the set of labels the
+// repository OFFERS. Not to be confused with the labels ON an issue, which
+// GitHub addresses under /issues and this package classifies there: the two
+// families read alike and are not alike at all, since deleting a definition
+// strips that label from every issue carrying it.
+//
+// GitHub addresses a label by its name rather than by a number, so the name is
+// what fills ExternalID. It arrives percent-encoded (labels may contain spaces
+// and colons) and is decoded for the row, because an audit log is read by people
+// and "needs%20triage" names the label less well than the label's own name does.
+func classifyLabels(s Shape, method string, rest []string) (Shape, bool) {
+	if len(rest) == 0 {
+		if method != "POST" {
+			return Shape{}, false
+		}
+		s.Action = domain.ActionLabelDefined
+		return s, true
+	}
+	if len(rest) != 1 || rest[0] == "" {
+		return Shape{}, false
+	}
+	name := rest[0]
+	if decoded, err := url.PathUnescape(name); err == nil {
+		name = decoded
+	}
+	s.ExternalID = name
+	switch method {
+	case "PATCH":
+		s.Action = domain.ActionLabelDefinitionEdited
+	case "DELETE":
+		s.Action = domain.ActionLabelDefinitionDeleted
+	default:
+		return Shape{}, false
+	}
+	return s, true
+}
+
+// classifyReleases handles /repos/{o}/{r}/releases/... — the release itself,
+// and nothing under it.
+//
+// A release's ASSETS are the deliberate omission. Their uploads go to an
+// absolute url the release payload carries, which addresses GitHub directly
+// rather than this channel's base, so the request never transits the injector
+// and no classification here could see it. Those paths fall to the fallback
+// like any unknown shape, which is the right outcome for a shape that will
+// almost never arrive: naming them would advertise coverage this channel
+// structurally does not have.
+func classifyReleases(s Shape, method string, rest []string) (Shape, bool) {
+	if len(rest) == 0 {
+		if method != "POST" {
+			return Shape{}, false
+		}
+		s.Action = domain.ActionReleaseCreated
+		s.CreatesObject = true
+		return s, true
+	}
+	if len(rest) != 1 {
+		return Shape{}, false
+	}
+	if id, err := strconv.Atoi(rest[0]); err != nil || id <= 0 {
+		return Shape{}, false
+	}
+	s.ExternalID = rest[0]
+	switch method {
+	case "PATCH":
+		s.Action = domain.ActionReleaseEdited
+	case "DELETE":
+		s.Action = domain.ActionReleaseDeleted
 	default:
 		return Shape{}, false
 	}

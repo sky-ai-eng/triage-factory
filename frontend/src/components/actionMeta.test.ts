@@ -61,6 +61,34 @@ describe('actionMeta', () => {
     }
   })
 
+  it('names the repository-configuration verbs', () => {
+    for (const action of [
+      'repo_created',
+      'repo_edited',
+      'repo_deleted',
+      'repo_forked',
+      'repo_archived',
+      'repo_unarchived',
+      'release_created',
+      'release_edited',
+      'release_deleted',
+      'label_defined',
+      'label_definition_edited',
+      'label_definition_deleted',
+    ]) {
+      expect(metaForAction(action)).not.toBe(FALLBACK_ACTION_META)
+    }
+  })
+
+  it('keeps a label definition apart from a label on an issue', () => {
+    // Deleting the definition strips that label from every issue carrying it,
+    // while label_removed takes one label off one issue. The two read alike at a
+    // glance, so the labels have to do the separating.
+    expect(metaForAction('label_definition_deleted').label).toBe('Label definition deleted')
+    expect(metaForAction('label_definition_deleted')).not.toBe(metaForAction('label_removed'))
+    expect(metaForAction('label_defined')).not.toBe(metaForAction('label_added'))
+  })
+
   it('surfaces slack in the Actions-lens provider filter', () => {
     expect(ACTION_PROVIDERS).toContain('slack')
   })

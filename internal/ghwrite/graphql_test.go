@@ -754,6 +754,10 @@ func TestGraphQLTable_ActionsAreKnownVocabulary(t *testing.T) {
 		domain.ActionIssuePinned:          true,
 		domain.ActionIssueUnpinned:        true,
 		domain.ActionIssueTransferred:     true,
+		domain.ActionRepoCreated:          true,
+		domain.ActionRepoEdited:           true,
+		domain.ActionRepoArchived:         true,
+		domain.ActionRepoUnarchived:       true,
 	}
 	for mutation, shape := range graphQLMutations {
 		if !known[shape.action] {
@@ -803,4 +807,109 @@ func FuzzParseGraphQLRequest(f *testing.F) {
 			t.Fatalf("classified %+v from facts naming no single act", shape)
 		}
 	})
+}
+
+// TestGraphQLRepositoryFamily covers the mutations `gh repo` sends. Each
+// document here is the one the pinned binary embeds — same operation name, same
+// selection set — so a table entry that stopped matching the porcelain fails
+// here rather than silently reaching the fallback in production.
+func TestGraphQLRepositoryFamily(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		field  string
+		action string
+	}{
+		{
+			name:   "repo create",
+			body:   `{"query":"mutation RepositoryCreate($input: CreateRepositoryInput!) {createRepository(input: $input) {repository {id name owner { login } url}}}","variables":{"input":{"name":"widgets","ownerId":"O_kwOrg","visibility":"PRIVATE"}}}`,
+			field:  "createRepository",
+			action: domain.ActionRepoCreated,
+		},
+		{
+			// A clone from a template makes a repository just as a create does,
+			// so it is the same act; the template it came from is not what the
+			// row is about.
+			name:   "template clone",
+			body:   `{"query":"mutation CloneTemplateRepository($input: CloneTemplateRepositoryInput!) {cloneTemplateRepository(input: $input) {repository {id name owner { login } url}}}","variables":{"input":{"name":"widgets","ownerId":"O_kwOrg","repositoryId":"R_kwTemplate"}}}`,
+			field:  "cloneTemplateRepository",
+			action: domain.ActionRepoCreated,
+		},
+		{
+			name:   "repo edit",
+			body:   `{"query":"mutation UpdateRepository($input: UpdateRepositoryInput!) {updateRepository(input: $input) {repository {id}}}","variables":{"input":{"repositoryId":"R_kwWidgets","description":"now with widgets"}}}`,
+			field:  "updateRepository",
+			action: domain.ActionRepoEdited,
+		},
+		{
+			name:   "repo archive",
+			body:   `{"query":"mutation ArchiveRepository($input: ArchiveRepositoryInput!) {archiveRepository(input: $input) {repository {id}}}","variables":{"input":{"repositoryId":"R_kwWidgets"}}}`,
+			field:  "archiveRepository",
+			action: domain.ActionRepoArchived,
+		},
+		{
+			name:   "repo unarchive",
+			body:   `{"query":"mutation UnarchiveRepository($input: UnarchiveRepositoryInput!) {unarchiveRepository(input: $input) {repository {id}}}","variables":{"input":{"repositoryId":"R_kwWidgets"}}}`,
+			field:  "unarchiveRepository",
+			action: domain.ActionRepoUnarchived,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			facts, ok := ParseGraphQLRequest([]byte(tc.body))
+			if !ok {
+				t.Fatal("the request was read as performing no write")
+			}
+			if facts.Mutation() != tc.field {
+				t.Fatalf("mutation = %q, want %q (unreadable=%q)", facts.Mutation(), tc.field, facts.Unreadable)
+			}
+			shape, classified := classifyGraphQL(facts)
+			if !classified {
+				t.Fatal("a mutation gh sends reached the fallback")
+			}
+			if shape.Action != tc.action {
+				t.Errorf("action = %q, want %q", shape.Action, tc.action)
+			}
+		})
+	}
+}
+
+// TestResolveGraphQL_RepoCreateIsLocatedByItsOwnURL pins the reason the repo
+// creates need a second url parser. Their input names the OWNER the repository
+// is made under — the repository itself did not exist when the request was
+// sent — so nothing in the request could locate it, and the response url is a
+// repository's, which the object parser is built to reject.
+func TestResolveGraphQL_RepoCreateIsLocatedByItsOwnURL(t *testing.T) {
+	shape, ok := Resolve(Observation{
+		Status:  200,
+		URL:     "https://github.com/acme/widgets",
+		GraphQL: &GraphQLFacts{Fields: []string{"createRepository"}},
+	})
+	if !ok {
+		t.Fatal("a repo create did not resolve")
+	}
+	if shape.Target() != "acme/widgets" {
+		t.Errorf("target = %q, want acme/widgets from the response url", shape.Target())
+	}
+
+	// An archive names its target in the request, so it never consults the url —
+	// and the node id stands as the target, as it does for every other mutation
+	// whose selection set returns no url.
+	archived, ok := Resolve(Observation{
+		Status:  200,
+		GraphQL: &GraphQLFacts{Fields: []string{"archiveRepository"}, Subject: "R_kwWidgets"},
+	})
+	if !ok || archived.Target() != "R_kwWidgets" || archived.ExternalID != "R_kwWidgets" {
+		t.Errorf("archive = %+v (ok=%v), want the node id as target and id", archived, ok)
+	}
+
+	// A create whose response could not be read keeps no target rather than
+	// inventing one: the request genuinely did not say which repository it made.
+	blind, ok := Resolve(Observation{
+		Status:  200,
+		GraphQL: &GraphQLFacts{Fields: []string{"createRepository"}},
+	})
+	if !ok || blind.Target() != "" {
+		t.Errorf("unresolved create = %+v (ok=%v), want an empty target", blind, ok)
+	}
 }

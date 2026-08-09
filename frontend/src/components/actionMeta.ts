@@ -1,8 +1,13 @@
 import {
+  Archive,
+  ArchiveRestore,
   CircleDot,
+  FolderGit2,
   GitBranch,
+  GitFork,
   GitPullRequest,
   Lock,
+  Package,
   LockOpen,
   MessageCircle,
   MessageSquare,
@@ -154,6 +159,77 @@ export const ACTION_META: Record<string, ActionMeta> = {
   },
   label_added: { icon: Tag, label: 'Label added', text: 'text-text-tertiary', tone: 'good' },
   label_removed: { icon: Tag, label: 'Label removed', text: 'text-text-tertiary', tone: 'neutral' },
+  // Changing which labels the repository offers, as opposed to putting one on
+  // an issue. The labels say "definition" out loud because the pair above reads
+  // almost identically at a glance, and a deleted definition takes the label off
+  // every issue that had it — the more consequential act of the two, hence
+  // 'problem' where label_removed is merely neutral.
+  label_defined: { icon: Tag, label: 'Label defined', text: 'text-text-tertiary', tone: 'good' },
+  label_definition_edited: {
+    icon: Tag,
+    label: 'Label definition edited',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
+  label_definition_deleted: {
+    icon: Tag,
+    label: 'Label definition deleted',
+    text: 'text-text-tertiary',
+    tone: 'problem',
+  },
+  // Repository configuration. One tint for the family, and the tone carries how
+  // much a reader should care: archiving makes a repository read-only and
+  // deleting it is unrecoverable, while a fork or a settings edit changes
+  // nothing anyone was relying on.
+  repo_created: {
+    icon: FolderGit2,
+    label: 'Repo created',
+    text: 'text-text-tertiary',
+    tone: 'good',
+  },
+  repo_edited: {
+    icon: FolderGit2,
+    label: 'Repo edited',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
+  repo_deleted: {
+    icon: FolderGit2,
+    label: 'Repo deleted',
+    text: 'text-text-tertiary',
+    tone: 'problem',
+  },
+  repo_forked: { icon: GitFork, label: 'Repo forked', text: 'text-text-tertiary', tone: 'neutral' },
+  repo_archived: {
+    icon: Archive,
+    label: 'Repo archived',
+    text: 'text-text-tertiary',
+    tone: 'attention',
+  },
+  repo_unarchived: {
+    icon: ArchiveRestore,
+    label: 'Repo unarchived',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
+  release_created: {
+    icon: Package,
+    label: 'Release created',
+    text: 'text-text-tertiary',
+    tone: 'good',
+  },
+  release_edited: {
+    icon: Package,
+    label: 'Release edited',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
+  release_deleted: {
+    icon: Package,
+    label: 'Release deleted',
+    text: 'text-text-tertiary',
+    tone: 'problem',
+  },
   conversation_locked: {
     icon: Lock,
     label: 'Conversation locked',

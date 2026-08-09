@@ -175,6 +175,22 @@ var graphQLMutations = map[string]graphQLShape{
 	// anyway — a branch with no commits has no page worth linking to.
 	"createLinkedBranch": {action: domain.ActionLinkedBranchCreated},
 
+	// The repository itself. gh performs these through GraphQL while performing
+	// the rest of the same command's settings work over REST, so the two halves
+	// of `gh repo edit` land under one verb from two transports — which is the
+	// property the shared table exists for.
+	//
+	// The creates resolve from their response because their input names the
+	// repository's OWNER, not the repository: it did not exist yet. Both make
+	// one, so both are repo_created — a clone from a template is not a lesser
+	// act than a create, and the template it came from is not something the
+	// audit row is for.
+	"createRepository":        {action: domain.ActionRepoCreated, creates: true, repoFromURL: true},
+	"cloneTemplateRepository": {action: domain.ActionRepoCreated, creates: true, repoFromURL: true},
+	"updateRepository":        {action: domain.ActionRepoEdited},
+	"archiveRepository":       {action: domain.ActionRepoArchived},
+	"unarchiveRepository":     {action: domain.ActionRepoUnarchived},
+
 	// TODO(TFAC-788): addPullRequestReviewThread is named in that ticket's gated
 	// set and is absent here because naming it needs a decision that ticket owns.
 	// No porcelain path emits it, and what it does is stage a thread on a PENDING
@@ -194,6 +210,12 @@ type graphQLShape struct {
 	// comment is the counter-case: its url points at the pull request it hangs
 	// off, whose number identifies that pull request and not the comment.
 	numberFromURL bool
+	// repoFromURL marks a create whose response url locates a REPOSITORY rather
+	// than an object inside one. It needs its own flag because the two url
+	// shapes are read by different parsers: everything else is addressed by a
+	// number under a collection, and a repository is addressed by having
+	// nothing under it at all.
+	repoFromURL bool
 }
 
 // ParseGraphQLRequest reads one GraphQL request body into the facts an audit
@@ -478,6 +500,16 @@ func resolveGraphQL(obs Observation) (Shape, bool) {
 	s, ok := classifyGraphQL(*obs.GraphQL)
 	if !ok {
 		return Shape{}, false
+	}
+	// A repository's url is read by its own parser and never by the object one:
+	// "…/octo/repo" would otherwise have to be told apart from "…/octo/repo/pull/7"
+	// by shape alone, and a table entry knows which of the two its mutation
+	// returns.
+	if graphQLMutations[obs.GraphQL.Mutation()].repoFromURL {
+		if owner, repo, parsed := ParseRepoURL(obs.URL); parsed {
+			s.Owner, s.Repo = owner, repo
+		}
+		return s, true
 	}
 	if owner, repo, number, parsed := ParseObjectURL(obs.URL); parsed {
 		s.Owner, s.Repo, s.Number = owner, repo, number

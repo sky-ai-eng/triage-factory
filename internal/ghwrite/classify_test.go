@@ -143,7 +143,7 @@ func TestClassify_TableShapes(t *testing.T) {
 
 		// Deliberately unclassified.
 		{name: "org-level endpoint", method: "POST", path: "/orgs/acme/repos", wantErr: true},
-		{name: "unmodeled repo endpoint", method: "PUT", path: "/repos/acme/widgets/topics", wantErr: true},
+		{name: "unmodeled repo endpoint", method: "POST", path: "/repos/acme/widgets/deployments", wantErr: true},
 		{name: "wrong method for the shape", method: "POST", path: "/repos/acme/widgets/pulls/841/merge", wantErr: true},
 		{name: "truncated path", method: "PATCH", path: "/repos/acme", wantErr: true},
 	}
@@ -424,5 +424,191 @@ func TestResolve_IssueCreateIsKeyedByItsNumber(t *testing.T) {
 	}
 	if shape.Target() != "octo/repo#19" || shape.ExternalID != "19" {
 		t.Errorf("shape = %+v, want octo/repo#19 keyed by 19", shape)
+	}
+}
+
+// TestClassify_RepositoryConfiguration covers the three families that change
+// the repository rather than anything being triaged inside it. They are named
+// for the reason the package doc gives: an org deciding whether an agent may
+// archive a repository decides it by reading this log, and a log that files an
+// archived repository under the opaque fallback cannot inform that decision.
+func TestClassify_RepositoryConfiguration(t *testing.T) {
+	cases := []struct {
+		name       string
+		method     string
+		path       string
+		action     string
+		target     string
+		externalID string
+		creates    bool
+	}{
+		{
+			name:   "repo settings edited",
+			method: "PATCH",
+			path:   "/repos/octo/repo",
+			action: domain.ActionRepoEdited,
+			target: "octo/repo",
+		},
+		{
+			// Same act, separate endpoint, so the same verb: `gh repo edit
+			// --add-topic` writes here alongside its settings mutation, and a
+			// reader filtering for repository edits wants both rows.
+			name:   "topics replaced",
+			method: "PUT",
+			path:   "/repos/octo/repo/topics",
+			action: domain.ActionRepoEdited,
+			target: "octo/repo",
+		},
+		{
+			name:   "repo deleted",
+			method: "DELETE",
+			path:   "/repos/octo/repo",
+			action: domain.ActionRepoDeleted,
+			target: "octo/repo",
+		},
+		{
+			// The target is the repository that was COPIED. Where the copy landed
+			// is in the response and deliberately not lifted out.
+			name:   "repo forked",
+			method: "POST",
+			path:   "/repos/octo/repo/forks",
+			action: domain.ActionRepoForked,
+			target: "octo/repo",
+		},
+		{
+			name:   "label defined",
+			method: "POST",
+			path:   "/repos/octo/repo/labels",
+			action: domain.ActionLabelDefined,
+			target: "octo/repo",
+		},
+		{
+			name:       "label definition edited",
+			method:     "PATCH",
+			path:       "/repos/octo/repo/labels/needs-triage",
+			action:     domain.ActionLabelDefinitionEdited,
+			target:     "octo/repo",
+			externalID: "needs-triage",
+		},
+		{
+			// A label name may contain spaces and colons, so the path carries it
+			// percent-encoded and the row carries the label's own name.
+			name:       "label definition deleted, name percent-encoded",
+			method:     "DELETE",
+			path:       "/repos/octo/repo/labels/needs%20triage",
+			action:     domain.ActionLabelDefinitionDeleted,
+			target:     "octo/repo",
+			externalID: "needs triage",
+		},
+		{
+			name:    "release created",
+			method:  "POST",
+			path:    "/repos/octo/repo/releases",
+			action:  domain.ActionReleaseCreated,
+			target:  "octo/repo",
+			creates: true,
+		},
+		{
+			name:       "release edited",
+			method:     "PATCH",
+			path:       "/repos/octo/repo/releases/1409",
+			action:     domain.ActionReleaseEdited,
+			target:     "octo/repo",
+			externalID: "1409",
+		},
+		{
+			name:       "release deleted",
+			method:     "DELETE",
+			path:       "/repos/octo/repo/releases/1409",
+			action:     domain.ActionReleaseDeleted,
+			target:     "octo/repo",
+			externalID: "1409",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shape, ok := Classify(tc.method, tc.path)
+			if !ok {
+				t.Fatalf("%s %s did not classify", tc.method, tc.path)
+			}
+			if shape.Action != tc.action {
+				t.Errorf("action = %q, want %q", shape.Action, tc.action)
+			}
+			if shape.Target() != tc.target {
+				t.Errorf("target = %q, want %q", shape.Target(), tc.target)
+			}
+			if shape.ExternalID != tc.externalID {
+				t.Errorf("externalID = %q, want %q", shape.ExternalID, tc.externalID)
+			}
+			if shape.CreatesObject != tc.creates {
+				t.Errorf("creates = %v, want %v", shape.CreatesObject, tc.creates)
+			}
+		})
+	}
+}
+
+// TestClassify_RepositoryConfigurationBoundaries pins where the new arms STOP.
+// Each of these is a real path an agent could send, and each must reach the
+// fallback rather than borrow a neighbouring verb — the whole value of the
+// table is that a named row means what it says.
+func TestClassify_RepositoryConfigurationBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+	}{
+		// A read of the repository is not an edit of it, and the repo-level arm
+		// is the one place a method check is all that separates the two.
+		{name: "repo read", method: "GET", path: "/repos/octo/repo"},
+		{name: "repo POST is not a shape gh sends", method: "POST", path: "/repos/octo/repo"},
+		// Release assets travel to an absolute upload url that never transits
+		// this channel. On the rare path that does arrive, an unnamed row is
+		// honest and a named one would advertise coverage that does not exist.
+		{
+			name:   "release asset deleted",
+			method: "DELETE",
+			path:   "/repos/octo/repo/releases/assets/55",
+		},
+		// The tag lookup is a GET, and its path shape is not a release id.
+		{
+			name:   "release by tag",
+			method: "PATCH",
+			path:   "/repos/octo/repo/releases/tags/v1.2.3",
+		},
+		// Deeper than the arm reads. Nothing under a label is addressable, and a
+		// fork collection has no members.
+		{name: "under a label", method: "DELETE", path: "/repos/octo/repo/labels/bug/extra"},
+		{name: "under forks", method: "POST", path: "/repos/octo/repo/forks/17"},
+		{name: "under topics", method: "PUT", path: "/repos/octo/repo/topics/17"},
+		// Repository creation posts outside the /repos/ namespace, so no repo
+		// coordinates exist to classify against. The porcelain sends the GraphQL
+		// mutation instead, which the GraphQL half names.
+		{name: "user repo create", method: "POST", path: "/user/repos"},
+		{name: "org repo create", method: "POST", path: "/orgs/acme/repos"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, ok := Classify(tc.method, tc.path); ok {
+				t.Errorf("Classify(%s %s) = %+v, want the fallback", tc.method, tc.path, got)
+			}
+		})
+	}
+}
+
+// TestParseRepoURL_TakesOnlyTheRepositoryItself pins the parser apart from
+// ParseObjectURL: a repository is located by having NOTHING under it, so a url
+// with a third segment names an object inside the repository and must not be
+// read as the repository.
+func TestParseRepoURL_TakesOnlyTheRepositoryItself(t *testing.T) {
+	owner, repo, ok := ParseRepoURL("https://github.com/octo/repo")
+	if !ok || owner != "octo" || repo != "repo" {
+		t.Errorf("ParseRepoURL = %q/%q ok=%v, want octo/repo", owner, repo, ok)
+	}
+	if _, _, ok := ParseRepoURL("https://github.com/octo/repo/pull/7"); ok {
+		t.Error("a pull request url parsed as a repository")
+	}
+	for _, raw := range []string{"", "https://github.com/octo", "https://github.com/", "://"} {
+		if _, _, ok := ParseRepoURL(raw); ok {
+			t.Errorf("ParseRepoURL(%q) parsed, want declined", raw)
+		}
 	}
 }
