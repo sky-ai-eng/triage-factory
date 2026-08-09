@@ -309,3 +309,19 @@ func TestNativeGHBlock_ClaimsNoInvisibility(t *testing.T) {
 		t.Error("the native gh block no longer refuses `gh pr review`")
 	}
 }
+
+// TestNativeGHBlock_RefusesRepoCreation pins the second refusal the harness
+// teaches. The gate refuses the command either way, but a model that learns the
+// boundary here spends no turn discovering it — and the prompt is the only half
+// of the pair the SDK runtime sees at all, since that runtime has no matcher.
+func TestNativeGHBlock_RefusesRepoCreation(t *testing.T) {
+	body := block(blockHarnessNativeGH)
+	if !strings.Contains(body, "`gh repo create` is refused") {
+		t.Error("the native gh block does not refuse `gh repo create`")
+	}
+	// The reason has to be the one that is actually true, since an agent that
+	// finds a stated rule false has reason to doubt the rest of the block.
+	if !strings.Contains(body, "before the run started") {
+		t.Error("the block refuses repo creation without giving the tracked-set reason")
+	}
+}

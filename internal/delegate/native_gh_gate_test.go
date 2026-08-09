@@ -46,6 +46,25 @@ func TestClassifyGHCommand(t *testing.T) {
 		{name: "a commenting review", command: `gh pr review 7 --comment --body "looks good"`, want: ghActionReview},
 		{name: "a review after a flag", command: "gh pr --repo owner/repo review 7 --request-changes -b nope", want: ghActionReview},
 
+		// --- repo create ---
+		{name: "the plain shape", command: "gh repo create acme/widgets --private", want: ghActionRepoCreate},
+		{name: "no arguments at all", command: "gh repo create", want: ghActionRepoCreate},
+		{name: "from a template", command: "gh repo create acme/widgets --template acme/tmpl", want: ghActionRepoCreate},
+		{name: "a flag between repo and create", command: "gh repo --json name create acme/widgets", want: ghActionRepoCreate},
+		{name: "after a cd", command: "cd /work && gh repo create acme/widgets", want: ghActionRepoCreate},
+		{name: "the REST collection under a user", command: "gh api -X POST /user/repos -f name=widgets", want: ghActionRepoCreate},
+		{name: "the REST collection under an org", command: "gh api --method POST orgs/acme/repos -f name=widgets", want: ghActionRepoCreate},
+		{
+			name:    "the mutation by hand",
+			command: `gh api graphql -f query='mutation{createRepository(input:{name:"w",ownerId:"O_1"}){repository{url}}}'`,
+			want:    ghActionRepoCreate,
+		},
+		{
+			name:    "the template clone by hand",
+			command: `gh api graphql -f query='mutation{cloneTemplateRepository(input:{name:"w"}){repository{url}}}'`,
+			want:    ghActionRepoCreate,
+		},
+
 		// --- negative space ---
 		{name: "empty", command: ""},
 		{name: "reading a PR", command: "gh pr view 7"},
@@ -69,6 +88,16 @@ func TestClassifyGHCommand(t *testing.T) {
 		{name: "a quoted mention of the command", command: `echo "gh pr merge 7" >> _tfac/notes.md`},
 		{name: "a grep for it", command: `grep -rn "gh pr review" .`},
 		{name: "a lookalike binary", command: "ghost pr merge 7"},
+		{name: "listing repos", command: "gh repo list acme"},
+		{name: "viewing a repo", command: "gh repo view acme/widgets"},
+		{name: "cloning a repo", command: "gh repo clone acme/widgets"},
+		{name: "reading the repo collection", command: "gh api /user/repos"},
+		{name: "reading an org's repo collection", command: "gh api orgs/acme/repos --paginate"},
+		{name: "an explicit GET with fields is still a read", command: "gh api -X GET /user/repos -f per_page=100"},
+		{name: "a repo-scoped path is not the collection", command: "gh api -X PATCH repos/acme/widgets -f description=x"},
+		{name: "an org repo path is not the org collection", command: "gh api repos/acme/widgets/topics"},
+		{name: "asking the schema about it", command: `gh api graphql -f query='query{__type(name:"CreateRepositoryInput"){name}}'`},
+		{name: "a quoted mention of the command", command: `echo "gh repo create acme/widgets" >> _tfac/notes.md`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -433,4 +462,43 @@ type staticGateCredentials struct{ provider agentloop.Provider }
 
 func (c staticGateCredentials) ForCall(context.Context) (schemas.ModelProvider, agentloop.Provider, func(), error) {
 	return inference.ProviderAnthropic, c.provider, nil, nil
+}
+
+// TestNativeGate_RepoCreateIsRefusedAndNeverDispatched: repository creation is
+// refused outright rather than questioned, because unlike a merge there is no
+// mission the runtime could be given that makes it right. The refusal names no
+// replacement verb — none exists — so this pins that it at least tells the
+// model what to do instead, which is stop and say so.
+func TestNativeGate_RepoCreateIsRefusedAndNeverDispatched(t *testing.T) {
+	h := newGateHarness(t, "r-gate-repo-create", "set up the new service", []gateTurn{
+		{calls: []domain.ToolCall{bashCall("c1", "gh repo create acme/widgets --private")}},
+		{calls: []domain.ToolCall{bashCall("c2", `gh api graphql -f query='mutation{createRepository(input:{name:"widgets",ownerId:"O_1"}){repository{url}}}'`)}},
+		{text: "Cannot create the repository; reporting instead."},
+	})
+
+	result := h.run()
+	if result.Kind != agentloop.ResultConcluded {
+		t.Fatalf("a refusal must not end the run: kind=%v err=%v", result.Kind, result.Err)
+	}
+	if got := h.host.commands(); len(got) != 0 {
+		t.Fatalf("a refused repo create reached the jail: %q", got)
+	}
+	results := h.toolResults()
+	if len(results) != 2 {
+		t.Fatalf("tool results = %d, want one refusal per attempt: %+v", len(results), results)
+	}
+	for i, r := range results {
+		if !r.IsError || r.Content != repoCreateRefusal {
+			t.Errorf("result %d = {is_error:%v, %q}, want the refusal in-band", i, r.IsError, r.Content)
+		}
+	}
+	// No verb is named because none exists, and the file's own rule is that a
+	// redirect to a command that does not exist is worse than none. What the
+	// text must still carry is the actionable alternative.
+	if strings.Contains(repoCreateRefusal, "tfac ") {
+		t.Error("the refusal names a tfac verb; there is no repo verb to name")
+	}
+	if !strings.Contains(repoCreateRefusal, "final message") {
+		t.Error("the refusal does not tell the model what to do instead")
+	}
 }

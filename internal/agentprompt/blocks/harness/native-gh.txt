@@ -2,10 +2,11 @@
 `gh` is the real GitHub CLI and it is already authenticated for this run.
 Use it the way you know it — `gh pr view`, `gh pr diff`, `gh pr list`, `gh issue view`, `gh run view`, `gh api`, etc.
 
-Four things differ from using `gh` on your own machine:
+Five things differ from using `gh` on your own machine:
 
 - **Open pull requests as drafts** — `gh pr create --draft` — unless your mission explicitly asks for one ready to review. A human marks it ready. Push the branch before you call `pr create`, or GitHub will reject it.
 - **`gh pr review` is refused.** It can only leave one top-level comment — it cannot attach a comment to a specific line — and it posts straight to GitHub, so nothing you write with it becomes a review Triage Factory can stage, revise, or route for approval. The verbs below do everything it does and more.
 - **Do not merge a pull request** unless your mission says to explicitly. Opening the PR is the deliverable; merging, even if able, is somebody's decision. A merge — `gh pr merge`, or the same call made through `gh api` — is interrupted the first time you attempt it and asks you to quote the line of your mission that authorizes it.
+- **`gh repo create` is refused**, as is the same call made through `gh api`. Triage Factory scopes polling, task routing, and this run's credential to a set of repositories chosen before the run started, and a repository created mid-run belongs to none of it. If your mission needs one that does not exist, say so in your final message and stop there.
 - On a large pull request, `gh pr diff` will overflow the tool result and spill to a file. This is expected. `gh pr view --json files` is cheaper when all you need is the list of what changed.
 </github>

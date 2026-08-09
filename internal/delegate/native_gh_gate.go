@@ -1,4 +1,4 @@
-// The native runtime's pre-dispatch gate on two `gh` commands.
+// The native runtime's pre-dispatch gate on three `gh` commands.
 //
 // The jail ships the real `gh` on a PATH-leading directory with a working
 // credential channel, so a delegated agent can merge a pull request or post a
@@ -11,7 +11,13 @@
 // what happened, not a substitute for the review object the product works on.)
 // Merging is something some missions are for, so refusing it would mean
 // deciding an intent the runtime cannot know: that gets a question, aimed at
-// the one artifact the model can actually check.
+// the one artifact the model can actually check. Creating a repository is
+// refused outright, and for a reason that is neither of those: the product is
+// built around knowing which repositories an agent works in BEFORE a run
+// starts — the tracked set is what scopes polling, task routing, and the
+// credential itself — so a repository that appears mid-run is outside every
+// structure meant to account for it. No mission needs one badly enough to
+// invent it unattended.
 //
 // These are accident controls, not security controls, and three limitations
 // come with them, accepted rather than worked around:
@@ -54,6 +60,18 @@ const reviewRefusal = "This command was not run. `gh pr review` cannot attach co
 	"and it posts straight to GitHub — no artifact, no approval path. " +
 	"Use `tfac gh pr start-review`, then `add-review-comment` for each finding, then `finalize-review`."
 
+// repoCreateRefusal answers `gh repo create` every time.
+//
+// It names no replacement command, unlike the review refusal, because there is
+// no `tfac exec gh repo` verb to name — and the file comment above holds that a
+// redirect to a command that does not exist is worse than no redirect at all.
+// So it redirects to the only thing that actually works: saying so, and letting
+// a human do it. When a verb exists, this text is where it gets named.
+const repoCreateRefusal = "This command was not run. Creating repositories is not something a run does — " +
+	"Triage Factory scopes polling, task routing, and this run's own credential to a set of repositories " +
+	"chosen before the run started, and a new one belongs to none of it. " +
+	"If your mission genuinely needs a repository that does not exist, say so in your final message and stop there."
+
 // mergeGateTag opens the merge question and is how a later call recognizes
 // that it has already been put. The identity lives in the tag, not in the
 // prose, so the wording can be changed without silently re-arming the question
@@ -86,6 +104,8 @@ func (s *Spawner) ghCommandGate(orgID, runID string) func(context.Context, domai
 		switch classifyGHCommand(bashCommand(call)) {
 		case ghActionReview:
 			return reviewRefusal
+		case ghActionRepoCreate:
+			return repoCreateRefusal
 		case ghActionMerge:
 			if s.mergeAlreadyQuestioned(ctx, orgID, runID) {
 				return ""
@@ -168,6 +188,7 @@ const (
 	ghActionNone ghAction = iota
 	ghActionMerge
 	ghActionReview
+	ghActionRepoCreate
 )
 
 // classifyGHCommand reports which gated action, if any, a shell command
@@ -214,12 +235,19 @@ func classifyGHSegment(words []string) ghAction {
 		if namesMergeEndpoint(args) {
 			return ghActionMerge
 		}
+		if namesRepoCreate(args) {
+			return ghActionRepoCreate
+		}
 	case chain[0] == "pr" && len(chain) > 1:
 		switch chain[1] {
 		case "merge":
 			return ghActionMerge
 		case "review":
 			return ghActionReview
+		}
+	case chain[0] == "repo" && len(chain) > 1:
+		if chain[1] == "create" {
+			return ghActionRepoCreate
 		}
 	}
 	return ghActionNone
@@ -267,6 +295,74 @@ func namesMergeEndpoint(words []string) bool {
 		}
 	}
 	return false
+}
+
+// repoCreateMutations are the two ways GitHub's schema makes a repository. Both
+// are what `gh repo create` itself sends, so a hand-written call is reaching for
+// the same act by a spelling the subcommand match does not see.
+var repoCreateMutations = []string{"createRepository", "cloneTemplateRepository"}
+
+// namesRepoCreate reports whether a `gh api` call reaches for repository
+// creation — the REST collections that mint one, or a GraphQL document naming a
+// mutation that does.
+//
+// Unlike the merge endpoint, both shapes here are addressed by paths that are
+// ALSO ordinary reads: `/user/repos` lists your repositories, and a schema query
+// may mention the mutation by name. Refusing those would make the control cost
+// more than it saves, so this half reads the method too — which for `gh api`
+// means the explicit flag when there is one and otherwise whether any field was
+// passed, since that is when gh switches from GET to POST on its own.
+//
+// Still substring-shaped and still evadable, which is what an accident control
+// is; see the file comment.
+func namesRepoCreate(words []string) bool {
+	if !apiPosts(words) {
+		return false
+	}
+	for _, w := range words {
+		for _, name := range repoCreateMutations {
+			if strings.Contains(w, name) {
+				return true
+			}
+		}
+		p, _, _ := strings.Cut(w, "?")
+		p, _, _ = strings.Cut(p, "#")
+		segs := strings.Split(strings.Trim(p, "/"), "/")
+		// /user/repos and /orgs/{org}/repos are the two collections that mint a
+		// repository. A repo-scoped path also ends in a segment pair, so the
+		// leading collection is what tells them apart.
+		if len(segs) == 2 && segs[0] == "user" && segs[1] == "repos" {
+			return true
+		}
+		if len(segs) == 3 && segs[0] == "orgs" && segs[2] == "repos" {
+			return true
+		}
+	}
+	return false
+}
+
+// apiPosts reports whether a `gh api` invocation issues a POST: the method flag
+// says so, or no method flag is present and a field was passed, which is when
+// gh posts of its own accord.
+//
+// An explicit non-POST method loses, even alongside fields — `-X GET -f q=x`
+// sends a GET with a query string, and refusing that would be refusing a read.
+func apiPosts(words []string) bool {
+	fields := false
+	for i, w := range words {
+		switch {
+		case w == "-X" || w == "--method":
+			return i+1 < len(words) && strings.EqualFold(words[i+1], "POST")
+		case strings.HasPrefix(w, "--method="):
+			return strings.EqualFold(strings.TrimPrefix(w, "--method="), "POST")
+		case strings.HasPrefix(w, "-X") && len(w) > 2:
+			return strings.EqualFold(w[2:], "POST")
+		case w == "-f", w == "-F", w == "--field", w == "--raw-field",
+			strings.HasPrefix(w, "--field="), strings.HasPrefix(w, "--raw-field="):
+			fields = true
+		}
+	}
+	return fields
 }
 
 // isEnvAssignment reports whether a word is a leading `NAME=VALUE` assignment
