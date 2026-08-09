@@ -786,19 +786,24 @@ func TestGHChannelWriteAction_GraphQLRefusalIsAnAttempt(t *testing.T) {
 // could be named: enough to go looking on GitHub, and an honest account of why
 // the name is missing.
 func TestGHChannelWriteAction_GraphQLFallback(t *testing.T) {
+	// The fixture deliberately names a mutation from outside the product's write
+	// surface. Coverage sweeps keep widening the table, and one that adopted this
+	// fixture's mutation would leave the test passing while asserting nothing —
+	// the failure mode is silent, so the guard is choosing a name no sweep will
+	// ever reach for.
 	t.Run("unknown mutation", func(t *testing.T) {
 		act := GHChannelWriteAction(ghwrite.Observation{
 			Method: "POST", Path: "/graphql", Status: 200,
 			GraphQL: &ghwrite.GraphQLFacts{
-				Operation: "Labels",
-				Fields:    []string{"addLabelsToLabelable"},
-				Subject:   "PR_kwLabel",
+				Operation: "Sponsor",
+				Fields:    []string{"createSponsorship"},
+				Subject:   "U_kwSponsor",
 			},
 		})
 		if act.Action != domain.ActionGraphQLWrite {
 			t.Errorf("action = %q, want graphql_write", act.Action)
 		}
-		if !strings.Contains(act.DetailJSON, `"mutations":["addLabelsToLabelable"]`) {
+		if !strings.Contains(act.DetailJSON, `"mutations":["createSponsorship"]`) {
 			t.Errorf("detail_json = %q, want the mutation name recorded verbatim", act.DetailJSON)
 		}
 		if strings.Contains(act.DetailJSON, "attempted") {

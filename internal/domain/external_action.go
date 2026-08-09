@@ -83,6 +83,24 @@ const (
 	ActionPRReopened         = "pr_reopened"
 	ActionPRMerged           = "pr_merged"
 
+	// Auto-merge is arming a merge, not performing one, which is why it is its
+	// own pair rather than a flavour of pr_merged: the run that enables it has
+	// merged nothing, and the merge it authorizes may land much later, triggered
+	// by a green check rather than by any agent.
+	ActionPRAutoMergeEnabled  = "pr_auto_merge_enabled"
+	ActionPRAutoMergeDisabled = "pr_auto_merge_disabled"
+
+	// Opening a pull request that undoes a merged one. Mechanically a pr_created
+	// and in intent something else entirely — undoing work that already landed is
+	// among the acts a reader most wants named — so it keeps its own verb, and
+	// its row addresses the revert that was opened.
+	ActionPRReverted = "pr_reverted"
+
+	// Merging the base branch into a pull request's own branch. It writes to the
+	// head ref under the org credential while changing nothing about the pull
+	// request itself, which is why it is audited separately from pr_edited.
+	ActionPRBranchUpdated = "pr_branch_updated"
+
 	// GitHub review lifecycle. The review *draft* is staged TF-side and makes no
 	// GitHub write until the atomic submit at approval (TFAC-494), so the only
 	// draft-lifecycle external-action is the submit — there is no review_started
@@ -105,6 +123,19 @@ const (
 	ActionReactionAdded   = "reaction_added"
 	ActionReactionRemoved = "reaction_removed"
 
+	// Labels applied to or taken off a pull request or an issue — ordinary triage
+	// work, and one verb pair for both families because GitHub serves both
+	// through the issue endpoint. Defining the repository's label SET is a
+	// different thing (repo configuration, not triage) and deliberately has no
+	// verb here.
+	ActionLabelAdded   = "label_added"
+	ActionLabelRemoved = "label_removed"
+
+	// Conversation locking, GitHub's own term for it. One pair for both families
+	// for the same reason as labels: a pull request's lock is an issue lock.
+	ActionConversationLocked   = "conversation_locked"
+	ActionConversationUnlocked = "conversation_unlocked"
+
 	// GitHub Actions. Both spend CI capacity under the org credential, which is
 	// why they are audited alongside the content writes.
 	ActionWorkflowDispatched   = "workflow_dispatched"
@@ -112,6 +143,11 @@ const (
 
 	// Git branch push (the one double-capture case — see BranchPushDedupKey).
 	ActionBranchPushed = "branch_pushed"
+
+	// A branch GitHub created and linked to an issue. Not a branch_pushed:
+	// nothing was pushed and no commit exists yet — what the row records is the
+	// link between an issue and the branch meant to implement it.
+	ActionLinkedBranchCreated = "linked_branch_created"
 
 	// Git branch push the upstream REFUSED (a non-2xx on the receive-pack
 	// POST — auth, protection, or outage; nothing landed). Recorded by the
@@ -185,6 +221,15 @@ const (
 	ActionIssueClosed        = "issue_closed"
 	ActionIssueReopened      = "issue_reopened"
 	ActionIssueDeleted       = "issue_deleted"
+
+	// The three that stay GitHub-shaped no matter which system the row's provider
+	// names: Jira has no pinned issues, and its equivalent of a transfer is a
+	// project move that reads as a field edit. They live here rather than in a
+	// parallel GitHub-only block because the family is organized by act, and a
+	// reader filtering for what happened to issues wants them in the same set.
+	ActionIssuePinned      = "issue_pinned"
+	ActionIssueUnpinned    = "issue_unpinned"
+	ActionIssueTransferred = "issue_transferred"
 
 	// GitHub review requests. Asking someone to review is an org-credential
 	// write that reaches a human, so it belongs in the log by name; it is not a

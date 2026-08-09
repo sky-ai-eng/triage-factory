@@ -111,7 +111,7 @@ func (f GraphQLFacts) Mutation() string {
 // anything absent records under the GraphQL fallback rather than being guessed
 // at, exactly as an unrecognized REST path does.
 //
-// The two creates carry provenance for the same reason their REST twins do:
+// The creates carry provenance for the same reason their REST twins do:
 // whether an autonomously-opened pull request or a submitted review came
 // through the governed verb path or a raw call is the question the policy work
 // downstream reads this log to answer. The rest deliberately do not, so their
@@ -128,22 +128,59 @@ var graphQLMutations = map[string]graphQLShape{
 	"markPullRequestReadyForReview": {action: domain.ActionPRMarkedReady},
 	"convertPullRequestToDraft":     {action: domain.ActionPRConvertedToDraft},
 	"addPullRequestReview":          {action: domain.ActionReviewSubmitted, provenance: true},
-	"submitPullRequestReview":       {action: domain.ActionReviewSubmitted, provenance: true},
 	"addReaction":                   {action: domain.ActionReactionAdded},
 	"removeReaction":                {action: domain.ActionReactionRemoved},
 
+	// The porcelain sends addPullRequestReview for every review flavour —
+	// approve, request-changes, and comment alike — and never this one, so it is
+	// here for hand-written calls only. It maps to the same act because it IS the
+	// same act: a review reaching GitHub.
+	"submitPullRequestReview": {action: domain.ActionReviewSubmitted, provenance: true},
+
+	// Arming a merge rather than performing one. A distinct mutation, not a
+	// variant of mergePullRequest, so gating one has never implied the other.
+	"enablePullRequestAutoMerge":  {action: domain.ActionPRAutoMergeEnabled},
+	"disablePullRequestAutoMerge": {action: domain.ActionPRAutoMergeDisabled},
+
+	// A revert opens a pull request, so it resolves like one — from the url in
+	// its own payload. gh selects only the new pull request's url, which is what
+	// makes that resolution unambiguous; a hand-written selection that also asked
+	// for the reverted PR's url would leave the two indistinguishable here, and
+	// the row would name whichever the scan reached first.
+	"revertPullRequest": {action: domain.ActionPRReverted, creates: true, provenance: true, numberFromURL: true},
+
+	"updatePullRequestBranch": {action: domain.ActionPRBranchUpdated},
+
+	// Labels and locks address a pull request and an issue through one mutation
+	// each, which is why their actions are one pair each rather than two.
+	"addLabelsToLabelable":      {action: domain.ActionLabelAdded},
+	"removeLabelsFromLabelable": {action: domain.ActionLabelRemoved},
+	"lockLockable":              {action: domain.ActionConversationLocked},
+	"unlockLockable":            {action: domain.ActionConversationUnlocked},
+
 	// The issue family. GitHub serves issue comments through addComment above,
 	// so only the lifecycle needs naming here.
-	"createIssue": {action: domain.ActionIssueCreated, creates: true, numberFromURL: true},
-	"updateIssue": {action: domain.ActionIssueUpdated},
-	"closeIssue":  {action: domain.ActionIssueClosed},
-	"reopenIssue": {action: domain.ActionIssueReopened},
-	"deleteIssue": {action: domain.ActionIssueDeleted},
+	"createIssue":   {action: domain.ActionIssueCreated, creates: true, numberFromURL: true},
+	"updateIssue":   {action: domain.ActionIssueUpdated},
+	"closeIssue":    {action: domain.ActionIssueClosed},
+	"reopenIssue":   {action: domain.ActionIssueReopened},
+	"deleteIssue":   {action: domain.ActionIssueDeleted},
+	"pinIssue":      {action: domain.ActionIssuePinned},
+	"unpinIssue":    {action: domain.ActionIssueUnpinned},
+	"transferIssue": {action: domain.ActionIssueTransferred},
 
-	// TODO(TFAC-788): enablePullRequestAutoMerge / disablePullRequestAutoMerge
-	// and addPullRequestReviewThread are named in that ticket's gated set and
-	// belong in this table before the gate can key on them. They are absent here
-	// because no pinned-gh porcelain path was observed emitting them.
+	// It creates a branch, but its payload carries a ref name rather than a url,
+	// so there is nothing for a create's response parse to find. The row keeps
+	// the issue the branch was linked to, which is the more useful coordinate
+	// anyway — a branch with no commits has no page worth linking to.
+	"createLinkedBranch": {action: domain.ActionLinkedBranchCreated},
+
+	// TODO(TFAC-788): addPullRequestReviewThread is named in that ticket's gated
+	// set and is absent here because naming it needs a decision that ticket owns.
+	// No porcelain path emits it, and what it does is stage a thread on a PENDING
+	// review — nothing is published until the review is submitted — so every verb
+	// above would overstate it, and inventing one would assert an act that has
+	// not happened yet.
 }
 
 // graphQLShape is one table entry: the act, and the flags the REST shapes carry
@@ -273,6 +310,11 @@ var graphQLSubjectKeys = []string{
 	"pullRequestId",
 	"subjectId",
 	"issueId",
+	// The interface-typed inputs: a label or a lock names its target by the
+	// interface it satisfies rather than by what it is, so these are the only
+	// thing those mutations disclose about the object acted on.
+	"labelableId",
+	"lockableId",
 	"commentId",
 	"repositoryId",
 	"id",

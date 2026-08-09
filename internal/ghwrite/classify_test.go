@@ -341,6 +341,52 @@ func TestClassify_IssuesAndReviewRequests(t *testing.T) {
 			action: domain.ActionReviewRequestRemoved,
 			target: "octo/repo#42",
 		},
+		// The REST twins of the label and lock mutations. A pull request's labels
+		// and lock are addressed under /issues, so these paths carry a PR number
+		// as readily as an issue's — the two are indistinguishable here, and
+		// nothing downstream needs them to be.
+		{
+			name:   "label applied",
+			method: "POST",
+			path:   "/repos/octo/repo/issues/7/labels",
+			action: domain.ActionLabelAdded,
+			target: "octo/repo#7",
+		},
+		{
+			name:   "label removed by name",
+			method: "DELETE",
+			path:   "/repos/octo/repo/issues/7/labels/needs-triage",
+			action: domain.ActionLabelRemoved,
+			target: "octo/repo#7",
+		},
+		{
+			name:   "every label removed at once",
+			method: "DELETE",
+			path:   "/repos/octo/repo/issues/7/labels",
+			action: domain.ActionLabelRemoved,
+			target: "octo/repo#7",
+		},
+		{
+			name:   "conversation locked",
+			method: "PUT",
+			path:   "/repos/octo/repo/issues/7/lock",
+			action: domain.ActionConversationLocked,
+			target: "octo/repo#7",
+		},
+		{
+			name:   "conversation unlocked",
+			method: "DELETE",
+			path:   "/repos/octo/repo/issues/7/lock",
+			action: domain.ActionConversationUnlocked,
+			target: "octo/repo#7",
+		},
+		{
+			name:   "pr branch updated",
+			method: "PUT",
+			path:   "/repos/octo/repo/pulls/42/update-branch",
+			action: domain.ActionPRBranchUpdated,
+			target: "octo/repo#42",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -51,6 +51,22 @@
 // deliberately cannot tell a PATCH that edits a pull request from one that
 // closes it.
 //
+// # What this channel cannot see at all
+//
+// GH_HOST redirects the base URL, so it reaches only the requests gh BUILDS
+// from that base. A command that takes an absolute URL out of a response body
+// and follows it — the release asset commands do this, using the upload_url and
+// the release object's own url — leaves this channel entirely, and neither its
+// act nor its outcome can be recorded here. Naming those shapes in the write
+// classifier would therefore be a promise it cannot keep.
+//
+// In the sandbox they do not merely go unlogged, they fail: the jail has no
+// route to those hosts and no keychain to authenticate them with, so the escape
+// is a fail-closed one. It is worth knowing about anyway, because "the injector
+// observes the agent's GitHub writes" is true only of the traffic the injector
+// is in front of, and a probe run outside the jail — on a host with a real
+// keyring — will see such a command succeed with nothing recorded.
+//
 // # TLS, but no interception
 //
 // gh forces https to any GH_HOST and rejects scheme prefixes, so the injector

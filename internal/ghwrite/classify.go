@@ -387,6 +387,8 @@ func classifyPulls(s Shape, method string, rest []string) (Shape, bool) {
 		s.Action = domain.ActionPREdited
 	case len(rest) == 2 && rest[1] == "merge" && method == "PUT":
 		s.Action = domain.ActionPRMerged
+	case len(rest) == 2 && rest[1] == "update-branch" && method == "PUT":
+		s.Action = domain.ActionPRBranchUpdated
 	case len(rest) == 2 && rest[1] == "reviews" && method == "POST":
 		// Also the only way inline review comments reach GitHub by hand: they
 		// ride the review's own body.
@@ -414,9 +416,12 @@ func classifyPulls(s Shape, method string, rest []string) (Shape, bool) {
 	return s, true
 }
 
-// classifyIssues handles /repos/{o}/{r}/issues/... — top-level comments and
-// reactions. GitHub serves a pull request's conversation comments here too, so
-// this covers `gh api` posting on a PR as well as on an issue.
+// classifyIssues handles /repos/{o}/{r}/issues/... — the issue itself, its
+// top-level comments and reactions, and the two things GitHub models on the
+// issue even when they are performed on a pull request: its labels and its
+// conversation lock. That last part is why this function covers more of the
+// pull-request surface than its name suggests — a PR's labels and lock are
+// addressed here, and only its diff-level objects live under /pulls.
 func classifyIssues(s Shape, method string, rest []string) (Shape, bool) {
 	// The collection itself: opening an issue.
 	if len(rest) == 0 {
@@ -467,6 +472,17 @@ func classifyIssues(s Shape, method string, rest []string) (Shape, bool) {
 		s.Action = domain.ActionReactionAdded
 	case len(rest) == 3 && rest[1] == "reactions" && method == "DELETE":
 		s.Action = domain.ActionReactionRemoved
+	case len(rest) == 2 && rest[1] == "labels" && method == "POST":
+		s.Action = domain.ActionLabelAdded
+	case (len(rest) == 2 || len(rest) == 3) && rest[1] == "labels" && method == "DELETE":
+		// One label by name, or the whole set at once. Both are "labels came off
+		// this issue", and the label is a parameter of the act rather than the
+		// object it was performed on — which is why neither form fills ExternalID.
+		s.Action = domain.ActionLabelRemoved
+	case len(rest) == 2 && rest[1] == "lock" && method == "PUT":
+		s.Action = domain.ActionConversationLocked
+	case len(rest) == 2 && rest[1] == "lock" && method == "DELETE":
+		s.Action = domain.ActionConversationUnlocked
 	default:
 		return Shape{}, false
 	}

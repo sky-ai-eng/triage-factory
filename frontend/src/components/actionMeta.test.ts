@@ -34,6 +34,33 @@ describe('actionMeta', () => {
     expect(metaForAction('graphql_write')).not.toBe(metaForAction('gh_channel_write'))
   })
 
+  it('keeps arming a merge visually apart from performing one', () => {
+    // The backend records these as different acts because they are: enabling
+    // auto-merge merges nothing, and what lands later lands with no agent
+    // present. A shared label here would undo that distinction at the only
+    // place a person actually reads it.
+    expect(metaForAction('pr_auto_merge_enabled').label).toBe('Auto-merge enabled')
+    expect(metaForAction('pr_auto_merge_enabled')).not.toBe(metaForAction('pr_merged'))
+    expect(metaForAction('pr_auto_merge_disabled')).not.toBe(metaForAction('pr_auto_merge_enabled'))
+  })
+
+  it('names every verb the gh-channel coverage sweep added', () => {
+    for (const action of [
+      'pr_reverted',
+      'pr_branch_updated',
+      'label_added',
+      'label_removed',
+      'conversation_locked',
+      'conversation_unlocked',
+      'issue_pinned',
+      'issue_unpinned',
+      'issue_transferred',
+      'linked_branch_created',
+    ]) {
+      expect(metaForAction(action)).not.toBe(FALLBACK_ACTION_META)
+    }
+  })
+
   it('surfaces slack in the Actions-lens provider filter', () => {
     expect(ACTION_PROVIDERS).toContain('slack')
   })

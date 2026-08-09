@@ -116,6 +116,80 @@ func TestParseGraphQLRequest_GHPorcelain(t *testing.T) {
 			action:    domain.ActionPRMarkedReady,
 			subject:   "PR_kwReady",
 		},
+		{
+			// The distinct mutation `pr merge --auto` sends. It is emphatically
+			// not a merge carrying an auto flag, which is why arming a merge and
+			// performing one are separate rows: at this point nothing has merged,
+			// and what lands later lands without an agent present.
+			name:      "pr merge --auto",
+			query:     `mutation($input:EnablePullRequestAutoMergeInput!){enablePullRequestAutoMerge(input:$input){clientMutationId}}`,
+			variables: input(map[string]any{"pullRequestId": "PR_kwAuto"}),
+			mutation:  "enablePullRequestAutoMerge",
+			action:    domain.ActionPRAutoMergeEnabled,
+			subject:   "PR_kwAuto",
+		},
+		{
+			name:      "pr merge --disable-auto",
+			query:     `mutation($input:DisablePullRequestAutoMergeInput!){disablePullRequestAutoMerge(input:$input){clientMutationId}}`,
+			variables: input(map[string]any{"pullRequestId": "PR_kwAutoOff"}),
+			mutation:  "disablePullRequestAutoMerge",
+			action:    domain.ActionPRAutoMergeDisabled,
+			subject:   "PR_kwAutoOff",
+		},
+		{
+			// The interface-typed inputs: these name their target by the interface
+			// it satisfies, so without those keys the row would have no target at
+			// all — a labelling with nothing to say what was labelled.
+			name:      "pr edit --add-label",
+			query:     `mutation($input:AddLabelsToLabelableInput!){addLabelsToLabelable(input:$input){clientMutationId}}`,
+			variables: input(map[string]any{"labelableId": "PR_kwLabel", "labelIds": []string{"LA_kw1"}}),
+			mutation:  "addLabelsToLabelable",
+			action:    domain.ActionLabelAdded,
+			subject:   "PR_kwLabel",
+		},
+		{
+			name:      "pr lock",
+			query:     `mutation($input:LockLockableInput!){lockLockable(input:$input){clientMutationId}}`,
+			variables: input(map[string]any{"lockableId": "PR_kwLock", "lockReason": "RESOLVED"}),
+			mutation:  "lockLockable",
+			action:    domain.ActionConversationLocked,
+			subject:   "PR_kwLock",
+		},
+		{
+			name:      "pr update-branch",
+			query:     `mutation($input:UpdatePullRequestBranchInput!){updatePullRequestBranch(input:$input){pullRequest{id}}}`,
+			variables: input(map[string]any{"pullRequestId": "PR_kwUpdate"}),
+			mutation:  "updatePullRequestBranch",
+			action:    domain.ActionPRBranchUpdated,
+			subject:   "PR_kwUpdate",
+		},
+		{
+			name:      "issue pin",
+			query:     `mutation($input:PinIssueInput!){pinIssue(input:$input){issue{id}}}`,
+			variables: input(map[string]any{"issueId": "I_kwPin"}),
+			mutation:  "pinIssue",
+			action:    domain.ActionIssuePinned,
+			subject:   "I_kwPin",
+		},
+		{
+			// Both ids are in the input, and the issue is what was acted on — the
+			// repository is where it went. The subject-key order is what decides
+			// that, so this case is also its regression test.
+			name:      "issue transfer",
+			query:     `mutation($input:TransferIssueInput!){transferIssue(input:$input){issue{id}}}`,
+			variables: input(map[string]any{"issueId": "I_kwMove", "repositoryId": "R_kwDest"}),
+			mutation:  "transferIssue",
+			action:    domain.ActionIssueTransferred,
+			subject:   "I_kwMove",
+		},
+		{
+			name:      "issue develop",
+			query:     `mutation($input:CreateLinkedBranchInput!){createLinkedBranch(input:$input){linkedBranch{id ref{name}}}}`,
+			variables: input(map[string]any{"issueId": "I_kwBranch", "repositoryId": "R_kwRepo"}),
+			mutation:  "createLinkedBranch",
+			action:    domain.ActionLinkedBranchCreated,
+			subject:   "I_kwBranch",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -562,6 +636,28 @@ func TestResolveGraphQL_ResponseLocatesTheObject(t *testing.T) {
 	}
 }
 
+// TestResolveGraphQL_RevertIsKeyedByThePRItOpened: a revert names two pull
+// requests — the one it undid and the one it opened — and the row addresses the
+// one it opened, because that is the object that did not exist before the
+// request and the one a reader following the link needs. gh selects a url only
+// for that one, which is what keeps the resolution unambiguous.
+func TestResolveGraphQL_RevertIsKeyedByThePRItOpened(t *testing.T) {
+	shape, ok := Resolve(Observation{
+		Status:  200,
+		URL:     "https://github.com/acme/widgets/pull/902",
+		GraphQL: &GraphQLFacts{Fields: []string{"revertPullRequest"}, Subject: "PR_kwOriginal"},
+	})
+	if !ok {
+		t.Fatal("a revert did not resolve; it would land an unnamed row")
+	}
+	if shape.Action != domain.ActionPRReverted {
+		t.Errorf("action = %q, want %q", shape.Action, domain.ActionPRReverted)
+	}
+	if shape.ExternalID != "902" || shape.Target() != "acme/widgets#902" {
+		t.Errorf("shape = %+v, want it keyed by the revert PR's own number", shape)
+	}
+}
+
 // TestObservation_GraphQLErrorsAreNotSuccesses: the endpoint refuses a mutation
 // with a 200 and an errors array, so a row that read only the status line would
 // record a merge that never happened.
@@ -628,24 +724,36 @@ func TestReadGraphQLResponse(t *testing.T) {
 // as an unlabelled row.
 func TestGraphQLTable_ActionsAreKnownVocabulary(t *testing.T) {
 	known := map[string]bool{
-		domain.ActionCommentPosted:      true,
-		domain.ActionCommentEdited:      true,
-		domain.ActionCommentDeleted:     true,
-		domain.ActionPRCreated:          true,
-		domain.ActionPREdited:           true,
-		domain.ActionPRClosed:           true,
-		domain.ActionPRReopened:         true,
-		domain.ActionPRMerged:           true,
-		domain.ActionPRMarkedReady:      true,
-		domain.ActionPRConvertedToDraft: true,
-		domain.ActionReviewSubmitted:    true,
-		domain.ActionReactionAdded:      true,
-		domain.ActionReactionRemoved:    true,
-		domain.ActionIssueCreated:       true,
-		domain.ActionIssueUpdated:       true,
-		domain.ActionIssueClosed:        true,
-		domain.ActionIssueReopened:      true,
-		domain.ActionIssueDeleted:       true,
+		domain.ActionCommentPosted:        true,
+		domain.ActionCommentEdited:        true,
+		domain.ActionCommentDeleted:       true,
+		domain.ActionPRCreated:            true,
+		domain.ActionPREdited:             true,
+		domain.ActionPRClosed:             true,
+		domain.ActionPRReopened:           true,
+		domain.ActionPRMerged:             true,
+		domain.ActionPRMarkedReady:        true,
+		domain.ActionPRConvertedToDraft:   true,
+		domain.ActionPRAutoMergeEnabled:   true,
+		domain.ActionPRAutoMergeDisabled:  true,
+		domain.ActionPRReverted:           true,
+		domain.ActionPRBranchUpdated:      true,
+		domain.ActionReviewSubmitted:      true,
+		domain.ActionReactionAdded:        true,
+		domain.ActionReactionRemoved:      true,
+		domain.ActionLabelAdded:           true,
+		domain.ActionLabelRemoved:         true,
+		domain.ActionConversationLocked:   true,
+		domain.ActionConversationUnlocked: true,
+		domain.ActionLinkedBranchCreated:  true,
+		domain.ActionIssueCreated:         true,
+		domain.ActionIssueUpdated:         true,
+		domain.ActionIssueClosed:          true,
+		domain.ActionIssueReopened:        true,
+		domain.ActionIssueDeleted:         true,
+		domain.ActionIssuePinned:          true,
+		domain.ActionIssueUnpinned:        true,
+		domain.ActionIssueTransferred:     true,
 	}
 	for mutation, shape := range graphQLMutations {
 		if !known[shape.action] {
