@@ -307,6 +307,95 @@ fn unknown_tool_is_a_structured_protocol_error() {
     assert_eq!(ok["ok"], json!(true));
 }
 
+/// The configure frame end to end: policy the peer sets over the socket
+/// reaches a real `bash` child, kills it, and leaves the engagement alive.
+///
+/// Linux-only for the memory hog (`tail` buffering a newline-free stream) and
+/// the `/proc` sampler behind it — the frame itself is portable, its effect is
+/// not.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_configured_budget_kills_a_hog_without_ending_the_engagement() {
+    let proc = ServeProc::start();
+    let mut stream = proc.accept();
+
+    let configured = call(
+        &mut stream,
+        &json!({ "id": 1, "tool": "_configure", "args": { "bash_mem_budget_mb": 128 } }),
+    );
+    assert_eq!(
+        configured["ok"],
+        json!(true),
+        "configure failed: {configured}"
+    );
+    assert_eq!(configured["result"], json!({ "content": [] }));
+
+    let breach = call(
+        &mut stream,
+        &json!({ "id": 2, "tool": "bash", "args": { "command": "echo starting; head -c 400M /dev/zero | tail" } }),
+    );
+    // An ordinary tool error — a string, not a kinded protocol object — so the
+    // loop hands it to the model as an is_error result and carries on.
+    assert_eq!(
+        breach["ok"],
+        json!(false),
+        "the hog was not stopped: {breach}"
+    );
+    let message = breach["error"].as_str().expect("a tool error string");
+    assert!(
+        message.contains("exceeded the per-command memory budget")
+            && message.contains("128 MB budget"),
+        "unexpected breach text: {message}"
+    );
+    assert!(
+        message.contains("starting"),
+        "the partial output was dropped: {message}"
+    );
+
+    // The engagement is untouched: the next call answers normally and the
+    // server still exits cleanly on EOF.
+    let after = call(
+        &mut stream,
+        &json!({ "id": 3, "tool": "bash", "args": { "command": "echo alive" } }),
+    );
+    assert_eq!(
+        after["ok"],
+        json!(true),
+        "the host did not survive: {after}"
+    );
+
+    drop(stream);
+    let (status, stderr) = proc.expect_exit(Duration::from_secs(5));
+    assert!(status.success(), "serve exited non-zero: {status:?}");
+    assert!(!stderr.contains("panic"), "serve panicked: {stderr}");
+}
+
+/// Without the frame there is no budget: the same hog runs to completion, which
+/// is what keeps the one-shot CLI and the differential parity corpus — neither
+/// of which ever sends a configure — outside this feature entirely.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unconfigured_session_lets_the_same_hog_finish() {
+    let proc = ServeProc::start();
+    let mut stream = proc.accept();
+    let resp = call(
+        &mut stream,
+        &json!({ "id": 1, "tool": "bash", "args": { "command": "head -c 200M /dev/zero | tail | wc -c" } }),
+    );
+    assert_eq!(
+        resp["ok"],
+        json!(true),
+        "an unconfigured session killed a command: {resp}"
+    );
+    assert!(
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("209715200"),
+        "the hog did not run to completion: {resp}"
+    );
+}
+
 #[test]
 fn malformed_frames_never_crash_the_server() {
     let proc = ServeProc::start();

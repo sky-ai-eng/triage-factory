@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -285,5 +286,75 @@ func TestExecutorChangedSince_UnwiredIdentityStaysSilent(t *testing.T) {
 	}
 	if s.executorChangedSince(context.Background(), runmode.LocalDefaultOrgID, "r-exec-unwired", "some-claim", domain.WorkspaceProvenanceRehydrated) {
 		t.Error("an unwired spawner claimed the executor changed; it has no identity to compare against")
+	}
+}
+
+// TestNativeBashMemBudgetMB pins the derivation, whose whole point is that the
+// budget tracks the ceiling the jail was actually launched under.
+func TestNativeBashMemBudgetMB(t *testing.T) {
+	tests := []struct {
+		name    string
+		ceiling int
+		want    int
+	}{
+		{
+			name:    "the default ceiling leaves a gigabyte of session headroom",
+			ceiling: agentproc.DefaultRunMemoryLimitMB,
+			want:    3072,
+		},
+		{
+			name:    "a generous ceiling is capped rather than handed over whole",
+			ceiling: 16384,
+			want:    3072,
+		},
+		{
+			name:    "a modest ceiling keeps the headroom instead of the cap",
+			ceiling: 3072,
+			want:    2048,
+		},
+		{
+			// The floor wins over the subtraction: a budget below it would be
+			// too tight for an ordinary build step, and the ceiling is still
+			// underneath as the backstop.
+			name:    "a tight ceiling floors rather than going negative",
+			ceiling: 1024,
+			want:    512,
+		},
+		{
+			name:    "a ceiling under the headroom still floors",
+			ceiling: 256,
+			want:    512,
+		},
+		{
+			// An operator who disabled the ceiling said there is no shared
+			// allowance to protect; inventing one here would impose a limit
+			// they turned off.
+			name:    "a disabled ceiling disables the budget",
+			ceiling: 0,
+			want:    0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nativeBashMemBudgetMB(tc.ceiling); got != tc.want {
+				t.Errorf("nativeBashMemBudgetMB(%d) = %d, want %d", tc.ceiling, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNativeBashMemBudgetMB_StaysUnderTheCeiling is the property the numbers
+// exist to satisfy: one command may never be licensed to consume the jail's
+// whole allowance, or the breach lands on the jail instead of on the command.
+//
+// Swept from the floor upward, because below it the floor deliberately wins —
+// a ceiling smaller than 512 MB cannot run an agent at all, and the answer
+// there is a bigger ceiling, not a budget rounded down to nothing.
+func TestNativeBashMemBudgetMB_StaysUnderTheCeiling(t *testing.T) {
+	for ceiling := bashMemBudgetFloorMB + 1; ceiling <= 32768; ceiling += 37 {
+		budget := nativeBashMemBudgetMB(ceiling)
+		if budget >= ceiling {
+			t.Fatalf("ceiling %d MB yields a budget of %d MB, which leaves the jail no headroom", ceiling, budget)
+		}
 	}
 }

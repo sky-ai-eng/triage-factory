@@ -356,12 +356,14 @@ func (c *staticCredentials) ForCall(context.Context) (schemas.ModelProvider, Pro
 	return inference.ProviderAnthropic, c.provider, nil, nil
 }
 
-// scriptedToolHost answers by tool name, recording the calls it saw.
+// scriptedToolHost answers by tool name, recording the calls it saw — names
+// in order, and the args each was sent with.
 type scriptedToolHost struct {
 	mu       sync.Mutex
 	answers  map[string]ToolOutcome
 	errs     map[string]error
 	observed []string
+	args     []map[string]any
 	closed   bool
 }
 
@@ -369,10 +371,11 @@ func newScriptedToolHost() *scriptedToolHost {
 	return &scriptedToolHost{answers: map[string]ToolOutcome{}, errs: map[string]error{}}
 }
 
-func (h *scriptedToolHost) Call(name string, _ map[string]any) (ToolOutcome, error) {
+func (h *scriptedToolHost) Call(name string, args map[string]any) (ToolOutcome, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.observed = append(h.observed, name)
+	h.args = append(h.args, args)
 	if err, ok := h.errs[name]; ok {
 		return ToolOutcome{}, err
 	}
@@ -393,6 +396,19 @@ func (h *scriptedToolHost) calls() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]string(nil), h.observed...)
+}
+
+// argsFor returns the args of the first call to `name`, and whether it
+// happened at all.
+func (h *scriptedToolHost) argsFor(name string) (map[string]any, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i, seen := range h.observed {
+		if seen == name {
+			return h.args[i], true
+		}
+	}
+	return nil, false
 }
 
 // racingToolHost lands a row in the transcript while the first tool call is

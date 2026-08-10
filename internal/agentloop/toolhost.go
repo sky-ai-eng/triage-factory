@@ -28,6 +28,20 @@ const (
 	protoResponseTooLarge = "response_too_large"
 )
 
+// toolHostConfigureTool is the serve-layer request that carries this
+// engagement's execution policy into the jail, sent once before any tool call.
+//
+// Deliberately not a tool. The host dispatches it ahead of its tool registry,
+// so it is absent from the model-facing definitions by construction — policy
+// the model must not choose cannot become an argument it can pass, and adding
+// a knob here cannot invalidate the cached prefix built from those
+// definitions.
+const toolHostConfigureTool = "_configure"
+
+// bashMemBudgetArg is the configure frame's key for the per-command resident
+// memory budget the harness enforces on `bash`, in MB.
+const bashMemBudgetArg = "bash_mem_budget_mb"
+
 // ProtocolError is a tool-host failure below the tool layer: the request
 // never reached a tool, or its response could not be delivered.
 type ProtocolError struct {

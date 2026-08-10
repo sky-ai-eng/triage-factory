@@ -557,7 +557,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 		}
 		if proc.OOMKilled() {
 			return outcome, fmt.Errorf("agent runtime killed: %w (%d MB; tune TF_RUN_MEMORY_LIMIT_MB): %v",
-				ErrRunMemoryLimit, runMemoryLimitMB(), waitErr)
+				ErrRunMemoryLimit, RunMemoryLimitMB(), waitErr)
 		}
 		return outcome, fmt.Errorf("agent runtime exited with error: %w", waitErr)
 	}
@@ -880,7 +880,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		Env:             sbEnv,
 		ExtraMounts:     extraMounts,
 		Network:         opts.PrebuiltNetwork,
-		MemoryLimitMB:   runMemoryLimitMB(),
+		MemoryLimitMB:   RunMemoryLimitMB(),
 	})
 	if err != nil {
 		// Wrap cleaned up its own partial state; cleanup covers the agenthost

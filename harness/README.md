@@ -65,11 +65,14 @@ cargo build && bun parity/parity.ts --mode socket [case-filter]
 ## Resident tool-host (`serve`)
 
 The native multi-mode agent loop runs *outside* the gVisor jail and dispatches
-each tool call *in*. `tf-harness-tools serve --socket <path> [--cwd <dir>]` is
-the in-jail counterpart: a long-lived process that listens on a unix stream
-socket and answers length-prefixed JSON tool-call frames, one at a time, using
-the exact same `run_tool` entry point as the one-shot CLI — so a call over the
-socket returns byte-identical bytes to a direct invocation.
+each tool call *in*. `tf-harness-tools serve --connect <path> [--cwd <dir>]` is
+the in-jail counterpart: a long-lived process that answers length-prefixed JSON
+tool-call frames, one at a time, using the exact same `run_tool` entry point as
+the one-shot CLI — so a call over the socket returns byte-identical bytes to a
+direct invocation. The loop binds the socket and `serve` dials in (the jail runs
+with gVisor's `--host-uds=open`, which permits `connect` but not `bind`); only
+the connection direction inverts, and the peer requests while `serve` answers as
+usual.
 
 The wire protocol is specified by the rustdoc on the frame types in
 `src/serve.rs` (`Request` / `Response` / `ErrorKind`) — the schema comment *is*
@@ -88,6 +91,15 @@ symlink/path-traversal resolution over hostile worktree content inside the
 Sentry; the resident-behind-a-socket shape keeps the capability-holding
 cap-broker out of the per-call hot path.
 
+One frame is not a tool call: `{"tool":"_configure","args":{…}}`, which the peer
+sends once before its first tool call to set policy for the session (today, only
+`bash_mem_budget_mb` — see the divergence below). It is dispatched ahead of the
+tool registry, so it never appears in `--definitions` and the model never sees
+it; unknown keys are ignored and answered `ok` so a newer peer degrades to
+"policy not applied", and a host predating the verb answers the ordinary
+non-fatal `unknown_tool`. Session state dies with the connection and is
+persisted nowhere.
+
 Launching `serve` as the sandbox's main process (the OCI-spec/mount wiring) and
 the Go client that drives it belong to the native-loop ticket; this crate ships
 `serve` standalone and fully tested:
@@ -98,10 +110,14 @@ the Go client that drives it belong to the native-loop ticket; this crate ships
   a protocol error or closes — it never panics on hostile bytes).
 - `parity/parity.ts --mode socket` — the full corpus over the socket, asserted
   byte-identical to direct invocation.
+- `tests/bash_budget.rs` — the per-command memory budget: the tree-RSS sampler,
+  a real breach, and an under-budget command asserted byte-identical to an
+  unwatched one. Linux-only.
 - `tests/injail_smoke.rs` — an env-gated smoke that runs `serve` under real
-  `runsc` and drives it from the host; skips cleanly where runsc is absent (set
-  `TF_HARNESS_INJAIL_SMOKE=1` and `TF_HARNESS_INJAIL_ROOTFS=<dir>` on the runsc
-  host to run it).
+  `runsc` and drives it from the host: tool calls, `/proc/<pid>/statm` and the
+  children lists the sampler reads, and one real breach killed inside the jail.
+  Skips cleanly where runsc is absent (set `TF_HARNESS_INJAIL_SMOKE=1` and
+  `TF_HARNESS_INJAIL_ROOTFS=<dir>` on the runsc host to run it).
 
 ## Measured syscall reduction
 
@@ -148,6 +164,20 @@ All model-visible strings match pi. The differences that exist:
   both.
 - **fd's global ignore file** (`~/.config/fd/ignore`) is not read; the
   sandbox has none.
+- **`bash` per-command memory budget** — pi has no such limit. Behavior parity
+  holds for every command under the budget (byte-identical output, truncation
+  and timeout semantics), and the budget is *off* unless a `serve` session was
+  configured with one, so the one-shot CLI and the differential parity corpus
+  never see it. What it adds is an error path pi does not have: a command whose
+  process tree exceeds the budget is SIGKILLed and comes back as a tool error
+  naming the observed figure and the limit, with whatever it printed first.
+  Sampling is adaptive — every 300 ms normally, every 100 ms once a sample
+  reaches 70% of the budget and until five consecutive samples fall back below
+  it — so a breach can still overshoot between ticks, bounded by the tighter
+  interval in the only band where a breach is reachable. The jail's own memory
+  ceiling remains the hard backstop, and the budget's job is attributing a
+  breach to the command that caused it instead of to the next innocent
+  allocation in the session.
 - **TF branding on agent-facing strings** — the bash spill file is
   `/tmp/tf-bash-<hex>.log` where pi writes `pi-bash-…`. The path is
   model-visible in the truncation notice (and read back by the agent), so

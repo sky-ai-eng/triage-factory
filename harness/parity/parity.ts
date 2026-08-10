@@ -176,28 +176,36 @@ async function runRust(c: Case, dir: string): Promise<Envelope> {
 
 // --------------------------------------------------------- socket transport
 
-/** Connect to the tool-host socket, retrying until it's bound (serve binds
- *  asynchronously after spawn). */
-async function connectWithRetry(sockPath: string): Promise<net.Socket> {
-  const deadline = Date.now() + 5000;
-  for (;;) {
-    try {
-      return await new Promise<net.Socket>((res, rej) => {
-        const conn = net.createConnection({ path: sockPath });
-        conn.once("connect", () => res(conn));
-        conn.once("error", rej);
-      });
-    } catch (e) {
-      if (Date.now() > deadline) throw e;
-      await new Promise((r) => setTimeout(r, 10));
-    }
-  }
+/** Bind the tool-host socket, exactly as the agent loop does: this side
+ *  listens and `serve` dials in. The jail runs under gVisor's
+ *  `--host-uds=open`, which permits a sandboxed `connect` but not a `bind`, so
+ *  the deployed direction is the inverted one and the parity harness has to
+ *  reproduce it to exercise the same path. Binding before the spawn also
+ *  removes the race the old direction had to retry around. */
+function bindToolHostSocket(sockPath: string): net.Server {
+  const server = net.createServer();
+  server.listen(sockPath);
+  return server;
+}
+
+/** The connection `serve` dials in, or a failure if it never arrives. */
+async function acceptOne(server: net.Server): Promise<net.Socket> {
+  return await new Promise<net.Socket>((res, rej) => {
+    const timer = setTimeout(() => rej(new Error("serve never dialed in")), 5000);
+    server.once("connection", (conn) => {
+      clearTimeout(timer);
+      res(conn);
+    });
+    server.once("error", (e) => {
+      clearTimeout(timer);
+      rej(e);
+    });
+  });
 }
 
 /** One length-prefixed request frame in, one response frame out. Mirrors the
  *  server framing: a 4-byte big-endian length then that many JSON bytes. */
-async function socketCall(sockPath: string, req: unknown): Promise<any> {
-  const conn = await connectWithRetry(sockPath);
+async function socketCall(conn: net.Socket, req: unknown): Promise<any> {
   return await new Promise((res, rej) => {
     let buf = Buffer.alloc(0);
     let expected: number | null = null;
@@ -233,13 +241,19 @@ async function runRustSocket(c: Case, dir: string): Promise<Envelope> {
   const sockDir = join(workRoot, `${c.name}-sock`);
   mkdirSync(sockDir, { recursive: true });
   const sockPath = join(sockDir, "toolhost.sock");
-  const proc = Bun.spawn([cliPath, "serve", "--socket", sockPath, "--cwd", dir], {
+  const server = bindToolHostSocket(sockPath);
+  const proc = Bun.spawn([cliPath, "serve", "--connect", sockPath, "--cwd", dir], {
     stdout: "ignore",
     stderr: "pipe",
   });
   let env: Envelope;
+  let conn: net.Socket | null = null;
   try {
-    const resp = await socketCall(sockPath, { id: 1, tool: c.tool, args: c.args(dir) });
+    // No configure frame is ever sent here, deliberately: the corpus measures
+    // the tools at their default configuration, which is what keeps a
+    // session-policy knob (the bash memory budget) out of parity entirely.
+    conn = await acceptOne(server);
+    const resp = await socketCall(conn, { id: 1, tool: c.tool, args: c.args(dir) });
     // A tool that ran carries `ok` + string `error` or `result`, exactly the
     // shape the direct CLI prints; a protocol error would carry an object
     // `error`, which the valid-tool corpus never triggers.
@@ -250,6 +264,8 @@ async function runRustSocket(c: Case, dir: string): Promise<Envelope> {
   } finally {
     // The connection half-close ends the engagement and serve exits; kill as a
     // backstop if it somehow lingers, then reap.
+    conn?.destroy();
+    server.close();
     proc.kill();
     await proc.exited;
   }
