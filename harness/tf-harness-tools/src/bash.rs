@@ -47,14 +47,55 @@ const MAX_TIMEOUT_MS: f64 = 2_147_483_647.0;
 const POST_EXIT_GRACE: Duration = Duration::from_millis(100);
 const READER_POLL_MS: i32 = 200;
 
-/// How often the supervisor samples the command tree's resident memory, and
-/// therefore the window a breach can overshoot by. Only armed when a budget
-/// is set: with no budget the supervisor waits exactly as it did before the
-/// watchdog existed, so an unconfigured session gains no wakeups.
+/// How often the supervisor samples a command tree that is nowhere near its
+/// budget. Only armed when a budget is set: with no budget the supervisor
+/// waits exactly as it did before the watchdog existed, so an unconfigured
+/// session gains no wakeups.
 const MEM_SAMPLE_INTERVAL: Duration = Duration::from_millis(300);
 
+/// How often it samples once the tree has come near its budget. The interval
+/// bounds how far a breach can overshoot (overshoot ≈ allocation rate ×
+/// interval), so it is spent where overshoot is actually reachable rather than
+/// uniformly.
+///
+/// Measured rates make the trade concrete: a single-threaded allocator faulting
+/// anonymous pages as fast as it can manages ~840 MB/s, and a pipe-buffering
+/// hog ~380 MB/s, so 300ms of blindness is ~115–250 MB while 100ms is ~40–85.
+/// Sampling that fast all the time would triple a cost the whole compiled
+/// harness exists to minimize — guest syscall rate — for a window most commands
+/// never enter. A command that is not near its budget cannot breach in one
+/// tick unless it is allocating faster than the ceiling's own headroom
+/// absorbs, and that case is what the jail ceiling is for.
+const MEM_SAMPLE_INTERVAL_HOT: Duration = Duration::from_millis(100);
+
+/// The share of the budget at which a sample counts as *hot* and tightens the
+/// interval, as a fraction (7/10). Chosen so the fast window opens with a
+/// budget's worth of slack still ahead: at 70% of the default 3072 MB budget,
+/// ~920 MB remain, which is ~10 fast ticks even at the fastest rate measured.
+const MEM_HOT_NUMERATOR: u64 = 7;
+const MEM_HOT_DENOMINATOR: u64 = 10;
+
+/// How many consecutive cold samples it takes to relax back to the slow
+/// interval — the "last N" of the rule, and the reason it is a decay window
+/// rather than a threshold read fresh each tick.
+///
+/// A tree at the watermark oscillates: a garbage collector, a linker freeing a
+/// stage, a test process exiting all dip the sample below 70% for a tick while
+/// the command is still very much near its limit. Relaxing on the first dip
+/// would spend the fast interval exactly when it stops helping, so the tree
+/// has to stay cold for a while to earn it back.
+const MEM_HOT_DECAY_SAMPLES: usize = 5;
+
+// The two relationships the policy is meaningless without: the tightened
+// interval has to be tighter, and the watermark has to sit below the budget it
+// warns about. Asserted at compile time rather than in a test, because a
+// violation is not a behavior regression to catch — it is a contradiction that
+// should never link.
+const _: () = assert!(MEM_SAMPLE_INTERVAL_HOT.as_millis() < MEM_SAMPLE_INTERVAL.as_millis());
+const _: () = assert!(MEM_HOT_NUMERATOR < MEM_HOT_DENOMINATOR);
+
 /// Upper bound on processes visited in one memory sample. A tree cannot cycle,
-/// so this only backstops a pathological fan-out from turning a 300ms tick
+/// so this only backstops a pathological fan-out from turning a sampling tick
 /// into an unbounded `/proc` walk.
 const MAX_SAMPLED_PROCS: usize = 4096;
 
@@ -112,6 +153,26 @@ enum KillReason {
     MemoryBudget { observed_bytes: u64 },
 }
 
+/// Whether a sample is close enough to the budget to sample faster.
+///
+/// Integer arithmetic on both sides rather than a float ratio, so a zero
+/// budget (the disabled case, which never reaches here) cannot divide and a
+/// huge sample cannot lose precision.
+fn sample_is_hot(observed_bytes: u64, budget_bytes: u64) -> bool {
+    observed_bytes.saturating_mul(MEM_HOT_DENOMINATOR)
+        >= budget_bytes.saturating_mul(MEM_HOT_NUMERATOR)
+}
+
+/// The next sampling interval, given how many consecutive samples have been
+/// cold. Fast while any of the last [`MEM_HOT_DECAY_SAMPLES`] samples was hot.
+fn sample_interval(cold_run: usize) -> Duration {
+    if cold_run < MEM_HOT_DECAY_SAMPLES {
+        MEM_SAMPLE_INTERVAL_HOT
+    } else {
+        MEM_SAMPLE_INTERVAL
+    }
+}
+
 /// Wait for the command, enforcing the deadline and the memory budget from one
 /// poll loop.
 ///
@@ -125,6 +186,13 @@ enum KillReason {
 /// a single receive bounded by the whole deadline, or an unbounded one — so an
 /// unconfigured session's timing is unchanged rather than approximately
 /// unchanged.
+///
+/// The sampling interval is adaptive: slow until a sample comes near the
+/// budget, then fast until the tree has been clear of the watermark for
+/// [`MEM_HOT_DECAY_SAMPLES`] samples running. Overshoot is proportional to the
+/// interval, so the tight one is spent in the only window where a breach is
+/// reachable, and a command that never approaches its budget — nearly all of
+/// them — pays the slow rate throughout.
 fn supervise(
     exit_rx: &Receiver<std::io::Result<std::process::ExitStatus>>,
     pid: i32,
@@ -141,12 +209,16 @@ fn supervise(
             .recv()
             .unwrap_or_else(|_| Ok(std::process::ExitStatus::from_raw(0)))
     };
+    // Consecutive cold samples. Starts relaxed: a command is not near a budget
+    // it has not begun to use.
+    let mut cold_run = MEM_HOT_DECAY_SAMPLES;
     loop {
         let remaining = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        let interval = sample_interval(cold_run);
         let tick = match (remaining, budget_bytes > 0) {
             (Some(left), false) => Some(left),
-            (Some(left), true) => Some(left.min(MEM_SAMPLE_INTERVAL)),
-            (None, true) => Some(MEM_SAMPLE_INTERVAL),
+            (Some(left), true) => Some(left.min(interval)),
+            (None, true) => Some(interval),
             (None, false) => None,
         };
         let waited = match tick {
@@ -167,6 +239,11 @@ fn supervise(
             Some(KillReason::Timeout)
         } else if budget_bytes > 0 {
             let observed_bytes = tree_resident_bytes(pid);
+            cold_run = if sample_is_hot(observed_bytes, budget_bytes) {
+                0
+            } else {
+                cold_run.saturating_add(1)
+            };
             (observed_bytes > budget_bytes).then_some(KillReason::MemoryBudget { observed_bytes })
         } else {
             None
@@ -573,4 +650,61 @@ pub fn execute(
         content: vec![ContentBlock::text(output_text)],
         details,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The interval policy is a pure function of the recent samples, so the
+    /// behavior a race-prone integration test could only sample is pinned here
+    /// exactly: when the fast interval opens, and what it takes to close it.
+    #[test]
+    fn the_interval_tightens_near_the_budget_and_relaxes_after_a_run_of_cold_samples() {
+        let budget = 1000 * BYTES_PER_MB;
+
+        // Cold below the watermark, hot at it and above it.
+        assert!(!sample_is_hot(699 * BYTES_PER_MB, budget));
+        assert!(sample_is_hot(700 * BYTES_PER_MB, budget));
+        assert!(sample_is_hot(2000 * BYTES_PER_MB, budget));
+        // A command that has allocated nothing yet is not near anything.
+        assert!(!sample_is_hot(0, budget));
+
+        // A fresh supervisor starts relaxed, one hot sample tightens, and it
+        // takes a full run of cold samples — not the first dip — to relax.
+        let mut cold_run = MEM_HOT_DECAY_SAMPLES;
+        assert_eq!(sample_interval(cold_run), MEM_SAMPLE_INTERVAL);
+        cold_run = 0; // one hot sample
+        assert_eq!(sample_interval(cold_run), MEM_SAMPLE_INTERVAL_HOT);
+        for dips in 1..MEM_HOT_DECAY_SAMPLES {
+            cold_run += 1;
+            assert_eq!(
+                sample_interval(cold_run),
+                MEM_SAMPLE_INTERVAL_HOT,
+                "relaxed after only {dips} cold sample(s); an oscillating tree is still near its budget"
+            );
+        }
+        cold_run += 1;
+        assert_eq!(sample_interval(cold_run), MEM_SAMPLE_INTERVAL);
+    }
+
+    /// The watermark must leave room to *use* the tighter interval — a hot
+    /// window that opened at the budget itself would sample faster only after
+    /// the breach it exists to catch. (That it is tighter at all, and that the
+    /// watermark is below the budget, are compile-time assertions above.)
+    #[test]
+    fn the_hot_window_opens_with_room_left_to_act() {
+        let budget = 3072 * BYTES_PER_MB;
+        let watermark = budget * MEM_HOT_NUMERATOR / MEM_HOT_DENOMINATOR;
+        // ~920 MB of slack at the default budget: many fast ticks even at the
+        // fastest allocation rate measured (~840 MB/s single-threaded).
+        assert!(budget - watermark > 512 * BYTES_PER_MB);
+    }
+
+    /// Saturating arithmetic on both sides: a sample large enough to overflow a
+    /// naive multiply must still read as hot rather than wrapping to cold.
+    #[test]
+    fn an_absurd_sample_does_not_wrap_to_cold() {
+        assert!(sample_is_hot(u64::MAX, 1024 * BYTES_PER_MB));
+    }
 }

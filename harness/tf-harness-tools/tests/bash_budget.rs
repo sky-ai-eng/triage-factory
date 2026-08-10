@@ -246,6 +246,28 @@ fn an_under_budget_command_is_byte_identical_to_an_unwatched_one() {
     }
 }
 
+/// Living in the hot band is not a breach. Sampling tightens once a tree comes
+/// near its budget, and the risk that introduces is a false kill: a command
+/// that legitimately sits just under its limit must still run to completion.
+///
+/// The numbers are chosen to be stable rather than close: a 100 MB stream held
+/// by `tail` peaks at a repeatable ~106 MB, which is above the 98 MB watermark
+/// of a 140 MB budget and comfortably under the budget itself.
+#[test]
+fn a_command_inside_the_hot_band_is_sampled_faster_but_not_killed() {
+    let cwd = tmp_cwd();
+    let result = execute(
+        cwd.path().to_str().unwrap(),
+        &args("head -c 100M /dev/zero | tail | wc -c"),
+        &budget(140),
+    )
+    .expect("a command under its budget must finish, however near the line it runs");
+    assert!(
+        text_of(&Ok(result)).contains("104857600"),
+        "the command did not run to completion"
+    );
+}
+
 /// A timeout with the watchdog armed still reports the timeout, unchanged: the
 /// budget folds into that supervisor rather than replacing it.
 #[test]

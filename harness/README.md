@@ -170,10 +170,13 @@ All model-visible strings match pi. The differences that exist:
   configured with one, so the one-shot CLI and the differential parity corpus
   never see it. What it adds is an error path pi does not have: a command whose
   process tree exceeds the budget is SIGKILLed and comes back as a tool error
-  naming the observed figure and the limit, with whatever it printed first. It
-  samples every 300 ms, so a breach can overshoot between ticks — the jail's own
-  memory ceiling remains the hard backstop, and the budget's job is attributing
-  a breach to the command that caused it instead of to the next innocent
+  naming the observed figure and the limit, with whatever it printed first.
+  Sampling is adaptive — every 300 ms normally, every 100 ms once a sample
+  reaches 70% of the budget and until five consecutive samples fall back below
+  it — so a breach can still overshoot between ticks, bounded by the tighter
+  interval in the only band where a breach is reachable. The jail's own memory
+  ceiling remains the hard backstop, and the budget's job is attributing a
+  breach to the command that caused it instead of to the next innocent
   allocation in the session.
 - **TF branding on agent-facing strings** — the bash spill file is
   `/tmp/tf-bash-<hex>.log` where pi writes `pi-bash-…`. The path is
