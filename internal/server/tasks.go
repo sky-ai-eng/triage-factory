@@ -631,6 +631,13 @@ func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskI
 	// AFTER it commits — a network call must not hold the tx open. Dismissed reviews
 	// need no post-tx pass: a review is staged TF-side (TFAC-494), so the in-tx flip
 	// to dismissed is the whole resolution — there is no GitHub object to retire.
+	//
+	// Which credential each draft PR's close is made under is classified BEFORE
+	// the tx opens, for the same reason the closes themselves run after it: the
+	// audit rows are composed inside that tx, and a classification can reach
+	// GitHub.
+	credentials := s.draftPRCredentials(ctx, orgID, userID, taskID)
+
 	var prArtifacts []domain.Artifact
 	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		runs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
@@ -684,7 +691,8 @@ func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskI
 					return fmt.Errorf("artifacts.Upsert(closed): %w", err)
 				}
 				if err := tx.ExternalActions.Record(ctx, orgID,
-					githubApprovalAction(&pr, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed)); err != nil {
+					githubApprovalAction(&pr, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed,
+						credentialForTarget(credentials, pr.Target))); err != nil {
 					return fmt.Errorf("external_actions.Record(closed): %w", err)
 				}
 				prArtifacts = append(prArtifacts, pr)
@@ -705,6 +713,63 @@ func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskI
 	}
 	// Dismissed reviews need no post-tx pass — they were staged TF-side and the
 	// in-tx flip is their whole resolution (TFAC-494).
+}
+
+// draftPRCredentials classifies the acting GitHub credential for every repo the
+// task's unresolved draft PRs live in, keyed by "owner/repo". It exists so the
+// teardown's audit rows can name that credential without probing GitHub from
+// inside the write tx those rows are composed into — the read pass and the
+// classification are both finished before that tx opens.
+//
+// Best-effort: a read failure yields an empty map and every row falls back to
+// the App, exactly as an unclassifiable repo does. The teardown itself is
+// unaffected — it re-reads the artifacts under its own tx and is the authority
+// on which ones it resolves.
+func (s *Server) draftPRCredentials(ctx context.Context, orgID, userID, taskID string) map[string]string {
+	type ownerRepo struct{ owner, repo string }
+	repos := map[string]ownerRepo{}
+	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		runs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
+		if err != nil {
+			return err
+		}
+		for i := range runs {
+			arts, artErr := tx.Artifacts.ListByRun(ctx, orgID, runs[i].ID)
+			if artErr != nil {
+				return artErr
+			}
+			for _, pr := range domain.AllDraftPullRequests(arts) {
+				if owner, repo, _, ok := domain.ParsePRTarget(pr.Target); ok {
+					repos[owner+"/"+repo] = ownerRepo{owner: owner, repo: repo}
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		approvalDiscardLog.Warn("pre-read draft PRs for credential attribution failed; teardown rows will record the app",
+			"task", taskID, "error", err)
+		return nil
+	}
+	out := make(map[string]string, len(repos))
+	for repoID, or := range repos {
+		out[repoID] = githubCredentialFor(ctx, s.ghResolver, orgID, or.owner, or.repo)
+	}
+	return out
+}
+
+// credentialForTarget looks a PR target's repo up in the map draftPRCredentials
+// built. A miss — an unparseable target, or a draft PR that appeared between the
+// pre-pass and the tx — reports the App, the same answer an unclassifiable repo
+// gets.
+func credentialForTarget(credentials map[string]string, target string) string {
+	owner, repo, _, ok := domain.ParsePRTarget(target)
+	if !ok {
+		return domain.CredentialGitHubApp
+	}
+	if cred, hit := credentials[owner+"/"+repo]; hit {
+		return cred
+	}
+	return domain.CredentialGitHubApp
 }
 
 // closeDraftPRBestEffort closes the abandoned draft PR on GitHub. Best-effort:

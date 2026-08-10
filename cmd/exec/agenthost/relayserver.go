@@ -107,6 +107,23 @@ func (s *RelayServer) SetCredentialRefresh(cr *CredentialRefresh) { s.credRefres
 // (proxyCreds still nil) fails clean rather than cloning unauthenticated.
 func (s *RelayServer) SetProxyCreds(pc *ProxyCredentials) { s.proxyCreds = pc }
 
+// SetGitHubCredential records which GitHub credential this run's writes act
+// under, so every audit row served here — the relayed gh-channel writes and
+// refusals, the git denials, the branch push composed into an artifact upsert —
+// names the credential that made them.
+//
+// Injected late for the same reason SetProxyCreds is, and from the same place:
+// the classification lives in the sealed bundle, which opens only in the
+// sidecar, so it arrives with the bring-up result. Bring-up completes before
+// the agent runs, so it is always settled before a relayed write can arrive.
+func (s *RelayServer) SetGitHubCredential(credential string) {
+	if credential == "" {
+		return
+	}
+	s.rt.ghCredential = credential
+	s.audit.SetGitHubCredential(credential)
+}
+
 // NewRelayServer builds the run's relay op server. git may be nil (no git
 // surface); stores/info are the run's own, admin-pool + RunInfo-bound.
 func NewRelayServer(stores db.Stores, info RunInfo, git *agentproc.GitProxyConfig) *RelayServer {

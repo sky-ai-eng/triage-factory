@@ -349,6 +349,13 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		proxyCreds: s.proxyCreds,
 		gateWired:  s.gateWired,
 	}
+	// Seed the audit credential before any verb runs. On the sidecar this is the
+	// tier it reported off the sealed bundle, so a write that records without
+	// ever resolving a repo client is still attributed; on all/local it is empty
+	// and the resolver settles it at the first resolution.
+	if s.proxyCreds != nil {
+		client.SetGitHubCredential(s.proxyCreds.GitHubCredential)
+	}
 	dec := func(dst any) error {
 		if len(rawArgs) == 0 {
 			return nil

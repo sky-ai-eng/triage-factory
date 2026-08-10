@@ -119,7 +119,7 @@ func TestGHWriteDeniedAction_GraphQLKeepsWhatWasRead(t *testing.T) {
 		t.Fatal("a review mutation was not gated")
 	}
 
-	act := GHWriteDeniedAction(req, ref)
+	act := GHWriteDeniedAction(req, ref, domain.CredentialGitHubApp)
 	if act.Target != "PR_kwABC" {
 		t.Errorf("target = %q, want the node id the variables disclosed", act.Target)
 	}

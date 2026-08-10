@@ -266,7 +266,8 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	// the snapshot refresh below (which is itself best-effort and skipped when
 	// details don't parse). No state transition — it's an in-place title/body edit.
 	recordExternalActionBestEffort(r.Context(), ah.tx, orgID, userID,
-		githubApprovalAction(art, userID, domain.ActionPREdited, "", ""))
+		githubApprovalAction(art, userID, domain.ActionPREdited, "", "",
+			githubCredentialFor(r.Context(), ah.ghResolver, orgID, owner, repo)))
 
 	// Refresh the artifact's mutable snapshot to the new title/body; proposed
 	// stays frozen. Best-effort-but-reported: the GitHub edit already landed, so
@@ -498,6 +499,11 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// (pre-footer) content. proposed stays frozen. When details didn't parse we
 	// still flip the state but leave the (malformed) details rather than blanking
 	// them.
+	//
+	// The credential is classified before the tx opens — the classification can
+	// reach GitHub, and the tx the row composes into must not wait on a network
+	// round trip.
+	credential := githubCredentialFor(cleanupCtx, ah.ghResolver, orgID, owner, repo)
 	openArt := *art
 	openArt.State = domain.ArtifactStatePROpen
 	if derr == nil {
@@ -513,7 +519,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 			return e
 		}
 		return tx.ExternalActions.Record(cleanupCtx, orgID,
-			githubApprovalAction(art, userID, domain.ActionPRMarkedReady, domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen))
+			githubApprovalAction(art, userID, domain.ActionPRMarkedReady, domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen, credential))
 	}); err != nil {
 		artifactsLog.Warn("flip PR artifact to open + record action failed", "artifact", art.ID, "error", err)
 	}
@@ -597,6 +603,11 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	// resolution, so a DB failure is a real error the client must see). The GitHub
 	// close + the terminal-on-last check run detached afterwards so a client
 	// disconnect can't strand them once the artifact is resolved.
+	//
+	// The credential is classified before the tx: the GitHub close runs after it,
+	// but the row records the credential that close is made under, and a probe
+	// inside the tx would hold it open across a round trip.
+	credential := githubCredentialForArtifact(r.Context(), ah.ghResolver, orgID, art)
 	closed := *art
 	closed.State = domain.ArtifactStatePRClosed
 	if err := ah.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -604,7 +615,7 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 			return e
 		}
 		return tx.ExternalActions.Record(r.Context(), orgID,
-			githubApprovalAction(art, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed))
+			githubApprovalAction(art, userID, domain.ActionPRClosed, domain.ArtifactStatePRDraft, domain.ArtifactStatePRClosed, credential))
 	}); err != nil {
 		internalError(w, "artifacts", err)
 		return
