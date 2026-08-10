@@ -3,6 +3,7 @@ package agentloop
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -105,9 +106,8 @@ func TestRun_NoBudgetSendsNoConfigureFrame(t *testing.T) {
 // is the case that matters: an older host answers the non-fatal unknown_tool.
 func TestRun_ConfigureFailureIsToleratedWithOneLogLine(t *testing.T) {
 	tests := []struct {
-		name  string
-		arm   func(*scriptedToolHost)
-		inLog string
+		name string
+		arm  func(*scriptedToolHost)
 	}{
 		{
 			name: "an older harness answers unknown_tool",
@@ -148,8 +148,14 @@ func TestRun_ConfigureFailureIsToleratedWithOneLogLine(t *testing.T) {
 			if _, ok := host.argsFor("bash"); !ok {
 				t.Fatalf("the engagement never reached the jail: %v", host.calls())
 			}
+			// Exactly one line, and the line about the budget: a count alone
+			// would pass on some unrelated warn while the failure this test is
+			// about went unmentioned.
 			if len(log.warns) != 1 {
-				t.Fatalf("logged %v, want exactly one warn about the budget", log.warns)
+				t.Fatalf("logged %v, want exactly one warn", log.warns)
+			}
+			if !strings.Contains(log.warns[0], "without a per-command memory budget") {
+				t.Errorf("warn = %q, want the one naming the lost budget", log.warns[0])
 			}
 		})
 	}
