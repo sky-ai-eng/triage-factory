@@ -171,6 +171,26 @@ func TestServeSocket_EndToEnd(t *testing.T) {
 		}
 	})
 
+	t.Run("the configure verb is accepted by the real host", func(t *testing.T) {
+		// The cross-language check: the loop's frame for a verb that is not a
+		// tool is the frame the Rust host parses, and its answer classifies as
+		// an ordinary success rather than unknown_tool. Nothing else compares
+		// the two sides of this contract.
+		out, err := host.Call(toolHostConfigureTool, map[string]any{bashMemBudgetArg: 2048})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Protocol != nil {
+			t.Fatalf("the host does not implement the configure verb: %+v", out.Protocol)
+		}
+		if out.ToolError != "" {
+			t.Fatalf("the host rejected the configure args: %s", out.ToolError)
+		}
+		if out.Content != "" {
+			t.Errorf("configure answered with content %q, want the empty result", out.Content)
+		}
+	})
+
 	t.Run("an unknown tool is a survivable protocol error", func(t *testing.T) {
 		out, err := host.Call("frobnicate", nil)
 		if err != nil {

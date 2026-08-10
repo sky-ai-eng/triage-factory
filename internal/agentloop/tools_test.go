@@ -138,6 +138,32 @@ func TestToolDefinitions_MatchHarness(t *testing.T) {
 			"The model would be told one thing and the jail would do another.\n\n"+
 			"tooldefs says:\n%s\n\nharness/tf-harness-tools says:\n%s", got, want)
 	}
+	if strings.Contains(want, toolHostConfigureTool) {
+		t.Fatalf("the harness exports %q as a tool definition; it is a serve-layer verb "+
+			"and must stay out of what the model reads:\n%s", toolHostConfigureTool, want)
+	}
+}
+
+// TestSandboxTools_OmitTheConfigureVerb is the cheap half of the same guard —
+// no cargo needed, so it runs everywhere.
+//
+// The configure frame carries policy the model must not choose, and the tool
+// definitions are the cached prefix every conversation in the fleet shares.
+// A knob that leaked into them would be both a capability nobody meant to
+// grant and a fleet-wide cache invalidation.
+func TestSandboxTools_OmitTheConfigureVerb(t *testing.T) {
+	defs, err := json.Marshal(SandboxTools())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(defs), toolHostConfigureTool) {
+		t.Fatalf("%q appears in the model-facing tool definitions: %s", toolHostConfigureTool, defs)
+	}
+	for _, tool := range SandboxTools() {
+		if tool.Function != nil && tool.Function.Name == toolHostConfigureTool {
+			t.Fatalf("%q is registered as a model-facing tool", toolHostConfigureTool)
+		}
+	}
 }
 
 // toolDoc is the harness's `--definitions` record shape.

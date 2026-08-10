@@ -4,11 +4,34 @@
 //! stderr stream into the OutputAccumulator, a timeout SIGKILLs the process
 //! group, and after exit the pipes get pi's 100ms idle grace so output from
 //! detached descendants isn't cut mid-write (`waitForChildProcess`).
+//!
+//! # The per-command memory budget
+//!
+//! One divergence from pi rides the same supervisor: when the session was
+//! configured with a budget, each poll also sums the command tree's resident
+//! memory and kills the tree that exceeds it. `bash` is the only tool that
+//! spawns children, so it is the only place a limit can be attributed to a
+//! command at all.
+//!
+//! It is a *sampling* watchdog, and deliberately so. Between ticks a command
+//! can overshoot by its allocation rate — the jail's own memory ceiling stays
+//! underneath as the kernel-truth backstop, and a single giant allocation that
+//! trips it first fails in-jail exactly as it did before. Both endings are an
+//! agent-legible error; neither ends the engagement. The budget's job is blame
+//! attribution and session headroom, not tight enforcement: without it, a
+//! command that squats near the ceiling doesn't fail — every *later*,
+//! innocent command does.
+//!
+//! Not rlimits, and not cgroups. `RLIMIT_AS`/`RLIMIT_DATA` bound virtual
+//! address space, which JIT runtimes reserve far past their resident set, so
+//! they produce false OOMs on healthy commands. Per-command cgroups don't
+//! exist under gVisor: the jail is one host cgroup and the in-jail cgroupfs is
+//! emulated and non-enforcing.
 
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -23,6 +46,19 @@ use crate::truncate::{format_size, DEFAULT_MAX_BYTES};
 const MAX_TIMEOUT_MS: f64 = 2_147_483_647.0;
 const POST_EXIT_GRACE: Duration = Duration::from_millis(100);
 const READER_POLL_MS: i32 = 200;
+
+/// How often the supervisor samples the command tree's resident memory, and
+/// therefore the window a breach can overshoot by. Only armed when a budget
+/// is set: with no budget the supervisor waits exactly as it did before the
+/// watchdog existed, so an unconfigured session gains no wakeups.
+const MEM_SAMPLE_INTERVAL: Duration = Duration::from_millis(300);
+
+/// Upper bound on processes visited in one memory sample. A tree cannot cycle,
+/// so this only backstops a pathological fan-out from turning a 300ms tick
+/// into an unbounded `/proc` walk.
+const MAX_SAMPLED_PROCS: usize = 4096;
+
+const BYTES_PER_MB: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BashArgs {
@@ -39,6 +75,11 @@ pub struct BashOptions {
     pub shell_path: Option<String>,
     /// Directory to prepend to PATH (pi prepends its tool bin dir).
     pub path_prepend: Option<String>,
+    /// Per-command resident-memory budget in MB, from the session's
+    /// configuration rather than from the model. Zero — every caller but the
+    /// configured resident host — disables the watchdog entirely: no sampling
+    /// tick, no `/proc` walk, no behavior to observe.
+    pub mem_budget_mb: u64,
 }
 
 fn resolve_timeout_ms(timeout: Option<f64>) -> Result<Option<f64>, ToolError> {
@@ -58,6 +99,157 @@ fn resolve_timeout_ms(timeout: Option<f64>) -> Result<Option<f64>, ToolError> {
         )));
     }
     Ok(Some(timeout_ms))
+}
+
+/// Why the supervisor killed the command tree. Absent when the command exited
+/// on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillReason {
+    /// The per-call wall-clock timeout elapsed.
+    Timeout,
+    /// The tree's sampled resident memory exceeded the session's budget.
+    /// Carries the sample that tripped it, which is what the model is told.
+    MemoryBudget { observed_bytes: u64 },
+}
+
+/// Wait for the command, enforcing the deadline and the memory budget from one
+/// poll loop.
+///
+/// One supervisor, one kill site: a command that is both over time and over
+/// budget in the same tick dies exactly once and reports exactly one reason.
+/// The deadline is checked first, because a command that has already outlived
+/// its timeout is over-time regardless of what a sample taken in the same
+/// instant says.
+///
+/// With no budget armed the wait is what it was before the watchdog existed —
+/// a single receive bounded by the whole deadline, or an unbounded one — so an
+/// unconfigured session's timing is unchanged rather than approximately
+/// unchanged.
+fn supervise(
+    exit_rx: &Receiver<std::io::Result<std::process::ExitStatus>>,
+    pid: i32,
+    deadline: Option<Instant>,
+    budget_bytes: u64,
+) -> (
+    std::io::Result<std::process::ExitStatus>,
+    Option<KillReason>,
+) {
+    // After a kill the child is already doomed; block until the waiter reaps
+    // it, exactly as the timeout path did.
+    let reap = || {
+        exit_rx
+            .recv()
+            .unwrap_or_else(|_| Ok(std::process::ExitStatus::from_raw(0)))
+    };
+    loop {
+        let remaining = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+        let tick = match (remaining, budget_bytes > 0) {
+            (Some(left), false) => Some(left),
+            (Some(left), true) => Some(left.min(MEM_SAMPLE_INTERVAL)),
+            (None, true) => Some(MEM_SAMPLE_INTERVAL),
+            (None, false) => None,
+        };
+        let waited = match tick {
+            Some(dur) => exit_rx.recv_timeout(dur),
+            None => exit_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        match waited {
+            Ok(status) => return (status, None),
+            Err(RecvTimeoutError::Disconnected) => {
+                return (Ok(std::process::ExitStatus::from_raw(0)), None)
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        // Decide the reason, then kill in one place: a command over both
+        // limits in the same tick must not be signalled twice, and the reason
+        // the model reads must not depend on which check ran first.
+        let reason = if deadline.is_some_and(|d| Instant::now() >= d) {
+            Some(KillReason::Timeout)
+        } else if budget_bytes > 0 {
+            let observed_bytes = tree_resident_bytes(pid);
+            (observed_bytes > budget_bytes).then_some(KillReason::MemoryBudget { observed_bytes })
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            kill_process_tree(pid);
+            return (reap(), Some(reason));
+        }
+    }
+}
+
+/// Sum resident memory, in bytes, across the process tree rooted at `pid`.
+///
+/// Children come from `/proc/<pid>/task/<tid>/children` and the resident set
+/// from field 2 of `/proc/<pid>/statm` (resident pages) — cheaper to parse
+/// than `status`, and served by gVisor's procfs for the Sentry's own tasks.
+///
+/// Shared pages count once per process that maps them, so a tree of forks
+/// sharing one heap reads high. Accepted: the over-estimate kills earlier, and
+/// the budget is policy rather than billing.
+///
+/// Every read is best-effort. A process that exits mid-walk contributes
+/// nothing instead of failing the sample, which is the right direction too —
+/// an unreadable `/proc` under-reports and the command lives. A host with no
+/// procfs at all (a macOS dev machine) therefore samples zero and never fires,
+/// which is the correct inert answer: the runtime that configures a budget
+/// only ever runs on Linux.
+pub fn tree_resident_bytes(pid: i32) -> u64 {
+    let page_size = page_size();
+    let mut total: u64 = 0;
+    let mut pending = vec![pid];
+    let mut visited = 0usize;
+    while let Some(pid) = pending.pop() {
+        visited += 1;
+        if visited > MAX_SAMPLED_PROCS {
+            break;
+        }
+        total = total.saturating_add(resident_pages(pid).saturating_mul(page_size));
+        collect_children(pid, &mut pending);
+    }
+    total
+}
+
+fn page_size() -> u64 {
+    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if size > 0 {
+        size as u64
+    } else {
+        4096
+    }
+}
+
+/// Field 2 of `/proc/<pid>/statm`: resident pages. Zero for a process that is
+/// gone, or whose procfs entry cannot be read or parsed.
+fn resident_pages(pid: i32) -> u64 {
+    let Ok(statm) = std::fs::read_to_string(format!("/proc/{pid}/statm")) else {
+        return 0;
+    };
+    statm
+        .split_whitespace()
+        .nth(1)
+        .and_then(|field| field.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Append `pid`'s direct children to `out`, from every thread's `children`
+/// file — a child is listed under the thread that forked it, not under the
+/// thread group.
+fn collect_children(pid: i32, out: &mut Vec<i32>) {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return;
+    };
+    for task in tasks.flatten() {
+        let path = task.path().join("children");
+        let Ok(listed) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        out.extend(
+            listed
+                .split_whitespace()
+                .filter_map(|p| p.parse::<i32>().ok()),
+        );
+    }
 }
 
 struct ReaderShared {
@@ -126,6 +318,31 @@ fn reader_thread(
         // fd_owner drops here, closing the pipe.
         drop(fd_owner);
     })
+}
+
+/// What the model is told when the budget kills its command.
+///
+/// The `~` is load-bearing: `observed` is the last sample, so a command that
+/// allocated fast between ticks really did peak higher than the number it is
+/// shown. Both numbers are stated because the actionable part is the gap
+/// between them — the remedies that follow only make sense against a limit the
+/// model can size its next attempt to.
+fn memory_budget_notice(observed_bytes: u64, budget_mb: u64) -> String {
+    format!(
+        "Command killed: exceeded the per-command memory budget (~{} MB resident against a {} MB budget). \
+The sandbox is unaffected. Retry with a lighter approach — lower build parallelism, stream instead of \
+loading whole files, or split the work into smaller steps.",
+        observed_bytes / BYTES_PER_MB,
+        budget_mb
+    )
+}
+
+fn prepend_status(status: &str, text: &str) -> String {
+    if text.is_empty() {
+        status.to_string()
+    } else {
+        format!("{status}\n\n{text}")
+    }
 }
 
 pub fn execute(
@@ -214,23 +431,13 @@ pub fn execute(
         let _ = exit_tx.send(child.wait());
     });
 
-    let mut timed_out = false;
-    let wait_result = match timeout_ms {
-        Some(ms) => match exit_rx.recv_timeout(Duration::from_millis(ms as u64)) {
-            Ok(status) => status,
-            Err(RecvTimeoutError::Timeout) => {
-                timed_out = true;
-                kill_process_tree(pid);
-                exit_rx
-                    .recv()
-                    .unwrap_or_else(|_| Ok(std::process::ExitStatus::from_raw(0)))
-            }
-            Err(RecvTimeoutError::Disconnected) => Ok(std::process::ExitStatus::from_raw(0)),
-        },
-        None => exit_rx
-            .recv()
-            .unwrap_or_else(|_| Ok(std::process::ExitStatus::from_raw(0))),
-    };
+    let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms as u64));
+    let (wait_result, killed) = supervise(
+        &exit_rx,
+        pid,
+        deadline,
+        options.mem_budget_mb.saturating_mul(BYTES_PER_MB),
+    );
     let _ = wait_handle.join();
 
     // Post-exit stdio grace: keep reading while data still arrives; release
@@ -327,15 +534,29 @@ pub fn execute(
     let snapshot = finish_output(&shared);
     let last_line_bytes = shared.accumulator.lock().unwrap().get_last_line_bytes();
 
-    if timed_out {
-        let (text, _) = format_output(&snapshot, "", last_line_bytes);
-        return Err(ToolError::new(append_status(
-            &text,
-            &format!(
-                "Command timed out after {} seconds",
-                js_num(args.timeout.unwrap_or(0.0))
-            ),
-        )));
+    match killed {
+        Some(KillReason::Timeout) => {
+            let (text, _) = format_output(&snapshot, "", last_line_bytes);
+            return Err(ToolError::new(append_status(
+                &text,
+                &format!(
+                    "Command timed out after {} seconds",
+                    js_num(args.timeout.unwrap_or(0.0))
+                ),
+            )));
+        }
+        Some(KillReason::MemoryBudget { observed_bytes }) => {
+            // Reason first, then whatever the command managed to print: this
+            // error IS the documentation of the budget — nothing else tells
+            // the model the limit exists — so it leads, and the partial output
+            // it kept follows as evidence.
+            let (text, _) = format_output(&snapshot, "", last_line_bytes);
+            return Err(ToolError::new(prepend_status(
+                &memory_budget_notice(observed_bytes, options.mem_budget_mb),
+                &text,
+            )));
+        }
+        None => {}
     }
 
     let (output_text, details) = format_output(&snapshot, "(no output)", last_line_bytes);

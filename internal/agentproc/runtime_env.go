@@ -45,11 +45,15 @@ var ErrRunMemoryLimit = errors.New("run exceeded its memory limit")
 // host protection against a pathological run, not budget enforcement.
 const DefaultRunMemoryLimitMB = 4096
 
-// runMemoryLimitMB resolves the per-run sandbox memory ceiling from
+// RunMemoryLimitMB resolves the per-run sandbox memory ceiling from
 // TF_RUN_MEMORY_LIMIT_MB. Empty → the default; 0 → disabled; invalid →
 // the default with one warning per process (a bad value must not brick
 // spawning). Read per spawn like the other agent runtime knobs.
-func runMemoryLimitMB() int {
+//
+// Exported because the native runtime derives its per-command bash budget
+// from the same number the launch caps the jail at: the two must be one
+// resolution, not two reads of one env var that could disagree.
+func RunMemoryLimitMB() int {
 	raw := strings.TrimSpace(os.Getenv("TF_RUN_MEMORY_LIMIT_MB"))
 	if raw == "" {
 		return DefaultRunMemoryLimitMB

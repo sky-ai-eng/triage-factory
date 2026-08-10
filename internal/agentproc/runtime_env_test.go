@@ -18,8 +18,8 @@ func TestRunMemoryLimitMB(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("TF_RUN_MEMORY_LIMIT_MB", tt.raw)
-			if got := runMemoryLimitMB(); got != tt.want {
-				t.Errorf("runMemoryLimitMB() with %q = %d, want %d", tt.raw, got, tt.want)
+			if got := RunMemoryLimitMB(); got != tt.want {
+				t.Errorf("RunMemoryLimitMB() with %q = %d, want %d", tt.raw, got, tt.want)
 			}
 		})
 	}
