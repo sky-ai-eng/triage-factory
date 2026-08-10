@@ -147,6 +147,58 @@ func TestWire_IsErrorOnToolResult(t *testing.T) {
 	}
 }
 
+// TestWire_SeqAnchoredToolResultLandsImmediatelyAfterItsCall pins the wire
+// shape a repaired transcript produces when input arrived between a tool call
+// and the result that answers it. The result row carries a fractional seq
+// placing it under its call, so it must reach the wire in the message directly
+// after the assistant turn — the user rows that outrank it by id follow behind.
+// Anthropic rejects any other arrangement outright ("tool_use ids were found
+// without tool_result blocks immediately after"), which is why the placement
+// exists at all.
+func TestWire_SeqAnchoredToolResultLandsImmediatelyAfterItsCall(t *testing.T) {
+	anchored := 2.5
+	areq := toAnthropic(t, Request{
+		Provider: ProviderAnthropic, Model: "claude-sonnet-4-20250514",
+		Rows: []domain.Message{
+			{ID: 1, Role: "user", Content: "check the file"},
+			{ID: 2, Role: "assistant", ToolCalls: []domain.ToolCall{
+				{ID: "toolu_a", Name: "Read", Input: map[string]any{"path": "/a"}},
+			}},
+			{ID: 3, Role: "user", Content: "also update the changelog"},
+			{ID: 4, Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "This run was stopped by the user."},
+			{ID: 5, Role: "tool", ToolCallID: "toolu_a", Content: "interrupted", IsError: true, Seq: &anchored},
+		},
+	})
+
+	assistantAt := -1
+	for i, m := range areq.Messages {
+		for _, b := range m.Content.ContentBlocks {
+			if b.Type == anthropic.AnthropicContentBlockTypeToolUse {
+				assistantAt = i
+			}
+		}
+	}
+	if assistantAt < 0 {
+		t.Fatal("no tool_use block reached the wire")
+	}
+	if assistantAt == len(areq.Messages)-1 {
+		t.Fatal("the tool_use is the final message; nothing answers it")
+	}
+	next := areq.Messages[assistantAt+1]
+	if next.Role != anthropic.AnthropicMessageRoleUser {
+		t.Fatalf("message after the tool_use has role %q, want the user turn carrying its result", next.Role)
+	}
+	var answered bool
+	for _, b := range next.Content.ContentBlocks {
+		if b.Type == anthropic.AnthropicContentBlockTypeToolResult && b.ToolUseID != nil && *b.ToolUseID == "toolu_a" {
+			answered = true
+		}
+	}
+	if !answered {
+		t.Fatalf("the message after the tool_use carries no tool_result for it: %+v", next.Content)
+	}
+}
+
 func TestWire_CacheControlPlacement(t *testing.T) {
 	areq := toAnthropic(t, Request{
 		Provider: ProviderAnthropic, Model: "claude-sonnet-4-20250514",

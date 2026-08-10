@@ -263,10 +263,27 @@ type directRuntime struct {
 	// lazily built from stores when unset (the local-mode CLI's directRuntime,
 	// which has no Server), and pre-set by tests.
 	ghResolver ghclient.Resolver
+
+	// ghCredential is the credential the branch-push row this runtime composes
+	// into an artifact upsert is stamped with. Set through
+	// LocalClient.SetGitHubCredential — from the sidecar's report on an
+	// executor, from the resolved tier on every other placement. Empty falls
+	// back to the resolver below, and to the App when even that can't answer.
+	ghCredential string
 }
 
 func newDirectRuntime(stores db.Stores, info RunInfo) *directRuntime {
 	return &directRuntime{stores: stores, info: info}
+}
+
+// githubResolver returns the seeded credential resolver, or one built from
+// stores when nothing seeded it (the local-mode CLI's runtime, which has no
+// Server to share one with).
+func (r *directRuntime) githubResolver() ghclient.Resolver {
+	if r.ghResolver != nil {
+		return r.ghResolver
+	}
+	return ghclient.NewResolver(r.stores.Secrets, r.stores.GitHubApps, r.stores.Orgs, r.stores.Agents, nil)
 }
 
 func (r *directRuntime) Info() RunInfo { return r.info }
@@ -360,11 +377,8 @@ func (r *directRuntime) ReviewPosture(ctx context.Context, owner, repo string) (
 	if out.Posture != domain.ReviewPostureIdentity {
 		return out, nil
 	}
-	resolver := r.ghResolver
-	if resolver == nil {
-		resolver = ghclient.NewResolver(r.stores.Secrets, r.stores.GitHubApps, r.stores.Orgs, r.stores.Agents, nil)
-		r.ghResolver = resolver
-	}
+	resolver := r.githubResolver()
+	r.ghResolver = resolver
 	ir, ok := resolver.(ghclient.RepoIdentityResolver)
 	if !ok {
 		return out, nil
@@ -415,7 +429,7 @@ func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
 	a.ConversationID = r.info.RunID
-	act := branchPushActionInfo(a, r.info)
+	act := branchPushActionInfo(a, r.info, r.githubCredential(ctx, a))
 	if r.info.IsEventTriggered {
 		stored, err := r.stores.Artifacts.UpsertSystem(ctx, r.info.OrgID, a)
 		if err != nil {
@@ -437,6 +451,40 @@ func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (
 		return recordActionTx(ctx, ts, r.info.OrgID, act)
 	})
 	return out, err
+}
+
+// githubCredential names the credential to stamp on the branch-push row for
+// artifact a. A credential reported by whoever holds it wins outright — on an
+// executor that is the sidecar, and nothing this process can read would confirm
+// or contradict it.
+//
+// The resolver fallback exists for one caller: the local-mode pre-push hook,
+// which upserts a branch artifact in a process that never resolved a gh client,
+// so nothing has classified the tier by the time the row is built. It is asked
+// only for a branch artifact — the sole kind that yields an action here — and
+// answers from the same resolver that minted the token the push authenticated
+// with. Failure is silent and reads as the App: a push that already landed must
+// not be held up, or logged twice, over how its row is labeled.
+func (r *directRuntime) githubCredential(ctx context.Context, a domain.Artifact) string {
+	if r.ghCredential != "" {
+		return r.ghCredential
+	}
+	if a.Kind != domain.ArtifactKindBranch {
+		return domain.CredentialGitHubApp
+	}
+	owner, repo, ok := strings.Cut(a.Target, "/")
+	if !ok {
+		return domain.CredentialGitHubApp
+	}
+	ir, ok := r.githubResolver().(ghclient.RepoIdentityResolver)
+	if !ok {
+		return domain.CredentialGitHubApp
+	}
+	_, identity, err := ir.ClientForRepoWithIdentity(ctx, r.info.OrgID, owner, repo)
+	if err != nil {
+		return domain.CredentialGitHubApp
+	}
+	return identity.Credential()
 }
 
 // UpdateReviewDetailsIfPending routes the guarded draft write through the same
@@ -751,7 +799,14 @@ func (c sidecarRelayConn) call(ctx context.Context, namespace, op string, args, 
 }
 
 func (c sidecarRelayConn) notify(namespace, op string, args any) {
-	_ = agentproc.NotifyRelay(c.conn, namespace, op, args)
+	// The audit sender, not the raw one: a record that never reaches the wire is
+	// reported back over the same channel where that is still possible, so the
+	// orchestrator can count it. Still fire-and-forget for the caller — the
+	// external write already landed, and nothing here may fail the op that
+	// follows it.
+	if err := agentproc.NotifyRelayAudit(c.conn, namespace, op, args); err != nil {
+		agenthostLog.Warn("relaying an audit record failed", "namespace", namespace, "op", op, "error", err)
+	}
 }
 
 // NewDirectRuntime builds the in-process runtime over db.Stores + RunInfo — the

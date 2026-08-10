@@ -3,6 +3,7 @@ package agenthost
 import (
 	"errors"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
@@ -27,6 +28,15 @@ var (
 // bring-up's returned coordinates. nil on all/local, where the daemon resolves
 // through the live secret store (githubResolver / the Jira resolver).
 type ProxyCredentials struct {
+	// GitHubCredential names the tier of the GitHub credential the sidecar
+	// injects on the upstream hop (a domain.Credential* value), relayed from
+	// the sidecar for the same reason JiraDeployment is: only the process
+	// holding the sealed bundle can read it. It is what this run's GitHub audit
+	// rows are stamped with, so the log names the credential that acted rather
+	// than the tier the deployment is assumed to run. Empty on a run with no
+	// GitHub credential, where the recorders fall back to the App.
+	GitHubCredential string
+
 	// GitHubAPIURL is the sidecar's GitHub-REST proxy base (a bare host URL —
 	// the proxy prepends the real REST base path, api.github.com or a GHES
 	// /api/v3). GitHubAPIToken is the per-run placeholder the client presents.
@@ -61,16 +71,22 @@ type ProxyCredentials struct {
 // injects the real repo-scoped token upstream, and its per-repo TokenSource
 // owns the App/PAT tier selection.
 //
-// Identity is reported as App: the executor provisions installation tokens for
-// tracked repos, and — since every production exec-gh verb funnels through
-// githubClientForRepo, which discards the identity — the value is descriptive
-// only, never behavioral. A repo the sidecar can't resolve surfaces as the
-// proxy's own 502 on first use, not here.
+// Identity is the tier the sidecar reported for the credential it injects, not
+// something read off the client — the proxy hands out a placeholder, and an
+// installation token and a PAT are indistinguishable strings anyway. It reaches
+// the audit rows and nothing else: every production exec-gh verb funnels through
+// githubClientForRepo, which discards it, and the review-posture decision
+// resolves its own identity orchestrator-side. A repo the sidecar can't resolve
+// surfaces as the proxy's own 502 on first use, not here.
 func proxyRepoClient(pc *ProxyCredentials, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
 	if pc == nil || pc.GitHubAPIURL == "" {
 		return nil, ghclient.IdentityUnknown, errGitHubNotConfigured
 	}
-	return ghclient.NewProxyClient(pc.GitHubAPIURL, pc.GitHubAPIToken), ghclient.IdentityApp, nil
+	identity := ghclient.IdentityApp
+	if pc.GitHubCredential == domain.CredentialGitHubPAT {
+		identity = ghclient.IdentityPAT
+	}
+	return ghclient.NewProxyClient(pc.GitHubAPIURL, pc.GitHubAPIToken), identity, nil
 }
 
 // proxyJiraClient builds a Jira client pointed at the sidecar's Jira-REST

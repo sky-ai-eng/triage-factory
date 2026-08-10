@@ -7,8 +7,9 @@ import (
 
 // ExternalAction is one row in external_actions — the append-only audit log of
 // record. Each row captures one external write Triage Factory performed under an
-// ORG-scoped credential (the org GitHub App / the org Jira service account):
-// who, what, when, under which credential, and from→to for a transition.
+// ORG-scoped credential (the org GitHub App or the PAT standing in for it, the
+// org Jira service account): who, what, when, under which credential, and
+// from→to for a transition.
 //
 // This is event-grain and immutable, distinct from the mutable, object-grain
 // Artifact (which records an object's current state and upserts in place). The
@@ -80,6 +81,26 @@ const (
 	ActionPRConvertedToDraft = "pr_converted_to_draft"
 	ActionPREdited           = "pr_edited"
 	ActionPRClosed           = "pr_closed"
+	ActionPRReopened         = "pr_reopened"
+	ActionPRMerged           = "pr_merged"
+
+	// Auto-merge is arming a merge, not performing one, which is why it is its
+	// own pair rather than a flavour of pr_merged: the run that enables it has
+	// merged nothing, and the merge it authorizes may land much later, triggered
+	// by a green check rather than by any agent.
+	ActionPRAutoMergeEnabled  = "pr_auto_merge_enabled"
+	ActionPRAutoMergeDisabled = "pr_auto_merge_disabled"
+
+	// Opening a pull request that undoes a merged one. Mechanically a pr_created
+	// and in intent something else entirely — undoing work that already landed is
+	// among the acts a reader most wants named — so it keeps its own verb, and
+	// its row addresses the revert that was opened.
+	ActionPRReverted = "pr_reverted"
+
+	// Merging the base branch into a pull request's own branch. It writes to the
+	// head ref under the org credential while changing nothing about the pull
+	// request itself, which is why it is audited separately from pr_edited.
+	ActionPRBranchUpdated = "pr_branch_updated"
 
 	// GitHub review lifecycle. The review *draft* is staged TF-side and makes no
 	// GitHub write until the atomic submit at approval (TFAC-494), so the only
@@ -97,8 +118,36 @@ const (
 	ActionCommentEdited  = "comment_edited"
 	ActionCommentDeleted = "comment_deleted"
 
+	// GitHub reactions. The target is the object the reaction lands on (a
+	// comment, an issue, a PR), never the reaction row itself — an emoji is
+	// only interesting as something done TO something.
+	ActionReactionAdded   = "reaction_added"
+	ActionReactionRemoved = "reaction_removed"
+
+	// Labels applied to or taken off a pull request or an issue — ordinary triage
+	// work, and one verb pair for both families because GitHub serves both
+	// through the issue endpoint. Changing which labels the repository OFFERS is
+	// a different act on a different object, and has its own verbs below.
+	ActionLabelAdded   = "label_added"
+	ActionLabelRemoved = "label_removed"
+
+	// Conversation locking, GitHub's own term for it. One pair for both families
+	// for the same reason as labels: a pull request's lock is an issue lock.
+	ActionConversationLocked   = "conversation_locked"
+	ActionConversationUnlocked = "conversation_unlocked"
+
+	// GitHub Actions. Both spend CI capacity under the org credential, which is
+	// why they are audited alongside the content writes.
+	ActionWorkflowDispatched   = "workflow_dispatched"
+	ActionWorkflowRunCancelled = "workflow_run_cancelled"
+
 	// Git branch push (the one double-capture case — see BranchPushDedupKey).
 	ActionBranchPushed = "branch_pushed"
+
+	// A branch GitHub created and linked to an issue. Not a branch_pushed:
+	// nothing was pushed and no commit exists yet — what the row records is the
+	// link between an issue and the branch meant to implement it.
+	ActionLinkedBranchCreated = "linked_branch_created"
 
 	// Git branch push the upstream REFUSED (a non-2xx on the receive-pack
 	// POST — auth, protection, or outage; nothing landed). Recorded by the
@@ -126,22 +175,128 @@ const (
 	// refused a destination at all, not how many times it retried.
 	ActionEgressDenied = "egress_denied"
 
-	// A write the agent made through the real-`gh` credential channel: a REST
-	// request whose method mutates, recorded with its upstream outcome so a
-	// refused write is as visible as a successful one. detail_json carries
-	// {method, path, http_status}. Appended unconditionally (no dedup key) —
-	// each attempt is its own event, exactly like ActionBranchPushFailed.
-	// GraphQL is deliberately out: gh's porcelain mutations and its ordinary
-	// reads are the same POST /api/graphql, separable only by parsing the
-	// request body, which the injector never does.
+	// A write through the real-`gh` credential channel that Triage Factory
+	// refused before forwarding it — a submitted review, a repository creation,
+	// or a GraphQL request whose act could not be established at all. Nothing
+	// reached GitHub, which is what
+	// separates this row from the fallbacks below: those say a write happened
+	// and could not be named, this says a write was stopped.
+	//
+	// detail_json carries {reason, method, path}, plus "refused" naming the act
+	// where the classifier resolved one, "mutation" for the GraphQL field, and
+	// "unreadable" for the band where naming it is exactly what failed. The
+	// distinction is the point: "we refused a review" and "we refused something
+	// we could not read" are different operational facts, and only the second
+	// one should ever be worth investigating.
+	//
+	// Appended unconditionally (no dedup key): every refused attempt is its own
+	// event, exactly like ActionGitDenied, which this follows in every respect
+	// — a per-run least-privilege gate turning down an act, recorded as a
+	// security signal.
+	ActionGHWriteDenied = "gh_write_denied"
+
+	// The fallback for a write the agent made through the real-`gh` credential
+	// channel — a mutating REST request whose method+path the shared classifier
+	// (internal/ghwrite) does not recognize, or a recognized one the upstream
+	// refused. A classified success carries its own semantic action instead (a
+	// reply is comment_posted, a merge is pr_merged), so this row means exactly
+	// "a write happened here and it has no better name yet".
+	//
+	// detail_json carries {method, path, http_status}, plus "attempted" naming
+	// the semantic action a refused write was reaching for — a 404'd merge is
+	// an attempt, never a merge. Appended unconditionally (no dedup key): each
+	// attempt is its own event, exactly like ActionBranchPushFailed.
 	ActionGHChannelWrite = "gh_channel_write"
 
-	// Jira issue lifecycle + comments.
+	// The same fallback one transport over: a GraphQL write through that
+	// channel whose mutation the classifier could not name, or could not read at
+	// all. Most of what `gh`'s porcelain writes is GraphQL, so this is the
+	// transport where an unrecognized act is likeliest to appear.
+	//
+	// It is a separate action from the REST fallback because the two know
+	// different things. A REST fallback has a path, which is most of an act's
+	// identity; this one has whatever the request envelope disclosed, so
+	// detail_json carries {operation, mutations, http_status}, "unreadable"
+	// naming why no single act could be resolved (an over-cap body, a request
+	// that stopped arriving, a malformed document, an ambiguous operation, an
+	// unresolved fragment spread), and "attempted" for a recognized mutation the
+	// server refused.
+	ActionGraphQLWrite = "graphql_write"
+
+	// Issue lifecycle + comments. The verb names the act; PROVIDER names the
+	// system it happened in, which is why a GitHub issue and a Jira issue share
+	// this vocabulary rather than each getting a parallel copy of it. Filtering
+	// the log for "issues created" across both is the useful default, and a
+	// caller that wants one system filters on provider as well.
+	//
+	// The transition/assignment pair is Jira-shaped (named statuses, a single
+	// assignee) and only the Jira writers use it. The open/closed pair below
+	// mirrors the pull-request family instead, because a GitHub issue has states
+	// rather than a workflow.
 	ActionIssueCreated       = "issue_created"
 	ActionIssueTransitioned  = "issue_transitioned"
 	ActionIssueAssigned      = "issue_assigned"
 	ActionIssueUpdated       = "issue_updated"
 	ActionIssueCommentPosted = "issue_comment_posted"
+	ActionIssueClosed        = "issue_closed"
+	ActionIssueReopened      = "issue_reopened"
+	ActionIssueDeleted       = "issue_deleted"
+
+	// The three that stay GitHub-shaped no matter which system the row's provider
+	// names: Jira has no pinned issues, and its equivalent of a transfer is a
+	// project move that reads as a field edit. They live here rather than in a
+	// parallel GitHub-only block because the family is organized by act, and a
+	// reader filtering for what happened to issues wants them in the same set.
+	ActionIssuePinned      = "issue_pinned"
+	ActionIssueUnpinned    = "issue_unpinned"
+	ActionIssueTransferred = "issue_transferred"
+
+	// GitHub review requests. Asking someone to review is an org-credential
+	// write that reaches a human, so it belongs in the log by name; it is not a
+	// review itself, which is why it sits apart from the review lifecycle above.
+	ActionReviewRequested      = "review_requested"
+	ActionReviewRequestRemoved = "review_request_removed"
+
+	// Repository configuration: acts that change the repository itself rather
+	// than anything being triaged inside it. They are not triage work and an org
+	// may well decide an agent should never perform them — which is the reason
+	// they are named rather than left anonymous. That decision gets made by
+	// reading this log, and a log that files an archived repository under "some
+	// GraphQL write happened" cannot inform it.
+	//
+	// repo_edited spans every settings change the porcelain makes, including the
+	// topic replacement it sends to a separate endpoint: what varies between
+	// them lives in a request body nothing on this path reads, so one verb is
+	// all the URL supports and a finer one would be invented rather than
+	// observed.
+	ActionRepoCreated    = "repo_created"
+	ActionRepoEdited     = "repo_edited"
+	ActionRepoDeleted    = "repo_deleted"
+	ActionRepoForked     = "repo_forked"
+	ActionRepoArchived   = "repo_archived"
+	ActionRepoUnarchived = "repo_unarchived"
+
+	// The repository's label SET — which labels exist at all, not which ones are
+	// on a given issue. Deliberately worded apart from label_added/label_removed
+	// above: deleting a label definition strips it from every issue carrying it,
+	// so the two must never read as variants of one another in the log.
+	ActionLabelDefined           = "label_defined"
+	ActionLabelDefinitionEdited  = "label_definition_edited"
+	ActionLabelDefinitionDeleted = "label_definition_deleted"
+
+	// Releases. A published release is the most outward-facing thing on this
+	// list — it is what consumers of the repository actually fetch — so it is
+	// named even though the run that makes one is doing something well outside
+	// triage.
+	//
+	// Uploading and deleting a release's ASSETS have no verbs, because they are
+	// unobservable here rather than unnamed: gh follows the absolute upload url
+	// out of the release payload, which points at GitHub directly and never at
+	// this channel's base. Naming an act nothing can see would promise coverage
+	// that does not exist.
+	ActionReleaseCreated = "release_created"
+	ActionReleaseEdited  = "release_edited"
+	ActionReleaseDeleted = "release_deleted"
 
 	// Slack messages (TFAC-596). Reads (thread/channel history, file
 	// download) are writes-only-by-charter exclusions — see external_actions'
@@ -156,6 +311,21 @@ const (
 // user's own credential is excluded.
 const (
 	CredentialGitHubApp = "github_app"
+	// CredentialGitHubPAT is the tier-3 PAT an org lends Triage Factory when it
+	// has no GitHub App. It sits on the ORG side of the ingestion gate beside
+	// the App, and the distinction the gate draws is about WHOSE ACT a row
+	// records, not whose token it is: this credential acts for the org on every
+	// run in it, exactly as the App does, and no user chose it per action. The
+	// excluded case is the opposite one — a user acting as themselves through
+	// their own authorization (the Jira claim/swipe/done/requeue flows), which
+	// is already attributed natively in the system it lands in.
+	//
+	// Which of the two acted is not cosmetic. A PAT is unscopeable, so the blast
+	// radius of a row written under it is every repository its holder can reach,
+	// and it carries a person's name into whatever it touches. A log that files
+	// those under github_app answers "who did this" with a service account that
+	// was never involved.
+	CredentialGitHubPAT = "github_pat"
 	CredentialJiraOrg   = "jira_org"
 	CredentialSlackBot  = "slack_bot"
 	// CredentialNone is the honest value for an action that spent no credential

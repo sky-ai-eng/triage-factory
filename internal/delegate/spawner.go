@@ -1043,6 +1043,10 @@ func isTaskOwnRepo(ctx context.Context, stores db.Stores, info agenthost.RunInfo
 //     branch_push_failed audit row. The audit log never omits an attempt;
 //     the artifact ledger never gains a branch that doesn't exist.
 //
+// host is the run's shared audit client rather than one built here, so the
+// credential the sidecar reports after bring-up reaches this recorder and the
+// denial recorder beside it through a single object.
+//
 // In multi mode this observer is authoritative for push capture — every push
 // transits the proxy (even `git push --no-verify`, which skips client hooks),
 // and the pre-push hook stands down there (githooks.PushCaptureEnvVar) because
@@ -1051,8 +1055,7 @@ func isTaskOwnRepo(ctx context.Context, stores db.Stores, info agenthost.RunInfo
 // Best-effort: a non-branch ref or a record failure is dropped (logged), never
 // surfaced. By the time this runs the push has already completed upstream, so
 // nothing it does can block, alter, or fail the push.
-func gitPushRecorder(stores db.Stores, info agenthost.RunInfo) func(context.Context, gitproxy.PushedRef) {
-	host := agenthost.NewLocal(stores, info)
+func gitPushRecorder(host *agenthost.LocalClient, info agenthost.RunInfo) func(context.Context, gitproxy.PushedRef) {
 	return func(ctx context.Context, push gitproxy.PushedRef) {
 		art, ok := domain.NewBranchArtifact(push.Repo, push.Ref, push.NewSHA, push.Created)
 		if !ok {

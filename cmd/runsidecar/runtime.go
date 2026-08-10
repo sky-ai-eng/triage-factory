@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
@@ -207,6 +208,12 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// stays here. Empty when no git proxy was started (GitEnabled false).
 	result.GitProxyURL, result.GitProxyToken = handle.GitProxy()
 
+	// Read off the bundle that is already open here, so the orchestrator's audit
+	// rows can name the credential these proxies inject. Sent unconditionally:
+	// every channel the run writes through resolves out of this one bundle, so a
+	// single classification answers for all of them.
+	result.GitHubCredential = bundle.GitHub.Credential()
+
 	// The GitHub/Jira REST credential proxies the orchestrator's own GetPR +
 	// agenthost verbs route through: the orchestrator holds only the
 	// placeholder, the sidecar injects the real token on the upstream hop. On
@@ -303,13 +310,14 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 		PinnedRepos:      ai.PinnedRepos,
 	}
 	proxyCreds := &agenthost.ProxyCredentials{
-		GitHubAPIURL:   proxies.GitHubAPIURL,
-		GitHubAPIToken: proxies.GitHubAPIToken,
-		JiraAPIURL:     proxies.JiraAPIURL,
-		JiraAPIToken:   proxies.JiraAPIToken,
-		JiraDeployment: proxies.JiraDeployment,
-		GitProxyURL:    proxies.GitProxyURL,
-		GitProxyToken:  proxies.GitProxyToken,
+		GitHubCredential: proxies.GitHubCredential,
+		GitHubAPIURL:     proxies.GitHubAPIURL,
+		GitHubAPIToken:   proxies.GitHubAPIToken,
+		JiraAPIURL:       proxies.JiraAPIURL,
+		JiraAPIToken:     proxies.JiraAPIToken,
+		JiraDeployment:   proxies.JiraDeployment,
+		GitProxyURL:      proxies.GitProxyURL,
+		GitProxyToken:    proxies.GitProxyToken,
 	}
 	// The provider-credential accessor lets a provider handler (Slack) select
 	// its bot token from the sealed bundle in-process — a live read so a mid-run
@@ -394,7 +402,7 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string, gitHan
 	if err != nil {
 		return "", "", err
 	}
-	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token, gitHandler))
+	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token, runID, gitHandler))
 	if err != nil {
 		return "", "", fmt.Errorf("runsidecar: construct gh injector: %w", err)
 	}
@@ -421,11 +429,12 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string, gitHan
 //
 // Split from startGHInjector so a test can assert on the wiring alone, without
 // the listener bring-up around it.
-func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, token string, gitHandler http.Handler) ghinjector.Config {
+func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, token, runID string, gitHandler http.Handler) ghinjector.Config {
 	return ghinjector.Config{
 		Upstream:         upstream,
 		IncomingToken:    token,
 		Cert:             cert,
+		RunID:            runID,
 		AllowNonLoopback: true,
 		// The run's git proxy, re-homed behind this listener so the API and git
 		// share one origin. Same handler as the standalone git-proxy listener:
@@ -442,7 +451,7 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 		Observe: func(_ context.Context, m ghinjector.ObservedMutation) {
 			// Fire-and-forget: the mutation already landed on GitHub; the
 			// orchestrator (which holds the DB) builds and upserts the artifact.
-			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordObservation,
+			r.notifyAudit(agentproc.OpRecordObservation,
 				agentproc.RecordObservationArgs{
 					Kind:        m.Kind,
 					Owner:       m.Owner,
@@ -463,10 +472,61 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			// Fire-and-forget beside Observe: the request already transited, and
 			// the orchestrator holds the DB that turns it into an audit row.
 			// Every mutating REST call rides this, including the refused ones the
-			// artifact path drops.
-			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite,
-				agentproc.RecordGHWriteArgs{Method: w.Method, Path: w.Path, Status: w.Status})
+			// artifact path drops. The created object's coordinates ride along
+			// for the shapes that make one — this process is the only one that
+			// ever sees a response body, so nothing downstream could recover
+			// them.
+			args := agentproc.RecordGHWriteArgs{
+				Method:         w.Method,
+				Path:           w.Path,
+				Status:         w.Status,
+				ExternalID:     w.ExternalID,
+				URL:            w.URL,
+				Errored:        w.Errored,
+				ResponseUnread: w.ResponseUnread,
+			}
+			// A GraphQL write is named in its request, which only this process
+			// ever saw — the orchestrator receives the act's name or nothing.
+			args.GraphQL = ghWriteFactsToWire(w.GraphQL)
+			r.notifyAudit(agentproc.OpRecordGHWrite, args)
 		},
+		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, _ ghwrite.Refusal) bool {
+			// A Call, not a notify: the agent's request is held until the
+			// orchestrator answers, because a refusal that raced the forward
+			// would not be one. The orchestrator re-derives the decision from
+			// the shared table and writes the denial row before replying, so
+			// this side sends only what was asked and never what it concluded.
+			var reply agentproc.AuthorizeGHWriteReply
+			if err := agentproc.CallRelay(ctx, r.conn, agentproc.RelayNamespaceCore, agentproc.OpAuthorizeGHWrite,
+				agentproc.AuthorizeGHWriteArgs{
+					Method:  req.Method,
+					Path:    req.Path,
+					GraphQL: ghWriteFactsToWire(req.GraphQL),
+				}, &reply); err != nil {
+				// Fail closed. A gated shape whose decision could not be
+				// obtained is refused, or a wedged relay becomes the way past
+				// the gate.
+				sidecarLog.Warn("gh write authorization relay failed; refusing",
+					"method", req.Method, "path", req.Path, "error", err)
+				return false
+			}
+			return reply.Allowed
+		},
+	}
+}
+
+// ghWriteFactsToWire projects the classifier's GraphQL facts onto the relay
+// protocol's own shape. nil in, nil out — a REST request carries no GraphQL
+// member, and both relay ops that cross this boundary need the same projection.
+func ghWriteFactsToWire(f *ghwrite.GraphQLFacts) *agentproc.GraphQLWriteFacts {
+	if f == nil {
+		return nil
+	}
+	return &agentproc.GraphQLWriteFacts{
+		Operation:  f.Operation,
+		Mutations:  f.Fields,
+		Subject:    f.Subject,
+		Unreadable: f.Unreadable,
 	}
 }
 
@@ -586,8 +646,22 @@ func (r *credRuntime) llmSource(ctx context.Context) (map[string]string, time.Ti
 // and repeated denials are the clearest signal available that an agent is
 // probing for a way out — the reason this hook exists at all.
 func (r *credRuntime) recordEgressDenial(_ context.Context, denied egressproxy.DeniedConnect) {
-	_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordEgressDenial,
+	r.notifyAudit(agentproc.OpRecordEgressDenial,
 		agentproc.RecordEgressDenialArgs{Target: denied.Target, Reason: denied.Reason})
+}
+
+// notifyAudit relays one audit record to the orchestrator, which holds the DB
+// that turns it into a row. Every audit relay this process sends goes through
+// here so that a record lost on the way is reported rather than discarded: this
+// process installs no meter provider and opens no listener, so the only place a
+// drop can be counted is the side it was headed for.
+//
+// Void, like every caller expects — the external act it describes already
+// happened, and no audit record may fail the thing it is a record of.
+func (r *credRuntime) notifyAudit(op string, args any) {
+	if err := agentproc.NotifyRelayAudit(r.conn, agentproc.RelayNamespaceCore, op, args); err != nil {
+		sidecarLog.Warn("relaying an audit record failed", "op", op, "error", err)
+	}
 }
 
 // gitProxyConfig builds the git credential proxy's wiring for the sidecar:
@@ -634,7 +708,7 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 			}, nil
 		},
 		RecordDenial: func(_ context.Context, denied gitproxy.DeniedGitOp) {
-			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordDenial,
+			r.notifyAudit(agentproc.OpRecordDenial,
 				agentproc.RecordDenialArgs{
 					Owner:  denied.Owner,
 					Repo:   denied.Repo,
@@ -649,7 +723,7 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 			// in this sandbox (StartRunProxies sets PushCaptureProxy), so this
 			// relay is the sole push-capture path on the executor — without it
 			// no executor push reaches the audit log.
-			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordPush,
+			r.notifyAudit(agentproc.OpRecordPush,
 				agentproc.RecordPushArgs{
 					Repo:    push.Repo,
 					Ref:     push.Ref,

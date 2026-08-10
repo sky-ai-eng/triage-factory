@@ -368,6 +368,10 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// the coordinates; retried once, and a double failure is loud — until the
 	// stamp lands the row shows submitted with no URL, which is why this must not
 	// stay a silent Warn.
+	//
+	// The credential is classified outside the stamp tx, against the same repo
+	// the submit just went to, so the row names the credential that posted it.
+	credential := githubCredentialFor(cleanupCtx, ah.ghResolver, orgID, owner, repo)
 	submitted := *fresh
 	submitted.State = domain.ArtifactStateReviewSubmitted
 	submitted.ExternalID = strconv.Itoa(res.ReviewID)
@@ -390,7 +394,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 				return fmt.Errorf("stamp CAS matched no row: artifact %s is missing or no longer submitted", art.ID)
 			}
 			return tx.ExternalActions.Record(cleanupCtx, orgID,
-				githubApprovalAction(&submitted, userID, domain.ActionReviewSubmitted, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted))
+				githubApprovalAction(&submitted, userID, domain.ActionReviewSubmitted, domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, credential))
 		})
 	}
 	if err := stamp(); err != nil {

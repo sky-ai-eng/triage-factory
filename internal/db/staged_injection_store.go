@@ -28,9 +28,11 @@ type StagedInjectionStore interface {
 	// decimal string — messages ids are integers); CreatedAt is stamped by
 	// the DB default. The injection's Body is the bare, already-rendered
 	// line — the flush wraps and bundles. A failure to append is the one
-	// drop the queue can suffer; the caller logs it and the producer's
-	// natural retry (the next poll re-diffs the head) covers a transient
-	// miss.
+	// drop the queue can suffer, and it is permanent for that injection:
+	// the transition that produced it was already committed alongside the
+	// snapshot it was diffed against, so re-polling re-derives nothing. A
+	// caller may still treat it as acceptable, but only where a LATER
+	// transition would carry the same news — never as a retry of this one.
 	AppendSystem(ctx context.Context, orgID string, n *domain.StagedInjection) error
 
 	// FlushPendingSystem atomically claims and returns every pending

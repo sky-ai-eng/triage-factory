@@ -7,25 +7,83 @@
 // lives only in the capless sidecar that runs this proxy and never enters the
 // jail's env, argv, or any file (placeholder only).
 //
-// # No traffic policy
+// # One traffic policy
 //
-// The credential carries the policy: an App-org token is minted scoped to the
-// team's authorized repo set, so a request for a repo outside that set gets
-// GitHub's own 404 masking, verbatim. The injector therefore does NO path
-// allowlist and applies no rule to what the agent may ask for — scope is
-// bounded by the token, not by the traffic. It only (a) maps the two GHE-shaped
-// path prefixes gh emits to the org's real API and (b) selects the one
-// credential to inject.
+// Most of the scope is carried by the credential: an App-org token is minted
+// scoped to the team's authorized repo set, so a request for a repo outside
+// that set gets GitHub's own 404 masking, verbatim. There is no path allowlist,
+// and a request for a repo the run may work in is forwarded whatever it asks
+// of it — with one exception, which is the whole of this proxy's traffic policy.
 //
-// # Requests are never inspected
+// Two families of write are refused before they are forwarded: submitting a
+// review, and creating a repository. So is any GraphQL request whose act could
+// not be established at all, since a policy keyed on the act's name is walked
+// through by anything that stops the act being named. What is refused, and the
+// reasoning for each — including why MERGING is deliberately not among them —
+// lives in internal/ghwrite alongside the classifier the audit log reads;
+// gate.go here is only the enforcement. There is no authorization mechanism and
+// no exemption: a mission that needs a gated act cannot perform it and finishes
+// by saying so.
 //
-// Treat this as an invariant of the package, not a scoping decision: the
-// injector reads responses and forwards requests. rewrite touches the URL and
-// the Authorization header and nothing else — no request body is ever buffered,
-// parsed, delayed, or altered. This is the one process that holds a run's live
-// GitHub credential while parsing hostile upstream output; widening it to also
-// parse every outbound request is not free, so a change that wants request
-// visibility has to re-derive that cost first.
+// This is the choke point, which is why the policy is here rather than at the
+// command-level matcher the delegated runtime also applies. That matcher sees
+// what a model typed; this sees what actually happened — and any client holding
+// the per-run placeholder reaches this proxy, curl included, while the SDK
+// runtime has no matcher seam at all.
+//
+// Everything else the injector does is unchanged: it maps the two GHE-shaped
+// path prefixes gh emits to the org's real API, and selects the one credential
+// to inject.
+//
+// # Requests are forwarded unaltered, and read in one place
+//
+// No request is ever ALTERED. rewrite touches the URL and the Authorization
+// header and nothing else, and reading a body neither changes it nor consumes
+// it: what the agent sent is what is forwarded, byte for byte, including the
+// bodies read below. Buffering adds no loss of its own — which is the whole of
+// what it can promise, since a body whose own read fails mid-stream was never
+// going to arrive whole regardless of who was in the middle.
+//
+// Requests are READ in exactly one place: a POST to the GraphQL endpoint, whose
+// body is buffered under maxRequestBody and parsed for the name of the mutation
+// it performs. That is a deliberate, bounded exception to what used to be a
+// blanket invariant, and it is not free — this is the one process that holds a
+// run's live GitHub credential while parsing hostile upstream output, and it
+// now also parses outbound documents an agent composed from that same text.
+//
+// The exception exists because the alternative was a governance hole rather
+// than a policy: nearly every write gh's porcelain performs — a comment, a
+// close, a merge, a review — is a POST to /api/graphql, indistinguishable on
+// the wire from `gh pr view`. Excluding it did not make those writes safe, only
+// unlogged. What bounds the cost is the shape of the read: the envelope's three
+// known members, the top level of the operation that runs — including the
+// fragments it spreads into that top level, since moving a mutation behind one
+// would otherwise be the cheapest way to perform a write nothing could name —
+// and a node id from the variables. No argument value and no free text is
+// interpreted (internal/ghwrite gqldoc.go states what the reader refuses to look
+// at), and a document that does not parse is recorded as unreadable rather than
+// guessed at.
+//
+// Anything beyond that shape still has to re-derive the cost. REST request
+// bodies remain unread — a REST path already names its act — so the classifier
+// deliberately cannot tell a PATCH that edits a pull request from one that
+// closes it.
+//
+// # What this channel cannot see at all
+//
+// GH_HOST redirects the base URL, so it reaches only the requests gh BUILDS
+// from that base. A command that takes an absolute URL out of a response body
+// and follows it — the release asset commands do this, using the upload_url and
+// the release object's own url — leaves this channel entirely, and neither its
+// act nor its outcome can be recorded here. Naming those shapes in the write
+// classifier would therefore be a promise it cannot keep.
+//
+// In the sandbox they do not merely go unlogged, they fail: the jail has no
+// route to those hosts and no keychain to authenticate them with, so the escape
+// is a fail-closed one. It is worth knowing about anyway, because "the injector
+// observes the agent's GitHub writes" is true only of the traffic the injector
+// is in front of, and a probe run outside the jail — on a host with a real
+// keyring — will see such a command succeed with nothing recorded.
 //
 // # TLS, but no interception
 //
@@ -87,6 +145,12 @@
 //     POST .../pulls (PR created) and POST .../pulls/{n}/reviews (review
 //     posted), which is also the only way inline review comments are posted.
 //
+// The review half of that pair no longer fires, because a review submitted
+// through this channel is now refused before it is forwarded. It is kept rather
+// than deleted: the observation is what the artifact row would be built from if
+// the policy ever admits the shape, and nothing about it is specific to the
+// policy that currently does not.
+//
 // Decoding a response narrows nothing the agent may do and never alters a
 // request. `gh pr review` posts addPullRequestReview, whose response carries
 // only clientMutationId — the PR it targets is named in the *request*, so
@@ -97,13 +161,27 @@
 //
 // Observation covers only the two artifact-bearing creates, so an edit, a
 // merge, a close, and every refused write used to leave no trace at all. The
-// second callback (ObserveWrite) closes that gap for the REST surface: each
-// mutating method is reported with its path and the upstream's status, success
-// and failure alike. It reads three fields the response already carries —
-// method, path, status — so no request is read and no body is buffered on
-// either side; the invariant above is untouched. GraphQL is deliberately excluded:
-// a porcelain mutation and an ordinary `gh pr view` are both POST
-// /api/graphql, and telling them apart means parsing the request body.
+// second callback (ObserveWrite) closes that gap on both transports, and every
+// write leaves exactly one report whichever one it took.
+//
+// REST is read from the response's own request record — method, path, status —
+// so those requests stay unread. The shapes the shared classifier
+// (internal/ghwrite) marks as creates — a posted comment, a review-thread reply
+// — additionally have their RESPONSE body parsed for the new object's id and
+// link, through the same cap-and-stitch machinery artifact observation uses, so
+// the audit row reaches parity with the equivalent exec verb's. Every other
+// shape is fully described by its path and costs no buffering at all.
+//
+// GraphQL needs both ends of the hop. The act is named only in the request, so
+// the capture in Handler reads it there; the outcome is only in the response,
+// and not in its status line — the endpoint refuses a mutation with a 200
+// carrying an errors array — so the audit reads that too and files a refused
+// write as an attempt. A request whose document names no mutation is a read and
+// reports nothing at all, which is nearly all of this endpoint's traffic.
+//
+// Neither callback is a policy: reporting a write neither permits nor prevents
+// it. Both fire after the request has already transited, so a refused request
+// reaches neither of them — its one row is the refusal, written by the gate.
 package ghinjector
 
 import (
@@ -124,7 +202,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
 // restPrefix is the GHE REST path prefix gh emits; graphqlPath is the GraphQL
@@ -144,6 +224,23 @@ const (
 // front of the untouched remainder. The agent's response is always delivered
 // whole; observation is the only thing that degrades.
 const maxObserveBody = 1 << 20
+
+// injectorLog carries what this package says out loud, which is only its
+// refusals. Everything it merely observes travels as a relayed audit row and is
+// silent here; a refusal is a decision this process made, and the line is
+// written locally so it owes nothing to the relay hop that records it.
+var injectorLog = logging.Component("ghinjector")
+
+// maxRequestBody caps how much of a GraphQL request body the injector will
+// buffer to name the act it performs. It is sized to clear anything real:
+// GitHub caps a comment at 64 KiB and gh's largest documents are a few, so a
+// megabyte is far past every legitimate mutation while still bounding what one
+// request can make this process hold.
+//
+// A body past it is forwarded whole and audited as unreadable. That direction
+// matters: the alternative — dropping the record — would make padding a request
+// past the cap the way to write without being logged.
+const maxRequestBody = 1 << 20
 
 // TokenSource supplies the single real GitHub credential to inject on every
 // request — the team-set-scoped installation token (App orgs) or the org PAT.
@@ -179,18 +276,11 @@ type ObservedMutation struct {
 }
 
 // ObservedWrite is one mutating REST request the injector forwarded, with the
-// outcome the upstream returned. Every field comes off the response's own
-// request record — no body is read on either side.
-type ObservedWrite struct {
-	// Method is the HTTP method, one of the mutating set (POST/PATCH/PUT/DELETE).
-	Method string
-	// Path is the upstream request path the injector forwarded to (post-rewrite,
-	// so the GHE /api/v3 prefix is already resolved to the org's real API shape).
-	Path string
-	// Status is the upstream response code. Non-2xx is recorded too: a refused
-	// write is exactly the outcome the audit log must not omit.
-	Status int
-}
+// outcome the upstream returned. It is the classifier package's Observation
+// under this package's name: the sidecar relays it and the orchestrator turns
+// it into an audit row, and one type across that hop is what keeps the two ends
+// from drifting.
+type ObservedWrite = ghwrite.Observation
 
 // Config bundles the per-run injector inputs. One Server per run.
 type Config struct {
@@ -219,10 +309,23 @@ type Config struct {
 	// ObserveWrite, when non-nil, is called for every mutating REST request the
 	// injector forwarded, whatever the outcome — the audit-parity callback, as
 	// opposed to Observe's artifact-parity one. Both fire for a successful REST
-	// PR create: they answer different questions (what exists vs what was
-	// attempted), the same way branch_pushed and branch_push_failed coexist.
+	// PR create, and neither is redundant with the other: an artifact says the
+	// pull request exists, an action says this run opened it, and a reader
+	// asking either question is not served by the other's answer.
 	// Called inline on the response path, so the callback must not block.
 	ObserveWrite func(ctx context.Context, w ObservedWrite)
+
+	// AuthorizeWrite decides the gated shapes and records their refusals. See
+	// the type's own doc: nil refuses every gated shape without recording one,
+	// which is the fail-closed reading of "no decision source is wired" and
+	// never the production shape — both modes supply it.
+	AuthorizeWrite AuthorizeWrite
+
+	// RunID names the run this injector serves, for log attribution only. It is
+	// never sent upstream and never reaches an audit row — those are attributed
+	// by the orchestrator from its own run identity, never from anything the
+	// sidecar names. Empty is fine; it costs a log line its run.
+	RunID string
 
 	// AllowNonLoopback opts into binding a non-loopback address (the veth IP the
 	// sandbox reaches). Loopback-only by default, exactly like the sibling
@@ -345,6 +448,17 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		// Read before forwarding, because after the hop the act is unrecoverable:
+		// a GraphQL response says nothing about which mutation produced it, and
+		// an aliased one says nothing at all. The gate below needs it for the
+		// same reason — on this transport the act is named in the request or
+		// nowhere.
+		facts := s.captureGraphQLWrite(r)
+		// Before the credential is resolved, so a refused request never reaches
+		// the credential pipeline at all.
+		if s.refused(w, r, facts) {
+			return
+		}
 		tok, err := s.cfg.TokenSource(r.Context())
 		if err != nil || tok == "" {
 			// 502: the proxy is alive but the credential pipeline is broken.
@@ -352,9 +466,112 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, "ghinjector: failed to resolve upstream credential", http.StatusBadGateway)
 			return
 		}
-		r = r.WithContext(context.WithValue(r.Context(), authCtxKey{}, tok))
+		ctx := context.WithValue(r.Context(), authCtxKey{}, tok)
+		if facts != nil {
+			ctx = context.WithValue(ctx, graphQLFactsKey{}, facts)
+		}
+		r = r.WithContext(ctx)
 		s.proxy.ServeHTTP(w, r)
 	})
+}
+
+// graphQLFactsKey carries what the request envelope disclosed from the capture
+// in Handler to the audit in ModifyResponse, where the outcome is finally
+// known. The request is the only place the act is named and the response is the
+// only place its outcome is, so one write's row needs both ends of the hop.
+type graphQLFactsKey struct{}
+
+// captureGraphQLWrite buffers a GraphQL request body, re-presents it unchanged,
+// and reads the act out of it. nil for everything that is not a GraphQL
+// mutation — a different endpoint, a read — and that is the overwhelming
+// majority of what passes through here.
+//
+// One return value rather than a (facts, ok) pair, because both the audit and
+// the refusal policy branch on "is there anything to say about this request",
+// and a boolean that only ever means "the pointer is non-nil" is one place for
+// the two to disagree.
+//
+// It runs whether or not the write audit is wired, because the refusal policy
+// reads the same facts and a run with no audit callback is still a run that may
+// not merge.
+//
+// The buffering is unconditional for POSTs to the GraphQL endpoint, because
+// whether a body is a read cannot be known before reading it. What stays cheap
+// is the parse: ParseGraphQLRequest decodes the envelope and stops at a
+// document with no mutation keyword in it, so ordinary query traffic costs one
+// copy and one JSON decode and never reaches the document reader.
+func (s *Server) captureGraphQLWrite(r *http.Request) *ghwrite.GraphQLFacts {
+	if r.Method != http.MethodPost || !isGraphQLPath(r.URL.Path) {
+		return nil
+	}
+
+	body, unread := bufferRequest(r)
+	if unread != "" {
+		// No document to read, so nothing can say what this request performs.
+		// It is refused on exactly that ground (see ghwrite.gateGraphQL) and the
+		// reason travels verbatim, because the two causes are not alike — a cap
+		// this side chose, against a caller that stopped sending — and a
+		// refusal in this band that is not vanishingly rare means something
+		// operational rather than someone probing.
+		return &ghwrite.GraphQLFacts{Unreadable: unread}
+	}
+
+	facts, isWrite := ghwrite.ParseGraphQLRequest(body)
+	if !isWrite {
+		return nil
+	}
+	return &facts
+}
+
+// isGraphQLPath reports whether an INBOUND path addresses the GraphQL endpoint,
+// matching what rewrite routes there.
+func isGraphQLPath(path string) bool {
+	return path == graphqlPath || strings.HasPrefix(path, graphqlPath+"/")
+}
+
+// bufferRequest reads a request body into memory and re-presents it, returning
+// the bytes. unread is empty when the whole body was buffered; otherwise it
+// names why not, in the classifier's own vocabulary, and body is nil.
+//
+// The two reasons are kept apart because they are different facts and the
+// guarantee differs between them:
+//
+//   - Past the cap. The read itself was clean, so the consumed prefix is
+//     stitched back in front of an intact remainder and the request reaches
+//     GitHub byte-for-byte. Only the audit degrades. (A declared length over the
+//     cap settles this before any I/O, leaving the body untouched entirely.)
+//   - The read broke mid-stream. The prefix is stitched back the same way, so
+//     this proxy still drops nothing — but the remainder is a stream that has
+//     already failed and will most likely fail again on the forward. What can be
+//     promised here is only that buffering added no loss of its own; a body the
+//     caller could not deliver is not one anything downstream can make whole.
+//
+// On the whole-body path GetBody is set alongside, which is what the buffered
+// body owes the transport: an in-memory body may be replayed, and a request
+// that can be replayed is one net/http may safely retry on a stale connection
+// rather than failing the agent's call.
+func bufferRequest(r *http.Request) (body []byte, unread string) {
+	if r.Body == nil {
+		return nil, ""
+	}
+	if r.ContentLength > maxRequestBody {
+		return nil, ghwrite.GraphQLOverCap
+	}
+	// One byte past the cap, so "over the cap" is distinguishable from "exactly
+	// the cap" — ReadAll on a LimitReader reports no error at the limit.
+	buf, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
+	if err != nil || len(buf) > maxRequestBody {
+		r.Body = &prefixedBody{r: io.MultiReader(bytes.NewReader(buf), r.Body), c: r.Body}
+		if err != nil {
+			return nil, ghwrite.GraphQLRequestUnread
+		}
+		return nil, ghwrite.GraphQLOverCap
+	}
+	// The original body is left for the server to close, as it always does — it
+	// is drained to EOF here, so nothing is holding the connection.
+	r.Body = io.NopCloser(bytes.NewReader(buf))
+	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(buf)), nil }
+	return buf, ""
 }
 
 // routesToGit decides which half of the shared origin owns this request.
@@ -474,66 +691,137 @@ var writeMethods = map[string]bool{
 }
 
 // auditWrite reports one mutating REST request to the write-audit callback,
-// whatever the upstream returned. GraphQL is skipped by the caller's flag: its
-// mutations are indistinguishable from its reads without the request body.
-// Reads three already-parsed fields and nothing else — no body on either side
-// of the hop is touched, so the package's never-inspect-requests invariant is
-// unaffected.
-func (s *Server) auditWrite(resp *http.Response, graphql bool) {
+// whatever the upstream returned. GraphQL is skipped by the caller's flag —
+// auditGraphQLWrite owns that transport, and running both would put two rows on
+// one request.
+//
+// Method, path, and status are already-parsed fields of the response's request
+// record, so a REST request is still never read. body
+// is the buffered RESPONSE body, non-nil only when the caller determined this
+// shape creates an object worth naming; an empty or unparseable one costs the
+// row its id and link, never the row itself.
+func (s *Server) auditWrite(resp *http.Response, graphql bool, body []byte) {
 	if s.cfg.ObserveWrite == nil || graphql || !writeMethods[resp.Request.Method] {
 		return
 	}
-	s.cfg.ObserveWrite(context.Background(), ObservedWrite{
+	w := ObservedWrite{
 		Method: resp.Request.Method,
 		Path:   resp.Request.URL.Path,
 		Status: resp.StatusCode,
-	})
+	}
+	if len(body) > 0 {
+		w.ExternalID, w.URL = parseCreatedObject(body)
+	}
+	s.cfg.ObserveWrite(context.Background(), w)
+}
+
+// auditGraphQLWrite reports one GraphQL mutation to the write-audit callback.
+// Both ends of the hop meet here: the act comes from the request the capture
+// read, the outcome from the response.
+//
+// body is the buffered response, empty when it was past the cap or broke
+// mid-read. Losing it costs the row its link and its knowledge of whether the
+// write was refused, so the record says the outcome went unread rather than
+// claiming a success nobody observed — and says that in its own words, since
+// "the server refused this" and "we could not tell" are different facts.
+func (s *Server) auditGraphQLWrite(resp *http.Response, facts *ghwrite.GraphQLFacts, body []byte) {
+	if s.cfg.ObserveWrite == nil {
+		return
+	}
+	w := ObservedWrite{
+		Method:  resp.Request.Method,
+		Path:    resp.Request.URL.Path,
+		Status:  resp.StatusCode,
+		GraphQL: facts,
+	}
+	if len(body) > 0 {
+		w.Errored, w.URL = ghwrite.ReadGraphQLResponse(body, facts.Mutation())
+	} else {
+		w.ResponseUnread = true
+	}
+	s.cfg.ObserveWrite(context.Background(), w)
+}
+
+// auditWantsBody reports whether the write audit needs this response's body:
+// the callback is wired, the request was a REST write the upstream accepted,
+// and the classifier says the response names an object that did not exist
+// before it. Everything else is described by its path alone.
+func (s *Server) auditWantsBody(resp *http.Response, graphql bool) bool {
+	if s.cfg.ObserveWrite == nil || graphql || !writeMethods[resp.Request.Method] {
+		return false
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	shape, ok := ghwrite.Classify(resp.Request.Method, resp.Request.URL.Path)
+	return ok && shape.CreatesObject
+}
+
+// observationCandidate reports whether this response is one of the
+// artifact-bearing mutations, with the coordinates the path supplies. GraphQL
+// is a candidate on shape alone — the operation is named in the request, which
+// is off limits, so its body has to say what it was.
+func (s *Server) observationCandidate(resp *http.Response, graphql bool) (kind, owner, repo string, number int, ok bool) {
+	if s.cfg.Observe == nil || resp.Request.Method != http.MethodPost ||
+		resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", "", "", 0, false
+	}
+	if graphql {
+		return "", "", "", 0, true
+	}
+	return classifyMutationPath(resp.Request.URL.Path)
 }
 
 // modifyResponse bumps the request counter, reports every mutating REST request
-// to the write audit, and, for the observable mutation shapes, buffers+parses
-// the response body to emit an observation before streaming it on unchanged.
-// Never returns an error (that would 502 the agent on a successful upstream
-// write) — observation failures are silently dropped and left to the
-// reconciler backstop.
+// to the write audit, and, for the shapes whose response names an object,
+// buffers+parses the body before streaming it on unchanged. Never returns an
+// error (that would 502 the agent on a successful upstream write) — observation
+// failures are silently dropped and left to the reconciler backstop.
+//
+// The body is buffered at most once and shared by both consumers: they read
+// different objects out of it, but a response has one body and reading it twice
+// is not a thing that can be made to work.
 func (s *Server) modifyResponse(resp *http.Response) error {
 	s.requestCount.Add(1)
 	if resp.Request == nil {
 		return nil
 	}
-
-	// Every GraphQL POST is a candidate — the operation is named in the request,
-	// which is off limits, so the response itself has to say what it was. REST
-	// candidates are recognized from the path alone.
 	graphql := resp.Request.URL.Path == s.graphqlURL.Path
 
-	// Write audit first, and before the success/method filters below, so it also
-	// covers the outcomes observation drops: a refused write, and every mutating
-	// method that creates no artifact.
-	s.auditWrite(resp, graphql)
+	kind, owner, repo, number, observing := s.observationCandidate(resp, graphql)
+	auditingCreate := s.auditWantsBody(resp, graphql)
+	// Non-nil only for a GraphQL request the capture in Handler read as a write.
+	facts, _ := resp.Request.Context().Value(graphQLFactsKey{}).(*ghwrite.GraphQLFacts)
 
-	if s.cfg.Observe == nil || resp.Request.Method != http.MethodPost ||
-		resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil
+	var buf []byte
+	if observing || auditingCreate || facts != nil {
+		buf, _ = bufferForObservation(resp)
 	}
 
-	var (
-		kind, owner, repo string
-		number            int
-	)
-	if !graphql {
-		var ok bool
-		kind, owner, repo, number, ok = classifyMutationPath(resp.Request.URL.Path)
-		if !ok {
-			return nil
+	if facts != nil {
+		// A GraphQL write's outcome is not in its status line, so this arm needs
+		// the body whatever the act was — an errors array is how the endpoint
+		// refuses, and a row that read only the 200 would report a refused merge
+		// as a merge.
+		s.auditGraphQLWrite(resp, facts, buf)
+	} else {
+		// The REST audit runs whatever the buffering produced — it covers the
+		// outcomes observation drops, a refused write and every mutating method
+		// that makes no artifact — but it is handed a body only when the
+		// classifier said this shape's response names a created object. The two
+		// conditions overlap for a REST create and diverge elsewhere, and
+		// handing over a body buffered for some other reason would hang whatever
+		// it happens to contain on a row with no use for it.
+		createdBody := buf
+		if !auditingCreate {
+			createdBody = nil
 		}
+		s.auditWrite(resp, graphql, createdBody)
 	}
 
-	buf, ok := bufferForObservation(resp)
-	if !ok {
+	if !observing || buf == nil {
 		return nil
 	}
-
 	var (
 		m      ObservedMutation
 		parsed bool
@@ -549,13 +837,33 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	return nil
 }
 
+// parseCreatedObject reads the id and html url of the object a create response
+// names. Both empty when the body doesn't parse or carries no id — a 2xx
+// without a recognizable object still happened, so the caller records the act
+// and lets the deep link degrade.
+func parseCreatedObject(body []byte) (externalID, url string) {
+	var o struct {
+		ID      int64  `json:"id"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.Unmarshal(body, &o); err != nil || o.ID == 0 {
+		return "", ""
+	}
+	return strconv.FormatInt(o.ID, 10), o.HTMLURL
+}
+
 // bufferForObservation reads the whole response body into memory and re-presents
 // it to the caller, returning the buffered bytes. ok is false when the body is
 // larger than the injector will buffer or the read broke mid-stream; in both
 // cases the response is restored to a readable state (consumed prefix stitched
-// back in front of the untouched remainder, original body kept as the Closer)
-// and observation is skipped for it. The agent's response is always delivered
-// whole; observation is the only thing that degrades.
+// back in front of the remainder, original body kept as the Closer) and
+// observation is skipped for it.
+//
+// Past the cap, that restoration is exact and the agent's response is delivered
+// whole, with observation the only thing degraded. On a broken read the same
+// stitch happens and this proxy still drops nothing of its own, but the
+// remainder is a stream that already failed — an upstream body that cannot be
+// read is not one anything in the middle can deliver whole.
 func bufferForObservation(resp *http.Response) ([]byte, bool) {
 	// A declared length past the cap settles the outcome before any I/O: the
 	// body would be skipped anyway, so read none of it and leave it streaming
@@ -650,7 +958,7 @@ func parseGraphQLObservation(body []byte) (ObservedMutation, bool) {
 		return ObservedMutation{}, false
 	}
 	pr := payload.Data.CreatePullRequest.PullRequest
-	owner, repo, number, ok := parsePullRequestURL(pr.URL)
+	owner, repo, number, ok := ghwrite.ParsePullRequestURL(pr.URL)
 	if !ok {
 		return ObservedMutation{}, false
 	}
@@ -662,30 +970,6 @@ func parseGraphQLObservation(body []byte) (ObservedMutation, bool) {
 		NodeID: pr.ID,
 		URL:    pr.URL,
 	}, true
-}
-
-// parsePullRequestURL pulls the coordinates out of a PR's html url, whose shape
-// is {scheme}://{host}/{owner}/{repo}/pull/{n} on dotcom and GHES alike. The
-// scan takes the first "pull" segment with two segments before it and a
-// positive integer after it, so a repository literally named "pull" still
-// resolves.
-func parsePullRequestURL(raw string) (owner, repo string, number int, ok bool) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", "", 0, false
-	}
-	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
-	for i, seg := range segs {
-		if seg != "pull" || i < 2 || i+1 >= len(segs) {
-			continue
-		}
-		n, err := strconv.Atoi(segs[i+1])
-		if err != nil || n <= 0 || segs[i-2] == "" || segs[i-1] == "" {
-			continue
-		}
-		return segs[i-2], segs[i-1], n, true
-	}
-	return "", "", 0, false
 }
 
 // parseObservation extracts the created object's coordinates from a mutation's

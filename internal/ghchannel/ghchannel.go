@@ -79,6 +79,14 @@ type Config struct {
 	// injector forwarded, with its outcome — the audit-log half of the same
 	// channel. Wired in-process too.
 	ObserveWrite func(context.Context, ghinjector.ObservedWrite)
+
+	// AuthorizeWrite decides the shapes the injector's refusal policy gates and
+	// records their denials. Multi mode relays the same decision to the
+	// orchestrator; here it is an ordinary call, since the process holding the
+	// policy and the one running the proxy are the same process. Leaving it nil
+	// refuses every gated shape without recording one — see the injector's own
+	// doc for why that is the fail-closed reading rather than an off switch.
+	AuthorizeWrite ghinjector.AuthorizeWrite
 }
 
 // Channel is a live per-run injector and the coordinates an agent subprocess
@@ -155,12 +163,14 @@ func Start(cfg Config) (*Channel, error) {
 		return fail(err)
 	}
 	srv, err := ghinjector.New(ghinjector.Config{
-		Upstream:      upstream,
-		IncomingToken: token,
-		Cert:          cert,
-		TokenSource:   cfg.TokenSource,
-		Observe:       cfg.Observe,
-		ObserveWrite:  cfg.ObserveWrite,
+		Upstream:       upstream,
+		IncomingToken:  token,
+		Cert:           cert,
+		RunID:          cfg.RunID,
+		TokenSource:    cfg.TokenSource,
+		Observe:        cfg.Observe,
+		ObserveWrite:   cfg.ObserveWrite,
+		AuthorizeWrite: cfg.AuthorizeWrite,
 		// Loopback only — no veth, no other host may reach this listener.
 	})
 	if err != nil {

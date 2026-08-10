@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -15,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -505,18 +507,20 @@ func TestCapture_EgressDenied_RecordsOneRowPerConversationAndHost(t *testing.T) 
 
 // TestCapture_GHChannelWrite_RecordsEveryAttempt pins the gh-channel write
 // audit: each mutating REST call is its own row (no dedup — a retried edit and a
-// refused one are distinct events), a repo path files under owner/repo, and a
-// non-2xx is recorded exactly like a success. The refused write is the whole
-// point: the artifact path drops it, so without this row an off-scope write
-// leaves no trace at all.
+// refused one are distinct events), and a non-2xx is recorded exactly like a
+// success. The refused write is the whole point: the artifact path drops it, so
+// without this row an off-scope write leaves no trace at all.
 func TestCapture_GHChannelWrite_RecordsEveryAttempt(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	client := NewLocal(stores, info)
 	ctx := context.Background()
 
-	client.RecordGHChannelWrite(ctx, "PATCH", "/repos/octo/repo/pulls/7", 200)
-	client.RecordGHChannelWrite(ctx, "PATCH", "/repos/octo/repo/pulls/7", 200)
-	client.RecordGHChannelWrite(ctx, "PATCH", "/repos/other/repo/pulls/1", 404)
+	edit := ghwrite.Observation{Method: "PATCH", Path: "/repos/octo/repo/pulls/7", Status: 200}
+	client.RecordGHChannelWrite(ctx, edit)
+	client.RecordGHChannelWrite(ctx, edit)
+	client.RecordGHChannelWrite(ctx, ghwrite.Observation{
+		Method: "PATCH", Path: "/repos/other/repo/pulls/1", Status: 404,
+	})
 
 	acts := listExternalActions(t, stores)
 	if len(acts) != 3 {
@@ -524,8 +528,7 @@ func TestCapture_GHChannelWrite_RecordsEveryAttempt(t *testing.T) {
 	}
 	var refused domain.ExternalAction
 	for _, a := range acts {
-		if a.Action != domain.ActionGHChannelWrite || a.Provider != domain.ArtifactProviderGitHub ||
-			a.Credential != domain.CredentialGitHubApp {
+		if a.Provider != domain.ArtifactProviderGitHub || a.Credential != domain.CredentialGitHubApp {
 			t.Errorf("gh channel row mismatch: %+v", a)
 		}
 		if a.ConversationID != info.RunID {
@@ -533,25 +536,401 @@ func TestCapture_GHChannelWrite_RecordsEveryAttempt(t *testing.T) {
 		}
 		if strings.Contains(a.DetailJSON, "404") {
 			refused = a
+		} else if a.Action != domain.ActionPREdited || a.Target != "octo/repo#7" {
+			t.Errorf("accepted PR edit = %+v, want pr_edited on octo/repo#7", a)
 		}
 	}
-	if refused.Target != "other/repo" {
-		t.Errorf("refused write target = %q, want the repo the path names", refused.Target)
+	// The refusal keeps the opaque row: nothing was edited, so nothing may claim
+	// the verb — and the target stays repo-level, since a 404 is also how an
+	// off-scope repo is masked and #1 there may not exist at all.
+	if refused.Action != domain.ActionGHChannelWrite || refused.Target != "other/repo" {
+		t.Errorf("refused write = %+v, want the fallback action on the repo the path names", refused)
 	}
 	if !strings.Contains(refused.DetailJSON, `"method":"PATCH"`) ||
-		!strings.Contains(refused.DetailJSON, "/repos/other/repo/pulls/1") {
-		t.Errorf("detail_json = %q, want method + path + status", refused.DetailJSON)
+		!strings.Contains(refused.DetailJSON, "/repos/other/repo/pulls/1") ||
+		!strings.Contains(refused.DetailJSON, `"attempted":"pr_edited"`) {
+		t.Errorf("detail_json = %q, want method + path + status + the attempted act", refused.DetailJSON)
 	}
 }
 
-// TestGHChannelWriteAction_TargetFallsBackToPath pins the non-repo case: a
-// user- or org-level write names no repo, so the row must not invent one.
-func TestGHChannelWriteAction_TargetFallsBackToPath(t *testing.T) {
-	act := GHChannelWriteAction("POST", "/user/repos", 201)
-	if act.Target != "/user/repos" {
-		t.Errorf("target = %q, want the path when it names no repo", act.Target)
+// TestGHChannelWriteAction_ReviewSubmit pins the raw review post: the same
+// review_submitted verb the governed path records, on the PR the request path
+// named, keyed on the review id the response returned — plus the raw method and
+// path, so a reader can tell this review did not come through the verbs.
+func TestGHChannelWriteAction_ReviewSubmit(t *testing.T) {
+	const reviewURL = "https://github.com/acme/widgets/pull/841#pullrequestreview-999"
+	act := GHChannelWriteAction(ghwrite.Observation{
+		Method:     "POST",
+		Path:       "/repos/acme/widgets/pulls/841/reviews",
+		Status:     200,
+		ExternalID: "999",
+		URL:        reviewURL,
+	}, domain.CredentialGitHubApp)
+	if act.Action != domain.ActionReviewSubmitted || act.Target != "acme/widgets#841" ||
+		act.ExternalID != "999" || act.URL != reviewURL {
+		t.Errorf("review submit row = %+v, want review_submitted on acme/widgets#841", act)
 	}
-	if got := GHChannelWriteAction("DELETE", "/repos/octo/repo/issues/comments/5", 204); got.Target != "octo/repo" {
-		t.Errorf("target = %q, want octo/repo", got.Target)
+	if !strings.Contains(act.DetailJSON, `"path":"/repos/acme/widgets/pulls/841/reviews"`) {
+		t.Errorf("detail_json = %q, want the raw path", act.DetailJSON)
+	}
+	// A refused submit is an attempt, exactly like a refused merge.
+	refused := GHChannelWriteAction(ghwrite.Observation{
+		Method: "POST", Path: "/repos/acme/widgets/pulls/841/reviews", Status: 422,
+	}, domain.CredentialGitHubApp)
+	if refused.Action != domain.ActionGHChannelWrite ||
+		!strings.Contains(refused.DetailJSON, `"attempted":"review_submitted"`) {
+		t.Errorf("refused submit = %+v, want the attempt row naming the act", refused)
+	}
+}
+
+// TestGHChannelWriteAction_UnclassifiedKeepsTheFallback pins what survives of
+// the old opaque row: a shape the table doesn't model records that a write
+// happened and refuses to name it, and a path naming no repo doesn't invent one.
+func TestGHChannelWriteAction_UnclassifiedKeepsTheFallback(t *testing.T) {
+	act := GHChannelWriteAction(ghwrite.Observation{Method: "POST", Path: "/user/repos", Status: 201}, domain.CredentialGitHubApp)
+	if act.Action != domain.ActionGHChannelWrite || act.Target != "/user/repos" {
+		t.Errorf("org-level write = %+v, want the fallback keyed on the path", act)
+	}
+	if strings.Contains(act.DetailJSON, "attempted") {
+		t.Errorf("detail_json = %q, want no attempted act on an unclassified shape", act.DetailJSON)
+	}
+	// A classified shape's 2xx is the other half of the same decision.
+	del := GHChannelWriteAction(ghwrite.Observation{
+		Method: "DELETE", Path: "/repos/octo/repo/issues/comments/5", Status: 204,
+	}, domain.CredentialGitHubApp)
+	if del.Action != domain.ActionCommentDeleted || del.Target != "octo/repo" || del.ExternalID != "5" {
+		t.Errorf("comment delete = %+v, want comment_deleted on octo/repo naming comment 5", del)
+	}
+}
+
+// TestCapture_ExecVerbsRideTheAPIProxyNotTheGHChannel pins why the row above
+// can never be written twice for one act. A verb write and a raw write are
+// audited by different observers — the verb self-reports, the injector observes
+// — so double-counting is only possible if a verb's traffic could transit the
+// injector. It cannot: the exec client is built against the credential proxy's
+// address and holds no other, and the gh channel's listener exists only for the
+// jail's own `gh`. Structural, and pinned here so it stays that way.
+func TestCapture_ExecVerbsRideTheAPIProxyNotTheGHChannel(t *testing.T) {
+	var apiProxyHits, ghChannelHits atomic.Int32
+	apiProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apiProxyHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":777}`)
+	}))
+	defer apiProxy.Close()
+	ghChannel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		ghChannelHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":778}`)
+	}))
+	defer ghChannel.Close()
+
+	client, _, err := proxyRepoClient(
+		&ProxyCredentials{GitHubAPIURL: apiProxy.URL, GitHubAPIToken: "run-placeholder"}, "octo", "repo")
+	if err != nil {
+		t.Fatalf("proxyRepoClient: %v", err)
+	}
+	if _, err := client.ReplyToComment(context.Background(), "octo", "repo", 1, 555, "thanks"); err != nil {
+		t.Fatalf("ReplyToComment: %v", err)
+	}
+	if got := apiProxyHits.Load(); got != 1 {
+		t.Errorf("credential proxy saw %d requests, want the verb's 1", got)
+	}
+	if got := ghChannelHits.Load(); got != 0 {
+		t.Errorf("the gh channel saw %d verb requests, want 0 — a verb write must never reach the injector", got)
+	}
+}
+
+// TestCapture_GHChannelReply_IsIndistinguishableFromTheVerbRow is the incident's
+// acceptance: the raw `gh api .../comments/{id}/replies` an agent reached for
+// must leave the same audit row as `exec gh pr comment-reply`, down to the
+// external id, the discussion deep link, and the in_reply_to detail — and it
+// must mint the same entity touch, which a repo-level target could not.
+func TestCapture_GHChannelReply_IsIndistinguishableFromTheVerbRow(t *testing.T) {
+	ctx := context.Background()
+
+	// Each half runs against its own store, so the row and the touch below are
+	// unambiguously that half's work rather than a leftover of the other's.
+	gh := startFakeGitHubComments(t)
+	_, verbStores, _, verbClient := newGithubRecordingClientConn(t, gh.URL, true)
+	if _, err := verbClient.GithubReplyToComment(ctx, "octo", "repo", 1, 555, "thanks for the catch"); err != nil {
+		t.Fatalf("GithubReplyToComment: %v", err)
+	}
+	verbRows := listExternalActions(t, verbStores)
+	if len(verbRows) != 1 {
+		t.Fatalf("want 1 verb row, got %d: %+v", len(verbRows), verbRows)
+	}
+
+	// The same reply, made by hand through the gh channel: the injector saw the
+	// method and path, and read the created reply's id + link off the response.
+	conn, stores, info, client := newGithubRecordingClientConn(t, gh.URL, true)
+	client.RecordGHChannelWrite(ctx, ghwrite.Observation{
+		Method:     "POST",
+		Path:       "/repos/octo/repo/pulls/1/comments/555/replies",
+		Status:     201,
+		ExternalID: "777",
+		URL:        "https://github.com/octo/repo/pull/1#discussion_r777",
+	})
+	rows := listExternalActions(t, stores)
+	if len(rows) != 1 {
+		t.Fatalf("want exactly 1 row for one request, got %d: %+v", len(rows), rows)
+	}
+
+	raw, verb := rows[0], verbRows[0]
+	if raw.Action != verb.Action || raw.Provider != verb.Provider || raw.Credential != verb.Credential ||
+		raw.Target != verb.Target || raw.ExternalID != verb.ExternalID || raw.URL != verb.URL ||
+		raw.DetailJSON != verb.DetailJSON || raw.ConversationID != verb.ConversationID {
+		t.Errorf("raw gh reply row\n  %+v\ndiffers from the verb's\n  %+v", raw, verb)
+	}
+	if raw.Target != "octo/repo#1" || raw.ExternalID != "777" {
+		t.Errorf("raw row = %+v, want the PR-shaped target and the reply id", raw)
+	}
+
+	// The PR-shaped target is what re-enables the touch; a repo-level one is
+	// skipped by the touch rule, which is why this write used to leave none.
+	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#1")
+	if err != nil || ent == nil {
+		t.Fatalf("GetBySource(github, octo/repo#1): ent=%v err=%v", ent, err)
+	}
+	var touches int
+	if err := conn.QueryRow(
+		`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ? AND role = 'touched'`,
+		info.RunID, ent.ID,
+	).Scan(&touches); err != nil {
+		t.Fatalf("count touches: %v", err)
+	}
+	if touches == 0 {
+		t.Error("the raw gh reply minted no entity touch")
+	}
+}
+
+// TestGHChannelWriteAction_GraphQLSemanticRow: a mutation the table knows, that
+// the endpoint accepted, earns the same verb its REST twin would. `gh pr
+// comment` and a hand-written `gh api …/comments` are one act, and the log has
+// to be filterable for it without the reader knowing which pipe was used.
+func TestGHChannelWriteAction_GraphQLSemanticRow(t *testing.T) {
+	act := GHChannelWriteAction(ghwrite.Observation{
+		Method: "POST",
+		Path:   "/graphql",
+		Status: 200,
+		URL:    "https://github.com/octo/repo/pull/1#issuecomment-7",
+		GraphQL: &ghwrite.GraphQLFacts{
+			Operation: "CommentCreate",
+			Fields:    []string{"addComment"},
+			Subject:   "PR_kwRow",
+		},
+	}, domain.CredentialGitHubApp)
+	if act.Action != domain.ActionCommentPosted {
+		t.Errorf("action = %q, want comment_posted", act.Action)
+	}
+	// The response located an object the request named only by node id, so the
+	// row addresses it the way every other surface does.
+	if act.Target != "octo/repo#1" {
+		t.Errorf("target = %q, want octo/repo#1 from the response url", act.Target)
+	}
+	if act.URL != "https://github.com/octo/repo/pull/1#issuecomment-7" {
+		t.Errorf("url = %q, want the created comment's link", act.URL)
+	}
+	// A comment's row must read like the verb's: no provenance, because the
+	// question "which channel posted this" is not asked of comments.
+	if strings.Contains(act.DetailJSON, "mutation") {
+		t.Errorf("detail_json = %q, want no provenance on a comment row", act.DetailJSON)
+	}
+}
+
+// TestGHChannelWriteAction_GraphQLCarriesProvenanceWhereItIsAsked: a PR create
+// and a review submit each have a governed verb path, and whether one came
+// through it or through a raw call is the fact the policy work reads this log
+// to settle. On this transport that provenance is the mutation's name.
+func TestGHChannelWriteAction_GraphQLCarriesProvenanceWhereItIsAsked(t *testing.T) {
+	act := GHChannelWriteAction(ghwrite.Observation{
+		Method: "POST", Path: "/graphql", Status: 200,
+		URL: "https://github.com/octo/repo/pull/9",
+		GraphQL: &ghwrite.GraphQLFacts{
+			Operation: "PullRequestCreate",
+			Fields:    []string{"createPullRequest"},
+			Subject:   "R_kwRepo",
+		},
+	}, domain.CredentialGitHubApp)
+	if act.Action != domain.ActionPRCreated || act.Target != "octo/repo#9" || act.ExternalID != "9" {
+		t.Errorf("row = %+v, want pr_created on octo/repo#9 keyed by number", act)
+	}
+	if !strings.Contains(act.DetailJSON, `"mutation":"createPullRequest"`) {
+		t.Errorf("detail_json = %q, want the mutation recorded as provenance", act.DetailJSON)
+	}
+}
+
+// TestGHChannelWriteAction_GraphQLRefusalIsAnAttempt: the endpoint answers a
+// refused mutation with 200 and an errors array, so without reading it a merge
+// that never happened would be logged as one that did.
+func TestGHChannelWriteAction_GraphQLRefusalIsAnAttempt(t *testing.T) {
+	act := GHChannelWriteAction(ghwrite.Observation{
+		Method: "POST", Path: "/graphql", Status: 200, Errored: true,
+		GraphQL: &ghwrite.GraphQLFacts{Fields: []string{"mergePullRequest"}, Subject: "PR_kwRefused"},
+	}, domain.CredentialGitHubApp)
+	if act.Action != domain.ActionGraphQLWrite {
+		t.Errorf("action = %q, want the graphql fallback — a refused merge is not pr_merged", act.Action)
+	}
+	if !strings.Contains(act.DetailJSON, `"attempted":"pr_merged"`) {
+		t.Errorf("detail_json = %q, want the attempted act named", act.DetailJSON)
+	}
+	if !strings.Contains(act.DetailJSON, `"errored":true`) {
+		t.Errorf("detail_json = %q, want the errors array recorded", act.DetailJSON)
+	}
+	if act.Target != "PR_kwRefused" {
+		t.Errorf("target = %q, want the node id the request named", act.Target)
+	}
+}
+
+// TestGHChannelWriteAction_GraphQLFallback covers what the row says when no act
+// could be named: enough to go looking on GitHub, and an honest account of why
+// the name is missing.
+func TestGHChannelWriteAction_GraphQLFallback(t *testing.T) {
+	// The fixture deliberately names a mutation from outside the product's write
+	// surface. Coverage sweeps keep widening the table, and one that adopted this
+	// fixture's mutation would leave the test passing while asserting nothing —
+	// the failure mode is silent, so the guard is choosing a name no sweep will
+	// ever reach for.
+	t.Run("unknown mutation", func(t *testing.T) {
+		act := GHChannelWriteAction(ghwrite.Observation{
+			Method: "POST", Path: "/graphql", Status: 200,
+			GraphQL: &ghwrite.GraphQLFacts{
+				Operation: "Sponsor",
+				Fields:    []string{"createSponsorship"},
+				Subject:   "U_kwSponsor",
+			},
+		}, domain.CredentialGitHubApp)
+		if act.Action != domain.ActionGraphQLWrite {
+			t.Errorf("action = %q, want graphql_write", act.Action)
+		}
+		if !strings.Contains(act.DetailJSON, `"mutations":["createSponsorship"]`) {
+			t.Errorf("detail_json = %q, want the mutation name recorded verbatim", act.DetailJSON)
+		}
+		if strings.Contains(act.DetailJSON, "attempted") {
+			t.Errorf("detail_json = %q, want no attempted act for a shape the table cannot name", act.DetailJSON)
+		}
+	})
+
+	t.Run("over cap", func(t *testing.T) {
+		act := GHChannelWriteAction(ghwrite.Observation{
+			Method: "POST", Path: "/graphql", Status: 200,
+			GraphQL: &ghwrite.GraphQLFacts{Unreadable: ghwrite.GraphQLOverCap},
+		}, domain.CredentialGitHubApp)
+		if act.Action != domain.ActionGraphQLWrite {
+			t.Errorf("action = %q, want graphql_write", act.Action)
+		}
+		if !strings.Contains(act.DetailJSON, `"unreadable":"over_cap"`) {
+			t.Errorf("detail_json = %q, want the reason recorded", act.DetailJSON)
+		}
+		// Nothing was readable, so the endpoint path is all the target can be —
+		// never an invented repo.
+		if act.Target != "/graphql" {
+			t.Errorf("target = %q, want the endpoint path", act.Target)
+		}
+	})
+
+	t.Run("several acts in one request", func(t *testing.T) {
+		act := GHChannelWriteAction(ghwrite.Observation{
+			Method: "POST", Path: "/graphql", Status: 200,
+			GraphQL: &ghwrite.GraphQLFacts{
+				Fields:  []string{"closePullRequest", "mergePullRequest"},
+				Subject: "PR_kwBoth",
+			},
+		}, domain.CredentialGitHubApp)
+		if act.Action != domain.ActionGraphQLWrite {
+			t.Errorf("action = %q, want graphql_write — no one row can carry two acts", act.Action)
+		}
+		if !strings.Contains(act.DetailJSON, `"mutations":["closePullRequest","mergePullRequest"]`) {
+			t.Errorf("detail_json = %q, want both names recorded", act.DetailJSON)
+		}
+	})
+}
+
+// TestCapture_GraphQLWrite_RecordsOneRowPerRequest runs the GraphQL arm through
+// the real recording funnel, which is where "exactly one row" is actually
+// enforced.
+func TestCapture_GraphQLWrite_RecordsOneRowPerRequest(t *testing.T) {
+	ctx := context.Background()
+	_, stores, _, client := newGithubRecordingClientConn(t, "", true)
+
+	client.RecordGHChannelWrite(ctx, ghwrite.Observation{
+		Method: "POST", Path: "/graphql", Status: 200,
+		GraphQL: &ghwrite.GraphQLFacts{Fields: []string{"closePullRequest"}, Subject: "PR_kwOne"},
+	})
+
+	rows := listExternalActions(t, stores)
+	if len(rows) != 1 {
+		t.Fatalf("want exactly 1 row for one request, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Action != domain.ActionPRClosed || rows[0].Target != "PR_kwOne" {
+		t.Errorf("row = %+v, want pr_closed against the node id the request named", rows[0])
+	}
+	if rows[0].Credential != domain.CredentialGitHubApp {
+		t.Errorf("credential = %q, want the org credential the write actually spent", rows[0].Credential)
+	}
+}
+
+// TestCapture_GraphQLOverCapStillLandsAnAttributedRow is the anti-evasion
+// property, asserted where it actually matters: in the store, not at the
+// injector.
+//
+// A body past the buffering cap costs the row its verb — nothing read the
+// document, so nothing can name the act. What it must not cost is the row. If
+// an oversized payload bought silence, padding a request past the cap would be
+// the way to write under the org credential without appearing in the log at
+// all, and the size threshold would be the exploit rather than the safeguard.
+//
+// So the write still lands a row, still attributed to the conversation that
+// made it, still carrying the reason it could say no more. That is also why the
+// injector logs this case: the row rides a fire-and-forget relay, and this is
+// the one outcome whose loss would erase the only trace of a write nobody could
+// name.
+func TestCapture_GraphQLOverCapStillLandsAnAttributedRow(t *testing.T) {
+	ctx := context.Background()
+	_, stores, info, client := newGithubRecordingClientConn(t, "", true)
+
+	client.RecordGHChannelWrite(ctx, ghwrite.Observation{
+		Method:  "POST",
+		Path:    "/graphql",
+		Status:  200,
+		GraphQL: &ghwrite.GraphQLFacts{Unreadable: ghwrite.GraphQLOverCap},
+	})
+
+	rows := listExternalActions(t, stores)
+	if len(rows) != 1 {
+		t.Fatalf("want exactly 1 row for an over-cap write, got %d: %+v", len(rows), rows)
+	}
+	row := rows[0]
+	if row.Action != domain.ActionGraphQLWrite {
+		t.Errorf("action = %q, want graphql_write — the act is unknown, the write is not", row.Action)
+	}
+	if row.ConversationID != info.RunID {
+		t.Errorf("conversation = %q, want the run that made the write %q", row.ConversationID, info.RunID)
+	}
+	if row.Credential != domain.CredentialGitHubApp {
+		t.Errorf("credential = %q, want the org credential it spent", row.Credential)
+	}
+	if !strings.Contains(row.DetailJSON, `"unreadable":"over_cap"`) {
+		t.Errorf("detail_json = %q, want the reason the act went unnamed", row.DetailJSON)
+	}
+
+	// A body that stopped arriving is a different fact and keeps its own name,
+	// so an operational failure never reads as someone hitting our cap.
+	client.RecordGHChannelWrite(ctx, ghwrite.Observation{
+		Method:  "POST",
+		Path:    "/graphql",
+		Status:  200,
+		GraphQL: &ghwrite.GraphQLFacts{Unreadable: ghwrite.GraphQLRequestUnread},
+	})
+	rows = listExternalActions(t, stores)
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows after a second write, got %d", len(rows))
+	}
+	var reasons []string
+	for _, r := range rows {
+		reasons = append(reasons, r.DetailJSON)
+	}
+	if strings.Count(strings.Join(reasons, " "), `"unreadable":"request_unread"`) != 1 {
+		t.Errorf("rows = %v, want the broken-read reason recorded distinctly", reasons)
 	}
 }

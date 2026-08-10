@@ -159,15 +159,15 @@ func TestRelayServer_EgressDenialWritesAuditRow(t *testing.T) {
 	}
 }
 
-// TestRelayServer_GHWriteWritesAuditRow pins the same for the gh channel: the
-// relayed method/path/status become a gh_channel_write row attributed to this
-// run, including a refused write.
+// TestRelayServer_GHWriteWritesAuditRow pins the same for the gh channel: a
+// refused write relays into the opaque attempt row — never the verb it was
+// reaching for — attributed to this run.
 func TestRelayServer_GHWriteWritesAuditRow(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	s := NewRelayServer(stores, info, nil)
 
 	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{
-		Method: "PATCH", Path: "/repos/octo/repo/pulls/7", Status: 404,
+		Method: "PUT", Path: "/repos/octo/repo/pulls/7/merge", Status: 404,
 	})
 	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
 
@@ -180,7 +180,144 @@ func TestRelayServer_GHWriteWritesAuditRow(t *testing.T) {
 		a.ConversationID != info.RunID {
 		t.Errorf("relayed gh write row mismatch: %+v", a)
 	}
-	if !strings.Contains(a.DetailJSON, `"http_status":404`) {
-		t.Errorf("detail_json = %q, want the refused status recorded", a.DetailJSON)
+	if !strings.Contains(a.DetailJSON, `"http_status":404`) ||
+		!strings.Contains(a.DetailJSON, `"attempted":"pr_merged"`) {
+		t.Errorf("detail_json = %q, want the refused status and the attempted act", a.DetailJSON)
+	}
+}
+
+// TestRelayServer_PRCreateLandsOneArtifactAndOneAction pins the two halves of a
+// raw PR create staying in their own lanes. The injector reports it twice — once
+// as an artifact-bearing mutation, once as a write — and the two must produce
+// exactly one artifact and exactly one action: an artifact says the pull request
+// exists, an action says this run opened it, and neither answers for the other.
+//
+// The action's id is the PR NUMBER, matching what the verb path records and what
+// every other surface addresses a PR by — not the database id the response's own
+// `id` field carries.
+func TestRelayServer_PRCreateLandsOneArtifactAndOneAction(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	s := NewRelayServer(stores, info, nil)
+	ctx := context.Background()
+
+	const prURL = "https://github.com/acme/widgets/pull/42"
+	obsArgs, _ := json.Marshal(agentproc.RecordObservationArgs{
+		Kind: domain.ArtifactKindPullRequest, Owner: "acme", Repo: "widgets", Number: 42,
+		NodeID: "PR_kwx", URL: prURL, Title: "Fix it", Draft: true,
+	})
+	s.DispatchNotify(ctx, agentproc.RelayNamespaceCore, agentproc.OpRecordObservation, obsArgs)
+
+	writeArgs, _ := json.Marshal(agentproc.RecordGHWriteArgs{
+		Method: "POST", Path: "/repos/acme/widgets/pulls", Status: 201,
+		ExternalID: "2314567890", URL: prURL,
+	})
+	s.DispatchNotify(ctx, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, writeArgs)
+
+	arts := listRunArtifacts(t, stores, info.RunID)
+	if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindPullRequest {
+		t.Fatalf("want 1 pull_request artifact, got %d: %+v", len(arts), arts)
+	}
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want exactly 1 action for one create, got %d: %+v", len(acts), acts)
+	}
+	a := acts[0]
+	if a.Action != domain.ActionPRCreated || a.Target != "acme/widgets#42" ||
+		a.ExternalID != "42" || a.URL != prURL {
+		t.Errorf("pr create row = %+v, want pr_created on acme/widgets#42 keyed on the number", a)
+	}
+	if !strings.Contains(a.DetailJSON, `"path":"/repos/acme/widgets/pulls"`) ||
+		!strings.Contains(a.DetailJSON, `"method":"POST"`) {
+		t.Errorf("detail_json = %q, want the raw method + path that distinguish this from a verb-path create", a.DetailJSON)
+	}
+}
+
+// TestRelayServer_GHWriteClassifiesTheCreate pins the relayed half of the
+// incident fix: the sidecar carries the wire facts it alone can see — the
+// created reply's id and link, read off the response — and the semantic row is
+// built HERE, on the side that owns the vocabulary. One request, one row.
+func TestRelayServer_GHWriteClassifiesTheCreate(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	s := NewRelayServer(stores, info, nil)
+
+	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{
+		Method:     "POST",
+		Path:       "/repos/acme/widgets/pulls/841/comments/555/replies",
+		Status:     201,
+		ExternalID: "777",
+		URL:        "https://github.com/acme/widgets/pull/841#discussion_r777",
+	})
+	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want exactly 1 row for one request, got %d: %+v", len(acts), acts)
+	}
+	a := acts[0]
+	if a.Action != domain.ActionCommentPosted || a.Target != "acme/widgets#841" ||
+		a.ExternalID != "777" || a.URL != "https://github.com/acme/widgets/pull/841#discussion_r777" ||
+		a.ConversationID != info.RunID {
+		t.Errorf("relayed reply row mismatch: %+v", a)
+	}
+	if !strings.Contains(a.DetailJSON, `"in_reply_to":555`) {
+		t.Errorf("detail_json = %q, want the thread the reply landed on", a.DetailJSON)
+	}
+}
+
+// TestRelayServer_GraphQLWriteWritesAuditRow pins the GraphQL hop end to end.
+// The act is named only in the request, which only the sidecar ever sees, so
+// what crosses this socket is the whole of what the row can know — a facts
+// member dropped in transit is an unnamed write, silently.
+func TestRelayServer_GraphQLWriteWritesAuditRow(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	s := NewRelayServer(stores, info, nil)
+
+	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{
+		Method: "POST",
+		Path:   "/graphql",
+		Status: 200,
+		URL:    "https://github.com/octo/repo/pull/7#issuecomment-9",
+		GraphQL: &agentproc.GraphQLWriteFacts{
+			Operation: "CommentCreate",
+			Mutations: []string{"addComment"},
+			Subject:   "PR_kwRelay",
+		},
+	})
+	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want 1 graphql write row, got %d: %+v", len(acts), acts)
+	}
+	a := acts[0]
+	if a.Action != domain.ActionCommentPosted || a.Target != "octo/repo#7" || a.ConversationID != info.RunID {
+		t.Errorf("relayed graphql write row mismatch: %+v", a)
+	}
+}
+
+// TestRelayServer_GraphQLRefusalRelaysAsAnAttempt: the endpoint's 200-with-
+// errors refusal is a fact only the sidecar's response read can establish, so
+// it has to survive the hop as its own field — the status code alone says the
+// opposite.
+func TestRelayServer_GraphQLRefusalRelaysAsAnAttempt(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	s := NewRelayServer(stores, info, nil)
+
+	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{
+		Method: "POST", Path: "/graphql", Status: 200, Errored: true,
+		GraphQL: &agentproc.GraphQLWriteFacts{
+			Mutations: []string{"mergePullRequest"},
+			Subject:   "PR_kwRelayRefused",
+		},
+	})
+	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want 1 row, got %d: %+v", len(acts), acts)
+	}
+	if acts[0].Action != domain.ActionGraphQLWrite ||
+		!strings.Contains(acts[0].DetailJSON, `"attempted":"pr_merged"`) {
+		t.Errorf("relayed refusal = %+v, want an attempt row naming the merge", acts[0])
 	}
 }

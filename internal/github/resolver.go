@@ -45,6 +45,20 @@ const (
 	IdentityPAT
 )
 
+// Credential names the audit-log credential (a domain.Credential* value) this
+// identity acts under, so the external-action row records the tier that made
+// the write rather than the one the deployment is assumed to have.
+//
+// IdentityUnknown reports the App: it means the tier was never established, and
+// the App is what this column has said since it existed, so an unclassified
+// write keeps reading as it always has instead of asserting a PAT nobody saw.
+func (i Identity) Credential() string {
+	if i == IdentityPAT {
+		return domain.CredentialGitHubPAT
+	}
+	return domain.CredentialGitHubApp
+}
+
 // RepoIdentityResolver is the optional extension of Resolver, implemented by
 // the production resolver, that reports the Identity (App installation vs
 // borrowed PAT) of the credential ClientForRepo would resolve — in the same

@@ -269,9 +269,14 @@ no way to invoke Playwright. Two pieces:
 ### 5.6 Artifacts
 
 Screenshots/videos written under `/work` (the worktree) flow into the existing
-`run_artifacts` model (`is_primary` per run). No new plumbing — point the
+`artifacts` model — one row per external object, upserted on its
+`(org_id, dedup_key)` unique key, with `provider` + `kind` discriminating the
+shape. (This section predates that table and named the `run_artifacts`
+placeholder it replaced, which was dropped without ever having been written to;
+there is no `is_primary` anywhere in the real model.) No new plumbing — point the
 wrapper's output at a known worktree subdir and register it like any structured
-output.
+output, which means deriving a `dedup_key` stable across a re-capture of the
+same shot.
 
 ---
 

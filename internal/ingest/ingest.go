@@ -66,14 +66,31 @@ func (i *Ingestor) Publish(ctx context.Context, evt domain.Event) {
 			// The durability boundary failed — this event will not route
 			// (no events row, no task). That's the loss this package exists
 			// to prevent, so log it loudly; a DB write failure here is
-			// exceptional and the next poll re-diffs the entity forward.
+			// exceptional.
+			//
+			// Nothing retries it here. Whether anything re-emits is a
+			// property of the caller, not of this seam, and the surviving
+			// callers differ — so no one of them may be assumed to
+			// recover. An emit re-derived from durable state every cycle (the
+			// tracker reconciling a stale review-request against the stored
+			// snapshot) does come back on the next poll. One that fires off
+			// a one-time observation does not: a first-discovery backfill
+			// runs behind an entity whose snapshot is already seeded, so
+			// the next cycle takes the already-exists path and never
+			// synthesizes it again, and an ee/ ingest runs behind a
+			// delivery id already recorded as consumed, so the upstream's
+			// own redelivery is dropped as a duplicate. Both are gone for
+			// good.
+			// The tracker's diffed transitions are not in this set at all —
+			// they commit inside the snapshot CAS's transaction and never
+			// reach this path.
 			//
 			// Deliberately do NOT fall through to the bus: with no events
 			// row, evt.ID is empty, and forwarding an id-less event would
 			// push a phantom live update that has no durable backing for
-			// the frontend to correlate against. Dropping it (the next poll
-			// re-emits) is cleaner than a broadcast we can't stand behind.
-			ingestLog.ErrorContext(ctx, "durable enqueue failed; dropping (next poll re-diffs)", "event_type", evt.EventType, "org", evt.OrgID, "error", err)
+			// the frontend to correlate against — a broadcast we can't
+			// stand behind is worse than the silence.
+			ingestLog.ErrorContext(ctx, "durable enqueue failed; event dropped", "event_type", evt.EventType, "org", evt.OrgID, "error", err)
 			return
 		}
 		evt.ID = id // so the bus event and the queue row agree on the id

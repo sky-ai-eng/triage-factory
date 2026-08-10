@@ -42,11 +42,27 @@ const (
 	// coordinates travel up and the orchestrator writes.
 	OpRecordEgressDenial = "record_egress_denial"
 	// OpRecordGHWrite is the gh-channel injector's fire-and-forget report of a
-	// REST write it forwarded, with the upstream's outcome. Distinct from
+	// write it forwarded, with the upstream's outcome. Distinct from
 	// record_observation, which reports only the artifact-bearing creates: this
-	// one covers every mutating REST method and both outcomes, so an edit, a
-	// merge, and a refused write all leave a trace.
+	// one covers every mutating REST method and every GraphQL mutation, on both
+	// outcomes, so an edit, a merge, and a refused write all leave a trace.
+	// A GraphQL write carries what its request envelope disclosed alongside the
+	// wire facts, since its path says only that a POST reached /graphql.
 	OpRecordGHWrite = "record_gh_write"
+	// OpAuthorizeGHWrite is the gh-channel injector's per-request decision on a
+	// shape the refusal policy gates — a merge, a submitted review, a
+	// repository creation, or a GraphQL request whose act could not be read.
+	// A Call rather than a notify for two reasons: the request is held until
+	// the answer arrives (a refusal that raced the forward would be no refusal
+	// at all), and the denial row is written by the handler, so it cannot be
+	// lost the way a fire-and-forget audit record can.
+	OpAuthorizeGHWrite = "authorize_gh_write"
+	// OpRecordRelayDrop is the sidecar's report that one of the audit notifies
+	// above never reached the wire. It carries no record — the record is what
+	// was lost — only the name of the op that lost it, so the orchestrator can
+	// count a hole in the log of record. See NotifyRelayAudit for what this can
+	// and cannot observe.
+	OpRecordRelayDrop = "record_relay_drop"
 )
 
 // AuthorizeRepoArgs / AuthorizeRepoReply are the authorize_repo op's payloads
@@ -99,12 +115,65 @@ type RecordEgressDenialArgs struct {
 }
 
 // RecordGHWriteArgs is record_gh_write's payload: the method, upstream path,
-// and response status of one mutating REST request the gh-channel injector
-// forwarded. Nothing from the request body — the injector never reads one.
+// and response status of one write the gh-channel injector forwarded, plus the
+// created object's id and link when the shape is one whose RESPONSE names an
+// object (a posted comment or reply). The orchestrator classifies these into
+// the semantic act; the sidecar only carries wire facts.
+//
+// A REST write is fully named by method+path and carries no GraphQL member. A
+// GraphQL write's path says only "/graphql", so what names it rides in GraphQL
+// instead — read from the request envelope, which is the only place it appears.
 type RecordGHWriteArgs struct {
-	Method string `json:"method"`
-	Path   string `json:"path"`
-	Status int    `json:"status"`
+	Method         string             `json:"method"`
+	Path           string             `json:"path"`
+	Status         int                `json:"status"`
+	ExternalID     string             `json:"external_id,omitempty"`
+	URL            string             `json:"url,omitempty"`
+	Errored        bool               `json:"errored,omitempty"`
+	ResponseUnread bool               `json:"response_unread,omitempty"`
+	GraphQL        *GraphQLWriteFacts `json:"graphql,omitempty"`
+}
+
+// GraphQLWriteFacts mirrors ghwrite.GraphQLFacts across the wire. It is spelled
+// out here rather than imported so the relay protocol stays a description of
+// what crosses the socket, independent of the classifier's own types — the same
+// reason the REST members are flat fields and not a shared struct.
+//
+// Names and ids only. The request these come from also carried the comment
+// bodies and review text the agent composed, and none of it is extracted, so
+// none of it can cross this hop.
+type GraphQLWriteFacts struct {
+	// Operation is the operation name the document gave, empty if anonymous.
+	Operation string `json:"operation,omitempty"`
+	// Mutations are the top-level field names the mutation selected, aliases
+	// already resolved to the fields actually invoked.
+	Mutations []string `json:"mutations,omitempty"`
+	// Subject is the node id the variables named for the object acted on.
+	Subject string `json:"subject,omitempty"`
+	// Unreadable names why the request resolved to no single act, empty when it
+	// resolved cleanly.
+	Unreadable string `json:"unreadable,omitempty"`
+}
+
+// AuthorizeGHWriteArgs is authorize_gh_write's payload: one request the
+// injector recognized as a gated shape, described in the same wire facts
+// record_gh_write carries — because the orchestrator re-derives the decision
+// from the shared classifier rather than trusting the sidecar's reading of it.
+// Nothing about the refusal itself crosses the wire in this direction; the
+// sidecar says what was asked, and the side holding the policy says what that
+// means.
+type AuthorizeGHWriteArgs struct {
+	Method  string             `json:"method"`
+	Path    string             `json:"path"`
+	GraphQL *GraphQLWriteFacts `json:"graphql,omitempty"`
+}
+
+// AuthorizeGHWriteReply is the decision. Allowed is true only for a request the
+// orchestrator's own reading finds ungated — there is no authorization that
+// admits a gated one, by design. A refused request has already had its audit
+// row written by the time this reply is sent.
+type AuthorizeGHWriteReply struct {
+	Allowed bool `json:"allowed"`
 }
 
 // RecordPushArgs is record_push's payload: one branch ref a receive-pack
@@ -145,6 +214,46 @@ type RecordObservationArgs struct {
 	Draft       bool   `json:"draft,omitempty"`
 	ReviewID    int    `json:"review_id,omitempty"`
 	ReviewState string `json:"review_state,omitempty"`
+}
+
+// RecordRelayDropArgs is record_relay_drop's payload: the namespace and op of
+// the audit notify that was lost. Nothing else — a report carrying the dropped
+// record would just be the notify that already failed.
+//
+// The pair travels split rather than pre-joined so the orchestrator resolves it
+// through the same naming path it uses for the notifies it serves, and so it
+// can tell a core op from a provider one without parsing. It treats both as
+// untrusted: they arrive from the one process deliberately exposed to hostile
+// text, and what they name becomes a metric label.
+type RecordRelayDropArgs struct {
+	Namespace string `json:"namespace"`
+	Op        string `json:"op"`
+}
+
+// NotifyRelayAudit sends a fire-and-forget audit op and, when the send itself
+// fails, tells the orchestrator that a record was lost. The orchestrator holds
+// the metrics exporter — the per-run sidecar opens no listener and installs no
+// meter provider — so a drop is countable only where it can be reported to,
+// which makes the report a relay op like any other.
+//
+// What it can observe is bounded by the channel it reports over, and the bound
+// is worth stating because it is the whole residual: a Conn collapses
+// permanently on a write error or a close, so any send failure of that kind
+// takes the drop report down with it. What survives to be reported is the
+// marshal failure — the case where the payload was never encodable and the
+// channel is fine. The unreportable half is the teardown race, where a notify
+// written as the run is torn down loses to the conn close; the returned error
+// is the caller's to log, and that log line is all that case ever gets.
+func NotifyRelayAudit(conn *sidecarproto.Conn, namespace, op string, args any) error {
+	err := NotifyRelay(conn, namespace, op, args)
+	if err == nil {
+		return nil
+	}
+	// Deliberately NOT recursive: the report goes out as a plain notify, so a
+	// dead channel ends the attempt here rather than looping on itself.
+	_ = NotifyRelay(conn, RelayNamespaceCore, OpRecordRelayDrop,
+		RecordRelayDropArgs{Namespace: namespace, Op: op})
+	return err
 }
 
 // RelayDispatcher serves the sidecar's org-bound relay ops. The concrete impl

@@ -15,6 +15,80 @@ describe('actionMeta', () => {
     expect(metaForAction('slack_channel_archived')).toBe(FALLBACK_ACTION_META)
   })
 
+  it('labels the gh-channel verbs, including the unclassified fallback row', () => {
+    expect(metaForAction('pr_merged').label).toBe('PR merged')
+    expect(metaForAction('reaction_added').label).toBe('Reaction added')
+    expect(metaForAction('workflow_dispatched').label).toBe('Workflow dispatched')
+    // The opaque row is the one the incident showed rendering as an anonymous
+    // "action" — it still has no verb, but it must at least say what it is.
+    expect(metaForAction('gh_channel_write')).not.toBe(FALLBACK_ACTION_META)
+  })
+
+  it('labels what arrives over GraphQL, verbs and fallback alike', () => {
+    // Most of gh's porcelain writes are GraphQL, so these are not an exotic
+    // corner: an unlabelled graphql_write would leave the commonest unnamed
+    // write rendering as an anonymous action, which is the bug this row exists
+    // to close.
+    expect(metaForAction('pr_reopened').label).toBe('PR reopened')
+    expect(metaForAction('graphql_write')).not.toBe(FALLBACK_ACTION_META)
+    expect(metaForAction('graphql_write')).not.toBe(metaForAction('gh_channel_write'))
+  })
+
+  it('keeps arming a merge visually apart from performing one', () => {
+    // The backend records these as different acts because they are: enabling
+    // auto-merge merges nothing, and what lands later lands with no agent
+    // present. A shared label here would undo that distinction at the only
+    // place a person actually reads it.
+    expect(metaForAction('pr_auto_merge_enabled').label).toBe('Auto-merge enabled')
+    expect(metaForAction('pr_auto_merge_enabled')).not.toBe(metaForAction('pr_merged'))
+    expect(metaForAction('pr_auto_merge_disabled')).not.toBe(metaForAction('pr_auto_merge_enabled'))
+  })
+
+  it('names every verb the gh-channel coverage sweep added', () => {
+    for (const action of [
+      'pr_reverted',
+      'pr_branch_updated',
+      'label_added',
+      'label_removed',
+      'conversation_locked',
+      'conversation_unlocked',
+      'issue_pinned',
+      'issue_unpinned',
+      'issue_transferred',
+      'linked_branch_created',
+    ]) {
+      expect(metaForAction(action)).not.toBe(FALLBACK_ACTION_META)
+    }
+  })
+
+  it('names the repository-configuration verbs', () => {
+    for (const action of [
+      'repo_created',
+      'repo_edited',
+      'repo_deleted',
+      'repo_forked',
+      'repo_archived',
+      'repo_unarchived',
+      'release_created',
+      'release_edited',
+      'release_deleted',
+      'label_defined',
+      'label_definition_edited',
+      'label_definition_deleted',
+    ]) {
+      expect(metaForAction(action)).not.toBe(FALLBACK_ACTION_META)
+    }
+  })
+
+  it('keeps a label definition apart from a label on an issue', () => {
+    // Deleting the definition strips that label from every issue carrying it,
+    // while label_removed takes one label off one issue. The two read alike at a
+    // glance, so the labels have to do the separating.
+    expect(metaForAction('label_definition_deleted').label).toBe('Label definition deleted')
+    expect(metaForAction('label_definition_deleted')).not.toBe(metaForAction('label_removed'))
+    expect(metaForAction('label_defined')).not.toBe(metaForAction('label_added'))
+  })
+
   it('surfaces slack in the Actions-lens provider filter', () => {
     expect(ACTION_PROVIDERS).toContain('slack')
   })

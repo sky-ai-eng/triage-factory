@@ -332,8 +332,11 @@ CREATE TABLE messages (
     reasoning             TEXT,
     -- Non-text content (images/files) the flat content column can't carry.
     content_blocks        TEXT,
-    -- 0 = durable pending input not yet folded into any assembly; flipped
-    -- exactly-once via UPDATE … RETURNING at delivery.
+    -- 0 = durable pending input not yet folded into any assembly. The
+    -- pending-input flush claims its rows in a single UPDATE … RETURNING
+    -- predicated on delivered=0; the native loop's drain names the ids it
+    -- already assembled and is a plain UPDATE, unfenced on this dialect
+    -- because N=1 leaves no second claimant to race.
     delivered             BOOLEAN NOT NULL DEFAULT 1,
     -- 'active' | 'elided' | 'inactive' — app-validated, sticky row state.
     window_state          TEXT NOT NULL DEFAULT 'active',

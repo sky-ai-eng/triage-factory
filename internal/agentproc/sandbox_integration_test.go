@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 )
 
 // TestBuildSandboxEnv_NoGitConfig enforces the invariant documented on
@@ -57,6 +59,72 @@ func TestBuildSandboxEnv_CarriesSandboxMarker(t *testing.T) {
 		if len(got) != 1 || got[0] != want {
 			t.Errorf("buildSandboxEnv(%v) carries %v for %s; want exactly one entry, %q",
 				extra, got, SandboxMarkerEnvVar, want)
+		}
+	}
+}
+
+// TestBuildSandboxEnv_CarriesGoToolchainAuto pins the Go version floor's
+// escape hatch onto the base env. The rootfs's Go comes from alpine, whose
+// go.env sets GOTOOLCHAIN=local; under that default a repo requiring a newer
+// Go than the packaged one is simply unbuildable in the jail, because the
+// agent is not root and no vendor download host is allowlisted. "auto" is
+// what makes the floor self-healing, so its absence is a silent capability
+// regression rather than a visible failure — hence a pin rather than a
+// comment. Asserted across extraEnv variants because ExtraEnv is appended
+// verbatim: a caller contributing its own GOTOOLCHAIN would otherwise
+// duplicate the key, and which copy cmd/go reads is platform-dependent. The
+// GOTOOLCHAIN=local cases are the ones that make the pin load-bearing rather
+// than decorative — that is the value the rootfs's own go.env carries, so it
+// is the one an inherited env is most likely to thread back in, and it is
+// precisely the value that re-breaks the builds this entry exists to fix.
+func TestBuildSandboxEnv_CarriesGoToolchainAuto(t *testing.T) {
+	const want = "GOTOOLCHAIN=auto"
+	for _, extra := range [][]string{
+		nil,
+		{"TRIAGE_FACTORY_CONVERSATION_ID=r1"},
+		{"GOTOOLCHAIN=local"},
+		{"TRIAGE_FACTORY_CONVERSATION_ID=r1", "GOTOOLCHAIN=local"},
+		{"GOTOOLCHAIN=auto"},
+		{"GOTOOLCHAIN=go1.21.0"},
+	} {
+		var got []string
+		for _, kv := range buildSandboxEnv(extra) {
+			if strings.HasPrefix(kv, "GOTOOLCHAIN=") {
+				got = append(got, kv)
+			}
+		}
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("buildSandboxEnv(%v) carries %v for GOTOOLCHAIN; want exactly one entry, %q",
+				extra, got, want)
+		}
+	}
+}
+
+// TestBuildSandboxEnv_DropsCatalogEnvKeys pins the relay-key filter, and
+// unlike the GOTOOLCHAIN case the ordering here is load-bearing: duplicate
+// env keys resolve first-wins on Linux, and the relay's own GOPROXY is
+// appended AFTER this function's output (run.go appends
+// opts.PrebuiltProxyEnv last). So an inherited GOPROXY surviving into the
+// output would shadow the relay's copy and point the jail's cmd/go at a
+// host the allowlist doesn't carry. The base env carries no catalog key
+// itself, so the correct post-filter count is zero — the relay's copy,
+// arriving later, is then the only one. Driven off the catalog so a future
+// entry's key is covered the moment it exists.
+func TestBuildSandboxEnv_DropsCatalogEnvKeys(t *testing.T) {
+	keys := egressrelay.CatalogEnvKeys()
+	if len(keys) == 0 {
+		t.Fatal("egressrelay.CatalogEnvKeys() is empty; expected at least GOPROXY")
+	}
+	for _, key := range keys {
+		for _, extra := range [][]string{
+			{key + "=direct"},
+			{"TRIAGE_FACTORY_CONVERSATION_ID=r1", key + "=https://proxy.golang.org"},
+		} {
+			for _, kv := range buildSandboxEnv(extra) {
+				if strings.HasPrefix(kv, key+"=") {
+					t.Errorf("buildSandboxEnv(%v) emitted %q; catalog env keys must be dropped from ExtraEnv so the relay's later copy is the only one", extra, kv)
+				}
+			}
 		}
 	}
 }

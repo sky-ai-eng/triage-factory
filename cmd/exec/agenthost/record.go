@@ -81,7 +81,9 @@ func recordActionTx(ctx context.Context, ts db.TxStores, orgID string, act *doma
 // Best-effort throughout: every write here already happened against the
 // external system (GitHub/Jira/Slack) before this is called, so a recording
 // failure is logged and swallowed — it must never unwind the agent's
-// already-applied action.
+// already-applied action. Swallowed, but counted: this is the last stage of
+// the audit funnel auditstats.go measures, and the only one a local-mode
+// deployment (no sidecar, no relay) can reach.
 func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a *domain.Artifact, act *domain.ExternalAction) {
 	if a != nil {
 		if stores.Artifacts == nil {
@@ -103,10 +105,12 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a 
 	// — it is always inside a caller this trace already covers.
 	//
 	// The whole point is the swallow below. Every write here is best-effort
-	// by contract, so a failure surfaces today only as a warn line; the span
-	// makes it a trace with an error status, which is how "the PR was opened
-	// but TF has no artifact for it" stops being invisible. The artifact kind
-	// is a closed domain vocabulary; its target is a repo path, and stays out.
+	// by contract, so a failure would otherwise surface only as a warn line;
+	// the span makes it a trace with an error status and the drop counter
+	// beside it makes it a number, which is how "the PR was opened but TF has
+	// no artifact for it" stops being invisible and starts being measurable.
+	// The artifact kind is a closed domain vocabulary; its target is a repo
+	// path, and stays out.
 	ctx, span := tracer.Start(ctx, "artifact.record",
 		trace.WithAttributes(telemetry.ConversationID(info.RunID), telemetry.OrgID(info.OrgID)))
 	defer span.End()
@@ -141,6 +145,7 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a 
 			target = act.Target
 		}
 		recordSpanError(span, err)
+		recordAuditDrop(ctx, dropStageRecord, recordDropOp(a, act))
 		agenthostLog.Warn("external write recording failed (action already applied)",
 			"run", info.RunID, "kind", kind, "target", target, "error", err)
 	}

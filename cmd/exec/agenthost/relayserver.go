@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -106,6 +107,23 @@ func (s *RelayServer) SetCredentialRefresh(cr *CredentialRefresh) { s.credRefres
 // (proxyCreds still nil) fails clean rather than cloning unauthenticated.
 func (s *RelayServer) SetProxyCreds(pc *ProxyCredentials) { s.proxyCreds = pc }
 
+// SetGitHubCredential records which GitHub credential this run's writes act
+// under, so every audit row served here — the relayed gh-channel writes and
+// refusals, the git denials, the branch push composed into an artifact upsert —
+// names the credential that made them.
+//
+// Injected late for the same reason SetProxyCreds is, and from the same place:
+// the classification lives in the sealed bundle, which opens only in the
+// sidecar, so it arrives with the bring-up result. Bring-up completes before
+// the agent runs, so it is always settled before a relayed write can arrive.
+func (s *RelayServer) SetGitHubCredential(credential string) {
+	if credential == "" {
+		return
+	}
+	s.rt.ghCredential = credential
+	s.audit.SetGitHubCredential(credential)
+}
+
 // NewRelayServer builds the run's relay op server. git may be nil (no git
 // surface); stores/info are the run's own, admin-pool + RunInfo-bound.
 func NewRelayServer(stores db.Stores, info RunInfo, git *agentproc.GitProxyConfig) *RelayServer {
@@ -145,18 +163,33 @@ func (s *RelayServer) dispatch(ctx context.Context, namespace, op string, args j
 	return dispatchProviderOp(ctx, s.stores, s.info, namespace, op, args)
 }
 
-// DispatchNotify serves a fire-and-forget audit relay op best-effort.
+// DispatchNotify serves a fire-and-forget audit relay op best-effort — and is
+// the single place a notify that produced no record is accounted for, the way
+// DispatchCall is the single instrumented point for the request/response half.
+//
+// The two failure stages it separates differ in whose fault they are: the core
+// half can only fail before a handler runs (an undecodable payload, an op this
+// binary has no case for), while a provider op fails inside a handler that did
+// run. A core notify whose own DB write fails is NOT counted here — that write
+// is void by contract and counts itself at the write stage, so nothing is
+// counted twice.
 func (s *RelayServer) DispatchNotify(ctx context.Context, namespace, op string, args json.RawMessage) {
 	ctx, span := s.startRelayOp(ctx, "relay.notify", namespace, op)
 	defer span.End()
 
+	var err error
+	stage := dropStageRelayDispatch
 	if namespace == agentproc.RelayNamespaceCore {
-		s.dispatchCoreNotify(ctx, op, args)
-		return
+		stage = dropStageRelayDecode
+		err = s.dispatchCoreNotify(ctx, op, args)
+	} else {
+		_, err = dispatchProviderOp(ctx, s.stores, s.info, namespace, op, args)
 	}
-	if _, err := dispatchProviderOp(ctx, s.stores, s.info, namespace, op, args); err != nil {
+	if err != nil {
 		recordSpanError(span, err)
-		agenthostLog.Warn("relay provider notify failed", "namespace", namespace, "op", op, "error", err)
+		recordAuditDrop(ctx, stage, relayDropOp(namespace, op))
+		agenthostLog.Warn("relay notify failed; audit record dropped",
+			"namespace", namespace, "op", op, "error", err)
 	}
 }
 
@@ -186,6 +219,13 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 			DenyReason:    dec.DenyReason,
 			DenyMessage:   dec.DenyMessage,
 		})
+
+	case agentproc.OpAuthorizeGHWrite:
+		var a agentproc.AuthorizeGHWriteArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		return json.Marshal(agentproc.AuthorizeGHWriteReply{Allowed: s.authorizeGHWrite(ctx, a)})
 
 	case opGetConversation:
 		run, err := s.rt.GetConversation(ctx)
@@ -577,15 +617,65 @@ func ObservationArtifact(a agentproc.RecordObservationArgs, runID string) (domai
 	return domain.Artifact{}, false
 }
 
-// dispatchCoreNotify serves the "core" fire-and-forget audit ops.
+// authorizeGHWrite decides one gh-channel request the injector recognized as a
+// gated shape, and writes the refusal row when the answer is no.
+//
+// The decision is re-derived here from the shared classifier rather than taken
+// from the sidecar: policy belongs on the side that holds it, and the sidecar's
+// recognition is a filter on which requests need asking about, not the answer.
+// The two readings agree by construction — one table, one binary — so a
+// disagreement can only mean this side found the request ungated, which lets it
+// through exactly as it would have gone through unnoticed.
+//
+// V1 has no authorized case: a gated shape is refused whatever the run, the
+// mission, or the trigger. The only true return is the ungated one.
+func (s *RelayServer) authorizeGHWrite(ctx context.Context, a agentproc.AuthorizeGHWriteArgs) bool {
+	req := ghwrite.Request{
+		Method:  a.Method,
+		Path:    a.Path,
+		GraphQL: graphQLFactsFromWire(a.GraphQL),
+	}
+	ref, gated := ghwrite.Gate(req)
+	if !gated {
+		return true
+	}
+	// The agent is waiting on this call, so the recording is capped like every
+	// other DB effect reached from the supervision channel. A store that cannot
+	// be written costs the row; the refusal itself is this function's return
+	// value and does not depend on it.
+	recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
+	defer cancel()
+	s.audit.RecordGHWriteDenied(recCtx, req, ref)
+	return false
+}
 
-func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args json.RawMessage) {
+// graphQLFactsFromWire rebuilds the classifier's facts from the relay payload.
+// nil in, nil out — a REST request carries no GraphQL member.
+func graphQLFactsFromWire(w *agentproc.GraphQLWriteFacts) *ghwrite.GraphQLFacts {
+	if w == nil {
+		return nil
+	}
+	return &ghwrite.GraphQLFacts{
+		Operation:  w.Operation,
+		Fields:     w.Mutations,
+		Subject:    w.Subject,
+		Unreadable: w.Unreadable,
+	}
+}
+
+// dispatchCoreNotify serves the "core" fire-and-forget audit ops.
+//
+// Its error return is narrow on purpose: every op below either records
+// something or is void by contract, so the only way this returns non-nil is
+// that the payload never became a record at all — an undecodable frame or an op
+// with no case here. That is what makes DispatchNotify's decode stage a real
+// stage rather than a catch-all.
+func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args json.RawMessage) error {
 	switch op {
 	case agentproc.OpRecordDenial:
 		var a agentproc.RecordDenialArgs
 		if err := json.Unmarshal(args, &a); err != nil {
-			agenthostLog.Warn("decode relayed git denial failed", "error", err)
-			return
+			return fmt.Errorf("agenthost: decode relayed git denial: %w", err)
 		}
 		if s.git != nil && s.git.RecordDenial != nil {
 			s.git.RecordDenial(ctx, gitproxy.DeniedGitOp{
@@ -600,8 +690,7 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 	case agentproc.OpRecordEgressDenial:
 		var a agentproc.RecordEgressDenialArgs
 		if err := json.Unmarshal(args, &a); err != nil {
-			agenthostLog.Warn("decode relayed egress denial failed", "error", err)
-			return
+			return fmt.Errorf("agenthost: decode relayed egress denial: %w", err)
 		}
 		// Unconditional, unlike the git denial above: every sandbox has an egress
 		// proxy, so there is no run shape where this op should be dropped. The
@@ -615,20 +704,29 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 	case agentproc.OpRecordGHWrite:
 		var a agentproc.RecordGHWriteArgs
 		if err := json.Unmarshal(args, &a); err != nil {
-			agenthostLog.Warn("decode relayed gh write failed", "error", err)
-			return
+			return fmt.Errorf("agenthost: decode relayed gh write: %w", err)
 		}
 		// The request already transited; recording it is best-effort and capped
-		// like the other audit ops.
+		// like the other audit ops. Classification happens here rather than in
+		// the sidecar, so the wire carries only what was observed and the row's
+		// vocabulary stays on the side that owns it.
 		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
 		defer cancel()
-		s.audit.RecordGHChannelWrite(recCtx, a.Method, a.Path, a.Status)
+		s.audit.RecordGHChannelWrite(recCtx, ghwrite.Observation{
+			Method:         a.Method,
+			Path:           a.Path,
+			Status:         a.Status,
+			ExternalID:     a.ExternalID,
+			URL:            a.URL,
+			Errored:        a.Errored,
+			ResponseUnread: a.ResponseUnread,
+			GraphQL:        graphQLFactsFromWire(a.GraphQL),
+		})
 
 	case agentproc.OpRecordPush:
 		var a agentproc.RecordPushArgs
 		if err := json.Unmarshal(args, &a); err != nil {
-			agenthostLog.Warn("decode relayed push failed", "error", err)
-			return
+			return fmt.Errorf("agenthost: decode relayed push: %w", err)
 		}
 		if s.git != nil && s.git.RecordPush != nil {
 			// The relayed push already completed upstream; the DB write here must
@@ -648,8 +746,7 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 	case opRecordExternalWrite:
 		var a recordExternalWriteArgs
 		if err := json.Unmarshal(args, &a); err != nil {
-			agenthostLog.Warn("decode relayed external write failed", "error", err)
-			return
+			return fmt.Errorf("agenthost: decode relayed external write: %w", err)
 		}
 		// The write already landed upstream; Record is best-effort and self-bounds
 		// its own recording. Cap it so a wedged store can't pin the frame goroutine.
@@ -660,12 +757,13 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 	case agentproc.OpRecordObservation:
 		var a agentproc.RecordObservationArgs
 		if err := json.Unmarshal(args, &a); err != nil {
-			agenthostLog.Warn("decode relayed gh observation failed", "error", err)
-			return
+			return fmt.Errorf("agenthost: decode relayed gh observation: %w", err)
 		}
 		art, ok := ObservationArtifact(a, s.info.RunID)
 		if !ok {
-			return
+			// A shape that maps to no artifact, not a lost one: the write's own
+			// audit row rides record_gh_write, which is a separate notify.
+			return nil
 		}
 		// The gh mutation already landed upstream; Record stamps the run identity
 		// from THIS server's RunInfo (never the wire) and upserts. Best-effort,
@@ -677,8 +775,7 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 	case opRecordReadTouch:
 		var a recordReadTouchArgs
 		if err := json.Unmarshal(args, &a); err != nil {
-			agenthostLog.Warn("decode relayed read touch failed", "error", err)
-			return
+			return fmt.Errorf("agenthost: decode relayed read touch: %w", err)
 		}
 		// The read already returned; RecordReadTouch is best-effort. Cap it like
 		// the external-write path so a wedged store can't pin the frame goroutine.
@@ -686,7 +783,21 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 		defer cancel()
 		s.rt.RecordReadTouch(recCtx, a.Provider, a.Target, a.URL)
 
+	case agentproc.OpRecordRelayDrop:
+		var a agentproc.RecordRelayDropArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return fmt.Errorf("agenthost: decode relayed drop report: %w", err)
+		}
+		// The one notify that carries no record: the sidecar is reporting that a
+		// record never made it onto the wire. Counted against the SENDING stage,
+		// naming the op that lost it — not against this frame, which arrived
+		// fine. See agentproc.NotifyRelayAudit for the half this cannot see.
+		recordAuditDrop(ctx, dropStageRelaySend, relayDropOp(a.Namespace, a.Op))
+		agenthostLog.Warn("sidecar could not relay an audit record",
+			"namespace", a.Namespace, "op", a.Op, "run", s.info.RunID)
+
 	default:
-		agenthostLog.Warn("unsupported core relay notify op", "op", op)
+		return fmt.Errorf("agenthost: unsupported core relay notify op %q", op)
 	}
+	return nil
 }

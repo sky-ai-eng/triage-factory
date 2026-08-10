@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -31,6 +32,12 @@ type memTranscript struct {
 	// failInsert, when set, makes the next Insert fail — used to exercise
 	// the loop's error paths.
 	failInsert error
+	// failInsertAt, when non-zero, fails that Insert and lets the ones before
+	// it land — counting from the first write after the seed. The crash
+	// mid-way through a sequence of writes no transaction spans: a repair that
+	// answered one call and died before the next, most of all.
+	failInsertAt int
+	inserts      int
 	// failMarkDelivered, when set, fails the next MarkDelivered. A function
 	// rather than an error so a test can land something else inside the
 	// write it stands in for — a context kill, most of all, which is how a
@@ -43,6 +50,7 @@ func newMemTranscript(seed ...domain.Message) *memTranscript {
 	for _, r := range seed {
 		_, _ = t.Insert(context.Background(), "org", &r)
 	}
+	t.inserts = 0 // the seed is the fixture, not a write under test
 	return t
 }
 
@@ -96,6 +104,11 @@ func (t *memTranscript) Insert(_ context.Context, _ string, msg *domain.Message)
 		err := t.failInsert
 		t.failInsert = nil
 		return 0, err
+	}
+	t.inserts++
+	if t.failInsertAt == t.inserts {
+		t.failInsertAt = 0
+		return 0, fmt.Errorf("insert %d failed", t.inserts)
 	}
 	row := *msg
 	row.ID = t.next
@@ -382,6 +395,26 @@ func (h *scriptedToolHost) calls() []string {
 	return append([]string(nil), h.observed...)
 }
 
+// racingToolHost lands a row in the transcript while the first tool call is
+// executing — the window where a person's follow-up takes the id between a
+// call and its answer. Once, so a multi-turn script races exactly one dispatch.
+type racingToolHost struct {
+	*scriptedToolHost
+	transcript *memTranscript
+	arrive     domain.Message
+	landed     bool
+}
+
+func (h *racingToolHost) Call(name string, input map[string]any) (ToolOutcome, error) {
+	if !h.landed {
+		h.landed = true
+		row := h.arrive
+		row.ConversationID = "conv"
+		_, _ = h.transcript.Insert(context.Background(), "org", &row)
+	}
+	return h.scriptedToolHost.Call(name, input)
+}
+
 // recordingLogger captures what the engine logged. Needed where the log IS
 // the deliverable: a shape the loop deliberately tolerates leaves no row
 // behind, so the warn is the only evidence it was noticed at all.
@@ -459,4 +492,68 @@ func mustJSON(v map[string]any) string {
 		panic(err)
 	}
 	return string(b)
+}
+
+// assertToolResultsAreAdjacent applies the adjacency rule to a request as the
+// model will see it. Every tool_use id an assistant message carries must be
+// answered within the run of tool messages that immediately follows it — the
+// exact condition behind Anthropic's "tool_use ids were found without
+// tool_result blocks immediately after".
+func assertToolResultsAreAdjacent(t *testing.T, req inference.Request) {
+	t.Helper()
+	msgs, err := inference.RowsToMessages(req.Rows, inference.AssemblyOptions{})
+	if err != nil {
+		t.Fatalf("assemble request: %v", err)
+	}
+	for i, m := range msgs {
+		if m.Role != schemas.ChatMessageRoleAssistant || m.ChatAssistantMessage == nil {
+			continue
+		}
+		unanswered := map[string]struct{}{}
+		for _, call := range m.ToolCalls {
+			if call.ID != nil && *call.ID != "" {
+				unanswered[*call.ID] = struct{}{}
+			}
+		}
+		if len(unanswered) == 0 {
+			continue
+		}
+		for j := i + 1; j < len(msgs) && msgs[j].Role == schemas.ChatMessageRoleTool; j++ {
+			if msgs[j].ChatToolMessage == nil || msgs[j].ToolCallID == nil {
+				continue
+			}
+			delete(unanswered, *msgs[j].ToolCallID)
+		}
+		if len(unanswered) > 0 {
+			var ids []string
+			for id := range unanswered {
+				ids = append(ids, id)
+			}
+			t.Fatalf("assistant message %d's calls %v are not answered in the messages immediately after it; assembled: %s",
+				i, ids, describeAssembly(msgs))
+		}
+	}
+}
+
+// describeAssembly renders an assembled request as a role sequence, so a
+// failure names the shape that broke rather than dumping every message.
+func describeAssembly(msgs []schemas.ChatMessage) string {
+	parts := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		switch {
+		case m.ChatAssistantMessage != nil && len(m.ToolCalls) > 0:
+			var ids []string
+			for _, c := range m.ToolCalls {
+				if c.ID != nil {
+					ids = append(ids, *c.ID)
+				}
+			}
+			parts = append(parts, fmt.Sprintf("assistant(tool_use:%s)", strings.Join(ids, ",")))
+		case m.ChatToolMessage != nil && m.ToolCallID != nil:
+			parts = append(parts, fmt.Sprintf("tool(%s)", *m.ToolCallID))
+		default:
+			parts = append(parts, string(m.Role))
+		}
+	}
+	return strings.Join(parts, " → ")
 }

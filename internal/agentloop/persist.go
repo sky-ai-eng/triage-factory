@@ -123,17 +123,50 @@ func stampUsage(row *domain.Message, usage inference.Usage) {
 	row.CacheCreationTokens = &cc
 }
 
-// insertToolResult appends one tool-result row. Every result reaches the
-// transcript through here — a real dispatch, a synthetic repair, a gate
-// denial, a truncated batch — so a tool_use always has exactly one matching
-// row and its is_error flag is set the same way regardless of origin.
-func (e *Engine) insertToolResult(ctx context.Context, params Params, call domain.ToolCall, content string, isErr bool) error {
+// toolResultPositions returns the assembly position for each result of one
+// assistant message's batch: fractions inside (ownerID, ownerID+1), in call
+// order. It answers by index rather than as a slice so a caller iterating the
+// batch cannot silently mispair a result with another call's position.
+//
+// This is what makes "a tool result assembles immediately after the call it
+// answers" a property of every result rather than a repair applied to some.
+// The transcript's tail is NOT that position: a user's follow-up can land
+// while a tool is running, taking the id between the call and its answer, and
+// then a tail-appended result assembles behind the follow-up. The provider
+// rejects that arrangement outright, which fails every later call on the
+// conversation, not just the one.
+//
+// No read is needed to be safe here. Any row that arrives after the owning
+// assistant row takes an id of at least ownerID+1, and every fraction below
+// is strictly under that — so the results land above their call and beneath
+// anything that could race them, whether or not anything did. The claim-start
+// repair computes its anchor from a read instead, because by then rows HAVE
+// accumulated after the call and it must slot in among them.
+func toolResultPositions(ownerID, n int) func(int) *float64 {
+	return func(i int) *float64 {
+		if ownerID <= 0 || n <= 0 || i < 0 || i >= n {
+			return nil
+		}
+		seq := float64(ownerID) + float64(i+1)/float64(n+1)
+		return &seq
+	}
+}
+
+// insertToolResult writes one tool-result row at a stated assembly position.
+// Every result reaches the transcript through here — a real dispatch, a
+// synthetic repair, a gate denial, a truncated batch — so a tool_use always
+// has exactly one matching row, its is_error flag is set the same way
+// regardless of origin, and its answer sits under the call whatever else took
+// an id in between. A nil seq is the tail, and every caller that passes one
+// has established that the tail IS the position under the call.
+func (e *Engine) insertToolResult(ctx context.Context, params Params, call domain.ToolCall, content string, isErr bool, seq *float64) error {
 	row := &domain.Message{
 		ConversationID: params.ConversationID,
 		Role:           "tool",
 		ToolCallID:     call.ID,
 		Content:        sanitizeForStore(content),
 		IsError:        isErr,
+		Seq:            seq,
 	}
 	id, err := e.Transcript.Insert(ctx, params.OrgID, row)
 	if err != nil {
@@ -148,7 +181,7 @@ func (e *Engine) insertToolResult(ctx context.Context, params Params, call domai
 // Content column so the display path is unchanged, and the image rides
 // ContentBlocks, which is what the assembly bijection replays to the
 // provider.
-func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, call domain.ToolCall, content string, images []ToolImage) error {
+func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, call domain.ToolCall, content string, images []ToolImage, seq *float64) error {
 	blocks := make([]domain.ContentBlock, 0, len(images))
 	for _, img := range images {
 		blocks = append(blocks, domain.ContentBlock{
@@ -167,6 +200,7 @@ func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, 
 		ToolCallID:     call.ID,
 		Content:        sanitizeForStore(content),
 		ContentBlocks:  blocks,
+		Seq:            seq,
 	}
 	id, err := e.Transcript.Insert(ctx, params.OrgID, row)
 	if err != nil {

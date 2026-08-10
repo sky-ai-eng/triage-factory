@@ -9,9 +9,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghbin"
 	"github.com/sky-ai-eng/triage-factory/internal/ghchannel"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -68,6 +70,18 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, runID, owner s
 		return nil, noopChannelCloser{}
 	}
 
+	// Which credential the injector will attach, settled once here rather than
+	// per observation: it comes from the same resolver call the TokenSource
+	// below makes, so the two can never disagree, and a run's channel holds one
+	// credential for its whole life. A resolve failure leaves the App default
+	// and costs a label — the first real request surfaces the same failure
+	// where it is actionable.
+	credential := domain.CredentialGitHubApp
+	if tok, terr := resolver.TokenFor(ctx, orgID, owner); terr == nil && tok.Value != "" && tok.ExpiresAt.IsZero() {
+		// No expiry is the PAT tell: an installation token always carries one.
+		credential = domain.CredentialGitHubPAT
+	}
+
 	ch, err := ghchannel.Start(ghchannel.Config{
 		RunID:    runID,
 		Upstream: s.githubAPIUpstreamFor(ctx, orgID),
@@ -97,8 +111,24 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, runID, owner s
 			if !storesSet {
 				return
 			}
+			// Same builder the relayed (multi) path calls, on the same
+			// observation type, so a write audited here is byte-identical to one
+			// audited from a sandbox.
 			agenthost.RecordExternalWrite(ctx, stores, info, nil,
-				agenthost.GHChannelWriteAction(w.Method, w.Path, w.Status))
+				agenthost.GHChannelWriteAction(w, credential))
+		},
+		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, ref ghwrite.Refusal) bool {
+			// The same decision the sandbox path relays, minus the relay and
+			// minus the re-derivation it exists for: the proxy that recognized
+			// the shape, the policy, and the database are one process here, so
+			// there is no second reading to reconcile. A run whose stores never
+			// arrived still refuses — the decision does not depend on being
+			// able to record it — and loses only the row.
+			if storesSet {
+				agenthost.RecordExternalWrite(ctx, stores, info, nil,
+					agenthost.GHWriteDeniedAction(req, ref, credential))
+			}
+			return false
 		},
 	})
 	if err != nil {

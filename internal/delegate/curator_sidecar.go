@@ -77,9 +77,17 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversation
 	// pinned ∩ team-tracked (a curator turn has no conversation_worktrees ledger). The
 	// sidecar resolves the real token from its own unsealed bundle; no
 	// TokenSource here.
-	var git *agentproc.GitProxyConfig
+	//
+	// The gate's audit client is held here for the same reason the delegated
+	// path holds its own: bring-up is where the sidecar reports which GitHub
+	// credential it injects, and this client's rows carry it.
+	var (
+		git       *agentproc.GitProxyConfig
+		auditHost *agenthost.LocalClient
+	)
 	if storesSet {
-		git = s.executorCuratorGitGate(ctx, info, stores, pinnedRepos)
+		auditHost = agenthost.NewLocal(stores, info)
+		git = s.executorCuratorGitGate(ctx, info, stores, pinnedRepos, auditHost)
 	}
 
 	// The org commit identity's git-config pairs fold into the sandbox's single
@@ -88,6 +96,7 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversation
 	// run. "manual" — every curator turn is user-driven.
 	identity := s.resolveCommitIdentity(ctx, orgID, "manual", userID)
 
+	relaySrv := agenthost.NewRelayServer(stores, info, git)
 	params := agentproc.SidecarBringUpParams{
 		HostVethIP: net.HostIP,
 		// A curator turn is an SDK engagement whose loop runs inside the jail,
@@ -95,7 +104,7 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversation
 		// this one's has not.
 		SandboxLLM:    true,
 		Git:           git,
-		Relay:         agenthost.NewRelayServer(stores, info, git),
+		Relay:         relaySrv,
 		IdentityPairs: githooks.IdentityConfigPairs(identity.Name, identity.Email),
 		// The curator advertises `exec gh` + host-side pinned-repo fetches, so
 		// the git + GitHub-REST proxies are always on.
@@ -127,6 +136,15 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversation
 		_ = sc.Close()
 		_ = net.Close()
 		return nil, fmt.Errorf("bring up curator credential sidecar: %w", err)
+	}
+
+	// The tier of the GitHub credential the sidecar injects, which only it could
+	// read off the sealed bundle. A curator turn writes through the same gh
+	// channel and exec verbs a delegated run does, so its rows need the same
+	// attribution. Set before the turn's agent runs.
+	relaySrv.SetGitHubCredential(res.GitHubCredential)
+	if auditHost != nil {
+		auditHost.SetGitHubCredential(res.GitHubCredential)
 	}
 
 	es := &executorSandbox{runID: conversationID, net: net, sidecar: sc, conn: conn, res: res, stopRelay: make(chan struct{})}
@@ -209,7 +227,7 @@ func (s *Spawner) curatorSidecarProvisionFor(orgID, conversationID string) agent
 // pinned worktrees are read-only, so no push transits). No TokenSource — the
 // sidecar resolves the real token from its own unsealed bundle. nil when the
 // resolver is unwired.
-func (s *Spawner) executorCuratorGitGate(ctx context.Context, info agenthost.RunInfo, stores db.Stores, pinnedRepos []string) *agentproc.GitProxyConfig {
+func (s *Spawner) executorCuratorGitGate(ctx context.Context, info agenthost.RunInfo, stores db.Stores, pinnedRepos []string, auditHost *agenthost.LocalClient) *agentproc.GitProxyConfig {
 	s.mu.Lock()
 	resolver := s.ghResolver
 	s.mu.Unlock()
@@ -222,16 +240,15 @@ func (s *Spawner) executorCuratorGitGate(ctx context.Context, info agenthost.Run
 	} else {
 		upstream = base
 	}
-	denialHost := agenthost.NewLocal(stores, info)
 	return &agentproc.GitProxyConfig{
 		Upstream: upstream,
 		Authorize: func(ctx context.Context, owner, repo string) (gitproxy.Decision, error) {
 			return curatorGitAuthorizeDecision(ctx, stores, info, pinnedRepos, owner, repo)
 		},
 		RecordDenial: func(ctx context.Context, denied gitproxy.DeniedGitOp) {
-			denialHost.RecordGitDenied(ctx, denied.Owner, denied.Repo, denied.Ref, denied.Op, denied.Reason)
+			auditHost.RecordGitDenied(ctx, denied.Owner, denied.Repo, denied.Ref, denied.Op, denied.Reason)
 		},
-		RecordPush: gitPushRecorder(stores, info),
+		RecordPush: gitPushRecorder(auditHost, info),
 	}
 }
 

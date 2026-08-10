@@ -499,24 +499,27 @@ func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) eve
 
 // resolveOwnedRouting routes an owner-ladder event to the entity's owning team.
 // A registered event source resolves its own owner first — if hooks exist
-// for evt's source, hooks.ResolveOwner supplies (owner, ownerSet) in place of
-// the built-in provider branch. Built-in providers differ by provider
+// for evt's source, hooks.ResolveOwner supplies (owner, ownerSet, err) in place
+// of the built-in provider branch. Built-in providers differ by provider
 // (author login for github, assignee account for jira); the shared tail —
 // visibility = ownerSet ∪ watchers, firing = members-then-watchers with the
 // no-steal invariant — lives in ownerLadderRouting, and registered sources
 // inherit all of it unchanged (do NOT reimplement it here). ok=false →
 // external identity, no watching handler → no task.
 //
-// A non-nil error means the built-in ladder could not resolve the owner and the
-// event must be replayed rather than routed on a guess. Registered sources have
-// no error arm: SourceHooks.ResolveOwner is contractually fail-open (see its
-// doc), so a source that wants a retry has to grow that contract first.
+// A non-nil error means the owner could not be resolved and the event must be
+// replayed rather than routed on a guess. The registered-source arm carries the
+// identical contract (see SourceHooks.ResolveOwner) — and needs it more, not
+// less: the hook stands in for the WHOLE ladder there, so a swallowed failure
+// has no lower tier left to be caught by. resolveSourceOwner is what makes that
+// contract a mechanism rather than a rule: a hook that returns empty without
+// claiming Unowned is refused, not believed.
 func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) (eventRouting, bool, error) {
 	var owner string
 	var ownerSet []string
 	var err error
 	if hooks, ok := sourceHooksFor(evt.EventType); ok {
-		owner, ownerSet = hooks.ResolveOwner(ctx, orgID, evt, entityID)
+		owner, ownerSet, err = resolveSourceOwner(ctx, hooks, eventSourcePrefix(evt.EventType), orgID, evt, entityID)
 	} else if isAuthorCentricGitHubEvent(evt.EventType) {
 		owner, ownerSet, err = r.authorCentricOwner(ctx, orgID, evt, entityID, scopeCache)
 	} else {

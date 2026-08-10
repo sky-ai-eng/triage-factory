@@ -274,7 +274,7 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 		return nil, fmt.Errorf("resolve authorized repo set: %w", err)
 	}
 
-	gh := &credbundle.GitHubCreds{Mode: "app", RepoTokens: map[string]credbundle.RepoToken{}}
+	gh := &credbundle.GitHubCreds{Mode: credbundle.GitHubModeApp, RepoTokens: map[string]credbundle.RepoToken{}}
 	if base, err := m.ghResolver.BaseURLFor(ctx, orgID); err == nil {
 		gh.BaseURL = base
 	}
@@ -302,7 +302,7 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 			return nil, fmt.Errorf("mint token for %s: %w", repoID, err)
 		}
 		if tok.ExpiresAt.IsZero() {
-			gh.Mode = "pat"
+			gh.Mode = credbundle.GitHubModePAT
 			gh.PAT = tok.Value
 		}
 		gh.RepoTokens[repoID] = credbundle.RepoToken{Token: tok.Value, ExpiresAt: tok.ExpiresAt}

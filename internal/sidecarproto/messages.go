@@ -156,6 +156,16 @@ type StartProxiesResult struct {
 	// recognize to the Data Center default both backends serve.
 	JiraDeployment string `json:"jira_deployment,omitempty"`
 
+	// GitHubCredential names the tier of the GitHub credential these proxies
+	// inject (a domain.Credential* value), so the orchestrator's audit rows
+	// record the credential that actually made each write. It travels for the
+	// same reason JiraDeployment does and only that reason: the sealed bundle
+	// opens in the sidecar alone, the executor's secret store is disabled, and
+	// an installation token and a PAT are indistinguishable strings on the
+	// wire — so nothing on the receiving side could re-derive it. The value is
+	// a closed classification, never credential material.
+	GitHubCredential string `json:"github_credential,omitempty"`
+
 	// GHChannelHost is the injector's bound "host:port" (no scheme) — the value
 	// the orchestrator stamps into the sandbox as GH_HOST. GHChannelToken is the
 	// per-run placeholder the agent's gh presents (GH_ENTERPRISE_TOKEN). Both

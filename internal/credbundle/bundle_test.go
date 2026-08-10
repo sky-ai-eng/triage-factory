@@ -67,3 +67,25 @@ func TestLLMExpiry_OmittedWhenZero(t *testing.T) {
 		t.Errorf("role LLMExpiry round trip = %v", got.LLMExpiry())
 	}
 }
+
+// TestGitHubCredsCredential pins the audit-log name each tier reports. The
+// bundle is the only thing on an executor that knows which one a run spends, so
+// this mapping is what keeps that side's rows from all claiming the App.
+func TestGitHubCredsCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		gh   *GitHubCreds
+		want string
+	}{
+		{"app", &GitHubCreds{Mode: GitHubModeApp}, "github_app"},
+		{"pat", &GitHubCreds{Mode: GitHubModePAT}, "github_pat"},
+		// A run with no GitHub credential at all, and one whose mode never got
+		// written, both read as the App — the value this column has always had.
+		{"absent", nil, "github_app"},
+		{"unset", &GitHubCreds{}, "github_app"},
+	} {
+		if got := tc.gh.Credential(); got != tc.want {
+			t.Errorf("%s: Credential() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

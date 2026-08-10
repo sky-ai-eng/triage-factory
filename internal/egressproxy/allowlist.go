@@ -10,6 +10,13 @@ import "strings"
 // doesn't ship (cargo, rubygems, ...) stay off the list until a
 // rootfs variant adds their toolchain.
 //
+// One exception to the consumer rule: an entry whose traffic has moved
+// to the fetch-relay lane (internal/egressrelay) may stay here, marked
+// VESTIGIAL in its comment, as a deliberate one-release degraded path
+// before removal — the Go entries below are the current case. Don't
+// delete a vestigial entry under the consumer rule; its comment names
+// when it goes.
+//
 // Deliberately absent:
 //   - github.com / codeload.github.com — git egress goes through the
 //     authenticated per-run git proxy with its Authorize gate; an
@@ -21,10 +28,22 @@ import "strings"
 // the spawner; the proxy's shape doesn't change.
 func DefaultRegistryHosts() []string {
 	return []string{
-		// npm / pnpm / yarn
+		// npm / pnpm
 		"registry.npmjs.org",
-		"registry.yarnpkg.com",
-		// Go modules + checksum database
+		// Go modules + checksum database. Both are now VESTIGIAL for a
+		// sandboxed run: GOPROXY points cmd/go at the per-run fetch relay
+		// (internal/egressrelay, go-modules catalog entry), which serves
+		// the module protocol and the /sumdb/ arm from the host, so the
+		// jail no longer dials either host. They stay for one release as
+		// the degraded path if that env plumbing is ever absent — small
+		// modules still resolve inline, where a jail with neither entry
+		// nor relay would fail at the first fetch with nothing to point
+		// at. Remove once the relay has production miles.
+		//
+		// Note the allowlist alone was never sufficient here: the public
+		// proxy 302s large zips (and every toolchain) to
+		// storage.googleapis.com, a shared storage namespace this list
+		// must never carry — which is why the relay lane exists.
 		"proxy.golang.org",
 		"sum.golang.org",
 		// PyPI

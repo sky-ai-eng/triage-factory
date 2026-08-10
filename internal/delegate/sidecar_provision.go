@@ -295,9 +295,17 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 	// proxy relays back per push, plus the non-secret org base as the insteadOf
 	// upstream. No TokenSource — the sidecar resolves the real token from its
 	// own unsealed bundle. Omitted (no git proxy) when stores are unwired.
-	var git *agentproc.GitProxyConfig
+	//
+	// The gate's audit client is held here so bring-up can tell it which GitHub
+	// credential the sidecar ended up injecting; its denial and push rows carry
+	// that credential, and nothing on this side can read it off the bundle.
+	var (
+		git       *agentproc.GitProxyConfig
+		auditHost *agenthost.LocalClient
+	)
 	if storesSet {
-		git = s.executorGitGate(ctx, info, stores)
+		auditHost = agenthost.NewLocal(stores, info)
+		git = s.executorGitGate(ctx, info, stores, auditHost)
 	}
 
 	// The commit identity's git config pairs (author/committer) fold into the
@@ -367,14 +375,23 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 	// no real credential for either. Set before the agent runs, so always ready
 	// by the time a materialization arrives.
 	relaySrv.SetProxyCreds(&agenthost.ProxyCredentials{
-		GitHubAPIURL:   res.GitHubAPIURL,
-		GitHubAPIToken: res.GitHubAPIToken,
-		JiraAPIURL:     res.JiraAPIURL,
-		JiraAPIToken:   res.JiraAPIToken,
-		JiraDeployment: res.JiraDeployment,
-		GitProxyURL:    res.GitProxyURL,
-		GitProxyToken:  res.GitProxyToken,
+		GitHubCredential: res.GitHubCredential,
+		GitHubAPIURL:     res.GitHubAPIURL,
+		GitHubAPIToken:   res.GitHubAPIToken,
+		JiraAPIURL:       res.JiraAPIURL,
+		JiraAPIToken:     res.JiraAPIToken,
+		JiraDeployment:   res.JiraDeployment,
+		GitProxyURL:      res.GitProxyURL,
+		GitProxyToken:    res.GitProxyToken,
 	})
+	// The tier of the credential the sidecar injects, which only it could read
+	// off the sealed bundle. Handed to both recorders on this side so a relayed
+	// gh-channel write, a git denial and a branch push all name the credential
+	// that made them. Set before the agent runs, like the coords above.
+	relaySrv.SetGitHubCredential(res.GitHubCredential)
+	if auditHost != nil {
+		auditHost.SetGitHubCredential(res.GitHubCredential)
+	}
 
 	es := &executorSandbox{runID: run.ID, net: net, sidecar: sc, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
 	_, myBootEpoch := s.executorIdentity()
@@ -517,7 +534,11 @@ func (s *Spawner) githubAPIUpstreamFor(ctx context.Context, orgID string) string
 // proxy's relayed capture is the ONLY path a branch push reaches the audit log
 // — the same gitPushRecorder the in-process (all/local) backstop uses, so both
 // modes land the identical branch artifact / push-failed row.
-func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.RunInfo, stores db.Stores) *agentproc.GitProxyConfig {
+//
+// auditHost is the caller's — not built here — because the run's acting GitHub
+// credential is not known until the sidecar reports it, and the caller is the
+// half that holds both the client and that answer.
+func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.RunInfo, stores db.Stores, auditHost *agenthost.LocalClient) *agentproc.GitProxyConfig {
 	s.mu.Lock()
 	resolver := s.ghResolver
 	s.mu.Unlock()
@@ -530,13 +551,12 @@ func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.RunInfo, s
 	} else {
 		upstream = base
 	}
-	denialHost := agenthost.NewLocal(stores, info)
 	// Captured while the engagement's root is still live — the gate is built
 	// during bring-up, but every callback below fires mid-run, on a git
 	// operation the agent performed. Same reason the permission handler
 	// captures at construction.
 	engagement := s.engagementSpanContext(info.RunID)
-	recordPush := gitPushRecorder(stores, info)
+	recordPush := gitPushRecorder(auditHost, info)
 	return &agentproc.GitProxyConfig{
 		Upstream: upstream,
 		Authorize: func(ctx context.Context, owner, repo string) (gitproxy.Decision, error) {
@@ -554,7 +574,7 @@ func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.RunInfo, s
 			return dec, err
 		},
 		RecordDenial: func(ctx context.Context, denied gitproxy.DeniedGitOp) {
-			denialHost.RecordGitDenied(ctx, denied.Owner, denied.Repo, denied.Ref, denied.Op, denied.Reason)
+			auditHost.RecordGitDenied(ctx, denied.Owner, denied.Repo, denied.Ref, denied.Op, denied.Reason)
 		},
 		RecordPush: func(ctx context.Context, pushed gitproxy.PushedRef) {
 			// This is the ONLY path a branch push reaches the audit log on an
