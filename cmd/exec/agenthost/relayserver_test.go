@@ -263,3 +263,61 @@ func TestRelayServer_GHWriteClassifiesTheCreate(t *testing.T) {
 		t.Errorf("detail_json = %q, want the thread the reply landed on", a.DetailJSON)
 	}
 }
+
+// TestRelayServer_GraphQLWriteWritesAuditRow pins the GraphQL hop end to end.
+// The act is named only in the request, which only the sidecar ever sees, so
+// what crosses this socket is the whole of what the row can know — a facts
+// member dropped in transit is an unnamed write, silently.
+func TestRelayServer_GraphQLWriteWritesAuditRow(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	s := NewRelayServer(stores, info, nil)
+
+	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{
+		Method: "POST",
+		Path:   "/graphql",
+		Status: 200,
+		URL:    "https://github.com/octo/repo/pull/7#issuecomment-9",
+		GraphQL: &agentproc.GraphQLWriteFacts{
+			Operation: "CommentCreate",
+			Mutations: []string{"addComment"},
+			Subject:   "PR_kwRelay",
+		},
+	})
+	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want 1 graphql write row, got %d: %+v", len(acts), acts)
+	}
+	a := acts[0]
+	if a.Action != domain.ActionCommentPosted || a.Target != "octo/repo#7" || a.ConversationID != info.RunID {
+		t.Errorf("relayed graphql write row mismatch: %+v", a)
+	}
+}
+
+// TestRelayServer_GraphQLRefusalRelaysAsAnAttempt: the endpoint's 200-with-
+// errors refusal is a fact only the sidecar's response read can establish, so
+// it has to survive the hop as its own field — the status code alone says the
+// opposite.
+func TestRelayServer_GraphQLRefusalRelaysAsAnAttempt(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	s := NewRelayServer(stores, info, nil)
+
+	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{
+		Method: "POST", Path: "/graphql", Status: 200, Errored: true,
+		GraphQL: &agentproc.GraphQLWriteFacts{
+			Mutations: []string{"mergePullRequest"},
+			Subject:   "PR_kwRelayRefused",
+		},
+	})
+	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want 1 row, got %d: %+v", len(acts), acts)
+	}
+	if acts[0].Action != domain.ActionGraphQLWrite ||
+		!strings.Contains(acts[0].DetailJSON, `"attempted":"pr_merged"`) {
+		t.Errorf("relayed refusal = %+v, want an attempt row naming the merge", acts[0])
+	}
+}

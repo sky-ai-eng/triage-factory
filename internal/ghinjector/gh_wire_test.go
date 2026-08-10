@@ -9,10 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 )
 
 // These tests drive the REAL pinned gh binary against a fake GitHub Enterprise
@@ -48,6 +52,10 @@ const (
 	ghePRNumber = 42
 	ghePRNodeID = "PR_kwWireTest"
 	ghePRURL    = "https://ghe.test/octo/repo/pull/42"
+	// The link `gh pr comment`'s mutation answers with — a comment anchor on the
+	// PR's own page, which is what lets the audit row locate an object the
+	// request named only by node id.
+	gheCommentURL = "https://ghe.test/octo/repo/pull/42#issuecomment-7"
 )
 
 // fakeGHE answers the handful of operations `gh pr create` / `gh pr view` need.
@@ -90,10 +98,30 @@ func fakeGHE(t *testing.T, createExtra string) (*httptest.Server, func() string)
 				`","url":"` + ghePRURL + `"}}}` + createExtra + `}`))
 
 		case strings.Contains(query, "PullRequestByNumber"):
+			// One PR object answering every finder in these tests. gh asks for a
+			// different field set per command (merge wants the merge state, close
+			// wants the state), so the fixture is the union — a finder that gets
+			// a field it did not ask for ignores it.
 			_, _ = w.Write([]byte(`{"data":{"repository":{"pullRequest":{"id":"` + ghePRNodeID +
 				`","number":42,"url":"` + ghePRURL + `","title":"T","state":"OPEN","body":"B",` +
-				`"baseRefName":"main","headRefName":"feature","commits":{"totalCount":1},` +
+				`"baseRefName":"main","headRefName":"feature","headRefOid":"deadbeef",` +
+				`"isCrossRepository":false,"mergeStateStatus":"CLEAN","mergeable":"MERGEABLE",` +
+				`"isInMergeQueue":false,"isMergeQueueEnabled":false,` +
+				`"headRepositoryOwner":{"id":"U_octo","login":"` + ghePROwner + `"},` +
+				`"commits":{"totalCount":1,"nodes":[{"commit":{"oid":"deadbeef"}}]},` +
 				`"author":{"login":"someone"}}}}}`))
+
+		case strings.Contains(query, "addComment"):
+			_, _ = w.Write([]byte(`{"data":{"addComment":{"commentEdge":{"node":{"url":"` + gheCommentURL + `"}}}}}`))
+
+		case strings.Contains(query, "closePullRequest"):
+			_, _ = w.Write([]byte(`{"data":{"closePullRequest":{"pullRequest":{"id":"` + ghePRNodeID + `"}}}}`))
+
+		case strings.Contains(query, "mergePullRequest"):
+			_, _ = w.Write([]byte(`{"data":{"mergePullRequest":{"clientMutationId":null}}}`))
+
+		case strings.Contains(query, "addReaction"):
+			_, _ = w.Write([]byte(`{"data":{"addReaction":{"clientMutationId":null}}}`))
 
 		default:
 			_, _ = w.Write([]byte(`{"data":{}}`))
@@ -114,6 +142,14 @@ func fakeGHE(t *testing.T, createExtra string) (*httptest.Server, func() string)
 // environment is built from scratch rather than inherited so a developer's real
 // GH_TOKEN or gh config can't influence the result.
 func ghEnv(t *testing.T, upstream string, observe func(context.Context, ObservedMutation)) []string {
+	return ghEnvWithWrites(t, upstream, observe, nil)
+}
+
+// ghEnvWithWrites is ghEnv with the write-audit callback wired too — the half
+// that answers "what did this run do", as opposed to Observe's "what exists".
+func ghEnvWithWrites(t *testing.T, upstream string,
+	observe func(context.Context, ObservedMutation),
+	observeWrite func(context.Context, ObservedWrite)) []string {
 	t.Helper()
 	const placeholder = "placeholder-wire-token"
 
@@ -126,6 +162,7 @@ func ghEnv(t *testing.T, upstream string, observe func(context.Context, Observed
 		IncomingToken: placeholder,
 		Cert:          cert,
 		Observe:       observe,
+		ObserveWrite:  observeWrite,
 		TokenSource:   func(context.Context) (string, error) { return "ghs_realtoken", nil },
 	})
 	if err != nil {
@@ -270,5 +307,194 @@ func TestGHWire_OversizedCreateReachesGHIntact(t *testing.T) {
 	}
 	if seen := obs.snap(); len(seen) != 0 {
 		t.Errorf("observations = %+v, want none for an over-cap response", seen)
+	}
+}
+
+// writeObservations collects the audit records the injector produced, from
+// whichever goroutine the proxy called back on.
+type writeObservations struct {
+	mu   sync.Mutex
+	seen []ObservedWrite
+}
+
+func (o *writeObservations) record(_ context.Context, w ObservedWrite) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.seen = append(o.seen, w)
+}
+
+func (o *writeObservations) snap() []ObservedWrite {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]ObservedWrite(nil), o.seen...)
+}
+
+// only returns the single record the run produced, failing if a command left
+// none or more than one. One write, one row is the rule the whole epic rests
+// on, and a porcelain command issues several requests — reads included — so
+// "exactly one" is the assertion that matters.
+func (o *writeObservations) only(t *testing.T, command string) ObservedWrite {
+	t.Helper()
+	seen := o.snap()
+	if len(seen) != 1 {
+		t.Fatalf("%s produced %d audit records (%+v), want exactly 1", command, len(seen), seen)
+	}
+	return seen[0]
+}
+
+// TestGHWire_PorcelainWritesAreAudited is this ticket's acceptance, run against
+// the pinned binary rather than an assumption about it. Each of these commands
+// performs its write as a GraphQL mutation — none of them touches a REST path
+// — so before this every one of them completed leaving no trace at all.
+func TestGHWire_PorcelainWritesAreAudited(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		mutation string
+		action   string
+		target   string
+		url      string
+	}{
+		{
+			name:     "pr comment",
+			args:     []string{"pr", "comment", "42", "-R", ghePROwner + "/" + ghePRRepo, "--body", "a reply"},
+			mutation: "addComment",
+			action:   domain.ActionCommentPosted,
+			// The request named only a node id; the response located it.
+			target: ghePROwner + "/" + ghePRRepo + "#" + strconv.Itoa(ghePRNumber),
+			url:    gheCommentURL,
+		},
+		{
+			name:     "pr close",
+			args:     []string{"pr", "close", "42", "-R", ghePROwner + "/" + ghePRRepo},
+			mutation: "closePullRequest",
+			action:   domain.ActionPRClosed,
+			// gh selects only the id back, so the node id is all this row can
+			// honestly carry.
+			target: ghePRNodeID,
+		},
+		{
+			name:     "pr merge",
+			args:     []string{"pr", "merge", "42", "-R", ghePROwner + "/" + ghePRRepo, "--merge"},
+			mutation: "mergePullRequest",
+			action:   domain.ActionPRMerged,
+			target:   ghePRNodeID,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream, _ := fakeGHE(t, "")
+			var writes writeObservations
+			env := ghEnvWithWrites(t, upstream.URL, nil, writes.record)
+
+			runGH(t, env, tc.args...)
+
+			w := writes.only(t, "gh "+strings.Join(tc.args, " "))
+			if w.GraphQL == nil {
+				t.Fatalf("audit record = %+v, want the request's own facts attached", w)
+			}
+			if got := w.GraphQL.Mutation(); got != tc.mutation {
+				t.Errorf("mutation = %q, want %q — the fixture or the table has drifted from gh", got, tc.mutation)
+			}
+			shape, ok := ghwrite.Resolve(w)
+			if !ok || !w.Succeeded() {
+				t.Fatalf("record = %+v resolved to %+v (ok=%v), want a classified success", w, shape, ok)
+			}
+			if shape.Action != tc.action {
+				t.Errorf("action = %q, want %q", shape.Action, tc.action)
+			}
+			if shape.Target() != tc.target {
+				t.Errorf("target = %q, want %q", shape.Target(), tc.target)
+			}
+			if w.URL != tc.url {
+				t.Errorf("url = %q, want %q", w.URL, tc.url)
+			}
+		})
+	}
+}
+
+// TestGHWire_HandWrittenMutationIsAudited covers the escape hatch: an agent
+// that writes its own `gh api graphql` call, with the mutation inline and
+// anonymous rather than in the shape gh's own commands emit.
+func TestGHWire_HandWrittenMutationIsAudited(t *testing.T) {
+	upstream, _ := fakeGHE(t, "")
+	var writes writeObservations
+	env := ghEnvWithWrites(t, upstream.URL, nil, writes.record)
+
+	runGH(t, env, "api", "graphql", "-f",
+		`query=mutation{addReaction(input:{subjectId:"`+ghePRNodeID+`",content:THUMBS_UP}){clientMutationId}}`)
+
+	w := writes.only(t, "gh api graphql")
+	shape, ok := ghwrite.Resolve(w)
+	if !ok || shape.Action != domain.ActionReactionAdded {
+		t.Fatalf("record = %+v resolved to %+v (ok=%v), want reaction_added", w, shape, ok)
+	}
+	// The node id rode in the document's own argument rather than the variables,
+	// so nothing located the object. The act is still named, which is the point:
+	// target resolution never gates the record.
+	if shape.Target() != "" {
+		t.Errorf("target = %q, want empty — this request disclosed no variables to read", shape.Target())
+	}
+}
+
+// TestGHWire_ReadsAreNotAudited is the acceptance's other half and the reason
+// the prescreen exists. gh issues several requests per command — repo lookups,
+// finder queries, schema introspection — and none of them may leave a row.
+func TestGHWire_ReadsAreNotAudited(t *testing.T) {
+	for _, args := range [][]string{
+		{"pr", "view", "42", "-R", ghePROwner + "/" + ghePRRepo},
+		{"pr", "diff", "42", "-R", ghePROwner + "/" + ghePRRepo},
+		{"api", "graphql", "-f", `query=query{viewer{login}}`},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			upstream, _ := fakeGHE(t, "")
+			var writes writeObservations
+			env := ghEnvWithWrites(t, upstream.URL, nil, writes.record)
+
+			// A read's exit status is beside the point here (a diff against a
+			// fixture with no patch is allowed to fail); what matters is that
+			// nothing it sent was recorded as a write.
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, ghBinary(t), args...)
+			cmd.Env = env
+			cmd.Dir = t.TempDir()
+			_, _ = cmd.CombinedOutput()
+
+			if seen := writes.snap(); len(seen) != 0 {
+				t.Errorf("read left %d audit records (%+v), want none", len(seen), seen)
+			}
+		})
+	}
+}
+
+// TestGHWire_PRCreateLeavesOneArtifactAndOneAction pins the boundary between
+// the two callbacks on the command that fires both. The artifact answers "what
+// exists" and the action answers "what this run did"; they are parallel records
+// of one event, and neither may become two.
+func TestGHWire_PRCreateLeavesOneArtifactAndOneAction(t *testing.T) {
+	upstream, _ := fakeGHE(t, "")
+	var (
+		muts   observations
+		writes writeObservations
+	)
+	env := ghEnvWithWrites(t, upstream.URL, muts.record, writes.record)
+
+	runGH(t, env, "pr", "create", "-R", ghePROwner+"/"+ghePRRepo,
+		"--head", "feature", "--base", "main", "--title", "T", "--body", "B")
+
+	if seen := muts.snap(); len(seen) != 1 || seen[0].Kind != "pull_request" {
+		t.Errorf("artifact observations = %+v, want exactly one pull_request", seen)
+	}
+	w := writes.only(t, "gh pr create")
+	shape, ok := ghwrite.Resolve(w)
+	if !ok || shape.Action != domain.ActionPRCreated {
+		t.Fatalf("record = %+v resolved to %+v (ok=%v), want pr_created", w, shape, ok)
+	}
+	// The response carried the created PR's url, so the row addresses it the way
+	// every other surface does — by number, not by the node id the request knew.
+	if shape.Target() != ghePROwner+"/"+ghePRRepo+"#"+strconv.Itoa(ghePRNumber) {
+		t.Errorf("target = %q, want the created PR's coordinates", shape.Target())
 	}
 }

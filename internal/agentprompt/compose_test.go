@@ -287,3 +287,41 @@ func TestNativeBlocks_NameTheRealPaths(t *testing.T) {
 		t.Errorf("the native memory block does not name the write path %q", want)
 	}
 }
+
+// TestNativeGHBlock_ClaimsNoInvisibility guards a claim that used to be true
+// and is not any more: every write the native `gh` performs — REST or GraphQL —
+// now lands an audit row, so a prompt telling the agent otherwise is teaching it
+// something false about the harness it is in.
+//
+// The redirect it carries is unaffected and stays: the TF review verbs dominate
+// `gh pr review` on what they can do, which was always the load-bearing reason.
+// This pins only that the justification is not the retired one.
+func TestNativeGHBlock_ClaimsNoInvisibility(t *testing.T) {
+	body := block(blockHarnessNativeGH)
+	for _, claim := range []string{"invisible", "no trace", "not recorded", "unrecorded"} {
+		if strings.Contains(strings.ToLower(body), claim) {
+			t.Errorf("the native gh block still claims %q; gh-channel writes are audited on both transports", claim)
+		}
+	}
+	// The refusal is still a refusal — losing it would hand the agent a review
+	// path that produces nothing the product can stage or route.
+	if !strings.Contains(body, "`gh pr review` is refused") {
+		t.Error("the native gh block no longer refuses `gh pr review`")
+	}
+}
+
+// TestNativeGHBlock_RefusesRepoCreation pins the second refusal the harness
+// teaches. The gate refuses the command either way, but a model that learns the
+// boundary here spends no turn discovering it — and the prompt is the only half
+// of the pair the SDK runtime sees at all, since that runtime has no matcher.
+func TestNativeGHBlock_RefusesRepoCreation(t *testing.T) {
+	body := block(blockHarnessNativeGH)
+	if !strings.Contains(body, "`gh repo create` is refused") {
+		t.Error("the native gh block does not refuse `gh repo create`")
+	}
+	// The reason has to be the one that is actually true, since an agent that
+	// finds a stated rule false has reason to doubt the rest of the block.
+	if !strings.Contains(body, "before the run started") {
+		t.Error("the block refuses repo creation without giving the tracked-set reason")
+	}
+}

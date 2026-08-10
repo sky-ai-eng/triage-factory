@@ -390,7 +390,7 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string, gitHan
 	if err != nil {
 		return "", "", err
 	}
-	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token, gitHandler))
+	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token, runID, gitHandler))
 	if err != nil {
 		return "", "", fmt.Errorf("runsidecar: construct gh injector: %w", err)
 	}
@@ -417,11 +417,12 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string, gitHan
 //
 // Split from startGHInjector so a test can assert on the wiring alone, without
 // the listener bring-up around it.
-func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, token string, gitHandler http.Handler) ghinjector.Config {
+func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, token, runID string, gitHandler http.Handler) ghinjector.Config {
 	return ghinjector.Config{
 		Upstream:         upstream,
 		IncomingToken:    token,
 		Cert:             cert,
+		RunID:            runID,
 		AllowNonLoopback: true,
 		// The run's git proxy, re-homed behind this listener so the API and git
 		// share one origin. Same handler as the standalone git-proxy listener:
@@ -463,14 +464,30 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			// for the shapes that make one — this process is the only one that
 			// ever sees a response body, so nothing downstream could recover
 			// them.
-			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite,
-				agentproc.RecordGHWriteArgs{
-					Method:     w.Method,
-					Path:       w.Path,
-					Status:     w.Status,
-					ExternalID: w.ExternalID,
-					URL:        w.URL,
-				})
+			args := agentproc.RecordGHWriteArgs{
+				Method:         w.Method,
+				Path:           w.Path,
+				Status:         w.Status,
+				ExternalID:     w.ExternalID,
+				URL:            w.URL,
+				Errored:        w.Errored,
+				ResponseUnread: w.ResponseUnread,
+			}
+			if w.GraphQL != nil {
+				// A GraphQL write is named in its request, which only this
+				// process ever saw — the orchestrator receives the act's name or
+				// nothing.
+				args.GraphQL = &agentproc.GraphQLWriteFacts{
+					Operation:  w.GraphQL.Operation,
+					Mutations:  w.GraphQL.Fields,
+					Subject:    w.GraphQL.Subject,
+					Unreadable: w.GraphQL.Unreadable,
+				}
+			}
+			// TODO(TFAC-790): this notify is fire-and-forget, so a failed relay
+			// hop loses the audit row with no trace anywhere. Needs the dropped-
+			// record counter before the loss can be noticed at all.
+			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
 		},
 	}
 }

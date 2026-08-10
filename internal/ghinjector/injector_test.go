@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 )
 
 // upstreamCapture records what the fake GitHub upstream saw, so a test can
@@ -823,5 +826,447 @@ func TestInjector_WriteAuditSkipsBodyOffTheCreatePath(t *testing.T) {
 				t.Fatal("no write audit recorded")
 			}
 		})
+	}
+}
+
+// graphQLEnvelope builds the request body gh sends: the document plus its
+// variables.
+func graphQLEnvelope(t *testing.T, query string, variables map[string]any) string {
+	t.Helper()
+	body := map[string]any{"query": query}
+	if variables != nil {
+		body["variables"] = variables
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal graphql envelope: %v", err)
+	}
+	return string(raw)
+}
+
+// graphQLUpstream answers a GraphQL POST with the given body and records what
+// it received, so a test can assert the request crossed the hop unaltered.
+func graphQLUpstream(t *testing.T, status int, response string) (*httptest.Server, <-chan string) {
+	t.Helper()
+	seen := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seen <- string(body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(response))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, seen
+}
+
+// TestInjector_GraphQLMutationIsAudited is this ticket's core: a mutation
+// through the GraphQL endpoint leaves a record naming the act, which it could
+// not before — the response says only that a POST succeeded.
+func TestInjector_GraphQLMutationIsAudited(t *testing.T) {
+	const commentURL = "https://github.com/acme/widgets/pull/841#issuecomment-7"
+	upstream, seen := graphQLUpstream(t, http.StatusOK,
+		`{"data":{"addComment":{"commentEdge":{"node":{"url":"`+commentURL+`"}}}}}`)
+
+	writes := make(chan ObservedWrite, 2)
+	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+		func(_ context.Context, w ObservedWrite) { writes <- w })
+
+	body := graphQLEnvelope(t,
+		`mutation CommentCreate($input:AddCommentInput!){addComment(input:$input){commentEdge{node{url}}}}`,
+		map[string]any{"input": map[string]any{"body": "good catch", "subjectId": "PR_kwAudit"}})
+	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/graphql", strings.NewReader(body))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case got := <-seen:
+		if got != body {
+			t.Errorf("upstream saw %q, want the caller's document verbatim — buffering must not alter it", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream never received the request")
+	}
+
+	select {
+	case w := <-writes:
+		if w.GraphQL == nil {
+			t.Fatalf("write audit = %+v, want the request's own facts attached", w)
+		}
+		if got := w.GraphQL.Mutation(); got != "addComment" {
+			t.Errorf("mutation = %q, want addComment", got)
+		}
+		if w.GraphQL.Subject != "PR_kwAudit" {
+			t.Errorf("subject = %q, want the node id from the variables", w.GraphQL.Subject)
+		}
+		if w.URL != commentURL {
+			t.Errorf("url = %q, want the created comment's link from the response", w.URL)
+		}
+		if w.Errored || !w.Succeeded() {
+			t.Errorf("write audit = %+v, want a clean success", w)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no write audit for a GraphQL mutation")
+	}
+
+	if extra := drainWrites(writes); extra != 0 {
+		t.Errorf("%d extra audit records; one request may leave exactly one", extra)
+	}
+}
+
+// TestInjector_GraphQLReadIsNotAudited is the other half of the acceptance, and
+// the one that keeps the log usable: reads are nearly all of this endpoint's
+// traffic and none of them may leave a row.
+func TestInjector_GraphQLReadIsNotAudited(t *testing.T) {
+	upstream, _ := graphQLUpstream(t, http.StatusOK, `{"data":{"repository":{"pullRequest":{"id":"PR_x"}}}}`)
+
+	writes := make(chan ObservedWrite, 2)
+	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+		func(_ context.Context, w ObservedWrite) { writes <- w })
+
+	body := graphQLEnvelope(t,
+		`query PullRequestByNumber($n:Int!){repository(owner:"acme",name:"widgets"){pullRequest(number:$n){id url}}}`,
+		map[string]any{"n": 841})
+	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/graphql", strings.NewReader(body))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case w := <-writes:
+		t.Errorf("a read left an audit row: %+v", w)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestInjector_GraphQLErrorsRecordAnAttempt: the endpoint refuses a mutation
+// with a 200 and an errors array, so the status line alone would report a merge
+// that never happened as one that did.
+func TestInjector_GraphQLErrorsRecordAnAttempt(t *testing.T) {
+	upstream, _ := graphQLUpstream(t, http.StatusOK,
+		`{"data":{"mergePullRequest":null},"errors":[{"message":"Pull request is not mergeable"}]}`)
+
+	writes := make(chan ObservedWrite, 2)
+	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+		func(_ context.Context, w ObservedWrite) { writes <- w })
+
+	body := graphQLEnvelope(t,
+		`mutation($input:MergePullRequestInput!){mergePullRequest(input:$input){clientMutationId}}`,
+		map[string]any{"input": map[string]any{"pullRequestId": "PR_kwRefused"}})
+	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/graphql", strings.NewReader(body))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case w := <-writes:
+		if !w.Errored {
+			t.Errorf("write audit = %+v, want the errors array recorded as a failure", w)
+		}
+		if w.Succeeded() {
+			t.Error("a refused merge reported success")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no write audit for a refused GraphQL mutation")
+	}
+}
+
+// TestInjector_GraphQLOverCapRequestIsForwardedAndRecorded pins both halves of
+// the cap: the agent's request still reaches GitHub whole, and the oversized
+// body buys no silence — padding past the cap must never be a way to write
+// without being logged.
+func TestInjector_GraphQLOverCapRequestIsForwardedAndRecorded(t *testing.T) {
+	upstream, seen := graphQLUpstream(t, http.StatusOK, `{"data":{"addComment":{"clientMutationId":null}}}`)
+
+	writes := make(chan ObservedWrite, 2)
+	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+		func(_ context.Context, w ObservedWrite) { writes <- w })
+
+	body := graphQLEnvelope(t,
+		`mutation($input:AddCommentInput!){addComment(input:$input){clientMutationId}}`,
+		map[string]any{"input": map[string]any{
+			"body":      strings.Repeat("x", maxRequestBody+4096),
+			"subjectId": "PR_kwHuge",
+		}})
+	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/graphql", strings.NewReader(body))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case got := <-seen:
+		if got != body {
+			t.Errorf("upstream received %d bytes, want the caller's %d verbatim — the stitch dropped data",
+				len(got), len(body))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream never received the oversized request")
+	}
+
+	select {
+	case w := <-writes:
+		if w.GraphQL == nil || w.GraphQL.Unreadable != ghwrite.GraphQLOverCap {
+			t.Errorf("write audit = %+v, want an over-cap record", w)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("an over-cap GraphQL request left no audit record")
+	}
+}
+
+// TestInjector_GraphQLGetBodyIsReplayable pins what the buffered body owes the
+// transport: an in-memory body may be replayed, so a request the injector
+// buffered is one net/http can safely retry rather than failing the agent's
+// call on a stale connection.
+func TestInjector_GraphQLGetBodyIsReplayable(t *testing.T) {
+	const body = `{"query":"mutation($input:MergePullRequestInput!){mergePullRequest(input:$input){clientMutationId}}"}`
+	req, err := http.NewRequest(http.MethodPost, "https://example.test/api/graphql", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	// A server-received request carries no GetBody; the capture is what supplies
+	// one, so clear it to model the real inbound shape.
+	req.GetBody = nil
+
+	buffered, unread := bufferRequest(req)
+	if unread != "" || string(buffered) != body {
+		t.Fatalf("bufferRequest returned %q (unread=%q), want the whole body", buffered, unread)
+	}
+	if req.GetBody == nil {
+		t.Fatal("GetBody was not set for a buffered body")
+	}
+	replay, err := req.GetBody()
+	if err != nil {
+		t.Fatalf("GetBody: %v", err)
+	}
+	first, _ := io.ReadAll(replay)
+	rest, _ := io.ReadAll(req.Body)
+	if string(first) != body || string(rest) != body {
+		t.Errorf("replay = %q, body = %q, want both to deliver the request whole", first, rest)
+	}
+}
+
+// TestInjector_RESTWritesAreUnaffectedByTheGraphQLCapture: the capture is
+// scoped to one endpoint, and a REST write must still be audited from its
+// response record alone with its request unread.
+func TestInjector_RESTWritesAreUnaffectedByTheGraphQLCapture(t *testing.T) {
+	const reqBody = `{"body":"a REST comment"}`
+	gotReq := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotReq <- string(b)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":7,"html_url":"https://github.com/acme/widgets/issues/1#issuecomment-7"}`))
+	}))
+	defer upstream.Close()
+
+	writes := make(chan ObservedWrite, 2)
+	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+		func(_ context.Context, w ObservedWrite) { writes <- w })
+
+	req, _ := http.NewRequest(http.MethodPost,
+		"https://"+host+"/api/v3/repos/acme/widgets/issues/1/comments", strings.NewReader(reqBody))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case b := <-gotReq:
+		if b != reqBody {
+			t.Errorf("upstream saw %q, want %q verbatim", b, reqBody)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream never received the request")
+	}
+	select {
+	case w := <-writes:
+		if w.GraphQL != nil {
+			t.Errorf("write audit = %+v, want no GraphQL facts on a REST write", w)
+		}
+		if w.ExternalID != "7" {
+			t.Errorf("write audit = %+v, want the created comment's id", w)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no write audit for a REST create")
+	}
+}
+
+// drainWrites reports how many further records are already queued.
+func drainWrites(writes <-chan ObservedWrite) int {
+	extra := 0
+	for {
+		select {
+		case <-writes:
+			extra++
+		default:
+			return extra
+		}
+	}
+}
+
+// BenchmarkGraphQLCapture measures what the capture costs the traffic that
+// pays for it without benefiting: an ordinary read, which is buffered like
+// everything else and then rejected by the prescreen without being parsed.
+func BenchmarkGraphQLCapture(b *testing.B) {
+	body := `{"query":"query PullRequestByNumber($n:Int!){repository(owner:\"acme\",name:\"widgets\"){pullRequest(number:$n){id url title body baseRefName headRefName}}}","variables":{"n":841}}`
+	srv := &Server{cfg: Config{ObserveWrite: func(context.Context, ObservedWrite) {}}}
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		req, _ := http.NewRequest(http.MethodPost, "https://example.test/api/graphql", strings.NewReader(body))
+		if _, ok := srv.captureGraphQLWrite(req); ok {
+			b.Fatal("a read classified as a write")
+		}
+	}
+}
+
+// BenchmarkGraphQLCaptureMutation is the other end: a mutation pays the parse
+// as well, and it is the rarer request by orders of magnitude.
+func BenchmarkGraphQLCaptureMutation(b *testing.B) {
+	body := `{"query":"mutation CommentCreate($input:AddCommentInput!){addComment(input:$input){commentEdge{node{url}}}}","variables":{"input":{"body":"a review reply of ordinary length, quoting the diff it answers","subjectId":"PR_kwBench"}}}`
+	srv := &Server{cfg: Config{ObserveWrite: func(context.Context, ObservedWrite) {}}}
+	b.SetBytes(int64(len(body)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		req, _ := http.NewRequest(http.MethodPost, "https://example.test/api/graphql", strings.NewReader(body))
+		if _, ok := srv.captureGraphQLWrite(req); !ok {
+			b.Fatal("a mutation did not classify as a write")
+		}
+	}
+}
+
+// TestInjector_GraphQLUnreadResponseIsNotASuccess: when the response cannot be
+// read, the write is recorded as attempted rather than as a success nobody
+// observed — and it says which of the two happened, since "the server refused
+// it" and "we could not tell" are different admissions.
+func TestInjector_GraphQLUnreadResponseIsNotASuccess(t *testing.T) {
+	huge := `{"data":{"mergePullRequest":{"clientMutationId":"` +
+		strings.Repeat("x", maxObserveBody+4096) + `"}}}`
+	upstream, _ := graphQLUpstream(t, http.StatusOK, huge)
+
+	writes := make(chan ObservedWrite, 2)
+	client, host := newInjectorWithWrites(t, upstream.URL, nil,
+		func(_ context.Context, w ObservedWrite) { writes <- w })
+
+	body := graphQLEnvelope(t,
+		`mutation($input:MergePullRequestInput!){mergePullRequest(input:$input){clientMutationId}}`,
+		map[string]any{"input": map[string]any{"pullRequestId": "PR_kwUnread"}})
+	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/graphql", strings.NewReader(body))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if len(got) != len(huge) {
+		t.Errorf("caller received %d bytes, want the whole %d-byte response", len(got), len(huge))
+	}
+
+	select {
+	case w := <-writes:
+		if !w.ResponseUnread {
+			t.Errorf("audit = %+v, want the unread response recorded as such", w)
+		}
+		if w.Errored {
+			t.Error("an unread response was reported as a server refusal; those are different facts")
+		}
+		if w.Succeeded() {
+			t.Error("a write whose outcome was never read reported success")
+		}
+		// The act is still named — it came from the request, which was read.
+		if w.GraphQL == nil || w.GraphQL.Mutation() != "mergePullRequest" {
+			t.Errorf("audit = %+v, want the merge still named from the request", w)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no audit record for a mutation with an unreadable response")
+	}
+}
+
+// failingBody delivers a prefix and then fails, modelling a client that dies
+// partway through sending its request.
+type failingBody struct {
+	prefix string
+	pos    int
+}
+
+func (b *failingBody) Read(p []byte) (int, error) {
+	if b.pos < len(b.prefix) {
+		n := copy(p, b.prefix[b.pos:])
+		b.pos += n
+		return n, nil
+	}
+	return 0, errors.New("connection reset mid-body")
+}
+
+func (b *failingBody) Close() error { return nil }
+
+// TestInjector_BufferRequestOnBrokenReadDropsNothing pins the weaker of the two
+// promises, which is worth a test precisely because it is weaker. A body whose
+// own read fails cannot be forwarded whole by anyone — but nothing this proxy
+// already consumed may go missing on top of that, so the prefix has to be
+// readable again through the re-presented body.
+func TestInjector_BufferRequestOnBrokenReadDropsNothing(t *testing.T) {
+	const prefix = `{"query":"mutation($input:MergePullRequestInput!){mergePullRequest`
+	req, err := http.NewRequest(http.MethodPost, "https://example.test/api/graphql", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Body = &failingBody{prefix: prefix}
+	// Unknown length, as a chunked or interrupted send has — otherwise the
+	// declared-length check settles it before any read happens.
+	req.ContentLength = -1
+
+	buffered, unread := bufferRequest(req)
+	if unread != ghwrite.GraphQLRequestUnread {
+		t.Fatalf("unread = %q, want %q — a caller that stopped sending is not a cap this side chose",
+			unread, ghwrite.GraphQLRequestUnread)
+	}
+	if buffered != nil {
+		t.Errorf("buffered = %q, want nil — a body that did not arrive names no act", buffered)
+	}
+
+	// Everything already consumed is still there to forward. The read fails
+	// again after it, which is the failure the caller brought with them.
+	got, err := io.ReadAll(req.Body)
+	if string(got) != prefix {
+		t.Errorf("re-presented body = %q, want the consumed prefix %q back in front", got, prefix)
+	}
+	if err == nil {
+		t.Error("reading past the prefix succeeded; the fixture no longer models a broken stream")
+	}
+}
+
+// TestInjector_BufferRequestOverCapKeepsTheStrongerPromise is the other arm: no
+// read error, so the stitch is exact and the body really does forward whole.
+func TestInjector_BufferRequestOverCapKeepsTheStrongerPromise(t *testing.T) {
+	body := strings.Repeat("x", maxRequestBody+512)
+	req, err := http.NewRequest(http.MethodPost, "https://example.test/api/graphql", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.ContentLength = -1
+
+	buffered, unread := bufferRequest(req)
+	if unread != ghwrite.GraphQLOverCap || buffered != nil {
+		t.Fatalf("bufferRequest = (%d bytes, unread=%q), want the over-cap refusal", len(buffered), unread)
+	}
+	got, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("re-presented body: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("re-presented body is %d bytes, want the original %d byte-for-byte", len(got), len(body))
 	}
 }

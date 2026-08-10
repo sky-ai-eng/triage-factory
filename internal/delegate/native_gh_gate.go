@@ -1,15 +1,23 @@
-// The native runtime's pre-dispatch gate on two `gh` commands.
+// The native runtime's pre-dispatch gate on three `gh` commands.
 //
 // The jail ships the real `gh` on a PATH-leading directory with a working
 // credential channel, so a delegated agent can merge a pull request or post a
 // review outside Triage Factory entirely. Both are intercepted here, and they
 // get different answers because the situations are not alike. A review posted
 // through `gh` can only be a top-level comment, lands no artifact and takes no
-// approval path, so it is permanently invisible to the product and the TF
-// review verbs strictly dominate it: that is a refusal with a redirect.
+// approval path, so the TF review verbs strictly dominate it: that is a refusal
+// with a redirect. (The injector does now audit such a review — it is a write
+// under the org credential like any other — but an audit row is a record of
+// what happened, not a substitute for the review object the product works on.)
 // Merging is something some missions are for, so refusing it would mean
 // deciding an intent the runtime cannot know: that gets a question, aimed at
-// the one artifact the model can actually check.
+// the one artifact the model can actually check. Creating a repository is
+// refused outright, and for a reason that is neither of those: the product is
+// built around knowing which repositories an agent works in BEFORE a run
+// starts — the tracked set is what scopes polling, task routing, and the
+// credential itself — so a repository that appears mid-run is outside every
+// structure meant to account for it. No mission needs one badly enough to
+// invent it unattended.
 //
 // These are accident controls, not security controls, and three limitations
 // come with them, accepted rather than worked around:
@@ -49,8 +57,24 @@ import (
 // two must stay in step, since a redirect to a command that does not exist is
 // worse than no redirect at all.
 const reviewRefusal = "This command was not run. `gh pr review` cannot attach comments to specific lines, " +
-	"and a review posted with it is invisible to Triage Factory — no artifact, no approval path. " +
+	"and it posts straight to GitHub — no artifact, no approval path. " +
 	"Use `tfac gh pr start-review`, then `add-review-comment` for each finding, then `finalize-review`."
+
+// repoCreateRefusal answers `gh repo create` every time.
+//
+// It names no replacement command, unlike the review refusal, because there is
+// no `tfac exec gh repo` verb to name — and the file comment above holds that a
+// redirect to a command that does not exist is worse than no redirect at all.
+// So it redirects to the only thing that actually works: saying so, and letting
+// a human do it.
+//
+// TODO(TFAC-793): when a governed repo-provisioning verb exists, name it here.
+// That ticket also carries the prior question of whether an agent should be able
+// to ask for a repository at all, in which case this text stands permanently.
+const repoCreateRefusal = "This command was not run. Creating repositories is not something a run does — " +
+	"Triage Factory scopes polling, task routing, and this run's own credential to a set of repositories " +
+	"chosen before the run started, and a new one belongs to none of it. " +
+	"If your mission genuinely needs a repository that does not exist, say so in your final message and stop there."
 
 // mergeGateTag opens the merge question and is how a later call recognizes
 // that it has already been put. The identity lives in the tag, not in the
@@ -84,6 +108,8 @@ func (s *Spawner) ghCommandGate(orgID, runID string) func(context.Context, domai
 		switch classifyGHCommand(bashCommand(call)) {
 		case ghActionReview:
 			return reviewRefusal
+		case ghActionRepoCreate:
+			return repoCreateRefusal
 		case ghActionMerge:
 			if s.mergeAlreadyQuestioned(ctx, orgID, runID) {
 				return ""
@@ -166,6 +192,7 @@ const (
 	ghActionNone ghAction = iota
 	ghActionMerge
 	ghActionReview
+	ghActionRepoCreate
 )
 
 // classifyGHCommand reports which gated action, if any, a shell command
@@ -212,12 +239,23 @@ func classifyGHSegment(words []string) ghAction {
 		if namesMergeEndpoint(args) {
 			return ghActionMerge
 		}
+		if namesRepoCreate(args) {
+			return ghActionRepoCreate
+		}
 	case chain[0] == "pr" && len(chain) > 1:
 		switch chain[1] {
 		case "merge":
 			return ghActionMerge
 		case "review":
 			return ghActionReview
+		}
+	case chain[0] == "repo" && len(chain) > 1:
+		// TODO(TFAC-788): this refusal is advisory — the limitations in the file
+		// comment apply to it in full, and a document shaped to dodge the match
+		// reaches GitHub. That ticket gates repository creation at the injector,
+		// where the decision is fail-closed and no client can route around it.
+		if chain[1] == "create" {
+			return ghActionRepoCreate
 		}
 	}
 	return ghActionNone
@@ -265,6 +303,115 @@ func namesMergeEndpoint(words []string) bool {
 		}
 	}
 	return false
+}
+
+// repoCreateMutations are the two ways GitHub's schema makes a repository. Both
+// are what `gh repo create` itself sends, so a hand-written call is reaching for
+// the same act by a spelling the subcommand match does not see.
+var repoCreateMutations = []string{"createRepository", "cloneTemplateRepository"}
+
+// namesRepoCreate reports whether a `gh api` call reaches for repository
+// creation — the REST collections that mint one, or a GraphQL document naming a
+// mutation that does.
+//
+// Unlike the merge endpoint, both shapes here are addressed by paths that are
+// ALSO ordinary reads: `/user/repos` lists your repositories, and a schema query
+// may mention the mutation by name. Refusing those would make the control cost
+// more than it saves, so this half reads the method too — which for `gh api`
+// means the explicit flag when there is one and otherwise whether any field was
+// passed, since that is when gh switches from GET to POST on its own.
+//
+// Still substring-shaped and still evadable, which is what an accident control
+// is; see the file comment.
+func namesRepoCreate(words []string) bool {
+	if !apiPosts(words) {
+		return false
+	}
+	for _, w := range words {
+		if namesRepoCreateMutation(w) || mintsRepoByPath(w) {
+			return true
+		}
+	}
+	return false
+}
+
+// namesRepoCreateMutation reports whether a word is the GraphQL `query` field
+// carrying a document that makes a repository.
+//
+// Scoped to that one field for the reason namesMergeEndpoint scopes itself to
+// path segments: a field value that happens to contain the word is not the act.
+// `gh api …/comments -f body='…createRepository…'` is a comment about repository
+// creation, and refusing it would be refusing ordinary work — a live risk in
+// this repository in particular, where a pull request discussing this very gate
+// contains those identifiers as prose.
+//
+// TODO(TFAC-788): a document passed by file (`-F query=@doc.graphql`, `--input
+// doc.json`) is not visible here, so this misses it. The injector gate that
+// ticket builds reads the request body itself and does not have the blind spot.
+func namesRepoCreateMutation(word string) bool {
+	for _, prefix := range []string{"--field=", "--raw-field="} {
+		word = strings.TrimPrefix(word, prefix)
+	}
+	document, isQuery := strings.CutPrefix(word, "query=")
+	if !isQuery {
+		return false
+	}
+	for _, name := range repoCreateMutations {
+		if strings.Contains(document, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// mintsRepoByPath reports whether a word is a REST path that creates a
+// repository. Three do: the two collections a repository can be posted to, and
+// the template-instantiation endpoint, which addresses the TEMPLATE and makes a
+// new repository out of it.
+func mintsRepoByPath(word string) bool {
+	p, _, _ := strings.Cut(word, "?")
+	p, _, _ = strings.Cut(p, "#")
+	segs := strings.Split(strings.Trim(p, "/"), "/")
+	switch {
+	// A repo-scoped path also ends in a segment pair, so the leading collection
+	// is what tells /user/repos apart from repos/{owner}/{repo}.
+	case len(segs) == 2 && segs[0] == "user" && segs[1] == "repos":
+		return true
+	case len(segs) == 3 && segs[0] == "orgs" && segs[2] == "repos":
+		return true
+	case len(segs) == 4 && segs[0] == "repos" && segs[3] == "generate":
+		return true
+	}
+	return false
+}
+
+// apiPosts reports whether a `gh api` invocation issues a POST: the method flag
+// says so, or no method flag is present and something was passed that makes gh
+// switch off GET on its own — a field, or a body file.
+//
+// `--input` counts for the same reason a field does. gh documents its own
+// ruleset-creation example as `gh api …/rulesets --input file.json` with no
+// method flag, which only works because supplying a body implies the POST.
+//
+// An explicit non-POST method loses, even alongside a body — `-X GET -f q=x`
+// sends a GET with a query string, and refusing that would be refusing a read.
+func apiPosts(words []string) bool {
+	body := false
+	for i, w := range words {
+		switch {
+		case w == "-X" || w == "--method":
+			return i+1 < len(words) && strings.EqualFold(words[i+1], "POST")
+		case strings.HasPrefix(w, "--method="):
+			return strings.EqualFold(strings.TrimPrefix(w, "--method="), "POST")
+		case strings.HasPrefix(w, "-X") && len(w) > 2:
+			return strings.EqualFold(w[2:], "POST")
+		case w == "-f", w == "-F", w == "--field", w == "--raw-field", w == "--input",
+			strings.HasPrefix(w, "--field="), strings.HasPrefix(w, "--raw-field="),
+			strings.HasPrefix(w, "--input="):
+			body = true
+		}
+	}
+	return body
 }
 
 // isEnvAssignment reports whether a word is a leading `NAME=VALUE` assignment

@@ -1,11 +1,21 @@
 import {
+  Archive,
+  ArchiveRestore,
   CircleDot,
+  FolderGit2,
   GitBranch,
+  GitFork,
   GitPullRequest,
+  Lock,
+  Package,
+  LockOpen,
   MessageCircle,
   MessageSquare,
+  Pin,
+  PinOff,
   Play,
   SmilePlus,
+  Tag,
   Terminal,
   Eye,
   type LucideIcon,
@@ -49,10 +59,50 @@ export const ACTION_META: Record<string, ActionMeta> = {
   },
   pr_edited: { icon: GitPullRequest, label: 'PR edited', text: 'text-delegate', tone: 'neutral' },
   pr_closed: { icon: GitPullRequest, label: 'PR closed', text: 'text-delegate', tone: 'problem' },
+  pr_reopened: {
+    icon: GitPullRequest,
+    label: 'PR reopened',
+    text: 'text-delegate',
+    tone: 'neutral',
+  },
   pr_merged: { icon: GitPullRequest, label: 'PR merged', text: 'text-delegate', tone: 'good' },
+  // Auto-merge reads as attention rather than good: nothing merged yet, and a
+  // merge armed to fire on a green check is the row a reader most wants to
+  // notice while it is still only armed.
+  pr_auto_merge_enabled: {
+    icon: GitPullRequest,
+    label: 'Auto-merge enabled',
+    text: 'text-delegate',
+    tone: 'attention',
+  },
+  pr_auto_merge_disabled: {
+    icon: GitPullRequest,
+    label: 'Auto-merge disabled',
+    text: 'text-delegate',
+    tone: 'neutral',
+  },
+  pr_reverted: {
+    icon: GitPullRequest,
+    label: 'PR reverted',
+    text: 'text-delegate',
+    tone: 'attention',
+  },
+  pr_branch_updated: {
+    icon: GitPullRequest,
+    label: 'PR branch updated',
+    text: 'text-delegate',
+    tone: 'neutral',
+  },
   review_started: { icon: Eye, label: 'Review started', text: 'text-snooze', tone: 'neutral' },
   review_submitted: { icon: Eye, label: 'Review submitted', text: 'text-snooze', tone: 'good' },
   review_dismissed: { icon: Eye, label: 'Review dismissed', text: 'text-snooze', tone: 'problem' },
+  review_requested: { icon: Eye, label: 'Review requested', text: 'text-snooze', tone: 'neutral' },
+  review_request_removed: {
+    icon: Eye,
+    label: 'Review request removed',
+    text: 'text-snooze',
+    tone: 'neutral',
+  },
   review_comment_edited: {
     icon: Eye,
     label: 'Review comment edited',
@@ -107,9 +157,100 @@ export const ACTION_META: Record<string, ActionMeta> = {
     text: 'text-delegate',
     tone: 'problem',
   },
+  label_added: { icon: Tag, label: 'Label added', text: 'text-text-tertiary', tone: 'good' },
+  label_removed: { icon: Tag, label: 'Label removed', text: 'text-text-tertiary', tone: 'neutral' },
+  // Changing which labels the repository offers, as opposed to putting one on
+  // an issue. The labels say "definition" out loud because the pair above reads
+  // almost identically at a glance, and a deleted definition takes the label off
+  // every issue that had it — the more consequential act of the two, hence
+  // 'problem' where label_removed is merely neutral.
+  label_defined: { icon: Tag, label: 'Label defined', text: 'text-text-tertiary', tone: 'good' },
+  label_definition_edited: {
+    icon: Tag,
+    label: 'Label definition edited',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
+  label_definition_deleted: {
+    icon: Tag,
+    label: 'Label definition deleted',
+    text: 'text-text-tertiary',
+    tone: 'problem',
+  },
+  // Repository configuration. One tint for the family, and the tone carries how
+  // much a reader should care: archiving makes a repository read-only and
+  // deleting it is unrecoverable, while a fork or a settings edit changes
+  // nothing anyone was relying on.
+  repo_created: {
+    icon: FolderGit2,
+    label: 'Repo created',
+    text: 'text-text-tertiary',
+    tone: 'good',
+  },
+  repo_edited: {
+    icon: FolderGit2,
+    label: 'Repo edited',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
+  repo_deleted: {
+    icon: FolderGit2,
+    label: 'Repo deleted',
+    text: 'text-text-tertiary',
+    tone: 'problem',
+  },
+  repo_forked: { icon: GitFork, label: 'Repo forked', text: 'text-text-tertiary', tone: 'neutral' },
+  repo_archived: {
+    icon: Archive,
+    label: 'Repo archived',
+    text: 'text-text-tertiary',
+    tone: 'attention',
+  },
+  repo_unarchived: {
+    icon: ArchiveRestore,
+    label: 'Repo unarchived',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
+  release_created: {
+    icon: Package,
+    label: 'Release created',
+    text: 'text-text-tertiary',
+    tone: 'good',
+  },
+  release_edited: {
+    icon: Package,
+    label: 'Release edited',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
+  release_deleted: {
+    icon: Package,
+    label: 'Release deleted',
+    text: 'text-text-tertiary',
+    tone: 'problem',
+  },
+  conversation_locked: {
+    icon: Lock,
+    label: 'Conversation locked',
+    text: 'text-text-tertiary',
+    tone: 'attention',
+  },
+  conversation_unlocked: {
+    icon: LockOpen,
+    label: 'Conversation unlocked',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
   branch_pushed: {
     icon: GitBranch,
     label: 'Branch pushed',
+    text: 'text-text-tertiary',
+    tone: 'good',
+  },
+  linked_branch_created: {
+    icon: GitBranch,
+    label: 'Linked branch created',
     text: 'text-text-tertiary',
     tone: 'good',
   },
@@ -119,6 +260,16 @@ export const ACTION_META: Record<string, ActionMeta> = {
   gh_channel_write: {
     icon: Terminal,
     label: 'Raw gh write',
+    text: 'text-text-tertiary',
+    tone: 'neutral',
+  },
+  // Its GraphQL sibling. Separate because the two rows know different things —
+  // this one's details carry the mutation names rather than a path — and
+  // because a run whose unnamed writes are all GraphQL is a different signal
+  // from one whose writes are raw REST calls.
+  graphql_write: {
+    icon: Terminal,
+    label: 'Raw gh GraphQL write',
     text: 'text-text-tertiary',
     tone: 'neutral',
   },
@@ -136,6 +287,22 @@ export const ACTION_META: Record<string, ActionMeta> = {
     tone: 'neutral',
   },
   issue_updated: { icon: CircleDot, label: 'Issue updated', text: 'text-accent', tone: 'neutral' },
+  issue_closed: { icon: CircleDot, label: 'Issue closed', text: 'text-accent', tone: 'problem' },
+  issue_reopened: {
+    icon: CircleDot,
+    label: 'Issue reopened',
+    text: 'text-accent',
+    tone: 'neutral',
+  },
+  issue_deleted: { icon: CircleDot, label: 'Issue deleted', text: 'text-accent', tone: 'problem' },
+  issue_pinned: { icon: Pin, label: 'Issue pinned', text: 'text-accent', tone: 'good' },
+  issue_unpinned: { icon: PinOff, label: 'Issue unpinned', text: 'text-accent', tone: 'neutral' },
+  issue_transferred: {
+    icon: CircleDot,
+    label: 'Issue transferred',
+    text: 'text-accent',
+    tone: 'attention',
+  },
   issue_comment_posted: {
     icon: CircleDot,
     label: 'Issue comment posted',

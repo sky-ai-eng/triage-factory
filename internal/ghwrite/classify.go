@@ -43,6 +43,7 @@ package ghwrite
 import (
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -75,6 +76,12 @@ type Shape struct {
 	// for every other shape.
 	InReplyTo int
 
+	// Subject is the node id a GraphQL request named for the object it acted on,
+	// standing in for the coordinates a REST path would have carried. Empty for
+	// every REST shape, and for a GraphQL request whose response located the
+	// object properly (see resolveGraphQL).
+	Subject string
+
 	// CreatesObject marks a shape whose response body names an object that did
 	// not exist before the request — a posted comment or reply, an opened pull
 	// request. The sidecar parses those bodies for the new object's id and
@@ -104,9 +111,14 @@ type Shape struct {
 // the path carries a number, owner/repo otherwise. The '#N' form is what makes
 // a raw-gh write resolve to an entity (see domain.EntityRefForExternal), so it
 // is deliberately preferred wherever the path supplies one.
+//
+// A GraphQL write that disclosed only a node id falls back to it. That target
+// resolves to no entity and links to nothing, which is the honest rendering of
+// what such a request actually said about its object — better than a repo the
+// row would be guessing at.
 func (s Shape) Target() string {
 	if s.Owner == "" || s.Repo == "" {
-		return ""
+		return s.Subject
 	}
 	if s.Number > 0 {
 		return fmt.Sprintf("%s/%s#%d", s.Owner, s.Repo, s.Number)
@@ -136,11 +148,39 @@ type Observation struct {
 	// didn't parse — the act is still recorded, only its deep link degrades.
 	ExternalID string
 	URL        string
+
+	// GraphQL, when set, marks this as a write performed through the GraphQL
+	// endpoint and carries what the request envelope disclosed. Method and Path
+	// are still filled in, but they say only "a POST to /graphql" — the act is
+	// named in these facts instead, which is the whole reason the request is
+	// read at all.
+	GraphQL *GraphQLFacts
+
+	// Errored marks a response that reported the write failed even though the
+	// transport succeeded — GraphQL's convention, where a refused mutation is a
+	// 200 carrying an errors array. It is the GraphQL spelling of a non-2xx and
+	// folds into Succeeded for exactly that reason.
+	Errored bool
+
+	// ResponseUnread marks a GraphQL write whose response could not be read at
+	// all — past the buffering cap, or broken mid-stream. Kept separate from
+	// Errored because they are different facts: one says the server refused the
+	// write, the other says nobody knows. Both stop the row short of claiming a
+	// success, which is the safe direction — an act recorded as attempted when
+	// it landed understates the log, while the reverse asserts a write nothing
+	// observed.
+	ResponseUnread bool
 }
 
-// Classify resolves this observation's shape from its method and path alone.
-// Most callers want Resolve, which also folds in what the response said.
-func (o Observation) Classify() (Shape, bool) { return Classify(o.Method, o.Path) }
+// Classify resolves this observation's shape: from the request envelope for a
+// GraphQL write, from method and path for a REST one. Most callers want
+// Resolve, which also folds in what the response said.
+func (o Observation) Classify() (Shape, bool) {
+	if o.GraphQL != nil {
+		return classifyGraphQL(*o.GraphQL)
+	}
+	return Classify(o.Method, o.Path)
+}
 
 // Resolve is Classify completed against the response's own facts: the created
 // object's id, and — for a create that posts to a collection — the number
@@ -154,6 +194,9 @@ func (o Observation) Classify() (Shape, bool) { return Classify(o.Method, o.Path
 // shape) leaves the row on its repo with no id: the act is still recorded, and
 // nothing is asserted that wasn't seen.
 func Resolve(obs Observation) (Shape, bool) {
+	if obs.GraphQL != nil {
+		return resolveGraphQL(obs)
+	}
 	s, ok := Classify(obs.Method, obs.Path)
 	if !ok {
 		return Shape{}, false
@@ -162,7 +205,9 @@ func Resolve(obs Observation) (Shape, bool) {
 		s.ExternalID = obs.ExternalID
 	}
 	if s.NumberFromObjectURL {
-		_, _, number, parsed := ParsePullRequestURL(obs.URL)
+		// Either collection's url: a pull request and an issue are both
+		// addressed by the number their own link carries.
+		_, _, number, parsed := ParseObjectURL(obs.URL)
 		if !parsed {
 			s.ExternalID = ""
 			return s, true
@@ -174,8 +219,12 @@ func Resolve(obs Observation) (Shape, bool) {
 }
 
 // Succeeded reports whether the upstream accepted the write. Only a successful
-// write earns its semantic verb: a 404'd merge is not a merge.
-func (o Observation) Succeeded() bool { return o.Status >= 200 && o.Status < 300 }
+// write earns its semantic verb: a 404'd merge is not a merge, and neither is a
+// GraphQL merge the server answered 200 with an errors array — the two are the
+// same refusal spelled in different transports.
+func (o Observation) Succeeded() bool {
+	return o.Status >= 200 && o.Status < 300 && !o.Errored && !o.ResponseUnread
+}
 
 // reposSegment is the path anchor every repository-scoped REST endpoint carries.
 const reposSegment = "/repos/"
@@ -203,13 +252,51 @@ func RepoPath(path string) string {
 // the same url, and two parsers would eventually disagree about what a PR url
 // is.
 func ParsePullRequestURL(raw string) (owner, repo string, number int, ok bool) {
+	return parseObjectURL(raw, "pull")
+}
+
+// ParseObjectURL is ParsePullRequestURL widened to an issue's url as well. A
+// GraphQL write discloses its target only as whatever object url the response
+// happened to carry, and gh's comment mutations answer with one that may point
+// at either — a pull request and an issue share GitHub's comment machinery, and
+// nothing in the request says which was addressed.
+func ParseObjectURL(raw string) (owner, repo string, number int, ok bool) {
+	return parseObjectURL(raw, "pull", "issues")
+}
+
+// ParseRepoURL pulls owner and repo out of a repository's own html url, whose
+// whole path is the two segments. Separate from ParseObjectURL because a
+// repository is located by having nothing under it — there is no collection
+// segment to anchor on, so the shape is "exactly two segments" and a url with a
+// third is some object inside the repository rather than the repository itself.
+//
+// Only the repository-family mutations use it, and only for the two that create:
+// every other mutation names its target in the request, while a repository that
+// did not exist when the request was sent can be located only by what came back.
+func ParseRepoURL(raw string) (owner, repo string, ok bool) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", false
+	}
+	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(segs) != 2 || segs[0] == "" || segs[1] == "" {
+		return "", "", false
+	}
+	return segs[0], segs[1], true
+}
+
+// parseObjectURL scans for the first of the given collection segments with two
+// segments before it and a positive integer after it. Any fragment on the url
+// (a comment anchor, which is what several of these carry) is already split off
+// by url.Parse, so it never reaches the scan.
+func parseObjectURL(raw string, collections ...string) (owner, repo string, number int, ok bool) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", "", 0, false
 	}
 	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
 	for i, seg := range segs {
-		if seg != "pull" || i < 2 || i+1 >= len(segs) {
+		if !slices.Contains(collections, seg) || i < 2 || i+1 >= len(segs) {
 			continue
 		}
 		n, err := strconv.Atoi(segs[i+1])
@@ -246,10 +333,26 @@ func splitRepoPath(path string) (owner, repo string, rest []string, ok bool) {
 // position, never by guessing which of two segments is numeric.
 func Classify(method, path string) (Shape, bool) {
 	owner, repo, rest, ok := splitRepoPath(path)
-	if !ok || len(rest) == 0 {
+	if !ok {
 		return Shape{}, false
 	}
 	s := Shape{Owner: owner, Repo: repo}
+
+	// The repository itself, with nothing addressed under it. Like its pull
+	// request and issue twins, the URL says only that the object changed — a
+	// rename, a visibility flip, and a description edit are one shape with
+	// different bodies — so the verb goes no finer than the path does.
+	if len(rest) == 0 {
+		switch method {
+		case "PATCH":
+			s.Action = domain.ActionRepoEdited
+		case "DELETE":
+			s.Action = domain.ActionRepoDeleted
+		default:
+			return Shape{}, false
+		}
+		return s, true
+	}
 
 	switch rest[0] {
 	case "pulls":
@@ -258,6 +361,40 @@ func Classify(method, path string) (Shape, bool) {
 		return classifyIssues(s, method, rest[1:])
 	case "actions":
 		return classifyActions(s, method, rest[1:])
+	case "labels":
+		return classifyLabels(s, method, rest[1:])
+	case "releases":
+		return classifyReleases(s, method, rest[1:])
+	case "forks":
+		if method == "POST" && len(rest) == 1 {
+			// The path names the repository that was COPIED, so that is the row's
+			// target — the act was performed on it. Where the copy landed is in
+			// the response and deliberately not lifted out: the fact worth
+			// recording is that the org credential forked this repository, and
+			// the copy is reachable from there.
+			s.Action = domain.ActionRepoForked
+			return s, true
+		}
+	case "generate":
+		if method == "POST" && len(rest) == 1 {
+			// Instantiating a template. Like a fork, the path names the
+			// repository being copied FROM and the new one exists only in the
+			// response, so the row targets the template and the act is the
+			// create. Its GraphQL twin (cloneTemplateRepository) can do better
+			// because gh selects the new repository's url back; nothing in this
+			// path's shape offers the same.
+			s.Action = domain.ActionRepoCreated
+			return s, true
+		}
+	case "topics":
+		if method == "PUT" && len(rest) == 1 {
+			// Topics are repository settings that happen to have their own
+			// endpoint, which `gh repo edit --add-topic` writes to alongside the
+			// ordinary settings mutation. Same act, so the same verb: a reader
+			// filtering for repository edits wants both.
+			s.Action = domain.ActionRepoEdited
+			return s, true
+		}
 	}
 	return Shape{}, false
 }
@@ -321,6 +458,8 @@ func classifyPulls(s Shape, method string, rest []string) (Shape, bool) {
 		s.Action = domain.ActionPREdited
 	case len(rest) == 2 && rest[1] == "merge" && method == "PUT":
 		s.Action = domain.ActionPRMerged
+	case len(rest) == 2 && rest[1] == "update-branch" && method == "PUT":
+		s.Action = domain.ActionPRBranchUpdated
 	case len(rest) == 2 && rest[1] == "reviews" && method == "POST":
 		// Also the only way inline review comments reach GitHub by hand: they
 		// ride the review's own body.
@@ -335,18 +474,35 @@ func classifyPulls(s Shape, method string, rest []string) (Shape, bool) {
 		s.Action = domain.ActionCommentPosted
 		s.InReplyTo = reply
 		s.CreatesObject = true
+	case len(rest) == 2 && rest[1] == "requested_reviewers" && method == "POST":
+		// `gh pr edit --add-reviewer` sends this alongside its GraphQL edit, so a
+		// single user command legitimately produces two rows — two requests, two
+		// acts. Naming this one is what keeps the second from being anonymous.
+		s.Action = domain.ActionReviewRequested
+	case len(rest) == 2 && rest[1] == "requested_reviewers" && method == "DELETE":
+		s.Action = domain.ActionReviewRequestRemoved
 	default:
 		return Shape{}, false
 	}
 	return s, true
 }
 
-// classifyIssues handles /repos/{o}/{r}/issues/... — top-level comments and
-// reactions. GitHub serves a pull request's conversation comments here too, so
-// this covers `gh api` posting on a PR as well as on an issue.
+// classifyIssues handles /repos/{o}/{r}/issues/... — the issue itself, its
+// top-level comments and reactions, and the two things GitHub models on the
+// issue even when they are performed on a pull request: its labels and its
+// conversation lock. That last part is why this function covers more of the
+// pull-request surface than its name suggests — a PR's labels and lock are
+// addressed here, and only its diff-level objects live under /pulls.
 func classifyIssues(s Shape, method string, rest []string) (Shape, bool) {
+	// The collection itself: opening an issue.
 	if len(rest) == 0 {
-		return Shape{}, false
+		if method != "POST" {
+			return Shape{}, false
+		}
+		s.Action = domain.ActionIssueCreated
+		s.CreatesObject = true
+		s.NumberFromObjectURL = true
+		return s, true
 	}
 
 	// Comments addressed by their own id: /issues/comments/{id}[/...].
@@ -376,6 +532,10 @@ func classifyIssues(s Shape, method string, rest []string) (Shape, bool) {
 	}
 	s.Number = n
 	switch {
+	case len(rest) == 1 && method == "PATCH":
+		// Like its pull-request twin: the URL says the issue changed, and
+		// whether that was a retitle or a close lives in a body nothing reads.
+		s.Action = domain.ActionIssueUpdated
 	case len(rest) == 2 && rest[1] == "comments" && method == "POST":
 		s.Action = domain.ActionCommentPosted
 		s.CreatesObject = true
@@ -383,6 +543,91 @@ func classifyIssues(s Shape, method string, rest []string) (Shape, bool) {
 		s.Action = domain.ActionReactionAdded
 	case len(rest) == 3 && rest[1] == "reactions" && method == "DELETE":
 		s.Action = domain.ActionReactionRemoved
+	case len(rest) == 2 && rest[1] == "labels" && method == "POST":
+		s.Action = domain.ActionLabelAdded
+	case (len(rest) == 2 || len(rest) == 3) && rest[1] == "labels" && method == "DELETE":
+		// One label by name, or the whole set at once. Both are "labels came off
+		// this issue", and the label is a parameter of the act rather than the
+		// object it was performed on — which is why neither form fills ExternalID.
+		s.Action = domain.ActionLabelRemoved
+	case len(rest) == 2 && rest[1] == "lock" && method == "PUT":
+		s.Action = domain.ActionConversationLocked
+	case len(rest) == 2 && rest[1] == "lock" && method == "DELETE":
+		s.Action = domain.ActionConversationUnlocked
+	default:
+		return Shape{}, false
+	}
+	return s, true
+}
+
+// classifyLabels handles /repos/{o}/{r}/labels/... — the set of labels the
+// repository OFFERS. Not to be confused with the labels ON an issue, which
+// GitHub addresses under /issues and this package classifies there: the two
+// families read alike and are not alike at all, since deleting a definition
+// strips that label from every issue carrying it.
+//
+// GitHub addresses a label by its name rather than by a number, so the name is
+// what fills ExternalID. It arrives percent-encoded (labels may contain spaces
+// and colons) and is decoded for the row, because an audit log is read by people
+// and "needs%20triage" names the label less well than the label's own name does.
+func classifyLabels(s Shape, method string, rest []string) (Shape, bool) {
+	if len(rest) == 0 {
+		if method != "POST" {
+			return Shape{}, false
+		}
+		s.Action = domain.ActionLabelDefined
+		return s, true
+	}
+	if len(rest) != 1 || rest[0] == "" {
+		return Shape{}, false
+	}
+	name := rest[0]
+	if decoded, err := url.PathUnescape(name); err == nil {
+		name = decoded
+	}
+	s.ExternalID = name
+	switch method {
+	case "PATCH":
+		s.Action = domain.ActionLabelDefinitionEdited
+	case "DELETE":
+		s.Action = domain.ActionLabelDefinitionDeleted
+	default:
+		return Shape{}, false
+	}
+	return s, true
+}
+
+// classifyReleases handles /repos/{o}/{r}/releases/... — the release itself,
+// and nothing under it.
+//
+// A release's ASSETS are the deliberate omission. Their uploads go to an
+// absolute url the release payload carries, which addresses GitHub directly
+// rather than this channel's base, so the request never transits the injector
+// and no classification here could see it. Those paths fall to the fallback
+// like any unknown shape, which is the right outcome for a shape that will
+// almost never arrive: naming them would advertise coverage this channel
+// structurally does not have.
+func classifyReleases(s Shape, method string, rest []string) (Shape, bool) {
+	if len(rest) == 0 {
+		if method != "POST" {
+			return Shape{}, false
+		}
+		s.Action = domain.ActionReleaseCreated
+		s.CreatesObject = true
+		return s, true
+	}
+	if len(rest) != 1 {
+		return Shape{}, false
+	}
+	if id, err := strconv.Atoi(rest[0]); err != nil || id <= 0 {
+		return Shape{}, false
+	}
+	s.ExternalID = rest[0]
+	switch method {
+	case "PATCH":
+		s.Action = domain.ActionReleaseEdited
+	case "DELETE":
+		s.Action = domain.ActionReleaseDeleted
 	default:
 		return Shape{}, false
 	}

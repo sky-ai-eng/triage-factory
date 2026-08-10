@@ -370,6 +370,12 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 		body    string
 		wantID  string
 		wantURL string
+
+		// reqBody is sent when non-empty; the GraphQL arm is the only one whose
+		// act is named in the request rather than the path.
+		reqBody      string
+		wantMutation string
+		wantSubject  string
 	}{
 		{
 			// An off-scope write masked as a not-found: the outcome that used to
@@ -387,6 +393,21 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 			body:    `{"id":777,"html_url":"` + replyURL + `"}`,
 			wantID:  "777",
 			wantURL: replyURL,
+		},
+		{
+			// The GraphQL half of the same wiring. Its facts exist only in this
+			// process, so a config that forgot to carry them would leave the
+			// commonest write gh performs arriving unnamed.
+			name:   "posted comment over graphql",
+			method: http.MethodPost,
+			path:   "/api/graphql",
+			status: http.StatusOK,
+			reqBody: `{"query":"mutation CommentCreate($input:AddCommentInput!){addComment(input: $input){commentEdge{node{url}}}}",` +
+				`"variables":{"input":{"subjectId":"PR_kwSidecar","body":"a reply"}}}`,
+			body:         `{"data":{"addComment":{"commentEdge":{"node":{"url":"` + replyURL + `"}}}}}`,
+			wantURL:      replyURL,
+			wantMutation: "addComment",
+			wantSubject:  "PR_kwSidecar",
 		},
 	}
 
@@ -431,7 +452,7 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 				t.Fatalf("GenerateCert: %v", err)
 			}
 			const placeholder = "per-run-placeholder"
-			srv, err := ghinjector.New(rt.ghInjectorConfig(upstream.URL, cert, placeholder, nil))
+			srv, err := ghinjector.New(rt.ghInjectorConfig(upstream.URL, cert, placeholder, "run-under-test", nil))
 			if err != nil {
 				t.Fatalf("construct injector: %v", err)
 			}
@@ -450,7 +471,11 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 				t.Fatal("append injector cert to pool failed")
 			}
 			client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
-			req, _ := http.NewRequest(tc.method, "https://"+host+tc.path, nil)
+			var reqBody io.Reader
+			if tc.reqBody != "" {
+				reqBody = strings.NewReader(tc.reqBody)
+			}
+			req, _ := http.NewRequest(tc.method, "https://"+host+tc.path, reqBody)
 			req.Header.Set("Authorization", "token "+placeholder)
 			resp, err := client.Do(req)
 			if err != nil {
@@ -478,6 +503,18 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 					}
 					if a.ExternalID != tc.wantID || a.URL != tc.wantURL {
 						t.Fatalf("relayed write = %+v, want created object (%q, %q)", a, tc.wantID, tc.wantURL)
+					}
+					if tc.wantMutation != "" {
+						if a.GraphQL == nil {
+							t.Fatalf("relayed write = %+v, want the request's facts carried across", a)
+						}
+						if len(a.GraphQL.Mutations) != 1 || a.GraphQL.Mutations[0] != tc.wantMutation ||
+							a.GraphQL.Subject != tc.wantSubject {
+							t.Fatalf("relayed graphql facts = %+v, want %q on %q",
+								a.GraphQL, tc.wantMutation, tc.wantSubject)
+						}
+					} else if a.GraphQL != nil {
+						t.Fatalf("relayed write = %+v, want no graphql facts on a REST write", a)
 					}
 					return
 				case <-deadline:
