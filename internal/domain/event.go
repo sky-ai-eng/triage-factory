@@ -101,7 +101,7 @@ const (
 	EventJiraIssuePriorityChanged = "jira:issue:priority_changed"
 	EventJiraIssueCommented       = "jira:issue:commented"
 	EventJiraIssueBecameAtomic    = "jira:issue:became_atomic"
-	EventJiraIssueDeleted         = "jira:issue:deleted"
+	EventJiraIssueUnreachable     = "jira:issue:unreachable"
 )
 
 // Slack events. Registered from ee/slack (an out-of-core source; see
@@ -202,7 +202,7 @@ func AllEventTypes() []EventType {
 		{ID: EventJiraIssueCommented, Source: "jira", Category: "issue", Label: "New Comment", Description: "A new comment was added to an issue"},
 		{ID: EventJiraIssueCompleted, Source: "jira", Category: "issue", Label: "Issue Completed", Description: "Issue was marked as done"},
 		{ID: EventJiraIssueBecameAtomic, Source: "jira", Category: "issue", Label: "Issue Became Atomic", Description: "Last open subtask closed — parent is now an atomic work unit"},
-		{ID: EventJiraIssueDeleted, Source: "jira", Category: "issue", Label: "Issue Deleted", Description: "A tracked issue no longer exists in Jira — confirmed against the issue endpoint, not inferred from its absence in a search"},
+		{ID: EventJiraIssueUnreachable, Source: "jira", Category: "issue", Label: "Issue Unreachable", Description: "A tracked issue can no longer be resolved in Jira — deleted, or no longer visible to the configured credential (Jira answers both the same way). Confirmed by asking about the issue directly, not inferred from its absence in a search"},
 
 		// --- Slack (schema + ownership registered by ee/slack) ---
 		{ID: EventSlackMessage, Source: "slack", Category: "message", Label: "Message to bot", Description: "A human addressed the TF bot in a Slack channel"},

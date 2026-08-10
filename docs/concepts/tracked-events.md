@@ -53,32 +53,43 @@ Events are emitted once per transition, not continuously. If a PR stays in the s
 |-------|----|---------|
 | **Status Changed** | `jira:issue:status_changed` | The `status` field changes (e.g. To Do → In Progress) |
 | **Issue Completed** | `jira:issue:completed` | The `status` changes to Done, Closed, or Resolved |
-| **Issue Deleted** | `jira:issue:deleted` | A tracked issue no longer exists — see below |
+| **Issue Unreachable** | `jira:issue:unreachable` | Jira will no longer resolve a tracked issue's key — see below |
 
-#### Issue Deleted
+#### Issue Unreachable
 
 The one Jira event that doesn't come from the snapshot-diff, because there is no
-new snapshot to diff: it reports that its own subject is gone. Like the terminal
-GitHub events it closes the entity and every task on it, so what it takes to
-emit one is deliberately strict.
+new snapshot to diff: it reports that its own subject can no longer be read. Like
+the terminal GitHub events it closes the entity and every task on it, so what it
+takes to emit one is deliberately strict.
 
-A tracked issue simply missing from a poll's search results is **not** enough. An
-issue can drop out of a search while still existing — an index that hasn't caught
-up, an archived issue or project, a key that moved, a narrowed credential — and
-all of those look identical to deletion from the search alone. So absence only
-starts a clock: once a key has gone unanswered for long enough, the poller asks
-Jira about that one issue directly, and emits this event **only** on a 404 from
-the issue endpoint.
+**It does not mean the issue was definitely deleted.** Jira answers a request for
+an issue you can't see exactly the way it answers one for an issue that doesn't
+exist — a 404, deliberately, so that existence isn't disclosed. Deletion is the
+usual cause, but a permission-scheme change, a project move, or a
+narrowed/rotated credential produce the identical answer, and nothing on our side
+can tell them apart. The event is named for what was observed rather than what
+probably happened. If one shows up for an issue you can still see in the browser,
+check the credential's access before concluding anything was deleted.
+
+Both causes leave the issue equally untrackable, which is why they share one
+event type instead of splitting on a discriminator nothing can actually read.
+
+A tracked issue simply missing from a poll's search results is **not** enough to
+emit it. An issue can drop out of a search while still perfectly readable — an
+index that hasn't caught up, an archived issue or project, a key that moved — so
+absence only starts a clock. Once a key has gone unanswered for long enough, the
+poller asks Jira about that one issue directly, and emits this event **only** on
+a 404 from that request.
 
 The other outcomes deliberately change nothing. An issue that resolves but never
 appears in search results is logged as such and stays tracked — its entity is
-being skipped by something that isn't deletion, and closing it would destroy live
-work. A confirmation that fails for any other reason is not evidence either way,
-and is retried on a later cycle.
+being skipped by something other than unreachability, and closing it would
+destroy live work. A confirmation that fails for any other reason is not evidence
+either way, and is retried on a later cycle.
 
 Metadata is the entity's last-known state (assignee, project, issue type, last
 status, summary), since the source has nothing left to read. There is no
-`dedup_key` — an issue can only stop existing once.
+`dedup_key` — a key can only stop resolving once.
 
 ## Slack Events
 

@@ -274,6 +274,23 @@ type EntityStore interface {
 	// the tracker) and lets the next poll cycle reconcile. There is no
 	// blind-write variant: every snapshot write goes through the CAS.
 	UpdateSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (ok bool, err error)
+
+	// MarkPolledSystem stamps last_polled_at without touching the
+	// snapshot or poll_seq — the row was read from the source, but
+	// nothing about it was diffed. Distinct from UpdateSnapshot* (which
+	// carries a snapshot) and from PatchSnapshot (which deliberately
+	// leaves last_polled_at stale so the next cycle still refreshes).
+	//
+	// It exists for reads that confirm an entity's state outside the
+	// snapshot-diff, where the column's age is itself an input: the
+	// tracker's Jira gone-confirmation selects candidates by how long
+	// last_polled_at has been stale, so an entity it successfully
+	// confirms must advance or it stays a candidate forever — and
+	// since candidates are ordered oldest-first against a per-cycle
+	// budget, one such entity would consume that budget every cycle and
+	// starve every other candidate behind it.
+	MarkPolledSystem(ctx context.Context, orgID, id string) error
+
 	UpdateTitleSystem(ctx context.Context, orgID, id, title string) error
 	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error
 

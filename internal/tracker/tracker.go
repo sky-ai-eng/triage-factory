@@ -1276,11 +1276,15 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 	}
 	diffSpan.End()
 
-	trackerLog.InfoContext(ctx, "jira refresh", "discovered", len(discovered), "entities", len(entities), "refreshed", len(refreshed), "events", eventsEmitted, "stale_reads", staleReads)
-
 	// Phase 4: confirm the long-unanswered keys against the issue endpoint.
-	// Emits deletion events, which the router turns into entity/task closes.
-	eventsEmitted += t.confirmMissingJiraEntities(ctx, client, orgID, entities, refreshed, time.Now())
+	// Emits unreachable events, which the router turns into entity/task
+	// closes. Ahead of the cycle log so its event count is the whole cycle's
+	// — the same number the poll-complete sentinel carries, rather than a
+	// second, quietly smaller one for the same cycle.
+	retired := t.confirmMissingJiraEntities(ctx, client, orgID, entities, refreshed, time.Now())
+	eventsEmitted += retired
+
+	trackerLog.InfoContext(ctx, "jira refresh", "discovered", len(discovered), "entities", len(entities), "refreshed", len(refreshed), "events", eventsEmitted, "retired", retired, "stale_reads", staleReads)
 
 	// Always fire the sentinel — it means "a poll cycle completed," not "a
 	// poll produced work." Carry-over readiness depends on this firing even
@@ -1292,9 +1296,9 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 }
 
 const (
-	// jiraGoneGrace is how long a tracked key must go unanswered by the
-	// refresh before the tracker spends a request asking whether its issue
-	// still exists.
+	// jiraUnreachableGrace is how long a tracked key must go unanswered by
+	// the refresh before the tracker spends a request asking Jira about it
+	// directly.
 	//
 	// The grace is the whole safety margin. A key's absence from one search
 	// is weak evidence — an index that hasn't caught up, a transient
@@ -1302,27 +1306,35 @@ const (
 	// event this pass can emit closes the entity and every task on it. Many
 	// consecutive misses across an hour is not proof either, which is why
 	// the pass confirms rather than concludes; the grace is only there so
-	// the confirmation is spent on keys that look durably gone instead of on
-	// every blip.
+	// the confirmation is spent on keys that look durably unanswered instead
+	// of on every blip.
 	//
 	// Wall-clock rather than a cycle count because the poll interval is the
 	// user's to set: an hour is an hour whether that is six cycles or sixty.
-	jiraGoneGrace = time.Hour
+	jiraUnreachableGrace = time.Hour
 
-	// jiraGoneProbeBudget caps confirmations per cycle. These are one
+	// jiraUnreachableProbeBudget caps confirmations per cycle. These are one
 	// request per key on top of a cycle that has already done its batch
 	// reads, and the population they draw from is unbounded — a whole
 	// project's worth of keys can go missing at once when a project is
-	// deleted or a credential's visibility narrows. Deferred keys are not
-	// dropped: they stay stale and are re-picked next cycle, so a large
-	// backlog drains over several cycles instead of arriving as one burst
-	// of API calls.
-	jiraGoneProbeBudget = 20
+	// deleted or a credential's visibility narrows.
+	//
+	// Deferred keys are not dropped. Candidates come off a list ordered
+	// oldest-last_polled_at-first, and every confirmation that reaches a
+	// verdict advances that column — a 404 by retiring the entity, a 200 by
+	// stamping it — so each cycle's budget lands on keys the previous
+	// cycles did not reach, and a backlog drains over several cycles rather
+	// than arriving as one burst of API calls. The exception is a key whose
+	// confirmation keeps erroring: it stays at the head of the queue and is
+	// retried every cycle, which is the right behaviour for a transient
+	// fault and self-limiting for a persistent one (nothing behind it could
+	// have been confirmed by the same broken endpoint either).
+	jiraUnreachableProbeBudget = 20
 )
 
 // confirmMissingJiraEntities asks Jira directly about tracked entities the
-// refresh has not answered for in a while, and emits jira:issue:deleted for the
-// ones it confirms are gone. Returns the number of events emitted.
+// refresh has not answered for in a while, and emits jira:issue:unreachable for
+// the keys Jira will no longer resolve. Returns the number of events emitted.
 //
 // This exists because the refresh cannot retire anything on its own. A key
 // missing from a `key IN (...)` result is skipped by the diff loop, so the
@@ -1332,11 +1344,14 @@ const (
 // equally consistent with an issue that is merely unindexed, archived, or newly
 // invisible to the credential, and closing those would destroy live work.
 //
-// The issue endpoint settles it. A 404 there is Jira answering about one issue
-// by key, which is the strongest statement available short of an audit log, and
-// the only one this acts on. A 200 means the opposite of gone — the issue
-// exists and something upstream of the diff is failing to return it — so it is
-// logged loudly and changes nothing. Any other error is not evidence at all.
+// Asking about the one key settles it, though not into the answer one might
+// want: a 404 says only that this credential cannot resolve this key, because
+// Jira answers the same way for an issue that was deleted and one it will not
+// admit exists. Both make the entity untrackable, which is what the event
+// records and all it claims. A 200 is the useful negative — the issue resolves,
+// so something upstream of the diff is failing to return it — logged loudly,
+// stamped so it stops consuming the budget, and otherwise left alone. Any other
+// error is not evidence in either direction.
 func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiraclient.Client, orgID string, entities []domain.Entity, refreshed map[string]jiraIssueState, now time.Time) int {
 	var candidates []domain.Entity
 	for _, e := range entities {
@@ -1349,7 +1364,7 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 		// to lose across a restart or a change of leader. A nil value predates
 		// the column's population and says nothing about recency, so it waits
 		// for the next successful refresh to give it a reading.
-		if e.LastPolledAt == nil || now.Sub(*e.LastPolledAt) < jiraGoneGrace {
+		if e.LastPolledAt == nil || now.Sub(*e.LastPolledAt) < jiraUnreachableGrace {
 			continue
 		}
 		candidates = append(candidates, e)
@@ -1364,10 +1379,10 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 
 	emitted := 0
 	for i, e := range candidates {
-		if i >= jiraGoneProbeBudget {
+		if i >= jiraUnreachableProbeBudget {
 			span.SetAttributes(telemetry.Outcome("partial"))
-			trackerLog.InfoContext(ctx, "jira gone-confirmation budget spent; remaining keys re-checked next cycle",
-				"budget", jiraGoneProbeBudget, "deferred", len(candidates)-i)
+			trackerLog.InfoContext(ctx, "jira reachability confirmation budget spent; remaining keys re-checked next cycle",
+				"budget", jiraUnreachableProbeBudget, "deferred", len(candidates)-i)
 			break
 		}
 		if ctx.Err() != nil {
@@ -1379,17 +1394,30 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 		case err == nil:
 			// Confirmed present, and yet the refresh didn't return it. The
 			// entity is being skipped every cycle by something other than
-			// deletion — an unindexed or archived issue, or one the
-			// credential can no longer see through search. Nothing here can
-			// repair that, but an entity silently frozen is exactly what this
-			// pass exists to stop being invisible.
-			trackerLog.WarnContext(ctx, "jira issue exists but no search returned it; entity is tracked and not being diffed",
+			// the key being unresolvable — an unindexed or archived issue, or one
+			// the credential can no longer see through search. Nothing here
+			// can repair that, but an entity silently frozen is exactly what
+			// this pass exists to stop being invisible.
+			trackerLog.WarnContext(ctx, "jira issue resolves but no search returned it; entity is tracked and not being diffed",
 				"source_id", e.SourceID, "entity_id", e.ID)
+			// Stamp the read. Candidates are selected by how stale this
+			// column is and drawn oldest-first against a per-cycle budget,
+			// so an entity that will confirm present on every future pass
+			// would otherwise sit at the head of that queue forever, consume
+			// the budget each cycle, and starve every candidate behind it —
+			// including ones that would have confirmed unreachable. Honest as
+			// as necessary: the row *was* just read from the source, which
+			// is what the column records; nothing was diffed off it, which
+			// is why this is not a snapshot write.
+			if err := t.entities.MarkPolledSystem(ctx, orgID, e.ID); err != nil {
+				trackerLog.WarnContext(ctx, "stamping a confirmed-present jira entity failed; it stays a confirmation candidate",
+					"source_id", e.SourceID, "entity_id", e.ID, "error", err)
+			}
 		case jiraclient.IsNotFound(err):
-			t.emitJiraDeleted(ctx, orgID, e)
+			t.emitJiraUnreachable(ctx, orgID, e)
 			emitted++
 		default:
-			trackerLog.WarnContext(ctx, "jira gone-confirmation failed; entity left tracked",
+			trackerLog.WarnContext(ctx, "jira reachability confirmation failed; entity left tracked",
 				"source_id", e.SourceID, "entity_id", e.ID, "error", err)
 		}
 	}
@@ -1403,31 +1431,31 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 	return emitted
 }
 
-// emitJiraDeleted publishes the terminal event for an entity whose issue Jira
-// no longer resolves. Every metadata field is last-known state off the stored
-// snapshot — the source has nothing left to read — and a snapshot that is
-// absent or unparseable still emits, with blank fields: the entity has to be
+// emitJiraUnreachable publishes the terminal event for an entity whose key Jira
+// will no longer resolve. Every metadata field is last-known state off the
+// stored snapshot — the source has nothing left to read — and a snapshot that
+// is absent or unparseable still emits, with blank fields: the entity has to be
 // retired either way, and a corrupt snapshot is not a reason to keep tracking
-// an issue that no longer exists.
+// something that can no longer be read.
 //
 // Publish, not the snapshot-CAS enqueue: there is no new snapshot to advance,
 // and the entity's own close is the router's job (the event terminates it).
-func (t *Tracker) emitJiraDeleted(ctx context.Context, orgID string, e domain.Entity) {
+func (t *Tracker) emitJiraUnreachable(ctx context.Context, orgID string, e domain.Entity) {
 	var snap domain.JiraSnapshot
 	if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
 		if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
-			trackerLog.WarnContext(ctx, "corrupt jira snapshot on a deleted issue; emitting with last-known fields blank",
+			trackerLog.WarnContext(ctx, "corrupt jira snapshot on an unreachable issue; emitting with last-known fields blank",
 				"source_id", e.SourceID, "entity_id", e.ID, "error", err)
 		}
 	}
 	entityID := e.ID
-	trackerLog.InfoContext(ctx, "jira issue no longer exists; retiring entity",
+	trackerLog.InfoContext(ctx, "jira will not resolve this key (deleted, or no longer visible to the credential); retiring entity",
 		"source_id", e.SourceID, "entity_id", e.ID)
 	t.publish(ctx, domain.Event{
 		OrgID:     orgID,
-		EventType: domain.EventJiraIssueDeleted,
+		EventType: domain.EventJiraIssueUnreachable,
 		EntityID:  &entityID,
-		MetadataJSON: mustJSON(events.JiraIssueDeletedMetadata{
+		MetadataJSON: mustJSON(events.JiraIssueUnreachableMetadata{
 			Assignee:          snap.Assignee,
 			AssigneeAccountID: snap.AssigneeAccountID,
 			IssueKey:          e.SourceID,
@@ -1436,9 +1464,16 @@ func (t *Tracker) emitJiraDeleted(ctx context.Context, orgID string, e domain.En
 			LastStatus:        snap.Status,
 			Summary:           snap.Summary,
 		}),
-		// No occurred_at: Jira reports that an issue is absent, never when it
-		// became absent, so detection time is the only honest reading and the
-		// enqueue's own fallback supplies it.
+		// occurred_at is deliberately left zero — Jira reports that a key does
+		// not resolve, never when it stopped, so there is no source time to
+		// carry and the nullable contract stores NULL rather than a fabricated
+		// one. Consumers fall back to created_at, which is the honest reading:
+		// this was observed at detection time.
+		//
+		// created_at is set even though recordEvent re-stamps it at write
+		// time. The durable row is not the only consumer — the bus hands this
+		// struct to subscribers as-is, so the websocket push carries whatever
+		// is set here, and a zero value would surface as one on the client.
 		CreatedAt: time.Now(),
 	})
 }

@@ -131,13 +131,13 @@ var closeRelations = []closeRelation{
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
 	},
-	// A Jira issue no longer exists → close everything on the entity and
-	// terminate it. Same shape as completion, and terminal for a stronger
-	// reason: a completed issue can be reopened, a deleted one cannot come
-	// back under the same key, so nothing further will ever be observed.
+	// Jira stopped resolving a tracked issue's key → close everything on the
+	// entity and terminate it. Same shape as completion, for a different
+	// reason: a completed issue can still be reopened and go on emitting,
+	// while an unreachable one can produce no further observation at all.
 	{
-		onEvents:         []string{domain.EventJiraIssueDeleted},
-		closes:           jiraIssueDeletedCloseTypes(),
+		onEvents:         []string{domain.EventJiraIssueUnreachable},
+		closes:           jiraIssueUnreachableCloseTypes(),
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
 	},
@@ -183,12 +183,12 @@ func jiraIssueTerminalCloseTypes() []string {
 	return jiraCloseTypesExcept(domain.EventJiraIssueCompleted)
 }
 
-// jiraIssueDeletedCloseTypes is what a confirmed deletion cleans up. It spares
-// only the deletion event's own type, so unlike the completed set it DOES close
+// jiraIssueUnreachableCloseTypes is what a confirmed-unreachable issue cleans
+// up. It spares only that event's own type, so unlike the completed set it closes
 // jira:issue:completed tasks — a "this got finished" task on an issue that no
 // longer exists has nothing left to act on.
-func jiraIssueDeletedCloseTypes() []string {
-	return jiraCloseTypesExcept(domain.EventJiraIssueDeleted)
+func jiraIssueUnreachableCloseTypes() []string {
+	return jiraCloseTypesExcept(domain.EventJiraIssueUnreachable)
 }
 
 // jiraCloseTypesExcept builds an entity-wide Jira close set: every

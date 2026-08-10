@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // EntityStoreFactory is what a per-backend test file hands to
@@ -56,6 +57,25 @@ type EntitySeeder struct {
 //   - ClassificationStatusSystem reports (classified, exists) keyed on
 //     classified_at (not project_id), with a missing row as (false,
 //     false, nil).
+//   - MarkPolledSystem advances last_polled_at without touching the
+//     snapshot or poll_seq.
+
+// mustEntity re-reads an entity by its natural key, failing the test if it is
+// missing. Assertions about timestamp columns have to compare DB-precision
+// values on both sides (see the UpdateSnapshot subtest), which means re-reading
+// rather than reusing the struct a mutation returned.
+func mustEntity(t *testing.T, s db.EntityStore, ctx context.Context, orgID, source, sourceID string) *domain.Entity {
+	t.Helper()
+	ent, err := s.GetBySource(ctx, orgID, source, sourceID)
+	if err != nil {
+		t.Fatalf("re-read %s/%s: %v", source, sourceID, err)
+	}
+	if ent == nil {
+		t.Fatalf("re-read %s/%s: no row", source, sourceID)
+	}
+	return ent
+}
+
 func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -331,6 +351,42 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		if got.LastPolledAt == nil || !got.LastPolledAt.Equal(*initialPolled) {
 			t.Errorf("PatchSnapshot must not advance last_polled_at — initial=%v after=%v",
 				initialPolled, got.LastPolledAt)
+		}
+	})
+
+	t.Run("MarkPolledSystem_advances_last_polled_at_and_nothing_else", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+
+		if _, _, err := s.FindOrCreate(ctx, orgID, "jira", "SKY-POLLED", "issue", "T", ""); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED").ID, `{"status":"To Do"}`, 0); err != nil || !ok {
+			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
+		}
+		// Re-read for a DB-precision baseline — see the UpdateSnapshot
+		// subtest above for the timestamptz-truncation rationale.
+		baseline := mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED")
+		if baseline.LastPolledAt == nil {
+			t.Fatal("baseline has no last_polled_at")
+		}
+
+		if err := s.MarkPolledSystem(ctx, orgID, baseline.ID); err != nil {
+			t.Fatalf("MarkPolledSystem: %v", err)
+		}
+
+		got := mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED")
+		if got.LastPolledAt == nil || !got.LastPolledAt.After(*baseline.LastPolledAt) {
+			t.Errorf("last_polled_at must advance — baseline=%v after=%v; a caller that selects candidates by this column's age would re-pick the row forever",
+				baseline.LastPolledAt, got.LastPolledAt)
+		}
+		// The snapshot is untouched, and poll_seq does not move: this
+		// records a read, not a diff, so it must not consume the CAS
+		// token a concurrent snapshot write is holding.
+		if got.SnapshotJSON != baseline.SnapshotJSON {
+			t.Errorf("snapshot_json changed: %q → %q", baseline.SnapshotJSON, got.SnapshotJSON)
+		}
+		if got.PollSeq != baseline.PollSeq {
+			t.Errorf("poll_seq moved %d → %d", baseline.PollSeq, got.PollSeq)
 		}
 	})
 

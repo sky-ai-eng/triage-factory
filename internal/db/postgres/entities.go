@@ -461,6 +461,18 @@ func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON
 	return err
 }
 
+// MarkPolledSystem stamps last_polled_at alone — no snapshot, no poll_seq
+// bump, so it is deliberately outside the CAS the snapshot writes use. There
+// is nothing for a CAS to protect here: the column is monotonic wall-clock and
+// a straggler writing an older stamp only makes the row look *more* stale,
+// which costs a redundant re-check rather than a lost transition.
+func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) error {
+	_, err := s.admin.ExecContext(ctx,
+		`UPDATE entities SET last_polled_at = $1 WHERE org_id = $2 AND id = $3`,
+		time.Now(), orgID, id)
+	return err
+}
+
 func (s *entityStore) UpdateTitle(ctx context.Context, orgID, id, title string) error {
 	return updateEntityTitle(ctx, s.q, orgID, id, title)
 }

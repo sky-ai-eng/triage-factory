@@ -235,7 +235,7 @@ func TestEntityTerminatingEvents(t *testing.T) {
 		domain.EventGitHubPRMerged,
 		domain.EventGitHubPRClosed,
 		domain.EventJiraIssueCompleted,
-		domain.EventJiraIssueDeleted,
+		domain.EventJiraIssueUnreachable,
 	}
 	for _, et := range terminators {
 		if !EntityTerminatingEvents[et] {
