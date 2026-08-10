@@ -1,41 +1,42 @@
-// The native runtime's pre-dispatch gate on three `gh` commands.
+// The native runtime's pre-dispatch matcher on three `gh` commands, which get
+// two different kinds of answer for two different reasons.
 //
-// The jail ships the real `gh` on a PATH-leading directory with a working
-// credential channel, so a delegated agent can merge a pull request or post a
-// review outside Triage Factory entirely. Both are intercepted here, and they
-// get different answers because the situations are not alike. A review posted
-// through `gh` can only be a top-level comment, lands no artifact and takes no
-// approval path, so the TF review verbs strictly dominate it: that is a refusal
-// with a redirect. (The injector does now audit such a review — it is a write
-// under the org credential like any other — but an audit row is a record of
-// what happened, not a substitute for the review object the product works on.)
-// Merging is something some missions are for, so refusing it would mean
-// deciding an intent the runtime cannot know: that gets a question, aimed at
-// the one artifact the model can actually check. Creating a repository is
-// refused outright, and for a reason that is neither of those: the product is
-// built around knowing which repositories an agent works in BEFORE a run
-// starts — the tracked set is what scopes polling, task routing, and the
-// credential itself — so a repository that appears mid-run is outside every
-// structure meant to account for it. No mission needs one badly enough to
-// invent it unattended.
+// Posting a review and creating a repository are REFUSED, and refused again —
+// for real — at the credential injector every request on this channel passes
+// through (internal/ghinjector, keyed on the shared classifier in
+// internal/ghwrite). For those two this file is early UX in front of an
+// enforced policy: the same answer arrives better from a matcher than from a
+// proxy, since a refusal here costs one tool call and names the redirect in the
+// model's own terms, where the injector's arrives as a 403 partway through a
+// `gh` invocation, after the model has committed to a plan built around the
+// command succeeding.
 //
-// These are accident controls, not security controls, and three limitations
-// come with them, accepted rather than worked around:
+// Merging gets a QUESTION, and nothing downstream enforces an answer. Refusing
+// it outright would mean deciding an intent the runtime cannot know — some
+// missions are for landing work — and unlike the other two there is no
+// dominating alternative to redirect to. So the merge attempt is interrupted
+// once and asked to quote the line of its mission that authorizes it; a model
+// that re-issues proceeds. The value is the forced restatement of intent
+// against the mission, not the obstruction: a model asked to quote its
+// authorization and unable to find one frequently abandons the action.
+//
+// That leaves three limitations, and which of them matter now depends on which
+// answer you are looking at:
 //
 //   - Injection-blind. The same hostile context that induced the action will
 //     satisfy a self-attestation just as easily.
 //   - Matcher-evadable. Any construction this matcher does not recognize —
 //     `gh api graphql` with an inline mutation being the obvious one — passes
-//     straight through.
-//   - Self-attestation only. Nothing checks the answer to the merge question,
-//     and a model that simply re-issues the call proceeds.
+//     straight through, as does any client that is not `bash` and any run on
+//     the SDK runtime, which has no matcher seam at all.
+//   - Self-attestation only. Nothing checks the answer to the merge question.
 //
-// What they do work against is the failure they target: a model reaching for
-// the command it knows best, or building momentum toward a helpful-seeming
-// finish. The value of the merge question is the forced restatement of intent
-// against the mission, not the obstruction — a model asked to quote its
-// authorization and unable to find one frequently abandons the action. The
-// actual boundary is the credential's repo scope, which none of this changes.
+// For the two refusals none of that is load-bearing: the injector catches what
+// this misses. For the merge question all three stand, and the question is the
+// only control there is. What every one of these texts must be is TRUE — a
+// model that discovers a stated rule is false has cause to doubt the rest — so
+// the two refusals say "refused" because the act genuinely does not happen, and
+// the merge question asks rather than claiming a refusal it cannot deliver.
 
 package delegate
 
@@ -56,25 +57,16 @@ import (
 // The verbs it names are the ones the native harness prompt documents; the
 // two must stay in step, since a redirect to a command that does not exist is
 // worse than no redirect at all.
-const reviewRefusal = "This command was not run. `gh pr review` cannot attach comments to specific lines, " +
-	"and it posts straight to GitHub — no artifact, no approval path. " +
+//
+// The justification is verb dominance, and only that. It used to also say such
+// a review was invisible to Triage Factory, which stopped being true when the
+// channel's writes started landing audit rows — the review verbs win because a
+// review posted raw cannot anchor to a line, carry a severity badge, be revised
+// as a draft, or go through the approval path, not because nobody would know.
+const reviewRefusal = "This command was not run, and the same call made another way will be refused too. " +
+	"`gh pr review` cannot attach comments to specific lines, and it posts straight to GitHub — " +
+	"no draft to revise, no severity badges, no approval path. " +
 	"Use `tfac gh pr start-review`, then `add-review-comment` for each finding, then `finalize-review`."
-
-// repoCreateRefusal answers `gh repo create` every time.
-//
-// It names no replacement command, unlike the review refusal, because there is
-// no `tfac exec gh repo` verb to name — and the file comment above holds that a
-// redirect to a command that does not exist is worse than no redirect at all.
-// So it redirects to the only thing that actually works: saying so, and letting
-// a human do it.
-//
-// TODO(TFAC-793): when a governed repo-provisioning verb exists, name it here.
-// That ticket also carries the prior question of whether an agent should be able
-// to ask for a repository at all, in which case this text stands permanently.
-const repoCreateRefusal = "This command was not run. Creating repositories is not something a run does — " +
-	"Triage Factory scopes polling, task routing, and this run's own credential to a set of repositories " +
-	"chosen before the run started, and a new one belongs to none of it. " +
-	"If your mission genuinely needs a repository that does not exist, say so in your final message and stop there."
 
 // mergeGateTag opens the merge question and is how a later call recognizes
 // that it has already been put. The identity lives in the tag, not in the
@@ -89,6 +81,10 @@ const mergeGateTag = `<system-note kind="merge-gate">`
 // while the opening turn is a specific artifact in its context that
 // demonstrably does or does not carry the instruction — and demonstrably does
 // not carry one that arrived in a PR comment.
+//
+// Unlike the two refusals, this text promises nothing it cannot deliver: it
+// says the command was not run, which is true, and it does not say a re-issue
+// will fail, because it will not.
 const mergeGateQuestion = mergeGateTag + "\n" +
 	"This command was not run. Merging is not reversible and no human is watching this run. " +
 	"Before you do it: does your mission — the opening message of this conversation — actually tell you to merge? " +
@@ -96,12 +92,29 @@ const mergeGateQuestion = mergeGateTag + "\n" +
 	"in your final message that you believe the branch is ready to merge, and let a human do it.\n" +
 	"</system-note>"
 
+// repoCreateRefusal answers `gh repo create` every time.
+//
+// It names no replacement command, unlike the review refusal, because there is
+// no `tfac exec gh repo` verb to name — and the file comment above holds that a
+// redirect to a command that does not exist is worse than no redirect at all.
+// So it redirects to the only thing that actually works: saying so, and letting
+// a human do it.
+//
+// TODO(TFAC-793): when a governed repo-provisioning verb exists, name it here.
+// That ticket also carries the prior question of whether an agent should be able
+// to ask for a repository at all, in which case this text stands permanently.
+const repoCreateRefusal = "This command was not run, and the same call made another way will be refused too. " +
+	"Creating repositories is not something a run does — Triage Factory scopes polling, task routing, " +
+	"and this run's own credential to a set of repositories chosen before the run started, and a new one " +
+	"belongs to none of it. " +
+	"If your mission genuinely needs a repository that does not exist, say so in your final message and stop there."
+
 // ghCommandGate builds the native loop's BeforeToolCall hook.
 //
 // A denial is a synthetic is_error result the model reads in-band, so neither
-// answer ever ends a run: the refusal redirects and the question is answerable
-// by re-issuing. Nothing but the two matched shapes is looked at, so a run
-// that attempts neither sees no evidence the gate exists — and only a matched
+// answer ever ends a run: the refusals redirect and the question is answerable
+// by re-issuing. Nothing but the three matched shapes is looked at, so a run
+// that attempts none of them sees no evidence this exists — and only a matched
 // merge pays for the transcript read.
 func (s *Spawner) ghCommandGate(orgID, runID string) func(context.Context, domain.ToolCall) string {
 	return func(ctx context.Context, call domain.ToolCall) string {
@@ -118,16 +131,6 @@ func (s *Spawner) ghCommandGate(orgID, runID string) func(context.Context, domai
 		}
 		return ""
 	}
-}
-
-// bashCommand extracts the shell command a call would run, or "" for any call
-// that is not a shell at all.
-func bashCommand(call domain.ToolCall) string {
-	if call.Name != "bash" {
-		return ""
-	}
-	cmd, _ := call.Input["command"].(string)
-	return cmd
 }
 
 // mergeAlreadyQuestioned reads the question's state off the transcript.
@@ -183,6 +186,16 @@ func askedAboutMergeAlready(rows []domain.Message) bool {
 // change, which is the whole reason the identity is a tag and not the prose.
 func isMergeGateNote(r domain.Message) bool {
 	return r.Role == "tool" && r.IsError && strings.HasPrefix(r.Content, mergeGateTag)
+}
+
+// bashCommand extracts the shell command a call would run, or "" for any call
+// that is not a shell at all.
+func bashCommand(call domain.ToolCall) string {
+	if call.Name != "bash" {
+		return ""
+	}
+	cmd, _ := call.Input["command"].(string)
+	return cmd
 }
 
 // ghAction is the gated action a shell command was recognized as reaching for.
@@ -250,10 +263,6 @@ func classifyGHSegment(words []string) ghAction {
 			return ghActionReview
 		}
 	case chain[0] == "repo" && len(chain) > 1:
-		// TODO(TFAC-788): this refusal is advisory — the limitations in the file
-		// comment apply to it in full, and a document shaped to dodge the match
-		// reaches GitHub. That ticket gates repository creation at the injector,
-		// where the decision is fail-closed and no client can route around it.
 		if chain[1] == "create" {
 			return ghActionRepoCreate
 		}
@@ -345,9 +354,10 @@ func namesRepoCreate(words []string) bool {
 // this repository in particular, where a pull request discussing this very gate
 // contains those identifiers as prose.
 //
-// TODO(TFAC-788): a document passed by file (`-F query=@doc.graphql`, `--input
-// doc.json`) is not visible here, so this misses it. The injector gate that
-// ticket builds reads the request body itself and does not have the blind spot.
+// A document passed by file (`-F query=@doc.graphql`, `--input doc.json`) is
+// invisible here and always was. It no longer needs chasing: the injector reads
+// the request body itself, so a document this scan cannot see is refused where
+// it actually arrives.
 func namesRepoCreateMutation(word string) bool {
 	for _, prefix := range []string{"--field=", "--raw-field="} {
 		word = strings.TrimPrefix(word, prefix)
@@ -395,21 +405,41 @@ func mintsRepoByPath(word string) bool {
 //
 // An explicit non-POST method loses, even alongside a body — `-X GET -f q=x`
 // sends a GET with a query string, and refusing that would be refusing a read.
+//
+// A REPEATED method flag resolves to the last one, which is what gh's own flag
+// parsing does with it. Reading the first instead would disagree with the
+// command that actually runs in both directions: `-X GET … -X POST` sends a
+// write this would call a read, and `-X POST … -X GET` sends a read this would
+// call a write. Neither spelling is one a model writes on purpose, and the
+// injector decides the real request either way; agreeing with gh is just the
+// cheapest way for this matcher to describe what it claims to describe.
 func apiPosts(words []string) bool {
 	body := false
+	method, methodSet := "", false
+	setMethod := func(value string) {
+		method, methodSet = value, true
+	}
 	for i, w := range words {
 		switch {
 		case w == "-X" || w == "--method":
-			return i+1 < len(words) && strings.EqualFold(words[i+1], "POST")
+			// A dangling flag with no value is a command gh rejects outright;
+			// leaving methodSet alone lets the body test below decide, which
+			// errs toward recognizing the act.
+			if i+1 < len(words) {
+				setMethod(words[i+1])
+			}
 		case strings.HasPrefix(w, "--method="):
-			return strings.EqualFold(strings.TrimPrefix(w, "--method="), "POST")
+			setMethod(strings.TrimPrefix(w, "--method="))
 		case strings.HasPrefix(w, "-X") && len(w) > 2:
-			return strings.EqualFold(w[2:], "POST")
+			setMethod(w[2:])
 		case w == "-f", w == "-F", w == "--field", w == "--raw-field", w == "--input",
 			strings.HasPrefix(w, "--field="), strings.HasPrefix(w, "--raw-field="),
 			strings.HasPrefix(w, "--input="):
 			body = true
 		}
+	}
+	if methodSet {
+		return strings.EqualFold(method, "POST")
 	}
 	return body
 }

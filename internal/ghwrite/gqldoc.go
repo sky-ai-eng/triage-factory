@@ -45,6 +45,10 @@ const (
 // document selecting more than this is already unclassifiable — the table names
 // single acts, and anything past one field takes the fallback — so the excess
 // would only pad an audit row's detail.
+//
+// Hitting it is recorded rather than silently absorbed, because the refusal
+// policy reads these names: a document that padded its selection until the
+// gated field fell off the end would otherwise be a mutation nothing could see.
 const maxTopLevelFields = 16
 
 // gqlSelection is one top-level selection set as the reader could see it.
@@ -61,6 +65,11 @@ type gqlSelection struct {
 	// mutation root. Collecting those fields would name an act from a branch the
 	// server never executes.
 	unresolvable bool
+	// truncated marks a selection that named more fields than the reader keeps.
+	// Distinct from unresolvable: nothing about the document defeated the
+	// reader, it simply says more than a row can hold. Both leave the reading
+	// partial, which is what the caller acts on.
+	truncated bool
 }
 
 // gqlOperation is one operation definition as the reader could see it.
@@ -103,30 +112,47 @@ const mutationRootType = "Mutation"
 const maxInlineFragmentDepth = 8
 
 // resolveTopLevelFields expands an operation's selection into the field names it
-// actually invokes, following each spread into its definition. resolved is false
-// when anything could not be accounted for — a spread naming a fragment the
-// document never defines, a fragment conditioned on the wrong type, an inline
-// fragment the reader declined — in which case the caller records the mutation
-// as unresolved rather than describing it from a partial reading.
+// actually invokes, following each spread into its definition. unreadable is
+// empty when the whole selection was accounted for, and otherwise names why it
+// was not — a spread the reader could not follow, or a selection wider than it
+// keeps — in which case the caller records the mutation as unresolved rather
+// than describing it from a partial reading.
+//
+// Neither cause may go unreported, because a partial reading is exactly how a
+// gated mutation becomes invisible — hidden behind an undefined fragment, or
+// pushed off the end of a padded selection set. Truncation in particular is not
+// allowed to pass as an ordinary short read, which is the whole reason the
+// selection carries a flag for it.
+//
+// A document that manages both reports the fragment. Only one reason fits in
+// the field, and which one it is changes nothing that matters: the refusal
+// policy branches on unreadable being set at all, never on its value, so the
+// choice is the audit row's wording alone. It is fixed here rather than left to
+// iteration order so the row is reproducible, and the fragment wins because it
+// names a specific thing the document did, where truncation only says the
+// document was wider than this reader keeps.
 //
 // Each fragment is followed at most once. That is what makes the work linear in
 // the document rather than exponential in its nesting, and it is also why a
 // cycle terminates: the second visit is skipped, not recursed into.
-func resolveTopLevelFields(sel gqlSelection, fragments map[string]gqlFragment) (fields []string, resolved bool) {
+func resolveTopLevelFields(sel gqlSelection, fragments map[string]gqlFragment) (fields []string, unreadable string) {
 	visited := make(map[string]bool)
 	queue := []gqlSelection{sel}
-	resolved = true
+	truncated := false
 
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
 		if current.unresolvable {
-			resolved = false
+			unreadable = GraphQLUnresolvedFragment
 		}
+		truncated = truncated || current.truncated
 		for _, field := range current.fields {
-			if len(fields) < maxTopLevelFields {
-				fields = append(fields, field)
+			if len(fields) >= maxTopLevelFields {
+				truncated = true
+				break
 			}
+			fields = append(fields, field)
 		}
 		for _, name := range current.spreads {
 			if visited[name] {
@@ -135,13 +161,16 @@ func resolveTopLevelFields(sel gqlSelection, fragments map[string]gqlFragment) (
 			visited[name] = true
 			fragment, defined := fragments[name]
 			if !defined || fragment.on != mutationRootType {
-				resolved = false
+				unreadable = GraphQLUnresolvedFragment
 				continue
 			}
 			queue = append(queue, fragment.sel)
 		}
 	}
-	return fields, resolved
+	if unreadable == "" && truncated {
+		unreadable = GraphQLTooManyFields
+	}
+	return fields, unreadable
 }
 
 // parseDocument reads a document's top level: its operations, and the fragments
@@ -256,6 +285,8 @@ func selectionFields(sc *gqlScanner, depth int) (sel gqlSelection, ok bool) {
 		}
 		if len(sel.fields) < maxTopLevelFields {
 			sel.fields = append(sel.fields, field)
+		} else {
+			sel.truncated = true
 		}
 
 		if next, more := sc.peek(); more && next.punct("(") {
@@ -324,12 +355,15 @@ func (sel *gqlSelection) readFragmentSelection(sc *gqlScanner, depth int) bool {
 // merge folds an inline fragment's selection into the level that contains it.
 func (sel *gqlSelection) merge(inner gqlSelection) {
 	for _, field := range inner.fields {
-		if len(sel.fields) < maxTopLevelFields {
-			sel.fields = append(sel.fields, field)
+		if len(sel.fields) >= maxTopLevelFields {
+			sel.truncated = true
+			break
 		}
+		sel.fields = append(sel.fields, field)
 	}
 	sel.spreads = append(sel.spreads, inner.spreads...)
 	sel.unresolvable = sel.unresolvable || inner.unresolvable
+	sel.truncated = sel.truncated || inner.truncated
 }
 
 // parseFragmentDefinition reads a top-level `fragment Name on Type { … }` with

@@ -608,3 +608,52 @@ func TestStartLoopbackGuard(t *testing.T) {
 		t.Error("second Start on the same Server should error")
 	}
 }
+
+// TestGatedShapesTransitTheVerbPipe pins that the gh channel's refusal policy
+// is a property of that channel and not of the credential. This proxy is the
+// pipe the scoped `exec gh` verbs use, and the shapes the injector refuses —
+// a merge, a review submit, a repository create — pass through it untouched.
+//
+// It matters most for the review: that refusal REDIRECTS to the verbs, so a
+// gate that reached this pipe would refuse the alternative it recommends and
+// leave an agent with nowhere to go. More generally, a shared middleware that
+// grew a traffic policy would be caught here rather than discovered when a
+// governed verb stopped working.
+func TestGatedShapesTransitTheVerbPipe(t *testing.T) {
+	gated := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{"a review submit", http.MethodPost, "/repos/octo/widgets/pulls/42/reviews"},
+		{"a repository create", http.MethodPost, "/orgs/octo/repos"},
+	}
+	for _, tt := range gated {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &upstreamRecord{}
+			upstream := fakeUpstream(rec)
+			defer upstream.Close()
+
+			proxyURL := startProxy(t, apiproxy.Config{
+				Provider:      apiproxy.ProviderGitHub,
+				Upstream:      upstream.URL,
+				TokenSource:   func(context.Context, string, string) (string, error) { return "tok", nil },
+				IncomingToken: "run-placeholder",
+			})
+
+			req, _ := http.NewRequest(tt.method, proxyURL+tt.path, strings.NewReader(`{"event":"APPROVE"}`))
+			req.Header.Set("Authorization", "Bearer run-placeholder")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("proxy roundtrip: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want the upstream's 200 — this pipe applies no traffic policy", resp.StatusCode)
+			}
+			if rec.hits.Load() != 1 {
+				t.Fatalf("upstream hits = %d, want the request forwarded", rec.hits.Load())
+			}
+		})
+	}
+}

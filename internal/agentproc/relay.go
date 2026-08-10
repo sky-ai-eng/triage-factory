@@ -49,6 +49,14 @@ const (
 	// A GraphQL write carries what its request envelope disclosed alongside the
 	// wire facts, since its path says only that a POST reached /graphql.
 	OpRecordGHWrite = "record_gh_write"
+	// OpAuthorizeGHWrite is the gh-channel injector's per-request decision on a
+	// shape the refusal policy gates — a merge, a submitted review, a
+	// repository creation, or a GraphQL request whose act could not be read.
+	// A Call rather than a notify for two reasons: the request is held until
+	// the answer arrives (a refusal that raced the forward would be no refusal
+	// at all), and the denial row is written by the handler, so it cannot be
+	// lost the way a fire-and-forget audit record can.
+	OpAuthorizeGHWrite = "authorize_gh_write"
 )
 
 // AuthorizeRepoArgs / AuthorizeRepoReply are the authorize_repo op's payloads
@@ -139,6 +147,27 @@ type GraphQLWriteFacts struct {
 	// Unreadable names why the request resolved to no single act, empty when it
 	// resolved cleanly.
 	Unreadable string `json:"unreadable,omitempty"`
+}
+
+// AuthorizeGHWriteArgs is authorize_gh_write's payload: one request the
+// injector recognized as a gated shape, described in the same wire facts
+// record_gh_write carries — because the orchestrator re-derives the decision
+// from the shared classifier rather than trusting the sidecar's reading of it.
+// Nothing about the refusal itself crosses the wire in this direction; the
+// sidecar says what was asked, and the side holding the policy says what that
+// means.
+type AuthorizeGHWriteArgs struct {
+	Method  string             `json:"method"`
+	Path    string             `json:"path"`
+	GraphQL *GraphQLWriteFacts `json:"graphql,omitempty"`
+}
+
+// AuthorizeGHWriteReply is the decision. Allowed is true only for a request the
+// orchestrator's own reading finds ungated — there is no authorization that
+// admits a gated one, by design. A refused request has already had its audit
+// row written by the time this reply is sent.
+type AuthorizeGHWriteReply struct {
+	Allowed bool `json:"allowed"`
 }
 
 // RecordPushArgs is record_push's payload: one branch ref a receive-pack

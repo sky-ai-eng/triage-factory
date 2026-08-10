@@ -14,6 +14,7 @@ import {
   Pin,
   PinOff,
   Play,
+  ShieldBan,
   SmilePlus,
   Tag,
   Terminal,
@@ -262,6 +263,17 @@ export const ACTION_META: Record<string, ActionMeta> = {
     label: 'Raw gh write',
     text: 'text-text-tertiary',
     tone: 'neutral',
+  },
+  // A write Triage Factory refused before it reached GitHub. Deliberately not
+  // in the neutral tint the two fallbacks above sit in: those say a write
+  // happened and could not be named, this says one was stopped, and someone
+  // scanning a run's actions should be able to see the difference without
+  // reading labels.
+  gh_write_denied: {
+    icon: ShieldBan,
+    label: 'gh write refused',
+    text: 'text-text-tertiary',
+    tone: 'attention',
   },
   // Its GraphQL sibling. Separate because the two rows know different things —
   // this one's details carry the mutation names rather than a path — and

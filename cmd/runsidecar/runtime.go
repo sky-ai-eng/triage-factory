@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
@@ -473,22 +474,51 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 				Errored:        w.Errored,
 				ResponseUnread: w.ResponseUnread,
 			}
-			if w.GraphQL != nil {
-				// A GraphQL write is named in its request, which only this
-				// process ever saw — the orchestrator receives the act's name or
-				// nothing.
-				args.GraphQL = &agentproc.GraphQLWriteFacts{
-					Operation:  w.GraphQL.Operation,
-					Mutations:  w.GraphQL.Fields,
-					Subject:    w.GraphQL.Subject,
-					Unreadable: w.GraphQL.Unreadable,
-				}
-			}
+			// A GraphQL write is named in its request, which only this process
+			// ever saw — the orchestrator receives the act's name or nothing.
+			args.GraphQL = ghWriteFactsToWire(w.GraphQL)
 			// TODO(TFAC-790): this notify is fire-and-forget, so a failed relay
 			// hop loses the audit row with no trace anywhere. Needs the dropped-
 			// record counter before the loss can be noticed at all.
 			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
 		},
+		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, _ ghwrite.Refusal) bool {
+			// A Call, not a notify: the agent's request is held until the
+			// orchestrator answers, because a refusal that raced the forward
+			// would not be one. The orchestrator re-derives the decision from
+			// the shared table and writes the denial row before replying, so
+			// this side sends only what was asked and never what it concluded.
+			var reply agentproc.AuthorizeGHWriteReply
+			if err := agentproc.CallRelay(ctx, r.conn, agentproc.RelayNamespaceCore, agentproc.OpAuthorizeGHWrite,
+				agentproc.AuthorizeGHWriteArgs{
+					Method:  req.Method,
+					Path:    req.Path,
+					GraphQL: ghWriteFactsToWire(req.GraphQL),
+				}, &reply); err != nil {
+				// Fail closed. A gated shape whose decision could not be
+				// obtained is refused, or a wedged relay becomes the way past
+				// the gate.
+				sidecarLog.Warn("gh write authorization relay failed; refusing",
+					"method", req.Method, "path", req.Path, "error", err)
+				return false
+			}
+			return reply.Allowed
+		},
+	}
+}
+
+// ghWriteFactsToWire projects the classifier's GraphQL facts onto the relay
+// protocol's own shape. nil in, nil out — a REST request carries no GraphQL
+// member, and both relay ops that cross this boundary need the same projection.
+func ghWriteFactsToWire(f *ghwrite.GraphQLFacts) *agentproc.GraphQLWriteFacts {
+	if f == nil {
+		return nil
+	}
+	return &agentproc.GraphQLWriteFacts{
+		Operation:  f.Operation,
+		Mutations:  f.Fields,
+		Subject:    f.Subject,
+		Unreadable: f.Unreadable,
 	}
 }
 
