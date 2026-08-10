@@ -42,12 +42,11 @@ PR Creation:
                                                           --body-file <path> (or "-" for stdin)
                                                           to skip shell escaping. --body and
                                                           --body-file are mutually exclusive.
-                                                          Inside a delegated Triage Factory run
-                                                          this queues the PR for human approval
-                                                          (the user opens it via the UI); run
-                                                          standalone, it posts to GitHub
-                                                          immediately. Output JSON includes a
-                                                          "status" field that disambiguates.
+                                                          The PR is opened on GitHub right away,
+                                                          always as a draft: repo-visible, not
+                                                          ready for review. A human marks it
+                                                          ready in the Triage Factory UI. Do not
+                                                          call this twice for the same branch.
 
 Review Lifecycle (managed locally, submitted atomically):
   gh pr start-review <number> [--repo o/r] [--fresh]      Start a local review draft. --fresh resets an

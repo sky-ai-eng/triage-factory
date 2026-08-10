@@ -120,7 +120,7 @@ it holds and the *hostile input* it is exposed to never overlap:
 | --- | --- | --- | --- |
 | **cap-broker** | **Yes** (the only holder) | No | **No** |
 | **orchestrator** | No (dropped at exec) | Its own control-plane creds; **no per-run agent credential** | Its own control-plane inputs; **not** a run's agent output |
-| **credential sidecar** (one per run) | No (capless) | Yes — one run's material only | Yes — that one run's agent traffic |
+| **credential sidecar** (one per run) | No (capless) | Yes — one run's material only | Yes — that one run's agent traffic, inbound and (at the `gh` injector) outbound |
 | **sandbox** (agent) | No | No | Yes |
 
 - **cap-broker** — the only process that holds `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`. It
@@ -142,7 +142,14 @@ it holds and the *hostile input* it is exposed to never overlap:
 - **credential sidecar** — a capless per-run child holding only *one* run's
   credentials, unsealed with a key it generates for itself. No capabilities, one
   tenant's material, exposed only to that run's own traffic, freed when the run's
-  process exits (§5).
+  process exits (§5). Its exposure runs both ways: besides the upstream
+  responses its proxies parse, the `gh` injector reads the body of an outbound
+  GraphQL request to learn which mutation it performs — a document the agent
+  composed, read in the process holding that run's live GitHub credential. The
+  read is deliberately narrow (one endpoint, a size cap, parse-fail refuses the
+  request) and changes nothing about what is forwarded; it is what makes a
+  write policy possible at all against a protocol that names the act only in
+  the body.
 - **sandbox** — the gVisor jail running the agent. No capabilities, no
   credentials (Property B). What it is *pointed at* narrows further with the
   runtime: a jail whose agent loop runs outside it — the native runtime, where
