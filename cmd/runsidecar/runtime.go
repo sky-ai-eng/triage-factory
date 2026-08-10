@@ -204,6 +204,12 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// stays here. Empty when no git proxy was started (GitEnabled false).
 	result.GitProxyURL, result.GitProxyToken = handle.GitProxy()
 
+	// Read off the bundle that is already open here, so the orchestrator's audit
+	// rows can name the credential these proxies inject. Sent unconditionally:
+	// every channel the run writes through resolves out of this one bundle, so a
+	// single classification answers for all of them.
+	result.GitHubCredential = bundle.GitHub.Credential()
+
 	// The GitHub/Jira REST credential proxies the orchestrator's own GetPR +
 	// agenthost verbs route through: the orchestrator holds only the
 	// placeholder, the sidecar injects the real token on the upstream hop. On
@@ -300,13 +306,14 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 		PinnedRepos:      ai.PinnedRepos,
 	}
 	proxyCreds := &agenthost.ProxyCredentials{
-		GitHubAPIURL:   proxies.GitHubAPIURL,
-		GitHubAPIToken: proxies.GitHubAPIToken,
-		JiraAPIURL:     proxies.JiraAPIURL,
-		JiraAPIToken:   proxies.JiraAPIToken,
-		JiraDeployment: proxies.JiraDeployment,
-		GitProxyURL:    proxies.GitProxyURL,
-		GitProxyToken:  proxies.GitProxyToken,
+		GitHubCredential: proxies.GitHubCredential,
+		GitHubAPIURL:     proxies.GitHubAPIURL,
+		GitHubAPIToken:   proxies.GitHubAPIToken,
+		JiraAPIURL:       proxies.JiraAPIURL,
+		JiraAPIToken:     proxies.JiraAPIToken,
+		JiraDeployment:   proxies.JiraDeployment,
+		GitProxyURL:      proxies.GitProxyURL,
+		GitProxyToken:    proxies.GitProxyToken,
 	}
 	// The provider-credential accessor lets a provider handler (Slack) select
 	// its bot token from the sealed bundle in-process — a live read so a mid-run

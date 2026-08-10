@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // Bundle is the resolved credential material for one run. BootEpoch is the
@@ -75,12 +77,20 @@ func (b *Bundle) LLMExpiry() time.Time {
 	return time.Unix(b.LLMExpiryUnix, 0)
 }
 
+// GitHub credential tiers a bundle can carry, the two values of
+// GitHubCreds.Mode. Named so the provisioner that writes them and the
+// consumers that read them agree by symbol rather than by spelling.
+const (
+	GitHubModeApp = "app"
+	GitHubModePAT = "pat"
+)
+
 // GitHubCreds carries either a set of repo-scoped installation tokens (an
 // active GitHub App) or a single PAT (tier-3 borrow, unscoped — a PAT
 // cannot be narrowed). Mode selects which. RepoTokens is keyed by
 // "owner/repo".
 type GitHubCreds struct {
-	Mode string `json:"mode"` // "app" | "pat"
+	Mode string `json:"mode"` // GitHubModeApp | GitHubModePAT
 
 	PAT string `json:"pat,omitempty"`
 
@@ -103,6 +113,26 @@ type GitHubCreds struct {
 	// per-repo exec-verb/SDK channel and git proxy consume until their P4
 	// retirement. Nil when the org has no GitHub credential.
 	CLIToken *RepoToken `json:"cli_token,omitempty"`
+}
+
+// Credential names the audit-log credential the run's GitHub writes act under
+// (a domain.Credential* value). The bundle is the only thing that knows this on
+// an executor — the secret store is disabled there and the tier cannot be
+// re-derived from an opaque bearer token — so it is read here and reported
+// outward rather than guessed at each recording site.
+//
+// It follows Mode, which the provisioner flips to PAT the moment ANY repo in
+// the run's authorized set resolves without an expiry. That is deliberately
+// coarser than ResolveRepoToken's per-repo answer: a run in a mixed org can
+// spend both tiers, and naming the weaker one is the honest summary — a PAT was
+// in play — where naming the stronger would understate what a row's write could
+// reach. A nil bundle half reports the App, which is what this column has always
+// said and the only tier a deployment with no PAT can have.
+func (g *GitHubCreds) Credential() string {
+	if g != nil && g.Mode == GitHubModePAT {
+		return domain.CredentialGitHubPAT
+	}
+	return domain.CredentialGitHubApp
 }
 
 // RepoToken is one repo-scoped installation token minted for the bundle.

@@ -50,7 +50,8 @@ func recorderInfo(runID string) agenthost.RunInfo {
 
 func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 	stores, runID := newRecorderStores(t)
-	rec := gitPushRecorder(stores, recorderInfo(runID))
+	info := recorderInfo(runID)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 
 	rec(context.Background(), gitproxy.PushedRef{
 		Repo:    "octo/repo",
@@ -94,7 +95,8 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 
 func TestGitPushRecorder_SkipsNonBranchAndMalformed(t *testing.T) {
 	stores, runID := newRecorderStores(t)
-	rec := gitPushRecorder(stores, recorderInfo(runID))
+	info := recorderInfo(runID)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 
 	// A tag isn't a branch; a 3-segment repo path isn't owner/repo. Both make
 	// NewBranchArtifact return ok=false, so the recorder skips them silently.
@@ -119,7 +121,8 @@ func TestGitPushRecorder_SkipsNonBranchAndMalformed(t *testing.T) {
 // usual (the failure row, having no dedup key, can't swallow it).
 func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 	stores, runID := newRecorderStores(t)
-	rec := gitPushRecorder(stores, recorderInfo(runID))
+	info := recorderInfo(runID)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 	ctx := context.Background()
 
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 403})
@@ -179,7 +182,8 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 // volatile head — rather than minting a second artifact.
 func TestGitPushRecorder_DedupConvergesWithHook(t *testing.T) {
 	stores, runID := newRecorderStores(t)
-	rec := gitPushRecorder(stores, recorderInfo(runID))
+	info := recorderInfo(runID)
+	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "aaa", Created: true, Status: 200})
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "bbb", Created: false, Status: 200})

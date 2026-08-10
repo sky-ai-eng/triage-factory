@@ -53,6 +53,16 @@ type LocalClient struct {
 	// PAT tiers without standing up the full App-mint plumbing.
 	ghResolver ghclient.Resolver
 
+	// ghCredential is the credential every GitHub audit row this client builds
+	// is stamped with (a domain.Credential* value). It is learned, never
+	// assumed: on an executor the sidecar reports it off the sealed bundle
+	// (proxyCreds), and everywhere else it is the tier the resolver actually
+	// selected for the repo being written to (resolveRepoClient). Empty until
+	// one of those happens, which githubCredential reads as the App — the value
+	// this column has carried since it existed, so an unclassified write keeps
+	// reading as it always has rather than claiming a tier nothing observed.
+	ghCredential string
+
 	// ghClients memoizes the per-repo scoped GitHub client (+ identity) built
 	// for this run, so several gh calls in one exec subcommand (e.g. pr
 	// start-review's GetPR + GetPRDiff + GetPRFiles) mint the repo-scoped token
@@ -87,6 +97,34 @@ func NewLocal(stores db.Stores, info RunInfo) *LocalClient {
 		rt:        newDirectRuntime(stores, info),
 		gateWired: stores.TeamGitHubRepos != nil && stores.RunWorktrees != nil,
 	}
+}
+
+// SetGitHubCredential records which GitHub credential this client's writes act
+// under, for the audit rows it builds — and on the runtime beneath it, which
+// owns the branch-push row an artifact upsert composes.
+//
+// Injected late on the executor, for the same reason the relay server's proxy
+// coordinates are: the classification lives in the sealed bundle, which does
+// not open until the sidecar it is sealed for has come up. Bring-up completes
+// before the agent runs, so every write it can make is stamped.
+func (c *LocalClient) SetGitHubCredential(credential string) {
+	if credential == "" {
+		return
+	}
+	c.ghCredential = credential
+	if dr, ok := c.rt.(*directRuntime); ok {
+		dr.ghCredential = credential
+	}
+}
+
+// githubCredential names the credential a GitHub audit row from this client is
+// stamped with. See the ghCredential field for why an unlearned one reads as
+// the App.
+func (c *LocalClient) githubCredential() string {
+	if c.ghCredential != "" {
+		return c.ghCredential
+	}
+	return domain.CredentialGitHubApp
 }
 
 // SetGitHubResolver overrides the credential resolver this client resolves gh
@@ -442,7 +480,7 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 	// other recording here — the GitHub write already landed and must not be
 	// unwound by a bookkeeping failure.
 	c.recordBotAction(ctx, githubAction(submitted, domain.ActionReviewSubmitted,
-		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted))
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, c.githubCredential()))
 
 	return ReviewFinalizeResult{Posted: true, URL: res.URL}
 }
@@ -1216,7 +1254,9 @@ func (c *LocalClient) githubClientForRepo(ctx context.Context, owner, repo strin
 // is the prior behavior verbatim: no gate, no scoping.
 func (c *LocalClient) resolveRepoClient(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
 	if runmode.Current() != runmode.ModeMulti {
-		return c.legacyRepoClient(ctx, owner, repo)
+		client, identity, err := c.legacyRepoClient(ctx, owner, repo)
+		c.noteGitHubCredential(identity)
+		return client, identity, err
 	}
 	if err := c.authorizeRepo(ctx, owner, repo); err != nil {
 		return nil, ghclient.IdentityUnknown, err
@@ -1229,11 +1269,41 @@ func (c *LocalClient) resolveRepoClient(ctx context.Context, owner, repo string)
 	if err != nil {
 		return nil, ghclient.IdentityUnknown, err
 	}
+	c.noteGitHubCredential(identity)
 	if c.ghClients == nil {
 		c.ghClients = make(map[string]repoClient)
 	}
 	c.ghClients[key] = repoClient{client: client, identity: identity}
 	return client, identity, nil
+}
+
+// noteGitHubCredential records the tier a just-resolved client acts under, so
+// the audit rows for the writes it goes on to make name the credential that
+// made them. This is the whole of the derivation — one place, off the
+// resolution that was happening anyway — rather than a probe at each of the
+// dozen sites that build a row.
+//
+// An unresolved tier changes nothing: a resolver that doesn't report identity
+// leaves the previously learned value (or the App default) standing, which is
+// strictly better than overwriting a known tier with "we don't know".
+//
+// A reported credential is left alone for a sharper reason. Where one exists the
+// client is talking to a per-run proxy, so the identity it just saw was derived
+// from that same report — and re-deriving it back would round-trip the value
+// through a three-valued enum, which is lossless only while the column carries
+// exactly the two tiers that enum models. Whoever holds a credential is the
+// authority on what it is; nothing downstream improves on that answer.
+//
+// Deliberately stops at this client, unlike SetGitHubCredential: the runtime a
+// daemon hands out is shared by every concurrent request, while a LocalClient
+// is per-request. The runtime needs no learned value anyway — the only row it
+// builds is the branch push, which reaches it either from a caller that was
+// told the credential outright or from a process that resolved no client at all.
+func (c *LocalClient) noteGitHubCredential(identity ghclient.Identity) {
+	if c.proxyCreds != nil || identity == ghclient.IdentityUnknown {
+		return
+	}
+	c.ghCredential = identity.Credential()
 }
 
 // scopedRepoClient builds a per-repo down-scoped client. On TF_ROLE=executor,
@@ -1839,7 +1909,7 @@ func (c *LocalClient) GithubReplyToComment(ctx context.Context, owner, repo stri
 			Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
 			ExternalID: strconv.Itoa(replyID),
 			URL:        fmt.Sprintf("%s#discussion_r%d", domain.GitHubPullURL(owner+"/"+repo, number), replyID),
-			Credential: domain.CredentialGitHubApp,
+			Credential: c.githubCredential(),
 			DetailJSON: string(detail),
 		})
 	}
@@ -1886,7 +1956,7 @@ func (c *LocalClient) GithubUpdateComment(ctx context.Context, owner, repo strin
 		Action:     domain.ActionReviewCommentEdited,
 		Target:     owner + "/" + repo,
 		ExternalID: strconv.Itoa(commentID),
-		Credential: domain.CredentialGitHubApp,
+		Credential: c.githubCredential(),
 	})
 	return nil
 }
@@ -1918,7 +1988,7 @@ func (c *LocalClient) GithubDeleteComment(ctx context.Context, owner, repo strin
 		Action:     domain.ActionReviewCommentDeleted,
 		Target:     owner + "/" + repo,
 		ExternalID: strconv.Itoa(commentID),
-		Credential: domain.CredentialGitHubApp,
+		Credential: c.githubCredential(),
 	})
 	return nil
 }
@@ -1977,7 +2047,7 @@ func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo strin
 		State:      domain.ArtifactStateCommentPosted,
 		DedupKey:   githubCommentDedupKey(commentID),
 	}
-	c.upsertGithubArtifact(ctx, a, githubAction(a, domain.ActionCommentPosted, "", ""))
+	c.upsertGithubArtifact(ctx, a, githubAction(a, domain.ActionCommentPosted, "", "", c.githubCredential()))
 }
 
 // recordGithubCommentState upserts the comment artifact for an edit (state
@@ -2006,7 +2076,7 @@ func (c *LocalClient) recordGithubCommentState(ctx context.Context, commentID in
 		State:      state,
 		DedupKey:   githubCommentDedupKey(commentID),
 	}
-	c.upsertGithubArtifact(ctx, a, githubAction(a, action, "", ""))
+	c.upsertGithubArtifact(ctx, a, githubAction(a, action, "", "", c.githubCredential()))
 }
 
 // --- github PR artifact recording ---
@@ -2040,7 +2110,7 @@ func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, bas
 		owner+"/"+repo, number, nodeID, head, base, htmlURL, title, body, draft,
 	)
 	// to=the created state (draft/open) so the feed can read "created as draft".
-	c.upsertGithubArtifact(ctx, a, githubAction(a, domain.ActionPRCreated, "", a.State))
+	c.upsertGithubArtifact(ctx, a, githubAction(a, domain.ActionPRCreated, "", a.State, c.githubCredential()))
 }
 
 // githubCommentDedupKey is the stable key every comment action upserts on:
@@ -2100,7 +2170,7 @@ func (c *LocalClient) RecordGitDenied(ctx context.Context, owner, repo, ref, op,
 		Action:     domain.ActionGitDenied,
 		Target:     owner + "/" + repo,
 		ExternalID: ref,
-		Credential: domain.CredentialGitHubApp,
+		Credential: c.githubCredential(),
 		DetailJSON: string(detail),
 	})
 }
@@ -2147,16 +2217,20 @@ func (c *LocalClient) RecordEgressDenied(ctx context.Context, target, reason str
 // GraphQL mutation), and everything else — an unrecognized shape, or a
 // recognized one that was refused — takes the fallback for its transport.
 //
+// credential is the tier the injector attached upstream, passed in rather than
+// read off the request: the token is a placeholder by the time anything here
+// can see it, so the only side that knows is the one that swapped it.
+//
 // Appended unconditionally (no dedup key): each attempt is its own event, so a
 // retried edit and a refused one both leave their own row.
-func GHChannelWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
+func GHChannelWriteAction(obs ghwrite.Observation, credential string) *domain.ExternalAction {
 	if shape, ok := ghwrite.Resolve(obs); ok && obs.Succeeded() {
-		return ghSemanticWriteAction(shape, obs)
+		return ghSemanticWriteAction(shape, obs, credential)
 	}
 	if obs.GraphQL != nil {
-		return graphQLFallbackWriteAction(obs)
+		return graphQLFallbackWriteAction(obs, credential)
 	}
-	return ghFallbackWriteAction(obs)
+	return ghFallbackWriteAction(obs, credential)
 }
 
 // graphQLFallbackWriteAction builds the opaque row for a GraphQL write with no
@@ -2177,7 +2251,7 @@ func GHChannelWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
 // TODO(TFAC-789): the mutation names and reason this builds into detail_json
 // are not rendered anywhere — the feed shows the action label only — so today
 // this row's most useful content is reachable only by querying the table.
-func graphQLFallbackWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
+func graphQLFallbackWriteAction(obs ghwrite.Observation, credential string) *domain.ExternalAction {
 	facts := obs.GraphQL
 	detail := map[string]any{"http_status": obs.Status}
 	if facts.Operation != "" {
@@ -2213,7 +2287,7 @@ func graphQLFallbackWriteAction(obs ghwrite.Observation) *domain.ExternalAction 
 		Provider:   domain.ArtifactProviderGitHub,
 		Action:     domain.ActionGraphQLWrite,
 		Target:     target,
-		Credential: domain.CredentialGitHubApp,
+		Credential: credential,
 		DetailJSON: string(payload),
 	}
 }
@@ -2228,14 +2302,14 @@ func graphQLFallbackWriteAction(obs ghwrite.Observation) *domain.ExternalAction 
 // the difference between these rows and the exec verbs': a reply is required to
 // read identically to `gh pr comment-reply`'s row, while a PR create or a
 // review submit is required to say which channel it came through.
-func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation) *domain.ExternalAction {
+func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation, credential string) *domain.ExternalAction {
 	act := &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderGitHub,
 		Action:     shape.Action,
 		Target:     shape.Target(),
 		ExternalID: shape.ExternalID,
 		URL:        obs.URL,
-		Credential: domain.CredentialGitHubApp,
+		Credential: credential,
 	}
 	detail := map[string]any{}
 	if shape.InReplyTo > 0 {
@@ -2273,7 +2347,7 @@ func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation) *domain
 // something this run was never allowed to see. The full path is in detail_json
 // either way. A path naming no repo (a user- or org-level endpoint) falls back
 // to the path itself rather than claiming a repo it never touched.
-func ghFallbackWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
+func ghFallbackWriteAction(obs ghwrite.Observation, credential string) *domain.ExternalAction {
 	detail := map[string]any{"method": obs.Method, "path": obs.Path, "http_status": obs.Status}
 	if shape, ok := obs.Classify(); ok {
 		detail["attempted"] = shape.Action
@@ -2287,7 +2361,7 @@ func ghFallbackWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
 		Provider:   domain.ArtifactProviderGitHub,
 		Action:     domain.ActionGHChannelWrite,
 		Target:     target,
-		Credential: domain.CredentialGitHubApp,
+		Credential: credential,
 		DetailJSON: string(payload),
 	}
 }
@@ -2298,7 +2372,7 @@ func ghFallbackWriteAction(obs ghwrite.Observation) *domain.ExternalAction {
 // produce a lifecycle object; this covers every attempt, so an edit, a merge, a
 // close, and a refusal are all in the log. Best-effort.
 func (c *LocalClient) RecordGHChannelWrite(ctx context.Context, obs ghwrite.Observation) {
-	c.recordBotAction(ctx, GHChannelWriteAction(obs))
+	c.recordBotAction(ctx, GHChannelWriteAction(obs, c.githubCredential()))
 }
 
 // GHWriteDeniedAction builds the audit row for one gh-channel request the
@@ -2318,7 +2392,7 @@ func (c *LocalClient) RecordGHChannelWrite(ctx context.Context, obs ghwrite.Obse
 // in detail_json either way. A GraphQL request names no repository at all, so
 // its target falls back to the node id its variables disclosed, and to the
 // endpoint path when even that was unreadable.
-func GHWriteDeniedAction(req ghwrite.Request, ref ghwrite.Refusal) *domain.ExternalAction {
+func GHWriteDeniedAction(req ghwrite.Request, ref ghwrite.Refusal, credential string) *domain.ExternalAction {
 	detail := map[string]any{"reason": ref.Reason, "method": req.Method, "path": req.Path}
 	if ref.Action != "" {
 		detail["refused"] = ref.Action
@@ -2349,7 +2423,7 @@ func GHWriteDeniedAction(req ghwrite.Request, ref ghwrite.Refusal) *domain.Exter
 		Provider:   domain.ArtifactProviderGitHub,
 		Action:     domain.ActionGHWriteDenied,
 		Target:     target,
-		Credential: domain.CredentialGitHubApp,
+		Credential: credential,
 		DetailJSON: string(payload),
 	}
 }
@@ -2363,7 +2437,7 @@ func GHWriteDeniedAction(req ghwrite.Request, ref ghwrite.Refusal) *domain.Exter
 // cannot be silently lost — but a store failure still only costs the row, never
 // the refusal: the request is already being turned down by the time this runs.
 func (c *LocalClient) RecordGHWriteDenied(ctx context.Context, req ghwrite.Request, ref ghwrite.Refusal) {
-	c.recordBotAction(ctx, GHWriteDeniedAction(req, ref))
+	c.recordBotAction(ctx, GHWriteDeniedAction(req, ref, c.githubCredential()))
 }
 
 // RecordGitPushFailed records one `branch_push_failed` external-action audit
@@ -2385,15 +2459,16 @@ func (c *LocalClient) RecordGitPushFailed(ctx context.Context, repoPath, ref, sh
 		Action:     domain.ActionBranchPushFailed,
 		Target:     repoPath,
 		ExternalID: ref,
-		Credential: domain.CredentialGitHubApp,
+		Credential: c.githubCredential(),
 		DetailJSON: string(detail),
 	})
 }
 
 // githubAction builds the external-action row for a GitHub write from the
 // artifact's coordinates. detail_json is left empty — the rich payload (PR body,
-// review draft) lives on the artifact; the audit row carries who/what/when/from→to.
-func githubAction(a domain.Artifact, action, from, to string) *domain.ExternalAction {
+// review draft) lives on the artifact; the audit row carries who/what/when/from→to
+// and the credential the write was made under.
+func githubAction(a domain.Artifact, action, from, to, credential string) *domain.ExternalAction {
 	return &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderGitHub,
 		Action:     action,
@@ -2402,7 +2477,7 @@ func githubAction(a domain.Artifact, action, from, to string) *domain.ExternalAc
 		URL:        a.URL,
 		FromState:  from,
 		ToState:    to,
-		Credential: domain.CredentialGitHubApp,
+		Credential: credential,
 	}
 }
 
@@ -2427,11 +2502,12 @@ func jiraAction(a domain.Artifact, action, from, to string) *domain.ExternalActi
 // or nil for any other kind. The dedup key is deterministic —
 // branch:<run>:<ref>:<sha> — so the git pre-push hook and the git-proxy
 // backstop, which both observe the same push, collapse to one row; a force-push
-// (new sha) is recorded distinctly. The push lands on GitHub under the org App
-// credential. Free-function form (the counterpart of the LocalClient method)
-// so the direct runtime — which owns UpsertArtifact but holds no LocalClient —
-// can build it from a RunInfo directly.
-func branchPushActionInfo(a domain.Artifact, info RunInfo) *domain.ExternalAction {
+// (new sha) is recorded distinctly. The push lands on GitHub under whichever org
+// credential the run's git path carries, which is why the caller supplies it.
+// Free-function form (the counterpart of the LocalClient method) so the direct
+// runtime — which owns UpsertArtifact but holds no LocalClient — can build it
+// from a RunInfo directly.
+func branchPushActionInfo(a domain.Artifact, info RunInfo, credential string) *domain.ExternalAction {
 	if a.Kind != domain.ArtifactKindBranch {
 		return nil
 	}
@@ -2443,7 +2519,7 @@ func branchPushActionInfo(a domain.Artifact, info RunInfo) *domain.ExternalActio
 		ExternalID: a.ExternalID, // the ref (refs/heads/...)
 		URL:        a.URL,
 		ToState:    domain.ArtifactStateBranchPushed,
-		Credential: domain.CredentialGitHubApp,
+		Credential: credential,
 		DedupKey:   domain.BranchPushDedupKey(info.RunID, a.ExternalID, sha),
 		DetailJSON: a.DetailsJSON, // {"sha":...,"new":...}
 	}

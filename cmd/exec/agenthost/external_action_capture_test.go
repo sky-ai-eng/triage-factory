@@ -565,7 +565,7 @@ func TestGHChannelWriteAction_ReviewSubmit(t *testing.T) {
 		Status:     200,
 		ExternalID: "999",
 		URL:        reviewURL,
-	})
+	}, domain.CredentialGitHubApp)
 	if act.Action != domain.ActionReviewSubmitted || act.Target != "acme/widgets#841" ||
 		act.ExternalID != "999" || act.URL != reviewURL {
 		t.Errorf("review submit row = %+v, want review_submitted on acme/widgets#841", act)
@@ -576,7 +576,7 @@ func TestGHChannelWriteAction_ReviewSubmit(t *testing.T) {
 	// A refused submit is an attempt, exactly like a refused merge.
 	refused := GHChannelWriteAction(ghwrite.Observation{
 		Method: "POST", Path: "/repos/acme/widgets/pulls/841/reviews", Status: 422,
-	})
+	}, domain.CredentialGitHubApp)
 	if refused.Action != domain.ActionGHChannelWrite ||
 		!strings.Contains(refused.DetailJSON, `"attempted":"review_submitted"`) {
 		t.Errorf("refused submit = %+v, want the attempt row naming the act", refused)
@@ -587,7 +587,7 @@ func TestGHChannelWriteAction_ReviewSubmit(t *testing.T) {
 // the old opaque row: a shape the table doesn't model records that a write
 // happened and refuses to name it, and a path naming no repo doesn't invent one.
 func TestGHChannelWriteAction_UnclassifiedKeepsTheFallback(t *testing.T) {
-	act := GHChannelWriteAction(ghwrite.Observation{Method: "POST", Path: "/user/repos", Status: 201})
+	act := GHChannelWriteAction(ghwrite.Observation{Method: "POST", Path: "/user/repos", Status: 201}, domain.CredentialGitHubApp)
 	if act.Action != domain.ActionGHChannelWrite || act.Target != "/user/repos" {
 		t.Errorf("org-level write = %+v, want the fallback keyed on the path", act)
 	}
@@ -597,7 +597,7 @@ func TestGHChannelWriteAction_UnclassifiedKeepsTheFallback(t *testing.T) {
 	// A classified shape's 2xx is the other half of the same decision.
 	del := GHChannelWriteAction(ghwrite.Observation{
 		Method: "DELETE", Path: "/repos/octo/repo/issues/comments/5", Status: 204,
-	})
+	}, domain.CredentialGitHubApp)
 	if del.Action != domain.ActionCommentDeleted || del.Target != "octo/repo" || del.ExternalID != "5" {
 		t.Errorf("comment delete = %+v, want comment_deleted on octo/repo naming comment 5", del)
 	}
@@ -719,7 +719,7 @@ func TestGHChannelWriteAction_GraphQLSemanticRow(t *testing.T) {
 			Fields:    []string{"addComment"},
 			Subject:   "PR_kwRow",
 		},
-	})
+	}, domain.CredentialGitHubApp)
 	if act.Action != domain.ActionCommentPosted {
 		t.Errorf("action = %q, want comment_posted", act.Action)
 	}
@@ -751,7 +751,7 @@ func TestGHChannelWriteAction_GraphQLCarriesProvenanceWhereItIsAsked(t *testing.
 			Fields:    []string{"createPullRequest"},
 			Subject:   "R_kwRepo",
 		},
-	})
+	}, domain.CredentialGitHubApp)
 	if act.Action != domain.ActionPRCreated || act.Target != "octo/repo#9" || act.ExternalID != "9" {
 		t.Errorf("row = %+v, want pr_created on octo/repo#9 keyed by number", act)
 	}
@@ -767,7 +767,7 @@ func TestGHChannelWriteAction_GraphQLRefusalIsAnAttempt(t *testing.T) {
 	act := GHChannelWriteAction(ghwrite.Observation{
 		Method: "POST", Path: "/graphql", Status: 200, Errored: true,
 		GraphQL: &ghwrite.GraphQLFacts{Fields: []string{"mergePullRequest"}, Subject: "PR_kwRefused"},
-	})
+	}, domain.CredentialGitHubApp)
 	if act.Action != domain.ActionGraphQLWrite {
 		t.Errorf("action = %q, want the graphql fallback — a refused merge is not pr_merged", act.Action)
 	}
@@ -799,7 +799,7 @@ func TestGHChannelWriteAction_GraphQLFallback(t *testing.T) {
 				Fields:    []string{"createSponsorship"},
 				Subject:   "U_kwSponsor",
 			},
-		})
+		}, domain.CredentialGitHubApp)
 		if act.Action != domain.ActionGraphQLWrite {
 			t.Errorf("action = %q, want graphql_write", act.Action)
 		}
@@ -815,7 +815,7 @@ func TestGHChannelWriteAction_GraphQLFallback(t *testing.T) {
 		act := GHChannelWriteAction(ghwrite.Observation{
 			Method: "POST", Path: "/graphql", Status: 200,
 			GraphQL: &ghwrite.GraphQLFacts{Unreadable: ghwrite.GraphQLOverCap},
-		})
+		}, domain.CredentialGitHubApp)
 		if act.Action != domain.ActionGraphQLWrite {
 			t.Errorf("action = %q, want graphql_write", act.Action)
 		}
@@ -836,7 +836,7 @@ func TestGHChannelWriteAction_GraphQLFallback(t *testing.T) {
 				Fields:  []string{"closePullRequest", "mergePullRequest"},
 				Subject: "PR_kwBoth",
 			},
-		})
+		}, domain.CredentialGitHubApp)
 		if act.Action != domain.ActionGraphQLWrite {
 			t.Errorf("action = %q, want graphql_write — no one row can carry two acts", act.Action)
 		}

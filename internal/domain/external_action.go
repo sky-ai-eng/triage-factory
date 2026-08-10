@@ -7,8 +7,9 @@ import (
 
 // ExternalAction is one row in external_actions — the append-only audit log of
 // record. Each row captures one external write Triage Factory performed under an
-// ORG-scoped credential (the org GitHub App / the org Jira service account):
-// who, what, when, under which credential, and from→to for a transition.
+// ORG-scoped credential (the org GitHub App or the PAT standing in for it, the
+// org Jira service account): who, what, when, under which credential, and
+// from→to for a transition.
 //
 // This is event-grain and immutable, distinct from the mutable, object-grain
 // Artifact (which records an object's current state and upserts in place). The
@@ -310,6 +311,21 @@ const (
 // user's own credential is excluded.
 const (
 	CredentialGitHubApp = "github_app"
+	// CredentialGitHubPAT is the tier-3 PAT an org lends Triage Factory when it
+	// has no GitHub App. It sits on the ORG side of the ingestion gate beside
+	// the App, and the distinction the gate draws is about WHOSE ACT a row
+	// records, not whose token it is: this credential acts for the org on every
+	// run in it, exactly as the App does, and no user chose it per action. The
+	// excluded case is the opposite one — a user acting as themselves through
+	// their own authorization (the Jira claim/swipe/done/requeue flows), which
+	// is already attributed natively in the system it lands in.
+	//
+	// Which of the two acted is not cosmetic. A PAT is unscopeable, so the blast
+	// radius of a row written under it is every repository its holder can reach,
+	// and it carries a person's name into whatever it touches. A log that files
+	// those under github_app answers "who did this" with a service account that
+	// was never involved.
+	CredentialGitHubPAT = "github_pat"
 	CredentialJiraOrg   = "jira_org"
 	CredentialSlackBot  = "slack_bot"
 	// CredentialNone is the honest value for an action that spent no credential
