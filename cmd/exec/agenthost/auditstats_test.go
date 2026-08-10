@@ -3,6 +3,7 @@ package agenthost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -204,9 +205,9 @@ func TestAuditDrop_WireOpNamesAreClamped(t *testing.T) {
 	for _, a := range []agentproc.RecordRelayDropArgs{
 		{Namespace: agentproc.RelayNamespaceCore, Op: "invented_one"},
 		{Namespace: agentproc.RelayNamespaceCore, Op: "invented_two"},
-		// A provider namespace: resolved through a registry this side does not
-		// enumerate, so it collapses too — its stage already says provider.
-		{Namespace: "slack", Op: agentproc.OpRecordGHWrite},
+		// An unregistered namespace: nothing serves it, so there is no name to
+		// vouch for.
+		{Namespace: "not_a_provider", Op: agentproc.OpRecordGHWrite},
 	} {
 		args, _ := json.Marshal(a)
 		s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordRelayDrop, args)
@@ -215,6 +216,36 @@ func TestAuditDrop_WireOpNamesAreClamped(t *testing.T) {
 	got := collectDrops(t, reader)
 	if len(got[dropStageRelaySend]) != 1 || got[dropStageRelaySend][dropOpOther] != 3 {
 		t.Fatalf("drops = %v; want all three collapsed onto op=%s", got, dropOpOther)
+	}
+}
+
+// TestAuditDrop_RegisteredProviderOpIsNamed: the clamp is against what this
+// binary REGISTERS, not against the core catalog — so a provider's own audit op
+// keeps its name. Without this, every provider drop would land on "other" and
+// the by-op panel could never break down the relay_dispatch stage, which only
+// ever fires for provider ops.
+func TestAuditDrop_RegisteredProviderOpIsNamed(t *testing.T) {
+	reader := installTestAuditDrops(t)
+	t.Cleanup(ResetProviders)
+	RegisterProviderOp("acmeprov", "record_thing",
+		func(context.Context, db.Stores, RunInfo, json.RawMessage) (any, error) {
+			return nil, errors.New("handler blew up")
+		})
+	s := NewRelayServer(db.Stores{}, RunInfo{}, nil)
+
+	// The send stage: the sidecar reporting it could not relay that provider's
+	// record.
+	args, _ := json.Marshal(agentproc.RecordRelayDropArgs{Namespace: "acmeprov", Op: "record_thing"})
+	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordRelayDrop, args)
+	// The dispatch stage: the same op arriving and its handler failing.
+	s.DispatchNotify(context.Background(), "acmeprov", "record_thing", json.RawMessage(`{}`))
+
+	got := collectDrops(t, reader)
+	if n := got[dropStageRelaySend]["acmeprov.record_thing"]; n != 1 {
+		t.Errorf("drops = %v; want one %s drop under op=acmeprov.record_thing", got, dropStageRelaySend)
+	}
+	if n := got[dropStageRelayDispatch]["acmeprov.record_thing"]; n != 1 {
+		t.Errorf("drops = %v; want one %s drop under op=acmeprov.record_thing", got, dropStageRelayDispatch)
 	}
 }
 

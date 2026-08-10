@@ -107,14 +107,19 @@ volume.
   | `relay_dispatch` | A provider's own notify handler (Slack, …) ran and failed. |
   | `record` | The record reached the database write and the write failed. |
 
-  `op` names what was being recorded, in the vocabulary of its stage: a relay
-  `<namespace>.<op>` pair for the relay stages, the row's own domain kind
-  (`pull_request`, `gh_channel_write`, `pr_merged`) for the write. `other`
-  means a name arrived on the wire that this binary does not know — the label
-  is clamped deliberately, because the sending process is the one exposed to
-  hostile text and an unclamped label would be an unbounded series. Nothing
-  here names a repository, a target, or an id; the accompanying `WARN` line
-  does.
+  `op` names what was being recorded, in the vocabulary of its stage: a
+  `<namespace>.<op>` relay pair for the relay stages (`core.record_gh_write`,
+  `slack.record_thread_root`, …), the row's own domain kind (`pull_request`,
+  `gh_channel_write`, `pr_merged`) for the write.
+
+  `other` means the name arrived on the wire and matches no op this binary
+  serves. The label is clamped against the ops actually registered — the core
+  catalog plus whatever providers registered at startup — because the sending
+  process is the one exposed to hostile text, and an unclamped label would let
+  it mint unbounded series in the exporter just by naming ops that do not
+  exist. Nothing here names a repository, a target, or an id; the accompanying
+  `WARN` line does, and it prints the wire name verbatim even when the label
+  collapsed to `other`.
 
   One loss is outside what this can measure, and is accepted rather than
   fixed: a record written as a run is torn down can lose to the supervision

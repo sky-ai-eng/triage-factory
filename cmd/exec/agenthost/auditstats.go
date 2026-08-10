@@ -73,10 +73,11 @@ func newAuditDropStats(mp metric.MeterProvider) *auditDropStats {
 }
 
 // recordAuditDrop counts one lost audit record. op names what was being
-// recorded, in the vocabulary of the stage that lost it — a relay
+// recorded, in the vocabulary of the stage that lost it — a registered relay
 // "<namespace>.<op>" pair for the relay stages, the domain kind of the row for
-// the write stage — so stage is what tells a reader which vocabulary to read op
-// in. Both are closed sets; neither carries a repo, a target, or an id.
+// the write stage, and "other" at either when the name is one this binary
+// cannot vouch for — so stage is what tells a reader which vocabulary to read
+// op in. Every value is a closed set; none carries a repo, a target, or an id.
 func recordAuditDrop(ctx context.Context, stage, op string) {
 	if auditDrops == nil || auditDrops.dropped == nil {
 		return
@@ -119,22 +120,41 @@ var coreNotifyOps = map[string]struct{}{
 }
 
 // relayDropOp names a relay-stage drop, in the "<namespace>.<op>" form the
-// relay spans already use — but only for a pair this process recognizes.
+// relay spans already use — but only for a pair this process can name.
 // Anything else collapses to "other".
 //
 // Both halves arrive ON THE WIRE, from the one process in the split
 // deliberately exposed to hostile text, and what they name becomes a metric
 // label. Unclamped, a compromised sidecar could mint unbounded series in the
-// orchestrator's exporter simply by naming ops that do not exist. The cost is
-// that a provider's own audit op — namespaced, resolved through a registry this
-// function does not enumerate — counts as "other"; its stage says so anyway,
-// and the warn line accompanying every drop names the pair exactly.
+// orchestrator's exporter simply by naming ops that do not exist. Clamping to
+// what is REGISTERED (rather than to the core catalog alone) is what keeps a
+// provider's own audit op nameable: sidecar and executor are one binary, so a
+// namespace that dispatches here is one this process also has in its registry.
+// An op nothing registered is the only thing left over, and "other" is the
+// honest name for it.
 func relayDropOp(namespace, op string) string {
-	if namespace != agentproc.RelayNamespaceCore {
+	if !isRegisteredRelayNotifyOp(namespace, op) {
 		return dropOpOther
 	}
-	if _, ok := coreNotifyOps[op]; ok {
-		return namespace + "." + op
+	return namespace + "." + op
+}
+
+// isRegisteredRelayNotifyOp reports whether (namespace, op) is a pair this
+// binary serves: a core op from dispatchCoreNotify's switch, or a provider op
+// some ee package registered at init. Both sets are fixed at startup and
+// bounded by construction — the core one by its switch, the provider one by a
+// registry that panics on a duplicate registration.
+func isRegisteredRelayNotifyOp(namespace, op string) bool {
+	if namespace == agentproc.RelayNamespaceCore {
+		_, ok := coreNotifyOps[op]
+		return ok
 	}
-	return dropOpOther
+	// Read without a lock, like dispatchProviderOp itself: the registry is
+	// written only by init-time registration, never once ops are being served.
+	ops, ok := providerOps[namespace]
+	if !ok {
+		return false
+	}
+	_, ok = ops[op]
+	return ok
 }

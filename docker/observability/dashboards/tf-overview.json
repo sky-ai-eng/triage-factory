@@ -2045,7 +2045,7 @@
     },
     {
       "collapsed": false,
-      "description": "Audit records that never reached the log of record. Every external write an agent makes is applied upstream before TF records it, so recording is best-effort by contract at three stages \u2014 the sidecar's send, the orchestrator's decode, the database write \u2014 and a failure at any of them is swallowed rather than allowed to unwind an act that already happened. These panels are the measurement that swallow needs. Flat zero is the expected shape, and the only interesting one: a single drop is a hole in the log, not a blip to smooth over. One residual is deliberately outside what this can see \u2014 a notify written as a run is torn down loses to the connection close, and takes the report of its own loss with it.",
+      "description": "Audit records that never reached the log of record. Every external write an agent makes is applied upstream before TF records it, so recording is best-effort by contract at every stage that follows \u2014 the sidecar's send, the orchestrator's decode, a provider handler's own dispatch, the database write \u2014 and a failure at any of them is swallowed rather than allowed to unwind an act that already happened. These panels are the measurement that swallow needs. Flat zero is the expected shape, and the only interesting one: a single drop is a hole in the log, not a blip to smooth over. One residual is deliberately outside what this can see \u2014 a notify written as a run is torn down loses to the connection close, and takes the report of its own loss with it.",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -2216,7 +2216,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "What was being recorded when it was lost, over the dashboard's time range. `op` is read in the vocabulary of its stage: a relay `<namespace>.<op>` pair for the relay stages, the row's own domain kind (`pull_request`, `gh_channel_write`, `pr_merged`) for the database write. `other` is a name that arrived on the wire and did not match anything this binary knows \u2014 the label is clamped on purpose, since the sending process is the one exposed to hostile text and an unclamped label would be an unbounded series. Nothing here names a repository, a target, or an id; the pod's WARN line does.",
+      "description": "What was being recorded when it was lost, over the dashboard's time range. `op` is read in the vocabulary of its stage: a `<namespace>.<op>` relay pair for the relay stages (`core.record_gh_write`, `slack.record_thread_root`, \u2026), the row's own domain kind (`pull_request`, `gh_channel_write`, `pr_merged`) for the database write. `other` is a name that arrived on the wire matching no op this binary serves \u2014 the label is clamped against the registered ops on purpose, since the sending process is the one exposed to hostile text and an unclamped label would be an unbounded series. Nothing here names a repository, a target, or an id; the pod's WARN line does.",
       "fieldConfig": {
         "defaults": {
           "custom": {
