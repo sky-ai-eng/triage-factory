@@ -380,6 +380,39 @@ func TestRuntimeRetired_RefusesTheFollowUpAndTheComposer(t *testing.T) {
 	}
 }
 
+// TestRuntimeRetired_NamesTheRetiredEngine pins the predicate against the one
+// rewrite that reads as equivalent and is not: "anything but the live engine".
+// The claim scan names `sdk`, so a row carrying neither name — a third engine,
+// or a row whose runtime never got written and reads back empty — is claimable
+// there. Spelled as a negation here, that row would be driven by the
+// dispatcher and refused by its own composer, which is the exact split this
+// gate exists to prevent.
+func TestRuntimeRetired_NamesTheRetiredEngine(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	delegation := func(runtime string) domain.Conversation {
+		return domain.Conversation{Type: domain.ConversationTypeDelegation, Runtime: runtime}
+	}
+	for _, tc := range []struct {
+		runtime string
+		want    bool
+	}{
+		{domain.ConversationRuntimeSDK, true},
+		{domain.ConversationRuntimeNative, false},
+		// Neither name: unclaimable-by-nobody is not this gate's call to make.
+		{"", false},
+		{"some-later-engine", false},
+	} {
+		if got := runtimeRetired(delegation(tc.runtime)); got != tc.want {
+			t.Errorf("runtimeRetired(runtime=%q) = %v, want %v", tc.runtime, got, tc.want)
+		}
+	}
+	// Type-scoped too: the same stamp on a curator conversation is a live
+	// engagement in its own jail.
+	if runtimeRetired(domain.Conversation{Type: "curator", Runtime: domain.ConversationRuntimeSDK}) {
+		t.Error("a curator conversation was reported retired; the gate is delegation-scoped")
+	}
+}
+
 // TestRuntimeRetired_LeavesTheNativeSurfaceAlone pins the gate's scope: the
 // retirement is about which engine drives a delegation, so the engine that
 // does must be untouched by it in the same mode.

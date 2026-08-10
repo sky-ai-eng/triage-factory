@@ -466,11 +466,17 @@ func (s *Spawner) followUpBlock(ctx context.Context, orgID string, run *domain.C
 //
 // Mode-gated because the SQL is dialect-gated and the dialect IS the mode:
 // local runs every delegation through the SDK and retires nothing.
+//
+// Named engines only, on both sides. Spelled as "not the live one" this would
+// retire whatever a third engine turns out to be — and the SQL, which names
+// `sdk`, would go on claiming it: driven by a dispatcher, refused by its own
+// composer. Retirement is a decision made about a specific engine, so both
+// halves say which one.
 func runtimeRetired(run domain.Conversation) bool {
 	if runmode.Current() != runmode.ModeMulti {
 		return false
 	}
-	return run.Type == domain.ConversationTypeDelegation && run.Runtime != domain.ConversationRuntimeNative
+	return run.Type == domain.ConversationTypeDelegation && run.Runtime == domain.ConversationRuntimeSDK
 }
 
 // blockedFollowUpError is the error a refusal reaches the HTTP layer as.
