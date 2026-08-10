@@ -234,6 +234,44 @@ func (p JiraIssueBecameAtomicPredicate) Matches(m JiraIssueBecameAtomicMetadata)
 }
 
 // -----------------------------------------------------------------------------
+// issue:deleted — a tracked issue no longer exists. Terminal for the entity:
+// nothing will ever be observed about it again, so it is the one Jira event
+// that reports the disappearance of its own subject.
+//
+// Every field is last-known state read off the entity's stored snapshot, not
+// the source — there is nothing left to read. That is also why there is no
+// dedup_key: an issue can only stop existing once.
+//
+// Emitted ONLY on a direct 404 from the issue endpoint, never on an issue's
+// absence from a search result (see the tracker's confirmation pass) — absence
+// is equally consistent with an unindexed or archived issue, a permission
+// change, or a paging bug, and this event closes the entity and every task on
+// it.
+// -----------------------------------------------------------------------------
+
+type JiraIssueDeletedMetadata struct {
+	Assignee          string `json:"assignee"`
+	AssigneeAccountID string `json:"assignee_account_id"`
+	IssueKey          string `json:"issue_key"`
+	Project           string `json:"project"`
+	IssueType         string `json:"issue_type"`
+	LastStatus        string `json:"last_status"`
+	Summary           string `json:"summary"`
+}
+
+type JiraIssueDeletedPredicate struct {
+	AssigneeIn []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
+	Project    *string  `json:"project,omitempty" doc:"Scope to a specific Jira project key."`
+	IssueType  *string  `json:"issue_type,omitempty"`
+}
+
+func (p JiraIssueDeletedPredicate) Matches(m JiraIssueDeletedMetadata) bool {
+	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
+		strEq(p.Project, m.Project) &&
+		strEq(p.IssueType, m.IssueType)
+}
+
+// -----------------------------------------------------------------------------
 // Registration.
 // -----------------------------------------------------------------------------
 
@@ -251,4 +289,5 @@ func init() {
 	Register(NewSchema[JiraIssueCommentedMetadata, JiraIssueCommentedPredicate](domain.EventJiraIssueCommented, OwnershipOwned))
 	Register(NewSchema[JiraIssueCompletedMetadata, JiraIssueCompletedPredicate](domain.EventJiraIssueCompleted, OwnershipOwned))
 	Register(NewSchema[JiraIssueBecameAtomicMetadata, JiraIssueBecameAtomicPredicate](domain.EventJiraIssueBecameAtomic, OwnershipOwned))
+	Register(NewSchema[JiraIssueDeletedMetadata, JiraIssueDeletedPredicate](domain.EventJiraIssueDeleted, OwnershipOwned))
 }

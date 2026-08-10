@@ -1278,6 +1278,10 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 
 	trackerLog.InfoContext(ctx, "jira refresh", "discovered", len(discovered), "entities", len(entities), "refreshed", len(refreshed), "events", eventsEmitted, "stale_reads", staleReads)
 
+	// Phase 4: confirm the long-unanswered keys against the issue endpoint.
+	// Emits deletion events, which the router turns into entity/task closes.
+	eventsEmitted += t.confirmMissingJiraEntities(ctx, client, orgID, entities, refreshed, time.Now())
+
 	// Always fire the sentinel — it means "a poll cycle completed," not "a
 	// poll produced work." Carry-over readiness depends on this firing even
 	// on an empty first poll (e.g. projects configured but nothing assigned
@@ -1285,6 +1289,158 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 	t.EmitPollComplete(ctx, "jira", startedAt, len(entities), eventsEmitted)
 
 	return eventsEmitted, nil
+}
+
+const (
+	// jiraGoneGrace is how long a tracked key must go unanswered by the
+	// refresh before the tracker spends a request asking whether its issue
+	// still exists.
+	//
+	// The grace is the whole safety margin. A key's absence from one search
+	// is weak evidence — an index that hasn't caught up, a transient
+	// visibility change, or a paging bug all present identically — and the
+	// event this pass can emit closes the entity and every task on it. Many
+	// consecutive misses across an hour is not proof either, which is why
+	// the pass confirms rather than concludes; the grace is only there so
+	// the confirmation is spent on keys that look durably gone instead of on
+	// every blip.
+	//
+	// Wall-clock rather than a cycle count because the poll interval is the
+	// user's to set: an hour is an hour whether that is six cycles or sixty.
+	jiraGoneGrace = time.Hour
+
+	// jiraGoneProbeBudget caps confirmations per cycle. These are one
+	// request per key on top of a cycle that has already done its batch
+	// reads, and the population they draw from is unbounded — a whole
+	// project's worth of keys can go missing at once when a project is
+	// deleted or a credential's visibility narrows. Deferred keys are not
+	// dropped: they stay stale and are re-picked next cycle, so a large
+	// backlog drains over several cycles instead of arriving as one burst
+	// of API calls.
+	jiraGoneProbeBudget = 20
+)
+
+// confirmMissingJiraEntities asks Jira directly about tracked entities the
+// refresh has not answered for in a while, and emits jira:issue:deleted for the
+// ones it confirms are gone. Returns the number of events emitted.
+//
+// This exists because the refresh cannot retire anything on its own. A key
+// missing from a `key IN (...)` result is skipped by the diff loop, so the
+// entity keeps its last snapshot and emits nothing — for as long as it takes
+// someone to notice, which for a durable entity is forever. Closing on that
+// signal alone would be wrong in the other direction: absence from a search is
+// equally consistent with an issue that is merely unindexed, archived, or newly
+// invisible to the credential, and closing those would destroy live work.
+//
+// The issue endpoint settles it. A 404 there is Jira answering about one issue
+// by key, which is the strongest statement available short of an audit log, and
+// the only one this acts on. A 200 means the opposite of gone — the issue
+// exists and something upstream of the diff is failing to return it — so it is
+// logged loudly and changes nothing. Any other error is not evidence at all.
+func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiraclient.Client, orgID string, entities []domain.Entity, refreshed map[string]jiraIssueState, now time.Time) int {
+	var candidates []domain.Entity
+	for _, e := range entities {
+		if _, answered := refreshed[e.SourceID]; answered {
+			continue
+		}
+		// LastPolledAt advances on every successful refresh write and is
+		// stamped at creation, so its age IS the "how long has this key gone
+		// unanswered" clock — no separate miss counter to keep, and nothing
+		// to lose across a restart or a change of leader. A nil value predates
+		// the column's population and says nothing about recency, so it waits
+		// for the next successful refresh to give it a reading.
+		if e.LastPolledAt == nil || now.Sub(*e.LastPolledAt) < jiraGoneGrace {
+			continue
+		}
+		candidates = append(candidates, e)
+	}
+	if len(candidates) == 0 {
+		return 0
+	}
+
+	ctx, span := tracer.Start(ctx, "tracker.jira.confirm_missing",
+		trace.WithAttributes(telemetry.Count(len(candidates))))
+	defer span.End()
+
+	emitted := 0
+	for i, e := range candidates {
+		if i >= jiraGoneProbeBudget {
+			span.SetAttributes(telemetry.Outcome("partial"))
+			trackerLog.InfoContext(ctx, "jira gone-confirmation budget spent; remaining keys re-checked next cycle",
+				"budget", jiraGoneProbeBudget, "deferred", len(candidates)-i)
+			break
+		}
+		if ctx.Err() != nil {
+			return emitted
+		}
+
+		_, err := client.GetIssue(ctx, e.SourceID)
+		switch {
+		case err == nil:
+			// Confirmed present, and yet the refresh didn't return it. The
+			// entity is being skipped every cycle by something other than
+			// deletion — an unindexed or archived issue, or one the
+			// credential can no longer see through search. Nothing here can
+			// repair that, but an entity silently frozen is exactly what this
+			// pass exists to stop being invisible.
+			trackerLog.WarnContext(ctx, "jira issue exists but no search returned it; entity is tracked and not being diffed",
+				"source_id", e.SourceID, "entity_id", e.ID)
+		case jiraclient.IsNotFound(err):
+			t.emitJiraDeleted(ctx, orgID, e)
+			emitted++
+		default:
+			trackerLog.WarnContext(ctx, "jira gone-confirmation failed; entity left tracked",
+				"source_id", e.SourceID, "entity_id", e.ID, "error", err)
+		}
+	}
+	if emitted > 0 {
+		// A disposition rather than a second Count — Count is one key, and the
+		// count worth keeping on this span is how many keys it examined, not
+		// how many it retired. A pass that retires anything is the rare case;
+		// this is what makes it findable.
+		span.SetAttributes(telemetry.Disposition("entities_retired"), telemetry.Attempt(emitted))
+	}
+	return emitted
+}
+
+// emitJiraDeleted publishes the terminal event for an entity whose issue Jira
+// no longer resolves. Every metadata field is last-known state off the stored
+// snapshot — the source has nothing left to read — and a snapshot that is
+// absent or unparseable still emits, with blank fields: the entity has to be
+// retired either way, and a corrupt snapshot is not a reason to keep tracking
+// an issue that no longer exists.
+//
+// Publish, not the snapshot-CAS enqueue: there is no new snapshot to advance,
+// and the entity's own close is the router's job (the event terminates it).
+func (t *Tracker) emitJiraDeleted(ctx context.Context, orgID string, e domain.Entity) {
+	var snap domain.JiraSnapshot
+	if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
+		if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
+			trackerLog.WarnContext(ctx, "corrupt jira snapshot on a deleted issue; emitting with last-known fields blank",
+				"source_id", e.SourceID, "entity_id", e.ID, "error", err)
+		}
+	}
+	entityID := e.ID
+	trackerLog.InfoContext(ctx, "jira issue no longer exists; retiring entity",
+		"source_id", e.SourceID, "entity_id", e.ID)
+	t.publish(ctx, domain.Event{
+		OrgID:     orgID,
+		EventType: domain.EventJiraIssueDeleted,
+		EntityID:  &entityID,
+		MetadataJSON: mustJSON(events.JiraIssueDeletedMetadata{
+			Assignee:          snap.Assignee,
+			AssigneeAccountID: snap.AssigneeAccountID,
+			IssueKey:          e.SourceID,
+			Project:           extractProject(e.SourceID),
+			IssueType:         snap.IssueType,
+			LastStatus:        snap.Status,
+			Summary:           snap.Summary,
+		}),
+		// No occurred_at: Jira reports that an issue is absent, never when it
+		// became absent, so detection time is the only honest reading and the
+		// enqueue's own fallback supplies it.
+		CreatedAt: time.Now(),
+	})
 }
 
 // jiraReadIsStale reports whether a freshly fetched snapshot is older than the

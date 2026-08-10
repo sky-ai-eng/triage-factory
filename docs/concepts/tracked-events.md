@@ -53,6 +53,32 @@ Events are emitted once per transition, not continuously. If a PR stays in the s
 |-------|----|---------|
 | **Status Changed** | `jira:issue:status_changed` | The `status` field changes (e.g. To Do → In Progress) |
 | **Issue Completed** | `jira:issue:completed` | The `status` changes to Done, Closed, or Resolved |
+| **Issue Deleted** | `jira:issue:deleted` | A tracked issue no longer exists — see below |
+
+#### Issue Deleted
+
+The one Jira event that doesn't come from the snapshot-diff, because there is no
+new snapshot to diff: it reports that its own subject is gone. Like the terminal
+GitHub events it closes the entity and every task on it, so what it takes to
+emit one is deliberately strict.
+
+A tracked issue simply missing from a poll's search results is **not** enough. An
+issue can drop out of a search while still existing — an index that hasn't caught
+up, an archived issue or project, a key that moved, a narrowed credential — and
+all of those look identical to deletion from the search alone. So absence only
+starts a clock: once a key has gone unanswered for long enough, the poller asks
+Jira about that one issue directly, and emits this event **only** on a 404 from
+the issue endpoint.
+
+The other outcomes deliberately change nothing. An issue that resolves but never
+appears in search results is logged as such and stays tracked — its entity is
+being skipped by something that isn't deletion, and closing it would destroy live
+work. A confirmation that fails for any other reason is not evidence either way,
+and is retried on a later cycle.
+
+Metadata is the entity's last-known state (assignee, project, issue type, last
+status, summary), since the source has nothing left to read. There is no
+`dedup_key` — an issue can only stop existing once.
 
 ## Slack Events
 
