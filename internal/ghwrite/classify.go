@@ -375,6 +375,17 @@ func Classify(method, path string) (Shape, bool) {
 			s.Action = domain.ActionRepoForked
 			return s, true
 		}
+	case "generate":
+		if method == "POST" && len(rest) == 1 {
+			// Instantiating a template. Like a fork, the path names the
+			// repository being copied FROM and the new one exists only in the
+			// response, so the row targets the template and the act is the
+			// create. Its GraphQL twin (cloneTemplateRepository) can do better
+			// because gh selects the new repository's url back; nothing in this
+			// path's shape offers the same.
+			s.Action = domain.ActionRepoCreated
+			return s, true
+		}
 	case "topics":
 		if method == "PUT" && len(rest) == 1 {
 			// Topics are repository settings that happen to have their own

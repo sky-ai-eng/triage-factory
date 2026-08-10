@@ -913,3 +913,39 @@ func TestResolveGraphQL_RepoCreateIsLocatedByItsOwnURL(t *testing.T) {
 		t.Errorf("unresolved create = %+v (ok=%v), want an empty target", blind, ok)
 	}
 }
+
+// TestParseGraphQLRequest_CycleAroundARealMutationIsStillNamed pins the
+// behaviour at the boundary of the cycle guard, which is subtler than the
+// pure-cycle case above and was previously unpinned.
+//
+// A fragment that participates in a cycle AND selects a real mutation resolves
+// and is named. The revisit is skipped rather than treated as a dead end, so
+// nothing marks the reading incomplete. That is the right outcome and not an
+// accident of the guard: the agent demonstrably reached for a merge, which is
+// what the row should say. The document is spec-invalid and GitHub executes
+// none of it, but that shows up where it belongs — the response carries an
+// errors array, so the row is an ATTEMPT rather than a merge, and no success is
+// ever asserted from a document the server refused.
+func TestParseGraphQLRequest_CycleAroundARealMutationIsStillNamed(t *testing.T) {
+	body := envelope(t, `mutation M { ...A }
+		fragment A on Mutation { mergePullRequest(input:{}) { clientMutationId } ...B }
+		fragment B on Mutation { ...A }`, "", input(map[string]any{"pullRequestId": "PR_kwCycle"}))
+
+	facts, ok := ParseGraphQLRequest(body)
+	if !ok {
+		t.Fatal("the request was read as performing no write")
+	}
+	if facts.Mutation() != "mergePullRequest" {
+		t.Fatalf("mutation = %q (unreadable=%q), want the merge named", facts.Mutation(), facts.Unreadable)
+	}
+
+	// The server rejects the document, and that is what keeps the row honest.
+	refused := Observation{Status: 200, GraphQL: &facts, Errored: true}
+	if refused.Succeeded() {
+		t.Error("a document the server refuses reported success")
+	}
+	shape, classified := refused.Classify()
+	if !classified || shape.Action != domain.ActionPRMerged {
+		t.Errorf("classify = %+v (ok=%v), want the attempted merge named", shape, classified)
+	}
+}

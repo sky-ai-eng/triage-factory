@@ -476,6 +476,15 @@ func TestClassify_RepositoryConfiguration(t *testing.T) {
 			target: "octo/repo",
 		},
 		{
+			// Instantiating a template: the path addresses the template and the
+			// act is a create, the same asymmetry a fork has.
+			name:   "template instantiated",
+			method: "POST",
+			path:   "/repos/octo/template/generate",
+			action: domain.ActionRepoCreated,
+			target: "octo/template",
+		},
+		{
 			name:   "label defined",
 			method: "POST",
 			path:   "/repos/octo/repo/labels",
@@ -579,6 +588,8 @@ func TestClassify_RepositoryConfigurationBoundaries(t *testing.T) {
 		// fork collection has no members.
 		{name: "under a label", method: "DELETE", path: "/repos/octo/repo/labels/bug/extra"},
 		{name: "under forks", method: "POST", path: "/repos/octo/repo/forks/17"},
+		{name: "reading the template endpoint", method: "GET", path: "/repos/octo/template/generate"},
+		{name: "under generate", method: "POST", path: "/repos/octo/template/generate/17"},
 		{name: "under topics", method: "PUT", path: "/repos/octo/repo/topics/17"},
 		// Repository creation posts outside the /repos/ namespace, so no repo
 		// coordinates exist to classify against. The porcelain sends the GraphQL

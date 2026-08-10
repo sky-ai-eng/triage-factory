@@ -66,7 +66,11 @@ const reviewRefusal = "This command was not run. `gh pr review` cannot attach co
 // no `tfac exec gh repo` verb to name — and the file comment above holds that a
 // redirect to a command that does not exist is worse than no redirect at all.
 // So it redirects to the only thing that actually works: saying so, and letting
-// a human do it. When a verb exists, this text is where it gets named.
+// a human do it.
+//
+// TODO(TFAC-793): when a governed repo-provisioning verb exists, name it here.
+// That ticket also carries the prior question of whether an agent should be able
+// to ask for a repository at all, in which case this text stands permanently.
 const repoCreateRefusal = "This command was not run. Creating repositories is not something a run does — " +
 	"Triage Factory scopes polling, task routing, and this run's own credential to a set of repositories " +
 	"chosen before the run started, and a new one belongs to none of it. " +
@@ -246,6 +250,10 @@ func classifyGHSegment(words []string) ghAction {
 			return ghActionReview
 		}
 	case chain[0] == "repo" && len(chain) > 1:
+		// TODO(TFAC-788): this refusal is advisory — the limitations in the file
+		// comment apply to it in full, and a document shaped to dodge the match
+		// reaches GitHub. That ticket gates repository creation at the injector,
+		// where the decision is fail-closed and no client can route around it.
 		if chain[1] == "create" {
 			return ghActionRepoCreate
 		}
@@ -320,35 +328,75 @@ func namesRepoCreate(words []string) bool {
 		return false
 	}
 	for _, w := range words {
-		for _, name := range repoCreateMutations {
-			if strings.Contains(w, name) {
-				return true
-			}
-		}
-		p, _, _ := strings.Cut(w, "?")
-		p, _, _ = strings.Cut(p, "#")
-		segs := strings.Split(strings.Trim(p, "/"), "/")
-		// /user/repos and /orgs/{org}/repos are the two collections that mint a
-		// repository. A repo-scoped path also ends in a segment pair, so the
-		// leading collection is what tells them apart.
-		if len(segs) == 2 && segs[0] == "user" && segs[1] == "repos" {
-			return true
-		}
-		if len(segs) == 3 && segs[0] == "orgs" && segs[2] == "repos" {
+		if namesRepoCreateMutation(w) || mintsRepoByPath(w) {
 			return true
 		}
 	}
 	return false
 }
 
-// apiPosts reports whether a `gh api` invocation issues a POST: the method flag
-// says so, or no method flag is present and a field was passed, which is when
-// gh posts of its own accord.
+// namesRepoCreateMutation reports whether a word is the GraphQL `query` field
+// carrying a document that makes a repository.
 //
-// An explicit non-POST method loses, even alongside fields — `-X GET -f q=x`
+// Scoped to that one field for the reason namesMergeEndpoint scopes itself to
+// path segments: a field value that happens to contain the word is not the act.
+// `gh api …/comments -f body='…createRepository…'` is a comment about repository
+// creation, and refusing it would be refusing ordinary work — a live risk in
+// this repository in particular, where a pull request discussing this very gate
+// contains those identifiers as prose.
+//
+// TODO(TFAC-788): a document passed by file (`-F query=@doc.graphql`, `--input
+// doc.json`) is not visible here, so this misses it. The injector gate that
+// ticket builds reads the request body itself and does not have the blind spot.
+func namesRepoCreateMutation(word string) bool {
+	for _, prefix := range []string{"--field=", "--raw-field="} {
+		word = strings.TrimPrefix(word, prefix)
+	}
+	document, isQuery := strings.CutPrefix(word, "query=")
+	if !isQuery {
+		return false
+	}
+	for _, name := range repoCreateMutations {
+		if strings.Contains(document, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// mintsRepoByPath reports whether a word is a REST path that creates a
+// repository. Three do: the two collections a repository can be posted to, and
+// the template-instantiation endpoint, which addresses the TEMPLATE and makes a
+// new repository out of it.
+func mintsRepoByPath(word string) bool {
+	p, _, _ := strings.Cut(word, "?")
+	p, _, _ = strings.Cut(p, "#")
+	segs := strings.Split(strings.Trim(p, "/"), "/")
+	switch {
+	// A repo-scoped path also ends in a segment pair, so the leading collection
+	// is what tells /user/repos apart from repos/{owner}/{repo}.
+	case len(segs) == 2 && segs[0] == "user" && segs[1] == "repos":
+		return true
+	case len(segs) == 3 && segs[0] == "orgs" && segs[2] == "repos":
+		return true
+	case len(segs) == 4 && segs[0] == "repos" && segs[3] == "generate":
+		return true
+	}
+	return false
+}
+
+// apiPosts reports whether a `gh api` invocation issues a POST: the method flag
+// says so, or no method flag is present and something was passed that makes gh
+// switch off GET on its own — a field, or a body file.
+//
+// `--input` counts for the same reason a field does. gh documents its own
+// ruleset-creation example as `gh api …/rulesets --input file.json` with no
+// method flag, which only works because supplying a body implies the POST.
+//
+// An explicit non-POST method loses, even alongside a body — `-X GET -f q=x`
 // sends a GET with a query string, and refusing that would be refusing a read.
 func apiPosts(words []string) bool {
-	fields := false
+	body := false
 	for i, w := range words {
 		switch {
 		case w == "-X" || w == "--method":
@@ -357,12 +405,13 @@ func apiPosts(words []string) bool {
 			return strings.EqualFold(strings.TrimPrefix(w, "--method="), "POST")
 		case strings.HasPrefix(w, "-X") && len(w) > 2:
 			return strings.EqualFold(w[2:], "POST")
-		case w == "-f", w == "-F", w == "--field", w == "--raw-field",
-			strings.HasPrefix(w, "--field="), strings.HasPrefix(w, "--raw-field="):
-			fields = true
+		case w == "-f", w == "-F", w == "--field", w == "--raw-field", w == "--input",
+			strings.HasPrefix(w, "--field="), strings.HasPrefix(w, "--raw-field="),
+			strings.HasPrefix(w, "--input="):
+			body = true
 		}
 	}
-	return fields
+	return body
 }
 
 // isEnvAssignment reports whether a word is a leading `NAME=VALUE` assignment

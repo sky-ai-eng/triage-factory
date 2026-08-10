@@ -42,10 +42,12 @@ const (
 	// coordinates travel up and the orchestrator writes.
 	OpRecordEgressDenial = "record_egress_denial"
 	// OpRecordGHWrite is the gh-channel injector's fire-and-forget report of a
-	// REST write it forwarded, with the upstream's outcome. Distinct from
+	// write it forwarded, with the upstream's outcome. Distinct from
 	// record_observation, which reports only the artifact-bearing creates: this
-	// one covers every mutating REST method and both outcomes, so an edit, a
-	// merge, and a refused write all leave a trace.
+	// one covers every mutating REST method and every GraphQL mutation, on both
+	// outcomes, so an edit, a merge, and a refused write all leave a trace.
+	// A GraphQL write carries what its request envelope disclosed alongside the
+	// wire facts, since its path says only that a POST reached /graphql.
 	OpRecordGHWrite = "record_gh_write"
 )
 

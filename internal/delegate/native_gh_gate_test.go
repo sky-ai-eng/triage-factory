@@ -64,6 +64,19 @@ func TestClassifyGHCommand(t *testing.T) {
 			command: `gh api graphql -f query='mutation{cloneTemplateRepository(input:{name:"w"}){repository{url}}}'`,
 			want:    ghActionRepoCreate,
 		},
+		{
+			name:    "the =-joined field spelling",
+			command: `gh api graphql --field=query='mutation{createRepository(input:{name:"w"}){repository{url}}}'`,
+			want:    ghActionRepoCreate,
+		},
+		// gh switches off GET when a body file is supplied, with no method flag —
+		// its own ruleset-create example relies on exactly that.
+		{name: "a body file instead of fields", command: "gh api --input body.json orgs/acme/repos", want: ghActionRepoCreate},
+		{name: "a body file, =-joined", command: "gh api --input=body.json /user/repos", want: ghActionRepoCreate},
+		{name: "a body from stdin", command: "gh api --input - orgs/acme/repos", want: ghActionRepoCreate},
+		// Instantiating a template makes a repository out of one that already
+		// exists, so the path addresses the template and the act is still a create.
+		{name: "the template endpoint", command: "gh api -X POST /repos/acme/tmpl/generate -f owner=acme -f name=w", want: ghActionRepoCreate},
 
 		// --- negative space ---
 		{name: "empty", command: ""},
@@ -94,6 +107,14 @@ func TestClassifyGHCommand(t *testing.T) {
 		{name: "reading the repo collection", command: "gh api /user/repos"},
 		{name: "reading an org's repo collection", command: "gh api orgs/acme/repos --paginate"},
 		{name: "an explicit GET with fields is still a read", command: "gh api -X GET /user/repos -f per_page=100"},
+		// The mutation names are matched only in the GraphQL query field. Ordinary
+		// work whose TEXT mentions them is not repository creation — and in this
+		// repository, prose containing those identifiers is entirely routine.
+		{name: "a comment mentioning the mutation", command: `gh api repos/o/r/issues/1/comments -f body='we refuse createRepository now'`},
+		{name: "a PR body mentioning the mutation", command: `gh api -X POST repos/o/r/pulls -f title=x -f body='maps cloneTemplateRepository to repo_created'`},
+		{name: "a file named after it", command: "gh api --input createRepository.json repos/o/r/issues"},
+		{name: "reading the template endpoint", command: "gh api /repos/acme/tmpl/generate"},
+		{name: "a repo path that merely ends in a pair", command: "gh api -X POST repos/acme/repos -f x=y"},
 		{name: "a repo-scoped path is not the collection", command: "gh api -X PATCH repos/acme/widgets -f description=x"},
 		{name: "an org repo path is not the org collection", command: "gh api repos/acme/widgets/topics"},
 		{name: "asking the schema about it", command: `gh api graphql -f query='query{__type(name:"CreateRepositoryInput"){name}}'`},
