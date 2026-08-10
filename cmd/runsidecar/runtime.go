@@ -440,7 +440,7 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 		Observe: func(_ context.Context, m ghinjector.ObservedMutation) {
 			// Fire-and-forget: the mutation already landed on GitHub; the
 			// orchestrator (which holds the DB) builds and upserts the artifact.
-			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordObservation,
+			r.notifyAudit(agentproc.OpRecordObservation,
 				agentproc.RecordObservationArgs{
 					Kind:        m.Kind,
 					Owner:       m.Owner,
@@ -477,10 +477,7 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			// A GraphQL write is named in its request, which only this process
 			// ever saw — the orchestrator receives the act's name or nothing.
 			args.GraphQL = ghWriteFactsToWire(w.GraphQL)
-			// TODO(TFAC-790): this notify is fire-and-forget, so a failed relay
-			// hop loses the audit row with no trace anywhere. Needs the dropped-
-			// record counter before the loss can be noticed at all.
-			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+			r.notifyAudit(agentproc.OpRecordGHWrite, args)
 		},
 		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, _ ghwrite.Refusal) bool {
 			// A Call, not a notify: the agent's request is held until the
@@ -638,8 +635,22 @@ func (r *credRuntime) llmSource(ctx context.Context) (map[string]string, time.Ti
 // and repeated denials are the clearest signal available that an agent is
 // probing for a way out — the reason this hook exists at all.
 func (r *credRuntime) recordEgressDenial(_ context.Context, denied egressproxy.DeniedConnect) {
-	_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordEgressDenial,
+	r.notifyAudit(agentproc.OpRecordEgressDenial,
 		agentproc.RecordEgressDenialArgs{Target: denied.Target, Reason: denied.Reason})
+}
+
+// notifyAudit relays one audit record to the orchestrator, which holds the DB
+// that turns it into a row. Every audit relay this process sends goes through
+// here so that a record lost on the way is reported rather than discarded: this
+// process installs no meter provider and opens no listener, so the only place a
+// drop can be counted is the side it was headed for.
+//
+// Void, like every caller expects — the external act it describes already
+// happened, and no audit record may fail the thing it is a record of.
+func (r *credRuntime) notifyAudit(op string, args any) {
+	if err := agentproc.NotifyRelayAudit(r.conn, agentproc.RelayNamespaceCore, op, args); err != nil {
+		sidecarLog.Warn("relaying an audit record failed", "op", op, "error", err)
+	}
 }
 
 // gitProxyConfig builds the git credential proxy's wiring for the sidecar:
@@ -686,7 +697,7 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 			}, nil
 		},
 		RecordDenial: func(_ context.Context, denied gitproxy.DeniedGitOp) {
-			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordDenial,
+			r.notifyAudit(agentproc.OpRecordDenial,
 				agentproc.RecordDenialArgs{
 					Owner:  denied.Owner,
 					Repo:   denied.Repo,
@@ -701,7 +712,7 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 			// in this sandbox (StartRunProxies sets PushCaptureProxy), so this
 			// relay is the sole push-capture path on the executor — without it
 			// no executor push reaches the audit log.
-			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordPush,
+			r.notifyAudit(agentproc.OpRecordPush,
 				agentproc.RecordPushArgs{
 					Repo:    push.Repo,
 					Ref:     push.Ref,

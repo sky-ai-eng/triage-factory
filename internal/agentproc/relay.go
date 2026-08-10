@@ -57,6 +57,12 @@ const (
 	// at all), and the denial row is written by the handler, so it cannot be
 	// lost the way a fire-and-forget audit record can.
 	OpAuthorizeGHWrite = "authorize_gh_write"
+	// OpRecordRelayDrop is the sidecar's report that one of the audit notifies
+	// above never reached the wire. It carries no record — the record is what
+	// was lost — only the name of the op that lost it, so the orchestrator can
+	// count a hole in the log of record. See NotifyRelayAudit for what this can
+	// and cannot observe.
+	OpRecordRelayDrop = "record_relay_drop"
 )
 
 // AuthorizeRepoArgs / AuthorizeRepoReply are the authorize_repo op's payloads
@@ -208,6 +214,46 @@ type RecordObservationArgs struct {
 	Draft       bool   `json:"draft,omitempty"`
 	ReviewID    int    `json:"review_id,omitempty"`
 	ReviewState string `json:"review_state,omitempty"`
+}
+
+// RecordRelayDropArgs is record_relay_drop's payload: the namespace and op of
+// the audit notify that was lost. Nothing else — a report carrying the dropped
+// record would just be the notify that already failed.
+//
+// The pair travels split rather than pre-joined so the orchestrator resolves it
+// through the same naming path it uses for the notifies it serves, and so it
+// can tell a core op from a provider one without parsing. It treats both as
+// untrusted: they arrive from the one process deliberately exposed to hostile
+// text, and what they name becomes a metric label.
+type RecordRelayDropArgs struct {
+	Namespace string `json:"namespace"`
+	Op        string `json:"op"`
+}
+
+// NotifyRelayAudit sends a fire-and-forget audit op and, when the send itself
+// fails, tells the orchestrator that a record was lost. The orchestrator holds
+// the metrics exporter — the per-run sidecar opens no listener and installs no
+// meter provider — so a drop is countable only where it can be reported to,
+// which makes the report a relay op like any other.
+//
+// What it can observe is bounded by the channel it reports over, and the bound
+// is worth stating because it is the whole residual: a Conn collapses
+// permanently on a write error or a close, so any send failure of that kind
+// takes the drop report down with it. What survives to be reported is the
+// marshal failure — the case where the payload was never encodable and the
+// channel is fine. The unreportable half is the teardown race, where a notify
+// written as the run is torn down loses to the conn close; the returned error
+// is the caller's to log, and that log line is all that case ever gets.
+func NotifyRelayAudit(conn *sidecarproto.Conn, namespace, op string, args any) error {
+	err := NotifyRelay(conn, namespace, op, args)
+	if err == nil {
+		return nil
+	}
+	// Deliberately NOT recursive: the report goes out as a plain notify, so a
+	// dead channel ends the attempt here rather than looping on itself.
+	_ = NotifyRelay(conn, RelayNamespaceCore, OpRecordRelayDrop,
+		RecordRelayDropArgs{Namespace: namespace, Op: op})
+	return err
 }
 
 // RelayDispatcher serves the sidecar's org-bound relay ops. The concrete impl
