@@ -76,6 +76,10 @@ func TestClassifyGHCommand(t *testing.T) {
 		{name: "a body file instead of fields", command: "gh api --input body.json orgs/acme/repos", want: ghActionRepoCreate},
 		{name: "a body file, =-joined", command: "gh api --input=body.json /user/repos", want: ghActionRepoCreate},
 		{name: "a body from stdin", command: "gh api --input - orgs/acme/repos", want: ghActionRepoCreate},
+		// A repeated method flag resolves to the last, which is what gh's own
+		// parsing does with it — so the read spelling in front of the write does
+		// not hide the write.
+		{name: "a method flag overridden to POST", command: "gh api -X GET /user/repos -X POST -f name=w", want: ghActionRepoCreate},
 		// Instantiating a template makes a repository out of one that already
 		// exists, so the path addresses the template and the act is still a create.
 		{name: "the template endpoint", command: "gh api -X POST /repos/acme/tmpl/generate -f owner=acme -f name=w", want: ghActionRepoCreate},
@@ -109,6 +113,9 @@ func TestClassifyGHCommand(t *testing.T) {
 		{name: "reading the repo collection", command: "gh api /user/repos"},
 		{name: "reading an org's repo collection", command: "gh api orgs/acme/repos --paginate"},
 		{name: "an explicit GET with fields is still a read", command: "gh api -X GET /user/repos -f per_page=100"},
+		// The same rule in the direction that matters more day to day: a write
+		// spelling overridden back to a read must not be refused.
+		{name: "a method flag overridden to GET", command: "gh api -X POST /user/repos -X GET"},
 		// The mutation names are matched only in the GraphQL query field. Ordinary
 		// work whose TEXT mentions them is not repository creation — and in this
 		// repository, prose containing those identifiers is entirely routine.

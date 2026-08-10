@@ -405,21 +405,41 @@ func mintsRepoByPath(word string) bool {
 //
 // An explicit non-POST method loses, even alongside a body — `-X GET -f q=x`
 // sends a GET with a query string, and refusing that would be refusing a read.
+//
+// A REPEATED method flag resolves to the last one, which is what gh's own flag
+// parsing does with it. Reading the first instead would disagree with the
+// command that actually runs in both directions: `-X GET … -X POST` sends a
+// write this would call a read, and `-X POST … -X GET` sends a read this would
+// call a write. Neither spelling is one a model writes on purpose, and the
+// injector decides the real request either way; agreeing with gh is just the
+// cheapest way for this matcher to describe what it claims to describe.
 func apiPosts(words []string) bool {
 	body := false
+	method, methodSet := "", false
+	setMethod := func(value string) {
+		method, methodSet = value, true
+	}
 	for i, w := range words {
 		switch {
 		case w == "-X" || w == "--method":
-			return i+1 < len(words) && strings.EqualFold(words[i+1], "POST")
+			// A dangling flag with no value is a command gh rejects outright;
+			// leaving methodSet alone lets the body test below decide, which
+			// errs toward recognizing the act.
+			if i+1 < len(words) {
+				setMethod(words[i+1])
+			}
 		case strings.HasPrefix(w, "--method="):
-			return strings.EqualFold(strings.TrimPrefix(w, "--method="), "POST")
+			setMethod(strings.TrimPrefix(w, "--method="))
 		case strings.HasPrefix(w, "-X") && len(w) > 2:
-			return strings.EqualFold(w[2:], "POST")
+			setMethod(w[2:])
 		case w == "-f", w == "-F", w == "--field", w == "--raw-field", w == "--input",
 			strings.HasPrefix(w, "--field="), strings.HasPrefix(w, "--raw-field="),
 			strings.HasPrefix(w, "--input="):
 			body = true
 		}
+	}
+	if methodSet {
+		return strings.EqualFold(method, "POST")
 	}
 	return body
 }
