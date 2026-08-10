@@ -118,10 +118,19 @@ const maxInlineFragmentDepth = 8
 // keeps — in which case the caller records the mutation as unresolved rather
 // than describing it from a partial reading.
 //
-// Both outcomes matter equally to the refusal policy, and neither is allowed to
-// mask the other: a partial reading is exactly how a gated mutation becomes
-// invisible, whether it was hidden behind an undefined fragment or pushed off
-// the end of a padded selection set.
+// Neither cause may go unreported, because a partial reading is exactly how a
+// gated mutation becomes invisible — hidden behind an undefined fragment, or
+// pushed off the end of a padded selection set. Truncation in particular is not
+// allowed to pass as an ordinary short read, which is the whole reason the
+// selection carries a flag for it.
+//
+// A document that manages both reports the fragment. Only one reason fits in
+// the field, and which one it is changes nothing that matters: the refusal
+// policy branches on unreadable being set at all, never on its value, so the
+// choice is the audit row's wording alone. It is fixed here rather than left to
+// iteration order so the row is reproducible, and the fragment wins because it
+// names a specific thing the document did, where truncation only says the
+// document was wider than this reader keeps.
 //
 // Each fragment is followed at most once. That is what makes the work linear in
 // the document rather than exponential in its nesting, and it is also why a

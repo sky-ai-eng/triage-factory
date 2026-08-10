@@ -410,6 +410,39 @@ func TestParseGraphQLRequest_FragmentsThatCannotBeFollowed(t *testing.T) {
 	}
 }
 
+// TestParseGraphQLRequest_TruncationAndUnresolvedFragmentTogether pins the one
+// case where two unreadable causes apply at once. Only one fits in the field,
+// and the refusal policy reads none of them — it branches on unreadable being
+// set at all — so what is pinned here is that the choice is FIXED rather than a
+// function of iteration order, and that the reading is still refused either way.
+//
+// The document is crafted by construction: nothing real spreads an undefined
+// fragment while also selecting past the field cap.
+func TestParseGraphQLRequest_TruncationAndUnresolvedFragmentTogether(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("mutation M{...Missing ")
+	for i := range maxTopLevelFields + 4 {
+		fmt.Fprintf(&b, `f%d:addComment(input:{subjectId:"PR_1",body:"x"}){clientMutationId} `, i)
+	}
+	b.WriteString("}")
+
+	facts, ok := ParseGraphQLRequest(envelope(t, b.String(), "", nil))
+	if !ok {
+		t.Fatal("a document reaching for a write produced no facts")
+	}
+	if facts.Unreadable != GraphQLUnresolvedFragment {
+		t.Errorf("unreadable = %q, want %q — the fragment names something the document did, "+
+			"where truncation only says it was wider than this reader keeps",
+			facts.Unreadable, GraphQLUnresolvedFragment)
+	}
+	// The half that actually matters: whichever reason landed, the request is
+	// refused, so the precedence above can never be the difference between a
+	// gated write transiting and not.
+	if _, gated := Gate(Request{Method: "POST", Path: "/api/graphql", GraphQL: &facts}); !gated {
+		t.Error("a partially-read document was not refused")
+	}
+}
+
 // TestParseGraphQLRequest_CyclicFragmentsTerminate covers the shape valid
 // GraphQL forbids and a hostile document is not bound by. The resolver visits
 // each definition once, so a cycle ends rather than being chased.
