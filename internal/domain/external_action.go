@@ -103,13 +103,20 @@ const (
 	ActionPRBranchUpdated = "pr_branch_updated"
 
 	// GitHub review lifecycle. The review *draft* is staged TF-side and makes no
-	// GitHub write until the atomic submit at approval (TFAC-494), so the only
-	// draft-lifecycle external-action is the submit — there is no review_started
-	// (start-review writes nothing) and no review_dismissed (a dismiss is a local
-	// state flip, not an org-credential write). The comment edit/delete actions
-	// below are unrelated: they audit edits to an already-*submitted* review's
-	// comments (real GitHub writes via `gh pr comment-update` / `comment-delete`).
+	// GitHub write until the atomic submit at approval, so there is no
+	// review_started — start-review writes nothing.
+	//
+	// Dismissal is two different acts sharing a word, and only one of them is
+	// here. Abandoning a TF-staged draft is a local state flip on an artifact
+	// that never reached GitHub, and records no external action. Dismissing a
+	// SUBMITTED review clears its approval or change-request standing on GitHub
+	// under the org credential — an ordinary write, and one an agent can aim at
+	// a review a person left.
+	//
+	// The comment edit/delete actions below are unrelated: they audit edits to
+	// an already-submitted review's comments.
 	ActionReviewSubmitted      = "review_submitted"
+	ActionReviewDismissed      = "review_dismissed"
 	ActionReviewCommentEdited  = "review_comment_edited"
 	ActionReviewCommentDeleted = "review_comment_deleted"
 

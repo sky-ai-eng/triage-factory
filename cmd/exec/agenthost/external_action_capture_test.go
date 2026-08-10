@@ -934,3 +934,95 @@ func TestCapture_GraphQLOverCapStillLandsAnAttributedRow(t *testing.T) {
 		t.Errorf("rows = %v, want the broken-read reason recorded distinctly", reasons)
 	}
 }
+
+// TestCapture_GithubReaction_RecordsArtifactlessAction and its dismissal
+// sibling below cover the two exec-gh verbs that reached GitHub under the org
+// credential and left nothing behind — neither an artifact (correctly: neither
+// act produces an object this run owns) nor an audit row (not correctly: the
+// log of record is supposed to have no fourth state where a write simply
+// happened invisibly).
+//
+// The target is the comment, not the reaction, matching what the gh channel's
+// classifier records for the identical act — the two channels have to name the
+// same act the same way or the log answers differently depending on which one
+// the agent reached for.
+func TestCapture_GithubReaction_RecordsArtifactlessAction(t *testing.T) {
+	gh := startFakeGitHubComments(t)
+	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
+
+	if err := client.GithubReactToComment(context.Background(), "octo", "repo", 555, "rocket"); err != nil {
+		t.Fatalf("GithubReactToComment: %v", err)
+	}
+
+	if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+		t.Errorf("a reaction should produce no artifact, got %+v", arts)
+	}
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
+	}
+	a := acts[0]
+	if a.Action != domain.ActionReactionAdded || a.Provider != domain.ArtifactProviderGitHub ||
+		a.Target != "octo/repo" || a.ExternalID != "555" || a.ConversationID != info.RunID {
+		t.Errorf("reaction action mismatch: %+v", a)
+	}
+	if !strings.Contains(a.DetailJSON, `"emoji":"rocket"`) {
+		t.Errorf("detail_json %q did not carry the emoji", a.DetailJSON)
+	}
+}
+
+// TestCapture_GithubReviewDismiss_RecordsArtifactlessAction covers the act the
+// action vocabulary used to assert could not happen — "a dismiss is a local
+// state flip, not an org-credential write". That is true of abandoning a
+// TF-staged draft and false of this verb, which PUTs to GitHub's dismissals
+// endpoint and can clear the standing of a review a person left.
+func TestCapture_GithubReviewDismiss_RecordsArtifactlessAction(t *testing.T) {
+	gh := startFakeGitHubComments(t)
+	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
+
+	if err := client.GithubDismissReview(context.Background(), "octo", "repo", 1, 99, "superseded by a newer push"); err != nil {
+		t.Fatalf("GithubDismissReview: %v", err)
+	}
+
+	if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+		t.Errorf("dismissing someone else's review should produce no artifact, got %+v", arts)
+	}
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
+	}
+	a := acts[0]
+	if a.Action != domain.ActionReviewDismissed || a.Target != "octo/repo#1" ||
+		a.ExternalID != "99" || a.ConversationID != info.RunID {
+		t.Errorf("dismiss action mismatch: %+v", a)
+	}
+	if a.URL != "https://github.com/octo/repo/pull/1#pullrequestreview-99" {
+		t.Errorf("dismiss url = %q, want the review deep link", a.URL)
+	}
+	// The reason is the whole of what makes a dismissal readable later.
+	if !strings.Contains(a.DetailJSON, "superseded by a newer push") {
+		t.Errorf("detail_json %q did not carry the dismissal message", a.DetailJSON)
+	}
+}
+
+// TestCapture_GithubWriteFailure_RecordsNothing pins the ordering both verbs
+// above depend on: the row is written after the upstream call succeeds, so a
+// refused or failed write leaves no row claiming it happened.
+func TestCapture_GithubWriteFailure_RecordsNothing(t *testing.T) {
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"Resource not accessible by integration"}`)
+	}))
+	t.Cleanup(gh.Close)
+	stores, _, client := newGithubRecordingClient(t, gh.URL, true)
+
+	if err := client.GithubReactToComment(context.Background(), "octo", "repo", 555, "rocket"); err == nil {
+		t.Fatal("GithubReactToComment on a 403 backend returned no error")
+	}
+	if err := client.GithubDismissReview(context.Background(), "octo", "repo", 1, 99, "nope"); err == nil {
+		t.Fatal("GithubDismissReview on a 403 backend returned no error")
+	}
+	if acts := listExternalActions(t, stores); len(acts) != 0 {
+		t.Errorf("a refused write recorded %d action(s): %+v", len(acts), acts)
+	}
+}
