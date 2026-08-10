@@ -12,11 +12,11 @@ import (
 )
 
 // TestCapture_GHWriteDenied_RecordsEveryRefusal pins the refusal row: one per
-// refused request (no dedup — a model that retries a merge three ways leaves
-// three rows, and that pattern is itself the signal), the act named where
+// refused request (no dedup — a model that retries a refused act three ways
+// leaves three rows, and that pattern is itself the signal), the act named where
 // anything could name it, and the reason always.
 //
-// The reason is the load-bearing field. "We refused a merge" is the system
+// The reason is the load-bearing field. "We refused a review" is the system
 // working as designed and needs no attention; "we refused something we could
 // not read" is either a real client this broke or someone probing the boundary,
 // and a log that renders them alike cannot tell an operator which happened.
@@ -25,10 +25,10 @@ func TestCapture_GHWriteDenied_RecordsEveryRefusal(t *testing.T) {
 	client := NewLocal(stores, info)
 	ctx := context.Background()
 
-	merge := ghwrite.Request{Method: "PUT", Path: "/repos/acme/widgets/pulls/7/merge"}
-	mergeRef, _ := ghwrite.Gate(merge)
-	client.RecordGHWriteDenied(ctx, merge, mergeRef)
-	client.RecordGHWriteDenied(ctx, merge, mergeRef)
+	review := ghwrite.Request{Method: "POST", Path: "/repos/acme/widgets/pulls/7/reviews"}
+	reviewRef, _ := ghwrite.Gate(review)
+	client.RecordGHWriteDenied(ctx, review, reviewRef)
+	client.RecordGHWriteDenied(ctx, review, reviewRef)
 
 	unreadable := ghwrite.Request{
 		Method:  "POST",
@@ -81,7 +81,7 @@ func TestCapture_GHWriteDenied_RecordsEveryRefusal(t *testing.T) {
 			}
 			continue
 		}
-		if detail["refused"] != domain.ActionPRMerged {
+		if detail["refused"] != domain.ActionReviewSubmitted {
 			t.Errorf("detail = %s, want the refused act named", a.DetailJSON)
 		}
 		// Repo-level, never owner/repo#N: the number came from the agent and
@@ -90,7 +90,7 @@ func TestCapture_GHWriteDenied_RecordsEveryRefusal(t *testing.T) {
 		if a.Target != "acme/widgets" {
 			t.Errorf("target = %q, want the repository only", a.Target)
 		}
-		if !strings.Contains(a.DetailJSON, "/pulls/7/merge") {
+		if !strings.Contains(a.DetailJSON, "/pulls/7/reviews") {
 			t.Errorf("detail = %s, want the full path", a.DetailJSON)
 		}
 	}
@@ -109,14 +109,14 @@ func TestGHWriteDeniedAction_GraphQLKeepsWhatWasRead(t *testing.T) {
 		Method: "POST",
 		Path:   "/api/graphql",
 		GraphQL: &ghwrite.GraphQLFacts{
-			Operation: "MergePullRequest",
-			Fields:    []string{"mergePullRequest"},
+			Operation: "SubmitReview",
+			Fields:    []string{"addPullRequestReview"},
 			Subject:   "PR_kwABC",
 		},
 	}
 	ref, gated := ghwrite.Gate(req)
 	if !gated {
-		t.Fatal("a merge mutation was not gated")
+		t.Fatal("a review mutation was not gated")
 	}
 
 	act := GHWriteDeniedAction(req, ref)
@@ -127,10 +127,10 @@ func TestGHWriteDeniedAction_GraphQLKeepsWhatWasRead(t *testing.T) {
 	if err := json.Unmarshal([]byte(act.DetailJSON), &detail); err != nil {
 		t.Fatalf("detail_json did not parse: %v", err)
 	}
-	if detail["mutation"] != "mergePullRequest" || detail["operation"] != "MergePullRequest" {
+	if detail["mutation"] != "addPullRequestReview" || detail["operation"] != "SubmitReview" {
 		t.Errorf("detail = %s, want the mutation and operation names", act.DetailJSON)
 	}
-	if detail["refused"] != domain.ActionPRMerged {
+	if detail["refused"] != domain.ActionReviewSubmitted {
 		t.Errorf("detail = %s, want the act named in the audit vocabulary", act.DetailJSON)
 	}
 }
@@ -147,15 +147,15 @@ func TestRelay_AuthorizeGHWrite(t *testing.T) {
 		wantAllowed bool
 	}{
 		{
-			name: "a REST merge",
-			args: agentproc.AuthorizeGHWriteArgs{Method: "PUT", Path: "/repos/acme/widgets/pulls/7/merge"},
+			name: "a REST review submit",
+			args: agentproc.AuthorizeGHWriteArgs{Method: "POST", Path: "/repos/acme/widgets/pulls/7/reviews"},
 		},
 		{
-			name: "a GraphQL merge",
+			name: "a GraphQL review submit",
 			args: agentproc.AuthorizeGHWriteArgs{
 				Method:  "POST",
 				Path:    "/api/graphql",
-				GraphQL: &agentproc.GraphQLWriteFacts{Mutations: []string{"mergePullRequest"}},
+				GraphQL: &agentproc.GraphQLWriteFacts{Mutations: []string{"addPullRequestReview"}},
 			},
 		},
 		{
@@ -176,6 +176,13 @@ func TestRelay_AuthorizeGHWrite(t *testing.T) {
 				Path:    "/api/graphql",
 				GraphQL: &agentproc.GraphQLWriteFacts{Mutations: []string{"addComment"}},
 			},
+			wantAllowed: true,
+		},
+		{
+			// Merging is ungated by decision, not by omission, and this side is
+			// where a change to that would first show up.
+			name:        "a merge",
+			args:        agentproc.AuthorizeGHWriteArgs{Method: "PUT", Path: "/repos/acme/widgets/pulls/7/merge"},
 			wantAllowed: true,
 		},
 	}

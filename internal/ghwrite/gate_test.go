@@ -20,22 +20,27 @@ func TestGate_REST(t *testing.T) {
 		wantAction string
 	}{
 		// --- refused ---
-		{"a merge", "PUT", "/repos/acme/widgets/pulls/7/merge", GateReasonMerge, domain.ActionPRMerged},
-		{"a merge behind the GHE prefix", "PUT", "/api/v3/repos/acme/widgets/pulls/7/merge", GateReasonMerge, domain.ActionPRMerged},
-		{"a merge with a trailing slash", "PUT", "/repos/acme/widgets/pulls/7/merge/", GateReasonMerge, domain.ActionPRMerged},
+		{"a review post", "POST", "/repos/acme/widgets/pulls/7/reviews", GateReasonReview, domain.ActionReviewSubmitted},
+		{"a review behind the GHE prefix", "POST", "/api/v3/repos/acme/widgets/pulls/7/reviews", GateReasonReview, domain.ActionReviewSubmitted},
+		{"a review with a trailing slash", "POST", "/repos/acme/widgets/pulls/7/reviews/", GateReasonReview, domain.ActionReviewSubmitted},
 		{
 			// Normalized before it is matched, because a router that resolves
 			// this and a scan that does not is exactly one bypass.
-			"a merge reached through a dot-dot segment", "PUT",
-			"/repos/acme/widgets/pulls/7/x/../merge", GateReasonMerge, domain.ActionPRMerged,
+			"a review reached through a dot-dot segment", "POST",
+			"/repos/acme/widgets/pulls/7/x/../reviews", GateReasonReview, domain.ActionReviewSubmitted,
 		},
-		{"a review post", "POST", "/repos/acme/widgets/pulls/7/reviews", GateReasonReview, domain.ActionReviewSubmitted},
 		{"the personal repo collection", "POST", "/user/repos", GateReasonRepoCreate, domain.ActionRepoCreated},
 		{"the org repo collection", "POST", "/orgs/acme/repos", GateReasonRepoCreate, domain.ActionRepoCreated},
 		{"the org collection behind the GHE prefix", "POST", "/api/v3/orgs/acme/repos", GateReasonRepoCreate, domain.ActionRepoCreated},
 		{"the template endpoint", "POST", "/repos/acme/tmpl/generate", GateReasonRepoCreate, domain.ActionRepoCreated},
 
 		// --- untouched ---
+		//
+		// Merging leads this list because its absence is a decision rather than
+		// an omission: it is gated by the delegated runtime's merge question,
+		// which promises that a re-issue proceeds, and this is what keeps that
+		// promise true.
+		{name: "a merge", method: "PUT", path: "/repos/acme/widgets/pulls/7/merge"},
 		{name: "reading a PR", method: "GET", path: "/repos/acme/widgets/pulls/7"},
 		{name: "asking whether a PR is merged", method: "GET", path: "/repos/acme/widgets/pulls/7/merge"},
 		{name: "listing repositories", method: "GET", path: "/user/repos"},
@@ -82,16 +87,6 @@ func TestGate_GraphQL(t *testing.T) {
 		wantAction string
 	}{
 		{
-			name: "a merge", facts: GraphQLFacts{Fields: []string{"mergePullRequest"}},
-			wantReason: GateReasonMerge, wantAction: domain.ActionPRMerged,
-		},
-		{
-			// Arming a merge is its own mutation, not a flag on the one above,
-			// so covering the merge family never implied covering this.
-			name: "arming a merge", facts: GraphQLFacts{Fields: []string{"enablePullRequestAutoMerge"}},
-			wantReason: GateReasonMerge, wantAction: domain.ActionPRAutoMergeEnabled,
-		},
-		{
 			name: "submitting a review", facts: GraphQLFacts{Fields: []string{"addPullRequestReview"}},
 			wantReason: GateReasonReview, wantAction: domain.ActionReviewSubmitted,
 		},
@@ -117,15 +112,18 @@ func TestGate_GraphQL(t *testing.T) {
 		{
 			// Every top-level field is checked, not just the single-field case
 			// the audit builder needs. A document selecting a comment AND a
-			// merge performs the merge, and the row it would take is beside
+			// review performs the review, and the row it would take is beside
 			// the point.
-			name:       "a merge hidden among several fields",
-			facts:      GraphQLFacts{Fields: []string{"addComment", "updateIssue", "mergePullRequest"}},
-			wantReason: GateReasonMerge, wantAction: domain.ActionPRMerged,
+			name:       "a review hidden among several fields",
+			facts:      GraphQLFacts{Fields: []string{"addComment", "updateIssue", "addPullRequestReview"}},
+			wantReason: GateReasonReview, wantAction: domain.ActionReviewSubmitted,
 		},
-		{
-			name: "disarming a merge", facts: GraphQLFacts{Fields: []string{"disablePullRequestAutoMerge"}},
-		},
+		// The merge family, ungated by decision — see the file comment on
+		// gate.go. Arming one follows performing one: gating the cautious
+		// spelling while the direct one transits would be backwards.
+		{name: "a merge", facts: GraphQLFacts{Fields: []string{"mergePullRequest"}}},
+		{name: "arming a merge", facts: GraphQLFacts{Fields: []string{"enablePullRequestAutoMerge"}}},
+		{name: "disarming a merge", facts: GraphQLFacts{Fields: []string{"disablePullRequestAutoMerge"}}},
 		{name: "a comment", facts: GraphQLFacts{Fields: []string{"addComment"}}},
 		{name: "closing a PR", facts: GraphQLFacts{Fields: []string{"closePullRequest"}}},
 		{name: "opening a PR", facts: GraphQLFacts{Fields: []string{"createPullRequest"}}},
@@ -194,7 +192,6 @@ func TestGate_UnreadableWinsOverAnyFieldsRead(t *testing.T) {
 // as admitting no exception, and gives a next step.
 func TestExplain_SaysWhatToDoInstead(t *testing.T) {
 	refusals := []Refusal{
-		{Reason: GateReasonMerge, Action: domain.ActionPRMerged},
 		{Reason: GateReasonReview, Action: domain.ActionReviewSubmitted},
 		{Reason: GateReasonRepoCreate, Action: domain.ActionRepoCreated},
 		{Reason: GateReasonUnreadable, Unreadable: GraphQLOverCap},
@@ -240,7 +237,6 @@ func TestExplain_SaysWhatToDoInstead(t *testing.T) {
 func TestGate_EveryGatedActionIsInTheClassifier(t *testing.T) {
 	produced := map[string]bool{
 		// The REST half, by the one shape each act is reached through.
-		domain.ActionPRMerged:        true,
 		domain.ActionReviewSubmitted: true,
 	}
 	for _, entry := range graphQLMutations {

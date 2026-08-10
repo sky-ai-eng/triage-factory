@@ -90,31 +90,38 @@ can't reach returns GitHub's own 404, unchanged.
 The agent gets an enumerated set of subcommands — `gh pr` (view / list / diff /
 checkout / create / comment / ready / close), `gh issue`, `gh run`, `gh repo
 view`, `gh search`. Not the whole binary: `gh api` would let a prompt-injected
-agent POST anything anywhere with the org's credential attached, and `gh auth` /
-`config` / `alias` / `extension` are credential and configuration surfaces.
-Those are refused, and the refusal is visible to the agent as an ordinary
-permission denial.
+agent POST anything anywhere with the org's credential attached, `gh auth` /
+`config` / `alias` / `extension` are credential and configuration surfaces, and
+`gh pr merge` has no local equivalent of the merge-intent question. Those are
+refused, and the refusal is visible to the agent as an ordinary permission
+denial.
 
 ### Writes the channel refuses
 
-Three families are refused at the proxy itself, before the request reaches
-GitHub: merging a pull request (or arming one to merge later), submitting a
-review, and creating a repository. The refusal is on the credential rather than
-on the command, so it covers every spelling — `gh pr merge`, the same call
-written as `gh api`, an inline GraphQL mutation, a raw `curl` from a script the
-agent wrote. There is no per-run authorization and no flag that opts out.
+Two families are refused at the proxy itself, before the request reaches GitHub:
+submitting a review, and creating a repository. The refusal is on the credential
+rather than on the command, so it covers every spelling — `gh pr review`, the
+same call written as `gh api`, an inline GraphQL mutation, a raw `curl` from a
+script the agent wrote. There is no per-run authorization and no flag that opts
+out.
 
 A refused request gets a 403 whose JSON body names what was refused and what to
 do instead, and leaves a `gh_write_denied` row in the run's actions. Nothing
 reaches GitHub, so nothing needs undoing.
 
-The reasoning differs per family. Merging is irreversible and nobody is watching
-a delegated run, so an agent finishes by saying the branch is ready rather than
-landing it. A review posted this way cannot anchor to a line, carry a severity
-badge, be revised as a draft, or go through approval — the `triagefactory exec
-gh pr` review verbs do all four, so they strictly dominate it. And a repository
-created mid-run sits outside the tracked set that scopes polling, task routing,
-and the run's own credential.
+The reasoning differs per family. A review posted this way cannot anchor to a
+line, carry a severity badge, be revised as a draft, or go through approval —
+the `triagefactory exec gh pr` review verbs do all four, so they strictly
+dominate it. And a repository created mid-run sits outside the tracked set that
+scopes polling, task routing, and the run's own credential.
+
+**Merging is not refused here.** Some missions are legitimately for landing
+work, and there is no better command to redirect to, so the control is a
+question rather than a refusal: the delegated runtime interrupts the first merge
+attempt and asks the agent to quote the line of its mission that authorizes one.
+A model that re-issues proceeds. That check only sees shell commands on the
+native runtime — a merge through a script, or from a run on the SDK runtime,
+meets nothing — which is an accepted limit, not an oversight.
 
 ### When the fetch fails
 

@@ -614,11 +614,11 @@ func TestStartLoopbackGuard(t *testing.T) {
 // pipe the scoped `exec gh` verbs use, and the shapes the injector refuses —
 // a merge, a review submit, a repository create — pass through it untouched.
 //
-// It matters twice over. The review refusal REDIRECTS to the verbs, so a gate
-// that reached this pipe would refuse the alternative it recommends and leave
-// an agent with nowhere to go. And the merge shape is here because the two
-// pipes must be provably distinct: a shared middleware that grew a gate would
-// be caught here rather than discovered when a governed verb stopped working.
+// It matters most for the review: that refusal REDIRECTS to the verbs, so a
+// gate that reached this pipe would refuse the alternative it recommends and
+// leave an agent with nowhere to go. More generally, a shared middleware that
+// grew a traffic policy would be caught here rather than discovered when a
+// governed verb stopped working.
 func TestGatedShapesTransitTheVerbPipe(t *testing.T) {
 	gated := []struct {
 		name   string
@@ -626,7 +626,6 @@ func TestGatedShapesTransitTheVerbPipe(t *testing.T) {
 		path   string
 	}{
 		{"a review submit", http.MethodPost, "/repos/octo/widgets/pulls/42/reviews"},
-		{"a merge", http.MethodPut, "/repos/octo/widgets/pulls/42/merge"},
 		{"a repository create", http.MethodPost, "/orgs/octo/repos"},
 	}
 	for _, tt := range gated {

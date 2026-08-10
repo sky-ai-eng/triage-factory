@@ -17,15 +17,7 @@ import (
 //
 // # What the gate refuses, and why those
 //
-// Three families, and one band that is not a family at all.
-//
-// MERGE. Merging is irreversible, no human is watching a delegated run, and a
-// run that merges its own work has removed the review step the product is built
-// around. Arming a merge is gated in its own right: enablePullRequestAutoMerge
-// is a distinct mutation that performs no merge now and lands one later with
-// nobody present, which is the same act with the supervision removed rather
-// than a lesser one. Disarming is not gated — dropping a queued merge is the
-// safe direction.
+// Two families, and one band that is not a family at all.
 //
 // REVIEW. The `gh pr` review verbs Triage Factory provides strictly dominate a
 // review posted through this channel: they anchor comments to lines, badge them
@@ -39,16 +31,33 @@ import (
 //
 // The band is the GraphQL requests that cannot be named at all — see gateGraphQL.
 //
+// # Why merging is NOT here
+//
+// It is the obvious third family and its absence is a decision, not an
+// oversight. Merging is something some missions are legitimately for, so
+// refusing it outright would mean deciding an intent this layer cannot know —
+// and unlike a review or a new repository, there is no dominating alternative
+// to redirect to. The control that stands is the delegated runtime's merge
+// question (internal/delegate/native_gh_gate.go): a merge attempt is
+// interrupted once and asked to quote the line of its mission that authorizes
+// it, and a model that re-issues proceeds.
+//
+// That control is deliberately weaker than this one. It is injection-blind, it
+// only sees `bash`, and nothing checks the answer — so a merge through
+// `gh api`, through a script, or from a run on the SDK runtime meets nothing at
+// all. The exposure is accepted rather than unnoticed; it is the same posture
+// that stood before this gate existed, and the reason to state it here is so
+// that adding pr_merged back is a decision someone makes rather than a gap
+// someone patches.
+//
 // # No authorization, deliberately
 //
-// There is no exemption: no per-run bit, no trigger field, no override. A
-// mission that legitimately needs a gated act cannot perform it, and finishes
-// by saying so. That is the policy, not a placeholder for one — an exemption
-// path built before anyone has asked for it gets used because it exists, and
-// the refusal it was built around stops holding.
+// There is no exemption for what IS gated: no per-run bit, no trigger field, no
+// override. A mission that legitimately needs one of these cannot perform it,
+// and finishes by saying so. That is the policy, not a placeholder for one — an
+// exemption path built before anyone has asked for it gets used because it
+// exists, and the refusal it was built around stops holding.
 const (
-	// GateReasonMerge covers performing a merge and arming one to happen later.
-	GateReasonMerge = "merge"
 	// GateReasonReview covers submitting a review and staging a thread on one.
 	GateReasonReview = "review"
 	// GateReasonRepoCreate covers minting a repository, by any of the four
@@ -96,15 +105,18 @@ type Refusal struct {
 // through `gh api`, and through a hand-written GraphQL document are one entry
 // here because the classifier already resolves all three to one verb.
 //
+// pr_merged and pr_auto_merge_enabled are absent by decision, not by omission —
+// see the file comment. Arming a merge follows performing one: it cannot be the
+// more dangerous of the two, so gating it while the merge itself transits would
+// refuse the cautious spelling and permit the direct one.
+//
 // TODO(TFAC-784): pr_created is absent pending that ticket's decision on
 // whether opening a pull request is governed here, through the verb path's
 // approval queue, or by draft-until-ready. Until it lands, a run opens pull
 // requests through this channel unrefused.
 var gatedActions = map[string]string{
-	domain.ActionPRMerged:           GateReasonMerge,
-	domain.ActionPRAutoMergeEnabled: GateReasonMerge,
-	domain.ActionReviewSubmitted:    GateReasonReview,
-	domain.ActionRepoCreated:        GateReasonRepoCreate,
+	domain.ActionReviewSubmitted: GateReasonReview,
+	domain.ActionRepoCreated:     GateReasonRepoCreate,
 }
 
 // gatedMutations are the GraphQL mutations gated by NAME because the classifier
@@ -268,12 +280,6 @@ func (r Refusal) Explain() Explanation {
 		e.Refused = r.Mutation
 	}
 	switch r.Reason {
-	case GateReasonMerge:
-		e.Policy = "Triage Factory refuses merges made with this run's credential — performing one, " +
-			"and arming one to happen later. This is unconditional: no mission, instruction, or " +
-			"authorization enables it, and re-sending the request by another route will be refused too."
-		e.NextStep = "Finish the work and push the branch. Say in your final message that you believe it " +
-			"is ready to merge, and leave the merge to a human."
 	case GateReasonReview:
 		e.Policy = "Triage Factory refuses pull-request reviews submitted through the `gh` credential " +
 			"channel. Its own review verbs do everything this call does and more — a comment anchored to " +

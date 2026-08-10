@@ -15,14 +15,15 @@
 // and a request for a repo the run may work in is forwarded whatever it asks
 // of it — with one exception, which is the whole of this proxy's traffic policy.
 //
-// Three families of write are refused before they are forwarded: merging a pull
-// request (or arming one to merge later), submitting a review, and creating a
-// repository. So is any GraphQL request whose act could not be established at
-// all, since a policy keyed on the act's name is walked through by anything that
-// stops the act being named. What is refused, and the reasoning for each, lives
-// in internal/ghwrite alongside the classifier the audit log reads; gate.go here
-// is only the enforcement. There is no authorization mechanism and no exemption:
-// a mission that needs a gated act cannot perform it and finishes by saying so.
+// Two families of write are refused before they are forwarded: submitting a
+// review, and creating a repository. So is any GraphQL request whose act could
+// not be established at all, since a policy keyed on the act's name is walked
+// through by anything that stops the act being named. What is refused, and the
+// reasoning for each — including why MERGING is deliberately not among them —
+// lives in internal/ghwrite alongside the classifier the audit log reads;
+// gate.go here is only the enforcement. There is no authorization mechanism and
+// no exemption: a mission that needs a gated act cannot perform it and finishes
+// by saying so.
 //
 // This is the choke point, which is why the policy is here rather than at the
 // command-level matcher the delegated runtime also applies. That matcher sees

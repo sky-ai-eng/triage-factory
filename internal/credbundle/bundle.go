@@ -97,7 +97,7 @@ type GitHubCreds struct {
 	// it is the org PAT. The injector injects it on every request it forwards —
 	// the token's own repo scope is what bounds WHICH repositories are
 	// reachable, and there is no path allowlist on top of it. What the injector
-	// does apply is a refusal policy on three families of write (see
+	// does apply is a refusal policy on two families of write (see
 	// internal/ghinjector); that is about the act, not the repository, so the
 	// two bounds compose rather than overlap. Distinct from RepoTokens, which the
 	// per-repo exec-verb/SDK channel and git proxy consume until their P4

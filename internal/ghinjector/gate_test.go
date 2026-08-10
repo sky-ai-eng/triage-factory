@@ -167,12 +167,20 @@ func (g *gatedRun) assertRefused(t *testing.T, resp *http.Response, wantReason s
 	return decisions[0]
 }
 
-// TestGate_MergeIsRefusedWhateverTheSpelling is the acceptance case. The four
-// spellings below are what `gh pr merge`, a hand-written `gh api`, an inline
-// GraphQL document, and a bare `curl` each put on the wire, and the point of
-// gating at the injector rather than at the command matcher is that they are
-// one thing here.
-func TestGate_MergeIsRefusedWhateverTheSpelling(t *testing.T) {
+// TestGate_MergeTransitsWhateverTheSpelling pins a deliberate absence.
+//
+// Merging is the obvious third family and it is not gated: some missions are
+// legitimately for landing work, and unlike a review or a new repository there
+// is no dominating alternative to redirect to. The control that stands is the
+// delegated runtime's merge question, which interrupts the first attempt and
+// asks the model to quote its authorization — and which promises that a
+// re-issue proceeds. This is what makes that promise true.
+//
+// Pinned rather than left implicit because the four spellings below are exactly
+// the ones a gated family would sweep up by act, so a later change that adds
+// pr_merged to the table would silently break the question's contract. If that
+// is ever the intent, this test is where the intent gets stated.
+func TestGate_MergeTransitsWhateverTheSpelling(t *testing.T) {
 	cases := []struct {
 		name   string
 		method string
@@ -189,8 +197,11 @@ func TestGate_MergeIsRefusedWhateverTheSpelling(t *testing.T) {
 				`"variables":{"input":{"pullRequestId":"PR_kwABC"}}}`,
 		},
 		{
-			// What `gh pr merge --auto` sends. A distinct mutation, not a flag
-			// on the one above, so gating the merge family never implied it.
+			// What `gh pr merge --auto` sends: a distinct mutation, not a flag on
+			// the one above. It follows the merge rather than leading it — arming
+			// a merge cannot be the more dangerous of the two, so gating it while
+			// the merge itself transits would refuse the cautious spelling and
+			// permit the direct one.
 			name:   "gh pr merge --auto",
 			method: http.MethodPost,
 			path:   "/api/graphql",
@@ -204,9 +215,6 @@ func TestGate_MergeIsRefusedWhateverTheSpelling(t *testing.T) {
 			body:   `{"merge_method":"squash"}`,
 		},
 		{
-			// A client that never went through gh at all. It holds the run's
-			// placeholder because the jail's env carries one, which is the whole
-			// reason a command-level matcher cannot be the control.
 			name:   "curl of the same shape",
 			method: http.MethodPut,
 			path:   "/repos/acme/widgets/pulls/7/merge",
@@ -216,34 +224,23 @@ func TestGate_MergeIsRefusedWhateverTheSpelling(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newGatedRun(t, ok)
-			g.assertRefused(t, g.do(t, tc.method, tc.path, tc.body), ghwrite.GateReasonMerge)
+			resp := g.do(t, tc.method, tc.path, tc.body)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want the upstream's 200 — merging is not gated here", resp.StatusCode)
+			}
+			forwarded, decisions := g.snap()
+			if len(forwarded) != 1 {
+				t.Fatalf("forwarded = %q, want the merge to reach GitHub", forwarded)
+			}
+			if len(decisions) != 0 {
+				t.Errorf("decisions = %+v, want none — an ungated act is never asked about", decisions)
+			}
 		})
 	}
 }
 
-// TestGate_DisablingAutoMergeIsNotRefused: disarming a queued merge is the safe
-// direction, and refusing it would leave an agent that armed one by accident
-// unable to undo it.
-func TestGate_DisablingAutoMergeIsNotRefused(t *testing.T) {
-	g := newGatedRun(t, ok)
-	resp := g.do(t, http.MethodPost, "/api/graphql",
-		`{"query":"mutation($input:DisablePullRequestAutoMergeInput!)`+
-			`{disablePullRequestAutoMerge(input:$input){clientMutationId}}"}`)
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want the upstream's 200", resp.StatusCode)
-	}
-	forwarded, decisions := g.snap()
-	if len(forwarded) != 1 {
-		t.Fatalf("forwarded = %q, want the disable to transit", forwarded)
-	}
-	if len(decisions) != 0 {
-		t.Fatalf("decisions = %+v, want none — nothing gated was reached for", decisions)
-	}
-}
-
-// TestGate_ReviewAndRepoCreationAreRefused covers the other two families, in
+// TestGate_ReviewAndRepoCreationAreRefused covers the two gated families, in
 // each of the spellings the pinned gh and a hand-written call produce.
 //
 // The two repository REST collections are the reason the gate cannot key on the
@@ -320,8 +317,15 @@ func TestGate_ReviewAndRepoCreationAreRefused(t *testing.T) {
 //
 // The first two are named rather than blocked and gate on their merits — an
 // alias resolves to the field it hides, a resolvable spread is followed into
-// its definition — so they arrive at the merge family like any other merge. The
-// rest cannot be named at all and are refused on exactly that ground.
+// its definition — so they arrive at the review family like any other review.
+// The rest cannot be named at all and are refused on exactly that ground.
+//
+// The hidden act is a REVIEW rather than a merge because merging is not gated
+// (see TestGate_MergeTransitsWhateverTheSpelling): an evasion test has to hide
+// something that would otherwise be refused, or it proves nothing about the
+// evasion. The undecidable cases below are shape-independent by construction —
+// nobody knows what they were — so their documents still say merge, which is
+// exactly the point of refusing them.
 func TestGate_UnnameableWritesAreRefused(t *testing.T) {
 	padded := `{"query":"mutation($input:MergePullRequestInput!){mergePullRequest(input:$input){clientMutationId}}",` +
 		`"variables":{"input":{"pullRequestId":"PR_1","commitBody":"` + strings.Repeat("x", maxRequestBody) + `"}}}`
@@ -333,24 +337,24 @@ func TestGate_UnnameableWritesAreRefused(t *testing.T) {
 		unreadable string
 	}{
 		{
-			name:   "an aliased merge",
-			body:   `{"query":"mutation{x: mergePullRequest(input:{pullRequestId:\"PR_1\"}){clientMutationId}}"}`,
-			reason: ghwrite.GateReasonMerge,
+			name:   "an aliased review",
+			body:   `{"query":"mutation{x: addPullRequestReview(input:{pullRequestId:\"PR_1\"}){clientMutationId}}"}`,
+			reason: ghwrite.GateReasonReview,
 		},
 		{
-			name: "a merge behind a fragment spread",
-			body: `{"query":"mutation{...M} fragment M on Mutation{mergePullRequest(input:{pullRequestId:\"PR_1\"})` +
+			name: "a review behind a fragment spread",
+			body: `{"query":"mutation{...M} fragment M on Mutation{addPullRequestReview(input:{pullRequestId:\"PR_1\"})` +
 				`{clientMutationId}}"}`,
-			reason: ghwrite.GateReasonMerge,
+			reason: ghwrite.GateReasonReview,
 		},
 		{
-			name:       "a merge behind an undefined fragment",
+			name:       "a write behind an undefined fragment",
 			body:       `{"query":"mutation{...Missing}"}`,
 			reason:     ghwrite.GateReasonUnreadable,
 			unreadable: ghwrite.GraphQLUnresolvedFragment,
 		},
 		{
-			name:       "a merge padded past the buffer cap",
+			name:       "a write padded past the buffer cap",
 			body:       padded,
 			reason:     ghwrite.GateReasonUnreadable,
 			unreadable: ghwrite.GraphQLOverCap,
@@ -367,14 +371,14 @@ func TestGate_UnnameableWritesAreRefused(t *testing.T) {
 			// keyword with JSON escapes hides it from a scan of the bytes and
 			// from nothing else.
 			name:   "the mutation keyword written as a JSON escape",
-			body:   `{"query":"\u006dutation{mergePullRequest(input:{pullRequestId:\"PR_1\"}){clientMutationId}}"}`,
-			reason: ghwrite.GateReasonMerge,
+			body:   `{"query":"\u006dutation{addPullRequestReview(input:{pullRequestId:\"PR_1\"}){clientMutationId}}"}`,
+			reason: ghwrite.GateReasonReview,
 		},
 		{
 			// A selection wider than the reader keeps: without the truncation
 			// reason, padding the front of the selection set would push the
-			// merge out of view entirely.
-			name: "a merge pushed past the field cap",
+			// gated field out of view entirely.
+			name: "a write pushed past the field cap",
 			body: `{"query":"mutation{a:addComment(input:{subjectId:\"1\",body:\"x\"}){clientMutationId} ` +
 				`b:addComment(input:{subjectId:\"1\",body:\"x\"}){clientMutationId} ` +
 				`c:addComment(input:{subjectId:\"1\",body:\"x\"}){clientMutationId} ` +
@@ -391,7 +395,7 @@ func TestGate_UnnameableWritesAreRefused(t *testing.T) {
 				`n:addComment(input:{subjectId:\"1\",body:\"x\"}){clientMutationId} ` +
 				`o:addComment(input:{subjectId:\"1\",body:\"x\"}){clientMutationId} ` +
 				`p:addComment(input:{subjectId:\"1\",body:\"x\"}){clientMutationId} ` +
-				`mergePullRequest(input:{pullRequestId:\"PR_1\"}){clientMutationId}}"}`,
+				`addPullRequestReview(input:{pullRequestId:\"PR_1\"}){clientMutationId}}"}`,
 			reason:     ghwrite.GateReasonUnreadable,
 			unreadable: ghwrite.GraphQLTooManyFields,
 		},
@@ -570,8 +574,8 @@ func TestGate_FailsClosedWithoutADecisionSource(t *testing.T) {
 	pool.AppendCertsFromPEM(certPEM)
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
 
-	req, _ := http.NewRequest(http.MethodPut, "https://"+addr+"/api/v3/repos/acme/widgets/pulls/7/merge",
-		strings.NewReader(`{}`))
+	req, _ := http.NewRequest(http.MethodPost, "https://"+addr+"/api/v3/repos/acme/widgets/pulls/7/reviews",
+		strings.NewReader(`{"event":"APPROVE"}`))
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request: %v", err)
@@ -581,7 +585,7 @@ func TestGate_FailsClosedWithoutADecisionSource(t *testing.T) {
 		t.Errorf("status = %d, want 403 with no decision source wired", resp.StatusCode)
 	}
 	if forwarded {
-		t.Error("a merge transited with nothing to authorize it")
+		t.Error("a gated write transited with nothing to authorize it")
 	}
 }
 
@@ -615,8 +619,8 @@ func TestGate_RefusedRequestNeverTouchesTheCredential(t *testing.T) {
 	pool.AppendCertsFromPEM(certPEM)
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
 
-	req, _ := http.NewRequest(http.MethodPut, "https://"+addr+"/api/v3/repos/acme/widgets/pulls/7/merge",
-		strings.NewReader(`{}`))
+	req, _ := http.NewRequest(http.MethodPost, "https://"+addr+"/api/v3/repos/acme/widgets/pulls/7/reviews",
+		strings.NewReader(`{"event":"APPROVE"}`))
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request: %v", err)

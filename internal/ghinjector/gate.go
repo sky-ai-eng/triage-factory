@@ -9,7 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 )
 
-// The injector's one traffic policy: three families of write are refused before
+// The injector's one traffic policy: two families of write are refused before
 // they are forwarded, and so is any GraphQL request whose act could not be
 // established. What is refused and why lives in internal/ghwrite — the same
 // table the audit builder reads — so a shape cannot be named one thing by the
