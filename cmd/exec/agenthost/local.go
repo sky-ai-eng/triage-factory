@@ -2301,6 +2301,71 @@ func (c *LocalClient) RecordGHChannelWrite(ctx context.Context, obs ghwrite.Obse
 	c.recordBotAction(ctx, GHChannelWriteAction(obs))
 }
 
+// GHWriteDeniedAction builds the audit row for one gh-channel request the
+// refusal policy stopped. Exported for the same reason GHChannelWriteAction is:
+// local mode records it without a LocalClient in hand, and one builder keeps
+// the row identical whichever mode produced it.
+//
+// It is the counterpart of that builder, not a variant of it — the two are
+// mutually exclusive by construction. A refused request is never forwarded, so
+// it never reaches the write audit, and a request that reached the write audit
+// was never refused. One request, one row, in both directions.
+//
+// Target is the repository the path names, deliberately never owner/repo#N even
+// when the path carries a number. The coordinates in a refused request were
+// supplied by the agent and verified by nothing, so an entity-shaped target
+// would mint an entity stub for an object that may not exist. The full path is
+// in detail_json either way. A GraphQL request names no repository at all, so
+// its target falls back to the node id its variables disclosed, and to the
+// endpoint path when even that was unreadable.
+func GHWriteDeniedAction(req ghwrite.Request, ref ghwrite.Refusal) *domain.ExternalAction {
+	detail := map[string]any{"reason": ref.Reason, "method": req.Method, "path": req.Path}
+	if ref.Action != "" {
+		detail["refused"] = ref.Action
+	}
+	if ref.Mutation != "" {
+		detail["mutation"] = ref.Mutation
+	}
+	if ref.Unreadable != "" {
+		detail["unreadable"] = ref.Unreadable
+	}
+	target := ""
+	if req.GraphQL != nil {
+		target = req.GraphQL.Subject
+		if op := req.GraphQL.Operation; op != "" {
+			detail["operation"] = op
+		}
+		if len(req.GraphQL.Fields) > 0 {
+			detail["mutations"] = req.GraphQL.Fields
+		}
+	} else {
+		target = ghwrite.RepoPath(req.Path)
+	}
+	if target == "" {
+		target = req.Path
+	}
+	payload, _ := json.Marshal(detail)
+	return &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderGitHub,
+		Action:     domain.ActionGHWriteDenied,
+		Target:     target,
+		Credential: domain.CredentialGitHubApp,
+		DetailJSON: string(payload),
+	}
+}
+
+// RecordGHWriteDenied appends the audit row for one gh-channel request the
+// refusal policy stopped. Host-side only, like the gate itself: the decision is
+// made outside the jail and the sandbox never names its own denials.
+//
+// Unlike the other recorders here this one is NOT best-effort by intent — its
+// caller is a relay Call rather than a notify precisely so the refusal record
+// cannot be silently lost — but a store failure still only costs the row, never
+// the refusal: the request is already being turned down by the time this runs.
+func (c *LocalClient) RecordGHWriteDenied(ctx context.Context, req ghwrite.Request, ref ghwrite.Refusal) {
+	c.recordBotAction(ctx, GHWriteDeniedAction(req, ref))
+}
+
 // RecordGitPushFailed records one `branch_push_failed` external-action audit
 // row for a branch push the upstream refused (a non-2xx receive-pack response —
 // observed by the git proxy's outcome capture). The audit log records every

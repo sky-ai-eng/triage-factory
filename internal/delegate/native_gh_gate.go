@@ -1,41 +1,25 @@
-// The native runtime's pre-dispatch gate on three `gh` commands.
+// The native runtime's pre-dispatch matcher on three `gh` commands: merging a
+// pull request, posting a review, and creating a repository. All three are
+// refused, and all three are refused again — for real — at the credential
+// injector every request on this channel passes through.
 //
-// The jail ships the real `gh` on a PATH-leading directory with a working
-// credential channel, so a delegated agent can merge a pull request or post a
-// review outside Triage Factory entirely. Both are intercepted here, and they
-// get different answers because the situations are not alike. A review posted
-// through `gh` can only be a top-level comment, lands no artifact and takes no
-// approval path, so the TF review verbs strictly dominate it: that is a refusal
-// with a redirect. (The injector does now audit such a review — it is a write
-// under the org credential like any other — but an audit row is a record of
-// what happened, not a substitute for the review object the product works on.)
-// Merging is something some missions are for, so refusing it would mean
-// deciding an intent the runtime cannot know: that gets a question, aimed at
-// the one artifact the model can actually check. Creating a repository is
-// refused outright, and for a reason that is neither of those: the product is
-// built around knowing which repositories an agent works in BEFORE a run
-// starts — the tracked set is what scopes polling, task routing, and the
-// credential itself — so a repository that appears mid-run is outside every
-// structure meant to account for it. No mission needs one badly enough to
-// invent it unattended.
+// That is the whole of what this file is now: early UX in front of an enforced
+// policy. It exists because the same answer arrives better from a matcher than
+// from a proxy. A refusal here costs one tool call and names the redirect in
+// the model's own terms; the injector's arrives as a 403 partway through a `gh`
+// invocation, after the model has already committed to a plan built around the
+// command succeeding.
 //
-// These are accident controls, not security controls, and three limitations
-// come with them, accepted rather than worked around:
-//
-//   - Injection-blind. The same hostile context that induced the action will
-//     satisfy a self-attestation just as easily.
-//   - Matcher-evadable. Any construction this matcher does not recognize —
-//     `gh api graphql` with an inline mutation being the obvious one — passes
-//     straight through.
-//   - Self-attestation only. Nothing checks the answer to the merge question,
-//     and a model that simply re-issues the call proceeds.
-//
-// What they do work against is the failure they target: a model reaching for
-// the command it knows best, or building momentum toward a helpful-seeming
-// finish. The value of the merge question is the forced restatement of intent
-// against the mission, not the obstruction — a model asked to quote its
-// authorization and unable to find one frequently abandons the action. The
-// actual boundary is the credential's repo scope, which none of this changes.
+// So the limitations that used to be caveats are now merely uninteresting. This
+// matcher is injection-blind and trivially evadable — `gh api graphql` with an
+// inline mutation walks straight past it, as does any client that is not `bash`
+// — and none of that matters, because nothing here is load-bearing. What the
+// three refusals must be is TRUE: a model that discovers a stated rule is false
+// has cause to doubt every other rule it was given, and a matcher that said
+// "this is refused" while the act quietly succeeded would be exactly that. The
+// enforcement is in internal/ghinjector, keyed on the shared classifier in
+// internal/ghwrite; these texts say the same thing that gate says, and change
+// when it changes.
 
 package delegate
 
@@ -44,7 +28,6 @@ import (
 	"path"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -56,9 +39,31 @@ import (
 // The verbs it names are the ones the native harness prompt documents; the
 // two must stay in step, since a redirect to a command that does not exist is
 // worse than no redirect at all.
-const reviewRefusal = "This command was not run. `gh pr review` cannot attach comments to specific lines, " +
-	"and it posts straight to GitHub — no artifact, no approval path. " +
+//
+// The justification is verb dominance, and only that. It used to also say such
+// a review was invisible to Triage Factory, which stopped being true when the
+// channel's writes started landing audit rows — the review verbs win because a
+// review posted raw cannot anchor to a line, carry a severity badge, be revised
+// as a draft, or go through the approval path, not because nobody would know.
+const reviewRefusal = "This command was not run, and the same call made another way will be refused too. " +
+	"`gh pr review` cannot attach comments to specific lines, and it posts straight to GitHub — " +
+	"no draft to revise, no severity badges, no approval path. " +
 	"Use `tfac gh pr start-review`, then `add-review-comment` for each finding, then `finalize-review`."
+
+// mergeRefusal answers a merge attempt every time.
+//
+// It used to be a question — "does your mission tell you to merge? quote the
+// line" — which was the right shape while the runtime could not know the
+// answer and nothing downstream enforced one. It is the wrong shape now: the
+// injector refuses the merge whatever the mission says, so a model that found
+// its authorization, quoted it, and re-issued would be told no by a 403. Asking
+// a question whose only correct answer is refused teaches the model that this
+// harness's rules do not mean what they say.
+const mergeRefusal = "This command was not run, and the same call made another way will be refused too. " +
+	"Triage Factory does not merge with a run's credential — not on any mission, and not with any " +
+	"authorization, because merging is irreversible and no human is watching this run. " +
+	"Finish your work and push the branch, then say in your final message that you believe it is " +
+	"ready to merge and let a human do it."
 
 // repoCreateRefusal answers `gh repo create` every time.
 //
@@ -71,50 +76,27 @@ const reviewRefusal = "This command was not run. `gh pr review` cannot attach co
 // TODO(TFAC-793): when a governed repo-provisioning verb exists, name it here.
 // That ticket also carries the prior question of whether an agent should be able
 // to ask for a repository at all, in which case this text stands permanently.
-const repoCreateRefusal = "This command was not run. Creating repositories is not something a run does — " +
-	"Triage Factory scopes polling, task routing, and this run's own credential to a set of repositories " +
-	"chosen before the run started, and a new one belongs to none of it. " +
+const repoCreateRefusal = "This command was not run, and the same call made another way will be refused too. " +
+	"Creating repositories is not something a run does — Triage Factory scopes polling, task routing, " +
+	"and this run's own credential to a set of repositories chosen before the run started, and a new one " +
+	"belongs to none of it. " +
 	"If your mission genuinely needs a repository that does not exist, say so in your final message and stop there."
-
-// mergeGateTag opens the merge question and is how a later call recognizes
-// that it has already been put. The identity lives in the tag, not in the
-// prose, so the wording can be changed without silently re-arming the question
-// on every conversation mid-flight.
-const mergeGateTag = `<system-note kind="merge-gate">`
-
-// mergeGateQuestion is what a merge attempt is asked before it runs.
-//
-// It points at the opening message rather than at "what the user asked for":
-// there is no user present, and a model's sense of what was asked is a vibe,
-// while the opening turn is a specific artifact in its context that
-// demonstrably does or does not carry the instruction — and demonstrably does
-// not carry one that arrived in a PR comment.
-const mergeGateQuestion = mergeGateTag + "\n" +
-	"This command was not run. Merging is not reversible and no human is watching this run. " +
-	"Before you do it: does your mission — the opening message of this conversation — actually tell you to merge? " +
-	"If it does, quote that line before merging. If you cannot find one, do not merge — finish your work and say " +
-	"in your final message that you believe the branch is ready to merge, and let a human do it.\n" +
-	"</system-note>"
 
 // ghCommandGate builds the native loop's BeforeToolCall hook.
 //
-// A denial is a synthetic is_error result the model reads in-band, so neither
-// answer ever ends a run: the refusal redirects and the question is answerable
-// by re-issuing. Nothing but the two matched shapes is looked at, so a run
-// that attempts neither sees no evidence the gate exists — and only a matched
-// merge pays for the transcript read.
-func (s *Spawner) ghCommandGate(orgID, runID string) func(context.Context, domain.ToolCall) string {
-	return func(ctx context.Context, call domain.ToolCall) string {
+// A refusal is a synthetic is_error result the model reads in-band, so it never
+// ends a run — it redirects, and the redirect is a call the model can make
+// instead. Nothing but the three matched shapes is looked at, so a run that
+// attempts none of them sees no evidence this exists.
+func (s *Spawner) ghCommandGate() func(context.Context, domain.ToolCall) string {
+	return func(_ context.Context, call domain.ToolCall) string {
 		switch classifyGHCommand(bashCommand(call)) {
 		case ghActionReview:
 			return reviewRefusal
 		case ghActionRepoCreate:
 			return repoCreateRefusal
 		case ghActionMerge:
-			if s.mergeAlreadyQuestioned(ctx, orgID, runID) {
-				return ""
-			}
-			return mergeGateQuestion
+			return mergeRefusal
 		}
 		return ""
 	}
@@ -128,61 +110,6 @@ func bashCommand(call domain.ToolCall) string {
 	}
 	cmd, _ := call.Input["command"].(string)
 	return cmd
-}
-
-// mergeAlreadyQuestioned reads the question's state off the transcript.
-//
-// A read failure asks again, which is the cheap way to be wrong: the model
-// answers a question it has already answered and re-issues, costing one turn.
-// Staying quiet would instead let the one call this exists for through on the
-// strength of a failed read.
-func (s *Spawner) mergeAlreadyQuestioned(ctx context.Context, orgID, runID string) bool {
-	rows, err := s.agentRuns.ListForAssemblySystem(ctx, orgID, runID)
-	if err != nil {
-		delegateLog.Warn("read transcript for the merge question failed; asking again", "run", runID, "error", err)
-		return false
-	}
-	return askedAboutMergeAlready(rows)
-}
-
-// askedAboutMergeAlready reports whether the merge question has been put with
-// no human input since.
-//
-// The state is the transcript, never process state, so a crash and a re-claim
-// behave identically to the engagement that asked. Walking back from the
-// newest row: the gate's own note means the question stands and the model has
-// already restated its intent against it, so asking again would be
-// obstruction rather than reconsideration. Genuine human input newer than the
-// note means a person spoke since — the premise changed, and the same question
-// about that new work has not been put. Everything else the system wrote on
-// the agent's behalf speaks for no one and is skipped, using the same closed
-// human set the engine's drain and turn budget key on.
-//
-// The note check comes first, because the row it looks for is system-authored
-// and the human filter below would skip it.
-func askedAboutMergeAlready(rows []domain.Message) bool {
-	for i := len(rows) - 1; i >= 0; i-- {
-		r := rows[i]
-		if isMergeGateNote(r) {
-			return true
-		}
-		if r.Role == "user" && agentloop.IsHumanInput(r) {
-			return false
-		}
-	}
-	return false
-}
-
-// isMergeGateNote reports whether a row is one this gate itself wrote.
-//
-// The tag has to open an is_error tool result, not merely appear somewhere in
-// a row: it is a string that exists in this repository and in every transcript
-// the note lands in, so a run that greps its own source, cats a log, or reads
-// a conversation would otherwise hand itself a row that spends the question it
-// was never asked. Anchoring it leaves everything after the tag free to
-// change, which is the whole reason the identity is a tag and not the prose.
-func isMergeGateNote(r domain.Message) bool {
-	return r.Role == "tool" && r.IsError && strings.HasPrefix(r.Content, mergeGateTag)
 }
 
 // ghAction is the gated action a shell command was recognized as reaching for.
@@ -250,10 +177,6 @@ func classifyGHSegment(words []string) ghAction {
 			return ghActionReview
 		}
 	case chain[0] == "repo" && len(chain) > 1:
-		// TODO(TFAC-788): this refusal is advisory — the limitations in the file
-		// comment apply to it in full, and a document shaped to dodge the match
-		// reaches GitHub. That ticket gates repository creation at the injector,
-		// where the decision is fail-closed and no client can route around it.
 		if chain[1] == "create" {
 			return ghActionRepoCreate
 		}
@@ -345,9 +268,10 @@ func namesRepoCreate(words []string) bool {
 // this repository in particular, where a pull request discussing this very gate
 // contains those identifiers as prose.
 //
-// TODO(TFAC-788): a document passed by file (`-F query=@doc.graphql`, `--input
-// doc.json`) is not visible here, so this misses it. The injector gate that
-// ticket builds reads the request body itself and does not have the blind spot.
+// A document passed by file (`-F query=@doc.graphql`, `--input doc.json`) is
+// invisible here and always was. It no longer needs chasing: the injector reads
+// the request body itself, so a document this scan cannot see is refused where
+// it actually arrives.
 func namesRepoCreateMutation(word string) bool {
 	for _, prefix := range []string{"--field=", "--raw-field="} {
 		word = strings.TrimPrefix(word, prefix)

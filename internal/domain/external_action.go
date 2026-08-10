@@ -174,6 +174,26 @@ const (
 	// refused a destination at all, not how many times it retried.
 	ActionEgressDenied = "egress_denied"
 
+	// A write through the real-`gh` credential channel that Triage Factory
+	// refused before forwarding it — a merge (or an auto-merge arming), a
+	// submitted review, a repository creation, or a GraphQL request whose act
+	// could not be established at all. Nothing reached GitHub, which is what
+	// separates this row from the fallbacks below: those say a write happened
+	// and could not be named, this says a write was stopped.
+	//
+	// detail_json carries {reason, method, path}, plus "refused" naming the act
+	// where the classifier resolved one, "mutation" for the GraphQL field, and
+	// "unreadable" for the band where naming it is exactly what failed. The
+	// distinction is the point: "we refused a merge" and "we refused something
+	// we could not read" are different operational facts, and only the second
+	// one should ever be worth investigating.
+	//
+	// Appended unconditionally (no dedup key): every refused attempt is its own
+	// event, exactly like ActionGitDenied, which this follows in every respect
+	// — a per-run least-privilege gate turning down an act, recorded as a
+	// security signal.
+	ActionGHWriteDenied = "gh_write_denied"
+
 	// The fallback for a write the agent made through the real-`gh` credential
 	// channel — a mutating REST request whose method+path the shared classifier
 	// (internal/ghwrite) does not recognize, or a recognized one the upstream

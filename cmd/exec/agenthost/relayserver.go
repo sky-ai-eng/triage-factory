@@ -188,6 +188,13 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 			DenyMessage:   dec.DenyMessage,
 		})
 
+	case agentproc.OpAuthorizeGHWrite:
+		var a agentproc.AuthorizeGHWriteArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		return json.Marshal(agentproc.AuthorizeGHWriteReply{Allowed: s.authorizeGHWrite(ctx, a)})
+
 	case opGetConversation:
 		run, err := s.rt.GetConversation(ctx)
 		if err != nil {
@@ -578,6 +585,52 @@ func ObservationArtifact(a agentproc.RecordObservationArgs, runID string) (domai
 	return domain.Artifact{}, false
 }
 
+// authorizeGHWrite decides one gh-channel request the injector recognized as a
+// gated shape, and writes the refusal row when the answer is no.
+//
+// The decision is re-derived here from the shared classifier rather than taken
+// from the sidecar: policy belongs on the side that holds it, and the sidecar's
+// recognition is a filter on which requests need asking about, not the answer.
+// The two readings agree by construction — one table, one binary — so a
+// disagreement can only mean this side found the request ungated, which lets it
+// through exactly as it would have gone through unnoticed.
+//
+// V1 has no authorized case: a gated shape is refused whatever the run, the
+// mission, or the trigger. The only true return is the ungated one.
+func (s *RelayServer) authorizeGHWrite(ctx context.Context, a agentproc.AuthorizeGHWriteArgs) bool {
+	req := ghwrite.Request{
+		Method:  a.Method,
+		Path:    a.Path,
+		GraphQL: graphQLFactsFromWire(a.GraphQL),
+	}
+	ref, gated := ghwrite.Gate(req)
+	if !gated {
+		return true
+	}
+	// The agent is waiting on this call, so the recording is capped like every
+	// other DB effect reached from the supervision channel. A store that cannot
+	// be written costs the row; the refusal itself is this function's return
+	// value and does not depend on it.
+	recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
+	defer cancel()
+	s.audit.RecordGHWriteDenied(recCtx, req, ref)
+	return false
+}
+
+// graphQLFactsFromWire rebuilds the classifier's facts from the relay payload.
+// nil in, nil out — a REST request carries no GraphQL member.
+func graphQLFactsFromWire(w *agentproc.GraphQLWriteFacts) *ghwrite.GraphQLFacts {
+	if w == nil {
+		return nil
+	}
+	return &ghwrite.GraphQLFacts{
+		Operation:  w.Operation,
+		Fields:     w.Mutations,
+		Subject:    w.Subject,
+		Unreadable: w.Unreadable,
+	}
+}
+
 // dispatchCoreNotify serves the "core" fire-and-forget audit ops.
 
 func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args json.RawMessage) {
@@ -625,7 +678,7 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 		// vocabulary stays on the side that owns it.
 		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
 		defer cancel()
-		obs := ghwrite.Observation{
+		s.audit.RecordGHChannelWrite(recCtx, ghwrite.Observation{
 			Method:         a.Method,
 			Path:           a.Path,
 			Status:         a.Status,
@@ -633,16 +686,8 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 			URL:            a.URL,
 			Errored:        a.Errored,
 			ResponseUnread: a.ResponseUnread,
-		}
-		if a.GraphQL != nil {
-			obs.GraphQL = &ghwrite.GraphQLFacts{
-				Operation:  a.GraphQL.Operation,
-				Fields:     a.GraphQL.Mutations,
-				Subject:    a.GraphQL.Subject,
-				Unreadable: a.GraphQL.Unreadable,
-			}
-		}
-		s.audit.RecordGHChannelWrite(recCtx, obs)
+			GraphQL:        graphQLFactsFromWire(a.GraphQL),
+		})
 
 	case agentproc.OpRecordPush:
 		var a agentproc.RecordPushArgs

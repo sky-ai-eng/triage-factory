@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -136,106 +138,13 @@ func TestGHCommandGate_OnlyReadsBashCalls(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-gate-bash", "", "/tmp/wt-gate-bash")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	gate := s.ghCommandGate(runmode.LocalDefaultOrgID, "r-gate-bash")
+	gate := s.ghCommandGate()
 
 	write := domain.ToolCall{ID: "c1", Name: "write", Input: map[string]any{
 		"file_path": "_tfac/notes.md", "content": "next step: gh pr merge 7",
 	}}
 	if deny := gate(context.Background(), write); deny != "" {
 		t.Errorf("a non-bash call was gated: %q", deny)
-	}
-}
-
-// TestAskedAboutMergeAlready pins when the merge question re-arms. Asking a
-// model that has already restated its intent is obstruction; asking again
-// after a human has changed the premise is a different question about
-// different work.
-//
-// The state is read from the transcript rather than remembered, so an
-// engagement that inherits a conversation behaves exactly like the one that
-// asked — a crash cannot buy a second merge un-questioned, and cannot spend a
-// question twice.
-func TestAskedAboutMergeAlready(t *testing.T) {
-	question := domain.Message{Role: "tool", ToolCallID: "c1", IsError: true, Content: mergeGateQuestion}
-	assistant := domain.Message{Role: "assistant", Content: "my mission says to merge"}
-	human := domain.Message{Role: "user", Content: "merge it when CI is green"}
-	steered := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "go ahead and merge"}
-	crashNotice := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionExecutorChanged, Content: "your executor changed"}
-	stopNote := domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "This run reached its spend cap and has been paused."}
-	stagedNote := domain.Message{Role: "user", Subtype: "injection:system-note", Content: "<system-note>PR gained commits</system-note>"}
-	echo := domain.Message{Role: "assistant", Content: "I was told: " + mergeGateQuestion}
-	// The gate's tag is a string that exists in this repository and in every
-	// transcript the note lands in, so tool output can carry it for reasons
-	// that have nothing to do with a question having been put.
-	grepHit := domain.Message{Role: "tool", ToolCallID: "c8", Content: "native_gh_gate.go:59:const mergeGateTag = `" + mergeGateTag + "`"}
-	readTranscript := domain.Message{Role: "tool", ToolCallID: "c9", Content: `[{"role":"tool","content":"` + mergeGateQuestion + `"}]`}
-
-	tests := []struct {
-		name string
-		rows []domain.Message
-		want bool
-	}{
-		{
-			name: "never asked",
-			rows: []domain.Message{human, assistant},
-		},
-		{
-			name: "asked, and nothing has happened since but the model's own answer",
-			rows: []domain.Message{human, assistant, question, assistant},
-			want: true,
-		},
-		{
-			name: "a human spoke after the question, so the premise is new",
-			rows: []domain.Message{human, assistant, question, assistant, human, assistant},
-		},
-		{
-			// A follow-up that lands mid-work is stamped as a steer, and it is
-			// still a person asking for more.
-			name: "a mid-work steer counts as a human speaking",
-			rows: []domain.Message{human, assistant, question, assistant, steered, assistant},
-		},
-		{
-			name: "an executor-changed notice does not re-arm",
-			rows: []domain.Message{human, assistant, question, crashNotice, assistant},
-			want: true,
-		},
-		{
-			name: "a stop-note from a guard park does not re-arm",
-			rows: []domain.Message{human, assistant, question, assistant, stopNote, crashNotice, assistant},
-			want: true,
-		},
-		{
-			name: "a staged system note does not re-arm",
-			rows: []domain.Message{human, assistant, question, stagedNote, assistant},
-			want: true,
-		},
-		{
-			// The reason the tag is looked for on the gate's own row: a model
-			// that quotes the question back must not disarm a gate that has
-			// never fired.
-			name: "the model quoting the question is not the question",
-			rows: []domain.Message{human, echo},
-		},
-		{
-			// The reason the tag must OPEN the note rather than appear in it:
-			// a run grepping this repository hands itself the string.
-			name: "a grep hit on the gate's own source is not the question",
-			rows: []domain.Message{human, assistant, grepHit, assistant},
-		},
-		{
-			name: "reading a transcript that carries the note is not the question",
-			rows: []domain.Message{human, assistant, readTranscript, assistant},
-		},
-		{
-			name: "an empty transcript has nothing to have asked",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := askedAboutMergeAlready(tc.rows); got != tc.want {
-				t.Errorf("askedAboutMergeAlready = %v, want %v", got, tc.want)
-			}
-		})
 	}
 }
 
@@ -274,64 +183,69 @@ func TestNativeGate_ReviewIsRefusedAndNeverDispatched(t *testing.T) {
 	}
 }
 
-// TestNativeGate_MergeIsQuestionedThenAllowed walks the merge lifecycle: the
-// first attempt is questioned and does not run, and the same call re-issued
-// after the model has answered runs normally. The run concludes either way —
-// the gate is a conversation, not a kill.
-func TestNativeGate_MergeIsQuestionedThenAllowed(t *testing.T) {
+// TestNativeGate_MergeIsRefusedAndNeverDispatched: a merge attempt is refused
+// every time it is made, and the second refusal is identical to the first. It
+// used to be a question — "does your mission tell you to merge? quote the line"
+// — which is the wrong shape now that the injector refuses the merge whatever
+// the answer would have been. The run concludes either way: a refusal is a
+// redirect, not a kill.
+func TestNativeGate_MergeIsRefusedAndNeverDispatched(t *testing.T) {
 	const merge = "gh pr merge 7 --squash --delete-branch"
 	h := newGateHarness(t, "r-gate-merge", "land the fix", []gateTurn{
 		{calls: []domain.ToolCall{bashCall("c1", merge)}},
 		{text: `My mission says "land the fix".`, calls: []domain.ToolCall{bashCall("c2", merge)}},
-		{text: "Merged."},
+		{text: "The branch is ready to merge."},
 	})
 
 	result := h.run()
 	if result.Kind != agentloop.ResultConcluded {
-		t.Fatalf("the merge gate must never fail a run: kind=%v err=%v", result.Kind, result.Err)
+		t.Fatalf("a refusal must not end the run: kind=%v err=%v", result.Kind, result.Err)
 	}
-	if got := h.host.commands(); len(got) != 1 || got[0] != merge {
-		t.Fatalf("dispatched commands = %q, want only the re-issued merge", got)
+	if got := h.host.commands(); len(got) != 0 {
+		t.Fatalf("a refused merge reached the jail: %q", got)
 	}
 	results := h.toolResults()
 	if len(results) != 2 {
-		t.Fatalf("tool results = %d, want the question then the real result: %+v", len(results), results)
+		t.Fatalf("tool results = %d, want one refusal per attempt: %+v", len(results), results)
 	}
-	if !results[0].IsError || !strings.Contains(results[0].Content, mergeGateTag) {
-		t.Errorf("first result = {is_error:%v, %q}, want the merge question", results[0].IsError, results[0].Content)
-	}
-	if results[1].IsError {
-		t.Errorf("the re-issued merge was denied a second time: %q", results[1].Content)
-	}
-	if !strings.Contains(results[0].Content, "the opening message of this conversation") {
-		t.Error("the question must point at the mission, which is the opening message — not at an absent user")
+	for i, r := range results {
+		if !r.IsError || r.Content != mergeRefusal {
+			t.Errorf("result %d = {is_error:%v, %q}, want the refusal in-band", i, r.IsError, r.Content)
+		}
 	}
 }
 
-// TestNativeGate_MergeReArmsAfterHumanInput: a person speaking is a new
-// premise, so the same question about that new work has not been put. The
-// engagement below is a re-claim of a conversation that was already questioned
-// and answered, with a follow-up waiting — the shape that must ask again.
-func TestNativeGate_MergeReArmsAfterHumanInput(t *testing.T) {
-	const merge = "gh pr merge 7"
-	h := newGateHarness(t, "r-gate-rearm", "review the PR", []gateTurn{
-		{text: "Done."},
-	})
-
-	// A prior stretch: the question was put, the model answered, and the merge
-	// it re-issued went through.
-	h.seed(domain.Message{Role: "assistant", Content: "merging"})
-	h.seed(domain.Message{Role: "tool", ToolCallID: "c0", IsError: true, Content: mergeGateQuestion})
-	h.seed(domain.Message{Role: "assistant", Content: "my mission says to merge"})
-
-	gate := h.spawner.ghCommandGate(runmode.LocalDefaultOrgID, h.runID)
-	if deny := gate(context.Background(), bashCall("c1", merge)); deny != "" {
-		t.Fatalf("the question re-fired with no human input since: %q", deny)
+// TestNativeGate_RefusalsPromiseWhatTheInjectorEnforces is the R5 check in
+// test form: what these texts tell a model must be what actually happens to
+// its request. A matcher that says "refused" while the act quietly succeeds
+// teaches the model that this harness's rules are negotiable, and it will
+// spend the rest of the run testing which other ones are.
+func TestNativeGate_RefusalsPromiseWhatTheInjectorEnforces(t *testing.T) {
+	cases := []struct {
+		name    string
+		refusal string
+		req     ghwrite.Request
+	}{
+		{"merge", mergeRefusal, ghwrite.Request{Method: http.MethodPut, Path: "/repos/acme/widgets/pulls/7/merge"}},
+		{"review", reviewRefusal, ghwrite.Request{Method: http.MethodPost, Path: "/repos/acme/widgets/pulls/7/reviews"}},
+		{"repo create", repoCreateRefusal, ghwrite.Request{Method: http.MethodPost, Path: "/user/repos"}},
 	}
-
-	h.seed(domain.Message{Role: "user", Content: "actually hold off, revert that"})
-	if deny := gate(context.Background(), bashCall("c2", merge)); !strings.Contains(deny, mergeGateTag) {
-		t.Fatalf("a human spoke and the question did not re-arm: %q", deny)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, gated := ghwrite.Gate(tc.req); !gated {
+				t.Fatalf("the matcher refuses %s but the injector forwards it", tc.name)
+			}
+			if !strings.Contains(tc.refusal, "This command was not run") {
+				t.Errorf("refusal does not say the command did not run: %q", tc.refusal)
+			}
+		})
+	}
+	// The review redirect names commands that have to exist, since a redirect
+	// to a verb nobody can run is worse than no redirect at all.
+	for _, verb := range []string{"tfac gh pr start-review", "add-review-comment", "finalize-review"} {
+		if !strings.Contains(reviewRefusal, verb) {
+			t.Errorf("the review refusal does not redirect to %q", verb)
+		}
 	}
 }
 
@@ -387,7 +301,7 @@ func (h *gateHarness) run() agentloop.Result {
 		Credentials: staticGateCredentials{provider: &scriptedGateProvider{turns: h.turns}},
 		Tools:       h.host,
 		Hooks: agentloop.Hooks{
-			BeforeToolCall: h.spawner.ghCommandGate(runmode.LocalDefaultOrgID, h.runID),
+			BeforeToolCall: h.spawner.ghCommandGate(),
 		},
 	}
 	return engine.Run(context.Background(), agentloop.Params{

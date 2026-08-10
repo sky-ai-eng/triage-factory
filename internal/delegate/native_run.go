@@ -183,7 +183,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		Tools:       tools,
 		Guards:      []agentloop.Guard{&spendGuard{spawner: s, orgID: orgID, teamID: cfg.teamID}},
 		Hooks: agentloop.Hooks{
-			BeforeToolCall:      s.ghCommandGate(orgID, runID),
+			BeforeToolCall:      s.ghCommandGate(),
 			ShouldStopAfterTurn: s.artifactContractNudge(orgID, runID, task, cfg),
 		},
 		Log: delegateLog,

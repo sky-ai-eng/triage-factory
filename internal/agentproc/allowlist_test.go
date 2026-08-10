@@ -214,10 +214,11 @@ func TestBuildAllowedTools_GHPorcelainAllowed(t *testing.T) {
 // an arbitrary body to an arbitrary path with the org's credential attached —
 // the same network-exfil channel omitting curl/wget/nc closes. `gh auth` /
 // `config` / `alias` / `extension` are credential and configuration surfaces
-// (extension install is plain arbitrary code execution). `gh pr merge` has no
-// local equivalent of the native loop's intent gate, so it stays unreachable
-// rather than ungated. A blanket `Bash(gh *)` added for convenience would
-// silently reopen every one of these.
+// (extension install is plain arbitrary code execution). `gh pr merge` is
+// refused at the credential channel whatever this list says, and stays off it
+// so the granted surface describes capabilities the agent actually has. A
+// blanket `Bash(gh *)` added for convenience would silently reopen every one of
+// these.
 func TestBuildAllowedTools_GHEscapeHatchesBlocked(t *testing.T) {
 	gh := ghAllowlist()
 	if strings.Contains(gh, "Bash(gh *)") {

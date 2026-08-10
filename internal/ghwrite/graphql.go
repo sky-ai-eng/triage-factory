@@ -1,10 +1,10 @@
 package ghwrite
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -30,8 +30,13 @@ import (
 
 // mutationKeyword is the prescreen. A document that performs a mutation must
 // say so — the spec's shorthand form (a bare selection set) is a query — so a
-// body without this token cannot be a write, and the reads that make up nearly
-// all of gh's traffic never reach the parser.
+// document without this token cannot be a write, and the reads that make up
+// nearly all of gh's traffic never reach the parser.
+//
+// It is applied to the DECODED query, not to the raw request body. A JSON
+// string may spell any character as an escape, so `"mutation{…}"` is a
+// body carrying a mutation that no scan of its bytes will find — which was a
+// hole in an audit and is a bypass in a gate.
 const mutationKeyword = "mutation"
 
 // Reasons a GraphQL request could not be resolved to one named act. Each one is
@@ -61,6 +66,12 @@ const (
 	// are followed, so this now means a genuine dead end rather than a
 	// construction declined on sight.
 	GraphQLUnresolvedFragment = "unresolved_fragment"
+	// GraphQLTooManyFields: the mutation selected more top-level fields than
+	// the reader keeps, so the names it holds are not the whole act. No real
+	// document does this — one act per request is what every client sends — and
+	// the reason exists because a selection padded past the bound is otherwise
+	// the cheapest way to push a gated field out of view.
+	GraphQLTooManyFields = "too_many_fields"
 )
 
 // GraphQLFacts is what the injector could read off one GraphQL request. It
@@ -191,12 +202,12 @@ var graphQLMutations = map[string]graphQLShape{
 	"archiveRepository":       {action: domain.ActionRepoArchived},
 	"unarchiveRepository":     {action: domain.ActionRepoUnarchived},
 
-	// TODO(TFAC-788): addPullRequestReviewThread is named in that ticket's gated
-	// set and is absent here because naming it needs a decision that ticket owns.
-	// No porcelain path emits it, and what it does is stage a thread on a PENDING
-	// review — nothing is published until the review is submitted — so every verb
-	// above would overstate it, and inventing one would assert an act that has
-	// not happened yet.
+	// addPullRequestReviewThread stays out, and now permanently. It stages a
+	// thread on a PENDING review — nothing is published until the review is
+	// submitted — so every verb above would overstate it. The refusal policy
+	// gates it by name instead (gate.go), which settles the question this table
+	// could not: a table of acts that HAPPENED needs no entry for a mutation
+	// that is refused unconditionally.
 }
 
 // graphQLShape is one table entry: the act, and the flags the REST shapes carry
@@ -220,19 +231,23 @@ type graphQLShape struct {
 
 // ParseGraphQLRequest reads one GraphQL request body into the facts an audit
 // row can be built from. ok is false when the request provably performs no
-// write — the document carries no mutation keyword, or its selected operation
+// write — its document carries no mutation keyword, or the operation it selects
 // is a query — which is the common case by a wide margin and the one that must
 // cost nothing downstream.
 //
 // A body that cannot be read is not the same as a body that performs no write,
-// and the two are kept apart: anything that fails to parse after the prescreen
-// matched returns ok WITH an Unreadable reason, so it is recorded rather than
-// dropped. Silence is reserved for requests known to be reads.
+// and the two are kept apart: anything that fails to resolve returns ok WITH an
+// Unreadable reason, so it is recorded rather than dropped. Silence is reserved
+// for requests known to be reads.
+//
+// The envelope is decoded BEFORE the keyword prescreen, which costs one JSON
+// parse on every request to this endpoint, reads included. That is the price of
+// the prescreen being sound: a scan of the raw bytes misses a keyword spelled
+// with JSON escapes, and a write that defeats the prescreen defeats everything
+// downstream of it — the audit row and the refusal alike. A body that is not an
+// envelope at all is unreadable rather than silent, for the same reason: nobody
+// can show it is a read.
 func ParseGraphQLRequest(body []byte) (GraphQLFacts, bool) {
-	if !bytes.Contains(body, []byte(mutationKeyword)) {
-		return GraphQLFacts{}, false
-	}
-
 	var envelope struct {
 		Query         string          `json:"query"`
 		OperationName string          `json:"operationName"`
@@ -240,6 +255,9 @@ func ParseGraphQLRequest(body []byte) (GraphQLFacts, bool) {
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Query == "" {
 		return GraphQLFacts{Unreadable: GraphQLMalformed}, true
+	}
+	if !strings.Contains(envelope.Query, mutationKeyword) {
+		return GraphQLFacts{}, false
 	}
 	subject := subjectFromVariables(envelope.Variables)
 
@@ -271,16 +289,16 @@ func ParseGraphQLRequest(body []byte) (GraphQLFacts, bool) {
 		return GraphQLFacts{}, false
 	}
 
-	fields, resolved := resolveTopLevelFields(op.sel, document.fragments)
+	fields, unreadable := resolveTopLevelFields(op.sel, document.fragments)
 	facts := GraphQLFacts{Operation: op.name, Fields: fields, Subject: subject}
 	switch {
-	case !resolved:
+	case unreadable != "":
 		// Some part of the selection could not be accounted for, so the fields
 		// that WERE read are not the whole act. They still ride the row — naming
 		// what was seen beats naming nothing — but the act stays unclassified,
 		// because a partial reading is exactly how a mutation gets labelled as
 		// something smaller than it was.
-		facts.Unreadable = GraphQLUnresolvedFragment
+		facts.Unreadable = unreadable
 	case len(fields) == 0:
 		// A selection set has to select something, so this document is invalid
 		// and the server runs none of it. It is still recorded — a mutation was

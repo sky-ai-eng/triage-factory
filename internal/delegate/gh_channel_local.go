@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ghbin"
 	"github.com/sky-ai-eng/triage-factory/internal/ghchannel"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -102,6 +103,19 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, runID, owner s
 			// audited from a sandbox.
 			agenthost.RecordExternalWrite(ctx, stores, info, nil,
 				agenthost.GHChannelWriteAction(w))
+		},
+		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, ref ghwrite.Refusal) bool {
+			// The same decision the sandbox path relays, minus the relay and
+			// minus the re-derivation it exists for: the proxy that recognized
+			// the shape, the policy, and the database are one process here, so
+			// there is no second reading to reconcile. A run whose stores never
+			// arrived still refuses — the decision does not depend on being
+			// able to record it — and loses only the row.
+			if storesSet {
+				agenthost.RecordExternalWrite(ctx, stores, info, nil,
+					agenthost.GHWriteDeniedAction(req, ref))
+			}
+			return false
 		},
 	})
 	if err != nil {

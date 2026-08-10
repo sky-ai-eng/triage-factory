@@ -251,33 +251,24 @@ func TestInjector_ObservesPRCreate(t *testing.T) {
 	}
 }
 
-// TestInjector_ObservesReviewPost asserts a review-post observation carries the
-// PR number from the path and the review id/state from the response.
-func TestInjector_ObservesReviewPost(t *testing.T) {
+// TestParseObservation_ReviewCoordinates asserts a review-post observation
+// carries the PR number from the path and the review id/state from the response.
+//
+// Driven directly rather than through the proxy, because the refusal policy now
+// stops a review post before it is forwarded (see gate_test.go) and no response
+// to parse ever arrives. The parse is kept, and tested, for the same reason the
+// observation is: it is what an artifact row would be built from if the policy
+// ever admits the shape, and nothing about it is specific to the policy that
+// currently does not.
+func TestParseObservation_ReviewCoordinates(t *testing.T) {
 	reviewJSON := `{"id":9911,"state":"APPROVED","html_url":"https://github.com/octo/repo/pull/7#pullrequestreview-9911"}`
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(reviewJSON))
-	}))
-	defer upstream.Close()
 
-	var got *ObservedMutation
-	observe := func(_ context.Context, m ObservedMutation) { got = &m }
-	_, client, host := newInjector(t, upstream.URL, "", observe)
-
-	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/v3/repos/octo/repo/pulls/7/reviews",
-		strings.NewReader(`{"event":"APPROVE"}`))
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	resp.Body.Close()
-
-	if got == nil {
-		t.Fatal("no review observation emitted")
+	got, ok := parseObservation("review", "octo", "repo", 7, []byte(reviewJSON))
+	if !ok {
+		t.Fatal("review response did not parse")
 	}
 	if got.Kind != "review" || got.Owner != "octo" || got.Repo != "repo" || got.Number != 7 {
-		t.Errorf("observation coords = %+v, want octo/repo#7 review", *got)
+		t.Errorf("observation coords = %+v, want octo/repo#7 review", got)
 	}
 	if got.ReviewID != 9911 || got.ReviewState != "APPROVED" {
 		t.Errorf("review id/state = %d / %q, want 9911 / APPROVED", got.ReviewID, got.ReviewState)
@@ -614,16 +605,20 @@ func TestInjector_ObservesRESTWrites(t *testing.T) {
 		name    string
 		method  string
 		path    string
+		body    string
 		status  int
 		wantHit bool
 	}{
-		{"patch a PR", http.MethodPatch, "/api/v3/repos/octo/repo/pulls/7", http.StatusOK, true},
-		{"off-scope patch masked as 404", http.MethodPatch, "/api/v3/repos/other/repo/pulls/7", http.StatusNotFound, true},
-		{"merge a PR", http.MethodPut, "/api/v3/repos/octo/repo/pulls/7/merge", http.StatusOK, true},
-		{"delete a comment", http.MethodDelete, "/api/v3/repos/octo/repo/issues/comments/5", http.StatusNoContent, true},
-		{"post a comment", http.MethodPost, "/api/v3/repos/octo/repo/issues/7/comments", http.StatusCreated, true},
-		{"read a PR", http.MethodGet, "/api/v3/repos/octo/repo/pulls/7", http.StatusOK, false},
-		{"graphql", http.MethodPost, "/api/graphql", http.StatusOK, false},
+		{"patch a PR", http.MethodPatch, "/api/v3/repos/octo/repo/pulls/7", "", http.StatusOK, true},
+		{"off-scope patch masked as 404", http.MethodPatch, "/api/v3/repos/other/repo/pulls/7", "", http.StatusNotFound, true},
+		// An ungated write under /pulls/{n}, so the audit surface is exercised
+		// without tripping the refusal policy — which owns the merge shape and
+		// pins it in gate_test.go.
+		{"update a PR branch", http.MethodPut, "/api/v3/repos/octo/repo/pulls/7/update-branch", "", http.StatusAccepted, true},
+		{"delete a comment", http.MethodDelete, "/api/v3/repos/octo/repo/issues/comments/5", "", http.StatusNoContent, true},
+		{"post a comment", http.MethodPost, "/api/v3/repos/octo/repo/issues/7/comments", "", http.StatusCreated, true},
+		{"read a PR", http.MethodGet, "/api/v3/repos/octo/repo/pulls/7", "", http.StatusOK, false},
+		{"graphql", http.MethodPost, "/api/graphql", `{"query":"query{viewer{login}}"}`, http.StatusOK, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -637,7 +632,11 @@ func TestInjector_ObservesRESTWrites(t *testing.T) {
 			client, host := newInjectorWithWrites(t, upstream.URL, nil,
 				func(_ context.Context, w ObservedWrite) { writes <- w })
 
-			req, _ := http.NewRequest(tc.method, "https://"+host+tc.path, strings.NewReader(`{"base":"main"}`))
+			body := tc.body
+			if body == "" {
+				body = `{"base":"main"}`
+			}
+			req, _ := http.NewRequest(tc.method, "https://"+host+tc.path, strings.NewReader(body))
 			resp, err := client.Do(req)
 			if err != nil {
 				t.Fatalf("request: %v", err)
@@ -945,18 +944,18 @@ func TestInjector_GraphQLReadIsNotAudited(t *testing.T) {
 }
 
 // TestInjector_GraphQLErrorsRecordAnAttempt: the endpoint refuses a mutation
-// with a 200 and an errors array, so the status line alone would report a merge
+// with a 200 and an errors array, so the status line alone would report a close
 // that never happened as one that did.
 func TestInjector_GraphQLErrorsRecordAnAttempt(t *testing.T) {
 	upstream, _ := graphQLUpstream(t, http.StatusOK,
-		`{"data":{"mergePullRequest":null},"errors":[{"message":"Pull request is not mergeable"}]}`)
+		`{"data":{"closePullRequest":null},"errors":[{"message":"Pull request is already closed"}]}`)
 
 	writes := make(chan ObservedWrite, 2)
 	client, host := newInjectorWithWrites(t, upstream.URL, nil,
 		func(_ context.Context, w ObservedWrite) { writes <- w })
 
 	body := graphQLEnvelope(t,
-		`mutation($input:MergePullRequestInput!){mergePullRequest(input:$input){clientMutationId}}`,
+		`mutation($input:ClosePullRequestInput!){closePullRequest(input:$input){clientMutationId}}`,
 		map[string]any{"input": map[string]any{"pullRequestId": "PR_kwRefused"}})
 	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/graphql", strings.NewReader(body))
 	resp, err := client.Do(req)
@@ -971,54 +970,10 @@ func TestInjector_GraphQLErrorsRecordAnAttempt(t *testing.T) {
 			t.Errorf("write audit = %+v, want the errors array recorded as a failure", w)
 		}
 		if w.Succeeded() {
-			t.Error("a refused merge reported success")
+			t.Error("a refused close reported success")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no write audit for a refused GraphQL mutation")
-	}
-}
-
-// TestInjector_GraphQLOverCapRequestIsForwardedAndRecorded pins both halves of
-// the cap: the agent's request still reaches GitHub whole, and the oversized
-// body buys no silence — padding past the cap must never be a way to write
-// without being logged.
-func TestInjector_GraphQLOverCapRequestIsForwardedAndRecorded(t *testing.T) {
-	upstream, seen := graphQLUpstream(t, http.StatusOK, `{"data":{"addComment":{"clientMutationId":null}}}`)
-
-	writes := make(chan ObservedWrite, 2)
-	client, host := newInjectorWithWrites(t, upstream.URL, nil,
-		func(_ context.Context, w ObservedWrite) { writes <- w })
-
-	body := graphQLEnvelope(t,
-		`mutation($input:AddCommentInput!){addComment(input:$input){clientMutationId}}`,
-		map[string]any{"input": map[string]any{
-			"body":      strings.Repeat("x", maxRequestBody+4096),
-			"subjectId": "PR_kwHuge",
-		}})
-	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/graphql", strings.NewReader(body))
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	_ = resp.Body.Close()
-
-	select {
-	case got := <-seen:
-		if got != body {
-			t.Errorf("upstream received %d bytes, want the caller's %d verbatim — the stitch dropped data",
-				len(got), len(body))
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("upstream never received the oversized request")
-	}
-
-	select {
-	case w := <-writes:
-		if w.GraphQL == nil || w.GraphQL.Unreadable != ghwrite.GraphQLOverCap {
-			t.Errorf("write audit = %+v, want an over-cap record", w)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("an over-cap GraphQL request left no audit record")
 	}
 }
 
@@ -1125,7 +1080,7 @@ func BenchmarkGraphQLCapture(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		req, _ := http.NewRequest(http.MethodPost, "https://example.test/api/graphql", strings.NewReader(body))
-		if _, ok := srv.captureGraphQLWrite(req); ok {
+		if srv.captureGraphQLWrite(req) != nil {
 			b.Fatal("a read classified as a write")
 		}
 	}
@@ -1141,7 +1096,7 @@ func BenchmarkGraphQLCaptureMutation(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		req, _ := http.NewRequest(http.MethodPost, "https://example.test/api/graphql", strings.NewReader(body))
-		if _, ok := srv.captureGraphQLWrite(req); !ok {
+		if srv.captureGraphQLWrite(req) == nil {
 			b.Fatal("a mutation did not classify as a write")
 		}
 	}
@@ -1152,7 +1107,7 @@ func BenchmarkGraphQLCaptureMutation(b *testing.B) {
 // observed — and it says which of the two happened, since "the server refused
 // it" and "we could not tell" are different admissions.
 func TestInjector_GraphQLUnreadResponseIsNotASuccess(t *testing.T) {
-	huge := `{"data":{"mergePullRequest":{"clientMutationId":"` +
+	huge := `{"data":{"closePullRequest":{"clientMutationId":"` +
 		strings.Repeat("x", maxObserveBody+4096) + `"}}}`
 	upstream, _ := graphQLUpstream(t, http.StatusOK, huge)
 
@@ -1161,7 +1116,7 @@ func TestInjector_GraphQLUnreadResponseIsNotASuccess(t *testing.T) {
 		func(_ context.Context, w ObservedWrite) { writes <- w })
 
 	body := graphQLEnvelope(t,
-		`mutation($input:MergePullRequestInput!){mergePullRequest(input:$input){clientMutationId}}`,
+		`mutation($input:ClosePullRequestInput!){closePullRequest(input:$input){clientMutationId}}`,
 		map[string]any{"input": map[string]any{"pullRequestId": "PR_kwUnread"}})
 	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/graphql", strings.NewReader(body))
 	resp, err := client.Do(req)
@@ -1186,8 +1141,8 @@ func TestInjector_GraphQLUnreadResponseIsNotASuccess(t *testing.T) {
 			t.Error("a write whose outcome was never read reported success")
 		}
 		// The act is still named — it came from the request, which was read.
-		if w.GraphQL == nil || w.GraphQL.Mutation() != "mergePullRequest" {
-			t.Errorf("audit = %+v, want the merge still named from the request", w)
+		if w.GraphQL == nil || w.GraphQL.Mutation() != "closePullRequest" {
+			t.Errorf("audit = %+v, want the close still named from the request", w)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("no audit record for a mutation with an unreadable response")

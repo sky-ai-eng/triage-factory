@@ -344,10 +344,13 @@ func BuildAllowedToolsFor(o AllowedToolsOptions) string {
 //     configuration surfaces. `gh auth` would let an agent re-point or re-read
 //     the channel's identity; `gh extension install` is arbitrary code
 //     execution, the same reason `pnpm dlx` and `go install` are absent.
-//   - gh pr merge — merging is gated on the native loop's intent check, which
-//     lives in internal/agentloop and does not run here. Leaving merge
-//     unreachable is the honest answer while there is no local equivalent of
-//     that gate; an ungated merge is not.
+//   - gh pr merge — the credential channel refuses a merge outright, in every
+//     spelling, so this is not the control. Omitting it is early UX: the
+//     permission denial arrives before the model has built a plan around the
+//     merge succeeding, where the channel's 403 arrives partway through the
+//     invocation. It is also the honest listing — granting a verb that is
+//     always refused downstream would advertise a capability that does not
+//     exist.
 //
 // Each verb gets a bare and a trailing-`*` form: gh's own porcelain is
 // frequently argument-free (`gh pr list`, `gh repo view`) and the pattern

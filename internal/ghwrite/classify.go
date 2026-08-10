@@ -4,13 +4,18 @@
 // — "posted a review-thread reply", "merged the pull request" — that the audit
 // log records.
 //
-// It exists because three consumers must agree on that mapping and they live in
-// different processes. The per-run credential sidecar reads it to decide which
-// responses carry a created object worth parsing; the orchestrator reads it to
-// build the audit row (it alone holds the DB and the domain vocabulary); and the
-// conformance test reads it to prove the table still matches what the pinned
-// `gh` actually emits. A second copy of the table anywhere is a version skew
-// waiting to mislabel a write.
+// It exists because several consumers must agree on that mapping and they live
+// in different processes. The per-run credential sidecar reads it to decide
+// which responses carry a created object worth parsing; the orchestrator reads
+// it to build the audit row (it alone holds the DB and the domain vocabulary);
+// and the conformance test reads it to prove the table still matches what the
+// pinned `gh` actually emits. A second copy of the table anywhere is a version
+// skew waiting to mislabel a write.
+//
+// The refusal policy (gate.go) is the consumer that reads it in the other
+// direction — not "what did this request do?" but "may it?" — and it lives in
+// this package for the same reason: an act named one thing by the log and
+// another by the gate is the failure both are meant to prevent.
 //
 // # What is classified, and what is not
 //

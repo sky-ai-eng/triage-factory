@@ -40,7 +40,7 @@ process inside the sandbox):
 | | Threat | Defense |
 | --- | --- | --- |
 | **T1** | Credential exfiltration | Property B (§5): no credential ever enters the sandbox environment. |
-| **T2** | In-run credential misuse | Strongly bounded: no credential is raw in the sandbox, and each is reachable only through a constrained interface (GitHub token injected only on git fetch/push to the authorized repo; Jira/GitHub API are fixed host-side `exec` verbs; LLM key is provider-only via the proxy). Residual: within its granted scope the agent still acts with the run's authority (push to the authorized repo, spend the org's LLM tokens), bounded by run wall-clock. |
+| **T2** | In-run credential misuse | Strongly bounded: no credential is raw in the sandbox, and each is reachable only through a constrained interface (GitHub token injected only on git fetch/push to the authorized repo; Jira/GitHub API are fixed host-side `exec` verbs; the real-`gh` channel injects one repo-set-scoped token at a proxy that audits every write it forwards and refuses three families outright — merging a pull request or arming one to merge later, submitting a review, and creating a repository, in every spelling including a raw `curl`; LLM key is provider-only via the proxy). Residual: within its granted scope, and outside those refused families, the agent still acts with the run's authority (push to the authorized repo, comment and label on the repos it tracks, spend the org's LLM tokens), bounded by run wall-clock. |
 | **T3** | RCE in the agent SDK escaping the SDK process | gVisor + in-sandbox hardening (non-root uid, empty caps, seccomp, no-new-privs). |
 | **T4** | RCE escaping gVisor to the host kernel | gVisor's user-mode-kernel architecture. |
 
