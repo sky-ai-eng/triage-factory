@@ -751,7 +751,14 @@ func (c sidecarRelayConn) call(ctx context.Context, namespace, op string, args, 
 }
 
 func (c sidecarRelayConn) notify(namespace, op string, args any) {
-	_ = agentproc.NotifyRelay(c.conn, namespace, op, args)
+	// The audit sender, not the raw one: a record that never reaches the wire is
+	// reported back over the same channel where that is still possible, so the
+	// orchestrator can count it. Still fire-and-forget for the caller — the
+	// external write already landed, and nothing here may fail the op that
+	// follows it.
+	if err := agentproc.NotifyRelayAudit(c.conn, namespace, op, args); err != nil {
+		agenthostLog.Warn("relaying an audit record failed", "namespace", namespace, "op", op, "error", err)
+	}
 }
 
 // NewDirectRuntime builds the in-process runtime over db.Stores + RunInfo — the

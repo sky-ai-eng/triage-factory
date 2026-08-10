@@ -81,9 +81,56 @@ from the user-facing server so it stays network-internal: **don't publish or
 route `9464` externally**; scrape it from inside the compose network / cluster.
 
 Beyond the standard Go runtime and process collectors (`go_*`, `process_*`),
-the TF-specific set today covers Slack message-event volume, per Slack app
-(`message.channels`/`message.groups` are a firehose, unlike mentions — watch
-that volume):
+the TF-specific set today covers dropped audit records and Slack message-event
+volume.
+
+### Dropped audit records
+
+- `tf_audit_records_dropped_total{stage, op}` — external-write audit records
+  that never reached the log of record. **Every sample is a bug or an
+  incident**: an agent wrote something under an org credential, the write
+  landed upstream, and TF has no `external_actions` row for it.
+
+  This exists because the audit pipeline is fire-and-forget by contract. The
+  external act has already happened by the time TF records it, so nothing
+  downstream may fail the act to save the record — which means a failure is
+  swallowed, and until it was counted, a hole in the log was invisible.
+
+  `stage` says where it was lost, and only the last of the four is reachable in
+  local mode (there is no sidecar and no relay there, so the rest staying empty
+  is the path not taken, not a gap):
+
+  | `stage` | What was lost |
+  | --- | --- |
+  | `relay_send` | The run's credential sidecar could not put the record on the supervision channel, and said so over that same channel. |
+  | `relay_decode` | The record arrived at the orchestrator and could not be decoded, or named an op this binary has no handler for. |
+  | `relay_dispatch` | A provider's own notify handler (Slack, …) ran and failed. |
+  | `record` | The record reached the database write and the write failed. |
+
+  `op` names what was being recorded, in the vocabulary of its stage: a relay
+  `<namespace>.<op>` pair for the relay stages, the row's own domain kind
+  (`pull_request`, `gh_channel_write`, `pr_merged`) for the write. `other`
+  means a name arrived on the wire that this binary does not know — the label
+  is clamped deliberately, because the sending process is the one exposed to
+  hostile text and an unclamped label would be an unbounded series. Nothing
+  here names a repository, a target, or an id; the accompanying `WARN` line
+  does.
+
+  One loss is outside what this can measure, and is accepted rather than
+  fixed: a record written as a run is torn down can lose to the supervision
+  channel closing, which takes the report of its own loss with it. There is no
+  durable spool — the decision was counters first, revisit if they ever fire.
+
+  Alertable at the first occurrence:
+
+  ```
+  sum(increase(tf_audit_records_dropped_total[1h])) > 0
+  ```
+
+### Slack ingest
+
+Per Slack app (`message.channels`/`message.groups` are a firehose, unlike
+mentions — watch that volume):
 
 - `tf_slack_ingest_events_total{app_id, outcome}` — every delivery reaching
   the ingest pipeline; `outcome` is `accepted` or the drop reason
@@ -287,9 +334,9 @@ instead of whichever replica DNS happened to answer with.
 
 Grafana's home page is the **Triage Factory — Overview** dashboard, provisioned
 from [`docker/observability/dashboards/`](../../docker/observability/dashboards/)
-the same way the data sources are. Five rows — three answering "is TF healthy,
+the same way the data sources are. Six rows — three answering "is TF healthy,
 and what is slow", then one each for the two pipelines whose spans need reading
-rather than aggregating:
+rather than aggregating, and one that should stay empty:
 
 - **Traces.** Five fixed TraceQL searches — GitHub and Jira poll cycles, system
   job cycles (scorer / profiler / classifier), API requests slower than 500 ms,
@@ -330,6 +377,14 @@ rather than aggregating:
   failure. A local-mode run populates a subset of this row — there is no broker,
   sidecar, or credential span there at all — and those empty panels are the path
   not taken, not a fault.
+- **Audit pipeline.** `tf_audit_records_dropped_total` three ways: the total
+  over the range, the rate by `stage`, and a filterable table by `op`. Unlike
+  the trace rows, this one is read for its *absence* — flat zero is the
+  expected shape and the only good one, since a single sample means the
+  `external_actions` log is missing a write that really happened. See
+  [dropped audit records](#dropped-audit-records) for what each stage means,
+  which of them local mode can reach, and the one loss the counters
+  deliberately cannot see.
 
 Everything the dashboard displays is span names, opaque IDs, and closed enums —
 never a repo name, username, or PR title — the same rule the spans and metrics
