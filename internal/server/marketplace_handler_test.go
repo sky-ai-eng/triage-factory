@@ -41,7 +41,7 @@ func newMarketplaceRig(t *testing.T) *marketplaceRig {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores, 3000)
+	s := New(h.AdminDB, stores)
 
 	orgID, founder, teamID := pgtest.SeedOrgWithUser(t, h, "founder")
 	viewer := pgtest.SeedUser(t, h, "viewer")

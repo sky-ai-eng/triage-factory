@@ -347,7 +347,7 @@ func newAuthRigWith(t *testing.T, publicURL string) *authRig {
 	fake := newSSOFakeGoTrue(t, ssoTestServiceToken)
 	t.Setenv(envServiceRoleToken, ssoTestServiceToken)
 
-	s := server.New(h.AdminDB, stores, 3000)
+	s := server.New(h.AdminDB, stores)
 
 	rigCtx, rigCancel := context.WithCancel(context.Background())
 	t.Cleanup(rigCancel)

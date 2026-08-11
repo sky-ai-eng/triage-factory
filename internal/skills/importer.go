@@ -25,10 +25,21 @@ type ImportResult struct {
 // ImportAll discovers and imports Claude Code skill files from both
 // personal (~/.claude/skills/) and project-scoped (./.claude/skills/) locations.
 //
-// Takes both *sql.DB (for the duplicate-detection raw scans that
-// haven't migrated to a store method yet — wave 1 carry-over) and
-// PromptStore (for the routable Get/Create/UpdateImported/Hide
-// calls).
+// Takes both *sql.DB (for the two duplicate-detection scans below,
+// which are raw SQLite) and PromptStore (for the routable
+// Get/Create/UpdateImported/Hide calls).
+//
+// The raw half is deliberate, not an unfinished store-layer port. A
+// filesystem scan of the TF process's own ~/.claude is meaningful only
+// where that process runs on the single trusted user's machine, so both
+// call sites gate it to local mode — startup skips it outright, and the
+// HTTP handler answers 501. Multi mode imports a skill through the
+// paste/upload handler instead, which writes a prompts row scoped to the
+// requesting org/team through the normal WithTx + Prompts.Create path.
+// That gate is what lets findVisibleImportedPromptByContent and
+// hideDuplicateImportedPrompts stay SQLite-dialect (`?` placeholders,
+// `hidden = 0`): they are unreachable under Postgres by construction.
+// Anyone lifting the local-mode gate has to port them first.
 //
 // ctx flows through every DB call and the per-file processing loop,
 // so the request-triggered import (POST /api/skills/import) cancels
