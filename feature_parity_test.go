@@ -135,10 +135,111 @@ func TestFrontendMirrorsRunStatusVocabulary(t *testing.T) {
 	}
 }
 
+// TestFrontendMirrorsExternalActionVocabulary asserts that every external-action
+// discriminator the backend can write has a presentation in the frontend's
+// ACTION_META, and that ACTION_META spells no action the backend never writes.
+//
+// Both directions decide what a person sees on the audit log of record. An
+// action missing from the map renders through FALLBACK_ACTION_META — an
+// unlabelled "action" pill — and, because the lens's filter dropdown is derived
+// from the map's keys, cannot be filtered for at all; that is how the four
+// security-signal rows came to be the least legible rows on a governance
+// surface. A key the backend never writes is the opposite defect: a filter
+// option that always returns nothing, which reads as "this never happened"
+// rather than "this cannot happen".
+//
+// The Go side is read out of the const block rather than a hand-kept
+// domain.AllActions(), which would just be a third list to forget.
+func TestFrontendMirrorsExternalActionVocabulary(t *testing.T) {
+	src, err := os.ReadFile("internal/domain/external_action.go")
+	if err != nil {
+		t.Fatalf("read external_action.go: %v", err)
+	}
+	var want []string
+	for _, m := range goActionConst.FindAllStringSubmatch(string(src), -1) {
+		want = append(want, m[1])
+	}
+	if len(want) == 0 {
+		t.Fatal("no Action* consts found in external_action.go — the const block's shape changed and this guard has stopped reading it")
+	}
+
+	meta, err := os.ReadFile("frontend/src/components/actionMeta.ts")
+	if err != nil {
+		t.Fatalf("read actionMeta.ts: %v", err)
+	}
+	got := tsObjectKeys(t, string(meta), "ACTION_META: Record<string, ActionMeta>")
+	if diff := vocabularyDiff(want, got); diff != "" {
+		t.Errorf("frontend ACTION_META has drifted from internal/domain/external_action.go:\n%s", diff)
+	}
+}
+
+// TestFrontendMirrorsRunActionsLimit pins the run view's copy of the
+// server's action-page cap to the server's own.
+//
+// The list renders a "most recent N" note when it receives a full page, so the
+// two numbers together are what stop a bounded list from reading as a complete
+// one. Raise the cap on the server alone and the note stops firing: the view
+// goes back to truncating silently, which on a governance surface is the
+// failure the note exists to prevent.
+func TestFrontendMirrorsRunActionsLimit(t *testing.T) {
+	// Both sides are read out of their own source, so neither needs an export
+	// that exists only for this test.
+	find := func(file string, re *regexp.Regexp, what string) string {
+		t.Helper()
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		m := re.FindStringSubmatch(string(src))
+		if m == nil {
+			t.Fatalf("%s has no %s — this guard has stopped reading it", file, what)
+		}
+		return m[1]
+	}
+	server := find("internal/server/agent.go", goRunActionsLimit, "`runActionsLimit = <n>` declaration")
+	frontend := find("frontend/src/components/ActionList.tsx", tsPageConst, "`const PAGE = <n>` declaration")
+	if server != frontend {
+		t.Errorf("ActionList.tsx PAGE = %s, but the server caps the run-scoped action read at %s — a full page would stop being recognized as one",
+			frontend, server)
+	}
+}
+
 var (
-	tsQuotedMember = regexp.MustCompile(`'([a-z_]+)'`)
-	tsSpreadMember = regexp.MustCompile(`\.\.\.([A-Z_]+)`)
+	goRunActionsLimit = regexp.MustCompile(`(?m)^const runActionsLimit = (\d+)$`)
+	tsPageConst       = regexp.MustCompile(`(?m)^const PAGE = (\d+)$`)
+	tsQuotedMember    = regexp.MustCompile(`'([a-z_]+)'`)
+	tsSpreadMember    = regexp.MustCompile(`\.\.\.([A-Z_]+)`)
+	// The const block's one-per-line `ActionX = "x"` form. Anchored to a leading
+	// tab so a doc comment quoting a value can't be mistaken for a declaration.
+	goActionConst = regexp.MustCompile(`(?m)^\tAction\w+\s+=\s+"([a-z_]+)"$`)
+	// A top-level key of a TS object literal, at the one indent level the
+	// formatter gives it.
+	tsObjectKey = regexp.MustCompile(`(?m)^  ([a-z_]+): `)
 )
+
+// tsObjectKeys pulls the top-level keys out of an `export const <decl> = { … }`
+// object literal, reading to the closing brace at column 0. A textual parser for
+// the same reason tsArrayDecl is one: the declarations are plain literals by
+// convention, and shelling out to a TS toolchain would make this test skip
+// wherever the frontend isn't installed.
+func tsObjectKeys(t *testing.T, src, decl string) []string {
+	t.Helper()
+	open := "export const " + decl + " = {"
+	start := strings.Index(src, open)
+	if start < 0 {
+		t.Fatalf("actionMeta.ts has no `%s…}` declaration — the Go vocabulary needs a frontend mirror to check against", open)
+	}
+	body := src[start+len(open):]
+	end := strings.Index(body, "\n}")
+	if end < 0 {
+		t.Fatalf("actionMeta.ts declaration %s is unterminated", decl)
+	}
+	var keys []string
+	for _, m := range tsObjectKey.FindAllStringSubmatch(body[:end], -1) {
+		keys = append(keys, m[1])
+	}
+	return keys
+}
 
 // tsArrayDecl pulls the quoted members and the `...SPREAD` references out of
 // an `export const <name> = [ … ]` declaration. Deliberately a small textual

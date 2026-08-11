@@ -111,6 +111,24 @@ func TestCrossOrgHTTP_AgentArtifacts(t *testing.T) {
 	}
 }
 
+// TestCrossOrgHTTP_AgentActions is the artifact test's sibling for the
+// run-scoped action read. It matters more than the shape of the two endpoints
+// suggests: this one is deliberately NOT behind the governance entitlement the
+// cross-team /usage feeds sit behind, so the run-visibility check is the whole
+// of its authorization and a regression there exposes another org's audit log.
+func TestCrossOrgHTTP_AgentActions(t *testing.T) {
+	r := newAuthRig(t)
+	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
+	runA := seedRunInOrg(t, r, orgA, alice, "run-acts")
+
+	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA+"/actions", sidA).StatusCode; got != http.StatusOK {
+		t.Errorf("alice GET /api/agent/conversations/%s/actions = %d, want 200", runA, got)
+	}
+	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA+"/actions", sidB).StatusCode; got != http.StatusNotFound {
+		t.Errorf("bob GET /api/agent/conversations/%s/actions = %d, want 404 (cross-org leak)", runA, got)
+	}
+}
+
 // TestCrossOrgHTTP_TaskSwipe covers the mutating path: bob's swipe
 // gesture against alice's task should appear as "task not found" to
 // bob, not as a 200 with a state change applied, and not as a 500. The

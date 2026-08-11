@@ -85,7 +85,7 @@ function mockFetch(transcript?: Promise<Message[]>) {
             // returns, and a test that later appends to the server's rows must
             // not be mutating the transcript React is rendering.
             (transcript ?? [...serverMessages])
-        : path.endsWith('/artifacts')
+        : path.endsWith('/artifacts') || path.endsWith('/actions')
           ? []
           : serverRun
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) })

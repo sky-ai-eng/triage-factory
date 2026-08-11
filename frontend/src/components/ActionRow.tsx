@@ -1,7 +1,7 @@
 import { ArrowRight, Bot, ExternalLink, User } from 'lucide-react'
 import type { ActivityAction } from '../types'
 import { TONE_TEXT, TONE_VAR, type Tone } from './board/cardStyle'
-import { metaForAction } from './actionMeta'
+import { actionDetailSummary, metaForAction } from './actionMeta'
 
 // ActionRow renders one external_actions row for the activity feed's Actions lens
 // (TFAC-483) — the audit log of record. It is the sibling of ArtifactRow (Objects
@@ -14,13 +14,27 @@ import { metaForAction } from './actionMeta'
 export function ActionRow({ action, note }: { action: ActivityAction; note?: React.ReactNode }) {
   const meta = metaForAction(action.action)
   const Icon = meta.icon
+  const detail = actionDetailSummary(action)
 
   const body = (
     <>
       <Icon size={13} className={`shrink-0 ${meta.text}`} aria-hidden />
       <VerbPill label={meta.label} tone={meta.tone} />
-      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-secondary">
-        {action.target || action.external_id || meta.label}
+      {/* Target and detail share the row's flexible middle, each sized by its
+          own content (flex-auto, not flex-1) so a short target doesn't hold
+          half the row back from a long path. */}
+      <span className="flex min-w-0 flex-1 items-baseline gap-2">
+        <span className="min-w-0 flex-auto truncate font-mono text-[11px] text-text-secondary">
+          {action.target || action.external_id || meta.label}
+        </span>
+        {detail && (
+          <span
+            className="min-w-0 flex-auto truncate font-mono text-[10px] text-text-tertiary"
+            title={detail}
+          >
+            {detail}
+          </span>
+        )}
       </span>
       {action.from_state && action.to_state && (
         <TransitionChip from={action.from_state} to={action.to_state} />
@@ -33,6 +47,11 @@ export function ActionRow({ action, note }: { action: ActivityAction; note?: Rea
   const rowClass =
     'flex w-full items-center gap-2 rounded-[4px] border border-border-subtle bg-black/[0.015] px-2 py-1.5 text-left transition-colors hover:bg-black/[0.04]'
 
+  // Both row shapes carry an aria-label, which REPLACES their content for a
+  // screen reader — so the detail has to be spelled into it or the rows whose
+  // substance lives there read as bare verbs.
+  const described = `${meta.label}: ${action.target}${detail ? ` (${detail})` : ''}`
+
   if (action.url) {
     return (
       <li>
@@ -41,7 +60,7 @@ export function ActionRow({ action, note }: { action: ActivityAction; note?: Rea
           target="_blank"
           rel="noopener noreferrer"
           className={rowClass}
-          aria-label={`${meta.label}: ${action.target} on ${action.provider}`}
+          aria-label={`${described} on ${action.provider}`}
           title={`Open on ${action.provider} (new tab)`}
         >
           {body}
@@ -53,7 +72,7 @@ export function ActionRow({ action, note }: { action: ActivityAction; note?: Rea
   // No external link (a transition with no browse URL) — a plain, non-interactive
   // row carrying the same content.
   return (
-    <li className={rowClass} aria-label={`${meta.label}: ${action.target}`}>
+    <li className={rowClass} aria-label={described}>
       {body}
     </li>
   )

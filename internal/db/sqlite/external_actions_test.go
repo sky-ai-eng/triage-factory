@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"testing"
 	"time"
 
@@ -323,5 +324,66 @@ func TestExternalActionStore_SQLite_EgressDenialDedupPerConversation(t *testing.
 	}
 	if count != 2 {
 		t.Fatalf("a second conversation's probe of the same host left %d rows total, want 2", count)
+	}
+}
+
+// TestExternalActionStore_SQLite_ListByRun pins the run-scoped read behind the
+// run view's actions list: one conversation's rows, newest first, and nothing
+// from a sibling run or from a row that has no run at all (a purged run's
+// actions survive in the org feed with conversation_id NULL, and must not
+// reappear under whichever run is being read).
+func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runA := seedArtifactRun(t, conn)
+	runB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+
+	record := func(runID, action string, occurred time.Time) {
+		t.Helper()
+		if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
+			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			Provider: domain.ArtifactProviderGitHub, Action: action, Target: "octo/repo",
+			ConversationID: runID, Credential: domain.CredentialGitHubApp,
+		}); err != nil {
+			t.Fatalf("record %s: %v", action, err)
+		}
+		// occurred_at is a column DEFAULT, so ordering is pinned by stamping the
+		// row after the fact rather than by sleeping between inserts.
+		if _, err := conn.Exec(`UPDATE external_actions SET occurred_at = ? WHERE action = ?`, occurred, action); err != nil {
+			t.Fatalf("stamp %s: %v", action, err)
+		}
+	}
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	record(runA, domain.ActionBranchPushed, base)
+	record(runA, domain.ActionGHChannelWrite, base.Add(time.Minute))
+	record(runB, domain.ActionPRMerged, base.Add(2*time.Minute))
+	// A detached row: the run that produced it was purged (FK ON DELETE SET NULL).
+	record(runA, domain.ActionEgressDenied, base.Add(3*time.Minute))
+	if _, err := conn.Exec(`UPDATE external_actions SET conversation_id = NULL WHERE action = ?`, domain.ActionEgressDenied); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+
+	got, err := stores.ExternalActions.ListByRun(ctx, runmode.LocalDefaultOrgID, runA, domain.ExternalActionListOpts{})
+	if err != nil {
+		t.Fatalf("ListByRun: %v", err)
+	}
+	var actions []string
+	for _, a := range got {
+		actions = append(actions, a.Action)
+	}
+	want := []string{domain.ActionGHChannelWrite, domain.ActionBranchPushed}
+	if !slices.Equal(actions, want) {
+		t.Errorf("ListByRun(runA) = %v, want %v (newest first, runB's and the detached row excluded)", actions, want)
+	}
+
+	// The same opts the handler binds: a cap on how much of a runaway run's
+	// history the run view pulls.
+	capped, err := stores.ExternalActions.ListByRun(ctx, runmode.LocalDefaultOrgID, runA, domain.ExternalActionListOpts{Limit: 1})
+	if err != nil {
+		t.Fatalf("ListByRun(limit): %v", err)
+	}
+	if len(capped) != 1 || capped[0].Action != domain.ActionGHChannelWrite {
+		t.Errorf("ListByRun with Limit 1 = %+v, want just the newest row", capped)
 	}
 }

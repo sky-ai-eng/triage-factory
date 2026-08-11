@@ -1921,7 +1921,30 @@ func (c *LocalClient) GithubReactToComment(ctx context.Context, owner, repo stri
 	if err != nil {
 		return err
 	}
-	return client.ReactToComment(ctx, owner, repo, commentID, emoji)
+	if err := client.ReactToComment(ctx, owner, repo, commentID, emoji); err != nil {
+		return err
+	}
+	// A reaction produces no artifact — there is no object to track the lifecycle
+	// of — so the audit log is the only place it can appear, exactly as for a
+	// review-thread reply. Its Slack sibling has recorded one all along; leaving
+	// this verb silent meant the same act was audited or not depending on which
+	// system it landed in.
+	//
+	// Target and ExternalID match what the same reaction records when it arrives
+	// as a raw REST call, so one act reads one way whichever channel carried it.
+	// The emoji is the one thing this path knows and that one does not: it lives
+	// in a request body the injector never reads, and a reaction with no content
+	// named is most of the way to unnamed.
+	detail, _ := json.Marshal(map[string]string{"emoji": emoji})
+	c.recordBotAction(ctx, &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderGitHub,
+		Action:     domain.ActionReactionAdded,
+		Target:     owner + "/" + repo,
+		ExternalID: strconv.Itoa(commentID),
+		Credential: c.githubCredential(),
+		DetailJSON: string(detail),
+	})
+	return nil
 }
 
 func (c *LocalClient) GithubUpdateComment(ctx context.Context, owner, repo string, commentID int, body string) error {
@@ -2248,9 +2271,6 @@ func GHChannelWriteAction(obs ghwrite.Observation, credential string) *domain.Ex
 // nothing but identifies the object exactly, and to the endpoint path when even
 // that was unreadable. Deliberately never a repo: a GraphQL request names no
 // repository, so any repo here would be invented.
-// TODO(TFAC-789): the mutation names and reason this builds into detail_json
-// are not rendered anywhere — the feed shows the action label only — so today
-// this row's most useful content is reachable only by querying the table.
 func graphQLFallbackWriteAction(obs ghwrite.Observation, credential string) *domain.ExternalAction {
 	facts := obs.GraphQL
 	detail := map[string]any{"http_status": obs.Status}
