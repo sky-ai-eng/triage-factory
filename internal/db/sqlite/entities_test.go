@@ -6,6 +6,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -114,6 +115,21 @@ func newSQLiteEntitySeeder(conn *sql.DB) dbtest.EntitySeeder {
 				t.Fatalf("seed project %s: %v", name, err)
 			}
 			return pid
+		},
+		Team: func(t *testing.T, name string) string {
+			t.Helper()
+			// Raw insert rather than the Teams store: local mode is N=1 and
+			// its team creation is not a supported operation, but the column
+			// under test is an FK to this table in both dialects, so the
+			// conformance suite still needs two real rows to write against.
+			id := uuid.New().String()
+			if _, err := conn.Exec(
+				`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, ?, ?)`,
+				id, runmode.LocalDefaultOrgID, "seed-"+id[:8], name,
+			); err != nil {
+				t.Fatalf("seed team %s: %v", name, err)
+			}
+			return id
 		},
 	}
 }
