@@ -19,10 +19,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )
 
-// openStores opens the right backend for the runtime mode, wires the
-// per-resource store bundle against it, and reads the boot-time
-// instance_config (local only). A misconfigured TF_MODE=multi fails fast
-// here — without this guard the local SQLite file would be created and
+// openStores opens the right backend for the runtime mode and wires the
+// per-resource store bundle against it. A misconfigured TF_MODE=multi fails
+// fast here — without this guard the local SQLite file would be created and
 // migrated before the multi branch could reject.
 //
 // Multi mode is unreachable end-to-end until the v1 multi-tenant epic
