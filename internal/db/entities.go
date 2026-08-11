@@ -376,7 +376,10 @@ type EntityStore interface {
 	//
 	// Admin-pool (BYPASSRLS): the caller is the exec recording funnel, which
 	// runs on an executor with no JWT claims. There is no app-pool variant
-	// because ownership is never stamped from a request; org_id stays in the
-	// WHERE clause as defense in depth.
+	// because ownership is never stamped from a request. Postgres keeps org_id
+	// in the WHERE clause as defense in depth, since BYPASSRLS means nothing
+	// else is scoping the statement; SQLite scopes at the assertLocalOrg gate
+	// like every other method in that store, where a WHERE predicate would
+	// match every row by construction and assert nothing.
 	StampOwningTeamIfUnsetSystem(ctx context.Context, orgID, entityID, teamID string) (stamped bool, err error)
 }
