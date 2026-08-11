@@ -116,6 +116,31 @@ func TestMigrate_MergesDuplicateJiraEntities(t *testing.T) {
 		`INSERT INTO conversation_memory_entities (conversation_id, entity_id, role) VALUES ('conv-both', 'var',  'touched')`,
 		`INSERT INTO conversation_memory_entities (conversation_id, entity_id, role) VALUES ('conv-var',  'var',  'touched')`,
 
+		// In-flight work, for the cancel intent a forced close owes. Four
+		// blueprints, one per arm of CloseWithRunCancelIntentSystem's
+		// predicate: running under a live conversation on the task the merge
+		// force-closes (must be called off); the same on the task that
+		// survives active (must NOT be — that work is still on the board);
+		// one that already finished; and one still running whose conversation
+		// has ended. The two live conversations take the two arms of the
+		// non-terminal test, NULL and a non-terminal value.
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, step_plan, worktree_path)
+			VALUES ('br-collide', 'bp1', 't-collide', '[]', '')`,
+		`INSERT INTO conversations (id, task_id, prompt_id, blueprint_run_id, status)
+			VALUES ('conv-live-collide', 't-collide', 'p1', 'br-collide', NULL)`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, step_plan, worktree_path)
+			VALUES ('br-move', 'bp1', 't-move', '[]', '')`,
+		`INSERT INTO conversations (id, task_id, prompt_id, blueprint_run_id, status)
+			VALUES ('conv-live-move', 't-move', 'p1', 'br-move', 'running')`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, status, step_plan, worktree_path)
+			VALUES ('br-finished', 'bp1', 't-collide', 'completed', '[]', '')`,
+		`INSERT INTO conversations (id, task_id, prompt_id, blueprint_run_id, status)
+			VALUES ('conv-finished', 't-collide', 'p1', 'br-finished', 'running')`,
+		`INSERT INTO blueprint_runs (id, blueprint_id, task_id, step_plan, worktree_path)
+			VALUES ('br-ended', 'bp1', 't-collide', '[]', '')`,
+		`INSERT INTO conversations (id, task_id, prompt_id, blueprint_run_id, status)
+			VALUES ('conv-ended', 't-collide', 'p1', 'br-ended', 'completed')`,
+
 		// entity_links, in all four shapes the merge has to tell apart: one
 		// that survives repointed, one that collapses to a self-link (the
 		// variant linked to its own twin), one that lands on a link the
@@ -213,6 +238,25 @@ func TestMigrate_MergesDuplicateJiraEntities(t *testing.T) {
 	}
 	if got := scalar(`SELECT status FROM tasks WHERE id = 't-rival'`); got != "queued" {
 		t.Errorf("survivor-side task status = %q, want queued — the live card is the one that stays", got)
+	}
+	// A forced close owes the same cancel intent the application's own close
+	// path stamps: an agent still running under the closed card is stopped,
+	// not orphaned. Everything the app's guard excludes stays excluded here.
+	cancelOf := func(blueprintRunID string) int {
+		t.Helper()
+		return count(`SELECT cancel_requested FROM blueprint_runs WHERE id = ?`, blueprintRunID)
+	}
+	if got := cancelOf("br-collide"); got != 1 {
+		t.Errorf("cancel_requested on the force-closed task's live blueprint = %d, want 1 — a closed card must not leave an agent running", got)
+	}
+	if got := cancelOf("br-move"); got != 0 {
+		t.Errorf("cancel_requested on the surviving task's live blueprint = %d, want 0 — that work is still on the board", got)
+	}
+	if got := cancelOf("br-finished"); got != 0 {
+		t.Errorf("cancel_requested on an already-finished blueprint = %d, want 0 — a close cannot call off what already ended", got)
+	}
+	if got := cancelOf("br-ended"); got != 0 {
+		t.Errorf("cancel_requested on a blueprint whose conversation ended = %d, want 0 — no live work to stop", got)
 	}
 	// The terminal task keeps its own outcome: it was never in the partial
 	// index, so it moved on the first pass and the duplicate-close never

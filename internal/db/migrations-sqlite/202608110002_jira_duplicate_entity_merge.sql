@@ -100,6 +100,43 @@ SET entity_id    = (SELECT survivor_id FROM jira_entity_merge_src WHERE variant_
     close_reason = 'duplicate_entity_merged'
 WHERE entity_id IN (SELECT variant_id FROM jira_entity_merge_src);
 
+-- Closing a task is not only a row write. Every close the application does
+-- goes through CloseWithRunCancelIntentSystem, which also calls off the work:
+-- a blueprint still running under a still-open conversation on that task gets
+-- cancel_requested stamped, and the claim then refuses to advance the
+-- sequence. Skipping it here would leave an agent executing against a card the
+-- board no longer shows — orphaned rather than stopped — and these rows are
+-- exactly where that is plausible, since a long-abandoned duplicate is a good
+-- place for a claim to have been left mid-flight.
+--
+-- The predicate is that method's verbatim, in both halves: `status =
+-- 'running' AND cancel_requested = 0`, because a blueprint that already
+-- finished is not one this close is entitled to call off; and the conversation
+-- filter is non-terminal ('completed','failed'), because a conversation that
+-- ended is not evidence of live work. close_reason identifies the set — this
+-- migration is the only writer of that value, so it names precisely the tasks
+-- force-closed above and nothing else on the survivor.
+--
+-- No task_events row to go with it: the application writes one only when it
+-- has a closing event to cite, and a merge has no event to name.
+--
+-- The other half of the application's close — stopRunsOnClosedTask, the
+-- post-commit kill of the live agent process — has no analogue here and needs
+-- none. This runs at boot, before anything is executing in this process; the
+-- durable stamp is the half that survives a restart, and it is the half that
+-- stops the sequence being picked back up.
+UPDATE blueprint_runs
+SET cancel_requested = 1
+WHERE status = 'running'
+  AND cancel_requested = 0
+  AND id IN (
+        SELECT c.blueprint_run_id
+        FROM conversations c
+        WHERE c.task_id IN (SELECT id FROM tasks WHERE close_reason = 'duplicate_entity_merged')
+          AND c.blueprint_run_id IS NOT NULL
+          AND (c.status IS NULL OR c.status NOT IN ('completed','failed'))
+  );
+
 -- events. Repointing an append-only row is deliberate and narrow: the event's
 -- own content — type, metadata, occurred_at, created_at — is untouched, and
 -- both rows always named the same real issue. The alternative to moving the
