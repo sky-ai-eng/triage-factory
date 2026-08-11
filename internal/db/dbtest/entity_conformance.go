@@ -31,6 +31,11 @@ type EntitySeeder struct {
 	// Project inserts a project row and returns its id. The
 	// AssignProject subtests need a real FK target.
 	Project func(t *testing.T, name string) string
+
+	// Team inserts a team row and returns its id. The owning-team stamp
+	// subtests need two DISTINCT ids that both satisfy the owning_team_id
+	// FK — one to stamp, one to prove a second writer cannot displace it.
+	Team func(t *testing.T, name string) string
 }
 
 // RunEntityStoreConformance covers the entity-store contract every
@@ -574,9 +579,9 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	// OwningTeamForEntitySystem resolves the structural owner (tiers
 	// 1+2). A plain entity has no override and no project → empty; an entity
 	// attached to a team-visibility project resolves to that project's team.
-	// (The owning_team_id override tier needs a writer this ticket doesn't add,
-	// so it's exercised at the router layer; here we cover the project tier and
-	// the empty fall-through across both dialects.)
+	// The override tier's writer is covered by the stamp subtest below; here
+	// we cover the project tier and the empty fall-through across both
+	// dialects.
 	t.Run("OwningTeamForEntity_resolves_project_team_else_empty", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 
@@ -610,6 +615,61 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// Missing entity → empty, not an error.
 		if team, err := s.OwningTeamForEntitySystem(ctx, orgID, uuid.New().String()); err != nil || team != "" {
 			t.Errorf("missing entity: got (%q, %v), want (\"\", nil)", team, err)
+		}
+	})
+
+	// StampOwningTeamIfUnsetSystem is the write half of tier 1 — the path that
+	// records the commissioning team on a PR the bot opened. The contract it
+	// has to hold is "if unset", because two unordered writers (the run that
+	// opened the PR, the poller that discovers it) converge only if neither can
+	// overwrite the other's answer.
+	t.Run("StampOwningTeamIfUnset_stamps_once_then_refuses", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		teamA := seed.Team(t, "Commissioning")
+		teamB := seed.Team(t, "Interloper")
+
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#stamp", "pr", "T", "")
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+
+		// A NULL owner takes the stamp, and tier 1 reads it straight back.
+		stamped, err := s.StampOwningTeamIfUnsetSystem(ctx, orgID, ent.ID, teamA)
+		if err != nil || !stamped {
+			t.Fatalf("first stamp: got (%v, %v), want (true, nil)", stamped, err)
+		}
+		if team, err := s.OwningTeamForEntitySystem(ctx, orgID, ent.ID); err != nil || team != teamA {
+			t.Errorf("after stamp: got (%q, %v), want (%q, nil)", team, err, teamA)
+		}
+
+		// A second writer with a different answer is refused, not applied —
+		// this is what makes an operator's transfer permanent and re-delivery
+		// of the same PR-open write a no-op.
+		stamped, err = s.StampOwningTeamIfUnsetSystem(ctx, orgID, ent.ID, teamB)
+		if err != nil || stamped {
+			t.Errorf("stamp over an owned entity: got (%v, %v), want (false, nil)", stamped, err)
+		}
+		if team, _ := s.OwningTeamForEntitySystem(ctx, orgID, ent.ID); team != teamA {
+			t.Errorf("owner changed under a second stamp: got %q, want %q", team, teamA)
+		}
+
+		// An empty team is the defensive case (a run with no team): no stamp,
+		// no error, and the entity keeps its NULL for a later writer.
+		fresh, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#stamp-noteam", "pr", "T", "")
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		if stamped, err := s.StampOwningTeamIfUnsetSystem(ctx, orgID, fresh.ID, ""); err != nil || stamped {
+			t.Errorf("empty team: got (%v, %v), want (false, nil)", stamped, err)
+		}
+		if team, _ := s.OwningTeamForEntitySystem(ctx, orgID, fresh.ID); team != "" {
+			t.Errorf("empty team left an owner: got %q", team)
+		}
+
+		// A missing entity is (false, nil) too — the caller is best-effort and
+		// has nothing to do about a row that isn't there.
+		if stamped, err := s.StampOwningTeamIfUnsetSystem(ctx, orgID, uuid.New().String(), teamA); err != nil || stamped {
+			t.Errorf("missing entity: got (%v, %v), want (false, nil)", stamped, err)
 		}
 	})
 

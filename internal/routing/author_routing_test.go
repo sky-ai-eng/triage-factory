@@ -230,8 +230,14 @@ func TestAuthorCentric_OverrideOwningTeam(t *testing.T) {
 	seedSystemCIRule(t, database, teamAuthor)
 
 	entityID := reviewEntity(t, database, "owner/repo#override")
-	if _, err := database.Exec(`UPDATE entities SET owning_team_id = ? WHERE id = ?`, teamOverride, entityID); err != nil {
-		t.Fatalf("set owning_team_id: %v", err)
+	// Through the real writer, not a raw UPDATE: this is the exact pairing the
+	// bot-opened-PR path relies on — the exec funnel stamps the commissioning
+	// team, and routing reads it back as tier 1 — so the two halves are proven
+	// against each other rather than against a hand-written column poke.
+	stamped, err := sqlitestore.New(database).Entities.StampOwningTeamIfUnsetSystem(
+		context.Background(), runmode.LocalDefaultOrgID, entityID, teamOverride)
+	if err != nil || !stamped {
+		t.Fatalf("stamp owning team: stamped=%v err=%v", stamped, err)
 	}
 
 	emitCI(reviewRouter(database), entityID, "aidan")

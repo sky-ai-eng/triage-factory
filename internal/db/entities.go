@@ -356,4 +356,27 @@ type EntityStore interface {
 	// mirroring the store's other ...System reads; org_id stays in the WHERE
 	// clause as defense in depth.
 	OwningTeamForEntitySystem(ctx context.Context, orgID, entityID string) (string, error)
+
+	// StampOwningTeamIfUnsetSystem writes entities.owning_team_id, but only
+	// onto a row that does not have one yet — the write half of tier 1 above.
+	// Returns stamped=false (no error) when the row already carries an owner,
+	// when teamID is empty, and when no such entity exists.
+	//
+	// Stamp-if-NULL is the whole contract, and it is what lets two unordered
+	// writers converge on one answer. A PR the bot opens has no TF author to
+	// resolve, so the commissioning team is recorded from the run that opened
+	// it; that write races the poller, which mints the same entity by natural
+	// key whenever it next sees the PR. Either order lands the same owner —
+	// the run's write back-fills a row the poller already created, or it
+	// creates the row the poller later enriches — and neither can overwrite an
+	// owner some *other* writer chose, because the only value this can replace
+	// is NULL. An explicit owner (an operator's transfer) is therefore
+	// permanent as far as this path is concerned, and re-delivery of the same
+	// PR-open write is a no-op rather than a second opinion.
+	//
+	// Admin-pool (BYPASSRLS): the caller is the exec recording funnel, which
+	// runs on an executor with no JWT claims. There is no app-pool variant
+	// because ownership is never stamped from a request; org_id stays in the
+	// WHERE clause as defense in depth.
+	StampOwningTeamIfUnsetSystem(ctx context.Context, orgID, entityID, teamID string) (stamped bool, err error)
 }

@@ -117,6 +117,31 @@ func (s *entityStore) OwningTeamForEntitySystem(ctx context.Context, orgID, enti
 	return team.String, nil
 }
 
+// StampOwningTeamIfUnsetSystem fills owning_team_id only where it is still
+// NULL. The IS NULL predicate is the concurrency story as much as the semantic
+// one: it lives in the UPDATE rather than in a read-then-write, so an executor
+// recording a bot-opened PR and a control pod's poller minting the same entity
+// cannot lose each other's write — whichever commits first wins the row, and
+// RowsAffected tells the loser it lost.
+func (s *entityStore) StampOwningTeamIfUnsetSystem(ctx context.Context, orgID, entityID, teamID string) (bool, error) {
+	if teamID == "" {
+		return false, nil
+	}
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE entities
+		SET owning_team_id = $1
+		WHERE org_id = $2 AND id = $3 AND owning_team_id IS NULL
+	`, teamID, orgID, entityID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *entityStore) GetBySource(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error) {
 	return getEntityBySource(ctx, s.q, orgID, source, sourceID)
 }

@@ -151,6 +151,9 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a 
 	}
 	// Resolve the touched entity outside the audit write (TFAC-513 §2).
 	recordTouchInfo(ctx, stores, info, act)
+	// Same placement, same reason: an admin-pool write, so it must run after
+	// withWriteInfo's tx has settled.
+	stampPROwnership(ctx, stores, info, a)
 }
 
 // --- touched-entity resolution (TFAC-513 §2) ---
@@ -226,6 +229,66 @@ func recordTouchInfo(ctx context.Context, stores db.Stores, info RunInfo, act *d
 		return
 	}
 	recordEntityTouch(ctx, stores, info, act.Provider, act.Target, act.URL)
+}
+
+// --- owning-team stamp for a bot-opened PR ---
+
+// stampPROwnership records the commissioning team on the entity behind a PR the
+// bot just opened, so the router can route that PR's later events to the team
+// whose work produced it.
+//
+// The gap it fills: routing resolves an owner from the entity's author, and the
+// author of a PR TF opened is a bot that maps to no TF user. Nothing else on the
+// PR carries the answer either — the run that opened it does, and this is the
+// only moment the two are in the same place. Left unstamped, the PR's first
+// ci_check_failed finds no owner and mints a task for nobody unless the repo
+// happens to be project-attached.
+//
+// Scoped to kind=pull_request deliberately. A submitted-review artifact shares
+// the owner/repo#N target shape, and reviewing someone else's PR is the clearest
+// case of touching an entity you must not come to own.
+//
+// Ordering against the poller does not matter. FindOrCreate resolves the same
+// natural key the tracker mints on (both go through domain.PullRequestTarget's
+// owner/repo#N), so this either back-fills the row the poller already created or
+// creates the stub the poller later enriches; the stamp itself is if-NULL, so
+// neither ordering can overwrite an owner set deliberately elsewhere.
+//
+// Best-effort, like everything else downstream of an already-applied write: the
+// PR is open on GitHub regardless, and a failure here costs routing precision on
+// that PR, never the run. It is not retried — the entity is durable and the
+// event that would need the owner has not arrived yet, but nothing re-derives
+// the stamp later either, so a failure means that PR's events fall through to
+// the router's remaining tiers for good.
+func stampPROwnership(ctx context.Context, stores db.Stores, info RunInfo, a *domain.Artifact) {
+	if a == nil || a.Provider != domain.ArtifactProviderGitHub || a.Kind != domain.ArtifactKindPullRequest {
+		return
+	}
+	// Defensive: auto-fire is gated on an owned task and artifacts.team_id is
+	// NOT NULL, so a run without a team should not reach here. If one does,
+	// there is no owner to record and the entity keeps its NULL.
+	if info.TeamID == "" || stores.Entities == nil {
+		return
+	}
+	entityID, err := resolveTouchedEntityInfo(ctx, stores, info, a.Provider, a.Target, a.URL)
+	if err != nil {
+		agenthostLog.Warn("owning-team stamp skipped: entity resolve failed",
+			"run", info.RunID, "target", a.Target, "error", err)
+		return
+	}
+	if entityID == "" {
+		return
+	}
+	stamped, err := stores.Entities.StampOwningTeamIfUnsetSystem(ctx, info.OrgID, entityID, info.TeamID)
+	if err != nil {
+		agenthostLog.Warn("owning-team stamp failed",
+			"run", info.RunID, "entity", entityID, "target", a.Target, "error", err)
+		return
+	}
+	if stamped {
+		agenthostLog.Info("stamped owning team on bot-opened PR",
+			"run", info.RunID, "entity", entityID, "target", a.Target, "team", info.TeamID)
+	}
 }
 
 // loadEntityMemory is the host side of `exec memory load`: it looks up the

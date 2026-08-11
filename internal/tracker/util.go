@@ -2,7 +2,8 @@ package tracker
 
 import (
 	"encoding/json"
-	"fmt"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 func mustJSON(v any) string {
@@ -16,8 +17,15 @@ func mustJSON(v any) string {
 
 // ghSourceID returns a globally unique source_id for a GitHub PR.
 // PR numbers are only unique within a repo, so we prefix with "owner/repo#".
+//
+// Delegates rather than formatting its own: this is the key the poller mints
+// entities on, and the exec recording funnel resolves the same entity from a
+// PR artifact's target to stamp its owning team. The two have to agree byte for
+// byte — a drifted separator would not error anywhere, it would just quietly
+// mint a second entity and lose the stamp — so both now read the format off
+// domain.PullRequestTarget.
 func ghSourceID(repo string, number int) string {
-	return fmt.Sprintf("%s#%d", repo, number)
+	return domain.PullRequestTarget(repo, number)
 }
 
 // maxReposPerQuery caps how many repo: qualifiers go into a single GitHub

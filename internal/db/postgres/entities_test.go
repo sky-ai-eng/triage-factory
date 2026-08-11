@@ -608,5 +608,16 @@ func newPgEntitySeeder(conn *sql.DB, orgID, userID string) dbtest.EntitySeeder {
 			}
 			return id
 		},
+		Team: func(t *testing.T, name string) string {
+			t.Helper()
+			id := uuid.New().String()
+			if _, err := conn.Exec(
+				`INSERT INTO teams (id, org_id, slug, name) VALUES ($1, $2, $3, $4)`,
+				id, orgID, "seed-"+id[:8], name,
+			); err != nil {
+				t.Fatalf("seed team %s: %v", name, err)
+			}
+			return id
+		},
 	}
 }
