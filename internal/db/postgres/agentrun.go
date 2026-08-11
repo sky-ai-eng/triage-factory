@@ -670,7 +670,7 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKin
 // (see runClaimLateral / runLedgerLateral). Status is the derived display
 // ladder (pgDisplayStatusSQL) rather than the stored column.
 const pgRunColumns = `
-	r.id, COALESCE(r.task_id::text, ''), COALESCE(r.runtime, ''), COALESCE(r.type, ''), ` + pgDisplayStatusSQL + `, COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
+	r.id, COALESCE(r.task_id::text, ''), COALESCE(r.runtime, ''), ` + pgDisplayStatusSQL + `, COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
 	msum.total_cost_usd, cl.duration_ms, cl.num_turns,
 	COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
 	COALESCE(r.result_summary, ''),
@@ -1592,7 +1592,7 @@ func scanConversation(row *sql.Row, r *domain.Conversation) error {
 	var failureKind string
 
 	if err := row.Scan(
-		&r.ID, &r.TaskID, &r.Runtime, &r.Type, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
@@ -1613,7 +1613,7 @@ func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
 	var failureKind string
 
 	if err := rows.Scan(
-		&r.ID, &r.TaskID, &r.Runtime, &r.Type, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,

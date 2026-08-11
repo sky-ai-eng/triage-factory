@@ -481,6 +481,53 @@ func TestRunQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
 	}
 }
 
+// TestRunQueueStore_SQLite_EnqueueStampsTheSDKEngine is the twin of the
+// Postgres assertion, and the pair is the point: the engine a delegation runs
+// on is decided by the dialect, because the dialect is the mode. Read
+// together they say the divergence is deliberate; either one alone could be
+// mistaken for the default nobody set.
+//
+// The stamp is explicit here too, rather than left to the column DEFAULT, so
+// that a later change to that DEFAULT is free to move without silently
+// re-homing local's delegations onto another engine.
+func TestRunQueueStore_SQLite_EnqueueStampsTheSDKEngine(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	task := seedEntityEventTask(t, conn, "rq-engine")
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqe-p0", Name: "Step 0", Body: "b", Source: "user"})
+	insertBlueprintForTest(t, conn, "rqe-bp", "RQ Engine Blueprint")
+	if err := stores.Blueprints.ReplaceSteps(ctx, org, "rqe-bp", []string{"rqe-p0"}, nil); err != nil {
+		t.Fatalf("ReplaceSteps: %v", err)
+	}
+	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "rqe-br", BlueprintID: "rqe-bp", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+		WorktreePath: "/tmp/wt-rqe",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	step0 := 0
+	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
+		ID: "rqe-run-0", TaskID: task.ID, PromptID: "rqe-p0", Model: "m",
+		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("EnqueueRun: %v", err)
+	}
+
+	var runtime string
+	if err := conn.QueryRow(`SELECT runtime FROM conversations WHERE id = ?`, "rqe-run-0").Scan(&runtime); err != nil {
+		t.Fatalf("read runtime: %v", err)
+	}
+	if runtime != domain.ConversationRuntimeSDK {
+		t.Errorf("mint runtime = %q, want %q", runtime, domain.ConversationRuntimeSDK)
+	}
+}
+
 // TestRunQueueStore_SQLite_Credentials runs the shared awaiting-credentials
 // pubkey conformance suite against the SQLite impl. Each factory call opens
 // a fresh in-memory DB so subtests don't share state.
@@ -806,10 +853,6 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 			Stores: stores,
 			OrgID:  org,
 			UserID: runmode.LocalDefaultUserID,
-			// Local drives every delegation through the SDK, so nothing is
-			// retired here — the empty value is what makes the shared suite
-			// assert the unchanged predicate rather than the refusal.
-			RetiredDelegationRuntime: "",
 			EnqueueDelegation: func(t *testing.T, runtime string) string {
 				t.Helper()
 				idx := nextStep

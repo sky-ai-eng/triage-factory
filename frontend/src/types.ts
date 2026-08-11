@@ -269,8 +269,8 @@ export interface Conversation {
   resumable?: boolean
   // resume_blocked_reason names the rung that refused, present only when
   // resumable is false: 'workspace_expired' | 'blueprint_concluded' |
-  // 'session_missing' | 'worktree_missing' | 'model_missing' | 'not_steerable' |
-  // 'runtime_retired' (internal/delegate's ResumeBlocked* constants). Open-world by design — an
+  // 'session_missing' | 'worktree_missing' | 'model_missing' | 'not_steerable'
+  // (internal/delegate's ResumeBlocked* constants). Open-world by design — an
   // unrecognized reason renders as the generic "can't be resumed" copy.
   resume_blocked_reason?: string
 }

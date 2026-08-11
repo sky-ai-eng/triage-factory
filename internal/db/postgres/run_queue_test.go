@@ -551,6 +551,59 @@ func TestRunQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	}
 }
 
+// TestRunQueueStore_Postgres_EnqueueStampsTheNativeEngine pins the single fact
+// that makes the SDK engine unreachable for a delegation in this mode: the
+// mint names the engine, so no row is ever written that a claimant would have
+// to be taught to refuse. There is no caller-passed knob and no reliance on
+// the column DEFAULT, which still reads 'sdk' for the curator's sake.
+//
+// Both arms, because they are separate statements: a stamp added to one and
+// forgotten in the other is exactly the drift this catches, and the arm that
+// forgot would take the DEFAULT silently.
+//
+// It reads the stored column rather than the projection on purpose. The
+// question is what the write put there, and a projection that COALESCEd an
+// absent value would answer it wrong.
+func TestRunQueueStore_Postgres_EnqueueStampsTheNativeEngine(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+
+	storedRuntime := func(t *testing.T, convID string) string {
+		t.Helper()
+		var runtime string
+		if err := h.AdminDB.QueryRow(
+			`SELECT runtime FROM conversations WHERE id = $1`, convID,
+		).Scan(&runtime); err != nil {
+			t.Fatalf("read runtime: %v", err)
+		}
+		return runtime
+	}
+
+	for i, trigger := range []string{"manual", "event"} {
+		step := i
+		convID := uuid.New().String()
+		run := domain.Conversation{
+			ID: convID, TaskID: taskID, PromptID: promptID, Model: "m",
+			TriggerType: trigger, BlueprintRunID: brID, BlueprintStepIndex: &step,
+		}
+		if trigger == "manual" {
+			// The schema CHECK pairs a manual trigger with a creator.
+			run.CreatorUserID = userID
+		}
+		if err := stores.RunQueue.EnqueueRun(ctx, orgID, run); err != nil {
+			t.Fatalf("EnqueueRun (%s): %v", trigger, err)
+		}
+		if got := storedRuntime(t, convID); got != domain.ConversationRuntimeNative {
+			t.Errorf("%s mint runtime = %q, want %q", trigger, got, domain.ConversationRuntimeNative)
+		}
+	}
+}
+
 // TestRunQueueStore_Postgres_Credentials runs the shared awaiting-credentials
 // pubkey conformance suite against the Postgres impl (admin pool, matching
 // production wiring). Each factory call resets the harness so subtests don't
@@ -938,10 +991,9 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 
 		nextStep := 0
 		return dbtest.ClaimPredicateHarness{
-			Stores:                   stores,
-			OrgID:                    orgID,
-			UserID:                   userID,
-			RetiredDelegationRuntime: domain.ConversationRuntimeSDK,
+			Stores: stores,
+			OrgID:  orgID,
+			UserID: userID,
 			EnqueueDelegation: func(t *testing.T, runtime string) string {
 				t.Helper()
 				idx := nextStep
