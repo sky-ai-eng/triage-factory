@@ -25,6 +25,17 @@
 -- untouched row keeps everything it references, its healthy twin carries the
 -- live tracking, and the poller's confirmation pass reports it rather than
 -- leaving it silent.
+--
+-- The `id = (SELECT min(...))` clause handles the same collision between two
+-- rows that are BOTH non-canonical — 'sky-4' and 'Sky-4' with no 'SKY-4' — which
+-- the NOT EXISTS above cannot see, because at statement start neither row
+-- occupies the spelling they would both fold onto. Left to the NOT EXISTS alone
+-- this statement fails outright on the UNIQUE constraint (verified, not
+-- theorised: see the migration test's two-variant case), and a migration that
+-- fails is a process that will not boot. Electing one winner per canonical key
+-- makes the outcome independent of how the engine interleaves its scan with its
+-- writes; the losers are duplicates and get the same treatment as any other —
+-- left intact for a human.
 UPDATE entities
 SET source_id = upper(trim(source_id))
 WHERE source = 'jira'
@@ -34,6 +45,12 @@ WHERE source = 'jira'
         FROM entities twin
         WHERE twin.source = 'jira'
           AND twin.source_id = upper(trim(entities.source_id))
+  )
+  AND id = (
+        SELECT min(pick.id)
+        FROM entities pick
+        WHERE pick.source = 'jira'
+          AND upper(trim(pick.source_id)) = upper(trim(entities.source_id))
   );
 
 -- +goose Down

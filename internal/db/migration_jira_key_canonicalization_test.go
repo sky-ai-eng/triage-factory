@@ -55,6 +55,15 @@ func TestMigrate_CanonicalizesJiraEntityKeys(t *testing.T) {
 	// non-canonical row would collide with its twin.
 	seed("twin-canonical", "jira", "SKY-2")
 	seed("twin-variant", "jira", "sky-2")
+	// Two variants that are BOTH non-canonical, with nothing yet occupying
+	// the spelling they would both fold onto — an agent that addressed one
+	// issue two ways across separate calls before the fix. The NOT EXISTS
+	// guard cannot see this collision (at statement start neither row holds
+	// SKY-4), so without the one-winner clause the UPDATE trips the UNIQUE
+	// constraint and fails the migration outright — which, since migrations
+	// run at boot, is a process that will not start.
+	seed("dupe-a", "jira", "sky-4")
+	seed("dupe-b", "jira", "Sky-4")
 	// Already canonical, and a non-Jira key that is legitimately lower-case.
 	seed("already", "jira", "SKY-3")
 	seed("gh", "github", "owner/repo#1")
@@ -86,5 +95,15 @@ func TestMigrate_CanonicalizesJiraEntityKeys(t *testing.T) {
 	}
 	if got := keyOf("gh"); got != "owner/repo#1" {
 		t.Errorf("github key = %q, want owner/repo#1 — only Jira keys are case-insensitive at the source", got)
+	}
+	// Exactly one of the two all-variant duplicates folds; the other is left
+	// as a duplicate, like any other. Which one wins is decided by the
+	// migration (lowest id), not by the engine's scan order — asserting the
+	// specific outcome is what keeps that deterministic.
+	if got := keyOf("dupe-a"); got != "SKY-4" {
+		t.Errorf("elected variant = %q, want SKY-4", got)
+	}
+	if got := keyOf("dupe-b"); got != "Sky-4" {
+		t.Errorf("losing variant = %q, want it left as Sky-4 — folding both would collide", got)
 	}
 }
