@@ -42,8 +42,11 @@ fn budget(mb: u64) -> BashOptions {
 /// The trailing `| sleep` is what makes that state durable rather than a spike,
 /// and it is load-bearing twice over. `head` exits once it has written its
 /// 400 MB; `tail` then sees EOF and writes its whole buffer onward, and since
-/// nothing ever reads that last pipe, `tail` blocks on a full one after 64KB
-/// and sits there still holding every byte it buffered.
+/// nothing ever reads that last pipe, `tail` blocks the moment it fills and
+/// sits there still holding every byte it buffered. How much it takes to fill
+/// is not something this relies on — capacity moves with kernel, page size and
+/// `F_SETPIPE_SZ`, and gVisor implements its own pipes — only that it is
+/// bounded, and that 400 MB is far past any of them.
 ///
 /// So the tree is over budget for as long as the watchdog could conceivably
 /// take to look at it. Unpinned, it is over budget only while it is running,
