@@ -35,10 +35,32 @@ fn budget(mb: u64) -> BashOptions {
     }
 }
 
-/// A command that grows without bound until something stops it: `head` feeds
-/// `tail` a stream with no newline in it, so `tail` can never retire a line and
-/// buffers everything it has read.
-const HOG: &str = "head -c 400M /dev/zero | tail";
+/// A command that goes over any budget these tests set and *stays* over it
+/// until something stops it. `head` feeds `tail` a stream with no newline in
+/// it, so `tail` can never retire a line and buffers all 400 MB it reads.
+///
+/// The trailing `| sleep` is what makes that state durable rather than a spike,
+/// and it is load-bearing twice over. `head` exits once it has written its
+/// 400 MB; `tail` then sees EOF and writes its whole buffer onward, and since
+/// nothing ever reads that last pipe, `tail` blocks the moment it fills and
+/// sits there still holding every byte it buffered. How much it takes to fill
+/// is not something this relies on — capacity moves with kernel, page size and
+/// `F_SETPIPE_SZ`, and gVisor implements its own pipes — only that it is
+/// bounded, and that 400 MB is far past any of them.
+///
+/// So the tree is over budget for as long as the watchdog could conceivably
+/// take to look at it. Unpinned, it is over budget only while it is running,
+/// and how long that is depends entirely on how fast the host moves 400 MB
+/// through a pipe — on one quick enough to do it inside a single sampling
+/// interval, the whole pipeline can come and go between two ticks and never be
+/// killed at all.
+///
+/// Pinning also keeps the hog's own output off the command's stdout. That
+/// output is a single multi-hundred-KB line of NULs, and the tail-truncation
+/// that renders it drops whole earlier lines to fit its 50KB budget — so a
+/// marker printed *before* the hog survives into what the model is shown only
+/// because the hog never gets to print over it.
+const HOG: &str = "head -c 400M /dev/zero | tail | sleep 30";
 
 fn text_of(result: &Result<ToolResult<BashToolDetails>, ToolError>) -> String {
     match result {
