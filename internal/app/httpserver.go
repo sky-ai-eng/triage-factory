@@ -34,9 +34,8 @@ func (a *App) buildExecutorRuntime() {
 // buildServer constructs the HTTP server, wires mode-specific deployment
 // identity (local HMAC key / multi-mode GoTrue auth stack), serves the
 // embedded frontend, and exposes the websocket hub the rest of the graph
-// broadcasts through. Must run after openStores (it needs the stores +
-// the boot-time port). Control/all only — an executor uses
-// buildExecutorRuntime instead.
+// broadcasts through. Must run after openStores (it needs the stores).
+// Control/all only — an executor uses buildExecutorRuntime instead.
 func (a *App) buildServer(ctx context.Context, static fs.FS) error {
 	a.srv = server.New(a.database, a.stores)
 	a.wsHub = a.srv.WSHub()
