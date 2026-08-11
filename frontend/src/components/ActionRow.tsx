@@ -15,6 +15,11 @@ export function ActionRow({ action, note }: { action: ActivityAction; note?: Rea
   const meta = metaForAction(action.action)
   const Icon = meta.icon
   const detail = actionDetailSummary(action)
+  // What the row calls this object. Resolved once because the aria-label below
+  // reads it too: an action with no target (a GraphQL write whose subject was
+  // unreadable) falls back to its id, and a label built from the raw field
+  // would announce an empty string over text that is on screen.
+  const subject = action.target || action.external_id || meta.label
 
   const body = (
     <>
@@ -25,7 +30,7 @@ export function ActionRow({ action, note }: { action: ActivityAction; note?: Rea
           half the row back from a long path. */}
       <span className="flex min-w-0 flex-1 items-baseline gap-2">
         <span className="min-w-0 flex-auto truncate font-mono text-[11px] text-text-secondary">
-          {action.target || action.external_id || meta.label}
+          {subject}
         </span>
         {detail && (
           <span
@@ -50,7 +55,7 @@ export function ActionRow({ action, note }: { action: ActivityAction; note?: Rea
   // Both row shapes carry an aria-label, which REPLACES their content for a
   // screen reader — so the detail has to be spelled into it or the rows whose
   // substance lives there read as bare verbs.
-  const described = `${meta.label}: ${action.target}${detail ? ` (${detail})` : ''}`
+  const described = `${meta.label}: ${subject}${detail ? ` (${detail})` : ''}`
 
   if (action.url) {
     return (

@@ -80,6 +80,27 @@ describe('ActionList', () => {
     expect(screen.getByText('reason not_on_allowlist')).toBeInTheDocument()
   })
 
+  it('announces the same subject a sighted reader sees when there is no target', async () => {
+    // The aria-label REPLACES the row's content for a screen reader, so it has
+    // to resolve the target the same way the visible row does. A GraphQL write
+    // whose subject was unreadable has no target, and a label built from that
+    // field alone would announce nothing over text that is on screen.
+    mockActions([
+      action({
+        id: 'a1',
+        action: 'graphql_write',
+        target: '',
+        external_id: 'PR_kwDOabc',
+        details: { operation: 'ClosePr' },
+      }),
+    ])
+    render(<ActionList runId="r1" />)
+
+    expect(
+      await screen.findByLabelText('Raw gh GraphQL write: PR_kwDOabc (operation ClosePr)'),
+    ).toBeInTheDocument()
+  })
+
   it('says a run touched nothing outside the box, rather than hiding', async () => {
     mockActions([])
     render(<ActionList runId="r1" />)

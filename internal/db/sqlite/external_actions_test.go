@@ -339,10 +339,14 @@ func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
 	runA := seedArtifactRun(t, conn)
 	runB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
 
-	record := func(runID, action string, occurred time.Time) {
+	// Each row carries a caller-supplied id (the store honors one) so the two
+	// UPDATEs below address exactly the row they mean. Keying them on `action`
+	// instead would silently span rows the moment this test grew a run that
+	// performs the same act twice — which is most runs.
+	record := func(id, runID, action string, occurred time.Time) string {
 		t.Helper()
 		if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
-			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ID: id, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: domain.ArtifactProviderGitHub, Action: action, Target: "octo/repo",
 			ConversationID: runID, Credential: domain.CredentialGitHubApp,
 		}); err != nil {
@@ -350,17 +354,18 @@ func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
 		}
 		// occurred_at is a column DEFAULT, so ordering is pinned by stamping the
 		// row after the fact rather than by sleeping between inserts.
-		if _, err := conn.Exec(`UPDATE external_actions SET occurred_at = ? WHERE action = ?`, occurred, action); err != nil {
+		if _, err := conn.Exec(`UPDATE external_actions SET occurred_at = ? WHERE id = ?`, occurred, id); err != nil {
 			t.Fatalf("stamp %s: %v", action, err)
 		}
+		return id
 	}
 	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
-	record(runA, domain.ActionBranchPushed, base)
-	record(runA, domain.ActionGHChannelWrite, base.Add(time.Minute))
-	record(runB, domain.ActionPRMerged, base.Add(2*time.Minute))
+	record("act-1", runA, domain.ActionBranchPushed, base)
+	record("act-2", runA, domain.ActionGHChannelWrite, base.Add(time.Minute))
+	record("act-3", runB, domain.ActionPRMerged, base.Add(2*time.Minute))
 	// A detached row: the run that produced it was purged (FK ON DELETE SET NULL).
-	record(runA, domain.ActionEgressDenied, base.Add(3*time.Minute))
-	if _, err := conn.Exec(`UPDATE external_actions SET conversation_id = NULL WHERE action = ?`, domain.ActionEgressDenied); err != nil {
+	detached := record("act-4", runA, domain.ActionEgressDenied, base.Add(3*time.Minute))
+	if _, err := conn.Exec(`UPDATE external_actions SET conversation_id = NULL WHERE id = ?`, detached); err != nil {
 		t.Fatalf("detach: %v", err)
 	}
 
