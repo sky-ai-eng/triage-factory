@@ -269,6 +269,40 @@ func TestCapture_GithubReply_RecordsArtifactlessAction(t *testing.T) {
 	}
 }
 
+// TestCapture_GithubReaction_RecordsArtifactlessAction pins that reacting to a
+// comment leaves a row. Like its reply sibling above it produces no artifact —
+// an emoji is not an object with a lifecycle — so the audit log is the only
+// place the act can appear, and the verb wrote nothing at all until now while
+// the same reaction arriving as a raw REST call was recorded and the Slack
+// equivalent had been recorded all along.
+func TestCapture_GithubReaction_RecordsArtifactlessAction(t *testing.T) {
+	gh := startFakeGitHubComments(t)
+	stores, info, client := newGithubRecordingClient(t, gh.URL, false)
+
+	if err := client.GithubReactToComment(context.Background(), "octo", "repo", 555, "+1"); err != nil {
+		t.Fatalf("GithubReactToComment: %v", err)
+	}
+	if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+		t.Errorf("a reaction should produce no artifact, got %+v", arts)
+	}
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
+	}
+	a := acts[0]
+	// Target and ExternalID are what the same reaction records when it arrives
+	// through the raw gh channel (internal/ghwrite classifies the reactions path
+	// to owner/repo + the comment id), so one act reads one way either way.
+	if a.Action != domain.ActionReactionAdded || a.Provider != domain.ArtifactProviderGitHub ||
+		a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||
+		a.ExternalID != "555" || a.ConversationID != info.RunID {
+		t.Errorf("reaction action mismatch: %+v", a)
+	}
+	if !strings.Contains(a.DetailJSON, `"emoji":"+1"`) {
+		t.Errorf("detail_json %q did not carry the emoji — the one thing this path knows that the raw channel cannot", a.DetailJSON)
+	}
+}
+
 // TestCapture_GithubReviewCommentEditDelete_RecordsArtifactlessAction pins
 // TFAC-485: editing/deleting a PUBLISHED review line-comment via the
 // pulls/comments fallback (isIssueComment == false) rides the review, so it
@@ -935,44 +969,13 @@ func TestCapture_GraphQLOverCapStillLandsAnAttributedRow(t *testing.T) {
 	}
 }
 
-// TestCapture_GithubReaction_RecordsArtifactlessAction and its dismissal
-// sibling below cover the two exec-gh verbs that reached GitHub under the org
-// credential and left nothing behind — neither an artifact (correctly: neither
-// act produces an object this run owns) nor an audit row (not correctly: the
-// log of record is supposed to have no fourth state where a write simply
-// happened invisibly).
+// TestCapture_GithubReviewDismiss_RecordsArtifactlessAction covers the last
+// exec-gh verb that reached GitHub under the org credential and left nothing
+// behind — neither an artifact (correctly: the act produces no object this run
+// owns) nor an audit row (not correctly: the log of record is supposed to have
+// no fourth state where a write simply happened invisibly).
 //
-// The target is the comment, not the reaction, matching what the gh channel's
-// classifier records for the identical act — the two channels have to name the
-// same act the same way or the log answers differently depending on which one
-// the agent reached for.
-func TestCapture_GithubReaction_RecordsArtifactlessAction(t *testing.T) {
-	gh := startFakeGitHubComments(t)
-	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
-
-	if err := client.GithubReactToComment(context.Background(), "octo", "repo", 555, "rocket"); err != nil {
-		t.Fatalf("GithubReactToComment: %v", err)
-	}
-
-	if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
-		t.Errorf("a reaction should produce no artifact, got %+v", arts)
-	}
-	acts := listExternalActions(t, stores)
-	if len(acts) != 1 {
-		t.Fatalf("want 1 action, got %d: %+v", len(acts), acts)
-	}
-	a := acts[0]
-	if a.Action != domain.ActionReactionAdded || a.Provider != domain.ArtifactProviderGitHub ||
-		a.Target != "octo/repo" || a.ExternalID != "555" || a.ConversationID != info.RunID {
-		t.Errorf("reaction action mismatch: %+v", a)
-	}
-	if !strings.Contains(a.DetailJSON, `"emoji":"rocket"`) {
-		t.Errorf("detail_json %q did not carry the emoji", a.DetailJSON)
-	}
-}
-
-// TestCapture_GithubReviewDismiss_RecordsArtifactlessAction covers the act the
-// action vocabulary used to assert could not happen — "a dismiss is a local
+// It is the act the action vocabulary used to assert could not happen — "a dismiss is a local
 // state flip, not an org-credential write". That is true of abandoning a
 // TF-staged draft and false of this verb, which PUTs to GitHub's dismissals
 // endpoint and can clear the standing of a review a person left.

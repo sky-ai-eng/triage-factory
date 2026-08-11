@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // EntityStoreFactory is what a per-backend test file hands to
@@ -30,6 +31,11 @@ type EntitySeeder struct {
 	// Project inserts a project row and returns its id. The
 	// AssignProject subtests need a real FK target.
 	Project func(t *testing.T, name string) string
+
+	// Team inserts a team row and returns its id. The owning-team stamp
+	// subtests need two DISTINCT ids that both satisfy the owning_team_id
+	// FK — one to stamp, one to prove a second writer cannot displace it.
+	Team func(t *testing.T, name string) string
 }
 
 // RunEntityStoreConformance covers the entity-store contract every
@@ -56,6 +62,25 @@ type EntitySeeder struct {
 //   - ClassificationStatusSystem reports (classified, exists) keyed on
 //     classified_at (not project_id), with a missing row as (false,
 //     false, nil).
+//   - MarkPolledSystem advances last_polled_at without touching the
+//     snapshot or poll_seq.
+
+// mustEntity re-reads an entity by its natural key, failing the test if it is
+// missing. Assertions about timestamp columns have to compare DB-precision
+// values on both sides (see the UpdateSnapshot subtest), which means re-reading
+// rather than reusing the struct a mutation returned.
+func mustEntity(t *testing.T, s db.EntityStore, ctx context.Context, orgID, source, sourceID string) *domain.Entity {
+	t.Helper()
+	ent, err := s.GetBySource(ctx, orgID, source, sourceID)
+	if err != nil {
+		t.Fatalf("re-read %s/%s: %v", source, sourceID, err)
+	}
+	if ent == nil {
+		t.Fatalf("re-read %s/%s: no row", source, sourceID)
+	}
+	return ent
+}
+
 func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -334,6 +359,42 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
+	t.Run("MarkPolledSystem_advances_last_polled_at_and_nothing_else", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+
+		if _, _, err := s.FindOrCreate(ctx, orgID, "jira", "SKY-POLLED", "issue", "T", ""); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED").ID, `{"status":"To Do"}`, 0); err != nil || !ok {
+			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
+		}
+		// Re-read for a DB-precision baseline — see the UpdateSnapshot
+		// subtest above for the timestamptz-truncation rationale.
+		baseline := mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED")
+		if baseline.LastPolledAt == nil {
+			t.Fatal("baseline has no last_polled_at")
+		}
+
+		if err := s.MarkPolledSystem(ctx, orgID, baseline.ID); err != nil {
+			t.Fatalf("MarkPolledSystem: %v", err)
+		}
+
+		got := mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED")
+		if got.LastPolledAt == nil || !got.LastPolledAt.After(*baseline.LastPolledAt) {
+			t.Errorf("last_polled_at must advance — baseline=%v after=%v; a caller that selects candidates by this column's age would re-pick the row forever",
+				baseline.LastPolledAt, got.LastPolledAt)
+		}
+		// The snapshot is untouched, and poll_seq does not move: this
+		// records a read, not a diff, so it must not consume the CAS
+		// token a concurrent snapshot write is holding.
+		if got.SnapshotJSON != baseline.SnapshotJSON {
+			t.Errorf("snapshot_json changed: %q → %q", baseline.SnapshotJSON, got.SnapshotJSON)
+		}
+		if got.PollSeq != baseline.PollSeq {
+			t.Errorf("poll_seq moved %d → %d", baseline.PollSeq, got.PollSeq)
+		}
+	})
+
 	t.Run("UpdateTitle_and_UpdateDescription_round_trip", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
@@ -518,9 +579,9 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	// OwningTeamForEntitySystem resolves the structural owner (tiers
 	// 1+2). A plain entity has no override and no project → empty; an entity
 	// attached to a team-visibility project resolves to that project's team.
-	// (The owning_team_id override tier needs a writer this ticket doesn't add,
-	// so it's exercised at the router layer; here we cover the project tier and
-	// the empty fall-through across both dialects.)
+	// The override tier's writer is covered by the stamp subtest below; here
+	// we cover the project tier and the empty fall-through across both
+	// dialects.
 	t.Run("OwningTeamForEntity_resolves_project_team_else_empty", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 
@@ -554,6 +615,61 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// Missing entity → empty, not an error.
 		if team, err := s.OwningTeamForEntitySystem(ctx, orgID, uuid.New().String()); err != nil || team != "" {
 			t.Errorf("missing entity: got (%q, %v), want (\"\", nil)", team, err)
+		}
+	})
+
+	// StampOwningTeamIfUnsetSystem is the write half of tier 1 — the path that
+	// records the commissioning team on a PR the bot opened. The contract it
+	// has to hold is "if unset", because two unordered writers (the run that
+	// opened the PR, the poller that discovers it) converge only if neither can
+	// overwrite the other's answer.
+	t.Run("StampOwningTeamIfUnset_stamps_once_then_refuses", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		teamA := seed.Team(t, "Commissioning")
+		teamB := seed.Team(t, "Interloper")
+
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#stamp", "pr", "T", "")
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+
+		// A NULL owner takes the stamp, and tier 1 reads it straight back.
+		stamped, err := s.StampOwningTeamIfUnsetSystem(ctx, orgID, ent.ID, teamA)
+		if err != nil || !stamped {
+			t.Fatalf("first stamp: got (%v, %v), want (true, nil)", stamped, err)
+		}
+		if team, err := s.OwningTeamForEntitySystem(ctx, orgID, ent.ID); err != nil || team != teamA {
+			t.Errorf("after stamp: got (%q, %v), want (%q, nil)", team, err, teamA)
+		}
+
+		// A second writer with a different answer is refused, not applied —
+		// this is what makes an operator's transfer permanent and re-delivery
+		// of the same PR-open write a no-op.
+		stamped, err = s.StampOwningTeamIfUnsetSystem(ctx, orgID, ent.ID, teamB)
+		if err != nil || stamped {
+			t.Errorf("stamp over an owned entity: got (%v, %v), want (false, nil)", stamped, err)
+		}
+		if team, _ := s.OwningTeamForEntitySystem(ctx, orgID, ent.ID); team != teamA {
+			t.Errorf("owner changed under a second stamp: got %q, want %q", team, teamA)
+		}
+
+		// An empty team is the defensive case (a run with no team): no stamp,
+		// no error, and the entity keeps its NULL for a later writer.
+		fresh, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#stamp-noteam", "pr", "T", "")
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		if stamped, err := s.StampOwningTeamIfUnsetSystem(ctx, orgID, fresh.ID, ""); err != nil || stamped {
+			t.Errorf("empty team: got (%v, %v), want (false, nil)", stamped, err)
+		}
+		if team, _ := s.OwningTeamForEntitySystem(ctx, orgID, fresh.ID); team != "" {
+			t.Errorf("empty team left an owner: got %q", team)
+		}
+
+		// A missing entity is (false, nil) too — the caller is best-effort and
+		// has nothing to do about a row that isn't there.
+		if stamped, err := s.StampOwningTeamIfUnsetSystem(ctx, orgID, uuid.New().String(), teamA); err != nil || stamped {
+			t.Errorf("missing entity: got (%v, %v), want (false, nil)", stamped, err)
 		}
 	})
 

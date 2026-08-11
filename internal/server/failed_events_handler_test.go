@@ -290,7 +290,7 @@ func TestFailedEventsHandler_AdminGate_Postgres(t *testing.T) {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores, 3000)
+	s := New(h.AdminDB, stores)
 
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "failed-events-founder")
 	member := pgtest.SeedUser(t, h, "failed-events-member")

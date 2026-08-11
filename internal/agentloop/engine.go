@@ -120,6 +120,19 @@ type Params struct {
 	// human input. Zero uses DefaultMaxIterations.
 	MaxIterations int
 
+	// BashMemBudgetMB bounds the resident memory of any single `bash`
+	// command the jail runs for this engagement. A command over it is killed
+	// and answered with an error naming the limit; the jail's own memory
+	// ceiling stays underneath as the backstop, so this is about attributing
+	// a breach to the command that caused it rather than to whoever
+	// allocates next.
+	//
+	// Zero disables it: no configure frame is sent, and the harness arms no
+	// watchdog. Policy, so it comes from the driver as a constant — there is
+	// no env knob and no settings surface, and it is never a tool argument
+	// the model could raise for itself.
+	BashMemBudgetMB int
+
 	// Effort rides through to the provider call unchanged.
 	Effort string
 
@@ -312,6 +325,10 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 	if maxIter <= 0 {
 		maxIter = DefaultMaxIterations
 	}
+
+	// Policy into the jail, before anything can dispatch a tool. One frame,
+	// once per engagement — the host holds it for the life of the connection.
+	e.configureToolHost(params)
 
 	// Setup: make the transcript legal and honest before anything reads it.
 	// Unconditional and idempotent — there is no resume branch, so the
@@ -735,6 +752,38 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			NumTurns:      turn,
 			DurationMs:    msSince(started),
 		}
+	}
+}
+
+// configureToolHost hands the tool host this engagement's execution policy —
+// today the per-command bash memory budget, and nothing else.
+//
+// Skipped entirely when there is no policy to send, which is what makes an
+// unconfigured engagement byte-identical to the world before the frame
+// existed: no frame, no watchdog, no syscall.
+//
+// Never fatal, in any of the three ways it can fail. A host older than the
+// verb answers the ordinary non-fatal unknown_tool; a host that rejects the
+// args answers a tool error; a dead connection answers nothing. All three
+// mean "this run has no per-command budget", and none of them is worth
+// refusing to run the engagement over — the jail ceiling is still underneath,
+// and a connection that is genuinely gone fails the first real tool call a
+// moment later with a diagnosis this frame could not improve on.
+func (e *Engine) configureToolHost(params Params) {
+	if params.BashMemBudgetMB <= 0 {
+		return
+	}
+	const notice = "configuring the tool host failed; this engagement runs without a per-command memory budget"
+	out, err := e.Tools.Call(toolHostConfigureTool, map[string]any{
+		bashMemBudgetArg: params.BashMemBudgetMB,
+	})
+	switch {
+	case err != nil:
+		e.warn(notice, "conversation", params.ConversationID, "error", err)
+	case out.Protocol != nil:
+		e.warn(notice, "conversation", params.ConversationID, "kind", out.Protocol.Kind)
+	case out.ToolError != "":
+		e.warn(notice, "conversation", params.ConversationID, "error", out.ToolError)
 	}
 }
 

@@ -39,7 +39,7 @@ func newTeamArchiveRig(t *testing.T) *teamArchiveRig {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores, 3000)
+	s := New(h.AdminDB, stores)
 
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "owner")
 	member := pgtest.SeedUser(t, h, "member")

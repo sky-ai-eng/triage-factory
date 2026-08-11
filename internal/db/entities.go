@@ -274,6 +274,23 @@ type EntityStore interface {
 	// the tracker) and lets the next poll cycle reconcile. There is no
 	// blind-write variant: every snapshot write goes through the CAS.
 	UpdateSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (ok bool, err error)
+
+	// MarkPolledSystem stamps last_polled_at without touching the
+	// snapshot or poll_seq — the row was read from the source, but
+	// nothing about it was diffed. Distinct from UpdateSnapshot* (which
+	// carries a snapshot) and from PatchSnapshot (which deliberately
+	// leaves last_polled_at stale so the next cycle still refreshes).
+	//
+	// It exists for reads that confirm an entity's state outside the
+	// snapshot-diff, where the column's age is itself an input: the
+	// tracker's Jira gone-confirmation selects candidates by how long
+	// last_polled_at has been stale, so an entity it successfully
+	// confirms must advance or it stays a candidate forever — and
+	// since candidates are ordered oldest-first against a per-cycle
+	// budget, one such entity would consume that budget every cycle and
+	// starve every other candidate behind it.
+	MarkPolledSystem(ctx context.Context, orgID, id string) error
+
 	UpdateTitleSystem(ctx context.Context, orgID, id, title string) error
 	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error
 
@@ -339,4 +356,30 @@ type EntityStore interface {
 	// mirroring the store's other ...System reads; org_id stays in the WHERE
 	// clause as defense in depth.
 	OwningTeamForEntitySystem(ctx context.Context, orgID, entityID string) (string, error)
+
+	// StampOwningTeamIfUnsetSystem writes entities.owning_team_id, but only
+	// onto a row that does not have one yet — the write half of tier 1 above.
+	// Returns stamped=false (no error) when the row already carries an owner,
+	// when teamID is empty, and when no such entity exists.
+	//
+	// Stamp-if-NULL is the whole contract, and it is what lets two unordered
+	// writers converge on one answer. A PR the bot opens has no TF author to
+	// resolve, so the commissioning team is recorded from the run that opened
+	// it; that write races the poller, which mints the same entity by natural
+	// key whenever it next sees the PR. Either order lands the same owner —
+	// the run's write back-fills a row the poller already created, or it
+	// creates the row the poller later enriches — and neither can overwrite an
+	// owner some *other* writer chose, because the only value this can replace
+	// is NULL. An explicit owner (an operator's transfer) is therefore
+	// permanent as far as this path is concerned, and re-delivery of the same
+	// PR-open write is a no-op rather than a second opinion.
+	//
+	// Admin-pool (BYPASSRLS): the caller is the exec recording funnel, which
+	// runs on an executor with no JWT claims. There is no app-pool variant
+	// because ownership is never stamped from a request. Postgres keeps org_id
+	// in the WHERE clause as defense in depth, since BYPASSRLS means nothing
+	// else is scoping the statement; SQLite scopes at the assertLocalOrg gate
+	// like every other method in that store, where a WHERE predicate would
+	// match every row by construction and assert nothing.
+	StampOwningTeamIfUnsetSystem(ctx context.Context, orgID, entityID, teamID string) (stamped bool, err error)
 }

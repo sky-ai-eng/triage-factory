@@ -94,15 +94,23 @@ export const ACTION_META: Record<string, ActionMeta> = {
     text: 'text-delegate',
     tone: 'neutral',
   },
-  review_started: { icon: Eye, label: 'Review started', text: 'text-snooze', tone: 'neutral' },
   review_submitted: { icon: Eye, label: 'Review submitted', text: 'text-snooze', tone: 'good' },
-  review_dismissed: { icon: Eye, label: 'Review dismissed', text: 'text-snooze', tone: 'problem' },
   review_requested: { icon: Eye, label: 'Review requested', text: 'text-snooze', tone: 'neutral' },
   review_request_removed: {
     icon: Eye,
     label: 'Review request removed',
     text: 'text-snooze',
     tone: 'neutral',
+  },
+  // A dismissal clears the standing of a review someone already submitted,
+  // which is why it reads as a problem where the request verbs above read as
+  // neutral: the others move a review through its own lifecycle, this one
+  // overrides a verdict a person left.
+  review_dismissed: {
+    icon: Eye,
+    label: 'Review dismissed',
+    text: 'text-snooze',
+    tone: 'problem',
   },
   review_comment_edited: {
     icon: Eye,
@@ -249,6 +257,16 @@ export const ACTION_META: Record<string, ActionMeta> = {
     text: 'text-text-tertiary',
     tone: 'good',
   },
+  // The push the upstream turned down — nothing landed, so no branch artifact
+  // exists and this row is the only trace of the attempt. 'problem' rather than
+  // the denials' 'attention' below: those are Triage Factory declining to do
+  // something, this is work the agent believed it had done and had not.
+  branch_push_failed: {
+    icon: GitBranch,
+    label: 'Branch push failed',
+    text: 'text-text-tertiary',
+    tone: 'problem',
+  },
   linked_branch_created: {
     icon: GitBranch,
     label: 'Linked branch created',
@@ -272,6 +290,24 @@ export const ACTION_META: Record<string, ActionMeta> = {
   gh_write_denied: {
     icon: ShieldBan,
     label: 'gh write refused',
+    text: 'text-text-tertiary',
+    tone: 'attention',
+  },
+  // The other two per-run gates, sharing gh_write_denied's shield and tone
+  // because a reader scanning for "what did we stop" wants all three to answer
+  // to the same shape. They keep separate labels because the boundary that
+  // refused each one is different, and so is what to do about it: a git denial
+  // is a repo/ref outside the run's grant, an egress denial is a host outside
+  // its allowlist.
+  git_denied: {
+    icon: ShieldBan,
+    label: 'Git op refused',
+    text: 'text-text-tertiary',
+    tone: 'attention',
+  },
+  egress_denied: {
+    icon: ShieldBan,
+    label: 'Network refused',
     text: 'text-text-tertiary',
     tone: 'attention',
   },
@@ -354,6 +390,65 @@ export function metaForAction(action: string): ActionMeta {
   return ACTION_META[action] ?? FALLBACK_ACTION_META
 }
 
+// DetailSource is the subset of an action row actionDetailSummary reads. Typed
+// structurally rather than as ActivityAction so the helper stays in this
+// data module and the test can call it with a literal.
+export interface DetailSource {
+  target?: string
+  external_id?: string
+  from_state?: string
+  to_state?: string
+  details?: unknown
+}
+
+// actionDetailSummary renders a row's detail_json as one compact line, or null
+// when it carries nothing the row doesn't already say.
+//
+// It is deliberately generic. For the two fallback actions the detail IS the
+// row's identifying content — a `gh_channel_write` says only "a write happened"
+// until its method and path are on screen — and the rest of the epic keeps
+// adding keys (`attempted`, `unreadable`, `refused`). A per-action list of
+// keys to display would leave each new one invisible until someone remembered
+// this file, which is the exact failure being fixed here. So every key renders,
+// and a shape nobody anticipated still says something.
+//
+// Two rules shape the output. Method and path pair into `POST /repos/…`,
+// because that is how an HTTP request is written and `method POST · path /…`
+// is not. And a value the row already displays elsewhere is dropped: a Jira
+// transition repeats its destination status in detail_json, and an egress
+// denial repeats the host that is already the row's target.
+export function actionDetailSummary(action: DetailSource): string | null {
+  const details = action.details
+  if (typeof details !== 'object' || details === null || Array.isArray(details)) return null
+  const entries = Object.entries(details as Record<string, unknown>)
+  if (entries.length === 0) return null
+
+  const shown = new Set(
+    [action.target, action.external_id, action.from_state, action.to_state].filter(
+      (v): v is string => !!v,
+    ),
+  )
+  const chunks: string[] = []
+  const { method, path } = details as Record<string, unknown>
+  if (typeof method === 'string' && method !== '' && typeof path === 'string' && path !== '') {
+    chunks.push(`${method} ${path}`)
+  }
+  for (const [key, value] of entries) {
+    if (chunks.length > 0 && (key === 'method' || key === 'path')) continue
+    // `false` is the absence of a flag, not a fact worth a chunk; `true` needs
+    // no value beyond its own name.
+    if (value === false || value === null || value === undefined || value === '') continue
+    if (value === true) {
+      chunks.push(key)
+      continue
+    }
+    const text = Array.isArray(value) ? value.join(', ') : String(value)
+    if (text === '' || shown.has(text)) continue
+    chunks.push(`${key} ${text}`)
+  }
+  return chunks.length > 0 ? chunks.join(' · ') : null
+}
+
 // ACTION_OPTIONS backs the Actions-lens action filter — the modeled action set,
 // grouped by family for a readable dropdown. Derived from ACTION_META so a newly
 // modeled action shows up in the filter the moment it's added.
@@ -362,8 +457,13 @@ export const ACTION_OPTIONS = Object.keys(ACTION_META).map((value) => ({
   label: ACTION_META[value].label,
 }))
 
-// ACTION_PROVIDERS backs the Actions-lens provider filter. Unlike the artifacts
-// feed (which also carries 'git'/'linear'), every external ACTION is performed
-// under an org github/jira credential or the workspace Slack bot token, so
-// only those three appear.
-export const ACTION_PROVIDERS = ['github', 'jira', 'slack'] as const
+// ACTION_PROVIDERS backs the Actions-lens provider filter. Three of the four are
+// the credentials an action can be performed under — an org github/jira
+// credential or the workspace Slack bot token — and 'network' is the odd one:
+// the sandbox egress denial spends no credential at all, because nothing left
+// the box. It is in the filter for exactly that reason. A refused connection is
+// the row an operator most wants to isolate, and it is the only one no other
+// provider value can reach. ('git'/'linear', which the artifacts feed carries,
+// stay out: a branch push is a github action even though its artifact is a git
+// one, and nothing writes to Linear.)
+export const ACTION_PROVIDERS = ['github', 'jira', 'slack', 'network'] as const

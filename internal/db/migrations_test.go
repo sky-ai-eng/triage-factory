@@ -48,7 +48,7 @@ func TestMigrate_FreshInstall(t *testing.T) {
 		"entities", "events", "tasks", "conversations", "messages", "claims",
 		"projects",
 		"orgs", "users", "event_handlers",
-		"instance_config", "org_settings", "team_settings", "user_settings",
+		"org_settings", "team_settings", "user_settings",
 		"jira_project_status_rules",
 	} {
 		exists, err := tableExists(database, table)

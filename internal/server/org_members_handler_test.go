@@ -41,7 +41,7 @@ func newOrgMembersRig(t *testing.T) *orgMembersRig {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores, 3000)
+	s := New(h.AdminDB, stores)
 
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "founder")
 	admin := pgtest.SeedUser(t, h, "admin")

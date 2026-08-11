@@ -19,10 +19,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )
 
-// openStores opens the right backend for the runtime mode, wires the
-// per-resource store bundle against it, and reads the boot-time
-// instance_config (local only). A misconfigured TF_MODE=multi fails fast
-// here — without this guard the local SQLite file would be created and
+// openStores opens the right backend for the runtime mode and wires the
+// per-resource store bundle against it. A misconfigured TF_MODE=multi fails
+// fast here — without this guard the local SQLite file would be created and
 // migrated before the multi branch could reject.
 //
 // Multi mode is unreachable end-to-end until the v1 multi-tenant epic
@@ -172,7 +171,7 @@ func (a *App) openStores(ctx context.Context) error {
 		return fmt.Errorf("unknown runmode: %v", runmode.Current())
 	}
 
-	return a.readInstanceConfig(ctx)
+	return nil
 }
 
 // warnIfExecutorAdminDBIsSuperuser checks whether this executor's admin
@@ -199,34 +198,6 @@ func warnIfExecutorAdminDBIsSuperuser(ctx context.Context, adminDB *sql.DB) {
 			"executor should connect as tf_system, the least-privilege role, not a superuser DSN; " +
 			"see docs/self-hosting/scaling.md#executor-database-role-tf_system")
 	}
-}
-
-// readInstanceConfig loads the small remainder of process-wide boot state
-// (server port) from the local instance_config table. The table is
-// local-only — hosted multi-mode uses env vars for these — so the read is
-// skipped in multi mode and the port falls back to the default.
-//
-// The stored port is surfaced to the Settings GET response; the actual
-// bind still wins from --port at boot.
-func (a *App) readInstanceConfig(ctx context.Context) error {
-	a.storedPort = DefaultPort
-	if !a.local() {
-		return nil
-	}
-
-	var storedPort int
-	if err := a.database.QueryRowContext(ctx,
-		`SELECT server_port FROM instance_config WHERE id = 1`,
-	).Scan(&storedPort); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("read instance_config: %w", err)
-	}
-	// Default to the binary's DefaultPort when the row is missing or holds
-	// the zero value — that's what the Settings GET response should render.
-	if storedPort == 0 {
-		storedPort = DefaultPort
-	}
-	a.storedPort = storedPort
-	return nil
 }
 
 // Per-role Postgres pool ceilings (per pool; multi mode opens two — the

@@ -20,7 +20,7 @@
 
 Triage Factory watches everything that needs attention across your GitHub and Jira — open PRs, review requests, CI failures, merge conflicts, assigned tickets — scores and ranks it with AI, and lets you delegate the work to Claude Code agents that run in isolation and stream back to a live dashboard. You decide what gets automated, and you can take over any agent's run at any point.
 
-It's a single Go binary that runs on infrastructure you control. One developer runs it locally — SQLite, credentials in the OS keychain (or an encrypted file when no keychain is reachable). A whole organization runs the _same_ binary self-hosted in multi-tenant mode — Postgres, per-org row-level isolation, and every agent run confined to its own gVisor sandbox. Your code and credentials stay on your infrastructure, and the only things that leave it are API calls to the services you connect — GitHub, Jira, and your model provider. Local mode is the fundamentally the same product, just with N=1 orgs, teams, and users.
+It's a single Go binary that runs on infrastructure you control. One developer runs it locally — SQLite, credentials in the OS keychain (or an encrypted file when no keychain is reachable). A whole organization runs the _same_ binary self-hosted in multi-tenant mode — Postgres, per-org row-level isolation, and every agent run confined to its own gVisor sandbox. Your code and credentials stay on your infrastructure, and the only things that leave it are API calls to the services you connect — GitHub, Jira, and your model provider. Local mode is fundamentally the same product, just with N=1 orgs, teams, and users.
 
 For a product tour and screenshots, see [triagefactory.com](https://www.triagefactory.com).
 

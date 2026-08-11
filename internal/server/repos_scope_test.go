@@ -39,7 +39,7 @@ func newRepoScopeRig(t *testing.T) *repoScopeRig {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores, 3000)
+	s := New(h.AdminDB, stores)
 
 	orgID, owner, teamA := pgtest.SeedOrgWithUser(t, h, "owner")
 	teamB := pgtest.SeedTeam(t, h, orgID, "team-b")

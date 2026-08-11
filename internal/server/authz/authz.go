@@ -1,10 +1,34 @@
 // Package authz is the org/team authorization layer for the Triage Factory
 // server: the shared gates and membership checks several handler domains run
-// before touching team- or org-scoped state. It owns the raw RLS-function
-// probes (tf.team_in_current_org, tf.user_is_team_admin, tf.user_has_org_access,
-// …) that execute on the app pool via db.WithTx, plus the friendly front gates
-// that translate a failed check into the right 403/404 and the resolve-error
-// renderer they share.
+// before touching team- or org-scoped state. It owns the friendly front gates
+// that translate a failed check into the right 403/404, the resolve-error
+// renderer they share, and the SQL those checks run.
+//
+// That SQL comes in two shapes, both executing on the app pool inside
+// db.WithTx so they see the caller's claims:
+//
+//   - RLS-function probes — tf.team_in_current_org, tf.user_is_team_admin,
+//     tf.user_has_org_access, tf.user_can_write_team, tf.user_owns_org, … —
+//     which call the same helpers the row policies call, so a gate and the
+//     policy behind it can't drift apart. There is nothing to route through a
+//     store: the answer lives in a SQL function, not a table.
+//   - Plain reads of four columns that no RLS helper exposes:
+//     teams.deleted_at (the archive block), a count of org_memberships, and a
+//     count-plus-caller's-role over memberships. They stay here rather than
+//     behind db.Stores because each is an authorization input read in the same
+//     claims transaction as the probe it accompanies — the membership pair in
+//     particular has to be one transaction under one claims context, and its
+//     role arm resolves the caller through tf.current_user_id() rather than an
+//     argument. Routing them through the store layer means minting
+//     multi-mode-only methods whose SQLite twins are unreachable stubs (every
+//     caller short-circuits local mode before the read) and moving an
+//     authorization check onto a different pool — a trade worth making
+//     deliberately, not as a side effect.
+//
+// RequireTaskWrite is a third thing again: it mirrors the tasks_update policy
+// arm-for-arm over tasks/task_teams, composing tf.* helpers inline. It reads
+// tables, but what it encodes is the policy, so it is written out here where it
+// can be diffed against the policy it shadows.
 //
 // It imports the httpx kernel for responses + request identity and depends
 // otherwise only on leaf packages (db, runmode), so handler subpackages can
@@ -33,8 +57,9 @@ import (
 // rely on their gate callers (and on local-mode routing never mounting an
 // {org_id} path) to avoid being reached under local SQLite.
 //
-// It needs only the raw pool (for the RLS probes) and the transactional store
-// runner (for ResolveTeamID's default-team lookup); handlers hold a single
+// It needs only the raw pool (for both SQL shapes the package doc describes)
+// and the transactional store runner (for ResolveTeamID's default-team lookup,
+// the one check with a store method behind it); handlers hold a single
 // *Checker instead of re-deriving these checks against their own store fields.
 type Checker struct {
 	db *sql.DB

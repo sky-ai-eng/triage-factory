@@ -481,6 +481,18 @@ func updateSnapshotCAS(ctx context.Context, q queryer, id, snapshotJSON string, 
 	return n > 0, nil
 }
 
+// MarkPolledSystem stamps last_polled_at alone — no snapshot, no poll_seq
+// bump. See the interface doc: it records that the row was read from the
+// source without anything having been diffed off it.
+func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx,
+		`UPDATE entities SET last_polled_at = ? WHERE id = ?`, time.Now(), id)
+	return err
+}
+
 func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) error {
 	return s.UpdateTitle(ctx, orgID, id, title)
 }
@@ -573,6 +585,38 @@ func (s *entityStore) OwningTeamForEntitySystem(ctx context.Context, orgID, enti
 		return "", err
 	}
 	return team.String, nil
+}
+
+// StampOwningTeamIfUnsetSystem fills owning_team_id only where it is still
+// NULL. The IS NULL predicate is the concurrency story as much as the
+// semantic one: it lives in the UPDATE rather than in a read-then-write, so
+// two callers racing on the same entity resolve to whichever committed first
+// with no lost update, and RowsAffected reports which one that was.
+//
+// N=1 here, so the race is theoretical — but the statement is the same one
+// Postgres runs, and a stamp that meant "if unset" on one dialect and "last
+// writer wins" on the other would make the conformance suite the only place
+// the difference showed up.
+func (s *entityStore) StampOwningTeamIfUnsetSystem(ctx context.Context, orgID, entityID, teamID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	if teamID == "" {
+		return false, nil
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE entities
+		SET owning_team_id = ?
+		WHERE id = ? AND owning_team_id IS NULL
+	`, teamID, entityID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // scanEntityRow / scanEntityFromRows return a fresh domain.Entity per

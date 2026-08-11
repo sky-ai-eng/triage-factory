@@ -53,11 +53,6 @@ type Server struct {
 	jiraRules    db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
 	githubApps   db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
 	authEvents   db.AuthEventStore       // TFAC-76: SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
-	// serverPort is the stored instance_config.server_port value
-	// surfaced to the settings GET response. The actual bind port
-	// comes from --port at boot, not this field — the Settings page
-	// reads it to populate its server_port input.
-	serverPort int
 	// tx runs handler-cleanup write batches under the request user's
 	// claims even when the cleanup needs to outlive the request
 	// context. Each cleanup wraps in `s.tx.WithTx(cleanupCtx, orgID,
@@ -516,15 +511,14 @@ func (s *Server) agentEnabledForTeam(ctx context.Context, orgID, userID, teamID 
 }
 
 // New creates a new server with the given database + the full
-// per-resource store bundle + the boot-time stored server port, and
-// registers all routes. The Server retains individual store fields
-// rather than a single db.Stores struct so existing handler code keeps
-// working — the constructor just unpacks the bundle once instead of
-// forcing every caller to enumerate 20+ stores positionally.
+// per-resource store bundle, and registers all routes. The Server retains
+// individual store fields rather than a single db.Stores struct so existing
+// handler code keeps working — the constructor just unpacks the bundle once
+// instead of forcing every caller to enumerate 20+ stores positionally.
 //
 // raw *sql.DB stays available for handlers that haven't been
 // ported to a store yet.
-func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
+func New(database *sql.DB, stores db.Stores) *Server {
 	s := &Server{
 		db:           database,
 		prompts:      stores.Prompts,
@@ -551,7 +545,6 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 		az:           authz.New(database, stores.Tx),
 		fleetQueue:   stores.RunQueue,
 		allStores:    stores,
-		serverPort:   serverPort,
 		mux:          http.NewServeMux(),
 		ws:           websocket.NewHub(),
 	}
@@ -1001,6 +994,11 @@ func (s *Server) routes() {
 	// Run-scoped artifact read (A·6, TFAC-465): the run's artifacts across
 	// every kind, team-scoped via the run. Backs the run-detail surface (TFAC-470).
 	s.api("GET /api/agent/conversations/{conversationID}/artifacts", ag.handleAgentArtifacts)
+	// Run-scoped external-action read — the audit log filtered to this run.
+	// Its sibling above answers "what objects does this run own"; this answers
+	// "what did it do", including the writes that produce no object at all (a
+	// review-thread reply, a refused merge, a denied push).
+	s.api("GET /api/agent/conversations/{conversationID}/actions", ag.handleAgentActions)
 	// The one conversation-level stop. It replaces the former /cancel and
 	// /interrupt outright rather than aliasing them: two addresses is how they
 	// drifted into two meanings of `open` in the first place.

@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // SlackSourceID builds the entities.source_id for a Slack thread:
 // "<channel_id>/<thread_ts>". It is the Slack analogue of the tracker's
@@ -27,10 +30,27 @@ func SlackSourceID(channel, threadTS string) string {
 	return channel + "/" + threadTS
 }
 
+// NormalizeJiraKey folds a Jira issue key to the canonical spelling Jira
+// itself answers with: upper-case, no surrounding whitespace.
+//
+// Jira resolves issue keys case-insensitively on every surface — the REST
+// issue endpoints and JQL alike — but always *answers* with the canonical
+// key. The poller matches a refresh back to its entity by exact source_id,
+// so an entity minted under a caller-supplied spelling that differs from
+// the canonical one can never match its own issue again: the refresh comes
+// back under the canonical key, the lookup misses, and the entity holds its
+// last snapshot forever. Nothing errors — the API call that minted it
+// succeeded, and so does every later one — which is what makes normalizing
+// at the boundary the fix rather than a validation check somewhere.
+func NormalizeJiraKey(key string) string {
+	return strings.ToUpper(strings.TrimSpace(key))
+}
+
 // EntityRefForExternal maps an external write/artifact coordinate to the
 // entity natural key it concerns: source is the entities.source column
 // (== provider for the mapped providers), sourceID is the natural key
-// (== target), kind is the entities.kind. ok=false for anything the
+// (== target, except for Jira, where it is the target folded to its
+// canonical spelling), kind is the entities.kind. ok=false for anything the
 // touched/produced rule skips — a repo-level GitHub target (owner/repo with
 // no '#N'), an empty key, or an unmapped provider — so the caller resolves,
 // creates, and records nothing.
@@ -56,10 +76,15 @@ func EntityRefForExternal(provider, target string) (source, sourceID, kind strin
 		}
 		return provider, target, "pr", true
 	case ArtifactProviderJira:
-		if target == "" {
+		// Normalized rather than passed through: this is the single seam
+		// every touched/produced Jira entity resolves through, so folding
+		// here is what makes a non-canonical source_id unrepresentable no
+		// matter which caller supplied the target. See NormalizeJiraKey.
+		key := NormalizeJiraKey(target)
+		if key == "" {
 			return "", "", "", false
 		}
-		return provider, target, "issue", true
+		return provider, key, "issue", true
 	case ArtifactProviderSlack:
 		if target == "" {
 			return "", "", "", false

@@ -282,6 +282,68 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, out)
 }
 
+// runActionsLimit caps the run-scoped action read. A run's artifacts are
+// bounded by the objects it creates, but its actions are bounded by nothing —
+// an agent in a retry loop can append hundreds of rows — so the run view reads
+// the most recent page rather than the whole history. The governance feed is
+// where an unbounded history is paged properly.
+//
+// The run view says so when it receives a full page, which means it holds its
+// own copy of this number (ActionList.tsx's PAGE). A cap raised here and not
+// there would silently truncate a list that claims to be the complete answer,
+// so the two are pinned together by TestFrontendMirrorsRunActionsLimit.
+const runActionsLimit = 200
+
+// handleAgentActions returns the external actions this run performed — the
+// audit log of record, filtered to one conversation and newest first. The
+// sibling of handleAgentArtifacts, and gated identically: the run is read first
+// under request claims, so a run the caller's team can't see is a 404 rather
+// than an empty list.
+//
+// Deliberately NOT behind the governance entitlement the /usage feeds sit
+// behind. That gate is about reading across teams; this read is scoped to a
+// single run whose transcript and artifacts the caller can already see, and the
+// actions are the part of that run's record which has no artifact to appear as
+// — a review-thread reply, a refused merge, a denied push. Withholding them
+// here would leave the incomplete answer the run view has today.
+func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	conversationID := r.PathValue("conversationID")
+
+	var run *domain.Conversation
+	var actions []domain.ExternalAction
+	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
+		if e != nil {
+			return e
+		}
+		if run == nil {
+			return nil
+		}
+		actions, e = tx.ExternalActions.ListByRun(r.Context(), orgID, conversationID,
+			domain.ExternalActionListOpts{Limit: runActionsLimit})
+		return e
+	}); err != nil {
+		internalError(w, "agent", err)
+		return
+	}
+	if run == nil {
+		notFound(w, "run")
+		return
+	}
+
+	out := make([]actionJSON, len(actions))
+	for i, a := range actions {
+		out[i] = toActionJSON(a)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // runResponse projects a Conversation into the wire shape the frontend consumes,
 // augmented with `artifact_count` (so the Board card can show how many artifacts
 // a run produced without a per-card fetch) and the derived approval signal:

@@ -104,6 +104,21 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 	return scanExternalActionRows(rows)
 }
 
+// ListByRun reads one conversation's actions on the app pool, under the same
+// org-scoped policy ListByTeam reads through — the run-visibility check the
+// handler already made is what narrows it to a run the caller may see. The
+// conversation_id bind casts to uuid so a malformed path value is a query error
+// rather than a text comparison against a uuid column.
+func (s *externalActionStore) ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, error) {
+	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions WHERE org_id = $1 AND conversation_id = $2::uuid`
+	query, args := appendPgExternalActionFilters(query, []any{orgID, conversationID}, opts)
+	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanExternalActionRows(rows)
+}
+
 // appendPgExternalActionFilters appends opts' optional provider/action/actor/time
 // predicates, the newest-first ORDER BY, and LIMIT/OFFSET to a SELECT whose WHERE
 // is already open. Placeholders number from len(args)+1 so the leading binds

@@ -429,7 +429,7 @@ func newUsageTestServer(t *testing.T) *Server {
 	); err != nil {
 		t.Fatalf("seed local agent: %v", err)
 	}
-	return New(database, sqlitestore.New(database), 3000)
+	return New(database, sqlitestore.New(database))
 }
 
 // seedUsageLocal seeds a cross-source spend fixture on the local sentinel

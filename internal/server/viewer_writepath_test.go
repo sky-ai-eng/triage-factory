@@ -42,7 +42,7 @@ func newViewerRig(t *testing.T) *viewerRig {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores, 3000)
+	s := New(h.AdminDB, stores)
 
 	orgID, founder, teamID := pgtest.SeedOrgWithUser(t, h, "founder")
 	member := pgtest.SeedUser(t, h, "member")

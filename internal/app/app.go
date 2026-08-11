@@ -74,10 +74,9 @@ type App struct {
 	// Persistence. database is the primary pool (SQLite in local mode,
 	// the admin Postgres pool in multi mode); appDB is the multi-mode
 	// app/RLS pool, nil in local. Both are closed by Close.
-	database   *sql.DB
-	appDB      *sql.DB
-	stores     db.Stores
-	storedPort int
+	database *sql.DB
+	appDB    *sql.DB
+	stores   db.Stores
 
 	// capBroker is the spawned cap-broker subprocess, non-nil only on a host
 	// that sandboxes runs (multi mode + Linux). nil otherwise — local mode

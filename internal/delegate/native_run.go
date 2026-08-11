@@ -196,7 +196,10 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		SystemPrompt:   systemPrompt,
 		HasBlueprint:   true,
 		MaxIterations:  nativeMaxIterations(),
-		UserID:         creatorUserID,
+		// Derived from the very ceiling this jail was launched under, not from
+		// a constant that could drift from it.
+		BashMemBudgetMB: nativeBashMemBudgetMB(agentproc.RunMemoryLimitMB()),
+		UserID:          creatorUserID,
 		// A delegation's opening turn is the control-plane-minted mission:
 		// compaction pins it instead of re-injecting the first message.
 		MissionAnchored:     true,
@@ -527,6 +530,42 @@ func nativeMaxIterations() int {
 		return 0
 	}
 	return n
+}
+
+// The per-command bash memory budget, as a policy rather than a knob: a cap,
+// the headroom it leaves under the jail's ceiling, and a floor.
+//
+// The headroom is what the rest of the session needs while one command runs —
+// the resident tool host, page cache, and the files the session has already
+// written. The cap keeps a generous ceiling from handing one command the whole
+// allowance. The floor keeps a small ceiling from producing a budget too tight
+// for an ordinary build step, at the cost of leaving less headroom than the
+// subtraction asked for; the jail ceiling is still underneath either way.
+const (
+	bashMemBudgetCapMB      = 3072
+	bashMemBudgetHeadroomMB = 1024
+	bashMemBudgetFloorMB    = 512
+)
+
+// nativeBashMemBudgetMB derives one engagement's per-command budget from the
+// jail ceiling it runs under.
+//
+// A disabled ceiling disables the budget. The derivation exists to keep a
+// single command from consuming a shared allowance, and an operator who set
+// TF_RUN_MEMORY_LIMIT_MB=0 has said there is no allowance to protect —
+// inventing one here would impose a limit they explicitly turned off.
+func nativeBashMemBudgetMB(ceilingMB int) int {
+	if ceilingMB <= 0 {
+		return 0
+	}
+	budget := ceilingMB - bashMemBudgetHeadroomMB
+	if budget > bashMemBudgetCapMB {
+		budget = bashMemBudgetCapMB
+	}
+	if budget < bashMemBudgetFloorMB {
+		budget = bashMemBudgetFloorMB
+	}
+	return budget
 }
 
 // recordNativeResult maps an engagement's terminal disposition onto the

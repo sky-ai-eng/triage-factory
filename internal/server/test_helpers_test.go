@@ -61,11 +61,7 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("seed local team_agents: %v", err)
 	}
 	stores := sqlitestore.New(database)
-	// Pass the production default port so handler tests that read
-	// settings GET see a realistic Server.Port (3000) — keeps test
-	// behavior aligned with production and lets future assertions
-	// on server_port pass through to the schema-mirroring path.
-	return New(database, stores, 3000)
+	return New(database, stores)
 }
 
 // doJSON performs a JSON request against the server's mux and returns

@@ -117,6 +117,31 @@ func (s *entityStore) OwningTeamForEntitySystem(ctx context.Context, orgID, enti
 	return team.String, nil
 }
 
+// StampOwningTeamIfUnsetSystem fills owning_team_id only where it is still
+// NULL. The IS NULL predicate is the concurrency story as much as the semantic
+// one: it lives in the UPDATE rather than in a read-then-write, so an executor
+// recording a bot-opened PR and a control pod's poller minting the same entity
+// cannot lose each other's write — whichever commits first wins the row, and
+// RowsAffected tells the loser it lost.
+func (s *entityStore) StampOwningTeamIfUnsetSystem(ctx context.Context, orgID, entityID, teamID string) (bool, error) {
+	if teamID == "" {
+		return false, nil
+	}
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE entities
+		SET owning_team_id = $1
+		WHERE org_id = $2 AND id = $3 AND owning_team_id IS NULL
+	`, teamID, orgID, entityID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *entityStore) GetBySource(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error) {
 	return getEntityBySource(ctx, s.q, orgID, source, sourceID)
 }
@@ -458,6 +483,18 @@ func updateSnapshotCAS(ctx context.Context, q queryer, orgID, id, snapshotJSON s
 
 func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) error {
 	_, err := s.q.ExecContext(ctx, `UPDATE entities SET snapshot_json = $1::jsonb WHERE org_id = $2 AND id = $3`, snapshotJSON, orgID, id)
+	return err
+}
+
+// MarkPolledSystem stamps last_polled_at alone — no snapshot, no poll_seq
+// bump, so it is deliberately outside the CAS the snapshot writes use. There
+// is nothing for a CAS to protect here: the column is monotonic wall-clock and
+// a straggler writing an older stamp only makes the row look *more* stale,
+// which costs a redundant re-check rather than a lost transition.
+func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) error {
+	_, err := s.admin.ExecContext(ctx,
+		`UPDATE entities SET last_polled_at = $1 WHERE org_id = $2 AND id = $3`,
+		time.Now(), orgID, id)
 	return err
 }
 

@@ -100,6 +100,23 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 	return scanExternalActionRows(rows)
 }
 
+// ListByRun returns one conversation's actions, newest first. A detached row
+// (conversation_id NULL after the run was purged) never matches, so a purged
+// run's actions survive in the org feed but no longer answer for a run that is
+// gone.
+func (s *externalActionStore) ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	query := `SELECT ` + externalActionColumns + ` FROM external_actions WHERE org_id = ? AND conversation_id = ?`
+	query, args := appendExternalActionFilters(query, []any{orgID, conversationID}, opts)
+	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanExternalActionRows(rows)
+}
+
 // appendExternalActionFilters appends opts' optional provider/action/actor/time
 // predicates, the newest-first ORDER BY, and LIMIT/OFFSET to a SELECT whose WHERE
 // is already open. Time bounds wrap both sides in datetime() — the spend/artifact

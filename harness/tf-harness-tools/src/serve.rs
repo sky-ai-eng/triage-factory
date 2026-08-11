@@ -78,7 +78,9 @@
 //! An unrecognized `tool` yields a structured protocol error with
 //! `kind = "unknown_tool"` (see [`ErrorKind`]) rather than a tool result, so a
 //! future verb (a subagent spawn, say) is addable without changing the framing.
-//! No such verb exists yet; only the contract does.
+//! [`CONFIGURE_TOOL`] is the first such verb: a serve-layer request, dispatched
+//! ahead of the tool registry, that carries the peer's execution policy for the
+//! engagement.
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -88,6 +90,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::definitions::ALL_TOOL_NAMES;
+use crate::ToolConfig;
+
+/// The serve-layer configuration request: `{"id":N,"tool":"_configure",
+/// "args":{...}}`, answered with an empty successful result.
+///
+/// It is **not** a tool, and the distinction is the point. The peer sends it
+/// once, right after the connection is up and before any tool call, to impose
+/// policy the model must not be able to choose — today the `bash` per-command
+/// memory budget. Being dispatched ahead of [`crate::run_tool`] means it is
+/// absent from `--definitions` by construction, so the model-facing tool
+/// definitions (and the cached prefix built from them) cannot move because a
+/// policy knob was added here.
+///
+/// Args are read leniently: a key this build doesn't know is ignored and the
+/// answer is still `ok`, so a newer peer talking to an older host degrades to
+/// "policy not applied" rather than an error. A host older than the verb
+/// itself has no such branch and answers the ordinary non-fatal
+/// [`ErrorKind::UnknownTool`], which the peer treats the same way.
+pub const CONFIGURE_TOOL: &str = "_configure";
+
+/// Args key of [`CONFIGURE_TOOL`]: the `bash` per-command resident-memory
+/// budget in MB. Zero disables the watchdog.
+const CONFIGURE_BASH_MEM_BUDGET_MB: &str = "bash_mem_budget_mb";
 
 /// Upper bound on a single frame's JSON body, in bytes. Tool outputs are
 /// truncation-bounded well under this; the cap exists so a malformed or hostile
@@ -105,9 +130,10 @@ pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 ///   matching [`Response`]. The server never interprets it (number, string, or
 ///   any JSON value are all fine); it exists only so the caller can pair a
 ///   response with its request.
-/// * `tool` — the tool name. Must be one of the seven the host implements
-///   (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`); anything else is
-///   an `unknown_tool` protocol error.
+/// * `tool` — the tool name. One of the seven the host implements (`read`,
+///   `bash`, `edit`, `write`, `grep`, `find`, `ls`), or the serve-layer verb
+///   [`CONFIGURE_TOOL`], which is answered by this server rather than
+///   dispatched to a tool; anything else is an `unknown_tool` protocol error.
 /// * `args` — the tool's own JSON argument object, byte-for-byte the shape the
 ///   differential parity corpus pins. Absent `args` is treated as `{}` so the
 ///   tool's normal argument validation produces the model-facing message.
@@ -342,53 +368,95 @@ fn write_frame(w: &mut impl Write, resp: &Response) -> io::Result<()> {
     w.flush()
 }
 
-/// Execute one request against `cwd`, producing the response to send back.
+/// One engagement's serve-side state: the working directory every tool call
+/// resolves against, plus whatever policy the peer configured over the wire.
 ///
-/// Pure and socket-free — the parsing, unknown-tool, and dispatch behavior is
-/// unit-testable without a connection. Dispatch goes through
-/// [`crate::run_tool`], the same entry point the one-shot CLI uses, so a tool's
-/// result and error bytes are identical on both paths.
-pub fn handle_request(body: &[u8], cwd: &str) -> Response {
-    // Parse to a Value first so an otherwise-malformed request can still echo
-    // its id, then into the typed [`Request`] frame.
-    let value: Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => {
-            return Response::protocol_error(
-                Value::Null,
-                ErrorKind::MalformedRequest,
-                format!("request frame is not valid JSON: {e}"),
-            );
+/// One connection is one engagement is one `Session`, so nothing here outlives
+/// the stream and nothing is persisted — a reconnect starts unconfigured, and
+/// process exit resets it by construction.
+pub struct Session {
+    cwd: String,
+    config: ToolConfig,
+}
+
+impl Session {
+    /// A fresh, unconfigured session rooted at `cwd`.
+    pub fn new(cwd: impl Into<String>) -> Self {
+        Session {
+            cwd: cwd.into(),
+            config: ToolConfig::default(),
         }
-    };
-    let id = value.get("id").cloned().unwrap_or(Value::Null);
-    let request: Request = match serde_json::from_value(value) {
-        Ok(r) => r,
-        Err(_) => {
+    }
+
+    /// Execute one request, producing the response to send back.
+    ///
+    /// Socket-free — the parsing, configure, unknown-tool and dispatch behavior
+    /// is unit-testable without a connection. Tool dispatch goes through
+    /// [`crate::run_tool_configured`], the same entry point the one-shot CLI
+    /// uses (at its default configuration), so a tool's result and error bytes
+    /// are identical on both paths.
+    pub fn handle_request(&mut self, body: &[u8]) -> Response {
+        // Parse to a Value first so an otherwise-malformed request can still
+        // echo its id, then into the typed [`Request`] frame.
+        let value: Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return Response::protocol_error(
+                    Value::Null,
+                    ErrorKind::MalformedRequest,
+                    format!("request frame is not valid JSON: {e}"),
+                );
+            }
+        };
+        let id = value.get("id").cloned().unwrap_or(Value::Null);
+        let request: Request = match serde_json::from_value(value) {
+            Ok(r) => r,
+            Err(_) => {
+                return Response::protocol_error(
+                    id,
+                    ErrorKind::MalformedRequest,
+                    "request is not a tool-call frame (needs a string \"tool\" field)",
+                );
+            }
+        };
+        // Ahead of the registry check, and ahead of run_tool: the configure
+        // verb is the peer talking to this server, not to a tool.
+        if request.tool == CONFIGURE_TOOL {
+            self.configure(&request.args);
+            return Response::ok(id, json!({ "content": [] }));
+        }
+        if !ALL_TOOL_NAMES.contains(&request.tool.as_str()) {
             return Response::protocol_error(
                 id,
-                ErrorKind::MalformedRequest,
-                "request is not a tool-call frame (needs a string \"tool\" field)",
+                ErrorKind::UnknownTool,
+                format!("unknown tool: {}", request.tool),
             );
         }
-    };
-    if !ALL_TOOL_NAMES.contains(&request.tool.as_str()) {
-        return Response::protocol_error(
-            id,
-            ErrorKind::UnknownTool,
-            format!("unknown tool: {}", request.tool),
-        );
+        // Absent (or null) args become an empty object so the tool's own
+        // argument validation produces the model-facing message.
+        let args = if request.args.is_null() {
+            json!({})
+        } else {
+            request.args
+        };
+        match crate::run_tool_configured(&request.tool, &self.cwd, args, self.config) {
+            Ok(result) => Response::ok(id, result),
+            Err(err) => Response::tool_error(id, err.0),
+        }
     }
-    // Absent (or null) args become an empty object so the tool's own argument
-    // validation produces the model-facing message.
-    let args = if request.args.is_null() {
-        json!({})
-    } else {
-        request.args
-    };
-    match crate::run_tool(&request.tool, cwd, args) {
-        Ok(result) => Response::ok(id, result),
-        Err(err) => Response::tool_error(id, err.0),
+
+    /// Apply a configure frame's args, ignoring everything this build does not
+    /// recognize — an unknown key, a key of the wrong type, absent args at all.
+    /// Forward compatibility is the whole reason the frame is lenient: the peer
+    /// and this host ship in one image today, and the day they don't, a policy
+    /// one side has never heard of must not fail the other's engagement.
+    fn configure(&mut self, args: &Value) {
+        if let Some(mb) = args
+            .get(CONFIGURE_BASH_MEM_BUDGET_MB)
+            .and_then(Value::as_u64)
+        {
+            self.config.bash_mem_budget_mb = mb;
+        }
     }
 }
 
@@ -405,10 +473,11 @@ fn serve_connection(stream: UnixStream, cwd: &str) -> io::Result<()> {
     // the writer don't alias one buffered wrapper.
     let mut reader = io::BufReader::new(stream.try_clone()?);
     let mut writer = io::BufWriter::new(stream);
+    let mut session = Session::new(cwd);
     loop {
         match read_frame(&mut reader) {
             ReadOutcome::Frame(body) => {
-                let response = handle_request(&body, cwd);
+                let response = session.handle_request(&body);
                 if write_frame(&mut writer, &response).is_err() {
                     // Peer vanished mid-request. The loser contract: the
                     // response never arrives, the client's read fails on EOF.
@@ -490,12 +559,87 @@ mod tests {
         assert_eq!(v["error"]["message"], json!("unknown tool: frob"));
     }
 
+    /// One request against a throwaway session, for the cases that don't care
+    /// about state carrying between frames.
+    fn answer(body: &[u8]) -> Value {
+        serde_json::to_value(Session::new(".").handle_request(body)).unwrap()
+    }
+
     #[test]
     fn unknown_tool_is_a_protocol_error_not_a_tool_error() {
-        let resp = handle_request(br#"{"id":1,"tool":"frobnicate","args":{}}"#, ".");
-        let v = serde_json::to_value(&resp).unwrap();
+        let v = answer(br#"{"id":1,"tool":"frobnicate","args":{}}"#);
         assert_eq!(v["id"], json!(1));
         assert_eq!(v["error"]["kind"], json!("unknown_tool"));
+    }
+
+    #[test]
+    fn configure_sets_the_session_budget() {
+        let mut session = Session::new(".");
+        let v =
+            serde_json::to_value(session.handle_request(
+                br#"{"id":1,"tool":"_configure","args":{"bash_mem_budget_mb":512}}"#,
+            ))
+            .unwrap();
+        assert_eq!(v["id"], json!(1));
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["result"], json!({ "content": [] }));
+        assert_eq!(session.config.bash_mem_budget_mb, 512);
+    }
+
+    #[test]
+    fn configure_ignores_what_it_does_not_recognize() {
+        // Forward compat: a newer peer's key, a wrong-typed value, and no args
+        // at all are all answered ok and leave the session as it was.
+        let mut session = Session::new(".");
+        session
+            .handle_request(br#"{"id":1,"tool":"_configure","args":{"bash_mem_budget_mb":256}}"#);
+        for body in [
+            &br#"{"id":2,"tool":"_configure","args":{"future_knob":true}}"#[..],
+            &br#"{"id":3,"tool":"_configure","args":{"bash_mem_budget_mb":"lots"}}"#[..],
+            &br#"{"id":4,"tool":"_configure"}"#[..],
+        ] {
+            let v = serde_json::to_value(session.handle_request(body)).unwrap();
+            assert_eq!(v["ok"], json!(true), "unrecognized args must still be ok");
+            assert_eq!(
+                session.config.bash_mem_budget_mb, 256,
+                "an unrecognized configure must not disturb applied policy"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unconfigured_session_has_no_budget() {
+        // The one-shot CLI and the parity harness never send the frame, so the
+        // default has to be "off" rather than "some sensible number".
+        assert_eq!(Session::new(".").config.bash_mem_budget_mb, 0);
+    }
+
+    #[test]
+    fn configure_is_not_a_registry_tool() {
+        // The two halves of "invisible to the model": it is absent from the
+        // definitions the model reads, and it is dispatched before the registry
+        // check that would otherwise reject it.
+        assert!(
+            !ALL_TOOL_NAMES.contains(&CONFIGURE_TOOL),
+            "the configure verb must never be a registry tool"
+        );
+        let defs = serde_json::to_string(&crate::definitions::all_tool_definitions()).unwrap();
+        assert!(
+            !defs.contains(CONFIGURE_TOOL),
+            "the configure verb leaked into the model-facing tool definitions"
+        );
+    }
+
+    #[test]
+    fn a_registry_miss_still_answers_unknown_tool_after_configure() {
+        // The configure branch sits ahead of the registry check, so the check
+        // it short-circuits must still answer for everything else.
+        let mut session = Session::new(".");
+        session.handle_request(br#"{"id":1,"tool":"_configure","args":{"bash_mem_budget_mb":64}}"#);
+        let v = serde_json::to_value(session.handle_request(br#"{"id":2,"tool":"_reconfigure"}"#))
+            .unwrap();
+        assert_eq!(v["error"]["kind"], json!("unknown_tool"));
+        assert_eq!(v["error"]["message"], json!("unknown tool: _reconfigure"));
     }
 
     #[test]
@@ -523,8 +667,7 @@ mod tests {
             &br#"[1,2,3]"#[..],
             &br#"{"id":1,"tool":"frobnicate"}"#[..],
         ] {
-            let resp = handle_request(body, ".");
-            let v = serde_json::to_value(&resp).unwrap();
+            let v = answer(body);
             let kind = v["error"]["kind"].as_str().expect("a kinded error");
             assert!(
                 kind == ErrorKind::MalformedRequest.as_str()
@@ -540,16 +683,14 @@ mod tests {
 
     #[test]
     fn malformed_json_recovers_null_id() {
-        let resp = handle_request(b"not json at all", ".");
-        let v = serde_json::to_value(&resp).unwrap();
+        let v = answer(b"not json at all");
         assert_eq!(v["id"], Value::Null);
         assert_eq!(v["error"]["kind"], json!("malformed_request"));
     }
 
     #[test]
     fn missing_tool_field_keeps_id() {
-        let resp = handle_request(br#"{"id":"keep-me","args":{}}"#, ".");
-        let v = serde_json::to_value(&resp).unwrap();
+        let v = answer(br#"{"id":"keep-me","args":{}}"#);
         assert_eq!(v["id"], json!("keep-me"));
         assert_eq!(v["error"]["kind"], json!("malformed_request"));
     }

@@ -33,12 +33,41 @@ pub mod write;
 use result::ToolError;
 use serde_json::Value;
 
+/// Execution policy a caller may impose on the tools — never a model-visible
+/// argument, and never part of a tool's JSON schema.
+///
+/// It exists for the resident host, whose peer configures one session's limits
+/// over the socket before the first tool call (see [`serve`]). The one-shot CLI
+/// has no such channel and uses the default, so every value here is off unless
+/// something deliberately set it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ToolConfig {
+    /// Per-command resident-memory budget for `bash`, in MB. Zero disables the
+    /// watchdog entirely.
+    pub bash_mem_budget_mb: u64,
+}
+
 /// Execute a tool by name against JSON args, returning the pi-shaped result
 /// (`{content, details?}`) as JSON. Errors carry the exact message pi's
 /// tools throw; argument-shape errors are validated against the exported
 /// schemas first so the model sees `"offset" must be a number`, never
 /// deserializer internals.
+///
+/// This is the unconfigured entry point — the one-shot CLI's and the parity
+/// harness's. A caller holding session policy uses [`run_tool_configured`].
 pub fn run_tool(name: &str, cwd: &str, args: Value) -> Result<Value, ToolError> {
+    run_tool_configured(name, cwd, args, ToolConfig::default())
+}
+
+/// [`run_tool`] under a session's execution policy. Identical in every respect
+/// a tool's result can express; `config` only bounds what a tool may consume
+/// while producing it.
+pub fn run_tool_configured(
+    name: &str,
+    cwd: &str,
+    args: Value,
+    config: ToolConfig,
+) -> Result<Value, ToolError> {
     let to_json = |v: Result<Value, serde_json::Error>| {
         v.map_err(|e| ToolError::new(format!("Internal serialization error: {e}")))
     };
@@ -55,7 +84,11 @@ pub fn run_tool(name: &str, cwd: &str, args: Value) -> Result<Value, ToolError> 
         "bash" => {
             validate::validate_args(name, &args)?;
             let parsed: bash::BashArgs = serde_json::from_value(args).map_err(bad_args)?;
-            let result = bash::execute(cwd, &parsed, &bash::BashOptions::default())?;
+            let options = bash::BashOptions {
+                mem_budget_mb: config.bash_mem_budget_mb,
+                ..Default::default()
+            };
+            let result = bash::execute(cwd, &parsed, &options)?;
             to_json(serde_json::to_value(result))
         }
         "edit" => {
