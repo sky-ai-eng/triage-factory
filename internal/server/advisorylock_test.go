@@ -25,7 +25,7 @@ func TestAcquireKeyedLock_Multi_SerializesSameKey(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores, 3000)
+	s := New(h.AdminDB, stores)
 	ctx := context.Background()
 
 	const key = "same-project-id"
@@ -73,7 +73,7 @@ func TestAcquireKeyedLock_Multi_DifferentKeysDoNotBlock(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores, 3000)
+	s := New(h.AdminDB, stores)
 	ctx := context.Background()
 
 	releaseA, err := s.acquireKeyedLock(ctx, &s.projectMutexes, projectRMWLockSalt, "project-a")
@@ -111,7 +111,7 @@ func TestAcquireKeyedLock_Multi_DifferentSaltsDoNotCollide(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores, 3000)
+	s := New(h.AdminDB, stores)
 	ctx := context.Background()
 
 	const key = "shared-id-value"

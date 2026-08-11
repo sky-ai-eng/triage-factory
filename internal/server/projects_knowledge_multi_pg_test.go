@@ -29,7 +29,7 @@ func TestKnowledgeMulti_RoundTrip(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores, 3000)
+	s := New(h.AdminDB, stores)
 	s.SetKBStore(kbstore.New(storage.NewFS(t.TempDir())))
 
 	ctx := context.Background()

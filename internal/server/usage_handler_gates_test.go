@@ -53,7 +53,7 @@ func newUsageRig(t *testing.T) *usageRig {
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	s := New(h.AdminDB, stores, 3000)
+	s := New(h.AdminDB, stores)
 
 	orgID, owner, teamA := pgtest.SeedOrgWithUser(t, h, "usage-founder")
 	teamB := pgtest.SeedTeam(t, h, orgID, "teamB")

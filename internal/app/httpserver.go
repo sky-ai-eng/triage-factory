@@ -38,7 +38,7 @@ func (a *App) buildExecutorRuntime() {
 // the boot-time port). Control/all only — an executor uses
 // buildExecutorRuntime instead.
 func (a *App) buildServer(ctx context.Context, static fs.FS) error {
-	a.srv = server.New(a.database, a.stores, a.storedPort)
+	a.srv = server.New(a.database, a.stores)
 	a.wsHub = a.srv.WSHub()
 	// TFAC-573: main.Version isn't otherwise threaded into this package;
 	// GET /readyz surfaces it so an operator can confirm a deploy landed.

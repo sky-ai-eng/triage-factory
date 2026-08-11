@@ -381,6 +381,16 @@ func clearAllSecrets(appKeys []string) error {
 // any open/query failure is returned so Handle can warn, but it never blocks the
 // rest of the uninstall — at worst a rare App key lingers, which the user can
 // remove by hand.
+//
+// The SELECT is raw rather than a GitHubAppsStore call for two reasons that
+// both point the same way. Uninstall opens the SQLite file by path and owns
+// that handle for one query — it builds no db.Stores, and standing one up
+// (both pools, the dialect split) to read one column would be more machinery
+// than the teardown warrants. And the read is org-blind on purpose: it wants
+// every App id in the file so no keychain entry survives the wipe, whereas the
+// store's reads are all org-scoped (GetForOrg / GetForOrgSystem) and there is
+// no cross-org list method — nor should there be one minted for a path that
+// runs after the user has already asked for everything to be deleted.
 func gitHubAppKeychainKeys(dbPath string) ([]string, error) {
 	if _, err := os.Stat(dbPath); err != nil {
 		if os.IsNotExist(err) {
