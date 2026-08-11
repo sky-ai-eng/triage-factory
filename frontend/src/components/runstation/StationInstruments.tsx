@@ -12,6 +12,7 @@ import {
 import { artifactSetKey } from '../../lib/approval'
 import { compactNum, tint, type StationState } from './stationStyle'
 import ArtifactList from '../ArtifactList'
+import ActionList from '../ActionList'
 
 interface Props {
   run: Conversation
@@ -137,6 +138,17 @@ export function TelemetryRail({
           />
         </Section>
       )}
+
+      {/* Actions — every external write this run made, artifact-bearing or not.
+          Unlike Artifacts above, this section is NOT gated on a count: an empty
+          Actions list is an answer ("this run touched nothing outside the box"),
+          where a hidden one is indistinguishable from a surface that was never
+          built — which is how the reply that started this went unnoticed.
+          Refetched when the run's status or turn count moves, so a live run's
+          list fills in without a request per streamed row. */}
+      <Section label="Actions">
+        <ActionList runId={run.ID} refreshKey={`${run.Status}:${run.NumTurns ?? 0}`} />
+      </Section>
 
       {run.Status === 'completed' && run.ResultSummary && (
         <Section label="Summary" last>

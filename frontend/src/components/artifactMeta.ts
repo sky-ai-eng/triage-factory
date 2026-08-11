@@ -54,12 +54,16 @@ export function metaForKind(kind: string): KindMeta {
 // the push-layer provider branches carry; the rest are the API providers.
 export const ARTIFACT_PROVIDERS = ['github', 'jira', 'slack', 'git', 'linear'] as const
 
+// PROVIDER_LABEL spans both feeds' provider vocabularies, so it carries
+// 'network' — the Actions lens's sandbox-egress provider — even though no
+// artifact is ever filed under it.
 export const PROVIDER_LABEL: Record<string, string> = {
   github: 'GitHub',
   jira: 'Jira',
   slack: 'Slack',
   git: 'Git',
   linear: 'Linear',
+  network: 'Network',
 }
 
 // ARTIFACT_STATES is the distinct lifecycle-state set across every kind

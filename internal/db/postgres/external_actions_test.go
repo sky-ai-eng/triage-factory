@@ -177,3 +177,63 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 		t.Errorf("ListByOrgSystem saw %d orgA rows, want 2", len(all))
 	}
 }
+
+// TestExternalActionStore_Postgres_ListByRun pins the run-scoped read on the app
+// pool: one conversation's rows, and — because the read runs under the same
+// org-scoped policy as ListByTeam — nothing at all for a member of another org
+// who guesses a run id. The handler's own run-visibility check is what narrows
+// this within an org; RLS is the backstop across orgs.
+func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	orgB, bob, _ := pgtest.SeedOrgWithUser(t, h, "bob")
+	runA := seedPgArtifactRun(t, h, orgA, teamA, alice)
+	ctx := context.Background()
+
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	// One row on the run, one with no run at all — the shape a purged run leaves
+	// behind (FK ON DELETE SET NULL), which must not surface under any run.
+	for _, act := range []domain.ExternalAction{
+		{
+			OrgID: orgA, TeamID: teamA, Provider: domain.ArtifactProviderGitHub,
+			Action: domain.ActionGHChannelWrite, Target: "octo/repo", ConversationID: runA,
+			Credential: domain.CredentialGitHubApp, DedupKey: "run-1",
+		},
+		{
+			OrgID: orgA, TeamID: teamA, Provider: domain.ArtifactProviderGitHub,
+			Action: domain.ActionBranchPushed, Target: "octo/repo",
+			Credential: domain.CredentialGitHubApp, DedupKey: "detached-1",
+		},
+	} {
+		if err := stores.ExternalActions.RecordSystem(ctx, orgA, act); err != nil {
+			t.Fatalf("RecordSystem %s: %v", act.Action, err)
+		}
+	}
+
+	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByRun(ctx, orgA, runA, domain.ExternalActionListOpts{})
+		if err != nil {
+			return err
+		}
+		if len(rows) != 1 || rows[0].Action != domain.ActionGHChannelWrite {
+			t.Errorf("alice ListByRun saw %+v, want just the run's own row", rows)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("alice ListByRun: %v", err)
+	}
+
+	if err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
+		rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByRun(ctx, orgA, runA, domain.ExternalActionListOpts{})
+		if err != nil {
+			return err
+		}
+		if len(rows) != 0 {
+			t.Errorf("bob (orgB) saw %d rows for an orgA run — RLS leaked across orgs", len(rows))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("bob ListByRun: %v", err)
+	}
+}

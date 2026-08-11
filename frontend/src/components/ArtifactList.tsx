@@ -4,7 +4,7 @@ import { readError } from '../lib/api'
 import { toast } from './Toast/toastStore'
 import { ArtifactRow } from './ArtifactRow'
 
-// ArtifactList — THE surface for everything a run produced, and (since the
+// ArtifactList — THE surface for every OBJECT a run produced, and (since the
 // separate approval roster was folded in here) the approval surface too. One
 // row per artifact: a kind icon + the target + a state badge + an external
 // link. Fetched run-scoped from GET /api/agent/conversations/{id}/artifacts;
@@ -17,6 +17,11 @@ import { ArtifactRow } from './ArtifactRow'
 // so artifact.state alone can't reconstruct it), those rows sort to the top in
 // the projection's order (draft PRs first, then ready reviews) and carry an
 // in-place [x] dismiss. Everything else keeps the backend's order below them.
+//
+// It is deliberately not the whole answer to "what did this run do" — an
+// artifact is a lifecycle object, so a write that creates none (a review-thread
+// reply, a refused merge, a denied push) can never appear here. ActionList is
+// the other half, and the run view mounts both.
 //
 // The row rendering itself lives in ArtifactRow.tsx, shared with the
 // bot-activity audit feed. pull_request / review rows open their approval

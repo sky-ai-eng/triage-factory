@@ -1001,6 +1001,11 @@ func (s *Server) routes() {
 	// Run-scoped artifact read (A·6, TFAC-465): the run's artifacts across
 	// every kind, team-scoped via the run. Backs the run-detail surface (TFAC-470).
 	s.api("GET /api/agent/conversations/{conversationID}/artifacts", ag.handleAgentArtifacts)
+	// Run-scoped external-action read — the audit log filtered to this run.
+	// Its sibling above answers "what objects does this run own"; this answers
+	// "what did it do", including the writes that produce no object at all (a
+	// review-thread reply, a refused merge, a denied push).
+	s.api("GET /api/agent/conversations/{conversationID}/actions", ag.handleAgentActions)
 	// The one conversation-level stop. It replaces the former /cancel and
 	// /interrupt outright rather than aliasing them: two addresses is how they
 	// drifted into two meanings of `open` in the first place.
