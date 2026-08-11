@@ -68,8 +68,20 @@ func TestMigrate_CanonicalizesJiraEntityKeys(t *testing.T) {
 	seed("already", "jira", "SKY-3")
 	seed("gh", "github", "owner/repo#1")
 
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
+	// Up to this migration and no further. What it leaves behind is the input
+	// to 202608110002, which merges the duplicates it skipped and deletes
+	// them — running to head would assert that migration's outcome instead of
+	// this one's. The goose globals are re-established under the lock rather
+	// than assumed to have survived the seeding above.
+	gooseMu.Lock()
+	goose.SetBaseFS(treeFS)
+	upErr := goose.SetDialect("sqlite3")
+	if upErr == nil {
+		upErr = goose.UpTo(database, dir, 202608100001)
+	}
+	gooseMu.Unlock()
+	if upErr != nil {
+		t.Fatalf("goose.UpTo canonicalization: %v", upErr)
 	}
 
 	keyOf := func(id string) string {

@@ -29,8 +29,8 @@ type Task struct {
 	// (user or bot) is doing it. Bot-claimed tasks auto-transition
 	// based on run state; user-claimed tasks transition manually.
 	Status         string     `json:"status"`           // queued | in_progress | in_review | done | dismissed | snoozed
-	CloseReason    string     `json:"close_reason"`     // run_completed | user_completed | user_dismissed | auto_closed_by_event | entity_closed | reconciled (the terminal-state sweep found the entity already finished, with no event to name)
-	CloseEventType string     `json:"close_event_type"` // FK to events_catalog.id; the event type that triggered the close (event-driven closes: auto_closed_by_event + entity_closed). NULL for non-event closes (run_completed, user_*, reconciled)
+	CloseReason    string     `json:"close_reason"`     // run_completed | user_completed | user_dismissed | auto_closed_by_event | entity_closed | reconciled (the terminal-state sweep found the entity already finished, with no event to name) | duplicate_entity_merged (write-once, by the migration that merged two entity rows for one Jira issue: this card duplicated one already on the surviving entity)
+	CloseEventType string     `json:"close_event_type"` // FK to events_catalog.id; the event type that triggered the close (event-driven closes: auto_closed_by_event + entity_closed). NULL for non-event closes (run_completed, user_*, reconciled, duplicate_entity_merged)
 	ClosedAt       *time.Time `json:"closed_at"`
 	SnoozeUntil    *time.Time `json:"snooze_until"`
 
