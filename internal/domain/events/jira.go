@@ -234,6 +234,51 @@ func (p JiraIssueBecameAtomicPredicate) Matches(m JiraIssueBecameAtomicMetadata)
 }
 
 // -----------------------------------------------------------------------------
+// issue:unreachable — Jira will not resolve a tracked issue's key for us any
+// more. Terminal for the entity: nothing further can be observed about it, so
+// it is the one Jira event that reports the disappearance of its own subject.
+//
+// Named for what was observed rather than what probably caused it. Jira answers
+// 404 both for an issue that was deleted and for one the credential may no
+// longer see — deliberately, so that existence isn't disclosed — so the two are
+// indistinguishable from here, and a name asserting deletion would be a claim
+// this cannot support. Both leave the entity equally untrackable, which is why
+// they share one event type rather than splitting on a discriminator nothing
+// can actually read.
+//
+// Every field is last-known state read off the entity's stored snapshot, not
+// the source — there is nothing left to read. That is also why there is no
+// dedup_key: a key can only stop resolving once.
+//
+// Emitted ONLY on a direct 404 from the issue endpoint, never on an issue's
+// absence from a search result (see the tracker's confirmation pass) — absence
+// is equally consistent with an unindexed or archived issue, a moved key, or a
+// paging bug, and this event closes the entity and every task on it.
+// -----------------------------------------------------------------------------
+
+type JiraIssueUnreachableMetadata struct {
+	Assignee          string `json:"assignee"`
+	AssigneeAccountID string `json:"assignee_account_id"`
+	IssueKey          string `json:"issue_key"`
+	Project           string `json:"project"`
+	IssueType         string `json:"issue_type"`
+	LastStatus        string `json:"last_status"`
+	Summary           string `json:"summary"`
+}
+
+type JiraIssueUnreachablePredicate struct {
+	AssigneeIn []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
+	Project    *string  `json:"project,omitempty" doc:"Scope to a specific Jira project key."`
+	IssueType  *string  `json:"issue_type,omitempty"`
+}
+
+func (p JiraIssueUnreachablePredicate) Matches(m JiraIssueUnreachableMetadata) bool {
+	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
+		strEq(p.Project, m.Project) &&
+		strEq(p.IssueType, m.IssueType)
+}
+
+// -----------------------------------------------------------------------------
 // Registration.
 // -----------------------------------------------------------------------------
 
@@ -251,4 +296,5 @@ func init() {
 	Register(NewSchema[JiraIssueCommentedMetadata, JiraIssueCommentedPredicate](domain.EventJiraIssueCommented, OwnershipOwned))
 	Register(NewSchema[JiraIssueCompletedMetadata, JiraIssueCompletedPredicate](domain.EventJiraIssueCompleted, OwnershipOwned))
 	Register(NewSchema[JiraIssueBecameAtomicMetadata, JiraIssueBecameAtomicPredicate](domain.EventJiraIssueBecameAtomic, OwnershipOwned))
+	Register(NewSchema[JiraIssueUnreachableMetadata, JiraIssueUnreachablePredicate](domain.EventJiraIssueUnreachable, OwnershipOwned))
 }

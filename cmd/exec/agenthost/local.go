@@ -865,7 +865,17 @@ func (c *LocalClient) JiraGetIssue(ctx context.Context, key string) (*jiraclient
 	}
 	// The addressed issue is the touched entity — best-effort, relayed on the
 	// sidecar. URL is left empty; the poll cycle owns stub enrichment.
-	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, key, "")
+	//
+	// The key comes off the *response*, not the argument: Jira resolves a key
+	// case-insensitively and follows a moved issue's old key to its new one,
+	// so the response is the only place the issue's current canonical key is
+	// known. Falls back to the argument when the response carried none, which
+	// EntityRefForExternal folds anyway.
+	touched := issue.Key
+	if touched == "" {
+		touched = key
+	}
+	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, touched, "")
 	return issue, nil
 }
 
@@ -1041,6 +1051,11 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([
 // agent moved the ticket to), empty otherwise; the agent's exec transition can't
 // cheaply know the prior status, so fromState stays empty.
 func (c *LocalClient) recordJiraIssue(ctx context.Context, key, action, state, toState, detailsJSON string) {
+	// Folded before it reaches target/external_id/dedup_key: the artifact row
+	// is deduped on the key, so two spellings of one issue would otherwise
+	// upsert into two rows describing the same object — and the produced-entity
+	// attach resolves its entity from this target.
+	key = domain.NormalizeJiraKey(key)
 	if key == "" {
 		return
 	}
@@ -1063,6 +1078,9 @@ func (c *LocalClient) recordJiraIssue(ctx context.Context, key, action, state, t
 // debug so a future Jira response-shape change surfaces as missing rows with a
 // breadcrumb, not silently.
 func (c *LocalClient) recordJiraComment(ctx context.Context, key, commentID, body string) {
+	// Deduped on the comment id, so the key only rides along as the target —
+	// but that target is what the produced-entity attach resolves against.
+	key = domain.NormalizeJiraKey(key)
 	if commentID == "" {
 		agenthostLog.Debug("jira comment recorded without an id; skipping artifact",
 			"run", c.info.RunID, "issue", key)

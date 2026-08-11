@@ -9,12 +9,18 @@ import "testing"
 // SlackSourceID, and every other provider or empty key is skipped (ok=false).
 func TestEntityRefForExternal(t *testing.T) {
 	cases := []struct {
-		name       string
-		provider   string
-		target     string
-		wantOK     bool
-		wantSource string
-		wantKind   string
+		name     string
+		provider string
+		target   string
+		wantOK   bool
+		// wantSourceID is the natural key expected out. Empty means "the
+		// target verbatim", which is every provider except Jira — whose keys
+		// are folded to canonical form because Jira resolves them
+		// case-insensitively but answers with one spelling, and an entity
+		// keyed on any other spelling can never match its own issue again.
+		wantSourceID string
+		wantSource   string
+		wantKind     string
 	}{
 		{
 			name:     "github PR target → pr entity",
@@ -38,6 +44,36 @@ func TestEntityRefForExternal(t *testing.T) {
 		{
 			name:     "jira empty target skipped",
 			provider: ArtifactProviderJira, target: "",
+		},
+		{
+			// The defect this folding closes: Jira accepts a lower-case key on
+			// every surface and answers with the upper-case one, so an entity
+			// minted verbatim here is one the poller can never match a refresh
+			// back to — silently, since nothing about the call fails.
+			name:     "jira lower-case key folded to canonical",
+			provider: ArtifactProviderJira, target: "sky-123",
+			wantOK: true, wantSourceID: "SKY-123",
+			wantSource: ArtifactProviderJira, wantKind: "issue",
+		},
+		{
+			name:     "jira mixed-case key with padding folded",
+			provider: ArtifactProviderJira, target: "  Sky-123 ",
+			wantOK: true, wantSourceID: "SKY-123",
+			wantSource: ArtifactProviderJira, wantKind: "issue",
+		},
+		{
+			// Skipped on the folded value, not the raw one — otherwise a
+			// whitespace-only target mints an entity keyed on "".
+			name:     "jira whitespace-only target skipped",
+			provider: ArtifactProviderJira, target: "   ",
+		},
+		{
+			// GitHub natural keys stay verbatim: repo and owner names are
+			// case-sensitive, so folding them would break the mapping rather
+			// than repair it.
+			name:     "github mixed-case target left verbatim",
+			provider: ArtifactProviderGitHub, target: "Octo/Repo#18",
+			wantOK: true, wantSource: ArtifactProviderGitHub, wantKind: "pr",
 		},
 		{
 			name:     "slack source id → message entity",
@@ -71,8 +107,12 @@ func TestEntityRefForExternal(t *testing.T) {
 			if source != tc.wantSource {
 				t.Errorf("source = %q, want %q", source, tc.wantSource)
 			}
-			if sourceID != tc.target {
-				t.Errorf("sourceID = %q, want %q (the target verbatim)", sourceID, tc.target)
+			wantSourceID := tc.wantSourceID
+			if wantSourceID == "" {
+				wantSourceID = tc.target
+			}
+			if sourceID != wantSourceID {
+				t.Errorf("sourceID = %q, want %q", sourceID, wantSourceID)
 			}
 			if kind != tc.wantKind {
 				t.Errorf("kind = %q, want %q", kind, tc.wantKind)

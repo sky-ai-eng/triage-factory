@@ -481,6 +481,18 @@ func updateSnapshotCAS(ctx context.Context, q queryer, id, snapshotJSON string, 
 	return n > 0, nil
 }
 
+// MarkPolledSystem stamps last_polled_at alone — no snapshot, no poll_seq
+// bump. See the interface doc: it records that the row was read from the
+// source without anything having been diffed off it.
+func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx,
+		`UPDATE entities SET last_polled_at = ? WHERE id = ?`, time.Now(), id)
+	return err
+}
+
 func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) error {
 	return s.UpdateTitle(ctx, orgID, id, title)
 }

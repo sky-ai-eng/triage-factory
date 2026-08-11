@@ -131,6 +131,16 @@ var closeRelations = []closeRelation{
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
 	},
+	// Jira stopped resolving a tracked issue's key → close everything on the
+	// entity and terminate it. Same shape as completion, for a different
+	// reason: a completed issue can still be reopened and go on emitting,
+	// while an unreachable one can produce no further observation at all.
+	{
+		onEvents:         []string{domain.EventJiraIssueUnreachable},
+		closes:           jiraIssueUnreachableCloseTypes(),
+		terminatesEntity: true,
+		closeReason:      "entity_closed",
+	},
 }
 
 // EntityTerminatingEvents is the set of event types that flip the entity to
@@ -170,9 +180,25 @@ func githubPRTerminalCloseTypes() []string {
 // jiraIssueTerminalCloseTypes is the Jira analog: every assignee-centric type
 // EXCEPT the terminating completed event, plus the unassigned pool task.
 func jiraIssueTerminalCloseTypes() []string {
+	return jiraCloseTypesExcept(domain.EventJiraIssueCompleted)
+}
+
+// jiraIssueUnreachableCloseTypes is what a confirmed-unreachable issue cleans
+// up. It spares only that event's own type, so unlike the completed set it closes
+// jira:issue:completed tasks — a "this got finished" task on an issue that no
+// longer exists has nothing left to act on.
+func jiraIssueUnreachableCloseTypes() []string {
+	return jiraCloseTypesExcept(domain.EventJiraIssueUnreachable)
+}
+
+// jiraCloseTypesExcept builds an entity-wide Jira close set: every
+// assignee-centric type plus the unassigned pool task, minus the terminating
+// event's own type. That exclusion is the load-bearing part — a terminating
+// event's own task is minted after the close phase and has to survive it.
+func jiraCloseTypesExcept(terminator string) []string {
 	out := make([]string, 0, len(assigneeCentricJiraEventTypes)+1)
 	for _, et := range assigneeCentricJiraEventTypes {
-		if et == domain.EventJiraIssueCompleted {
+		if et == terminator {
 			continue
 		}
 		out = append(out, et)

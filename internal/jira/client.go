@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1244,13 +1245,44 @@ func awaitRetry(ctx context.Context, attempt int, wait time.Duration, reason str
 	return nil
 }
 
+// StatusError is a non-2xx Jira response, carrying the status alongside the
+// message so callers can branch on *which* failure they got rather than
+// pattern-matching a string. Its Error() text is the same line these paths
+// have always produced.
+//
+// The distinction that motivates it: a 404 from the issue endpoint is Jira
+// stating that an issue does not exist, which is a far stronger claim than an
+// issue's absence from a JQL result set (equally consistent with an unindexed
+// or archived issue, a permission change, or a moved key). Only the former is
+// safe to act on destructively.
+type StatusError struct {
+	Method string
+	URL    string
+	Status int
+	Body   string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s %s returned %d: %s", e.Method, e.URL, e.Status, e.Body)
+}
+
+// IsNotFound reports whether err is a Jira 404. Jira also answers 404 for an
+// issue the credential may not see, which it does deliberately so existence
+// isn't disclosed — so "not found" means "this credential cannot resolve this
+// key", and a caller treating it as proof of deletion owes that distinction a
+// thought.
+func IsNotFound(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Status == http.StatusNotFound
+}
+
 func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 	status, body, err := c.doRequest(ctx, "GET", url, nil, true)
 	if err != nil {
 		return nil, fmt.Errorf("request %s: %w", url, err)
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("GET %s returned %d: %s", url, status, string(body))
+		return nil, &StatusError{Method: "GET", URL: url, Status: status, Body: string(body)}
 	}
 	return body, nil
 }
