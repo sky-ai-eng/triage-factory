@@ -36,6 +36,10 @@
 -- makes the outcome independent of how the engine interleaves its scan with its
 -- writes; the losers are duplicates and get the same treatment as any other —
 -- left intact for a human.
+--
+-- Both skipped shapes are merged into their canonical twin by 202608110002,
+-- which is where the survivorship decision this migration declined to make now
+-- lives. The rows are still left intact HERE, for the reason above.
 UPDATE entities
 SET source_id = upper(trim(source_id))
 WHERE source = 'jira'
