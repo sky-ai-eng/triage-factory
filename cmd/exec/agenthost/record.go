@@ -150,10 +150,13 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a 
 			"run", info.RunID, "kind", kind, "target", target, "error", err)
 	}
 	// Resolve the touched entity outside the audit write (TFAC-513 §2).
-	recordTouchInfo(ctx, stores, info, act)
+	touched := recordTouchInfo(ctx, stores, info, act)
 	// Same placement, same reason: an admin-pool write, so it must run after
-	// withWriteInfo's tx has settled.
-	stampPROwnership(ctx, stores, info, a)
+	// withWriteInfo's tx has settled. It takes the touch's resolution because
+	// on the common path the two want the same entity — githubAction copies the
+	// artifact's target and url onto the action — and resolving is a
+	// FindOrCreate, not a read.
+	stampPROwnership(ctx, stores, info, a, touched)
 }
 
 // --- touched-entity resolution (TFAC-513 §2) ---
@@ -205,30 +208,57 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info RunInf
 // these ...System (admin-pool) writes inside that closure would deadlock. Every
 // funnel caller invokes it only after withWriteInfo returns; the read path
 // carries no tx.
-func recordEntityTouch(ctx context.Context, stores db.Stores, info RunInfo, provider, target, url string) {
+// It returns the entity it resolved (empty for a skipped or failed resolve) so
+// a later consumer in the same funnel call can reuse it rather than resolving
+// the same key again; callers with no such consumer ignore the result.
+func recordEntityTouch(ctx context.Context, stores db.Stores, info RunInfo, provider, target, url string) string {
 	id, err := resolveTouchedEntityInfo(ctx, stores, info, provider, target, url)
 	if err != nil {
 		agenthostLog.Warn("touched-entity resolve failed (will retry on next poll)",
 			"run", info.RunID, "target", target, "error", err)
-		return
+		return ""
 	}
 	if id == "" || stores.TaskMemory == nil {
-		return
+		return id
 	}
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.RunID, id, domain.MemoryRoleTouched); err != nil {
 		agenthostLog.Warn("touched-entity record failed", "run", info.RunID, "entity", id, "error", err)
 	}
+	return id
+}
+
+// resolvedEntity is one (provider, target) → entity resolution, carried between
+// two consumers of the same funnel call. The coordinates ride along with the id
+// because reuse is only sound when the second consumer wants the same key, and
+// the two are not the same field: the touch resolves off the external action,
+// the ownership stamp off the artifact.
+type resolvedEntity struct {
+	entityID string
+	provider string
+	target   string
+}
+
+// matches reports whether r resolved the same (provider, target) another
+// consumer is about to resolve. A zero r never matches.
+func (r resolvedEntity) matches(provider, target string) bool {
+	return r.entityID != "" && r.provider == provider && r.target == target
 }
 
 // recordTouchInfo persists the write funnel's touched entity: it unwraps the
 // external action into its (provider, target, url) and records the run→entity
 // touch. A nil action (an audit-only write with no external action) touches
 // nothing. See recordEntityTouch for the best-effort + outside-the-tx contract.
-func recordTouchInfo(ctx context.Context, stores db.Stores, info RunInfo, act *domain.ExternalAction) {
+//
+// Returns what it resolved, for stampPROwnership to reuse — see the funnel.
+func recordTouchInfo(ctx context.Context, stores db.Stores, info RunInfo, act *domain.ExternalAction) resolvedEntity {
 	if act == nil {
-		return
+		return resolvedEntity{}
 	}
-	recordEntityTouch(ctx, stores, info, act.Provider, act.Target, act.URL)
+	return resolvedEntity{
+		entityID: recordEntityTouch(ctx, stores, info, act.Provider, act.Target, act.URL),
+		provider: act.Provider,
+		target:   act.Target,
+	}
 }
 
 // --- owning-team stamp for a bot-opened PR ---
@@ -260,7 +290,11 @@ func recordTouchInfo(ctx context.Context, stores db.Stores, info RunInfo, act *d
 // event that would need the owner has not arrived yet, but nothing re-derives
 // the stamp later either, so a failure means that PR's events fall through to
 // the router's remaining tiers for good.
-func stampPROwnership(ctx context.Context, stores db.Stores, info RunInfo, a *domain.Artifact) {
+// touched is whatever the touch pass already resolved this call; it is reused
+// only when it names the same (provider, target) the artifact does, so the
+// artifact stays the authority for who owns the PR even if the action beside it
+// ever points somewhere else.
+func stampPROwnership(ctx context.Context, stores db.Stores, info RunInfo, a *domain.Artifact, touched resolvedEntity) {
 	if a == nil || a.Provider != domain.ArtifactProviderGitHub || a.Kind != domain.ArtifactKindPullRequest {
 		return
 	}
@@ -270,11 +304,15 @@ func stampPROwnership(ctx context.Context, stores db.Stores, info RunInfo, a *do
 	if info.TeamID == "" || stores.Entities == nil {
 		return
 	}
-	entityID, err := resolveTouchedEntityInfo(ctx, stores, info, a.Provider, a.Target, a.URL)
-	if err != nil {
-		agenthostLog.Warn("owning-team stamp skipped: entity resolve failed",
-			"run", info.RunID, "target", a.Target, "error", err)
-		return
+	entityID := touched.entityID
+	if !touched.matches(a.Provider, a.Target) {
+		var err error
+		entityID, err = resolveTouchedEntityInfo(ctx, stores, info, a.Provider, a.Target, a.URL)
+		if err != nil {
+			agenthostLog.Warn("owning-team stamp skipped: entity resolve failed",
+				"run", info.RunID, "target", a.Target, "error", err)
+			return
+		}
 	}
 	if entityID == "" {
 		return

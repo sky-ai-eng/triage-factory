@@ -153,6 +153,79 @@ func TestStampPROwnership_NoTeamOnRun(t *testing.T) {
 	}
 }
 
+// TestStampPROwnership_WithAction covers the exec-verb path, where the funnel
+// receives the artifact AND its audit action together. githubAction copies the
+// artifact's target and url, so both the touch pass and the stamp want the same
+// entity; the stamp reuses what the touch resolved rather than running a second
+// FindOrCreate. Both effects still have to land.
+func TestStampPROwnership_WithAction(t *testing.T) {
+	ctx := context.Background()
+	conn, stores, info, _ := prOwnershipFixture(t)
+
+	a := botOpenedPR()
+	act := &domain.ExternalAction{
+		Provider: domain.ArtifactProviderGitHub,
+		Action:   domain.ActionPRCreated,
+		Target:   a.Target,
+		URL:      a.URL,
+	}
+	RecordExternalWrite(ctx, stores, info, &a, act)
+
+	ent := prEntity(t, stores)
+	if ent == nil {
+		t.Fatal("no entity for the opened PR")
+	}
+	if got := ownerOf(t, stores, ent.ID); got != info.TeamID {
+		t.Errorf("owning team = %q, want %q", got, info.TeamID)
+	}
+	// The reuse must not have cost the touch row the action pass writes.
+	var touches int
+	if err := conn.QueryRow(
+		`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ? AND role = 'touched'`,
+		info.RunID, ent.ID,
+	).Scan(&touches); err != nil {
+		t.Fatalf("count touches: %v", err)
+	}
+	if touches == 0 {
+		t.Error("reusing the touch's resolution lost the touch row")
+	}
+}
+
+// TestStampPROwnership_ActionTargetsElsewhere is why the reuse is guarded on the
+// coordinates rather than assuming the pair always agree. If an action ever
+// names a different object than the artifact beside it, ownership must follow
+// the ARTIFACT — that is the PR that was opened — and the touch must still
+// follow the action.
+func TestStampPROwnership_ActionTargetsElsewhere(t *testing.T) {
+	ctx := context.Background()
+	_, stores, info, _ := prOwnershipFixture(t)
+
+	a := botOpenedPR() // octo/repo#42
+	act := &domain.ExternalAction{
+		Provider: domain.ArtifactProviderGitHub,
+		Action:   domain.ActionPRCreated,
+		Target:   "octo/repo#7",
+		URL:      "https://github.com/octo/repo/pull/7",
+	}
+	RecordExternalWrite(ctx, stores, info, &a, act)
+
+	owned := prEntity(t, stores)
+	if owned == nil {
+		t.Fatal("no entity for the artifact's PR")
+	}
+	if got := ownerOf(t, stores, owned.ID); got != info.TeamID {
+		t.Errorf("artifact's PR owner = %q, want %q", got, info.TeamID)
+	}
+
+	other, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#7")
+	if err != nil || other == nil {
+		t.Fatalf("the action's own entity was not resolved: ent=%v err=%v", other, err)
+	}
+	if got := ownerOf(t, stores, other.ID); got != "" {
+		t.Errorf("the action's PR was stamped %q; ownership must follow the artifact", got)
+	}
+}
+
 // TestStampPROwnership_ReviewArtifactDoesNotClaimOwnership guards the narrowest
 // and most consequential edge: a submitted review carries the same
 // owner/repo#N target as the PR it reviews. Reviewing another team's PR must
