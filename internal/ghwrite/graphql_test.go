@@ -799,11 +799,16 @@ func TestGraphQLTable_ActionsAreKnownVocabulary(t *testing.T) {
 	}
 }
 
-// FuzzParseGraphQLRequest exists because of where this code runs: the process
-// holding the run's live GitHub credential, reading a document an agent
-// assembled out of pull-request text that anyone on the internet may have
-// written. The reader must terminate and must not panic on anything, however
-// malformed — a crash here takes the credential sidecar with it.
+// FuzzParseGraphQLRequest exists because of what this code reads: a document an
+// agent assembled out of pull-request text that anyone on the internet may have
+// written, parsed in the process holding the run's live GitHub credential. The
+// reader must terminate and must not panic on anything, however malformed.
+//
+// What a crash here costs is the request, not the process: captureGraphQLWrite
+// runs inside ReverseProxy.Rewrite under http.Server, and net/http recovers a
+// panic per connection — it logs, closes that connection, and every other proxy
+// in the sidecar keeps serving. The containment argument for the goroutines that
+// have no such guard lives in cmd/runsidecar's package doc, not here.
 //
 // Correctness is not what this asserts; the table tests do that. This asserts
 // only that no input escapes the contract's two outcomes.
