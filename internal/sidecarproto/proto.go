@@ -28,6 +28,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 )
 
@@ -161,6 +163,7 @@ func New(rwc io.ReadWriteCloser, handler Handler) *Conn {
 		pending: make(map[uint64]chan Frame),
 		done:    make(chan struct{}),
 	}
+	// Recovers — see readLoop.
 	go c.readLoop(bufio.NewReader(rwc))
 	return c
 }
@@ -299,6 +302,17 @@ func (c *Conn) writeFrame(f Frame) error {
 }
 
 func (c *Conn) readLoop(r *bufio.Reader) {
+	// The reader is a raw goroutine in a process whose death fails the run, so
+	// it collapses the connection on a panic instead of taking the process with
+	// it: every pending Call then fails with the shutdown cause — a defined
+	// outcome the peer already handles — rather than blocking to its deadline.
+	defer func() {
+		if rec := recover(); rec != nil {
+			slog.Error("sidecarproto: panic in read loop; connection collapsed",
+				"component", "sidecarproto", "panic", fmt.Sprint(rec), "stack", string(debug.Stack()))
+			c.shutdown(fmt.Errorf("%w: read loop panic: %v", ErrClosed, rec))
+		}
+	}()
 	dec := json.NewDecoder(r)
 	for {
 		var f Frame
@@ -334,8 +348,13 @@ func (c *Conn) dispatchRequest(f Frame) {
 	// One goroutine per inbound request: a slow authorize callback must not
 	// head-of-line-block the reader from delivering the response to a Call
 	// this side has open. The control channel's request rate is low.
+	//
+	// The panic guard lives in serveGuarded rather than here so its recovery
+	// becomes this request's error response — see the goroutine rule in
+	// cmd/runsidecar's package doc. Everything after that call is frame
+	// bookkeeping over stdlib marshaling and cannot panic on its own.
 	go func() {
-		respBody, err := c.serve(f)
+		respBody, err := c.serveGuarded(f)
 		if f.ID == 0 {
 			// Notify — no response frame.
 			return
@@ -350,6 +369,36 @@ func (c *Conn) dispatchRequest(f Frame) {
 		}
 		_ = c.writeFrame(resp)
 	}()
+}
+
+// serveGuarded runs the handler under a panic guard, converting a panicking
+// handler into this request's error response. Two things make that the right
+// answer here, where the agenthost socket's guard deliberately answers nothing:
+// this frame carries an id, and the response is written by the reader
+// goroutine's own path rather than whatever unwound — so an answer is both
+// possible and safe.
+//
+// It is a correctness fix as much as a containment one. Without it a panicking
+// handler leaves the peer's Call blocked until its own deadline for a request
+// that is already dead, turning an immediate failure into a timeout — and, in
+// the sidecar, an unrecovered panic in this goroutine would take down the
+// process holding one run's credentials and every proxy serving it.
+//
+// The panic value reaches the peer (which is the orchestrator or its sidecar,
+// not the jailed agent); the stack stays in this process's log.
+func (c *Conn) serveGuarded(f Frame) (respBody any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			// slog directly, not internal/logging: this package is stdlib-only by
+			// contract (see the package doc) and slog.Error resolves the default
+			// logger — the one internal/logging configured — at call time.
+			slog.Error("sidecarproto: panic serving inbound request",
+				"component", "sidecarproto", "kind", string(f.Kind), "id", f.ID,
+				"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			err = fmt.Errorf("sidecarproto: internal failure serving %s: handler panicked: %v", f.Kind, r)
+		}
+	}()
+	return c.serve(f)
 }
 
 func (c *Conn) serve(f Frame) (any, error) {

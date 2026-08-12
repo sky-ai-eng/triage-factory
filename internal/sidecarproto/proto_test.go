@@ -188,6 +188,52 @@ func TestConn_CallInterruptedByCloseFails(t *testing.T) {
 	}
 }
 
+// TestConn_PanickingHandler_AnswersAndKeepsServing pins both halves of the
+// dispatch guard. Containment: the panic doesn't take the process (without the
+// recover this test kills the binary, which is what it would do to the sidecar
+// and every proxy in it). Correctness: the caller gets an error response
+// promptly instead of blocking to its own deadline — a panicking handler used
+// to turn an immediate failure into a timeout.
+func TestConn_PanickingHandler_AnswersAndKeepsServing(t *testing.T) {
+	server := HandlerFunc(func(_ context.Context, kind Kind, _ json.RawMessage) (any, error) {
+		if kind == KindSealedBundle {
+			panic("handler exploded")
+		}
+		return StartProxiesResult{Env: []string{"OK=1"}}, nil
+	})
+	client, _ := pipeConns(t, nil, server)
+
+	// A deadline far longer than the answer should take, so a timeout here
+	// means the caller was left blocking rather than answered.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	answered := make(chan error, 1)
+	go func() {
+		answered <- client.Call(ctx, KindSealedBundle, SealedBundleBody{Sealed: []byte{1, 2, 3}}, nil)
+	}()
+	select {
+	case err := <-answered:
+		if err == nil {
+			t.Fatal("expected the panicking handler to answer with an error")
+		}
+		if !contains(err.Error(), "panicked") {
+			t.Fatalf("error = %q, want it to name the internal failure", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("caller was left blocking on a request whose handler panicked")
+	}
+
+	// The connection is still usable: one dead request is one dead request.
+	var res StartProxiesResult
+	if err := client.Call(ctx, KindStartProxies, StartProxiesBody{HostVethIP: "10.42.1.1"}, &res); err != nil {
+		t.Fatalf("next call after the panic: %v", err)
+	}
+	if len(res.Env) != 1 || res.Env[0] != "OK=1" {
+		t.Fatalf("unexpected result after the panic: %+v", res)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

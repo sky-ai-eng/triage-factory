@@ -490,6 +490,9 @@ func (s *Server) Start(addr string) (string, error) {
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	// No recover: net/http recovers a handler panic per connection, so nothing
+	// a request does reaches this frame; Serve itself only accepts, and the
+	// buffered send + close cannot panic (one sender, one close).
 	go func() {
 		err := s.httpSrv.Serve(ln)
 		// ErrServerClosed is the normal return from Serve after

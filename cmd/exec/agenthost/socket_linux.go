@@ -153,6 +153,9 @@ func StartWithServer(server *Server, runID string) (*HostDaemon, sandbox.Mount, 
 		server:   server,
 		doneCh:   make(chan struct{}),
 	}
+	// No recover: this goroutine is the accept loop and nothing else — every
+	// request is dispatched into its own goroutine, which recovers (see
+	// Server.serveConn). Accept, an errors.Is, and a log call cannot panic.
 	go func() {
 		defer close(hd.doneCh)
 		if err := server.Serve(listener); err != nil {

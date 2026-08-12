@@ -77,6 +77,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -243,6 +244,10 @@ func (s *Server) Start(addr string) (string, error) {
 		// design (a large module download can run for minutes).
 		ReadHeaderTimeout: 30 * time.Second,
 	}
+	// No recover: net/http recovers a handler panic per connection, so nothing
+	// a request does reaches this frame; Serve itself only accepts, and the
+	// buffered send + close cannot panic (one sender, one close). The hijacked
+	// CONNECT tunnels are the exception to "handlers are covered" — see tunnel.
 	go func() {
 		err := s.httpSrv.Serve(ln)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -251,6 +256,7 @@ func (s *Server) Start(addr string) (string, error) {
 		close(s.serveErr)
 	}()
 	if s.denials != nil {
+		// Recovers per record — see drainDenials.
 		go s.drainDenials()
 	}
 	return ln.Addr().String(), nil
@@ -282,17 +288,36 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // each record to the sink under a per-record timeout ctx, so one
 // wedged sink call is bounded and the queue keeps moving. Exits on
 // drainStop; anything still queued then is dropped by design.
+//
+// The delivery recovers per record: this runs in the per-run credential
+// sidecar, where an unrecovered panic in the sink would fail the run and kill
+// every other proxy in the process to save one audit breadcrumb this queue
+// already declares droppable. Recovering per record also keeps the drain alive
+// for the records behind the bad one. See the goroutine rule in
+// cmd/runsidecar's package doc.
 func (s *Server) drainDenials() {
 	for {
 		select {
 		case d := <-s.denials:
-			ctx, cancel := context.WithTimeout(context.Background(), recordDenialTimeout)
-			s.cfg.RecordDenial(ctx, d)
-			cancel()
+			s.deliverDenial(d)
 		case <-s.drainStop:
 			return
 		}
 	}
+}
+
+// deliverDenial hands one record to the sink under its own timeout, so a
+// panicking sink costs that record and nothing else.
+func (s *Server) deliverDenial(d DeniedConnect) {
+	defer func() {
+		if r := recover(); r != nil {
+			egressLog.Error("panic recording egress denial; audit record dropped",
+				"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), recordDenialTimeout)
+	defer cancel()
+	s.cfg.RecordDenial(ctx, d)
 }
 
 // DroppedDenials reports how many audit records were dropped because
@@ -421,6 +446,12 @@ func (s *Server) tunnel(w http.ResponseWriter, r *http.Request, upstream net.Con
 		}
 	}
 
+	// No recover on either copier, and this is the one place in the package
+	// where that needs saying: the conn is hijacked, so these run OUTSIDE
+	// net/http's per-connection recover. They can skip a guard because they are
+	// structurally incapable of panicking — io.Copy over two net.Conns, a type
+	// assertion in comma-ok form, and a send on a buffered channel sized for
+	// both senders. Nothing here parses a byte of what it moves.
 	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(upstream, client)

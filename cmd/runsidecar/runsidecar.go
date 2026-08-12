@@ -16,6 +16,41 @@
 // cap-broker): a sandboxed agent's Bash allowlist only ever names
 // `<selfBin> exec *`, so this subcommand is unreachable from inside a jail
 // even if discovered. Undocumented in --help for the same reason.
+//
+// # The goroutine rule for this process
+//
+// Every goroutine spawned in this process's own packages — this one,
+// cmd/exec/agenthost, internal/sidecarproto, and the proxies (apiproxy,
+// egressproxy, egressrelay, ghinjector, gitproxy, llmproxy) — either recovers
+// from a panic or carries a comment saying why it structurally cannot panic.
+// Adding one without doing either is the mistake this paragraph exists to
+// prevent.
+//
+// The reason is the shape of this process and nothing more exotic. It holds one
+// run's credentials, it runs every proxy that run's traffic crosses, and it
+// parses text an agent assembled out of pull-request bodies anyone on the
+// internet may have written. Go is memory-safe, so a bug in any of those parsers
+// yields a panic, not a code-execution hole — but an unrecovered panic in ANY
+// goroutine terminates the whole process, so a parsing mistake on one RPC would
+// take down every proxy serving the run and fail it. The blast radius stops
+// there (the sidecar is per-run, at a per-run uid, and concurrent runs are
+// untouched), which is exactly why containment is cheap enough to be
+// unconditional.
+//
+// What "recovers" means depends on whether an answer is possible. The agenthost
+// accept loop drops the connection and lets the client see EOF, because the
+// panic may have unwound mid-write and its frame protocol has no partial-frame
+// recovery. sidecarproto's request dispatch answers with an error frame, because
+// the frame carries an id and the response rides a different path from whatever
+// failed. An audit-record goroutine logs and drops, because losing an audit
+// breadcrumb is already that goroutine's stated contract. Handlers hosted by
+// net/http need nothing: it recovers a panic per connection already, so a guard
+// there would be duplicate machinery — the exception is a HIJACKED connection
+// (egressproxy's CONNECT tunnels), which is past net/http's guard and back under
+// this rule.
+//
+// Test files are outside the rule: a panic in a test binary should fail the
+// test, which is the outcome the rule is trying to buy in production.
 package runsidecar
 
 import (
