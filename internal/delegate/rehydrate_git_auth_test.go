@@ -34,11 +34,11 @@ func (s *seedRepoStore) GetSystem(_ context.Context, _, repoID string) (*domain.
 
 var _ db.RepoStore = (*seedRepoStore)(nil)
 
-// proxySandbox is an executorSandbox carrying only the git-proxy coordinates —
+// proxySandbox is an runSidecar carrying only the git-proxy coordinates —
 // everything gitSeedFor reads. Close() is never called on it (the seed path
 // doesn't own it) and every other field stays nil.
-func proxySandbox(proxyURL, proxyToken string) *executorSandbox {
-	return &executorSandbox{res: &sidecarproto.StartProxiesResult{GitProxyURL: proxyURL, GitProxyToken: proxyToken}}
+func proxySandbox(proxyURL, proxyToken string) *runSidecar {
+	return &runSidecar{res: &sidecarproto.StartProxiesResult{GitProxyURL: proxyURL, GitProxyToken: proxyToken}}
 }
 
 // wantProxyEntries is the git config a proxy-routed rebuild must run under: the

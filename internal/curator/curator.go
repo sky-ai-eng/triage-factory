@@ -75,14 +75,14 @@ type Curator struct {
 	// dependency.
 	doorbell func(kind, orgID, projectID string)
 
-	// bringUpTurnSandbox stands up a homed turn's executor sandbox (network +
-	// credential sidecar) before the turn runs — the delegation spawner's
-	// BringUpCuratorSandbox, wired via SetTurnSandbox on a multi-mode executor
+	// bringUpTurnSidecar stands up a homed turn's run sidecar (the credential
+	// sidecar process plus the network its proxies bind on) before the turn runs — the delegation spawner's
+	// BringUpCuratorSidecar, wired via SetTurnSidecar on a multi-mode executor
 	// pod only. nil on control/all/local keeps the in-process
 	// agenthost.Start path byte-identical. Defined as a curator-local func type
 	// (not a delegate import) to avoid a dependency cycle, exactly how admitTurn
 	// avoids importing delegate.
-	bringUpTurnSandbox BringUpTurnSandboxFunc
+	bringUpTurnSidecar BringUpTurnSidecarFunc
 
 	// turnMaxAttempts caps how many failed pickups (claim minted, BeginTurn
 	// failed, claim released 'failed' with the message still undelivered) a
@@ -281,56 +281,59 @@ func (c *Curator) SetDoorbell(fn func(kind, orgID, projectID string)) {
 	c.doorbell = fn
 }
 
-// TurnSandbox is the executor-side network + credential sidecar a homed curator
-// turn runs under. Returned by the SetTurnSandbox seam (the
-// delegation spawner's BringUpCuratorSandbox); *delegate.executorSandbox
+// TurnSidecar is the executor-side credential sidecar — the process holding
+// this turn's unsealed secrets, plus the network its proxies bind on — that a
+// homed curator turn runs under. It is not the jail: the jail is launched
+// later, from the coordinates below. Returned by the SetTurnSidecar seam (the
+// delegation spawner's BringUpCuratorSidecar); *delegate.runSidecar
 // satisfies it. Curator defines the interface rather than importing delegate to
 // avoid a dependency cycle, mirroring how admitTurn avoids it.
-type TurnSandbox interface {
+type TurnSidecar interface {
 	// Network is the prebuilt run network agentproc launches the jail into
 	// (RunOptions.PrebuiltNetwork).
 	Network() *sandbox.RunNetwork
-	// ProxyEnv is the non-secret sandbox proxy env (RunOptions.PrebuiltProxyEnv).
-	ProxyEnv() []string
+	// JailEnv is the non-secret env the jail is launched with
+	// (RunOptions.PrebuiltProxyEnv).
+	JailEnv() []string
 	// GHChannel is the real-gh channel params (RunOptions.GHChannel) when the
 	// turn's sidecar bound the injector; nil otherwise. runID is the
 	// conversation id (the cert path key).
 	GHChannel(runID string) *agentproc.GHChannelParams
 	// GitCloneAuth routes a host-side fetch of cloneURL through the turn's git
-	// proxy so the orchestrator holds no token (empty when the sandbox has no
+	// proxy so the orchestrator holds no token (empty when the sidecar has no
 	// git proxy).
 	GitCloneAuth(cloneURL string) worktree.CloneAuth
-	// Close tears the sandbox down (network + sidecar). Deferred by the dispatch
+	// Close tears it down (the sidecar process + its network). Deferred by the dispatch
 	// after a successful bring-up.
 	Close()
 }
 
-// BringUpTurnSandboxFunc stands up a homed curator turn's sandbox before the
+// BringUpTurnSidecarFunc stands up a homed curator turn's sidecar before the
 // turn runs, keyed by the conversation id (the claim-credentials channel's
 // key — one active turn per conversation, so it also names the per-turn
-// network/socket uniquely). Its shape matches Spawner.BringUpCuratorSandbox,
+// network/socket uniquely). Its shape matches Spawner.BringUpCuratorSidecar,
 // which returns (nil, nil) on every non-executor role and unwired fixture —
 // the caller then keeps the in-process path.
-type BringUpTurnSandboxFunc func(ctx context.Context, orgID, conversationID, userID, teamID string, pinnedRepos []string) (TurnSandbox, error)
+type BringUpTurnSidecarFunc func(ctx context.Context, orgID, conversationID, userID, teamID string, pinnedRepos []string) (TurnSidecar, error)
 
-// SetTurnSandbox wires the executor-side turn-sandbox bring-up — the
-// delegation spawner's BringUpCuratorSandbox. Called once at startup on a
+// SetTurnSidecar wires the executor-side turn-sidecar bring-up — the
+// delegation spawner's BringUpCuratorSidecar. Called once at startup on a
 // multi-mode executor pod only (gated on the executor runtime in
 // buildCuratorRuntime); left nil on control/all/local, where dispatch keeps the
 // in-process agenthost.Start path unchanged.
-func (c *Curator) SetTurnSandbox(fn BringUpTurnSandboxFunc) {
+func (c *Curator) SetTurnSidecar(fn BringUpTurnSidecarFunc) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.bringUpTurnSandbox = fn
+	c.bringUpTurnSidecar = fn
 }
 
-// getTurnSandbox returns the wired bring-up seam under the lock, matching
+// getTurnSidecar returns the wired bring-up seam under the lock, matching
 // getSecrets' race-free accessor shape. nil on every pod but a multi-mode
 // executor.
-func (c *Curator) getTurnSandbox() BringUpTurnSandboxFunc {
+func (c *Curator) getTurnSidecar() BringUpTurnSidecarFunc {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.bringUpTurnSandbox
+	return c.bringUpTurnSidecar
 }
 
 // SetWake wires this pod's claim-loop doorbell (the delegation spawner's

@@ -140,6 +140,23 @@ func TestClassify_TableShapes(t *testing.T) {
 				Number: 841, CreatesObject: true, CarriesProvenance: true,
 			},
 		},
+		{
+			// The review id is load-bearing here in a way it is not on a submit:
+			// a dismissal undoes a specific review, possibly a person's, and the
+			// row is unreadable without saying which.
+			name:   "review dismiss",
+			method: "PUT",
+			path:   "/repos/acme/widgets/pulls/841/reviews/99/dismissals",
+			want: Shape{
+				Action: domain.ActionReviewDismissed, Owner: "acme", Repo: "widgets",
+				Number: 841, ExternalID: "99",
+			},
+		},
+		{
+			// A review id with no dismissals segment is a read of that review.
+			name: "review by id is not a write", method: "PUT",
+			path: "/repos/acme/widgets/pulls/841/reviews/99", wantErr: true,
+		},
 
 		// Deliberately unclassified.
 		{name: "org-level endpoint", method: "POST", path: "/orgs/acme/repos", wantErr: true},

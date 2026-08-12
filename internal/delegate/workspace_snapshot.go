@@ -267,7 +267,7 @@ type gitSeed struct {
 // still authenticates (the insteadOf falls back to the org's git host base, the
 // same upstream the sidecar's proxy relays to) but cannot seed a missing bare;
 // with no sandbox it seeds and fetches anonymously, which is only ever local.
-func (s *Spawner) gitSeedFor(ctx context.Context, orgID, owner, repo string, execSandbox *executorSandbox) gitSeed {
+func (s *Spawner) gitSeedFor(ctx context.Context, orgID, owner, repo string, sidecar *runSidecar) gitSeed {
 	seed := gitSeed{owner: owner, repo: repo}
 	if owner == "" || repo == "" {
 		return seed
@@ -283,7 +283,7 @@ func (s *Spawner) gitSeedFor(ctx context.Context, orgID, owner, repo string, exe
 	if upstream == "" {
 		upstream = s.gitHostBaseFor(ctx, orgID)
 	}
-	seed.auth = execSandbox.GitCloneAuth(upstream)
+	seed.auth = sidecar.GitCloneAuth(upstream)
 	return seed
 }
 

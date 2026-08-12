@@ -22,10 +22,9 @@ self-host's shared Docker engine.
 
 **Why a profile is needed at all.** Docker's own default seccomp profile blocks
 several syscalls that `runsc` (gVisor, `--platform=systrap`) needs to construct its
-own, far stricter, per-run sandbox — that's why the container previously ran fully
-unconfined. `unconfined` reads as "no syscall filtering at all" to a security
-reviewer, which overstates what's actually required: the gap turned out to be a
-single syscall.
+own, far stricter, per-run sandbox — which makes `unconfined` the obvious answer and
+the wrong one. It reads as "no syscall filtering at all" to a security reviewer,
+which overstates what is actually required: the gap is a single syscall.
 
 **Scope — this is the host-level profile, not the in-sandbox one.**
 `docker/seccomp-profile.json` constrains the `triagefactory` **container** as seen

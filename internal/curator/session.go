@@ -252,11 +252,11 @@ func (s *projectSession) dispatch(item queueItem) {
 	// the sidecar's git proxy while the orchestrator holds no credential. The
 	// seam is wired only on a multi-mode executor pod (buildCuratorRuntime gated
 	// on the executor runtime); control/all/local leave it nil (bringUp nil →
-	// turnSandbox nil) and keep the in-process path below byte-identical.
+	// turnSidecar nil) and keep the in-process path below byte-identical.
 	// Keyed by the conversation id — the claim-credentials channel's key, and
 	// unique per active turn (one active claim per conversation).
-	var turnSandbox TurnSandbox
-	if bringUp := s.curator.getTurnSandbox(); bringUp != nil {
+	var turnSidecar TurnSidecar
+	if bringUp := s.curator.getTurnSidecar(); bringUp != nil {
 		sb, err := bringUp(msgCtx, item.orgID, item.conversationID, item.creatorUserID, project.TeamID, project.PinnedRepos)
 		if err != nil {
 			s.releaseFailed(item, fmt.Sprintf("bring up turn sandbox: %v", err))
@@ -264,7 +264,7 @@ func (s *projectSession) dispatch(item queueItem) {
 			return
 		}
 		if sb != nil {
-			turnSandbox = sb
+			turnSidecar = sb
 			// Deferred immediately after a successful bring-up. releaseRepos
 			// (deferred below, so registered LATER) runs BEFORE this Close under
 			// LIFO — safe: both fire only after runAgent returns (the jail has
@@ -296,11 +296,11 @@ func (s *projectSession) dispatch(item queueItem) {
 	// authFor builds the host-side fetch credential for a pinned repo. On the
 	// executor the turn sandbox routes it through the sidecar's git proxy (no
 	// orchestrator-held token); on all/local it injects the App token
-	// from the live store (the prior path). turnSandbox is nil on all/local, so
+	// from the live store (the prior path). turnSidecar is nil on all/local, so
 	// the closure resolves to CloneAuthFor there exactly as before.
 	authFor := func(ctx context.Context, owner, cloneURL string) worktree.CloneAuth {
-		if turnSandbox != nil {
-			return turnSandbox.GitCloneAuth(cloneURL)
+		if turnSidecar != nil {
+			return turnSidecar.GitCloneAuth(cloneURL)
 		}
 		return worktree.CloneAuthFor(cloneURL, s.curator.cloneTokenFor(ctx, item.orgID, owner))
 	}
@@ -454,7 +454,7 @@ func (s *projectSession) dispatch(item queueItem) {
 	// so project.TeamID is the canonical team here). IsEventTriggered is
 	// false — every curator turn is user-driven.
 	startAgentHost := func() (sandbox.Mount, io.Closer, error) {
-		if turnSandbox != nil {
+		if turnSidecar != nil {
 			// Executor path: the credential sidecar HOSTS the exec-verb
 			// socket server (created at bring-up over the sealed bundle), so the
 			// orchestrator only supplies the bind mount — it runs no in-process
@@ -489,10 +489,10 @@ func (s *projectSession) dispatch(item queueItem) {
 	var prebuiltNet *sandbox.RunNetwork
 	var prebuiltProxyEnv []string
 	var ghChannel *agentproc.GHChannelParams
-	if turnSandbox != nil {
-		prebuiltNet = turnSandbox.Network()
-		prebuiltProxyEnv = turnSandbox.ProxyEnv()
-		ghChannel = turnSandbox.GHChannel(item.conversationID)
+	if turnSidecar != nil {
+		prebuiltNet = turnSidecar.Network()
+		prebuiltProxyEnv = turnSidecar.JailEnv()
+		ghChannel = turnSidecar.GHChannel(item.conversationID)
 	}
 
 	// msgCancel is the sink's kill switch for a fence trip: a turn whose

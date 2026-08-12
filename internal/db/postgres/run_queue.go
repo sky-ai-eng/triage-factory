@@ -54,9 +54,14 @@ const runTerminalStatusesSQL = `'completed','failed'`
 // column and queued_at carries the enqueue moment. runtime is stamped
 // 'native' here and 'sdk' in the SQLite sibling: the dialect IS the mode
 // (Postgres is multi-only, SQLite is local-only), so the split lands where
-// the row is written rather than as a caller-passed knob. The stamp is a
-// one-way ratchet — a conversation already carrying 'sdk' keeps running
-// through the SDK path regardless of what new rows mint.
+// the row is written rather than as a caller-passed knob.
+//
+// Both arms stamp it explicitly, which is what makes the SDK engine
+// unreachable for a multi delegation: the ratchet means no conversation ever
+// changes engines, so an engine no mint writes is an engine nothing runs.
+// That is the whole enforcement — there is no claim-side exclusion, because
+// there is no row for one to exclude. Leaving either arm to the column
+// DEFAULT (still 'sdk', for the curator's sake) would quietly undo it.
 func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.Conversation) error {
 	if err := db.AssertBlueprintStepIndexed(run); err != nil {
 		return err

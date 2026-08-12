@@ -456,12 +456,12 @@ func (a *App) buildCuratorRuntime() error {
 		// credential path: the spawner stands each turn's network +
 		// credential sidecar up so the turn resolves LLM/GitHub/Jira through the
 		// sidecar's proxies over the sealed bundle, never the disabled secret
-		// store. The adapter converts the spawner's *executorSandbox to the
-		// curator.TurnSandbox interface, mapping a nil return to a nil interface
+		// store. The adapter converts the spawner's *runSidecar to the
+		// curator.TurnSidecar interface, mapping a nil return to a nil interface
 		// (avoiding a non-nil interface wrapping a nil pointer). Wired only here,
 		// so control/all/local keep the in-process path.
-		a.curator.SetTurnSandbox(func(ctx context.Context, orgID, conversationID, userID, teamID string, pinnedRepos []string) (curator.TurnSandbox, error) {
-			sb, err := a.spawner.BringUpCuratorSandbox(ctx, orgID, conversationID, userID, teamID, pinnedRepos)
+		a.curator.SetTurnSidecar(func(ctx context.Context, orgID, conversationID, userID, teamID string, pinnedRepos []string) (curator.TurnSidecar, error) {
+			sb, err := a.spawner.BringUpCuratorSidecar(ctx, orgID, conversationID, userID, teamID, pinnedRepos)
 			if err != nil {
 				return nil, err
 			}

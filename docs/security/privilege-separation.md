@@ -23,8 +23,8 @@ image is completely unaffected by this section.
 | Process | Holds capabilities | Holds credentials | Parses hostile input | Listens for connections |
 | --- | --- | --- | --- | --- |
 | **cap-broker** (`tf-cap-broker`) | **Yes** — `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` | No | No | Yes — but only a host-only unix socket (`/run/tf/cap-broker.sock`, mode 0600), reachable only by the orchestrator |
-| **orchestrator** (`tf-orchestrator`) | **No** — empty effective set, capability bounding set cleared | Its own control-plane work only — webhook/poll/DB credentials on the control role; **never a per-run agent credential** (those live only in the run's sidecar), and on a `TF_ROLE=executor` process, none at all (the secret store is disabled there — and multi mode has no fused role that would hold the store on a sandboxing host) | Its own control-plane inputs — webhook payloads, the HTTP API; **not** the per-run agent's output anymore (that moved to the sidecar). Hosts the capless `RelayServer` that answers the sidecar's narrow, validated policy/DB/audit relays — no credential-bearing op | Yes — the public HTTP API / websocket |
-| **credential sidecar** (`tf-sidecar`, one per live run) | **No** — the setuid-from-root exec clears its effective/permitted capabilities | Yes — exactly **one** run's material, from the sealed per-run bundle (LLM key, GitHub/Jira/provider tokens), unsealed with a key the process mints for itself and that never leaves it | Yes — **that one run's** agent traffic: the exec-verb socket the agent dials and the upstream API responses its proxies parse | The per-run agenthost unix socket + that run's LLM/git/API proxies, bound on the run's own veth IP — reachable by the run's sandbox and the orchestrator, never off-box |
+| **orchestrator** (`tf-orchestrator`) | **No** — empty effective set, capability bounding set cleared | Its own control-plane work only — webhook/poll/DB credentials on the control role; **never a per-run agent credential** (those live only in the run's sidecar), and on a `TF_ROLE=executor` process, none at all (the secret store is disabled there — and multi mode has no fused role that would hold the store on a sandboxing host) | Its own control-plane inputs — webhook payloads, the HTTP API; **not** the per-run agent's output, which only the sidecar sees. Hosts the capless `RelayServer` that answers the sidecar's narrow, validated policy/DB/audit relays — no credential-bearing op | Yes — the public HTTP API / websocket |
+| **credential sidecar** (`tf-sidecar`, one per live run) | **No** — the setuid-from-root exec clears its effective/permitted capabilities | Yes — exactly **one** run's material, from the sealed per-run bundle (LLM key, GitHub/Jira/provider tokens), unsealed with a key the process mints for itself and that never leaves it | Yes — **that one run's** agent traffic, in both directions: the exec-verb socket the agent dials, the upstream API responses its proxies parse, and — at the `gh` injector only — the body of an outbound GraphQL request, a document the agent composed. The outbound read exists because a policy keyed on what a write *does* cannot be applied to a request whose act is stated only in its body. It is narrow by construction: one endpoint, a size cap, a grammar that collects top-level field names and skips everything beneath them uninterpreted, parse-fail refuses the request, and nothing forwarded is altered — see `internal/ghinjector` and `internal/ghwrite` | The per-run agenthost unix socket + that run's LLM/git/API proxies, bound on the run's own veth IP — reachable by the run's sandbox and the orchestrator, never off-box |
 | **sandbox** (the delegated agent) | No | No | Yes — it's the source of the hostile input | No — outbound only, through the run's egress proxy |
 
 The **credential sidecar** is not a boot process like the other two: the broker
@@ -36,10 +36,10 @@ though they share the host's process table, so a compromise of one run's
 credential process reaches that run's material and no other's. When the run
 ends the sidecar's process exits and its whole credential-bearing address space
 goes with it — the eviction guarantee (`internal/sandbox`'s eviction proof reads
-the per-run uid band out of `/proc` to confirm it vacates). This is why the
-per-run agent credentials and the parsing of that agent's own output moved off
-the orchestrator: no single process now holds both a run's credentials and the
-capabilities that build its cell.
+the per-run uid band out of `/proc` to confirm it vacates). This is why a run's
+agent credentials and the parsing of that agent's own output live here rather
+than in the orchestrator: no single process holds both a run's credentials and
+the capabilities that build its cell.
 
 The broker serves two families of operations over that socket, both behind
 boundary validation (`internal/sandbox`'s `ValidateLaunchParams` and
@@ -166,28 +166,3 @@ unconditionally, with no switch to disable it and no in-process fallback. If the
 broker can't start, boot fails with a clear error rather than silently running the
 sandbox from a less-isolated, fully-privileged process. (Local mode never
 sandboxes, so it never spawns a broker and is unaffected.)
-
-## Upgrading an existing deployment
-
-The orchestrator now runs as uid `10001` instead of root. Files created under the
-`tf-data` (`/data`) and `tf-rootfs` (`/opt/triagefactory/sandbox`) volumes by an
-earlier root-running orchestrator stay root-owned — the entrypoint only `chown`s the
-top-level mount points, not existing content recursively, to keep every boot fast.
-If the orchestrator logs permission errors reading or writing under `/data` after
-upgrading, run a one-time recursive fix from the host:
-
-```sh
-docker compose run --rm --user root triagefactory chown -R 10001:10001 /data /opt/triagefactory/sandbox
-```
-
-A fresh deployment (empty volumes) needs no such step.
-
-One more upgrade wrinkle, only if you persisted the container's `/root` across
-upgrades (no stock volume does): Claude Code SDK session state an earlier
-deployment wrote under `/root/.claude` (curator session resume, primarily) is
-orphaned once `$HOME` moves to `/home/tf-orchestrator` — the orchestrator won't
-find it, and parked curator sessions from before the upgrade rehydrate from their
-snapshots instead of resuming warm. If keeping warm resume matters, copy
-`/root/.claude` into `/home/tf-orchestrator/.claude` (and `chown -R 10001:10001`
-it) before the first post-upgrade boot; otherwise nothing needs doing — the state
-regenerates.

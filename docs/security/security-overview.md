@@ -40,7 +40,7 @@ process inside the sandbox):
 | | Threat | Defense |
 | --- | --- | --- |
 | **T1** | Credential exfiltration | Property B (§5): no credential ever enters the sandbox environment. |
-| **T2** | In-run credential misuse | Strongly bounded: no credential is raw in the sandbox, and each is reachable only through a constrained interface (GitHub token injected only on git fetch/push to the authorized repo; Jira/GitHub API are fixed host-side `exec` verbs; the real-`gh` channel injects one repo-set-scoped token at a proxy that audits every write it forwards and refuses two families outright — submitting a review and creating a repository, in every spelling including a raw `curl`; LLM key is provider-only via the proxy). Residual: within its granted scope, and outside those refused families, the agent still acts with the run's authority (push to the authorized repo, comment and label on the repos it tracks, merge a pull request it was told to — subject only to the delegated runtime's advisory merge question, which does not bind a non-`bash` client — spend the org's LLM tokens), bounded by run wall-clock. |
+| **T2** | In-run credential misuse | Strongly bounded: no credential is raw in the sandbox, and each is reachable only through a constrained interface (GitHub token injected only on git fetch/push to the authorized repo; Jira/GitHub API are fixed host-side `exec` verbs; the real-`gh` channel injects one repo-set-scoped token at a proxy that audits every write it forwards and refuses two families outright — submitting a review and creating a repository, in every spelling including a raw `curl`; LLM key is provider-only via the proxy, and under the native runtime the sandbox is given no LLM channel at all). Residual: within its granted scope, and outside those refused families, the agent still acts with the run's authority (push to the authorized repo, comment and label on the repos it tracks, merge a pull request it was told to — subject only to the delegated runtime's advisory merge question, which does not bind a non-`bash` client — spend the org's LLM tokens), bounded by run wall-clock. |
 | **T3** | RCE in the agent SDK escaping the SDK process | gVisor + in-sandbox hardening (non-root uid, empty caps, seccomp, no-new-privs). |
 | **T4** | RCE escaping gVisor to the host kernel | gVisor's user-mode-kernel architecture. |
 
@@ -120,7 +120,7 @@ it holds and the *hostile input* it is exposed to never overlap:
 | --- | --- | --- | --- |
 | **cap-broker** | **Yes** (the only holder) | No | **No** |
 | **orchestrator** | No (dropped at exec) | Its own control-plane creds; **no per-run agent credential** | Its own control-plane inputs; **not** a run's agent output |
-| **credential sidecar** (one per run) | No (capless) | Yes — one run's material only | Yes — that one run's agent traffic |
+| **credential sidecar** (one per run) | No (capless) | Yes — one run's material only | Yes — that one run's agent traffic, inbound and (at the `gh` injector) outbound |
 | **sandbox** (agent) | No | No | Yes |
 
 - **cap-broker** — the only process that holds `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`. It
@@ -142,9 +142,21 @@ it holds and the *hostile input* it is exposed to never overlap:
 - **credential sidecar** — a capless per-run child holding only *one* run's
   credentials, unsealed with a key it generates for itself. No capabilities, one
   tenant's material, exposed only to that run's own traffic, freed when the run's
-  process exits (§5).
+  process exits (§5). Its exposure runs both ways: besides the upstream
+  responses its proxies parse, the `gh` injector reads the body of an outbound
+  GraphQL request to learn which mutation it performs. That read is what makes
+  a write policy possible at all against a protocol that names the act only in
+  the body, and it is narrow by construction — one endpoint, a size cap, a
+  grammar that collects top-level field names and skips everything beneath them
+  uninterpreted, parse-fail refuses the request, and nothing forwarded is
+  altered. §4.1 covers what a fault in it would and would not yield.
 - **sandbox** — the gVisor jail running the agent. No capabilities, no
-  credentials (Property B).
+  credentials (Property B). What it is *pointed at* narrows further with the
+  runtime: a jail whose agent loop runs outside it — the native runtime, where
+  the loop lives in the executor process and only tool execution is jailed — is
+  built with no LLM proxy address and no placeholder to present at one, so it
+  has no provider channel to reach for at all rather than a channel carrying a
+  per-run placeholder.
 
 ### 4.1 Why this bounds a compromise
 
@@ -160,6 +172,14 @@ kernel at syscall time.
   compromising the orchestrator/dispatcher core yields **no** agent credentials,
   and compromising a single run's sidecar yields only **that run's** material —
   never the co-located set (§5).
+- Both are Go, so the realistic fault in a parser here is a panic or a
+  misclassification rather than memory corruption, and both are contained. Every
+  goroutine in the sidecar's own packages either recovers or documents why it
+  cannot panic (the rule is stated in `cmd/runsidecar`'s package doc), so a
+  panic costs the request or the connection, not the process holding the run's
+  credentials. A misclassification fails closed where it matters: the `gh`
+  channel's write gate refuses any request whose act it could not name, so a
+  document the reader cannot parse is refused rather than forwarded.
 - There is no attacker-reachable path to the cap-broker. It parses no network,
   agent, or repository data; reaching it requires first owning the orchestrator
   and then finding a flaw in the narrow RPC between them.

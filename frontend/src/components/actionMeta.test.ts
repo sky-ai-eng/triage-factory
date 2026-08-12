@@ -95,6 +95,16 @@ describe('actionMeta', () => {
     expect(metaForAction('label_defined')).not.toBe(metaForAction('label_added'))
   })
 
+  it('tells clearing a submitted review apart from the review lifecycle around it', () => {
+    // The one review verb that overrides a human: the others move a review
+    // through its own states, a dismissal revokes the standing of one somebody
+    // already left. Falling back here would render it as an unnamed act, which
+    // is the wrong way for that to appear in an audit lens.
+    expect(metaForAction('review_dismissed').label).toBe('Review dismissed')
+    expect(metaForAction('review_dismissed').tone).toBe('problem')
+    expect(metaForAction('review_dismissed')).not.toBe(metaForAction('review_request_removed'))
+  })
+
   it('surfaces slack in the Actions-lens provider filter', () => {
     expect(ACTION_PROVIDERS).toContain('slack')
   })

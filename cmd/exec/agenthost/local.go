@@ -1546,12 +1546,34 @@ func (c *LocalClient) MemoryLoad(ctx context.Context, source, sourceID string, l
 	return c.rt.MemoryLoad(ctx, source, sourceID, limit)
 }
 
+// GithubDismissReview clears a SUBMITTED review's approval or change-request
+// standing on GitHub — an org-credential write against an object this run did
+// not necessarily create, and possibly a person's review. It leaves no
+// artifact: the review is not this run's to own, and the artifact table holds
+// objects a run produced. So the audit log is the only place it appears, which
+// is exactly the case the Actions lens exists for.
 func (c *LocalClient) GithubDismissReview(ctx context.Context, owner, repo string, number, reviewID int, message string) error {
 	client, err := c.githubClientForRepo(ctx, owner, repo)
 	if err != nil {
 		return err
 	}
-	return client.DismissReview(ctx, owner, repo, number, reviewID, message)
+	if err := client.DismissReview(ctx, owner, repo, number, reviewID, message); err != nil {
+		return err
+	}
+	// The reason travels on the row. A dismissal is the one review act whose
+	// justification is the whole of what a reader needs, and GitHub keeps it
+	// only as timeline prose.
+	detail, _ := json.Marshal(map[string]any{"message": message})
+	c.recordBotAction(ctx, &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderGitHub,
+		Action:     domain.ActionReviewDismissed,
+		Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
+		ExternalID: strconv.Itoa(reviewID),
+		URL:        fmt.Sprintf("%s#pullrequestreview-%d", domain.GitHubPullURL(owner+"/"+repo, number), reviewID),
+		Credential: c.githubCredential(),
+		DetailJSON: string(detail),
+	})
+	return nil
 }
 
 func (c *LocalClient) GithubSubmitReview(ctx context.Context, owner, repo string, number int, commitSHA, event, body string, comments []ghclient.SubmitReviewComment) (int, string, error) {

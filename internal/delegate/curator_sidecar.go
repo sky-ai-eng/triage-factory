@@ -16,17 +16,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
-// BringUpCuratorSandbox stands up the run network + credential sidecar for a
+// BringUpCuratorSidecar stands up the run network + credential sidecar for a
 // homed curator turn — the curator-turn analog of
-// bringUpExecutorSandbox, keyed by the CONVERSATION id: the sealed-bundle
+// bringUpRunSidecar, keyed by the CONVERSATION id: the sealed-bundle
 // channel (claim_credentials) resolves the conversation's active claim, and
 // one active claim per conversation makes the id unique per concurrent
-// sandbox/network/socket. Curator wires it through the SetTurnSandbox seam,
+// sidecar/network/socket. Curator wires it through the SetTurnSidecar seam,
 // gated on the executor runtime, so local (where this returns nil) keeps the
 // in-process agenthost.Start path byte-identical.
 //
 // Gated on the MODE, not the role, for the same reason as
-// bringUpExecutorSandbox: multi is always per-run-isolated, and a future
+// bringUpRunSidecar: multi is always per-run-isolated, and a future
 // multi caller must never silently fall back to in-process credential
 // resolution. Returns (nil, nil) in local mode and on an unwired fixture (nil
 // curator stores) — the caller then keeps the in-process path. On any error
@@ -37,7 +37,7 @@ import (
 // sidecar's git proxy (pinned ∩ tracked) and, carried on RunInfo/AgentHostInfo,
 // authorizes the agent's exec-gh verbs against the same set. userID is the
 // requesting user; teamID the curated project's owning team.
-func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversationID, userID, teamID string, pinnedRepos []string) (*executorSandbox, error) {
+func (s *Spawner) BringUpCuratorSidecar(ctx context.Context, orgID, conversationID, userID, teamID string, pinnedRepos []string) (*runSidecar, error) {
 	if runmode.Current() != runmode.ModeMulti {
 		return nil, nil
 	}
@@ -98,7 +98,11 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversation
 
 	relaySrv := agenthost.NewRelayServer(stores, info, git)
 	params := agentproc.SidecarBringUpParams{
-		HostVethIP:    net.HostIP,
+		HostVethIP: net.HostIP,
+		// A curator turn is an SDK engagement whose loop runs inside the jail,
+		// so its jail keeps the LLM proxy — the run surface's engine moved out,
+		// this one's has not.
+		SandboxLLM:    true,
 		Git:           git,
 		Relay:         relaySrv,
 		IdentityPairs: githooks.IdentityConfigPairs(identity.Name, identity.Email),
@@ -143,7 +147,7 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversation
 		auditHost.SetGitHubCredential(res.GitHubCredential)
 	}
 
-	es := &executorSandbox{runID: conversationID, net: net, sidecar: sc, conn: conn, res: res, stopRelay: make(chan struct{})}
+	es := &runSidecar{runID: conversationID, net: net, proc: sc, conn: conn, res: res, stopRelay: make(chan struct{})}
 	// Same mid-flight refresh relay as a delegated run: the brain re-mints and
 	// re-seals the turn's short-lived credentials into claim_credentials
 	// (keyed by the conversation's active claim), and this goroutine relays

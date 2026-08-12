@@ -471,6 +471,12 @@ func classifyPulls(s Shape, method string, rest []string) (Shape, bool) {
 		s.Action = domain.ActionReviewSubmitted
 		s.CreatesObject = true
 		s.CarriesProvenance = true
+	case len(rest) == 4 && rest[1] == "reviews" && rest[3] == "dismissals" && method == "PUT":
+		// Clearing a submitted review's approval or change-request standing.
+		// The review it names may be anyone's, which is why the id is on the
+		// row: the act is only legible against the review it undid.
+		s.Action = domain.ActionReviewDismissed
+		s.ExternalID = rest[2]
 	case len(rest) == 4 && rest[1] == "comments" && rest[3] == "replies" && method == "POST":
 		reply, err := strconv.Atoi(rest[2])
 		if err != nil || reply <= 0 {

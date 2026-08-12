@@ -102,6 +102,16 @@ export const ACTION_META: Record<string, ActionMeta> = {
     text: 'text-snooze',
     tone: 'neutral',
   },
+  // A dismissal clears the standing of a review someone already submitted,
+  // which is why it reads as a problem where the request verbs above read as
+  // neutral: the others move a review through its own lifecycle, this one
+  // overrides a verdict a person left.
+  review_dismissed: {
+    icon: Eye,
+    label: 'Review dismissed',
+    text: 'text-snooze',
+    tone: 'problem',
+  },
   review_comment_edited: {
     icon: Eye,
     label: 'Review comment edited',

@@ -134,10 +134,10 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		Worktree:             claudeCwd,
 		SDKDir:               paths.SDKDir(),
 		ExtraEnv:             s.nativeAgentEnv(ctx, orgID, runID, namespace, cfg, triggerType, creatorUserID),
-		PrebuiltNetwork:      cfg.execSandbox.runNetwork(),
-		PrebuiltProxyEnv:     cfg.execSandbox.proxyEnv(),
+		PrebuiltNetwork:      cfg.sidecar.runNetwork(),
+		PrebuiltProxyEnv:     cfg.sidecar.jailEnv(),
 		AgentHostSocket:      agenthost.SocketMountFor(runID),
-		GHChannel:            cfg.execSandbox.ghChannel(runID),
+		GHChannel:            cfg.sidecar.ghChannel(runID),
 		SkillsSourcePath:     cfg.skillsSourcePath,
 		MemorySourcePath:     cfg.memorySourcePath,
 		OrgID:                orgID,
@@ -393,19 +393,18 @@ func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, runID, namespace st
 
 // nativeCredentials resolves the loop's provider account per call.
 //
-// In this phase the account points at the per-run credential sidecar's LLM
-// proxy: the sidecar holds the unsealed bundle and injects the real key on
-// the upstream hop, and its proxy env is already the resolved-credential
-// vocabulary the adapter reads. The orchestrator therefore still opens no
-// sealed bundle, and Property B is untouched — the placeholder the loop
-// sends is the same one the SDK path sends from inside the jail.
+// The account points at this claim's credential sidecar, the one process
+// holding the unsealed bundle: it injects the real key on the upstream hop, so
+// what travels here is a per-run placeholder and the loop holds no provider
+// credential. The material behind it arrived sealed to this claim and nowhere
+// else — no secret store is reachable from an executor to resolve it any other
+// way.
 //
-// Removing that hop (the loop calling the provider directly with the sealed
-// bundle's own material, and the LLM proxy disappearing along with the
-// provider hosts in the egress allowlist) is the cutover phase's work, and
-// is a change of what Resolve returns — nothing above it moves.
+// Read off the sidecar's LLM coordinates rather than the sandbox env, and that
+// distinction is the whole of the cell shrink: those coordinates now go to
+// exactly one place, this call, and the jail is built without them.
 func (s *Spawner) nativeCredentials(cfg runConfig, model, coldModel string) agentloop.Credentials {
-	env := envSliceToMap(cfg.execSandbox.proxyEnv())
+	env := envSliceToMap(cfg.sidecar.engineLLMEnv())
 	return &agentloop.EnvCredentials{
 		Resolve: func(context.Context) (map[string]string, error) { return env, nil },
 		// The whitelist must name the models actually requested: bifrost
