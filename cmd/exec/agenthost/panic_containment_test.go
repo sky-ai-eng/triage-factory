@@ -3,8 +3,10 @@ package agenthost
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
@@ -52,4 +54,47 @@ func TestServer_PanickingVerb_FailsRPCAndKeepsServing(t *testing.T) {
 	if got.RunID != info.RunID {
 		t.Errorf("LookupRun after the panic returned %+v, want run %q", got, info.RunID)
 	}
+}
+
+// TestHandleConn_NilMethodSeenServesNormally pins the one hazard the panic
+// guard's out-parameter introduces: a caller that passes nil because it doesn't
+// want the method name must get a served request, not a nil dereference. A
+// crash there would be contained by serveConn — and would still have turned a
+// working RPC into a failed one, using the mechanism added to prevent exactly
+// that.
+func TestHandleConn_NilMethodSeenServesNormally(t *testing.T) {
+	info := RunInfo{OrgID: "org-1", RunID: "run-nil-out"}
+	stores, _ := newTestDB(t)
+	srv := NewServer(stores, info, nil)
+
+	srvSide, cliSide := net.Pipe()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		defer func() { _ = srvSide.Close() }()
+		srv.handleConn(srvSide, nil)
+	}()
+
+	if err := cliSide.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	if err := writeFrame(cliSide, request{Version: ProtocolVersion, Method: methodLookupRun, Args: json.RawMessage(`{}`)}); err != nil {
+		t.Fatalf("writeFrame: %v", err)
+	}
+	var resp response
+	if err := readFrame(cliSide, &resp); err != nil {
+		t.Fatalf("readFrame: %v (a nil methodSeen dropped the connection instead of serving)", err)
+	}
+	if resp.Error != "" {
+		t.Fatalf("daemon answered with an error: %s", resp.Error)
+	}
+	var res lookupRunResult
+	if err := json.Unmarshal(resp.Result, &res); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if res.Info.RunID != info.RunID {
+		t.Errorf("LookupRun returned %+v, want run %q", res.Info, info.RunID)
+	}
+	_ = cliSide.Close()
+	<-served
 }

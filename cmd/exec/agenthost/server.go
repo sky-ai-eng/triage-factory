@@ -270,10 +270,11 @@ const connIOTimeout = 10 * time.Second
 // rather than silently dropped — the client has to know the call
 // failed.
 //
-// methodSeen receives the request's method name as soon as the frame decodes,
-// for serveConn's panic guard to name. Callers that don't need it (the fuzz
-// target drives handleConn directly, deliberately outside the guard) pass a
-// throwaway.
+// methodSeen, when non-nil, receives the request's method name as soon as the
+// frame decodes, for serveConn's panic guard to name. nil is allowed and means
+// "nobody is watching" — a caller that doesn't want the name must not have to
+// invent a variable, and a nil here must never become the very failure the
+// parameter exists to report.
 func (s *Server) handleConn(conn net.Conn, methodSeen *string) {
 	if err := conn.SetDeadline(time.Now().Add(connIOTimeout)); err != nil {
 		agenthostLog.Warn("set deadline failed", "error", err)
@@ -289,7 +290,9 @@ func (s *Server) handleConn(conn net.Conn, methodSeen *string) {
 		return
 	}
 
-	*methodSeen = req.Method
+	if methodSeen != nil {
+		*methodSeen = req.Method
+	}
 
 	if req.Version != ProtocolVersion {
 		s.sendError(conn, fmt.Sprintf("%s: client v%d, daemon v%d", ErrProtocolVersion, req.Version, ProtocolVersion))

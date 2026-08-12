@@ -306,11 +306,16 @@ func (c *Conn) readLoop(r *bufio.Reader) {
 	// it collapses the connection on a panic instead of taking the process with
 	// it: every pending Call then fails with the shutdown cause — a defined
 	// outcome the peer already handles — rather than blocking to its deadline.
+	//
+	// The cause names the panic without carrying its value, for a sharper reason
+	// than serveGuarded's: this one is handed to EVERY in-flight Call, so an
+	// arbitrary value formatted into it would fan out across every caller's
+	// error handling at once. The value and the stack stay in the log.
 	defer func() {
 		if rec := recover(); rec != nil {
 			slog.Error("sidecarproto: panic in read loop; connection collapsed",
 				"component", "sidecarproto", "panic", fmt.Sprint(rec), "stack", string(debug.Stack()))
-			c.shutdown(fmt.Errorf("%w: read loop panic: %v", ErrClosed, rec))
+			c.shutdown(fmt.Errorf("%w: read loop panicked; see the serving process's log", ErrClosed))
 		}
 	}()
 	dec := json.NewDecoder(r)
@@ -384,8 +389,12 @@ func (c *Conn) dispatchRequest(f Frame) {
 // the sidecar, an unrecovered panic in this goroutine would take down the
 // process holding one run's credentials and every proxy serving it.
 //
-// The panic value reaches the peer (which is the orchestrator or its sidecar,
-// not the jailed agent); the stack stays in this process's log.
+// The response names the failure and nothing else. A panic value is arbitrary
+// runtime state — a formatted request body, a struct that happened to hold a
+// credential — and this response crosses a process boundary into an error
+// string the peer may log, persist, or surface. The value and the stack go to
+// this process's log, which is where debugging it belongs; the peer gets the
+// fact, the kind, and the id, which is all it can act on anyway.
 func (c *Conn) serveGuarded(f Frame) (respBody any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -395,7 +404,7 @@ func (c *Conn) serveGuarded(f Frame) (respBody any, err error) {
 			slog.Error("sidecarproto: panic serving inbound request",
 				"component", "sidecarproto", "kind", string(f.Kind), "id", f.ID,
 				"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
-			err = fmt.Errorf("sidecarproto: internal failure serving %s: handler panicked: %v", f.Kind, r)
+			err = fmt.Errorf("sidecarproto: internal failure serving %s (id %d): handler panicked; see the serving process's log", f.Kind, f.ID)
 		}
 	}()
 	return c.serve(f)
