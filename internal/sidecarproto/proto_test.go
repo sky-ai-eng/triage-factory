@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -185,6 +186,134 @@ func TestConn_CallInterruptedByCloseFails(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Call did not return after the conn was closed mid-flight")
+	}
+}
+
+// panicPayload is the giveaway a panic value would carry across the wire if
+// either guard formatted it into an error. Panic values are arbitrary runtime
+// state — a formatted request body, a struct that happened to hold a credential
+// — and the peer's error string is logged and persisted, so the tests below
+// assert this string is nowhere in what the caller receives.
+const panicPayload = "token-abc123-must-not-cross-the-wire"
+
+// TestConn_PanickingHandler_AnswersAndKeepsServing pins all three halves of the
+// dispatch guard. Containment: the panic doesn't take the process (without the
+// recover this test kills the binary, which is what it would do to the sidecar
+// and every proxy in it). Correctness: the caller gets an error response
+// promptly instead of blocking to its own deadline — a panicking handler used
+// to turn an immediate failure into a timeout. Discretion: the response names
+// the failure without carrying the panic value.
+func TestConn_PanickingHandler_AnswersAndKeepsServing(t *testing.T) {
+	server := HandlerFunc(func(_ context.Context, kind Kind, _ json.RawMessage) (any, error) {
+		if kind == KindSealedBundle {
+			panic("handler exploded: " + panicPayload)
+		}
+		return StartProxiesResult{Env: []string{"OK=1"}}, nil
+	})
+	client, _ := pipeConns(t, nil, server)
+
+	// A deadline far longer than the answer should take, so a timeout here
+	// means the caller was left blocking rather than answered.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	answered := make(chan error, 1)
+	go func() {
+		answered <- client.Call(ctx, KindSealedBundle, SealedBundleBody{Sealed: []byte{1, 2, 3}}, nil)
+	}()
+	select {
+	case err := <-answered:
+		if err == nil {
+			t.Fatal("expected the panicking handler to answer with an error")
+		}
+		if !contains(err.Error(), "panicked") {
+			t.Fatalf("error = %q, want it to name the internal failure", err)
+		}
+		if contains(err.Error(), panicPayload) {
+			t.Fatalf("the panic value crossed the wire in %q — a response is an error string the peer logs and persists", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("caller was left blocking on a request whose handler panicked")
+	}
+
+	// The connection is still usable: one dead request is one dead request.
+	var res StartProxiesResult
+	if err := client.Call(ctx, KindStartProxies, StartProxiesBody{HostVethIP: "10.42.1.1"}, &res); err != nil {
+		t.Fatalf("next call after the panic: %v", err)
+	}
+	if len(res.Env) != 1 || res.Env[0] != "OK=1" {
+		t.Fatalf("unexpected result after the panic: %+v", res)
+	}
+}
+
+// panickingStream is a duplex stream whose Read panics — the shape of a
+// decoder blowing up on an inbound frame. The read blocks until the first
+// Write, so the panic lands after a Call has registered its pending entry and
+// the test is exercising the in-flight case rather than a race.
+type panickingStream struct {
+	release   chan struct{}
+	once      sync.Once
+	firstRead chan struct{}
+}
+
+func newPanickingStream() *panickingStream {
+	return &panickingStream{release: make(chan struct{}), firstRead: make(chan struct{}, 1)}
+}
+
+func (p *panickingStream) Read([]byte) (int, error) {
+	select {
+	case p.firstRead <- struct{}{}:
+	default:
+	}
+	<-p.release
+	panic("reader exploded: " + panicPayload)
+}
+
+func (p *panickingStream) Write(b []byte) (int, error) {
+	p.once.Do(func() { close(p.release) })
+	return len(b), nil
+}
+
+func (p *panickingStream) Close() error { return nil }
+
+// TestConn_PanickingReadLoop_CollapsesConnWithoutLeakingTheValue covers the
+// other raw goroutine. A panic in the reader must collapse the connection
+// rather than the process — every in-flight Call fails with the shutdown cause,
+// which is an outcome callers already handle — and that cause must not carry
+// the panic value, because unlike a response it is handed to EVERY pending Call
+// at once.
+func TestConn_PanickingReadLoop_CollapsesConnWithoutLeakingTheValue(t *testing.T) {
+	stream := newPanickingStream()
+	c := New(stream, nil)
+	t.Cleanup(func() { _ = c.Close() })
+
+	// Wait for the read loop to be parked in Read, so the Call below is the
+	// in-flight case: its own Write is what releases the panic.
+	select {
+	case <-stream.firstRead:
+	case <-time.After(2 * time.Second):
+		t.Fatal("read loop never reached its first Read")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := c.Call(ctx, KindStartProxies, StartProxiesBody{HostVethIP: "10.42.1.1"}, nil)
+	if err == nil {
+		t.Fatal("Call returned nil after the read loop panicked")
+	}
+	if !errors.Is(err, ErrClosed) {
+		t.Fatalf("error = %v, want it to wrap ErrClosed (the defined collapse outcome)", err)
+	}
+	if contains(err.Error(), panicPayload) {
+		t.Fatalf("the panic value reached a pending Call in %q — this cause fans out to every caller at once", err)
+	}
+
+	// The conn is properly collapsed, not merely wedged: Done is closed and
+	// subsequent Calls fail fast instead of blocking on a dead reader.
+	select {
+	case <-c.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done was not closed after the read loop panicked")
 	}
 }
 

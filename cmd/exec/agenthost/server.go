@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -181,12 +182,43 @@ func (s *Server) Serve(l net.Listener) error {
 			return fmt.Errorf("agenthost server: accept: %w", err)
 		}
 		s.inflight.Add(1)
+		// Recovers via serveConn — every frame this dispatches was composed by
+		// the jailed agent, and this goroutine's death is the process's.
 		go func() {
 			defer s.inflight.Done()
 			defer func() { _ = conn.Close() }()
-			s.handleConn(conn)
+			s.serveConn(conn)
 		}()
 	}
+}
+
+// serveConn is handleConn under a panic guard. It exists because of where this
+// accept loop runs: in multi mode the daemon lives in the per-run credential
+// sidecar, and the frames it dispatches are composed by the jailed agent — the
+// most directly attacker-influenced input in a process that also holds that
+// run's credentials and every proxy serving it. An unrecovered panic in this
+// goroutine would terminate that whole process; the dispatch fan-out below
+// unmarshals agent-supplied arguments across roughly forty verbs, so "no verb
+// ever panics" is not a property worth betting the process on. See the
+// goroutine rule in cmd/runsidecar's package doc.
+//
+// Deliberately NO response frame from here. The panic may have unwound
+// mid-write and the frame protocol has no partial-frame recovery, so the only
+// safe move is to let the deferred Close hand the client an EOF — already a
+// defined outcome on this channel, which the IPCClient surfaces as "daemon
+// closed connection during <method>" and the agent reads as a failed tool call.
+func (s *Server) serveConn(conn net.Conn) {
+	// Set by handleConn the moment the request frame decodes, so the guard can
+	// name the verb that died; a panic unwinds past every return value, which is
+	// why this is an out-parameter rather than a result.
+	var method string
+	defer func() {
+		if r := recover(); r != nil {
+			agenthostLog.Error("panic serving exec rpc; connection dropped",
+				"method", method, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+		}
+	}()
+	s.handleConn(conn, &method)
 }
 
 // Shutdown closes the listener (caller does that — Serve returns when
@@ -209,6 +241,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Unlock()
 
 	done := make(chan struct{})
+	// No recover: the body is a WaitGroup wait and a channel close, neither of
+	// which can panic (Wait's own misuse panic requires a negative counter, and
+	// Add/Done here are strictly paired around one connection).
 	go func() {
 		s.inflight.Wait()
 		close(done)
@@ -234,7 +269,13 @@ const connIOTimeout = 10 * time.Second
 // closes. Any malformed input is responded to with an error frame
 // rather than silently dropped — the client has to know the call
 // failed.
-func (s *Server) handleConn(conn net.Conn) {
+//
+// methodSeen, when non-nil, receives the request's method name as soon as the
+// frame decodes, for serveConn's panic guard to name. nil is allowed and means
+// "nobody is watching" — a caller that doesn't want the name must not have to
+// invent a variable, and a nil here must never become the very failure the
+// parameter exists to report.
+func (s *Server) handleConn(conn net.Conn, methodSeen *string) {
 	if err := conn.SetDeadline(time.Now().Add(connIOTimeout)); err != nil {
 		agenthostLog.Warn("set deadline failed", "error", err)
 		return
@@ -247,6 +288,10 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 		s.sendError(conn, fmt.Sprintf("read request: %v", err))
 		return
+	}
+
+	if methodSeen != nil {
+		*methodSeen = req.Method
 	}
 
 	if req.Version != ProtocolVersion {

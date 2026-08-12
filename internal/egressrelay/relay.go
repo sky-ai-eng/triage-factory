@@ -417,6 +417,9 @@ func (s *Server) Start(addr string) (string, error) {
 		// outlasts any fixed deadline, same reasoning as the git proxy's
 		// pack transfers.
 	}
+	// No recover: net/http recovers a handler panic per connection, so nothing
+	// a request does reaches this frame; Serve itself only accepts, and the
+	// buffered send + close cannot panic (one sender, one close).
 	go func() {
 		err := s.httpSrv.Serve(ln)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {

@@ -1074,6 +1074,9 @@ func (s *Server) Serve(ln net.Listener) (string, error) {
 		IdleTimeout:       120 * time.Second,
 		TLSConfig:         &tls.Config{Certificates: []tls.Certificate{s.cfg.Cert}},
 	}
+	// No recover: net/http recovers a handler panic per connection, so nothing
+	// a request does reaches this frame; ServeTLS itself only accepts, and the
+	// buffered send + close cannot panic (one sender, one close).
 	go func() {
 		// Certs already live in TLSConfig, so ServeTLS's file args are empty.
 		err := s.httpSrv.ServeTLS(ln, "", "")

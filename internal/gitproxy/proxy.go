@@ -76,11 +76,17 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
+
+// gitproxyLog is this package's component logger (see internal/logging).
+var gitproxyLog = logging.Component("gitproxy")
 
 // refreshThreshold is how close to expiry the cached token gets before
 // the next request triggers a fresh mint. Installation tokens are
@@ -511,6 +517,16 @@ func (s *Server) recordDenial(denied DeniedGitOp) {
 		return
 	}
 	go func() {
+		// Recover and drop: this runs in the per-run credential sidecar, where an
+		// unrecovered panic would fail the run and kill every other proxy in the
+		// process to save an audit breadcrumb the paragraph above already declares
+		// droppable. See the goroutine rule in cmd/runsidecar's package doc.
+		defer func() {
+			if r := recover(); r != nil {
+				gitproxyLog.Error("panic recording git denial; audit record dropped",
+					"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			}
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), recordPushTimeout)
 		defer cancel()
 		s.cfg.RecordDenial(ctx, denied)
@@ -704,6 +720,9 @@ func (s *Server) Start(addr string) (string, error) {
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	// No recover: net/http recovers a handler panic per connection, so nothing
+	// a request does reaches this frame; Serve itself only accepts, and the
+	// buffered send + close cannot panic (one sender, one close).
 	go func() {
 		err := s.httpSrv.Serve(ln)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
