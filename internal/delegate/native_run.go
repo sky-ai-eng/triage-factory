@@ -134,10 +134,10 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		Worktree:             claudeCwd,
 		SDKDir:               paths.SDKDir(),
 		ExtraEnv:             s.nativeAgentEnv(ctx, orgID, runID, namespace, cfg, triggerType, creatorUserID),
-		PrebuiltNetwork:      cfg.execSandbox.runNetwork(),
-		PrebuiltProxyEnv:     cfg.execSandbox.proxyEnv(),
+		PrebuiltNetwork:      cfg.sidecar.runNetwork(),
+		PrebuiltProxyEnv:     cfg.sidecar.jailEnv(),
 		AgentHostSocket:      agenthost.SocketMountFor(runID),
-		GHChannel:            cfg.execSandbox.ghChannel(runID),
+		GHChannel:            cfg.sidecar.ghChannel(runID),
 		SkillsSourcePath:     cfg.skillsSourcePath,
 		MemorySourcePath:     cfg.memorySourcePath,
 		OrgID:                orgID,
@@ -404,7 +404,7 @@ func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, runID, namespace st
 // distinction is the whole of the cell shrink: those coordinates now go to
 // exactly one place, this call, and the jail is built without them.
 func (s *Spawner) nativeCredentials(cfg runConfig, model, coldModel string) agentloop.Credentials {
-	env := envSliceToMap(cfg.execSandbox.llmEnv())
+	env := envSliceToMap(cfg.sidecar.engineLLMEnv())
 	return &agentloop.EnvCredentials{
 		Resolve: func(context.Context) (map[string]string, error) { return env, nil },
 		// The whitelist must name the models actually requested: bifrost

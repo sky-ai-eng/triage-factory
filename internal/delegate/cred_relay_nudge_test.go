@@ -71,7 +71,7 @@ func TestNudgeCredentialRelay(t *testing.T) {
 		return 7, sealed, true, nil
 	}
 
-	es := &executorSandbox{stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
+	es := &runSidecar{stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
 	s := &Spawner{}
 	go s.relayCredentialRefreshes("run-1", getter, 7, conn, es.credNudge, es.stopRelay)
 	t.Cleanup(func() { close(es.stopRelay) })
@@ -134,7 +134,7 @@ func TestNudgeCredentialRelay_CancelStopsTheWork(t *testing.T) {
 		return 0, nil, false, ctx.Err()
 	}
 
-	es := &executorSandbox{stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
+	es := &runSidecar{stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
 	s := &Spawner{}
 	go s.relayCredentialRefreshes("run-1", getter, 7, conn, es.credNudge, es.stopRelay)
 	t.Cleanup(func() { close(es.stopRelay) })
@@ -161,7 +161,7 @@ func TestNudgeCredentialRelay_CancelStopsTheWork(t *testing.T) {
 // caller's deadline — the materialization then fails with a clear error rather
 // than sitting out the whole wait window.
 func TestNudgeCredentialRelay_AfterStopDoesNotBlock(t *testing.T) {
-	es := &executorSandbox{stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
+	es := &runSidecar{stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
 	close(es.stopRelay)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -178,10 +178,10 @@ func TestNudgeCredentialRelay_AfterStopDoesNotBlock(t *testing.T) {
 // TestNudgeCredentialRelay_UnwiredIsNoOp pins the nil-safe shape the curator
 // and local paths rely on: no nudge channel means no relay to nudge.
 func TestNudgeCredentialRelay_UnwiredIsNoOp(t *testing.T) {
-	if err := (*executorSandbox)(nil).nudgeCredentialRelay(context.Background()); err != nil {
+	if err := (*runSidecar)(nil).nudgeCredentialRelay(context.Background()); err != nil {
 		t.Fatalf("nil sandbox nudge = %v, want nil", err)
 	}
-	if err := (&executorSandbox{}).nudgeCredentialRelay(context.Background()); err != nil {
+	if err := (&runSidecar{}).nudgeCredentialRelay(context.Background()); err != nil {
 		t.Fatalf("unwired sandbox nudge = %v, want nil", err)
 	}
 }

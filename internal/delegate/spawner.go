@@ -92,12 +92,12 @@ type Spawner struct {
 	// nil-safe (local resolves credentials directly and never gates on it).
 	runCredentials db.RunCredentialsStore
 	// curatorStore is the curator-turn half of the credential handshake:
-	// BringUpCuratorSandbox publishes the turn's sidecar pubkey onto the
+	// BringUpCuratorSidecar publishes the turn's sidecar pubkey onto the
 	// conversation's active claim via
 	// curatorStore.PublishTurnCredPubKeySystem and polls runCredentials
 	// (keyed by the conversation id — the shared claim_credentials channel)
 	// for the sealed bundle the brain wrote. nil-safe (local never brings a
-	// curator sidecar up); a nil store makes BringUpCuratorSandbox degrade
+	// curator sidecar up); a nil store makes BringUpCuratorSidecar degrade
 	// like every other nil-store seam here.
 	curatorStore db.CuratorStore
 	// awaitingCredentialsTimeout overrides awaitingCredentialsTimeout (the
@@ -854,7 +854,7 @@ func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo,
 func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string) *ghclient.Client {
 	// TF_ROLE=executor never reaches here for a run's GetPR — setupGitHub
 	// builds its client against the credential sidecar's GitHub-REST proxy
-	// (execSandbox), so this resolver path serves only all/local.
+	// (sidecar), so this resolver path serves only all/local.
 	s.mu.Lock()
 	resolver := s.ghResolver
 	fallback := s.ghClient

@@ -422,7 +422,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// on an unwired fixture. A bring-up failure (brain not provisioning) is a
 	// transient setup failure — requeue like any other. Torn down after the run.
 	closeGate("passed", nil)
-	execSandbox, err := s.bringUpExecutorSandbox(ctx, orgID, run, *task)
+	sidecar, err := s.bringUpRunSidecar(ctx, orgID, run, *task)
 	if err != nil {
 		if ctx.Err() != nil {
 			s.endEngagement(run.ID, engagementShutdown)
@@ -432,7 +432,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 		s.handlePreAgentFailure(orgID, br, *run, err)
 		return
 	}
-	defer execSandbox.Close()
+	defer sidecar.Close()
 
 	// Sequence off the plan frozen at mint (br.StepPlan), not the live
 	// blueprint_steps/prompts — an edit to the blueprint mid-flight must not
@@ -460,12 +460,12 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	stepPrompt := planStep.Prompt()
 
 	// Resolve the run's GitHub client for the self-contained (all/local) path.
-	// On the executor path execSandbox is non-nil and setupGitHub routes GetPR
+	// On the executor path sidecar is non-nil and setupGitHub routes GetPR
 	// through the sidecar's GitHub-REST proxy instead — this client is unused
 	// there (the executor's secret store is disabled).
 	owner, repo := ownerRepoForTask(*task)
 	var gh *ghclient.Client
-	if execSandbox == nil {
+	if sidecar == nil {
 		gh = s.resolveGHClient(ctx, orgID, owner, repo)
 	}
 
@@ -478,7 +478,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// Build (step 0, first claim) or rehydrate (later steps / crash re-claim) the
 	// shared workspace. A transient setup failure requeues; a persistent one
 	// fails the blueprint.
-	cfg, err := s.buildStepConfig(ctx, orgID, br, *task, *run, gh, execSandbox)
+	cfg, err := s.buildStepConfig(ctx, orgID, br, *task, *run, gh, sidecar)
 	if err != nil {
 		s.failEngagement(run.ID, err)
 		s.handlePreAgentFailure(orgID, br, *run, err)
@@ -490,7 +490,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	cfg.isBlueprintStep = true
 	cfg.blueprintRunID = br.ID
 	cfg.blueprintStep = stepIdx
-	cfg.execSandbox = execSandbox
+	cfg.sidecar = sidecar
 
 	// Increment the step prompt's usage, routed per trigger type.
 	if run.TriggerType == "manual" {
@@ -803,19 +803,19 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	// worktree needs the network — the shared bare is a blobless partial clone,
 	// so the rebuild's checkout triggers a lazy promisor fetch. The sidecar's
 	// git proxy is the only credential an executor has for it.
-	execSandbox, esErr := s.bringUpExecutorSandbox(stepCtx, orgID, run, *task)
+	sidecar, esErr := s.bringUpRunSidecar(stepCtx, orgID, run, *task)
 	if esErr != nil {
 		// Still pre-agent: the sidecar is part of the runtime coming up, so
 		// the answer is another attempt, not a dead conversation.
 		handBack(fmt.Errorf("bring up credential sidecar for resume failed: %w", esErr))
 		return
 	}
-	defer execSandbox.Close()
+	defer sidecar.Close()
 
 	// The SDK path's resume carries its context in the session file rather than
 	// in rows, so it has no claim-time notice to make honest — the provenance
 	// is dropped here rather than threaded on to nothing.
-	resumeCwd, _, werr := s.ensureWorkspace(stepCtx, orgID, run, s.gitSeedFor(stepCtx, orgID, owner, repo, execSandbox))
+	resumeCwd, _, werr := s.ensureWorkspace(stepCtx, orgID, run, s.gitSeedFor(stepCtx, orgID, owner, repo, sidecar))
 	if werr != nil {
 		// A rehydrate that failed is the resume runtime failing to come up,
 		// and it fails for the same passing reasons the native path's jail
@@ -877,7 +877,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		ExtraAllowedTools: extraTools,
 		Namespace:         namespace,
 		TeamID:            run.TeamID,
-		execSandbox:       execSandbox,
+		sidecar:           sidecar,
 		claimID:           run.ClaimID,
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
@@ -1180,7 +1180,7 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 // every later claim it reconstructs the lightweight config from the task and
 // guarantees the shared worktree is on disk (warm reuse, or cold rehydrate from
 // the durable snapshot via ensureWorkspace).
-func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, run domain.Conversation, gh *ghclient.Client, execSandbox *executorSandbox) (runConfig, error) {
+func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, run domain.Conversation, gh *ghclient.Client, sidecar *runSidecar) (runConfig, error) {
 	if br.WorktreePath == "" {
 		var (
 			cfg runConfig
@@ -1191,7 +1191,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// per-run identity for the worktree_path / conversation_worktrees records.
 		switch task.EntitySource {
 		case "github":
-			cfg, err = s.setupGitHub(ctx, orgID, run.ID, run.ClaimID, br.ID, task, gh, execSandbox)
+			cfg, err = s.setupGitHub(ctx, orgID, run.ID, run.ClaimID, br.ID, task, gh, sidecar)
 		case "jira":
 			cfg, err = s.setupJira(ctx, orgID, run.ID, run.ClaimID, br.ID, task, gh)
 		case "slack":
@@ -1230,11 +1230,11 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// Re-fetched rather than inherited from the first step: by now the
 		// PR's history includes whatever the earlier steps pushed, which is
 		// exactly what this step needs to see.
-		cfg.prSkeleton = renderPRSkeleton(ctx, prReadClient(gh, execSandbox), owner, repo, prNumber)
+		cfg.prSkeleton = renderPRSkeleton(ctx, prReadClient(gh, sidecar), owner, repo, prNumber)
 		// The rehydrate's git runs through this claim's own sidecar proxy — the
 		// sandbox is already up (dispatchClaimedRun brings it up before calling
 		// here), so the proxy is live by the time the rebuild fetches.
-		wt, prov, err := s.ensureWorkspace(ctx, orgID, runForWS, s.gitSeedFor(ctx, orgID, owner, repo, execSandbox))
+		wt, prov, err := s.ensureWorkspace(ctx, orgID, runForWS, s.gitSeedFor(ctx, orgID, owner, repo, sidecar))
 		if err != nil {
 			return runConfig{}, err
 		}

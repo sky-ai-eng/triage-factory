@@ -483,7 +483,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// closure, and the former in-process socket server over live stores is
 	// gone with the fused single-process shape.
 	var startAgentHost func() (sandbox.Mount, io.Closer, error)
-	if cfg.execSandbox != nil {
+	if cfg.sidecar != nil {
 		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
 			return agenthost.SocketMountFor(runID), noopCloser{}, nil
 		}
@@ -511,7 +511,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	// Local mode's half of the real-gh channel: a loopback injector holding the
 	// org's live credential, fronted by the TF-owned pinned binary. Multi gets
-	// the same channel from the sidecar (cfg.execSandbox below), so exactly one
+	// the same channel from the sidecar (cfg.sidecar below), so exactly one
 	// of the two is ever non-nil. A host that can't provision it degrades to the
 	// scoped exec verbs rather than failing the run.
 	localGH, localGHCloser := s.startLocalGHChannel(ctx, orgID, runID, cfg.owner, agenthost.RunInfo{
@@ -522,7 +522,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 	})
 	defer func() { _ = localGHCloser.Close() }()
-	ghChannel := cfg.execSandbox.ghChannel(runID)
+	ghChannel := cfg.sidecar.ghChannel(runID)
 	if ghChannel == nil {
 		ghChannel = localGH
 	}
@@ -559,8 +559,8 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		// sidecar's proxy env so it launches into them and holds no
 		// credential — the sidecar owns the LLM/git/egress proxies + the
 		// live SigV4 refresh. nil in local (no sandbox).
-		PrebuiltNetwork:  cfg.execSandbox.runNetwork(),
-		PrebuiltProxyEnv: cfg.execSandbox.proxyEnv(),
+		PrebuiltNetwork:  cfg.sidecar.runNetwork(),
+		PrebuiltProxyEnv: cfg.sidecar.jailEnv(),
 		StartAgentHost:   startAgentHost,
 		// Real-gh channel: the sidecar's injector + mounted binary in multi, the
 		// loopback injector + fetched binary in local. nil when neither could be

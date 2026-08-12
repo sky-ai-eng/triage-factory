@@ -92,12 +92,12 @@ type runConfig struct {
 	// worktree instead.
 	memorySourcePath string
 
-	// execSandbox, when non-nil (TF_ROLE=executor), is the run network +
+	// sidecar, when non-nil (TF_ROLE=executor), is the run network +
 	// credential sidecar + proxy coordinates the dispatcher stood up before
 	// workspace setup. runAgent threads it into agentproc.RunOptions
 	// (PrebuiltNetwork/PrebuiltProxyEnv) and the agenthost (ProxyCredentials);
 	// the dispatcher owns its teardown (after runAgent returns).
-	execSandbox *executorSandbox
+	sidecar *runSidecar
 }
 
 // ErrTaskBusy is returned by Delegate on the event path when the fenced
@@ -474,13 +474,13 @@ func cloneHostBase(cloneURL string) string {
 
 // setupGitHub prepares a worktree for a GitHub PR task.
 //
-// On the executor path (execSandbox non-nil) the GetPR client and the host-side
+// On the executor path (sidecar non-nil) the GetPR client and the host-side
 // clone both route through the run's credential sidecar — the client against
 // the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
 // orchestrator holds no GitHub credential for either. Elsewhere (all/local)
 // ghClient is the resolver-built client and the clone injects a real token.
-func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client, execSandbox *executorSandbox) (runConfig, error) {
-	ghClient = prReadClient(ghClient, execSandbox)
+func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client, sidecar *runSidecar) (runConfig, error) {
+	ghClient = prReadClient(ghClient, sidecar)
 	if ghClient == nil {
 		return runConfig{}, fmt.Errorf("GitHub credentials not configured")
 	}
@@ -571,8 +571,8 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 	// injected credential (the former in-process token mint is gone with the
 	// fused single-process shape).
 	var cloneAuth worktree.CloneAuth
-	if execSandbox != nil {
-		cloneAuth = worktree.CloneAuthViaGitProxy(execSandbox.res.GitProxyURL, cloneHostBase(upstreamCloneURL), execSandbox.res.GitProxyToken)
+	if sidecar != nil {
+		cloneAuth = worktree.CloneAuthViaGitProxy(sidecar.res.GitProxyURL, cloneHostBase(upstreamCloneURL), sidecar.res.GitProxyToken)
 	}
 	// rootKey (the blueprint run id), not this step's run id, keys the worktree
 	// dir + its per-run push config — the PR worktree IS the shared run-root, and
@@ -642,9 +642,9 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 // executor path every GitHub read routes through the run's credential
 // sidecar (the REST proxy), so the orchestrator holds no token; elsewhere
 // the resolver-built client is already the right one.
-func prReadClient(ghClient *ghclient.Client, execSandbox *executorSandbox) *ghclient.Client {
-	if execSandbox != nil {
-		return ghclient.NewProxyClient(execSandbox.res.GitHubAPIURL, execSandbox.res.GitHubAPIToken)
+func prReadClient(ghClient *ghclient.Client, sidecar *runSidecar) *ghclient.Client {
+	if sidecar != nil {
+		return ghclient.NewProxyClient(sidecar.res.GitHubAPIURL, sidecar.res.GitHubAPIToken)
 	}
 	return ghClient
 }

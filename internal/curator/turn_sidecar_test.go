@@ -13,26 +13,26 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// fakeTurnSandbox stands in for *delegate.executorSandbox behind the
-// curator.TurnSandbox seam.
-type fakeTurnSandbox struct {
+// fakeTurnSidecar stands in for *delegate.runSidecar behind the
+// curator.TurnSidecar seam.
+type fakeTurnSidecar struct {
 	net    *sandbox.RunNetwork
 	env    []string
 	closed atomic.Bool
 }
 
-func (f *fakeTurnSandbox) Network() *sandbox.RunNetwork                { return f.net }
-func (f *fakeTurnSandbox) ProxyEnv() []string                          { return f.env }
-func (f *fakeTurnSandbox) GHChannel(string) *agentproc.GHChannelParams { return nil }
-func (f *fakeTurnSandbox) GitCloneAuth(string) worktree.CloneAuth      { return worktree.CloneAuth{} }
-func (f *fakeTurnSandbox) Close()                                      { f.closed.Store(true) }
+func (f *fakeTurnSidecar) Network() *sandbox.RunNetwork                { return f.net }
+func (f *fakeTurnSidecar) JailEnv() []string                           { return f.env }
+func (f *fakeTurnSidecar) GHChannel(string) *agentproc.GHChannelParams { return nil }
+func (f *fakeTurnSidecar) GitCloneAuth(string) worktree.CloneAuth      { return worktree.CloneAuth{} }
+func (f *fakeTurnSidecar) Close()                                      { f.closed.Store(true) }
 
-// TestDispatch_ExecutorPath_ConsumesTurnSandbox pins the executor wiring:
-// when the SetTurnSandbox seam is present, dispatch stands the turn
+// TestDispatch_ExecutorPath_ConsumesTurnSidecar pins the executor wiring:
+// when the SetTurnSidecar seam is present, dispatch stands the turn
 // sandbox up, threads its prebuilt network + proxy env into RunOptions, hands
 // back the sidecar-hosted socket mount (a noopCloser, not the in-process
 // daemon), and tears the sandbox down after the turn.
-func TestDispatch_ExecutorPath_ConsumesTurnSandbox(t *testing.T) {
+func TestDispatch_ExecutorPath_ConsumesTurnSidecar(t *testing.T) {
 	t.Setenv("TF_STATE_ROOT", t.TempDir())
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "homed")
@@ -43,11 +43,11 @@ func TestDispatch_ExecutorPath_ConsumesTurnSandbox(t *testing.T) {
 
 	fakeNet := &sandbox.RunNetwork{}
 	fakeEnv := []string{"LLM_PROXY_URL=http://127.0.0.1:9"}
-	sb := &fakeTurnSandbox{net: fakeNet, env: fakeEnv}
+	sb := &fakeTurnSidecar{net: fakeNet, env: fakeEnv}
 
 	var gotOrg, gotConv, gotUser, gotTeam string
 	bringUpCalled := make(chan struct{}, 1)
-	c.SetTurnSandbox(func(_ context.Context, orgID, conversationID, userID, teamID string, _ []string) (TurnSandbox, error) {
+	c.SetTurnSidecar(func(_ context.Context, orgID, conversationID, userID, teamID string, _ []string) (TurnSidecar, error) {
 		gotOrg, gotConv, gotUser, gotTeam = orgID, conversationID, userID, teamID
 		bringUpCalled <- struct{}{}
 		return sb, nil
@@ -73,7 +73,7 @@ func TestDispatch_ExecutorPath_ConsumesTurnSandbox(t *testing.T) {
 	select {
 	case <-bringUpCalled:
 	default:
-		t.Fatal("SetTurnSandbox seam was not invoked on the executor path")
+		t.Fatal("SetTurnSidecar seam was not invoked on the executor path")
 	}
 	conv, err := sqlitestore.New(database).Curator.GetLiveConversation(t.Context(), runmode.LocalDefaultOrgID, projectID, runmode.LocalDefaultUserID)
 	if err != nil || conv == nil {
@@ -115,10 +115,10 @@ func TestDispatch_ExecutorPath_ConsumesTurnSandbox(t *testing.T) {
 	}
 }
 
-// TestDispatch_InProcessPath_SkipsTurnSandbox pins that control/all/local (no
-// SetTurnSandbox seam) leave RunOptions' prebuilt fields nil, so agentproc runs
+// TestDispatch_InProcessPath_SkipsTurnSidecar pins that control/all/local (no
+// SetTurnSidecar seam) leave RunOptions' prebuilt fields nil, so agentproc runs
 // its own in-process credential resolution + network exactly as before.
-func TestDispatch_InProcessPath_SkipsTurnSandbox(t *testing.T) {
+func TestDispatch_InProcessPath_SkipsTurnSidecar(t *testing.T) {
 	t.Setenv("TF_STATE_ROOT", t.TempDir())
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "local")
@@ -126,7 +126,7 @@ func TestDispatch_InProcessPath_SkipsTurnSandbox(t *testing.T) {
 	c := New(stores, nil, "test-model")
 	t.Cleanup(c.Shutdown)
 	t.Cleanup(startTestClaimLoop(t, stores, c))
-	// No SetTurnSandbox — the untouched in-process path.
+	// No SetTurnSidecar — the untouched in-process path.
 
 	optsCh := make(chan agentproc.RunOptions, 1)
 	c.runAgent = func(_ context.Context, opts agentproc.RunOptions, _ agentproc.Sink) (*agentproc.Outcome, error) {

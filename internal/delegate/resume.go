@@ -248,11 +248,11 @@ type ResumeOptions struct {
 	// to the schema defaults for the absent-auto-deny resolve.
 	TeamID string
 
-	// execSandbox, when non-nil (TF_ROLE=executor), is the run network +
+	// sidecar, when non-nil (TF_ROLE=executor), is the run network +
 	// credential sidecar the dispatcher stood up for this resume turn.
 	// ResumeWithMessage threads it into agentproc.RunOptions and the agenthost;
 	// the dispatcher owns its teardown. nil on all/local.
-	execSandbox *executorSandbox
+	sidecar *runSidecar
 
 	// claimID is the engagement driving this resume — its own claims row, not
 	// the one the run was originally claimed under (a resume is a fresh
@@ -363,7 +363,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// so none is built — the former in-process socket server over live
 	// stores is gone with the fused single-process shape.
 	var startAgentHost func() (sandbox.Mount, io.Closer, error)
-	if opts.execSandbox != nil {
+	if opts.sidecar != nil {
 		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
 			return agenthost.SocketMountFor(runID), noopCloser{}, nil
 		}
@@ -382,7 +382,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 	})
 	defer func() { _ = localGHCloser.Close() }()
-	ghChannel := opts.execSandbox.ghChannel(runID)
+	ghChannel := opts.sidecar.ghChannel(runID)
 	if ghChannel == nil {
 		ghChannel = localGH
 	}
@@ -410,8 +410,8 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		RecordSandboxActuals: s.recordSandboxActuals,
 		// Multi mode: launch into the prebuilt network + the sidecar's proxy
 		// env; the sidecar holds the credentials. nil in local (no sandbox).
-		PrebuiltNetwork:  opts.execSandbox.runNetwork(),
-		PrebuiltProxyEnv: opts.execSandbox.proxyEnv(),
+		PrebuiltNetwork:  opts.sidecar.runNetwork(),
+		PrebuiltProxyEnv: opts.sidecar.jailEnv(),
 		StartAgentHost:   startAgentHost,
 		GHChannel:        ghChannel,
 		// Re-mount the step skill this run's original claim staged, when it's

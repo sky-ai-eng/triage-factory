@@ -23,16 +23,25 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// executorSandbox is the run network + credential sidecar + proxy coordinates
-// the dispatcher stands up on TF_ROLE=executor BEFORE the pre-sandbox clone, so
-// the clone (and GetPR, and the agenthost) route through the sidecar's proxies
-// while the orchestrator holds no credential. It owns its own teardown, which
-// the dispatcher defers until after the agent run returns.
-type executorSandbox struct {
-	net     *sandbox.RunNetwork
-	sidecar sandbox.LaunchedSidecar
-	conn    *sidecarproto.Conn
-	res     *sidecarproto.StartProxiesResult
+// runSidecar is this engagement's credential sidecar — the process holding its
+// unsealed bundle — plus the network that process's proxies bind on and the
+// coordinates for reaching them. The dispatcher stands it up on
+// TF_ROLE=executor BEFORE the pre-sandbox clone, so the clone (and GetPR, and
+// the agenthost) route through those proxies while the orchestrator holds no
+// credential. It owns its own teardown, which the dispatcher defers until after
+// the agent run returns.
+//
+// It is NOT the jail, and the distinction is load-bearing: the jail is built
+// later by the cap-broker, out of the network and env this hands to
+// agentproc.Run. Hence jailEnv and engineLLMEnv rather than a pair of
+// env-shaped names — one is what the jail is launched with, the other is what
+// this process dials, and a native engagement's jail is deliberately given no
+// model-provider channel at all.
+type runSidecar struct {
+	net  *sandbox.RunNetwork
+	proc sandbox.LaunchedSidecar
+	conn *sidecarproto.Conn
+	res  *sidecarproto.StartProxiesResult
 
 	// runID is the key every per-run file under the socket root is named
 	// after — the conversation id, for a delegated run and a curator turn
@@ -53,7 +62,7 @@ type executorSandbox struct {
 	credNudge chan credRelayNudge
 }
 
-// Close tears the executor sandbox down in the order that keeps the veth alive
+// Close tears the run sidecar down in the order that keeps the veth alive
 // under anything still using it: stop the refresh relay, stop the supervision
 // reader, SIGKILL the sidecar (freeing its proxies + unsealed bundle), remove
 // the per-run files that sidecar left under the socket root, then tear down the
@@ -65,25 +74,25 @@ type executorSandbox struct {
 // hygiene: the run's next engagement clears whatever is left regardless, and
 // this is what keeps a long-lived executor's tmpfs socket root from carrying
 // one orphaned pair per run id it ever ran.
-func (e *executorSandbox) Close() {
-	if e == nil {
+func (rs *runSidecar) Close() {
+	if rs == nil {
 		return
 	}
 	started := time.Now()
-	if e.stopRelay != nil {
-		e.relayOnce.Do(func() { close(e.stopRelay) })
+	if rs.stopRelay != nil {
+		rs.relayOnce.Do(func() { close(rs.stopRelay) })
 	}
-	if e.conn != nil {
-		_ = e.conn.Close()
+	if rs.conn != nil {
+		_ = rs.conn.Close()
 	}
-	if e.sidecar != nil {
-		_ = e.sidecar.Close()
+	if rs.proc != nil {
+		_ = rs.proc.Close()
 	}
-	if e.net != nil {
-		if e.runID != "" {
-			sandbox.ReleaseRunCellFiles(e.runID, e.net.Idx)
+	if rs.net != nil {
+		if rs.runID != "" {
+			sandbox.ReleaseRunCellFiles(rs.runID, rs.net.Idx)
 		}
-		_ = e.net.Close()
+		_ = rs.net.Close()
 	}
 	// A stop that queues a message re-claims the conversation within a scan
 	// tick, so this teardown routinely overlaps its own successor's bring-up.
@@ -92,7 +101,7 @@ func (e *executorSandbox) Close() {
 	// it took is worth having in the log next to the successor's first line.
 	if elapsed := time.Since(started); elapsed > slowCellTeardown {
 		dispatchLog.Warn("cell teardown was slow; the run's subnet index and sidecar uid stayed held for that long",
-			"run", e.runID, "took", elapsed)
+			"run", rs.runID, "took", elapsed)
 	}
 }
 
@@ -121,16 +130,16 @@ type credRelayNudge struct {
 
 // nudgeCredentialRelay drives one out-of-band read-and-push and waits for it,
 // bounded by ctx on both sides — the handoff to the relay goroutine and the
-// work it then does. Nil-safe, and safe on a torn-down sandbox: a stopped relay
+// work it then does. Nil-safe, and safe on a torn-down sidecar: a stopped relay
 // answers immediately instead of blocking until ctx expires.
-func (e *executorSandbox) nudgeCredentialRelay(ctx context.Context) error {
-	if e == nil || e.credNudge == nil {
+func (rs *runSidecar) nudgeCredentialRelay(ctx context.Context) error {
+	if rs == nil || rs.credNudge == nil {
 		return nil
 	}
 	req := credRelayNudge{ctx: ctx, done: make(chan error, 1)}
 	select {
-	case e.credNudge <- req:
-	case <-e.stopRelay:
+	case rs.credNudge <- req:
+	case <-rs.stopRelay:
 		return errors.New("credential refresh relay has stopped")
 	case <-ctx.Done():
 		return ctx.Err()
@@ -143,35 +152,36 @@ func (e *executorSandbox) nudgeCredentialRelay(ctx context.Context) error {
 	}
 }
 
-// proxyEnv is the non-secret sandbox env the sidecar's proxies produced (git /
-// egress URLs + placeholders + the single GIT_CONFIG_* block, and the LLM proxy
-// for an engagement that dials it from inside the jail), threaded into
-// agentproc.RunOptions.PrebuiltProxyEnv. nil-safe.
-func (e *executorSandbox) proxyEnv() []string {
-	if e == nil || e.res == nil {
+// jailEnv is the non-secret env the jail is launched with: the coordinates and
+// placeholders the sidecar's proxies produced (git / egress URLs, the single
+// GIT_CONFIG_* block, and the LLM proxy for an engagement that dials it from
+// inside the jail), threaded into agentproc.RunOptions.PrebuiltProxyEnv.
+// nil-safe.
+func (rs *runSidecar) jailEnv() []string {
+	if rs == nil || rs.res == nil {
 		return nil
 	}
-	return e.res.Env
+	return rs.res.Env
 }
 
-// llmEnv is this engagement's provider coordinates for an engine that runs in
+// engineLLMEnv is this engagement's provider coordinates for an engine that runs in
 // THIS process: the sidecar's LLM proxy address plus the per-run placeholder.
-// Read separately from proxyEnv because the two answer different questions —
+// Read separately from jailEnv because the two answer different questions —
 // what the jail is pointed at versus what the executor dials — and a native
 // engagement's jail is deliberately pointed at nothing. nil-safe.
-func (e *executorSandbox) llmEnv() []string {
-	if e == nil || e.res == nil {
+func (rs *runSidecar) engineLLMEnv() []string {
+	if rs == nil || rs.res == nil {
 		return nil
 	}
-	return e.res.LLMEnv
+	return rs.res.LLMEnv
 }
 
 // runNetwork is the prebuilt network handed to agentproc.RunOptions.PrebuiltNetwork.
-func (e *executorSandbox) runNetwork() *sandbox.RunNetwork {
-	if e == nil {
+func (rs *runSidecar) runNetwork() *sandbox.RunNetwork {
+	if rs == nil {
 		return nil
 	}
-	return e.net
+	return rs.net
 }
 
 // ghChannel is the real-gh channel params threaded into agentproc.RunOptions.
@@ -179,35 +189,35 @@ func (e *executorSandbox) runNetwork() *sandbox.RunNetwork {
 // placeholder, plus the per-run cert source path the orchestrator bind-mounts
 // (the sidecar wrote it to the same deterministic path). nil when no injector
 // was bound (the run then keeps no gh binary/env). runID resolves the cert path.
-func (e *executorSandbox) ghChannel(runID string) *agentproc.GHChannelParams {
-	if e == nil || e.res == nil || e.res.GHChannelHost == "" {
+func (rs *runSidecar) ghChannel(runID string) *agentproc.GHChannelParams {
+	if rs == nil || rs.res == nil || rs.res.GHChannelHost == "" {
 		return nil
 	}
 	return &agentproc.GHChannelParams{
-		Host:           e.res.GHChannelHost,
-		Token:          e.res.GHChannelToken,
+		Host:           rs.res.GHChannelHost,
+		Token:          rs.res.GHChannelToken,
 		CertSourcePath: agenthost.CertPathFor(runID),
 	}
 }
 
 // GHChannel is the exported accessor the curator seam consumes (parallel to
-// Network / ProxyEnv), so a homed curator turn wires the same gh channel.
-func (e *executorSandbox) GHChannel(runID string) *agentproc.GHChannelParams {
-	return e.ghChannel(runID)
+// Network / JailEnv), so a homed curator turn wires the same gh channel.
+func (rs *runSidecar) GHChannel(runID string) *agentproc.GHChannelParams {
+	return rs.ghChannel(runID)
 }
 
-// Network / ProxyEnv / GitCloneAuth are the exported accessors the curator seam
-// (internal/curator's TurnSandbox) consumes — a homed curator turn runs under
-// this same executor sandbox but curator can't import the unexported delegate
+// Network / JailEnv / GitCloneAuth are the exported accessors the curator seam
+// (internal/curator's TurnSidecar) consumes — a homed curator turn runs under
+// this same run sidecar, but curator can't import the unexported delegate
 // type, so it depends on an interface these satisfy. Kept thin wrappers over
 // the run-path accessors so both paths read the same coordinates.
 
 // Network is the prebuilt run network for a curator turn (PrebuiltNetwork).
-func (e *executorSandbox) Network() *sandbox.RunNetwork { return e.runNetwork() }
+func (rs *runSidecar) Network() *sandbox.RunNetwork { return rs.runNetwork() }
 
-// ProxyEnv is the non-secret sandbox proxy env for a curator turn
+// JailEnv is the env a curator turn's jail is launched with
 // (PrebuiltProxyEnv).
-func (e *executorSandbox) ProxyEnv() []string { return e.proxyEnv() }
+func (rs *runSidecar) JailEnv() []string { return rs.jailEnv() }
 
 // GitCloneAuth builds the CloneAuth that routes a host-side fetch of cloneURL
 // through this turn's sidecar git proxy — the curator materialize's equivalent
@@ -215,11 +225,11 @@ func (e *executorSandbox) ProxyEnv() []string { return e.proxyEnv() }
 // so the orchestrator holds no token and the real credential is injected
 // host-side on the sidecar's upstream hop. Empty (a no-op CloneAuth) when the
 // sidecar exposes no git proxy.
-func (e *executorSandbox) GitCloneAuth(cloneURL string) worktree.CloneAuth {
-	if e == nil || e.res == nil {
+func (rs *runSidecar) GitCloneAuth(cloneURL string) worktree.CloneAuth {
+	if rs == nil || rs.res == nil {
 		return worktree.CloneAuth{}
 	}
-	return worktree.CloneAuthViaGitProxy(e.res.GitProxyURL, cloneHostBase(cloneURL), e.res.GitProxyToken)
+	return worktree.CloneAuthViaGitProxy(rs.res.GitProxyURL, cloneHostBase(cloneURL), rs.res.GitProxyToken)
 }
 
 // loopRunsInJail reports whether this runtime's agent loop executes inside the
@@ -244,7 +254,7 @@ func loopRunsInJail(runtime string) bool {
 	return runtime == domain.ConversationRuntimeSDK
 }
 
-// bringUpExecutorSandbox stands up the run network, launches the credential
+// bringUpRunSidecar stands up the run network, launches the credential
 // sidecar, provisions it (publishing the sidecar's public key so the brain
 // seals THIS run's bundle to it, without the orchestrator ever unsealing), and
 // binds the sidecar's proxies on the veth. Gated on the MODE, not the role:
@@ -259,7 +269,7 @@ func loopRunsInJail(runtime string) bool {
 //
 // On any error the partial state (network, sidecar) is already torn down; the
 // caller does not Close a nil return.
-func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run *domain.Conversation, task domain.Task) (*executorSandbox, error) {
+func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *domain.Conversation, task domain.Task) (*runSidecar, error) {
 	if runmode.Current() != runmode.ModeMulti {
 		return nil, nil
 	}
@@ -410,7 +420,7 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 		auditHost.SetGitHubCredential(res.GitHubCredential)
 	}
 
-	es := &executorSandbox{runID: run.ID, net: net, sidecar: sc, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
+	es := &runSidecar{runID: run.ID, net: net, proc: sc, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
 	_, myBootEpoch := s.executorIdentity()
 
 	// A relayed `workspace add` widens this run's authorized repo set, which
@@ -467,8 +477,8 @@ const credRelayStepTimeout = 20 * time.Second
 // channel (run vs curator). nudge carries out-of-band requests from a caller
 // that can't wait out the tick (the relayed `workspace add`); nil for the
 // curator, which never widens a repo set. Runs until stop is closed
-// (executorSandbox.Close) or the supervision channel dies. Never fires on
-// all/local (no executor sandbox).
+// (runSidecar.Close) or the supervision channel dies. Never fires on
+// all/local (no run sidecar).
 func (s *Spawner) relayCredentialRefreshes(subject string, getter credBundleGetter, bootEpoch int64, conn *sidecarproto.Conn, nudge <-chan credRelayNudge, stop <-chan struct{}) {
 	if getter == nil {
 		return
@@ -632,7 +642,7 @@ func gitAuthorizeOutcome(dec gitproxy.Decision) string {
 //
 // A timeout (brain down at claim time) surfaces as an error, failing the
 // bring-up; the dispatcher then requeues the run's setup like any transient
-// setup failure. Only the executor role reaches here (bringUpExecutorSandbox
+// setup failure. Only the executor role reaches here (bringUpRunSidecar
 // returns nil otherwise).
 func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProvisionFunc {
 	myID, myBootEpoch := s.executorIdentity()
