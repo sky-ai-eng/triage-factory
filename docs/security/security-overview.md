@@ -144,12 +144,12 @@ it holds and the *hostile input* it is exposed to never overlap:
   tenant's material, exposed only to that run's own traffic, freed when the run's
   process exits (§5). Its exposure runs both ways: besides the upstream
   responses its proxies parse, the `gh` injector reads the body of an outbound
-  GraphQL request to learn which mutation it performs — a document the agent
-  composed, read in the process holding that run's live GitHub credential. The
-  read is deliberately narrow (one endpoint, a size cap, parse-fail refuses the
-  request) and changes nothing about what is forwarded; it is what makes a
-  write policy possible at all against a protocol that names the act only in
-  the body.
+  GraphQL request to learn which mutation it performs. That read is what makes
+  a write policy possible at all against a protocol that names the act only in
+  the body, and it is narrow by construction — one endpoint, a size cap, a
+  grammar that collects top-level field names and skips everything beneath them
+  uninterpreted, parse-fail refuses the request, and nothing forwarded is
+  altered. §4.1 covers what a fault in it would and would not yield.
 - **sandbox** — the gVisor jail running the agent. No capabilities, no
   credentials (Property B). What it is *pointed at* narrows further with the
   runtime: a jail whose agent loop runs outside it — the native runtime, where
@@ -172,6 +172,14 @@ kernel at syscall time.
   compromising the orchestrator/dispatcher core yields **no** agent credentials,
   and compromising a single run's sidecar yields only **that run's** material —
   never the co-located set (§5).
+- Both are Go, so the realistic fault in a parser here is a panic or a
+  misclassification rather than memory corruption, and both are contained. Every
+  goroutine in the sidecar's own packages either recovers or documents why it
+  cannot panic (the rule is stated in `cmd/runsidecar`'s package doc), so a
+  panic costs the request or the connection, not the process holding the run's
+  credentials. A misclassification fails closed where it matters: the `gh`
+  channel's write gate refuses any request whose act it could not name, so a
+  document the reader cannot parse is refused rather than forwarded.
 - There is no attacker-reachable path to the cap-broker. It parses no network,
   agent, or repository data; reaching it requires first owning the orchestrator
   and then finding a flaw in the narrow RPC between them.
