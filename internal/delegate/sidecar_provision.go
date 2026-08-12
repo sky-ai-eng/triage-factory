@@ -31,12 +31,8 @@ import (
 // credential. It owns its own teardown, which the dispatcher defers until after
 // the agent run returns.
 //
-// It is NOT the jail, and the distinction is load-bearing: the jail is built
-// later by the cap-broker, out of the network and env this hands to
-// agentproc.Run. Hence jailEnv and engineLLMEnv rather than a pair of
-// env-shaped names — one is what the jail is launched with, the other is what
-// this process dials, and a native engagement's jail is deliberately given no
-// model-provider channel at all.
+// It is NOT the jail. The jail is built later by the cap-broker, out of the network
+// and env this hands to agentproc.Run.
 type runSidecar struct {
 	net  *sandbox.RunNetwork
 	proc sandbox.LaunchedSidecar
