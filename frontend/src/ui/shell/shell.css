@@ -29,6 +29,12 @@
 .sh-rail {
   flex: none;
   width: 52px;
+  /* Above page content. A page may place a positioned layer of its own — the
+     factory floods the viewport with its scene — and the frame has to survive
+     it. Painting order by DOM position alone does not guarantee that: page
+     content comes after the rail in the tree, so anything positioned would win.
+     Stated here rather than defended page by page. */
+  z-index: 2;
   background: var(--color-sunk);
   border-right: 1px solid var(--color-line-1);
   display: flex;
@@ -374,6 +380,12 @@
 .sh-head {
   height: 55px;
   flex: none;
+  /* Opaque, and above the page for the same reason as the rail. The band never
+     needed to say so while nothing could get behind it; a page that fills the
+     viewport puts something there. */
+  position: relative;
+  z-index: 2;
+  background: var(--color-ground);
   display: flex;
   align-items: center;
   gap: 10px;

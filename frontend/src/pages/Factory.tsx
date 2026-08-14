@@ -407,18 +407,28 @@ export default function Factory() {
 
   return (
     <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd}>
-      {/* Full bleed: the negative margins cancel the shell body's gutter, and
-          the height adds it back so the scene spans the whole frame.
-
-          The height has to sit HERE, not only on the canvas holder inside.
-          A percentage resolves against the parent, so with an auto-height
-          wrapper the chain broke and — because a canvas has an intrinsic size
-          — it broke circularly: the wrapper sized itself to the canvas, the
-          canvas resized to the wrapper, and toggling the rail changed the
-          width, which fed back into the height. An empty div would merely have
-          collapsed; the canvas made it look like it was working. */}
+      {/* The HUD layer. Sized to the page area — inside the rail and below the
+          header — so every control below sits clear of the chrome, the way it
+          would on any other page. */}
       <div className="relative -mx-8 -my-8 h-[calc(100%+4rem)] overflow-hidden">
-        <div ref={containerRef} className="relative h-full w-full overflow-hidden" />
+        {/* The world. Fixed to the VIEWPORT, not to the page area, and it is the
+            only element here that is.
+
+            The rail animates its width over 220ms. A canvas sized to the page
+            area follows that, which means a ResizeObserver firing every frame
+            of the transition and engine.resize() reallocating the framebuffer
+            each time — the scene visibly tearing down and coming back. Sizing
+            it to the window instead means the rail moving is simply not an
+            event the scene can observe: no resize, no reallocation, nothing to
+            flash.
+
+            It also reads better. This is the most game-like surface in the
+            product, and in a game the world does not disappear when the HUD
+            changes — the HUD is drawn over a world that was already there. The
+            rail and header now pass over the scene rather than displacing it,
+            which costs the pixels they cover and buys a world that holds
+            still. */}
+        <div ref={containerRef} className="fixed inset-0 z-0" />
         {/* Per-page team filter — narrows the entity belt.
             Gated on ≥2 teams so solo users get no empty overlay box. */}
         {teams.length >= 2 && (
