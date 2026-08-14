@@ -199,23 +199,18 @@ function TeamPageBody({
   const promptsTab = tab === 'prompts'
 
   return (
-    // Prompts is a full binding-graph canvas: give it a viewport-tall flex
-    // column (nav + page padding ≈ 8rem) so the embedded editor fills the space
-    // below the header + tab strip. Members + Settings stay a narrow column.
-    <div
-      className={`mx-auto ${
-        promptsTab ? 'flex h-full max-w-6xl flex-col' : 'max-w-3xl'
-      }`}
-    >
+    // Prompts is a full binding-graph canvas: give it a full-height flex column
+    // so the embedded editor fills the space below the header + tab strip. The
+    // height comes from the shell body rather than from the viewport minus a
+    // guess at the chrome above it. Members + Settings stay a narrow column.
+    <div className={`mx-auto ${promptsTab ? 'flex h-full max-w-6xl flex-col' : 'max-w-3xl'}`}>
       <div className="mb-5 flex shrink-0 items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-warm-2 text-warm">
             <Users size={15} />
           </span>
           <div>
-            <h1 className="text-section font-semibold leading-tight text-ink-1">
-              {team.name}
-            </h1>
+            <h1 className="text-section font-semibold leading-tight text-ink-1">{team.name}</h1>
             <p className="text-reported leading-tight text-ink-3">
               Members, settings, Slack, and prompts.
             </p>

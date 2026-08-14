@@ -407,12 +407,18 @@ export default function Factory() {
 
   return (
     <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd}>
-      <div className="relative -mx-8 -my-8 overflow-hidden">
-        <div
-          ref={containerRef}
-          className="relative w-full overflow-hidden"
-          style={{ height: 'calc(100% + 4rem)' }}
-        />
+      {/* Full bleed: the negative margins cancel the shell body's gutter, and
+          the height adds it back so the scene spans the whole frame.
+
+          The height has to sit HERE, not only on the canvas holder inside.
+          A percentage resolves against the parent, so with an auto-height
+          wrapper the chain broke and — because a canvas has an intrinsic size
+          — it broke circularly: the wrapper sized itself to the canvas, the
+          canvas resized to the wrapper, and toggling the rail changed the
+          width, which fed back into the height. An empty div would merely have
+          collapsed; the canvas made it look like it was working. */}
+      <div className="relative -mx-8 -my-8 h-[calc(100%+4rem)] overflow-hidden">
+        <div ref={containerRef} className="relative h-full w-full overflow-hidden" />
         {/* Per-page team filter — narrows the entity belt.
             Gated on ≥2 teams so solo users get no empty overlay box. */}
         {teams.length >= 2 && (
