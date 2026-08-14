@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Triage Factory — design language</title>
+<meta name="description" content="The Triage Factory design language: thesis, light model, colour, state, structure, type, motion and data visualisation." />
+<style>
+  /* Minimal reset — the artifact host provided one; a standalone file does not. */
+  *, *::before, *::after { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; }
+  h1, h2, h3, h4, p, ol, ul { margin: 0; }
+  button { font-family: inherit; }
+  img, svg { display: block; max-width: 100%; }
+</style>
+<style>
+  :root {
+    --ground: #f7f5f2; --raised: #fffdfb; --sunk: #f2efea;
+    --ink: #1a1a1a; --ink-2: #4a4541; --ink-3: #6b6560; --ink-4: #9a938c;
+    --line: rgba(0,0,0,.07); --line-2: rgba(0,0,0,.15);
+    --tint: rgba(0,0,0,.03); --tint-2: rgba(0,0,0,.06); --tint-soft: rgba(0,0,0,.014);
+    --warm: #a85a3a; --warm-ink: #ffffff;
+    --cool: #1f6f8b;
+    --alarm: #a84545;
+    --float: 0 10px 34px -18px rgba(0,0,0,.35);
+    --sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+    --mono: ui-monospace, 'SF Mono', 'Fira Code', Menlo, monospace;
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    --sweep: 2.2s;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #161311; --raised: #1e1a17; --sunk: #110f0d;
+      --ink: #ece7e0; --ink-2: #b8b0a8; --ink-3: #8a827a; --ink-4: #6d665f;
+      --line: rgba(255,255,255,.08); --line-2: rgba(255,255,255,.17);
+      --tint: rgba(255,255,255,.035); --tint-2: rgba(255,255,255,.07); --tint-soft: rgba(255,255,255,.03);
+      --warm: #d18a64; --warm-ink: #16110d; --cool: #7ec8e0; --alarm: #d97777;
+      --float: 0 10px 34px -18px rgba(0,0,0,.8);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #161311; --raised: #1e1a17; --sunk: #110f0d;
+    --ink: #ece7e0; --ink-2: #b8b0a8; --ink-3: #8a827a; --ink-4: #6d665f;
+    --line: rgba(255,255,255,.08); --line-2: rgba(255,255,255,.17);
+    --tint: rgba(255,255,255,.035); --tint-2: rgba(255,255,255,.07); --tint-soft: rgba(255,255,255,.03);
+    --warm: #d18a64; --warm-ink: #16110d; --cool: #7ec8e0; --alarm: #d97777;
+    --float: 0 10px 34px -18px rgba(0,0,0,.8);
+  }
+  :root[data-theme="light"] {
+    --ground: #f7f5f2; --raised: #fffdfb; --sunk: #f2efea;
+    --ink: #1a1a1a; --ink-2: #4a4541; --ink-3: #6b6560; --ink-4: #9a938c;
+    --line: rgba(0,0,0,.07); --line-2: rgba(0,0,0,.15);
+    --tint: rgba(0,0,0,.03); --tint-2: rgba(0,0,0,.06); --tint-soft: rgba(0,0,0,.014);
+    --warm: #a85a3a; --warm-ink: #ffffff; --cool: #1f6f8b; --alarm: #a84545;
+    --float: 0 10px 34px -18px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  button { font: inherit; color: inherit; cursor: pointer; background: none; border: 0; padding: 0; }
+  :where(button):focus-visible { outline: 1.5px solid var(--warm); outline-offset: 3px; border-radius: 4px; }
+  code { font-family: var(--mono); font-size: .88em; }
+
+  .wrap { max-width: 980px; margin: 0 auto; padding: 30px 24px 80px; }
+  .lbl { font-family: var(--mono); font-size: 9px; font-weight: 600; letter-spacing: .18em; text-transform: uppercase; }
+
+  header.top { max-width: 66ch; display: flex; flex-direction: column; gap: 11px; margin-bottom: 18px; }
+  header.top .lbl { color: var(--ink-3); }
+  header.top h1 { margin: 0; font-size: 27px; font-weight: 600; letter-spacing: -.025em; line-height: 1.18; text-wrap: balance; }
+  header.top p { margin: 0; color: var(--ink-2); font-size: 14px; }
+
+  .toolbar { display: flex; gap: 18px; align-items: center; margin-bottom: 34px; }
+  .tgl { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-3); transition: color .2s; }
+  .tgl:hover { color: var(--ink); }
+  .tgl .sw { width: 22px; height: 12px; border-radius: 999px; background: var(--tint-2); position: relative; transition: background .2s; }
+  .tgl .sw::after { content:''; position:absolute; top:2px; left:2px; width:8px; height:8px; border-radius:999px; background: var(--ink-3); transition: transform .22s var(--ease), background .2s; }
+  .tgl[aria-pressed="true"] { color: var(--warm); }
+  .tgl[aria-pressed="true"] .sw { background: color-mix(in srgb, var(--warm) 28%, transparent); }
+  .tgl[aria-pressed="true"] .sw::after { transform: translateX(10px); background: var(--warm); }
+
+  section { margin-bottom: 54px; scroll-margin-top: 20px; }
+  .snum { display: flex; align-items: baseline; gap: 11px; margin-bottom: 5px; }
+  .snum .n { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .16em; color: var(--warm); }
+  .snum h2 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.015em; }
+  section > .sub { margin: 0 0 18px; font-size: 13px; color: var(--ink-2); max-width: 74ch; }
+  .rule { height: 1px; background: var(--line); margin: 0 0 20px; }
+  h3 { margin: 24px 0 8px; font-size: 13px; font-weight: 600; }
+  p { max-width: 74ch; }
+
+  /* the law list — the enumerable rules an agent can follow */
+  ol.laws { counter-reset: l; list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 11px; }
+  /* Marker is absolute, not a grid cell: a grid container turns bare text
+     nodes into anonymous items, so mixed <b>+text content wrapped into the
+     counter column. Block flow + padding cannot break on content shape. */
+  ol.laws li { counter-increment: l; position: relative; padding-left: 34px; font-size: 13px; line-height: 1.62; max-width: 76ch; }
+  ol.laws li::before { content: counter(l); position: absolute; left: 0; top: 4px; width: 22px; line-height: 1; font-family: var(--mono); font-size: 9.5px; font-weight: 700; color: var(--warm); }
+  ol.laws b { font-weight: 620; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; margin: 4px 0 6px; }
+  th { text-align: left; font-family: var(--mono); font-size: 9px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-4); padding: 0 12px 7px 0; border-bottom: 1px solid var(--line); }
+  td { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.k { font-family: var(--mono); font-size: 11.5px; color: var(--ink); white-space: nowrap; }
+  td.d { color: var(--ink-2); }
+  .sw2 { display: inline-block; width: 13px; height: 13px; border-radius: 3px; vertical-align: -2px; margin-right: 7px; box-shadow: inset 0 0 0 1px var(--line-2); }
+
+  .grid { display: grid; gap: 16px; }
+  .g2 { grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); }
+  .g3 { grid-template-columns: repeat(auto-fit, minmax(190px,1fr)); }
+  .g4 { grid-template-columns: repeat(auto-fit, minmax(148px,1fr)); }
+
+  .box { border-radius: 5px; padding: 13px 14px; background: var(--tint); box-shadow: inset 0 0 0 1px var(--line); }
+  .box .t { font-size: 12.5px; font-weight: 600; margin-bottom: 4px; }
+  .box .d { font-size: 11.5px; color: var(--ink-3); line-height: 1.5; }
+  .box.no { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--alarm) 30%, transparent); background: none; }
+  .box.no .t { color: var(--alarm); }
+
+  /* layers */
+  .chip { height: 58px; border-radius: 5px; position: relative; overflow: hidden; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); margin-bottom: 8px; }
+  .chip.st::after { content:''; position:absolute; inset:0; background: repeating-linear-gradient(0deg,var(--line) 0 1px,transparent 1px 9px), repeating-linear-gradient(90deg,var(--line) 0 1px,transparent 1px 9px); }
+  .chip.me::after { content:''; position:absolute; inset:-22% -6%; background: repeating-radial-gradient(ellipse at 42% 58%, transparent 0 6px, color-mix(in srgb,var(--warm) 55%,transparent) 6px 7px); }
+  .chip.em { display:grid; place-items:center; }
+  .chip.em i { width:3px; height:38px; border-radius:2px; background: var(--cool); box-shadow: 0 0 16px 1px color-mix(in srgb,var(--cool) 70%,transparent); animation: breathe 4.5s ease-in-out infinite; }
+  @keyframes breathe { 0%,100%{opacity:.5} 50%{opacity:1} }
+
+  /* card + ladder */
+  .card { position: relative; border-radius: 5px; padding: 11px 13px 10px; background: var(--tint-soft); box-shadow: inset 0 0 0 1px var(--line); display: flex; flex-direction: column; gap: 8px; }
+  .card .hd { display: flex; align-items: center; gap: 7px; }
+  /* Assignee is always visible — who owns this is a scanning fact, not
+     hover-only information. Neutral at rest: a real avatar may carry its own
+     colour, but a synthetic mark never invents one. Person and agent differ
+     by SHAPE, which is the same encoding used everywhere else. */
+  .assign { position: relative; margin-left: auto; flex-shrink: 0; }
+  .assign.open { z-index: 20; }
+  .who { display: grid; place-items: center; width: 18px; height: 18px;
+         font-family: var(--mono); font-size: 8px; font-weight: 700; letter-spacing: .03em;
+         color: var(--ink-3); box-shadow: inset 0 0 0 1.2px var(--line-2);
+         border-radius: 999px; transition: color .2s, box-shadow .2s; }
+  .who:hover { color: var(--ink-2); box-shadow: inset 0 0 0 1.2px var(--ink-4); }
+  .who.bot  { border-radius: 4px; }
+  .who.none { color: var(--ink-4); opacity: .6; }
+
+  /* The picker is a structure that DRAWS itself: the spine grows from the
+     mark, ticks extend, labels arrive. No fill and no rectangle — separation
+     comes from a soft-edged blur field that has no border to read as a panel.
+     The mark itself retires while open so the line has a clean terminus. */
+  .picker { position: absolute; inset: 0; visibility: hidden; transition: visibility 0s .34s; }
+  .assign.open .picker { visibility: visible; transition-delay: 0s; }
+  .assign.open .who { opacity: 0; pointer-events: none; }
+  .who { transition: color .2s, box-shadow .2s, opacity .18s; }
+
+  /* soft-edged blur — a haze, not a box */
+  /* Sized to the FADE, not to the menu: the mask used to reach past this
+     element's own right edge, which clipped the backdrop-filter into a hard
+     line. Centred on the labels via a 50% translate. */
+  .picker .haze { position: absolute; right: 82px; bottom: 78px; width: 400px; height: 320px;
+                  transform: translate(50%, 50%);
+                  backdrop-filter: blur(10px) saturate(.5); -webkit-backdrop-filter: blur(10px) saturate(.5);
+                  -webkit-mask-image: radial-gradient(ellipse 50% 46% at 50% 50%, #000 40%, transparent 85%);
+                          mask-image: radial-gradient(ellipse 50% 46% at 50% 50%, #000 40%, transparent 85%);
+                  opacity: 0; transition: opacity .26s var(--ease); pointer-events: none; }
+  .assign.open .picker .haze { opacity: 1; }
+
+  /* terminus ring where the mark was */
+  .picker .term { position: absolute; right: 4.5px; bottom: 4.5px; width: 9px; height: 9px; opacity: 0;
+                  transform: scale(.4) rotate(-30deg); transition: opacity .18s, transform .26s var(--ease); }
+  .picker .term::before, .picker .term::after { content: ''; position: absolute; left: 50%; top: 0;
+                  width: 1px; height: 100%; background: var(--warm); }
+  .picker .term::before { transform: translateX(-50%) rotate(45deg); }
+  .picker .term::after  { transform: translateX(-50%) rotate(-45deg); }
+  .assign.open .picker .term { opacity: .9; transform: scale(1) rotate(0deg); transition-delay: .26s; }
+
+  /* the spine grows up out of the terminus */
+  .picker .stem { position: absolute; right: 8.5px; bottom: 9px; width: 1px; height: 132px;
+                   background: color-mix(in srgb, var(--warm) 55%, transparent);
+                   transform: scaleY(0); transform-origin: bottom;
+                   transition: transform .3s var(--ease); }
+  .assign.open .picker .stem { transform: scaleY(1); }
+
+  .picker .opts { position: absolute; right: 9px; bottom: 20px;
+                  display: flex; flex-direction: column; align-items: flex-end; padding: 5px 0; }
+  .picker .opt { position: relative; text-align: right; white-space: nowrap;
+                 padding: 4px 16px 4px 10px; font-size: 12px; color: var(--ink-3);
+                 opacity: 0; transform: translateX(7px);
+                 transition: opacity .2s var(--ease), transform .2s var(--ease), color .15s; }
+  .assign.measuring .picker .opt,
+  .assign.measuring .picker .frow,
+  .assign.measuring .picker .rest { transform: none !important; transition: none !important; }
+  .assign.open .picker .opt { opacity: 1; transform: none;
+                              transition-delay: calc(.16s + var(--i) * .045s), calc(.16s + var(--i) * .045s), 0s; }
+  /* the tick that connects a label to the spine */
+  .picker .opt::after { content:''; position: absolute; right: 0; top: 50%; height: 1px; width: 0;
+                        background: color-mix(in srgb, var(--warm) 40%, transparent);
+                        transition: width .2s var(--ease), background .15s; }
+  .assign.open .picker .opt::after { width: 9px; transition-delay: calc(.14s + var(--i) * .045s); }
+  /* The filter is the bottom row of the same structure — same alignment, same
+     tick, same stem. It is not a search box bolted onto a menu. */
+  .picker .frow { position: relative; align-self: flex-end; padding: 4px 16px 4px 10px; }
+  .picker .frow::after { content:''; position: absolute; right: 0; top: 50%; height: 1px; width: 0;
+                         background: color-mix(in srgb, var(--warm) 40%, transparent);
+                         transition: width .2s var(--ease); }
+  .assign.open .picker .frow::after { width: 9px; transition-delay: .1s; }
+  .picker .filter { border: 0; background: none; outline: none; text-align: right;
+                    font: inherit; font-size: 12px; color: var(--ink); width: 118px;
+                    padding: 0; caret-color: var(--warm); }
+  .picker .filter::placeholder { color: var(--ink-4); }
+  .picker .frow { opacity: 0; transform: translateX(7px);
+                  transition: opacity .2s var(--ease), transform .2s var(--ease); }
+  .assign.open .picker .frow { opacity: 1; transform: none; transition-delay: .1s; }
+  .assign.measuring .picker .frow { transform: none !important; transition: none !important; }
+  /* how many matches are not shown — a count, never a scrollbar */
+  .picker .rest { align-self: flex-end; text-align: right; padding: 2px 16px 2px 10px; font-family: var(--mono);
+                  font-size: 9.5px; letter-spacing: .06em; color: var(--ink-4); opacity: 0;
+                  transition: opacity .2s var(--ease); }
+  .assign.open .picker .rest { opacity: .85; transition-delay: .2s; }
+  .picker .opt.cursor { color: var(--ink); }
+  .picker .opt.cursor::after { width: 13px; background: var(--warm); }
+
+  .picker .opt:hover { color: var(--ink); }
+  .picker .opt:hover::after { width: 13px; background: var(--warm); }
+  .picker .opt.on { color: var(--ink); font-weight: 550; }
+  .assign.open .picker .opt.on::after { width: 13px; background: var(--warm); }
+
+  .card .dot { width: 7px; height: 7px; border-radius: 999px; flex-shrink: 0; }
+  .card .tt { font-size: 12.5px; font-weight: 600; line-height: 1.3; letter-spacing: -.008em; }
+  .card .ft { display: flex; gap: 8px; font-family: var(--mono); font-size: 10px; color: var(--ink-4); font-variant-numeric: tabular-nums; }
+  .card .ft .g { flex: 1; }
+  .card .why { font-size: 11.5px; color: var(--ink-3); }
+  .st-q { background: none; }
+  .st-q .dot { box-shadow: inset 0 0 0 1.5px var(--ink-4); }
+  .st-w .dot { background: var(--cool); box-shadow: 0 0 9px color-mix(in srgb,var(--cool) 75%,transparent); animation: breathe 4.5s ease-in-out infinite; }
+  .st-w .spine { position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--cool); box-shadow: 0 0 14px color-mix(in srgb,var(--cool) 65%,transparent); animation: breathe 4.5s ease-in-out infinite; }
+  /* The ask plate is the ATTENTION axis and composes with any lifecycle
+     state, so it is never scoped to one. Scoping it to .st-a is what made it
+     silently render as bare text once asks appeared on working/done cards. */
+  .card .ask { display: flex; align-items: center; gap: 7px; background: var(--warm); color: var(--warm-ink); border-radius: 3px; padding: 5px 9px; font-size: 11.5px; font-weight: 600; letter-spacing: -.005em; }
+  .card .ask .g { flex: 1; }
+  .card .ask svg { opacity: .75; }
+  .card > .ask { margin-top: -1px; }
+  /* Recession is applied to CONTENT, never as a container opacity: opacity
+     composites the whole subtree, so it would drag the assignee overlay down
+     with the card and leave a floating surface half-faded. */
+  .st-d { background: none; }
+  .st-d .tt { color: var(--ink-4); font-weight: 500; }
+  .st-d .why { color: var(--ink-4); }
+  .st-d .ft { color: color-mix(in srgb, var(--ink-4) 62%, transparent); }
+  .st-d .act .go { color: var(--ink-4); }
+  .st-d .who { color: var(--ink-4); box-shadow: inset 0 0 0 1.2px color-mix(in srgb, var(--line-2) 70%, transparent); }
+  /* A finished run holding an open ask is not resolved, so it does not recede. */
+  .st-d:has(.ask) .tt { color: var(--ink); font-weight: 600; }
+  .st-d:has(.ask) .why, .st-d:has(.ask) .ft { color: var(--ink-3); }
+  .st-d .dot { box-shadow: inset 0 0 0 1.5px var(--line-2); }
+  .st-d .tt { color: var(--ink-3); font-weight: 500; }
+  .st-f { background: none; box-shadow: inset 0 0 0 1px color-mix(in srgb,var(--alarm) 40%,transparent); }
+  .st-f .dot { background: var(--alarm); }
+  .st-f .err { font-family: var(--mono); font-size: 10.5px; color: var(--alarm); opacity: .85; }
+  .st-f::after { content:''; position:absolute; left:0; right:0; bottom:0; height:3px; border-radius:0 0 5px 5px; background: repeating-linear-gradient(-45deg, color-mix(in srgb,var(--alarm) 65%,transparent) 0 3px, transparent 3px 6px); }
+
+  /* The activity row: one line, always in the same place, always the same
+     destination. Only its words change with state. */
+  .act { display: flex; align-items: center; gap: 7px; width: 100%; text-align: left; padding: 1px 0; }
+  .act .arw { flex-shrink: 0; color: var(--ink-4); opacity: .5; transition: opacity .2s, transform .2s var(--ease); }
+  .act:hover .arw { opacity: 1; transform: translateX(2px); }
+  .act .go { font-size: 12px; color: var(--ink-3); transition: color .2s; }
+  .act:hover .go { color: var(--ink); }
+  .act .shim, .act .go { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap;
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent);
+            mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent); }
+  .st-w .spine { animation: none; }
+  .st-w .dot { animation: none; }
+
+  /* Trace lap — a straight port of BoardColumn's TraceLayer.
+     Six CONCENTRIC dashes, all co-centred on one point: short layers cover only
+     the middle, long ones reach the tips, and the long ones are faintest — so
+     the stack reads as one soft-edged segment rather than a trail. At rest the
+     segment straddles the path origin as an L-bracket; the lap slides the shared
+     offset exactly one perimeter (100 path units) and folds back into the L. */
+  @property --slide { syntax: '<number>'; inherits: true; initial-value: 0; }
+  .tracehost { position: relative; }
+  .tracesvg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible;
+              pointer-events: none; opacity: 0; }
+  .tracesvg rect { fill: none; stroke: var(--warm); stroke-width: 1; stroke-linecap: round;
+                   stroke-dashoffset: calc(var(--off0) + var(--slide)); }
+  /* One shared slide on the parent, exactly as the motion value is shared. */
+  .lapping .tracesvg { animation: lap 1.4s cubic-bezier(0.65, 0, 0.35, 1) both,
+                                  tracefade 1.85s linear both; }
+  @keyframes lap { to { --slide: -100; } }
+  @keyframes tracefade { 0% { opacity: 0 } 5% { opacity: .85 } 76% { opacity: .85 } 100% { opacity: 0 } }
+
+  /* scan */
+  .scan { position: relative; height: 92px; border-radius: 5px; background: var(--tint); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
+  .scan .dots { position:absolute; inset:0; background-image: radial-gradient(var(--line-2) .5px, transparent .6px); background-size: 9px 9px; opacity:.45; }
+  .mk { position:absolute; width:7px; height:7px; border-radius:2px; transform: translate(-50%,-50%); box-shadow: inset 0 0 0 1.5px var(--ink-4); }
+  .lapping .mk { animation: resolve .5s var(--ease) both; animation-delay: calc(var(--d) * 1ms); }
+  @keyframes resolve { to { background: var(--tone); box-shadow: inset 0 0 0 1.5px var(--tone); } }
+  .beam { position:absolute; top:0; bottom:0; width:2px; background: var(--cool); box-shadow: 0 0 22px 2px color-mix(in srgb,var(--cool) 65%,transparent); opacity:0; left:0; }
+  .lapping .beam { animation: sweep var(--sweep) linear both; }
+  @keyframes sweep { 0%{left:-4px;opacity:0} 6%{opacity:1} 92%{opacity:1} 100%{left:100%;opacity:0} }
+
+  /* shimmer */
+  /* no-repeat is load-bearing: the default tiles the gradient, so a second
+     crest arrives mid-pass and the wrap reads as a skip. At 300% width the
+     element is always fully covered, so clipping to text stays safe. */
+  .shim { background: linear-gradient(100deg, color-mix(in srgb,var(--ink-3) 40%,transparent) 0%, color-mix(in srgb,var(--ink-3) 40%,transparent) 42%, var(--ink) 50%, color-mix(in srgb,var(--ink-3) 40%,transparent) 58%, color-mix(in srgb,var(--ink-3) 40%,transparent) 100%); background-size: 300% 100%; background-repeat: no-repeat; -webkit-background-clip: text; background-clip: text; color: transparent; animation: sh 2.2s linear infinite; font-size: 12.5px; font-weight: 500; }
+  @keyframes sh { from{background-position:100% 0} to{background-position:0% 0} }
+
+  /* dataviz */
+  .terr { position: relative; border-radius: 5px; overflow: hidden; background: var(--tint); box-shadow: inset 0 0 0 1px var(--line); }
+  .terr canvas { display:block; width:100%; height:150px; }
+  .cells { display:flex; gap:3px; height:104px; }
+  .ccol { display:flex; flex-direction:column; gap:3px; }
+  .cll { border-radius:3px; background: color-mix(in srgb,var(--warm) 13%,transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb,var(--warm) 26%,transparent), 0 3px 0 -1px color-mix(in srgb,var(--warm) 15%,transparent); display:flex; align-items:flex-end; padding:6px 7px; }
+  .cll span { font-size:10.5px; font-weight:600; }
+  .cll.off { background:none; box-shadow: inset 0 0 0 1px var(--line); }
+  .cll.off span { color: var(--ink-3); font-weight:500; }
+  .skel { border-radius:5px; padding:11px 12px; box-shadow: inset 0 0 0 1px var(--line); display:flex; flex-direction:column; gap:8px; }
+  .skel i { display:block; border-radius:2px; box-shadow: inset 0 0 0 1px var(--line-2); height:8px; animation: dr 1.9s var(--ease) infinite; }
+  @keyframes dr { 0%{opacity:.25} 50%{opacity:.75} 100%{opacity:.25} }
+  .lead2 { position:relative; height:84px; }
+  .lead2 .ob { position:absolute; left:10px; bottom:8px; width:70px; height:26px; border-radius:4px; background: var(--tint); box-shadow: inset 0 0 0 1px var(--line); }
+  .lead2 .rg { position:absolute; left:42px; bottom:18px; width:9px; height:9px; border-radius:999px; box-shadow: inset 0 0 0 1.5px var(--warm); }
+  .lead2 .sk { position:absolute; left:46px; bottom:27px; width:1px; height:30px; background: var(--warm); opacity:.55; }
+  .lead2 .sk::after { content:''; position:absolute; top:0; left:0; width:38px; height:1px; background: var(--warm); opacity:.55; }
+  .lead2 .cp { position:absolute; left:86px; top:18px; font-family: var(--mono); font-size:9px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color: var(--warm); }
+
+  .type-row { display:flex; align-items:baseline; gap:14px; padding:7px 0; border-bottom:1px solid var(--line); }
+  .type-row .spec { font-family: var(--mono); font-size:10px; color: var(--ink-4); width:150px; flex-shrink:0; }
+
+  .float-demo { border-radius:10px; padding:11px 13px; background: var(--raised); border:1px solid var(--line); box-shadow: var(--float); font-size:12.5px; }
+
+  .note { max-width: 76ch; font-size: 12.5px; color: var(--ink-3); line-height: 1.62; }
+  .note b { color: var(--ink-2); font-weight: 600; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+    .mk { background: var(--tone); box-shadow: inset 0 0 0 1.5px var(--tone); }
+    .tracesvg rect { opacity: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <span class="lbl">Triage Factory</span>
+    <h1>Design language</h1>
+    <p>An instrument, not a machine. The housing is warm and quiet; the readout is exact. Industrial futurism enters through precision and material honesty — never through machine iconography.</p>
+  </header>
+
+  <div class="toolbar">
+    <button class="tgl" id="themeBtn" aria-pressed="false"><span class="sw"></span>Dark ground</button>
+    <button class="tgl" id="motionBtn" aria-pressed="false"><span class="sw"></span>Replay motion</button>
+    <button class="tgl" id="teamBtn" aria-pressed="false"><span class="sw"></span>Small team (6)</button>
+  </div>
+
+  <!-- 00 -->
+  <section>
+    <div class="snum"><span class="n">00</span><h2>The thesis</h2></div>
+    <p class="sub">Two references, one idea. <em>The Creator</em> supplies the housing: warm, weathered, inhabited — a future built from familiar industrial parts, where the only saturated thing in frame is emitted light. <em>Arknights: Endfield</em>'s title sequence supplies the readout: information staged in a scene, attached to what it describes, dense because it is precise.</p>
+    <div class="rule"></div>
+    <ol class="laws">
+      <li><b>Nothing may imitate a mechanism it does not have.</b> No vents that vent nothing, belts that carry nothing, scanlines on a screen that is not a CRT. If it looks like it does something, it must do it.</li>
+      <li><b>Depth is light, never framing.</b> Planes separate from the field by depth and tone. In-flow content is borderless; only things that genuinely float get a frame.</li>
+      <li><b>Measurement is the aesthetic.</b> The beautiful object is the dial that is exactly right — tabular numerals, a ring at precisely 34%, a 1px hairline.</li>
+      <li><b>Warm housing, cool readout.</b> Warm is the world, its data and its asks. Cool is the machine acting, and nothing else.</li>
+      <li><b>Motion marks events. It is never ambience.</b> Spend it where something happened; never on a loop that runs regardless.</li>
+    </ol>
+  </section>
+
+  <!-- 01 -->
+  <section>
+    <div class="snum"><span class="n">01</span><h2>The light model</h2></div>
+    <p class="sub">Four layers. This is a physical rule, not a palette — it generates the palette, and it is why light mode is not dark mode inverted. In dark, attention <em>emits</em>. On paper you cannot emit, so attention becomes ink density: the darkest, most saturated mark on the page.</p>
+    <div class="rule"></div>
+    <div class="grid g4">
+      <div><div class="chip"></div><span class="lbl" style="color:var(--ink-4)">01 · Ground</span><div class="box" style="background:none;box-shadow:none;padding:6px 0"><div class="d">Unlit field. Warm paper or warm near-black. The only layer that changes between modes.</div></div></div>
+      <div><div class="chip st"></div><span class="lbl" style="color:var(--ink-4)">02 · Structure</span><div class="box" style="background:none;box-shadow:none;padding:6px 0"><div class="d">Drawn, not lit. Hairlines, rules, outlines, wireframes. Carries layout. Never competes.</div></div></div>
+      <div><div class="chip me"></div><span class="lbl" style="color:var(--ink-4)">03 · Measurement</span><div class="box" style="background:none;box-shadow:none;padding:6px 0"><div class="d">One warm family. Data, gauges, contours — and the ask. Same hue at every intensity.</div></div></div>
+      <div><div class="chip em"><i></i></div><span class="lbl" style="color:var(--ink-4)">04 · Emission</span><div class="box" style="background:none;box-shadow:none;padding:6px 0"><div class="d">An agent is working. The only saturated thing on screen, so it needs no label.</div></div></div>
+    </div>
+  </section>
+
+  <!-- 02 -->
+  <section>
+    <div class="snum"><span class="n">02</span><h2>Colour</h2></div>
+    <p class="sub">Three hues and a neutral ramp. One accent system across both grounds — a token is the same hue in light and dark, at the lightness that ground demands. The two modes are lighting conditions on the same materials, never two languages.</p>
+    <div class="rule"></div>
+    <table>
+      <tr><th>Token</th><th>Light</th><th>Dark</th><th>Means</th></tr>
+      <tr><td class="k">--ground</td><td class="k">#f7f5f2</td><td class="k">#161311</td><td class="d">Page. Warm neutral, never pure white or black.</td></tr>
+      <tr><td class="k">--raised</td><td class="k">#fffdfb</td><td class="k">#1e1a17</td><td class="d">Floating surfaces only — popovers, the composer, dialogs.</td></tr>
+      <tr><td class="k">--ink / 2 / 3 / 4</td><td class="k">#1a1a1a → #9a938c</td><td class="k">#ece7e0 → #6d665f</td><td class="d">Primary, secondary, tertiary, faint. Four steps, no more.</td></tr>
+      <tr><td class="k">--line / --line-2</td><td class="k">rgba(0,0,0,.07/.15)</td><td class="k">rgba(255,255,255,.08/.17)</td><td class="d">Hairline and emphasised hairline. The structure layer.</td></tr>
+      <tr><td class="k"><span class="sw2" style="background:var(--warm)"></span>--warm</td><td class="k">#a85a3a</td><td class="k">#d18a64</td><td class="d">Measurement, data, and anything asking for a human.</td></tr>
+      <tr><td class="k"><span class="sw2" style="background:var(--cool)"></span>--cool</td><td class="k">#1f6f8b</td><td class="k">#7ec8e0</td><td class="d">Emission. An agent is working. Nothing else, ever.</td></tr>
+      <tr><td class="k"><span class="sw2" style="background:var(--alarm)"></span>--alarm</td><td class="k">#a84545</td><td class="k">#d97777</td><td class="d">Failure. Applied to a container's frame, not as a badge.</td></tr>
+    </table>
+
+    <h3>Rules</h3>
+    <ol class="laws">
+      <li><b>Cool is only ever linear or point</b> — a spine, a dot, a stroke, a beam. <b>Warm is the only hue allowed area</b> — fills, plates, blocks. This makes the one bad case (two saturated blocks sharing an edge) unrepresentable rather than merely discouraged.</li>
+      <li><b>There is no success colour.</b> Green was removed deliberately. Settled work recedes into structure; on a board where most work eventually completes, success that shouts is noise.</li>
+      <li><b>Alarm never becomes a badge.</b> It takes the container's edge — corner notches and a hatched foot — so it reads at any zoom and never competes with an ask for the same slot.</li>
+      <li><b>Accents are muted by construction.</b> <code>#a85a3a</code> is clay, not orange; <code>#1f6f8b</code> is a dulled teal. Saturated complementaries vibrate; desaturated ones are the cinema grade both references use.</li>
+    </ol>
+  </section>
+
+  <!-- 03 -->
+  <section>
+    <div class="snum"><span class="n">03</span><h2>Two axes, not five states</h2></div>
+    <p class="sub">Where a run <em>is</em> and whether it <em>wants you</em> are independent, and conflating them is the mistake that makes a board lie. An agent can stage a pull request and keep working. A finished run can still have something open. Both axes are encoded separately, and they compose freely.</p>
+    <div class="rule"></div>
+
+    <table>
+      <tr><th>Axis</th><th>Values</th><th>Encoded by</th></tr>
+      <tr><td class="k">Lifecycle</td><td class="d">queued · working · done · failed</td><td class="d">The dot, the spine, the frame. Never words.</td></tr>
+      <tr><td class="k">Attention</td><td class="d">nothing · one thing · several</td><td class="d">The ask row — a solid warm plate — or its absence.</td></tr>
+    </table>
+
+    <h3>Lifecycle alone</h3>
+    <div class="grid g4" style="margin-bottom:8px;">
+      <div>
+        <span class="lbl" style="color:var(--ink-4)">Queued</span>
+        <div class="card st-q" style="margin-top:8px"><div class="hd"><span class="dot"></span><span class="tt">Sample resource series</span><span class="assign"><button class="who none" title="Assign">—</button><span class="picker"><span class="haze"></span><span class="term"></span><span class="stem"></span><span class="opts"></span></span></span></div><div class="why">Waiting for a slot — 3 ahead.</div><button class="act"><span class="go">View run</span><svg class="arw" width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h7M6.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
+      </div>
+      <div>
+        <span class="lbl" style="color:var(--ink-4)">Working</span>
+        <div class="card st-w" style="margin-top:8px"><span class="spine"></span><div class="hd"><span class="dot"></span><span class="tt">Skip the pre-ready tick</span><span class="assign"><button class="who " title="Assign">AA</button><span class="picker"><span class="haze"></span><span class="term"></span><span class="stem"></span><span class="opts"></span></span></span></div><button class="act"><span class="shim">Confirming the fix across 50 runs</span><svg class="arw" width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h7M6.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="ft"><span>12:41</span><span class="g"></span><span>$1.83</span></div></div>
+      </div>
+      <div>
+        <span class="lbl" style="color:var(--ink-4)">Done</span>
+        <div class="card st-d" style="margin-top:8px"><div class="hd"><span class="dot"></span><span class="tt">Record actuals at teardown</span><span class="assign"><button class="who bot" title="Assign">M</button><span class="picker"><span class="haze"></span><span class="term"></span><span class="stem"></span><span class="opts"></span></span></span></div><div class="why">Merged. Peak memory and CPU now land on the claim.</div><button class="act"><span class="go">View run</span><svg class="arw" width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h7M6.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="ft"><span>4:12</span><span class="g"></span><span>$0.94</span></div></div>
+      </div>
+      <div>
+        <span class="lbl" style="color:var(--ink-4)">Failed</span>
+        <div class="card st-f" style="margin-top:8px"><div class="hd"><span class="dot"></span><span class="tt">Refresh pricing snapshot</span><span class="assign"><button class="who bot" title="Assign">M</button><span class="picker"><span class="haze"></span><span class="term"></span><span class="stem"></span><span class="opts"></span></span></span></div><div class="err">529 from provider, 3rd attempt</div><button class="act"><span class="go">View run</span><svg class="arw" width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h7M6.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="ft"><span>2:06</span><span class="g"></span><span>$0.11</span></div></div>
+      </div>
+    </div>
+
+    <h3>Attention layered on top</h3>
+    <div class="grid g3">
+      <div>
+        <span class="lbl" style="color:var(--ink-4)">Working · one thing</span>
+        <div class="card st-w" style="margin-top:8px"><span class="spine"></span><div class="hd"><span class="dot"></span><span class="tt">Serialize the cgroup read</span><span class="assign"><button class="who " title="Assign">AA</button><span class="picker"><span class="haze"></span><span class="term"></span><span class="stem"></span><span class="opts"></span></span></span></div><div class="ask"><span>Review pull request #761</span><span class="g"></span><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h7M6.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div><button class="act"><span class="shim">Running the migration check</span><svg class="arw" width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h7M6.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="ft"><span>18:04</span><span class="g"></span><span>$2.10</span></div></div>
+      </div>
+      <div>
+        <span class="lbl" style="color:var(--ink-4)">Working · several</span>
+        <div class="card st-w" style="margin-top:8px"><span class="spine"></span><div class="hd"><span class="dot"></span><span class="tt">Split the sampler into two passes</span><span class="assign"><button class="who " title="Assign">AA</button><span class="picker"><span class="haze"></span><span class="term"></span><span class="stem"></span><span class="opts"></span></span></span></div><div class="ask"><span>2 items need you</span><span class="g"></span><span><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h7M6.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span></div><button class="act"><span class="shim">Rebasing onto main</span><svg class="arw" width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h7M6.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="ft"><span>22:31</span><span class="g"></span><span>$3.04</span></div></div>
+      </div>
+      <div>
+        <span class="lbl" style="color:var(--ink-4)">Done · still wants you</span>
+        <div class="card st-d" style="margin-top:8px;opacity:1;"><div class="hd"><span class="dot"></span><span class="tt">Record actuals at teardown</span><span class="assign"><button class="who " title="Assign">AA</button><span class="picker"><span class="haze"></span><span class="term"></span><span class="stem"></span><span class="opts"></span></span></span></div><div class="ask"><span>Review pull request #757</span><span class="g"></span><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h7M6.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div><button class="act"><span class="go">View run</span><svg class="arw" width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h7M6.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button><div class="ft"><span>18h ago</span><span class="g"></span><span>$0.94</span></div></div>
+      </div>
+    </div>
+
+    <ol class="laws" style="margin-top:20px;">
+      <li><b>The ask row scales, it does not multiply.</b> One pending thing names itself — <em>Review pull request #761</em>. Several collapse to a count — <em>2 items need you</em>. Never two plates on one card: a card asks once, and the run page enumerates.</li>
+      <li><b>Settled does not mean resolved.</b> A finished run holding an open pull request keeps its ask and does not recede — the lifecycle dot goes quiet, the plate stays lit. Receding is for work that wants nothing.</li>
+      <li><b>Attention outranks lifecycle for placement.</b> If a card asks, the plate sits directly under the title, above the activity row, so the scan finds it before anything else on the card.</li>
+      <li><b>Rhythm from content.</b> Height varies because content varies — a queued card has nothing to report, a live one has its activity, a settled one collapses to its verdict. Never pad for uniformity; never decorate for variety.</li>
+    </ol>
+
+    <h3>On artifact indicators</h3>
+    <p class="note" style="margin-bottom:12px;">There are none, and that is deliberate. Marks for each produced artifact were tried and cut: <b>attention is the ask row's job</b>, so the marks could only carry inventory — and inventory is a run-page question, not a triage question. Five 7px hover targets on a swipeable card is real interaction cost for information nobody is scanning the board to find. What a run <em>produced</em> is already said better in words by its verdict line, and enumerated properly one click away.</p>
+
+    <h3>The activity row</h3>
+    <p class="note" style="margin-bottom:12px;">Every card carries one row in the same place with the same destination — the run. Only its words change. While work is live it shimmers the agent's current command (or its last, between commands), so a board of live cards reads as a list of what is <em>actually happening right now</em> rather than a list of spinners. Otherwise it reads <b>View run →</b>. One target, one position, no state where the affordance disappears.</p>
+    <ol class="laws">
+      <li><b>Setup phases are activity too.</b> Before an agent starts there is still text — fetching, cloning, starting, awaiting credentials. The row is never empty on a live card, so it never needs a spinner fallback.</li>
+      <li><b>Present tense while running, past tense once done.</b> "Confirming the fix across 50 runs" → "Confirmed the fix across 50 runs". The verb carries the state; the row does not need a badge.</li>
+      <li><b>Dissolve, never truncate.</b> One line that fades into the arrow at the right — no ellipsis. Same rule as every other overflow in this system: edges dissolve, they do not cut. A card's height must never shift because a command was long.</li>
+      <li><b>A card is a container of targets, never a target itself.</b> The activity row goes to the run; the assignee glyph opens its picker; an ask opens its approval. Whole-card navigation with carve-outs is the pattern that produces nested-interactive bugs — give every destination its own hit area and leave the card inert between them.</li>
+      <li><b>A horizontal drag cancels the click.</b> Cards are swipeable, so any pointer movement past a small threshold must abandon the press rather than navigate on release.</li>
+      <li><b>Assignment is always visible, never hover-only.</b> Who owns a piece of work is a scanning fact. A person is a round mark with initials, an agent a squared one, nobody a dash — <b>distinguished by shape, never by colour</b>. A real avatar may carry its own colours; a synthetic mark never invents any.</li>
+      <li><b>A request never shows elapsed time; it shows an arrow.</b> How long something has waited is not actionable and does not compare between rows, and a mixed treatment — a clock on single asks, an arrow on aggregate ones — makes two identical affordances look like different controls. One glyph, every ask.</li>
+      <li><b>Its picker draws itself rather than appearing.</b> The mark retires, a terminus ring takes its place, a stem grows out of it, ticks extend and labels arrive along them — then the whole thing retracts the same way. Opening is a <em>construction</em>, which is the blueprint-scaffold idea doing a real job instead of decorating one.</li>
+      <li><b>Six or fewer: show everyone, no filter.</b> A search box on a list you can read at a glance is friction pretending to be power. Below the threshold the structure is simply the whole roster.</li>
+      <li><b>Above it, filter — never scroll.</b> A scroll container needs a bounded height, which is a rectangle, which is the panel this treatment exists to avoid, and its clip would cut the blur field into a hard edge. So the structure never grows: five rows, always, just a different five. The empty state is not the first five alphabetically but the five actually picked — the agent, you, recent assignees, and the escape hatch.</li>
+      <li><b>A truncation count must be shorter than the things it truncates.</b> Right-aligned rows take their left edge from the longest string, so a verbose count becomes the widest element and reads as misaligned against the spine. <code>+26 more</code>, not <code>+26 more — keep typing</code>.</li>
+      <li><b>No fill, no rectangle, no shadow.</b> Separation comes from a soft-edged blur field with no border to read as a panel — the card underneath stays half-legible rather than being covered. A floating surface earns a boundary, but a boundary can be a stem; it does not have to be a box. <em>Click a mark to try it.</em></li>
+      <li><b>Recession is a property of content, never a container opacity.</b> Dim the title, the verdict and the readouts individually. A blanket <code>opacity</code> composites the entire subtree, so anything floating out of a settled card — its assignee picker above all — comes out half-faded and unreadable while the thing it overlaps is not.</li>
+      <li><b>Show the numbers whenever they exist.</b> A settled run has a duration and a cost, and a failed one has both plus a reason to care about them — an engagement that burned four minutes and eleven cents before dying is exactly the case where the footer earns its place. Only queued cards have nothing to report.</li>
+    </ol>
+  </section>
+
+  <!-- 04 -->
+  <section>
+    <div class="snum"><span class="n">04</span><h2>Structure</h2></div>
+    <p class="sub">The single most load-bearing rule in this system: <b>in-flow content is borderless; only things floating above the plane get a frame.</b></p>
+    <div class="rule"></div>
+    <div class="grid g2">
+      <div class="box"><div class="t">In flow — no frame</div><div class="d">Cards, rows, sections, panels, transcript blocks. Separation comes from a tint fill, an inset hairline, spacing, or a toned spine on the left edge. Radius <code>5px</code>; nested interactive blocks step to <code>4px</code>.</div></div>
+      <div><div class="float-demo">Floating — border <code>1px</code>, radius <code>10px</code>, soft shadow, optional blur.</div><div class="box" style="margin-top:10px;background:none;box-shadow:none;padding:6px 0"><div class="d">Popovers, tooltips, dialogs, the composer. These detach from the page, so they earn chrome — and are the only place a control may look like a control.</div></div></div>
+    </div>
+    <h3>Also standing</h3>
+    <ol class="laws">
+      <li><b>Badges are toned text, never pills.</b> Uppercase, tracked, in one of the three hues. A pill is chrome an in-flow element has not earned.</li>
+      <li><b>Scroll edges dissolve, they do not cut.</b> Mask gradients at the boundary — <code>linear-gradient(to bottom, transparent 0, #000 8px, #000 calc(100% - 44px), transparent)</code>.</li>
+      <li><b>Detail expands in place.</b> It does not open on top. Prefer disclosure over dialogs; a modal is a last resort, not a default.</li>
+      <li><b>Empty states are a line of text.</b> No dashed drop-zones, no illustrations.</li>
+    </ol>
+  </section>
+
+  <!-- 05 -->
+  <section>
+    <div class="snum"><span class="n">05</span><h2>Type</h2></div>
+    <p class="sub">Inter for human content, monospace for machine data. That split is semantic, not decorative — if a number came from the system, it is mono and tabular. <b>Tracking scales inversely with size:</b> the smaller the label, the wider the letterspacing.</p>
+    <div class="rule"></div>
+    <div class="type-row"><span class="spec">27px / 600 / -.025em</span><span style="font-size:27px;font-weight:600;letter-spacing:-.025em;">Page title</span></div>
+    <div class="type-row"><span class="spec">17px / 600 / -.015em</span><span style="font-size:17px;font-weight:600;letter-spacing:-.015em;">Section heading</span></div>
+    <div class="type-row"><span class="spec">15px / 600 / -.015em</span><span style="font-size:15px;font-weight:600;letter-spacing:-.015em;">Column title</span></div>
+    <div class="type-row"><span class="spec">13.5px / 400</span><span style="font-size:13.5px;">Body and running prose, capped near 68ch</span></div>
+    <div class="type-row"><span class="spec">12.5px / 600</span><span style="font-size:12.5px;font-weight:600;">Card title</span></div>
+    <div class="type-row"><span class="spec">11.5px / 400</span><span style="font-size:11.5px;color:var(--ink-3)">Secondary and supporting text</span></div>
+    <div class="type-row"><span class="spec">mono 11px / tabular</span><span class="mono" style="font-family:var(--mono);font-size:11px;font-variant-numeric:tabular-nums;">68.2k · $1.83 · 12:41</span></div>
+    <div class="type-row"><span class="spec">mono 10px / .12em / caps</span><span style="font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)">Readout label</span></div>
+    <div class="type-row"><span class="spec">mono 9px / .18em / caps</span><span style="font-family:var(--mono);font-size:9px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-4)">Section label</span></div>
+    <p class="note" style="margin-top:14px;">Uppercase is reserved for labels, verdicts and state words. It is never used for content. Prose caps at a measure; activity lines, panes, diffs and tables take the full width available.</p>
+  </section>
+
+  <!-- 06 -->
+  <section>
+    <div class="snum"><span class="n">06</span><h2>Motion</h2></div>
+    <p class="sub">Content moves on <code>cubic-bezier(0.22, 1, 0.36, 1)</code> at <code>0.34s</code>, staggered <code>50ms</code>. A sweep that <em>traverses</em> a field is linear at <code>2.2s</code>; the bracket lap eases on <code>[0.65, 0, 0.35, 1]</code> over <code>1.4s</code> because it is not a traversal but a fold — it unrolls from a resting L and rolls back into it, so it must arrive and depart at rest. Every animation answers "what just happened?", and <b>at most one thing moves per card</b>.</p>
+    <div class="rule"></div>
+
+    <h3>Two sweeps, two meanings — they may not share a colour</h3>
+    <div class="grid g2">
+      <div>
+        <div class="tracehost" id="th">
+          <svg class="tracesvg" aria-hidden="true" id="tsvg"></svg>
+          <div class="card st-w"><span class="spine"></span><div class="hd"><span class="dot"></span><span class="tt">Approve push to aa/TFAC-758</span></div><div class="ask"><span>Allow</span><span class="g"></span><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h7M6.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div><button class="act"><span class="go">View run</span><svg class="arw" width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6h7M6.5 3l3 3-3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
+        </div>
+        <div class="box" style="margin-top:12px;background:none;box-shadow:none;padding:0">
+          <div class="t">Trace lap — <span style="color:var(--warm)">warm</span></div>
+          <div class="d">Marks <em>arrival</em>, and is the board column's bracket exactly. Six <b>concentric</b> dashes share one centre: short layers cover the middle, long ones reach the tips, and the long ones are faintest — so the stack is one soft-edged segment, never a trail. The lap slides the shared offset one full perimeter — <code>ARM 10</code>, <code>pathLength 100</code>, <code>1.4s</code> on <code>[0.65, 0, 0.35, 1]</code> — and then dissolves. Warm because arriving is not the machine working.
+        <br><br>
+        <b>The one place it differs from the board.</b> A column keeps its L at rest, because there it marks a real boundary — nothing else draws the lane's extent. A card already has its own hairline, so a resting bracket would mark nothing and become texture. Same gesture, and it persists only where it has a job.</div>
+        </div>
+      </div>
+      <div>
+        <div class="scan" id="scan"><span class="dots"></span><div id="mks"></div><span class="beam"></span></div>
+        <div class="box" style="margin-top:12px;background:none;box-shadow:none;padding:0">
+          <div class="t">Scan beam — <span style="color:var(--cool)">cool</span></div>
+          <div class="d">Marks <em>the system reading a field</em>. Hollow marks resolve in its wake, so the progress indicator is the result arriving. Cool because it is literally emission — an agent working over a set. Legitimate only when something passes over a population and produces structure; loading a page is not a scan.</div>
+        </div>
+      </div>
+    </div>
+
+    <h3>The rest</h3>
+    <table>
+      <tr><th>Move</th><th>Spec</th><th>Use</th></tr>
+      <tr><td class="k">Mount</td><td class="k">0.34s · ease · 50ms stagger</td><td class="d">Lists and columns appearing. Rise 9px + fade.</td></tr>
+      <tr><td class="k">Shimmer</td><td class="k">2.2s linear, infinite</td><td class="d">A light travelling across the words of an in-flight action — <span class="shim">Confirming the fix across 50 runs</span> — trough at 40% of <code>--ink-3</code>, crest at full <code>--ink</code>, and <code>background-repeat: no-repeat</code> so exactly one crest crosses per cycle. It is an <b>ink-layer</b> effect, not emission: it modulates luminance, spends no hue, and so may sit on a card that is already showing cool.</td></tr>
+      <tr><td class="k">Breath</td><td class="k">4.5s ease-in-out, infinite</td><td class="d">Reserved for a live element that has <em>no</em> activity text of its own. Where a shimmer is present the breath is dropped — one moving thing per card, and the one that carries words wins.</td></tr>
+      <tr><td class="k">Disclosure</td><td class="k">0.2s ease</td><td class="d">Chevron rotate + height. Never a slide-over.</td></tr>
+      <tr><td class="k">Hover</td><td class="k">0.2s colour only</td><td class="d">Never lift, scale or shadow. Opacity and colour only.</td></tr>
+    </table>
+  </section>
+
+  <!-- 07 -->
+  <section>
+    <div class="snum"><span class="n">07</span><h2>Data visualisation</h2></div>
+    <p class="sub">Charts get the same care as type, and follow the same light model: <b>the field is drawn in line work, and only the thing that matters is filled.</b> Data has a native form — reach for the form the data actually has before reaching for a bar chart.</p>
+    <div class="rule"></div>
+
+    <h3>The honesty test</h3>
+    <p class="note" style="margin-bottom:16px;">A contour, a cell map or a fan is legitimate when the data genuinely has that shape and the reading carries meaning. A contour needs a <b>continuous quantity over two axes</b> where the gradient means something. Fail the test and it is wallpaper that resembles measurement — worse than decoration, because it implies rigour it does not have. Never use topology as page texture, and never where it implies a place rather than a quantity.</p>
+
+    <div class="grid g2">
+      <div>
+        <div class="terr"><canvas id="cv"></canvas></div>
+        <div class="box" style="margin-top:10px;background:none;box-shadow:none;padding:0"><div class="t">Field → contours</div><div class="d">Two axes and a magnitude: fleet pressure over executor × time, triage load over source × time, work stuck over column × age. Iso-lines in warm, weight rising with level. <b>Line density is the reading</b> — tight bands mean a fast climb, which separate sparklines cannot show. The ground beneath is a dotted lattice, structure not data.</div></div>
+      </div>
+      <div>
+        <div class="cells">
+          <div class="ccol" style="flex:2.1"><div class="cll" style="flex:2.2"><span>platform</span></div><div class="cll" style="flex:1"><span>infra</span></div></div>
+          <div class="ccol" style="flex:1"><div class="cll" style="flex:1.3"><span>growth</span></div><div class="cll" style="flex:1"><span>docs</span></div><div class="cll off" style="flex:.8"><span>design</span></div></div>
+        </div>
+        <div class="box" style="margin-top:10px;background:none;box-shadow:none;padding:0"><div class="t">Composition → cells</div><div class="d">A space-filling partition where area is magnitude — spend by team, tokens by model, artifacts by repo. Cells with no value drop to <b>outline rather than disappearing</b>, so the shape of the whole stays constant between reads and you compare against a stable frame.</div></div>
+      </div>
+      <div>
+        <div class="lead2"><span class="ob"></span><span class="rg"></span><span class="sk"></span><span class="cp">cold start</span></div>
+        <div class="box" style="background:none;box-shadow:none;padding:0"><div class="t">Annotation → leader lines</div><div class="d">A line to a ring on the thing described, not a tooltip that appears elsewhere and vanishes. Use anywhere a tooltip would otherwise be the answer: a spike on a chart, a failing assertion on a diff, a step on a progress rail.</div></div>
+      </div>
+      <div>
+        <div class="skel"><div style="display:flex;gap:6px;align-items:center"><i style="width:9px;height:9px;border-radius:999px"></i><i style="flex:1"></i></div><div style="display:flex;gap:6px"><i style="width:48px"></i><i style="width:28px"></i></div><div style="display:flex;gap:6px"><i style="width:34px;height:7px"></i><span style="flex:1"></span><i style="width:24px;height:7px"></i></div></div>
+        <div class="box" style="margin-top:10px;background:none;box-shadow:none;padding:0"><div class="t">Loading → wireframe of itself</div><div class="d">Not grey blobs. The component draws its own layout in hairlines and fills as data lands. This is the structure layer doing a real job, and it makes loading legible instead of merely animated.</div></div>
+      </div>
+    </div>
+
+    <h3>Chart rules</h3>
+    <ol class="laws">
+      <li><b>Line work first, fill second.</b> Areas get a faint tint at most; the line carries the shape. Grids are hairlines or omitted, never boxes.</li>
+      <li><b>Emphasise the endpoint.</b> The latest value gets a filled mark and a label; history stays unlabelled line.</li>
+      <li><b>Tabular numerals everywhere digits align.</b> <code>font-variant-numeric: tabular-nums</code> is not optional in a readout.</li>
+      <li><b>One warm family for data.</b> Series are separated by weight, dash and label — not by a rainbow. If a chart genuinely needs categorical colour, it needs fewer categories.</li>
+      <li><b>Absent is not zero.</b> A missing series stays as an outlined placeholder; dropping it silently rewrites the shape of the whole.</li>
+      <li><b>The axis is structure.</b> Labels are mono, 9px, tracked, in <code>--ink-4</code>. They never compete with the data.</li>
+    </ol>
+  </section>
+
+  <!-- 08 -->
+  <section>
+    <div class="snum"><span class="n">08</span><h2>Forbidden</h2></div>
+    <p class="sub">Everything here was in the product and was removed on purpose. Reintroducing any of it breaks the thesis.</p>
+    <div class="rule"></div>
+    <div class="grid g3">
+      <div class="box no"><div class="t">Machine cosplay</div><div class="d">Scanlines, grain, vent heat, conveyor belts, bolted panels, CRT curvature. Depiction of a machine rather than being an instrument.</div></div>
+      <div class="box no"><div class="t">Decorative brackets</div><div class="d">Corner marks that frame nothing. A bracket may mark a real boundary or a real arrival — never sit as texture.</div></div>
+      <div class="box no"><div class="t">A success colour</div><div class="d">Green. Done recedes; it does not celebrate.</div></div>
+      <div class="box no"><div class="t">Pills for badges</div><div class="d">Filled rounded chips in flow. Badges are toned text.</div></div>
+      <div class="box no"><div class="t">Gradient heroes</div><div class="d">Purple-to-blue washes, glassmorphism as ornament, blur without elevation.</div></div>
+      <div class="box no"><div class="t">Topology as texture</div><div class="d">Contours behind content, wireframe as wallpaper, maps of nothing.</div></div>
+    </div>
+  </section>
+
+  <!-- 09 -->
+  <section>
+    <div class="snum"><span class="n">09</span><h2>When in doubt</h2></div>
+    <div class="rule"></div>
+    <ol class="laws">
+      <li><b>Ask what the element is measuring.</b> If it measures nothing, it is chrome, and chrome is borderless, quiet and warm at most.</li>
+      <li><b>Ask whether it is in flow or floating.</b> That answers whether it gets a frame, and it answers it every time.</li>
+      <li><b>Ask what state it is in, then encode with fill.</b> Reach for hue only after fill, weight, opacity and frame are exhausted.</li>
+      <li><b>Ask whether anything is happening.</b> If yes and only if yes, it may emit cool.</li>
+      <li><b>Prefer removing.</b> Every good decision in this language so far has been a deletion.</li>
+    </ol>
+  </section>
+
+</div>
+
+<script>
+  const root = document.documentElement;
+  const cssv = (n) => getComputedStyle(root).getPropertyValue(n).trim();
+
+  // Constants lifted verbatim from BoardColumn.tsx so the demo cannot drift
+  // from the shipped bracket.
+  const ARM = 10;          // each arm, in path units of a pathLength=100 perimeter
+  const FADE_N = 6;
+  function buildTrace() {
+    const svg = document.getElementById('tsvg');
+    if (!svg) return;
+    let out = '';
+    for (let k = 0; k < FADE_N; k++) {
+      const t = (k + 1) / FADE_N;             // longest layer (reaches the tips) at t = 1
+      const length = 2 * ARM * t;
+      const opacity = 0.46 * (1 - t) + 0.07;  // longest is faintest
+      // Co-centred: offset shifted by (length/2 − ARM) off the shared base,
+      // whose rest value is ARM — so off0 reduces to exactly length/2.
+      const off0 = length / 2;
+      out += `<rect x="0" y="0" width="100%" height="100%" pathLength="100"`
+           + ` stroke-dasharray="${length.toFixed(4)} ${(100 - length).toFixed(4)}"`
+           + ` style="--off0:${off0.toFixed(4)};opacity:${opacity.toFixed(4)}"/>`;
+    }
+    svg.innerHTML = out;
+  }
+
+  // scan marks
+  let seed = 7717;
+  const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+  function buildMarks() {
+    const host = document.getElementById('mks');
+    const tones = ['var(--warm)', 'var(--cool)', 'var(--alarm)', 'var(--ink-3)'];
+    let out = '';
+    for (let i = 0; i < 26; i++) {
+      const x = 5 + rnd() * 90, y = 14 + rnd() * 72;
+      out += `<span class="mk" style="left:${x.toFixed(1)}%;top:${y.toFixed(1)}%;--tone:${tones[Math.floor(rnd()*4)]};--d:${Math.round(x*20)}"></span>`;
+    }
+    host.innerHTML = out;
+  }
+
+  // contour field
+  const PEAKS = [[.28,.36,1,.13],[.31,.44,.6,.09],[.62,.30,.55,.11],[.78,.62,.6,.12],[.12,.68,.35,.10]];
+  const field = (x,y) => PEAKS.reduce((v,[cx,cy,a,s]) => v + a*Math.exp(-(((x-cx)**2+(y-cy)**2)/(s*s))), 0);
+  function contours() {
+    const cv = document.getElementById('cv'); if (!cv) return;
+    const b = cv.getBoundingClientRect(), dpr = Math.min(devicePixelRatio||1,2);
+    cv.width = b.width*dpr; cv.height = b.height*dpr;
+    const c = cv.getContext('2d'); c.setTransform(dpr,0,0,dpr,0,0); c.clearRect(0,0,b.width,b.height);
+    c.fillStyle = cssv('--line-2'); c.globalAlpha = .5;
+    for (let y=8;y<b.height;y+=9) for (let x=8;x<b.width;x+=9) c.fillRect(x,y,1,1);
+    c.globalAlpha = 1;
+    const NX=120, NY=40, g=[];
+    for (let j=0;j<=NY;j++){const r=[];for(let i=0;i<=NX;i++)r.push(field(i/NX,j/NY));g.push(r);}
+    const px=i=>(i/NX)*b.width, py=j=>(j/NY)*b.height, lp=(a,z,t)=>a+(z-a)*t;
+    const levels=[]; for(let i=1;i<=10;i++) levels.push(i*.12);
+    levels.forEach((lv,idx)=>{
+      c.beginPath();
+      for(let j=0;j<NY;j++) for(let i=0;i<NX;i++){
+        const tl=g[j][i],tr=g[j][i+1],br=g[j+1][i+1],bl=g[j+1][i];
+        let k=0; if(tl>lv)k|=8; if(tr>lv)k|=4; if(br>lv)k|=2; if(bl>lv)k|=1;
+        if(k===0||k===15) continue;
+        const x0=px(i),x1=px(i+1),y0=py(j),y1=py(j+1);
+        const T=()=>[lp(x0,x1,(lv-tl)/(tr-tl)),y0], R=()=>[x1,lp(y0,y1,(lv-tr)/(br-tr))],
+              B=()=>[lp(x1,x0,(lv-br)/(bl-br)),y1], L=()=>[x0,lp(y1,y0,(lv-bl)/(tl-bl))];
+        const sg=(a,z)=>{c.moveTo(a[0],a[1]);c.lineTo(z[0],z[1]);};
+        switch(k){case 1:case 14:sg(L(),B());break;case 2:case 13:sg(B(),R());break;
+          case 3:case 12:sg(L(),R());break;case 4:case 11:sg(T(),R());break;
+          case 6:case 9:sg(T(),B());break;case 7:case 8:sg(L(),T());break;
+          case 5:sg(L(),T());sg(B(),R());break;case 10:sg(L(),B());sg(T(),R());break;}
+      }
+      const t = idx/(levels.length-1);
+      c.strokeStyle = cssv('--warm'); c.globalAlpha = .2 + t*.6; c.lineWidth = t>.7?1.15:.85; c.stroke();
+    });
+    c.globalAlpha = 1;
+  }
+
+  // The stem terminates exactly at the FIRST option's tick, so the join reads
+  // as a corner rather than a T. Measured from the DOM, so the option count is
+  // free rather than baked into a magic height.
+  function sizeStems() {
+    document.querySelectorAll('.assign').forEach((a) => {
+      const first = a.querySelector('.opt'), stem = a.querySelector('.stem');
+      if (!first || !stem) return;
+      const aR = a.getBoundingClientRect(), fR = first.getBoundingClientRect();
+      const terminusY = aR.bottom - 9;               // ring centre
+      const firstTickY = fR.top + fR.height / 2;     // tick sits at 50%
+      stem.style.height = Math.max(0, Math.round(terminusY - firstTickY)) + 'px';
+    });
+  }
+
+  // The haze is ONE backdrop-filter region masked by a union of per-option
+  // blobs, so the blur follows the ragged text edge. One region rather than one
+  // per row: overlapping backdrop-filters double-blur and band at the seams,
+  // whereas multiple mask layers composite as a clean union.
+  function shapeHaze() {
+    document.querySelectorAll('.assign').forEach((a) => {
+      const haze = a.querySelector('.haze');
+      const opts = a.querySelectorAll('.opt, .frow, .rest');
+      if (!haze || !opts.length) return;
+      a.classList.add('measuring');
+      const h = haze.getBoundingClientRect();
+      const layers = [];
+      opts.forEach((o) => {
+        const r = o.getBoundingClientRect();
+        if (!r.width || !h.width) return;
+        const cx = ((r.left + r.width / 2 - h.left) / h.width) * 100;
+        const cy = ((r.top + r.height / 2 - h.top) / h.height) * 100;
+        const rx = ((r.width / 2 + 30) / h.width) * 100;
+        const ry = ((r.height / 2 + 26) / h.height) * 100;
+        layers.push(`radial-gradient(ellipse ${rx.toFixed(2)}% ${ry.toFixed(2)}% at ${cx.toFixed(2)}% ${cy.toFixed(2)}%, #000 30%, transparent 82%)`);
+      });
+      a.classList.remove('measuring');
+      if (!layers.length) return;
+      const m = layers.join(',');
+      haze.style.webkitMaskImage = m;
+      haze.style.maskImage = m;
+      haze.style.webkitMaskComposite = 'source-over';
+      haze.style.maskComposite = 'add';
+    });
+  }
+
+  function play() {
+    for (const id of ['th','scan']) {
+      const el = document.getElementById(id);
+      el.classList.remove('lapping'); void el.offsetWidth; el.classList.add('lapping');
+    }
+  }
+
+  // Density demo — the actual rule, executed, rather than four hand-drawn rows.
+  // Marks encode KIND and nothing else, capped at five. Past that the tail is
+  // a count — five distinguishable shapes is a composition, twelve identical
+  // ones is a texture that reads worse than the numeral it replaced.
+  buildTrace(); buildMarks(); contours(); play();
+  addEventListener('resize', () => { contours(); sizeStems(); shapeHaze(); });
+
+  // The sweeps run once and leave nothing behind, so a reader who scrolls down
+  // after load would find two static boxes. Replay on entry, loop while in
+  // view, stop when it leaves.
+  let loop = null;
+  const motion = document.querySelector('#th') && document.querySelector('#th').closest('section');
+  if (motion && 'IntersectionObserver' in window && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        clearInterval(loop);
+        if (e.isIntersecting) { play(); loop = setInterval(play, 4200); }
+      }
+    }, { threshold: 0.25 }).observe(motion);
+  }
+  for (const id of ['th','scan']) {
+    const el = document.getElementById(id);
+    if (el) { el.style.cursor = 'pointer'; el.title = 'Replay'; el.addEventListener('click', play); }
+  }
+
+  const themeBtn = document.getElementById('themeBtn');
+  themeBtn.setAttribute('aria-pressed', String(matchMedia('(prefers-color-scheme: dark)').matches));
+  themeBtn.addEventListener('click', () => {
+    const cur = root.getAttribute('data-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark':'light');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    themeBtn.setAttribute('aria-pressed', String(next === 'dark'));
+    requestAnimationFrame(contours);
+  });
+
+  // ── Assignee picker ────────────────────────────────────────────────────
+  // Past a handful of people a list stops being browsable, and a scroll
+  // container would need a bounded height — a rectangle, which is the panel we
+  // just removed. So the list never grows: it FILTERS. Five rows always, just
+  // different five.
+  const TEAM = [
+    'Agent · machinist', 'Aidan Allchin', 'Priya Raman', 'Marcus Webb', 'Yuki Tanaka',
+    'Sofia Marchetti', 'Dan Okoro', 'Hannah Lindqvist', 'Raj Patel', 'Elena Vasquez',
+    'Tom Bright', 'Nadia Haddad', 'Chris Yoon', 'Beatriz Almeida', 'Omar Nasser',
+    'Grace Chen', 'Liam Doyle', 'Ines Moreau', 'Kwame Mensah', 'Sara Lindgren',
+    'Victor Hugo Silva', 'Amara Diallo', 'Ben Kowalski', 'Mei Ling Zhou', 'Felix Braun',
+    'Rosa Ibarra', 'Noah Fitzgerald', 'Anja Sørensen', 'Tobias Meyer', 'Zara Ahmed',
+  ];
+  // A roster this size is browsable; one that is not gets a filter. The
+  // threshold is where scanning stops being faster than typing.
+  const TEAM_SMALL = ['Agent · machinist', 'Aidan Allchin', 'Priya Raman', 'Marcus Webb', 'Yuki Tanaka', 'Unassign'];
+  const BROWSE_MAX = 6;
+  let roster = TEAM;
+  const SHOWN = 5;
+  // Empty query is not "the first five alphabetically" — it is the five you
+  // actually pick: the agent, yourself, recents, and the escape hatch.
+  const DEFAULTS = ['Agent · machinist', 'Aidan Allchin', 'Priya Raman', 'Marcus Webb', 'Unassign'];
+
+  function rank(q) {
+    // Small roster: show everyone, no filter, nothing hidden.
+    if (roster.length <= BROWSE_MAX) return { list: roster, rest: 0, browse: true };
+    if (!q.trim()) return { list: DEFAULTS, rest: roster.length - 4, browse: false };
+    const n = q.trim().toLowerCase();
+    const starts = [], has = [];
+    for (const name of roster) {
+      const l = name.toLowerCase();
+      if (l.startsWith(n) || l.split(/[\s·]+/).some(w => w.startsWith(n))) starts.push(name);
+      else if (l.includes(n)) has.push(name);
+    }
+    const all = starts.concat(has);
+    return { list: all.slice(0, SHOWN), rest: Math.max(0, all.length - SHOWN), browse: false };
+  }
+
+  function initials(name) {
+    if (name === 'Unassign') return '—';
+    if (name.startsWith('Agent')) return 'M';
+    return name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+  }
+  function markClass(name) {
+    return 'who' + (name.startsWith('Agent') ? ' bot' : name === 'Unassign' ? ' none' : '');
+  }
+
+  function renderOpts(a, q) {
+    const opts = a.querySelector('.opts');
+    const current = a.dataset.assignee || 'Aidan Allchin';
+    const { list, rest, browse } = rank(q || '');
+    // Newest-to-oldest visually: the list grows upward away from the filter.
+    const rows = list.map((name, i) =>
+      `<button class="opt${name === current ? ' on' : ''}" style="--i:${list.length - 1 - i}">${name}</button>`
+    ).join('');
+    // The count stays SHORTER than a name: as the longest string in the block
+    // it would define the left edge and read as misaligned against the spine.
+    opts.innerHTML =
+      rows +
+      (rest > 0 ? `<span class="rest">+${rest} more</span>` : '') +
+      (browse ? '' :
+        `<span class="frow"><input class="filter" type="text" placeholder="Assign to…" value="${(q || '').replace(/"/g, '&quot;')}" aria-label="Filter people"></span>`);
+    wireOpts(a);
+  }
+
+  function wireOpts(a) {
+    a.querySelectorAll('.opt').forEach((opt) => {
+      opt.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const name = opt.textContent.trim();
+        a.dataset.assignee = name;
+        const who = a.querySelector('.who');
+        who.className = markClass(name);
+        who.textContent = initials(name);
+        who.title = name === 'Unassign' ? 'Unassigned' : name;
+        a.classList.remove('open');
+        renderOpts(a, '');
+        sizeStems(); shapeHaze();
+      });
+    });
+    const input = a.querySelector('.filter');
+    if (!input) return;
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('input', () => {
+      renderOpts(a, input.value);
+      const nx = a.querySelector('.filter');
+      nx.focus();
+      nx.setSelectionRange(nx.value.length, nx.value.length);
+      sizeStems(); shapeHaze();
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { a.classList.remove('open'); return; }
+      if (e.key === 'Enter') {
+        const first = a.querySelector('.opt');
+        if (first) first.click();
+      }
+    });
+  }
+
+  document.querySelectorAll('.assign').forEach((a) => renderOpts(a, ''));
+  sizeStems(); shapeHaze();
+
+  document.querySelectorAll('.assign .who').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const host = btn.closest('.assign');
+      const wasOpen = host.classList.contains('open');
+      document.querySelectorAll('.assign.open').forEach(x => x.classList.remove('open'));
+      if (!wasOpen) {
+        renderOpts(host, '');
+        host.classList.add('open');
+        sizeStems(); shapeHaze();
+        const f = host.querySelector('.filter');
+        if (f) setTimeout(() => f.focus(), 60);   // absent on a browsable roster
+      }
+    });
+  });
+  addEventListener('click', () => document.querySelectorAll('.assign.open').forEach(a => a.classList.remove('open')));
+  addEventListener('keydown', (e) => { if (e.key === 'Escape') document.querySelectorAll('.assign.open').forEach(a => a.classList.remove('open')); });
+
+  const teamBtn = document.getElementById('teamBtn');
+  teamBtn.addEventListener('click', () => {
+    const small = teamBtn.getAttribute('aria-pressed') !== 'true';
+    teamBtn.setAttribute('aria-pressed', String(small));
+    roster = small ? TEAM_SMALL : TEAM;
+    document.querySelectorAll('.assign').forEach((a) => renderOpts(a, ''));
+    sizeStems(); shapeHaze();
+  });
+
+  const mb = document.getElementById('motionBtn');
+  mb.addEventListener('click', () => {
+    mb.setAttribute('aria-pressed','true'); play();
+    setTimeout(()=>mb.setAttribute('aria-pressed','false'), 2400);
+  });
+</script>
+</body>
+</html>
