@@ -74,7 +74,11 @@ const DEFAULT_FLOOR_SIZE = 4800
 const MAX_ZOOM = 9
 // Initial zoom level relative to the floor's full-extent ortho
 // bounds. >1 is zoomed in (smaller visible area).
-const INITIAL_ZOOM = 1.75
+//
+// Note this also sets how far IN the camera can go: radius_min is
+// derived from the initial radius (see MAX_ZOOM above), so opening
+// wider moves the closest approach out by the same proportion.
+const INITIAL_ZOOM = 1.5
 // Camera target's y offset below the floor center, so the action
 // fills more of the lower half of the screen by default. ~10 cells
 // at the debug scene's 80-wu cell size.
@@ -108,6 +112,7 @@ export class IsoScene {
   private itemSim: ItemSimulator | null = null
   private snapshotChips: SnapshotChipController | null = null
   private detachShiftPan: (() => void) | null = null
+  private detachWheelGuard: (() => void) | null = null
 
   constructor(canvas: HTMLCanvasElement) {
     this.engine = new Engine(canvas, true, {
@@ -187,6 +192,20 @@ export class IsoScene {
     // on canvas events" so the surrounding page still receives them
     // when appropriate (we suppress only what we explicitly need to).
     this.camera.attachControl(true)
+
+    // Wheel is one of the things we explicitly need to suppress. Babylon
+    // reads it for zoom but, told not to preventDefault, leaves the browser
+    // free to hand the same event to the nearest scroller as well. Now that
+    // the scene covers the window that scroller is the shell, and on macOS
+    // the result is the whole frame rubber-banding under the cursor while
+    // the camera zooms — one gesture, two responses.
+    //
+    // Suppressed here rather than by flipping attachControl to preventDefault
+    // everything: that would also swallow pointerdown, and dragging an entity
+    // out of the scene and onto a station is a dnd-kit sensor that needs it.
+    const swallowWheel = (e: WheelEvent) => e.preventDefault()
+    canvas.addEventListener('wheel', swallowWheel, { passive: false })
+    this.detachWheelGuard = () => canvas.removeEventListener('wheel', swallowWheel)
 
     // Sensitivity tuning for our world's scale (~1200 units across):
     // smaller `*Sensibility` = more pan/rotation per pixel. Babylon's
@@ -712,6 +731,8 @@ export class IsoScene {
   destroy(): void {
     this.detachShiftPan?.()
     this.detachShiftPan = null
+    this.detachWheelGuard?.()
+    this.detachWheelGuard = null
     this.itemSim?.destroy()
     this.snapshotChips?.destroy()
     this.gridMesh?.dispose()
