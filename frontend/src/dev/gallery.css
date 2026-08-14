@@ -1,0 +1,233 @@
+/* The gallery's own chrome. Deliberately plain: it is a measuring instrument,
+   so anything it draws around a specimen has to be quieter than the specimen.
+   Everything here resolves through the token layer like any other surface —
+   if the gallery looks wrong, that is the tokens telling you something. */
+
+.gal {
+  min-height: 100vh;
+  background: var(--color-ground);
+  color: var(--color-ink-1);
+  font-family: var(--font-sans);
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+}
+
+.gal-rail {
+  border-right: 1px solid var(--color-line-1);
+  padding: var(--space-8) 0;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.gal-mark {
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--color-ink-4);
+  padding: 0 var(--space-8) var(--space-7);
+}
+
+.gal-nav {
+  appearance: none;
+  background: none;
+  border: 0;
+  text-align: left;
+  font: inherit;
+  font-size: var(--text-ui);
+  color: var(--color-ink-3);
+  padding: var(--space-3) var(--space-8);
+  transition: color var(--dur-hover) var(--ease-default);
+}
+.gal-nav:hover {
+  color: var(--color-ink-1);
+}
+.gal-nav[data-on] {
+  color: var(--color-warm);
+}
+
+.gal-foot {
+  margin-top: auto;
+  padding: var(--space-7) var(--space-8) 0;
+  border-top: 1px solid var(--color-line-1);
+}
+
+.gal-theme {
+  appearance: none;
+  background: none;
+  border: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-readout);
+  letter-spacing: var(--tracking-readout);
+  color: var(--color-ink-3);
+  padding: 0;
+}
+.gal-theme:hover {
+  color: var(--color-ink-1);
+}
+
+.gal-main {
+  padding: var(--space-10) var(--space-11) var(--space-11);
+  max-width: 1080px;
+}
+
+.gal-h {
+  font-size: var(--text-page-title);
+  letter-spacing: var(--tracking-page-title);
+  font-weight: var(--font-weight-medium);
+  margin: 0 0 var(--space-3);
+}
+
+.gal-sub {
+  font-size: var(--text-body);
+  color: var(--color-ink-3);
+  margin: 0 0 var(--space-10);
+  max-width: var(--container-measure);
+  line-height: var(--leading-prose);
+}
+
+.gal-sec {
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--color-ink-4);
+  margin: var(--space-10) 0 var(--space-6);
+}
+.gal-sec:first-of-type {
+  margin-top: 0;
+}
+
+.gal-note {
+  font-size: var(--text-secondary);
+  color: var(--color-ink-3);
+  max-width: var(--container-measure);
+  line-height: var(--leading-prose);
+  margin: 0 0 var(--space-7);
+}
+
+/* A swatch states the token and the value it actually resolved to, read back
+   off the document rather than repeated from the stylesheet. A specimen that
+   prints what it was told would agree with a broken token layer; this one
+   disagrees, which is the entire point of having it. */
+.gal-ramp {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-7);
+}
+
+.gal-sw {
+  width: 132px;
+  border-radius: var(--radius-inflow);
+  box-shadow: var(--shadow-edge);
+  overflow: hidden;
+}
+
+.gal-chip {
+  height: 46px;
+  border-bottom: 1px solid var(--color-line-1);
+}
+
+.gal-meta {
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.gal-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-label-sm);
+  letter-spacing: var(--tracking-label-sm);
+  text-transform: uppercase;
+  color: var(--color-ink-2);
+  display: block;
+}
+
+.gal-val {
+  font-family: var(--font-mono);
+  font-size: var(--text-label-sm);
+  color: var(--color-ink-4);
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gal-val[data-missing] {
+  color: var(--color-alarm);
+}
+
+.gal-type {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  margin-bottom: var(--space-7);
+}
+
+.gal-type-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-7);
+}
+
+.gal-type-tag {
+  font-family: var(--font-mono);
+  font-size: var(--text-label-sm);
+  letter-spacing: var(--tracking-label-sm);
+  text-transform: uppercase;
+  color: var(--color-ink-4);
+  width: 148px;
+  flex: none;
+}
+
+.gal-boxes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  margin-bottom: var(--space-7);
+}
+
+.gal-box {
+  width: 168px;
+  height: 76px;
+  background: var(--color-raised);
+  border-radius: var(--radius-inflow);
+  display: flex;
+  align-items: flex-end;
+  padding: var(--space-4);
+}
+
+.gal-box span {
+  font-family: var(--font-mono);
+  font-size: var(--text-label-sm);
+  letter-spacing: var(--tracking-label-sm);
+  text-transform: uppercase;
+  color: var(--color-ink-3);
+}
+
+/* The empty state carries the rule for what may live here, because this is
+   where someone stands when they are about to add the wrong thing. */
+.gal-empty {
+  border-radius: var(--radius-inflow);
+  box-shadow: var(--shadow-edge);
+  padding: var(--space-9);
+  max-width: var(--container-measure);
+}
+
+.gal-empty p {
+  font-size: var(--text-body);
+  color: var(--color-ink-3);
+  line-height: var(--leading-prose);
+  margin: 0 0 var(--space-5);
+}
+.gal-empty p:last-child {
+  margin-bottom: 0;
+}
+.gal-empty code {
+  font-size: var(--text-reported);
+  color: var(--color-ink-2);
+}

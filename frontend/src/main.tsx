@@ -3,9 +3,9 @@
    RootRedirect, *Routes) aren't exported anywhere — the file calls
    createRoot().render() at the bottom and exits. The rule's HMR
    heuristic doesn't apply to an entrypoint. */
-import { StrictMode } from 'react'
+import { StrictMode, Suspense, lazy } from 'react'
 import { createRoot } from 'react-dom/client'
-import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router'
 import { useEffect } from 'react'
 import './index.css'
 import { watchSystemTheme } from './lib/theme'
@@ -58,8 +58,8 @@ import { OrgProvider, useActiveOrgId } from './contexts/OrgContext'
 
 function Loading() {
   return (
-    <div className="min-h-screen bg-surface flex items-center justify-center">
-      <p className="text-text-tertiary text-sm">Loading...</p>
+    <div className="min-h-screen bg-ground flex items-center justify-center">
+      <p className="text-ink-3 text-sm">Loading...</p>
     </div>
   )
 }
@@ -287,18 +287,38 @@ function MultiRoutes() {
   )
 }
 
+/* The design-system gallery. `import.meta.env.DEV` is statically replaced at
+   build time, so in production this is `false ? lazy(...) : null` and neither
+   the component nor its stylesheet reaches the bundle. */
+const UiGallery = import.meta.env.DEV ? lazy(() => import('./dev/UiGallery')) : null
+
 function AppRoutes() {
+  const { pathname } = useLocation()
   const { config, loading, error } = useDeploymentConfig()
+
+  /* Intercepted ahead of the deployment-mode branch, and ahead of every gate:
+     the gallery mounts ui components with hand-written props and talks to
+     nothing, so it must stay reachable when the backend is down or the user is
+     signed out. That independence is the point — it is where the design system
+     is reviewed, including when the API is what you are busy breaking. */
+  if (UiGallery && pathname.startsWith('/dev/ui')) {
+    return (
+      <Suspense fallback={<Loading />}>
+        <UiGallery />
+      </Suspense>
+    )
+  }
+
   if (loading) return <Loading />
   if (error || !config) {
     return (
-      <div className="min-h-screen bg-surface flex items-center justify-center">
+      <div className="min-h-screen bg-ground flex items-center justify-center">
         <div className="text-center space-y-3">
-          <p className="text-text-secondary text-sm">{error ?? 'Failed to load configuration'}</p>
+          <p className="text-ink-2 text-sm">{error ?? 'Failed to load configuration'}</p>
           <button
             type="button"
             onClick={() => window.location.reload()}
-            className="text-accent text-sm underline"
+            className="text-warm text-sm underline"
           >
             Retry
           </button>
