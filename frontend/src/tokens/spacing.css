@@ -1,0 +1,38 @@
+/* Spacing and radius.
+   The product's real values, not a 4/8 grid snapped over them.
+   Radius is small on purpose: 5px in flow, 4px for a nested interactive
+   block, 10px only for something that genuinely floats.
+
+   --radius-* is a Tailwind namespace (rounded-inflow, rounded-float).
+   The rest deliberately are not: Tailwind's --spacing-* is a multiplier scale
+   and these are the product's measured values, so forcing them in would make
+   `p-5` mean something other than what every other Tailwind project means.
+   Reach for them as var(--space-5) from a component stylesheet. */
+
+@theme {
+  --radius-nested: 4px;
+  --radius-inflow: 5px;
+  --radius-float: 10px;
+  --radius-pill: 999px;
+}
+
+:root {
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 11px;
+  --space-6: 13px;
+  --space-7: 16px;
+  --space-8: 20px;
+  --space-9: 24px;
+  --space-10: 34px;
+  --space-11: 54px;
+
+  --hairline: 1px;
+  --spine: 2px;
+
+  --card-pad-x: 13px;
+  --card-pad-y: 11px;
+  --card-gap: 8px;
+}

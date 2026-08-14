@@ -1,0 +1,133 @@
+/* Color.
+   Three hues and a neutral ramp. A token is the SAME HUE in light and dark,
+   at the lightness that ground demands — the two modes are lighting
+   conditions on one set of materials, never two languages.
+
+   Naming. Every token sits in Tailwind v4's --color-* namespace, so one
+   declaration is consumable both ways: bg-ground / text-ink-1 / border-line-1
+   from a page, var(--color-ground) from a component stylesheet. There is no
+   alias layer; an alias layer is the translation step the namespace removes.
+
+   Ramps are ORDINAL, never alpha-encoded. What a consumer reasons about is
+   rank ("one step stronger"), which is stable across lighting conditions;
+   alpha is an implementation detail that is not — warm-1 is 8% in light and
+   10% in dark, so a name carrying the number would already be lying.
+
+   Theme mechanism — exactly one. Light is the default; dark is `.dark` on
+   <html>, applied before paint by the inline script in index.html and owned
+   by lib/theme.ts thereafter. There is deliberately no prefers-color-scheme
+   arm: our convention is .dark-or-nothing, so a media query would hand the
+   dark palette to a user who explicitly chose light. OS-preference resolution
+   is the 'auto' setting, and it belongs to lib/theme.ts, which is the only
+   layer that knows whether a preference was stored.
+
+   Dark overrides are written `:root.dark`, not `.dark` as the design bundle
+   has them. `@theme` emits its variables at `:root` (specificity 0,1,0) and a
+   bare `.dark` matches that exactly, leaving the winner to source order we do
+   not control. `:root.dark` is 0,2,0 and wins regardless of where Tailwind
+   places its output. */
+
+@theme {
+  /* Ground — the unlit field. Layer 01. */
+  --color-ground: #f7f5f2;
+  --color-raised: #fffdfb;
+  --color-sunk: #f2efea;
+
+  /* Ink — four steps, no more. 1 is the strongest. */
+  --color-ink-1: #1a1a1a;
+  --color-ink-2: #4a4541;
+  --color-ink-3: #6b6560;
+  --color-ink-4: #9a938c;
+
+  /* Structure — layer 02. Drawn, never lit. */
+  --color-line-1: rgba(0, 0, 0, 0.07);
+  --color-line-2: rgba(0, 0, 0, 0.15);
+  --color-tint-1: rgba(0, 0, 0, 0.014);
+  --color-tint-2: rgba(0, 0, 0, 0.03);
+  --color-tint-3: rgba(0, 0, 0, 0.06);
+
+  /* Measurement — layer 03. Data, gauges, contours, and the ask. */
+  --color-warm: #a85a3a;
+  --color-warm-ink: #ffffff;
+  --color-warm-1: rgba(168, 90, 58, 0.08);
+  --color-warm-2: rgba(168, 90, 58, 0.14);
+  --color-warm-3: rgba(168, 90, 58, 0.28);
+  --color-warm-4: rgba(168, 90, 58, 0.4);
+
+  /* Emission — layer 04. An agent is working. Nothing else, ever. */
+  --color-cool: #1f6f8b;
+  --color-cool-glow: rgba(31, 111, 139, 0.7);
+
+  /* Failure. Applied to a container's frame, never as a badge. */
+  --color-alarm: #a84545;
+  --color-alarm-1: rgba(168, 69, 69, 0.3);
+  --color-alarm-2: rgba(168, 69, 69, 0.65);
+
+  /* Inverted chip — the one place a control may be a solid dark block. */
+  --color-inverse: #1a1a1a;
+  --color-inverse-ink: #ffffff;
+}
+
+/* Deliberately absent: --color-claim, --color-delegate and --color-snooze.
+   The triage verbs used to carry a green, a purple and a gold, which put six
+   hues on a page the language allows three. They are not renamed here because
+   there is nothing to rename them to — a verb is not a layer, and "green
+   means claim" is a legend the reader has to be taught.
+
+   Their utility classes (text-claim, bg-snooze, …) survive at ~135 call sites
+   and are now inert: those elements inherit their color. That is intentional
+   and temporary. The triage surfaces are being redesigned in this same effort,
+   and the classes go when the components do — rewriting them first would be
+   churn on files that are about to be replaced.
+
+   Whatever replaces them resolves through this file. Nothing reintroduces a
+   fourth hue without earning it. */
+
+/* Composites — inline so the utility carries the reference rather than a
+   value resolved once at :root. */
+@theme inline {
+  /* The focus ring draws in the measurement hue. Named so it can be
+     retargeted without repainting every accent. */
+  --color-focus: var(--color-warm);
+
+  /* The ground behind a modal. Derived from --color-sunk rather than from
+     black, so it deepens with the ground instead of fighting it: a fixed black
+     wash reads as a grey film over a dark theme, which is why the legacy
+     bg-black/30 scrims needed a dark-mode override to look right at all.
+     62% is the value the design bundle's dialog uses. */
+  --color-scrim: color-mix(in srgb, var(--color-sunk) 62%, transparent);
+}
+
+:root.dark {
+  --color-ground: #161311;
+  --color-raised: #1e1a17;
+  --color-sunk: #110f0d;
+
+  --color-ink-1: #ece7e0;
+  --color-ink-2: #b8b0a8;
+  --color-ink-3: #8a827a;
+  --color-ink-4: #6d665f;
+
+  --color-line-1: rgba(255, 255, 255, 0.08);
+  --color-line-2: rgba(255, 255, 255, 0.17);
+  --color-tint-1: rgba(255, 255, 255, 0.03);
+  --color-tint-2: rgba(255, 255, 255, 0.035);
+  --color-tint-3: rgba(255, 255, 255, 0.07);
+
+  --color-warm: #d18a64;
+  --color-warm-ink: #16110d;
+  --color-warm-1: rgba(209, 138, 100, 0.1);
+  --color-warm-2: rgba(209, 138, 100, 0.18);
+  --color-warm-3: rgba(209, 138, 100, 0.32);
+  --color-warm-4: rgba(209, 138, 100, 0.44);
+
+  --color-cool: #7ec8e0;
+  --color-cool-glow: rgba(126, 200, 224, 0.7);
+
+  --color-alarm: #d97777;
+  --color-alarm-1: rgba(217, 119, 119, 0.3);
+  --color-alarm-2: rgba(217, 119, 119, 0.65);
+
+  --color-inverse: #ece7e0;
+  --color-inverse-ink: #161311;
+}

@@ -1,0 +1,126 @@
+/* Motion.
+   Every animation answers "what just happened?". At most one thing moves per
+   card. Ambience is not a use case.
+
+   --ease-* is a Tailwind namespace (ease-default, ease-fold). Durations stay
+   outside it deliberately: Tailwind's --animate-* namespace names whole
+   animations, not bare times, and a --duration-* namespace does not exist. */
+
+@theme {
+  --ease-default: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-fold: cubic-bezier(0.65, 0, 0.35, 1);
+}
+
+:root {
+  --dur-hover: 0.2s;
+  --dur-disclosure: 0.2s;
+  --dur-content: 0.34s;
+  --dur-lap: 1.4s;
+  --dur-shimmer: 2.2s;
+  --dur-sweep: 2.2s;
+  --dur-breath: 4.5s;
+  --stagger: 50ms;
+}
+
+@keyframes tf-breathe {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes tf-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0% 0;
+  }
+}
+
+@keyframes tf-sweep {
+  0% {
+    left: -4px;
+    opacity: 0;
+  }
+  6% {
+    opacity: 1;
+  }
+  92% {
+    opacity: 1;
+  }
+  100% {
+    left: 100%;
+    opacity: 0;
+  }
+}
+
+@keyframes tf-draw {
+  0% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.75;
+  }
+  100% {
+    opacity: 0.25;
+  }
+}
+
+/* The assignee picker's spine growing out of its terminus. */
+@keyframes tf-draw-stem {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+/* The trace lap: one shared offset slid exactly one perimeter (pathLength 100). */
+@property --slide {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+
+@keyframes tf-lap {
+  to {
+    --slide: -100;
+  }
+}
+
+/* A mark resolving in the scan beam's wake. */
+@keyframes tf-resolve {
+  to {
+    background: var(--tone);
+    box-shadow: inset 0 0 0 1.5px var(--tone);
+  }
+}
+
+@keyframes tf-rise {
+  from {
+    opacity: 0;
+    transform: translateY(9px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* A blanket for CSS-driven motion. It cannot reach a sequence driven by
+   setTimeout or rAF, so any component whose motion is JS-timed reads the
+   preference itself — see src/ui/lib/useReducedMotion.ts, and the
+   reduced-motion note each such component carries in its .md. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
