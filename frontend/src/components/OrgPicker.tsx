@@ -104,18 +104,18 @@ export default function OrgPicker() {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 text-[13px] font-medium px-3 py-1.5 rounded-full text-text-secondary hover:text-text-primary hover:bg-black/[0.03] transition-colors"
+        className="flex items-center gap-1.5 text-body font-medium px-3 py-1.5 rounded-full text-ink-2 hover:text-ink-1 hover:bg-tint-2 transition-colors"
         aria-haspopup="listbox"
         aria-expanded={open}
       >
         <span className="truncate max-w-[160px]">{active.name}</span>
-        <ChevronDown size={14} className="text-text-tertiary" />
+        <ChevronDown size={14} className="text-ink-3" />
       </button>
 
       {open && (
         <div
           role="listbox"
-          className="absolute left-0 top-full mt-1.5 min-w-[200px] backdrop-blur-xl bg-surface-raised border border-border-glass rounded-xl shadow-lg shadow-black/[0.08] py-1 z-50"
+          className="absolute left-0 top-full mt-1.5 min-w-[200px] backdrop-blur-xl bg-raised border border-line-1 rounded-xl shadow-float shadow-black/[0.08] py-1 z-50"
         >
           {auth.orgs.map((org) => {
             const isActive = org.id === active.id
@@ -126,13 +126,13 @@ export default function OrgPicker() {
                 role="option"
                 aria-selected={isActive}
                 onClick={() => handlePick(org.id)}
-                className="w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-[13px] text-text-primary hover:bg-black/[0.03] transition-colors"
+                className="w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-body text-ink-1 hover:bg-tint-2 transition-colors"
               >
                 <span className="flex flex-col">
                   <span className="font-medium">{org.name}</span>
-                  <span className="text-[11px] text-text-tertiary capitalize">{org.role}</span>
+                  <span className="text-reported text-ink-3 capitalize">{org.role}</span>
                 </span>
-                {isActive && <Check size={14} className="text-accent shrink-0" />}
+                {isActive && <Check size={14} className="text-warm shrink-0" />}
               </button>
             )
           })}

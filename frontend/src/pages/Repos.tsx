@@ -182,14 +182,14 @@ function BranchPicker({
       <Popover.Trigger asChild>
         <button
           type="button"
-          className={`group inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] transition-colors ${
+          className={`group inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-reported transition-colors ${
             open
-              ? 'bg-accent/10 text-accent'
-              : 'text-text-tertiary hover:text-text-secondary hover:bg-black/[0.03]'
+              ? 'bg-warm/10 text-warm'
+              : 'text-ink-3 hover:text-ink-2 hover:bg-tint-2'
           }`}
         >
           <GitBranch size={11} strokeWidth={2} />
-          <span className={usingDefault ? 'text-text-tertiary' : 'text-text-secondary'}>
+          <span className={usingDefault ? 'text-ink-3' : 'text-ink-2'}>
             {effective}
           </span>
           <ChevronDown size={10} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
@@ -199,23 +199,23 @@ function BranchPicker({
         <Popover.Content
           align="end"
           sideOffset={6}
-          className="z-[60] w-64 origin-top-right rounded-xl border border-border-glass bg-surface-raised/95 backdrop-blur-xl shadow-lg shadow-black/[0.08] data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95"
+          className="z-[60] w-64 origin-top-right rounded-xl border border-line-1 bg-raised/95 backdrop-blur-xl shadow-float shadow-black/[0.08] data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95"
         >
-          <div className="px-2 pt-2 pb-1.5 border-b border-border-subtle">
+          <div className="px-2 pt-2 pb-1.5 border-b border-line-1">
             <input
               autoFocus
               value={query}
               onChange={handleQueryChange}
               onKeyDown={handleKeyDown}
               placeholder={profile.default_branch || 'main'}
-              className="w-full bg-transparent px-2 py-1 text-[12px] text-text-primary placeholder:text-text-tertiary/60 focus:outline-none"
+              className="w-full bg-transparent px-2 py-1 text-ui text-ink-1 placeholder:text-ink-3/60 focus:outline-none"
             />
           </div>
           <div className="max-h-56 overflow-y-auto py-1">
             {loading && branches.length === 0 ? (
-              <div className="px-3 py-1.5 text-[11px] text-text-tertiary">Loading…</div>
+              <div className="px-3 py-1.5 text-reported text-ink-3">Loading…</div>
             ) : branches.length === 0 ? (
-              <div className="px-3 py-1.5 text-[11px] text-text-tertiary">No branches found</div>
+              <div className="px-3 py-1.5 text-reported text-ink-3">No branches found</div>
             ) : (
               branches.map((b) => {
                 const isDefault = b === profile.default_branch
@@ -229,13 +229,13 @@ function BranchPicker({
                     key={b}
                     type="button"
                     onClick={() => handleSelect(b)}
-                    className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-accent/[0.06] ${
-                      isCurrent ? 'text-accent' : 'text-text-primary'
+                    className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-ui transition-colors hover:bg-warm/[0.06] ${
+                      isCurrent ? 'text-warm' : 'text-ink-1'
                     }`}
                   >
                     <span className="truncate">{b}</span>
                     {isDefault && (
-                      <span className="shrink-0 text-[10px] text-text-tertiary">default</span>
+                      <span className="shrink-0 text-label text-ink-3">default</span>
                     )}
                   </button>
                 )
@@ -259,10 +259,10 @@ function BranchLabel({ profile }: { profile: RepoProfile }) {
   return (
     <span
       title="Only an org admin, or a team admin of a team tracking this repo, can change the base branch"
-      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] text-text-tertiary"
+      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-reported text-ink-3"
     >
       <GitBranch size={11} strokeWidth={2} />
-      <span className={profile.base_branch ? 'text-text-secondary' : 'text-text-tertiary'}>
+      <span className={profile.base_branch ? 'text-ink-2' : 'text-ink-3'}>
         {effectiveBranch(profile)}
       </span>
     </span>
@@ -301,8 +301,8 @@ function StatusDot({ state }: { state: DotState }) {
         role="img"
         aria-label={label}
         title={label}
-        className="block h-2 w-2 shrink-0 rounded-full bg-[var(--color-accent)]"
-        style={{ boxShadow: '0 0 8px 0 var(--color-accent-soft)' }}
+        className="block h-2 w-2 shrink-0 rounded-full bg-[var(--color-warm)]"
+        style={{ boxShadow: '0 0 8px 0 var(--color-warm-2)' }}
       />
     )
   }
@@ -311,11 +311,11 @@ function StatusDot({ state }: { state: DotState }) {
       <span role="img" aria-label={label} title={label} className="relative block h-2 w-2 shrink-0">
         <span
           aria-hidden
-          className="absolute inset-0 animate-ping rounded-full bg-[var(--color-accent)] opacity-50"
+          className="absolute inset-0 animate-ping rounded-full bg-[var(--color-warm)] opacity-50"
         />
         <span
           aria-hidden
-          className="absolute inset-0 rounded-full border border-[var(--color-accent)]"
+          className="absolute inset-0 rounded-full border border-[var(--color-warm)]"
         />
       </span>
     )
@@ -329,7 +329,7 @@ function StatusDot({ state }: { state: DotState }) {
         aria-label={label}
         title={label}
         className="block h-2 w-2 shrink-0 rounded-full border"
-        style={{ borderColor: 'var(--color-text-tertiary)' }}
+        style={{ borderColor: 'var(--color-ink-3)' }}
       />
     )
   }
@@ -340,7 +340,7 @@ function StatusDot({ state }: { state: DotState }) {
       aria-label={label}
       title={label}
       className="block h-2 w-2 shrink-0 rounded-full border"
-      style={{ borderColor: 'var(--color-dismiss)' }}
+      style={{ borderColor: 'var(--color-alarm)' }}
     />
   )
 }
@@ -367,11 +367,11 @@ function CloneFailedBadge({ profile }: { profile: RepoProfile }) {
           aria-label={`Clone failed for ${profile.id}`}
           className="
             inline-flex items-center gap-1 rounded-full
-            border border-[var(--color-dismiss)]/30
-            bg-[var(--color-dismiss)]/10 px-2 py-0.5
-            text-[10px] font-medium uppercase tracking-wide
-            text-[var(--color-dismiss)]
-            hover:bg-[var(--color-dismiss)]/15 transition-colors
+            border border-[var(--color-alarm)]/30
+            bg-[var(--color-alarm)]/10 px-2 py-0.5
+            text-label font-medium uppercase tracking-wide
+            text-[var(--color-alarm)]
+            hover:bg-[var(--color-alarm)]/15 transition-colors
           "
         >
           <AlertTriangle size={10} />
@@ -384,22 +384,22 @@ function CloneFailedBadge({ profile }: { profile: RepoProfile }) {
           align="start"
           sideOffset={6}
           className="
-            z-50 w-[320px] rounded-xl border border-border-glass
-            bg-surface-raised/95 backdrop-blur-xl shadow-lg shadow-black/[0.08]
-            p-3 text-[12px] text-text-primary
+            z-50 w-[320px] rounded-xl border border-line-1
+            bg-raised/95 backdrop-blur-xl shadow-float shadow-black/[0.08]
+            p-3 text-ui text-ink-1
           "
         >
           <p className="font-semibold mb-1.5">
             {isSSH ? 'SSH not configured for GitHub' : 'Clone failed'}
           </p>
           {isSSH ? (
-            <p className="text-text-secondary leading-snug mb-2">
+            <p className="text-ink-2 leading-snug mb-2">
               The bare-clone for this repo couldn&apos;t be created over SSH. Our preflight against
               your GitHub host also failed — check that your SSH key is added to GitHub and loaded
               into your agent, or switch the clone protocol to HTTPS.
             </p>
           ) : (
-            <p className="text-text-secondary leading-snug mb-2">
+            <p className="text-ink-2 leading-snug mb-2">
               The bare-clone for this repo failed. Raw output from git:
             </p>
           )}
@@ -407,7 +407,7 @@ function CloneFailedBadge({ profile }: { profile: RepoProfile }) {
             <pre
               className="
               mb-2 max-h-[140px] overflow-auto rounded
-              bg-black/[0.04] p-2 text-[11px] text-text-secondary
+              bg-tint-3 p-2 text-reported text-ink-2
               whitespace-pre-wrap break-words
             "
             >
@@ -420,8 +420,8 @@ function CloneFailedBadge({ profile }: { profile: RepoProfile }) {
               onClick={() => setOpen(false)}
               className="
                 inline-flex items-center gap-1 rounded-md
-                bg-accent/10 px-2 py-1 text-[12px] font-medium
-                text-accent hover:bg-accent/15 transition-colors
+                bg-warm/10 px-2 py-1 text-ui font-medium
+                text-warm hover:bg-warm/15 transition-colors
               "
             >
               Fix in Settings
@@ -478,23 +478,23 @@ function RepoCard({
   return (
     <article
       className="
-        group relative overflow-hidden rounded-2xl border border-border-glass
-        bg-gradient-to-br from-white/70 via-white/50 to-white/35
-        p-5 shadow-sm shadow-black/[0.03] backdrop-blur-xl
+        group relative overflow-hidden rounded-2xl border border-line-1
+        bg-raised
+        p-5 shadow-float shadow-black/[0.03] backdrop-blur-xl
         transition-[box-shadow,border-color] duration-300
-        hover:border-white/90 hover:shadow-md hover:shadow-black/[0.05]
+        hover:border-line-1 hover:shadow-float hover:shadow-black/[0.05]
       "
     >
       {/* Top-left catchlight — implies refraction without being loud */}
       <span
         aria-hidden
-        className="pointer-events-none absolute -left-8 -top-8 h-24 w-24 rounded-full bg-white/30 blur-2xl"
+        className="pointer-events-none absolute -left-8 -top-8 h-24 w-24 rounded-full bg-raised blur-2xl"
       />
 
       {/* Header row */}
       <header className="relative flex items-center gap-3">
         <StatusDot state={state} />
-        <h3 className="text-[13px] font-semibold tracking-tight text-text-primary truncate">
+        <h3 className="text-body font-semibold tracking-tight text-ink-1 truncate">
           {profile.id}
         </h3>
         {profile.clone_status === 'failed' && <CloneFailedBadge profile={profile} />}
@@ -505,7 +505,7 @@ function RepoCard({
             <BranchLabel profile={profile} />
           )}
           {profile.profiled_at && (
-            <span className="text-[10px] text-text-tertiary whitespace-nowrap tabular-nums">
+            <span className="text-label text-ink-3 whitespace-nowrap tabular-nums">
               {formatAge(profile.profiled_at)}
             </span>
           )}
@@ -513,12 +513,12 @@ function RepoCard({
       </header>
 
       {/* Recessed description well */}
-      <div className="relative mt-3 rounded-xl bg-black/[0.02] ring-1 ring-inset ring-black/[0.04] px-4 py-3">
+      <div className="relative mt-3 rounded-xl bg-tint-2 ring-1 ring-inset ring-line-1 px-4 py-3">
         {profile.profile_text ? (
           <>
             <p
               ref={bodyRef}
-              className={`text-[12px] leading-relaxed text-text-secondary ${
+              className={`text-ui leading-relaxed text-ink-2 ${
                 expanded ? '' : 'line-clamp-3'
               }`}
             >
@@ -530,7 +530,7 @@ function RepoCard({
                 onClick={() => setExpanded(true)}
                 aria-label={`Show full profile for ${profile.id}`}
                 aria-expanded={false}
-                className="mt-1 text-[11px] font-medium text-accent/80 hover:text-accent transition-colors"
+                className="mt-1 text-reported font-medium text-warm/80 hover:text-warm transition-colors"
               >
                 Show more
               </button>
@@ -541,7 +541,7 @@ function RepoCard({
                 onClick={() => setExpanded(false)}
                 aria-label={`Collapse profile for ${profile.id}`}
                 aria-expanded={true}
-                className="mt-2 text-[11px] font-medium text-text-tertiary hover:text-text-secondary transition-colors"
+                className="mt-2 text-reported font-medium text-ink-3 hover:text-ink-2 transition-colors"
               >
                 Show less
               </button>
@@ -549,14 +549,14 @@ function RepoCard({
           </>
         ) : hasAnyDocs ? (
           <div className="space-y-1.5">
-            <div className="h-2.5 w-full animate-pulse rounded-full bg-black/[0.05]" />
-            <div className="h-2.5 w-5/6 animate-pulse rounded-full bg-black/[0.05]" />
-            <div className="h-2.5 w-4/6 animate-pulse rounded-full bg-black/[0.05]" />
+            <div className="h-2.5 w-full animate-pulse rounded-full bg-tint-3" />
+            <div className="h-2.5 w-5/6 animate-pulse rounded-full bg-tint-3" />
+            <div className="h-2.5 w-4/6 animate-pulse rounded-full bg-tint-3" />
           </div>
         ) : neverChecked ? (
-          <p className="text-[12px] italic text-text-tertiary">Profiling pending…</p>
+          <p className="text-ui italic text-ink-3">Profiling pending…</p>
         ) : (
-          <p className="text-[12px] italic text-text-tertiary">
+          <p className="text-ui italic text-ink-3">
             No README, CLAUDE.md, or AGENTS.md — profile cannot be generated.
           </p>
         )}
@@ -591,13 +591,13 @@ function RepoCard({
 function DocChip({ label, present, href }: { label: string; present: boolean; href?: string }) {
   if (!present) {
     return (
-      <span className="rounded-full px-1.5 py-0.5 text-[9px] font-medium tracking-wide text-text-tertiary/50 line-through">
+      <span className="rounded-full px-1.5 py-0.5 text-label-sm font-medium tracking-wide text-ink-3/50 line-through">
         {label}
       </span>
     )
   }
   const base =
-    'rounded-full border border-accent/15 bg-accent/5 px-1.5 py-0.5 text-[9px] font-medium tracking-wide text-accent'
+    'rounded-full border border-warm/15 bg-warm/5 px-1.5 py-0.5 text-label-sm font-medium tracking-wide text-warm'
   if (!href) {
     return <span className={base}>{label}</span>
   }
@@ -607,7 +607,7 @@ function DocChip({ label, present, href }: { label: string; present: boolean; hr
       target="_blank"
       rel="noopener noreferrer"
       title={`Open ${label === 'README' ? 'README' : label}.md on GitHub`}
-      className={`${base} transition-colors hover:border-accent/35 hover:bg-accent/10`}
+      className={`${base} transition-colors hover:border-warm/35 hover:bg-warm/10`}
     >
       {label}
     </a>
@@ -852,7 +852,7 @@ export default function Repos() {
   if (loading) {
     return (
       <div className="flex min-h-[50vh] items-center justify-center">
-        <p className="text-[13px] text-text-tertiary">Loading repos…</p>
+        <p className="text-body text-ink-3">Loading repos…</p>
       </div>
     )
   }
@@ -862,33 +862,33 @@ export default function Repos() {
       {/* Etched gradient rail — subtle Halo HUD nod, warm copper fade */}
       <div
         aria-hidden
-        className="mb-4 h-px w-full bg-gradient-to-r from-transparent via-[var(--color-accent-soft)] to-transparent"
+        className="mb-4 h-px w-full bg-gradient-to-r from-transparent via-[var(--color-warm-2)] to-transparent"
       />
 
       <header className="mb-6 flex items-start justify-between gap-6">
         <div>
           <div className="flex items-baseline gap-2">
-            <h1 className="text-[22px] font-semibold tracking-tight text-text-primary">
+            <h1 className="text-[22px] font-semibold tracking-tight text-ink-1">
               Repositories
             </h1>
             {profiles.length > 0 && (
-              <span className="text-[11px] tabular-nums text-text-tertiary">
+              <span className="text-reported tabular-nums text-ink-3">
                 {profiledCount}/{profiles.length} profiled
               </span>
             )}
           </div>
-          <p className="mt-1 text-[13px] text-text-tertiary">
+          <p className="mt-1 text-body text-ink-3">
             Watched repos surface in your triage queue and anchor Jira-to-code matching for
             delegation.
           </p>
           {teamLoadFailed && (
-            <p className="mt-1 text-[13px] text-amber-600">
+            <p className="mt-1 text-body text-warm">
               Couldn&rsquo;t load your repo selection — editing and re-profiling are paused to avoid
               overwriting it.{' '}
               <button
                 type="button"
                 onClick={() => fetchData()}
-                className="underline hover:text-amber-700"
+                className="underline hover:text-warm"
               >
                 Retry
               </button>
@@ -965,12 +965,12 @@ function ActionButton({
       onClick={onClick}
       disabled={disabled}
       className={`
-        inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-medium
+        inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-ui font-medium
         transition-colors disabled:opacity-40 disabled:hover:bg-transparent
         ${
           accent
-            ? 'text-accent hover:bg-accent/[0.08]'
-            : 'text-text-secondary hover:text-text-primary hover:bg-black/[0.03]'
+            ? 'text-warm hover:bg-warm/[0.08]'
+            : 'text-ink-2 hover:text-ink-1 hover:bg-tint-2'
         }
       `}
     >
@@ -984,17 +984,17 @@ function EmptyState({ onPick }: { onPick: () => void }) {
   return (
     <div
       className="
-        relative overflow-hidden rounded-2xl border border-border-glass
-        bg-gradient-to-br from-white/70 via-white/50 to-white/35
+        relative overflow-hidden rounded-2xl border border-line-1
+        bg-raised
         p-12 text-center backdrop-blur-xl
       "
     >
       <span
         aria-hidden
-        className="pointer-events-none absolute -left-12 -top-12 h-36 w-36 rounded-full bg-white/30 blur-2xl"
+        className="pointer-events-none absolute -left-12 -top-12 h-36 w-36 rounded-full bg-raised blur-2xl"
       />
-      <p className="relative text-[13px] text-text-secondary">No repositories configured yet.</p>
-      <p className="relative mt-1 text-[12px] text-text-tertiary">
+      <p className="relative text-body text-ink-2">No repositories configured yet.</p>
+      <p className="relative mt-1 text-ui text-ink-3">
         Pick a few to start watching for PRs and to anchor Jira delegation.
       </p>
       <button
@@ -1002,8 +1002,8 @@ function EmptyState({ onPick }: { onPick: () => void }) {
         onClick={onPick}
         className="
           relative mt-5 inline-flex items-center gap-1.5 rounded-full
-          border border-accent/25 px-4 py-1.5 text-[12px] font-medium text-accent
-          transition-colors hover:bg-accent/[0.06] hover:border-accent/40
+          border border-warm/25 px-4 py-1.5 text-ui font-medium text-warm
+          transition-colors hover:bg-warm/[0.06] hover:border-warm/40
         "
       >
         <Plus size={12} />

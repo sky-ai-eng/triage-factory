@@ -50,10 +50,10 @@ export default function Shell() {
   // Team/Prompts entries (whose active state we compute by hand, since they
   // share the /team pathname and differ only by ?tab) match the NavLink ones.
   const pill = (isActive: boolean) =>
-    `text-[13px] font-medium px-4 py-1.5 rounded-full transition-all duration-200 ${
+    `text-body font-medium px-4 py-1.5 rounded-full transition-all duration-200 ${
       isActive
-        ? 'bg-accent-soft text-accent'
-        : 'text-text-tertiary hover:text-text-secondary hover:bg-black/[0.03]'
+        ? 'bg-warm-2 text-warm'
+        : 'text-ink-3 hover:text-ink-2 hover:bg-tint-2'
     }`
 
   // Team + Prompts both live on /team in multi mode (Prompts is the ?tab=prompts
@@ -64,10 +64,10 @@ export default function Shell() {
   const teamHomeActive = onTeam && !promptsTabActive
 
   return (
-    <div className="min-h-screen bg-surface text-text-primary">
+    <div className="min-h-screen bg-ground text-ink-1">
       {!fullBleed && (
-        <nav className="sticky top-0 z-50 backdrop-blur-xl bg-surface-overlay border-b border-border-subtle px-8 py-4 flex items-center gap-6">
-          <span className="text-base font-semibold tracking-tight text-text-primary">
+        <nav className="sticky top-0 z-50 backdrop-blur-xl bg-raised border-b border-line-1 px-8 py-4 flex items-center gap-6">
+          <span className="text-base font-semibold tracking-tight text-ink-1">
             Triage Factory
           </span>
           {isMulti && <OrgPicker />}
@@ -136,8 +136,8 @@ export default function Shell() {
             className={({ isActive }) =>
               `p-2 rounded-full transition-all duration-200 ${
                 isActive
-                  ? 'bg-accent-soft text-accent'
-                  : 'text-text-tertiary hover:text-text-secondary hover:bg-black/[0.03]'
+                  ? 'bg-warm-2 text-warm'
+                  : 'text-ink-3 hover:text-ink-2 hover:bg-tint-2'
               }`
             }
           >

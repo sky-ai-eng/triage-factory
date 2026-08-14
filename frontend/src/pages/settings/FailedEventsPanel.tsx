@@ -86,13 +86,13 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
   }
 
   if (loading) {
-    return <p className="text-[13px] text-text-tertiary">Loading parked events…</p>
+    return <p className="text-body text-ink-3">Loading parked events…</p>
   }
   if (error) {
     return (
-      <p className="text-[13px] text-text-secondary">
+      <p className="text-body text-ink-2">
         {error}{' '}
-        <button type="button" onClick={() => void reload()} className="text-accent underline">
+        <button type="button" onClick={() => void reload()} className="text-warm underline">
           Retry
         </button>
       </p>
@@ -101,8 +101,8 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
   if (events.length === 0) {
     return (
       <div className="space-y-2">
-        <p className="text-[13px] text-text-primary">Nothing parked.</p>
-        <p className="text-[11px] leading-relaxed text-text-tertiary">
+        <p className="text-body text-ink-1">Nothing parked.</p>
+        <p className="text-reported leading-relaxed text-ink-3">
           Events land here only when routing fails repeatedly enough to exhaust the retry budget. An
           empty list is the healthy state.
         </p>
@@ -113,10 +113,10 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
   return (
     <div className="space-y-4">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
           Events that never routed
         </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           Each of these was recorded but its follow-up work — creating or bumping a task, firing a
           trigger, processing a close — failed enough times to be parked. Nothing retries them
           automatically, because the poller only reports transitions once. Requeue puts a row back
@@ -125,13 +125,13 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
       </div>
 
       <div className="flex items-center justify-between gap-4">
-        <label className="flex items-center gap-2 text-[12px] text-text-secondary">
+        <label className="flex items-center gap-2 text-ui text-ink-2">
           <input
             type="checkbox"
             checked={allSelected}
             onChange={toggleAll}
             aria-label="Select all parked events"
-            className="h-3.5 w-3.5 accent-[var(--color-accent)]"
+            className="h-3.5 w-3.5 accent-[var(--color-warm)]"
           />
           Select all ({events.length})
         </label>
@@ -139,7 +139,7 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
           type="button"
           onClick={() => void run([...selected])}
           disabled={selected.size === 0 || inFlight.size > 0}
-          className="shrink-0 rounded-xl border border-accent/20 px-4 py-2 text-[13px] text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+          className="shrink-0 rounded-xl border border-warm/20 px-4 py-2 text-body text-warm transition-colors hover:border-warm/30 hover:text-warm/80 disabled:opacity-40"
         >
           Requeue selected{selected.size > 0 ? ` (${selected.size})` : ''}
         </button>
@@ -147,9 +147,9 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
 
       {/* The error column is the widest and the least predictable, so the table
           scrolls inside its own box rather than widening the settings stack. */}
-      <div className="overflow-x-auto rounded-xl border border-border-subtle">
-        <table className="w-full min-w-[720px] text-left text-[12px]">
-          <thead className="border-b border-border-subtle text-[11px] text-text-tertiary">
+      <div className="overflow-x-auto rounded-xl border border-line-1">
+        <table className="w-full min-w-[720px] text-left text-ui">
+          <thead className="border-b border-line-1 text-reported text-ink-3">
             <tr>
               <th scope="col" className="w-8 px-3 py-2">
                 <span className="sr-only">Select</span>
@@ -174,7 +174,7 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
               </th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-border-subtle">
+          <tbody className="divide-y divide-line-1">
             {events.map((e) => {
               const busy = inFlight.has(e.id)
               return (
@@ -186,29 +186,29 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
                       onChange={() => toggleRow(e.id)}
                       disabled={busy}
                       aria-label={`Select event ${e.id}`}
-                      className="h-3.5 w-3.5 accent-[var(--color-accent)]"
+                      className="h-3.5 w-3.5 accent-[var(--color-warm)]"
                     />
                   </td>
                   {/* The raw event type, not a friendly label: this is the
                       string an operator greps the logs and the trigger config
                       for. */}
-                  <td className="px-3 py-2 font-mono text-[11px] text-text-primary">
+                  <td className="px-3 py-2 font-mono text-reported text-ink-1">
                     {e.event_type}
                   </td>
-                  <td className="px-3 py-2 text-text-secondary">
-                    <span className="font-mono text-[11px]">{entityLabel(e)}</span>
+                  <td className="px-3 py-2 text-ink-2">
+                    <span className="font-mono text-reported">{entityLabel(e)}</span>
                     {e.entity_title && (
-                      <span className="mt-0.5 block max-w-[220px] truncate text-[11px] text-text-tertiary">
+                      <span className="mt-0.5 block max-w-[220px] truncate text-reported text-ink-3">
                         {e.entity_title}
                       </span>
                     )}
                   </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-text-tertiary">
+                  <td className="whitespace-nowrap px-3 py-2 text-ink-3">
                     {timeAgo(e.enqueued_at)}
                   </td>
-                  <td className="px-3 py-2 text-text-tertiary">{e.attempts}</td>
+                  <td className="px-3 py-2 text-ink-3">{e.attempts}</td>
                   <td className="px-3 py-2">
-                    <span className="block max-w-[320px] break-words font-mono text-[11px] text-text-secondary">
+                    <span className="block max-w-[320px] break-words font-mono text-reported text-ink-2">
                       {e.last_error || '—'}
                     </span>
                   </td>
@@ -218,7 +218,7 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
                       onClick={() => void run([e.id])}
                       disabled={busy}
                       title="Requeue this event"
-                      className="inline-flex items-center gap-1 rounded-lg border border-border-subtle px-2 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent/30 hover:text-accent disabled:opacity-40"
+                      className="inline-flex items-center gap-1 rounded-lg border border-line-1 px-2 py-1 text-reported text-ink-2 transition-colors hover:border-warm/30 hover:text-warm disabled:opacity-40"
                     >
                       <RotateCcw size={11} aria-hidden />
                       {busy ? 'Requeueing…' : 'Requeue'}

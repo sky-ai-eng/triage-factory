@@ -182,13 +182,13 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim backdrop-blur-sm"
       onClick={handleBackdropClick}
     >
       <div
         ref={dialogRef}
         tabIndex={-1}
-        className="w-full max-w-2xl backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl shadow-lg shadow-black/[0.04] overflow-hidden flex flex-col max-h-[85vh]"
+        className="w-full max-w-2xl backdrop-blur-xl bg-raised border border-line-1 rounded-2xl shadow-float shadow-black/[0.04] overflow-hidden flex flex-col max-h-[85vh]"
         role="dialog"
         aria-modal="true"
         aria-labelledby="project-backfill-modal-title"
@@ -197,11 +197,11 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
         <div className="px-6 pt-6 pb-4">
           <h2
             id="project-backfill-modal-title"
-            className="text-[18px] font-semibold text-text-primary tracking-tight"
+            className="text-section font-semibold text-ink-1 tracking-tight"
           >
             Claim entities for {projectName}
           </h2>
-          <p className="text-[13px] text-text-tertiary mt-1 leading-relaxed">
+          <p className="text-body text-ink-3 mt-1 leading-relaxed">
             Pick the entities you want to claim for this project. Unclaimed entities are listed
             first; reclaiming one already in another project moves it.
           </p>
@@ -209,10 +209,10 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
 
         <div className="flex-1 overflow-y-auto px-6 min-h-0">
           {isLoading && (
-            <p className="text-[13px] text-text-tertiary text-center py-12">Loading candidates…</p>
+            <p className="text-body text-ink-3 text-center py-12">Loading candidates…</p>
           )}
           {loadError && !isLoading && (
-            <p className="text-[13px] text-dismiss text-center py-12">{loadError}</p>
+            <p className="text-body text-alarm text-center py-12">{loadError}</p>
           )}
           {!isLoading && !loadError && (candidates?.length ?? 0) > 0 && (
             <div className="py-2 space-y-4">
@@ -240,22 +240,22 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
           )}
         </div>
 
-        <div className="px-6 py-4 border-t border-border-subtle flex items-center justify-between">
+        <div className="px-6 py-4 border-t border-line-1 flex items-center justify-between">
           <button
             type="button"
             onClick={onClose}
             disabled={saving}
-            className="text-[12px] text-text-tertiary hover:text-text-secondary transition-colors"
+            className="text-ui text-ink-3 hover:text-ink-2 transition-colors"
           >
             Skip for now
           </button>
           <div className="flex items-center gap-3">
-            <span className="text-[11px] text-text-tertiary">{selectionCount} selected</span>
+            <span className="text-reported text-ink-3">{selectionCount} selected</span>
             <button
               type="button"
               onClick={handleSubmit}
               disabled={selectionCount === 0 || saving || isLoading || !!loadError}
-              className="bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-5 py-2 text-[13px] transition-colors"
+              className="bg-warm hover:bg-warm/90 disabled:opacity-40 text-warm-ink font-medium rounded-xl px-5 py-2 text-body transition-colors"
             >
               {saving ? 'Assigning…' : 'Assign'}
             </button>
@@ -284,10 +284,10 @@ function Section({
   return (
     <div>
       <div className="px-1 pb-1.5">
-        <h3 className="text-[12px] font-semibold text-text-secondary uppercase tracking-wide">
+        <h3 className="text-ui font-semibold text-ink-2 uppercase tracking-wide">
           {title}
         </h3>
-        <p className="text-[11px] text-text-tertiary mt-0.5">{caption}</p>
+        <p className="text-reported text-ink-3 mt-0.5">{caption}</p>
       </div>
       <ul className="space-y-0.5">
         {candidates.map((c) => (
@@ -318,7 +318,7 @@ function CandidateRow({ candidate, checked, failure, onToggle }: RowProps) {
     <li
       className={`
         flex items-center gap-3 px-3 py-2.5 rounded-xl transition-colors cursor-pointer
-        ${errored ? 'bg-dismiss/[0.04]' : 'hover:bg-black/[0.02]'}
+        ${errored ? 'bg-alarm/[0.04]' : 'hover:bg-tint-2'}
       `}
       onClick={onToggle}
     >
@@ -327,12 +327,12 @@ function CandidateRow({ candidate, checked, failure, onToggle }: RowProps) {
         checked={checked}
         onChange={onToggle}
         onClick={(e) => e.stopPropagation()}
-        className="h-4 w-4 accent-accent cursor-pointer"
+        className="h-4 w-4 accent-warm cursor-pointer"
         aria-label={`Toggle ${candidate.source_id}`}
       />
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 text-[13px]">
-          <span className="text-text-tertiary text-[11px] uppercase tracking-wide">
+        <div className="flex items-center gap-2 text-body">
+          <span className="text-ink-3 text-reported uppercase tracking-wide">
             {sourceLabel}
           </span>
           <a
@@ -340,17 +340,17 @@ function CandidateRow({ candidate, checked, failure, onToggle }: RowProps) {
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="text-text-primary font-medium hover:text-accent transition-colors flex items-center gap-1"
+            className="text-ink-1 font-medium hover:text-warm transition-colors flex items-center gap-1"
           >
             {candidate.source_id}
             <ExternalLink size={11} className="opacity-50" />
           </a>
         </div>
-        <div className="text-[13px] text-text-secondary truncate">{candidate.title}</div>
-        {failure && <div className="text-[11px] text-dismiss mt-1">{failure}</div>}
+        <div className="text-body text-ink-2 truncate">{candidate.title}</div>
+        {failure && <div className="text-reported text-alarm mt-1">{failure}</div>}
       </div>
       {candidate.current_project_name && (
-        <span className="text-[11px] text-text-tertiary border border-border-subtle rounded-full px-2 py-0.5 whitespace-nowrap">
+        <span className="text-reported text-ink-3 border border-line-1 rounded-full px-2 py-0.5 whitespace-nowrap">
           in: {candidate.current_project_name}
         </span>
       )}

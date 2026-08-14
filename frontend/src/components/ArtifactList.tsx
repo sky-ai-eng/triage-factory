@@ -146,13 +146,13 @@ export default function ArtifactList({
   // a transient error defeats the point of refreshKey — and the next
   // set-shape change retries.
   if (error && artifacts === null) {
-    return <p className="text-[11.5px] leading-relaxed text-dismiss">{error}</p>
+    return <p className="text-secondary leading-relaxed text-alarm">{error}</p>
   }
   if (ordered === null) {
-    return <p className="text-[11.5px] text-text-tertiary/70">Loading artifacts…</p>
+    return <p className="text-secondary text-ink-3/70">Loading artifacts…</p>
   }
   if (ordered.length === 0) {
-    return <p className="text-[11.5px] text-text-tertiary/70">No artifacts yet.</p>
+    return <p className="text-secondary text-ink-3/70">No artifacts yet.</p>
   }
 
   return (

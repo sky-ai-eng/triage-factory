@@ -70,21 +70,21 @@ export default function MemberRoster({ adapter, canManage }: MemberRosterProps) 
   }, [reload])
 
   if (loading) {
-    return <p className="text-[13px] text-text-tertiary">Loading members…</p>
+    return <p className="text-body text-ink-3">Loading members…</p>
   }
   if (error) {
-    return <p className="text-[13px] text-dismiss">{error}</p>
+    return <p className="text-body text-alarm">{error}</p>
   }
 
   return (
     <div className="space-y-3">
       {actionError && (
-        <div className="flex items-start justify-between gap-3 rounded-xl border border-dismiss/30 bg-dismiss/[0.06] px-4 py-2.5">
-          <span className="text-[12px] text-dismiss">{actionError}</span>
+        <div className="flex items-start justify-between gap-3 rounded-xl border border-alarm/30 bg-alarm/[0.06] px-4 py-2.5">
+          <span className="text-ui text-alarm">{actionError}</span>
           <button
             type="button"
             onClick={clearActionError}
-            className="text-[11px] text-text-tertiary underline transition-colors hover:text-text-secondary"
+            className="text-reported text-ink-3 underline transition-colors hover:text-ink-2"
           >
             Dismiss
           </button>
@@ -100,7 +100,7 @@ export default function MemberRoster({ adapter, canManage }: MemberRosterProps) 
             // change is in flight so it can't race the hook's serialized writes.
             disabled={busy}
             title={busy ? 'Another change is in progress…' : undefined}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border-glass bg-surface px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-border-glass disabled:hover:text-text-secondary"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-line-1 bg-ground px-3 py-1.5 text-ui font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-warm disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line-1 disabled:hover:text-ink-2"
           >
             <ArrowLeftRight size={13} />
             Transfer ownership
@@ -108,8 +108,8 @@ export default function MemberRoster({ adapter, canManage }: MemberRosterProps) 
         </div>
       )}
 
-      <div className="overflow-hidden rounded-2xl border border-border-subtle">
-        <ul className="divide-y divide-border-subtle">
+      <div className="overflow-hidden rounded-2xl border border-line-1">
+        <ul className="divide-y divide-line-1">
           {members.map((m) => {
             const isLastProtected = m.role === adapter.protectedRole && protectedCount <= 1
             // A sole owner clicking Leave shouldn't hit a dead disabled button
@@ -193,17 +193,17 @@ function MemberRow({
 
   return (
     <li className="flex items-center gap-4 px-4 py-3">
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[13px] font-semibold text-accent">
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-warm-2 text-body font-semibold text-warm">
         {initialFor(member)}
       </span>
 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="truncate text-[13px] font-medium text-text-primary">
+          <span className="truncate text-body font-medium text-ink-1">
             {displayNameFor(member)}
           </span>
           {member.isCurrentUser && (
-            <span className="rounded-full bg-black/[0.04] px-2 py-0.5 text-[10px] font-medium text-text-tertiary">
+            <span className="rounded-full bg-tint-3 px-2 py-0.5 text-label font-medium text-ink-3">
               You
             </span>
           )}
@@ -233,7 +233,7 @@ function MemberRow({
               ? "You can't change your own role here"
               : undefined
         }
-        className="rounded-lg border border-border-glass bg-surface px-2.5 py-1.5 text-[12px] text-text-secondary transition-colors focus:border-accent/40 focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50"
+        className="rounded-lg border border-line-1 bg-ground px-2.5 py-1.5 text-ui text-ink-2 transition-colors focus:border-warm/40 focus:outline-none focus:ring-2 focus:ring-warm/30 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {/* Keep the current role selectable even if it's outside the adapter's
             primary vocab (defensive against legacy values). */}
@@ -258,7 +258,7 @@ function MemberRow({
             onClick={onRemove}
             disabled={isLastProtected || busy}
             title={isLastProtected ? `Can't remove the last ${member.role}` : 'Remove from org'}
-            className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-text-tertiary transition-colors hover:bg-dismiss/[0.06] hover:text-dismiss disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-tertiary"
+            className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-ui font-medium text-ink-3 transition-colors hover:bg-alarm/[0.06] hover:text-alarm disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-3"
           >
             <Trash2 size={13} />
             Remove
@@ -300,7 +300,7 @@ function LeaveButton({
         onClick={onNeedsTransfer}
         disabled={busy}
         title={busy ? 'Another change is in progress…' : 'Transfer ownership before leaving'}
-        className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-text-tertiary transition-colors hover:bg-dismiss/[0.06] hover:text-dismiss disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-tertiary"
+        className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-ui font-medium text-ink-3 transition-colors hover:bg-alarm/[0.06] hover:text-alarm disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-3"
       >
         <LogOut size={13} />
         Leave
@@ -321,14 +321,14 @@ function LeaveButton({
             setConfirming(false)
             onConfirm()
           }}
-          className="rounded-lg bg-dismiss px-2 py-1.5 text-[11px] font-semibold text-white transition-colors hover:bg-dismiss/90 disabled:cursor-not-allowed disabled:opacity-40"
+          className="rounded-lg bg-alarm px-2 py-1.5 text-reported font-semibold text-ground transition-colors hover:bg-alarm/90 disabled:cursor-not-allowed disabled:opacity-40"
         >
           Confirm
         </button>
         <button
           type="button"
           onClick={() => setConfirming(false)}
-          className="rounded-lg px-1.5 py-1.5 text-[11px] text-text-tertiary transition-colors hover:text-text-secondary"
+          className="rounded-lg px-1.5 py-1.5 text-reported text-ink-3 transition-colors hover:text-ink-2"
         >
           Cancel
         </button>
@@ -344,7 +344,7 @@ function LeaveButton({
       title={
         disabled ? "You're the last owner — assign another owner before leaving" : 'Leave this org'
       }
-      className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-text-tertiary transition-colors hover:bg-dismiss/[0.06] hover:text-dismiss disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-tertiary"
+      className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-ui font-medium text-ink-3 transition-colors hover:bg-alarm/[0.06] hover:text-alarm disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-3"
     >
       <LogOut size={13} />
       Leave
@@ -366,13 +366,13 @@ function ReadinessBadge({
 }) {
   if (!value) {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-black/[0.03] px-2 py-0.5 text-[10px] text-text-tertiary">
+      <span className="inline-flex items-center gap-1 rounded-full bg-tint-2 px-2 py-0.5 text-label text-ink-3">
         {label}: Not connected
       </span>
     )
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded-full border border-claim/15 bg-claim/[0.06] px-2 py-0.5 text-[10px] text-claim">
+    <span className="inline-flex items-center gap-1 rounded-full border border-line-1 bg-tint-2 px-2 py-0.5 text-label text-ink-2">
       <Check size={10} />
       {label}
       {connectedText ? `: ${connectedText}` : ''}

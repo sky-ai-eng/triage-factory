@@ -148,24 +148,24 @@ export default function JiraProjectRulesGroup({
     <>
       {bare ? (
         <div className="mb-4 space-y-1.5">
-          <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+          <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
             Jira projects
           </h2>
-          <p className="text-[13px] leading-relaxed text-text-tertiary">
+          <p className="text-body leading-relaxed text-ink-3">
             Track Jira projects and map each one&rsquo;s statuses to pickup / in-progress / done.
           </p>
         </div>
       ) : (
-        <h2 className="mb-4 text-[13px] font-medium text-text-secondary">Jira projects</h2>
+        <h2 className="mb-4 text-body font-medium text-ink-2">Jira projects</h2>
       )}
       {!connected ? (
-        <p className="text-[12px] text-text-tertiary italic">
+        <p className="text-ui text-ink-3 italic">
           Connect Jira under Workspace settings before configuring tracked projects.
         </p>
       ) : (
         <div className="space-y-2">
           {value.length === 0 && (
-            <p className="text-[12px] text-text-tertiary italic">
+            <p className="text-ui text-ink-3 italic">
               No Jira projects configured. Click &ldquo;Add project&rdquo; to start.
             </p>
           )}
@@ -182,15 +182,15 @@ export default function JiraProjectRulesGroup({
                 key={i}
                 className={`rounded-xl border ${
                   bare
-                    ? 'border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/50'
-                    : 'border-border-subtle bg-white/40'
+                    ? 'border-[var(--color-line-1)] bg-[var(--color-raised)]/50'
+                    : 'border-line-1 bg-raised'
                 }`}
               >
                 <div className="flex items-center gap-2 px-3 py-2">
                   <button
                     type="button"
                     onClick={() => toggleExpanded(i)}
-                    className="text-text-tertiary hover:text-text-secondary"
+                    className="text-ink-3 hover:text-ink-2"
                     aria-label={expanded ? 'Collapse project' : 'Expand project'}
                   >
                     {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -200,12 +200,12 @@ export default function JiraProjectRulesGroup({
                     placeholder="PROJ"
                     value={project.key}
                     onChange={(e) => updateProject(i, { key: e.target.value })}
-                    className="flex-1 bg-transparent border-0 focus:outline-none text-[13px] font-medium text-text-primary placeholder-text-tertiary"
+                    className="flex-1 bg-transparent border-0 focus:outline-none text-body font-medium text-ink-1 placeholder-ink-3"
                   />
                   {project.key.trim() !== '' && (
                     <span
-                      className={`text-[10px] uppercase tracking-wide ${
-                        complete ? 'text-claim' : 'text-snooze'
+                      className={`text-label uppercase tracking-wide ${
+                        complete ? 'text-ink-2' : 'text-ink-2'
                       }`}
                     >
                       {complete ? 'Ready' : 'Needs rules'}
@@ -214,7 +214,7 @@ export default function JiraProjectRulesGroup({
                   <button
                     type="button"
                     onClick={() => removeProject(i)}
-                    className="text-text-tertiary hover:text-dismiss"
+                    className="text-ink-3 hover:text-alarm"
                     aria-label="Remove project"
                   >
                     <Trash2 size={14} />
@@ -224,7 +224,7 @@ export default function JiraProjectRulesGroup({
                 {expanded && (
                   <div className="px-4 pb-4 pt-1 space-y-3">
                     <div className="flex items-center justify-between">
-                      <p className="text-[11px] text-text-tertiary">
+                      <p className="text-reported text-ink-3">
                         {statuses.length > 0
                           ? `${statuses.length} statuses available`
                           : 'Click Fetch Statuses to load options'}
@@ -233,7 +233,7 @@ export default function JiraProjectRulesGroup({
                         type="button"
                         onClick={() => fetchJiraStatuses([key].filter(Boolean))}
                         disabled={loadingKeys.has(key) || !key}
-                        className="shrink-0 text-[11px] text-accent hover:text-accent/80 disabled:opacity-40 border border-accent/20 rounded-xl px-3 py-1 transition-colors"
+                        className="shrink-0 text-reported text-warm hover:text-warm/80 disabled:opacity-40 border border-warm/20 rounded-xl px-3 py-1 transition-colors"
                       >
                         {loadingKeys.has(key) ? 'Loading...' : 'Fetch Statuses'}
                       </button>
@@ -277,7 +277,7 @@ export default function JiraProjectRulesGroup({
           <button
             type="button"
             onClick={addProject}
-            className="w-full text-[12px] text-accent hover:text-accent/80 border border-dashed border-accent/30 rounded-xl px-3 py-2 transition-colors"
+            className="w-full text-ui text-warm hover:text-warm/80 border border-dashed border-warm/30 rounded-xl px-3 py-2 transition-colors"
           >
             + Add project
           </button>

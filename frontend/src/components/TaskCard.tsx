@@ -66,18 +66,18 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
           </HudHeader>
 
           <div className="relative px-4 pb-3 pt-3">
-            <h3 className="mb-1 line-clamp-2 text-[13px] font-semibold leading-snug text-text-primary">
+            <h3 className="mb-1 line-clamp-2 text-body font-semibold leading-snug text-ink-1">
               {task.title}
             </h3>
 
             {task.ai_summary && (
-              <p className="mb-2 line-clamp-2 text-[12px] leading-relaxed text-text-tertiary">
+              <p className="mb-2 line-clamp-2 text-ui leading-relaxed text-ink-3">
                 {task.ai_summary}
               </p>
             )}
 
             <div className="flex items-center justify-between">
-              <span className="font-mono text-[11px] tracking-wide text-text-tertiary/80">
+              <span className="font-mono text-reported tracking-wide text-ink-3/80">
                 {age}
               </span>
 
@@ -89,7 +89,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
                       onRetry()
                     }}
                     onPointerDown={(e) => e.stopPropagation()}
-                    className="text-[12px] font-medium text-dismiss transition-colors hover:text-dismiss/70"
+                    className="text-ui font-medium text-alarm transition-colors hover:text-alarm/70"
                     title="Re-attempt the delegate run"
                   >
                     Retry
@@ -102,7 +102,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
                       onRequeue()
                     }}
                     onPointerDown={(e) => e.stopPropagation()}
-                    className="text-[12px] font-medium text-text-tertiary transition-colors hover:text-text-secondary"
+                    className="text-ui font-medium text-ink-3 transition-colors hover:text-ink-2"
                     title="Return to queue"
                   >
                     Requeue
@@ -113,7 +113,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
                     href={task.source_url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-[12px] font-semibold text-accent transition-colors hover:text-accent/70"
+                    className="text-ui font-semibold text-warm transition-colors hover:text-warm/70"
                     onClick={(e) => e.stopPropagation()}
                     onPointerDown={(e) => e.stopPropagation()}
                   >
@@ -140,7 +140,7 @@ function SubtaskHint({ count }: { count: number }) {
   return (
     <span
       title="This ticket has open subtasks — the work may have been decomposed since the task was queued. Consider dismissing and working the subtasks directly."
-      className="inline-flex shrink-0 items-center gap-1 text-[10px] font-medium text-snooze"
+      className="inline-flex shrink-0 items-center gap-1 text-label font-medium text-ink-2"
     >
       <span aria-hidden>⋮</span>
       {label}
@@ -158,7 +158,7 @@ function SlackThreadBadge({ count }: { count: number }) {
   return (
     <span
       title={`${label} addressed to the bot in this thread`}
-      className="inline-flex shrink-0 items-center gap-1 text-[10px] font-medium text-text-tertiary"
+      className="inline-flex shrink-0 items-center gap-1 text-label font-medium text-ink-3"
     >
       <MessageSquare aria-hidden size={10} className="shrink-0" />
       {label}
@@ -172,7 +172,7 @@ function DelegateFailedBadge({ message }: { message: string }) {
   return (
     <span
       title={`The bot took this task but the run didn't fire: ${message}. Click Retry to re-attempt.`}
-      className="inline-flex shrink-0 items-center gap-1 text-[10px] font-medium text-dismiss"
+      className="inline-flex shrink-0 items-center gap-1 text-label font-medium text-alarm"
     >
       <span aria-hidden>⚠</span>
       didn't fire
@@ -186,7 +186,7 @@ function SnoozedBadge({ until }: { until: Date }) {
   return (
     <span
       title={`Snoozed until ${until.toLocaleString()}. Wakes automatically on next matching event, or via the Requeue affordance.`}
-      className="inline-flex shrink-0 items-center gap-1 text-[10px] font-medium text-snooze"
+      className="inline-flex shrink-0 items-center gap-1 text-label font-medium text-ink-2"
     >
       <span aria-hidden>⏾</span>
       wakes {formatSnoozeUntil(until)}

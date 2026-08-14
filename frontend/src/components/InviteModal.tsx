@@ -100,13 +100,13 @@ export default function InviteModal({ create, onClose }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim backdrop-blur-sm"
       onClick={handleBackdrop}
     >
       <div
         ref={dialogRef}
         tabIndex={-1}
-        className="relative w-full max-w-md overflow-y-auto rounded-2xl border border-border-glass bg-gradient-to-br from-white/95 via-white/90 to-white/85 p-6 shadow-xl shadow-black/[0.08] backdrop-blur-xl"
+        className="relative w-full max-w-md overflow-y-auto rounded-2xl border border-line-1 bg-raised p-6 shadow-float shadow-black/[0.08] backdrop-blur-xl"
         role="dialog"
         aria-modal="true"
         aria-labelledby="invite-modal-title"
@@ -116,11 +116,11 @@ export default function InviteModal({ create, onClose }: Props) {
           <div>
             <h2
               id="invite-modal-title"
-              className="text-lg font-semibold tracking-tight text-text-primary"
+              className="text-lg font-semibold tracking-tight text-ink-1"
             >
               {created ? 'Invite created' : 'Invite to organization'}
             </h2>
-            <p className="mt-0.5 text-[12px] text-text-tertiary">
+            <p className="mt-0.5 text-ui text-ink-3">
               {created
                 ? 'Copy this link and send it to them — it works once.'
                 : 'They join after signing in and accepting the link.'}
@@ -132,7 +132,7 @@ export default function InviteModal({ create, onClose }: Props) {
               if (!submitting) onClose()
             }}
             disabled={submitting}
-            className="rounded-full p-1 text-text-tertiary hover:bg-black/[0.03] hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-full p-1 text-ink-3 hover:bg-tint-2 hover:text-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
             aria-label="Close"
           >
             <X size={16} />
@@ -146,7 +146,7 @@ export default function InviteModal({ create, onClose }: Props) {
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded-full bg-accent px-4 py-2 text-[13px] font-medium text-white transition-all hover:opacity-90"
+                className="rounded-full bg-warm px-4 py-2 text-body font-medium text-warm-ink transition-all hover:opacity-90"
               >
                 Done
               </button>
@@ -163,7 +163,7 @@ export default function InviteModal({ create, onClose }: Props) {
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 placeholder="person@example.com"
-                className="w-full rounded-lg border border-border-subtle bg-white/60 px-3 py-2 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-accent focus:bg-white focus:outline-none"
+                className="w-full rounded-lg border border-line-1 bg-raised px-3 py-2 text-body text-ink-1 placeholder:text-ink-3 focus:border-warm focus:bg-raised focus:outline-none"
               />
             </Field>
 
@@ -172,7 +172,7 @@ export default function InviteModal({ create, onClose }: Props) {
                 id="invite-role"
                 value={role}
                 onChange={(e) => setRole(e.target.value)}
-                className="w-full rounded-lg border border-border-subtle bg-white/60 px-3 py-2 text-[13px] text-text-primary focus:border-accent focus:bg-white focus:outline-none"
+                className="w-full rounded-lg border border-line-1 bg-raised px-3 py-2 text-body text-ink-1 focus:border-warm focus:bg-raised focus:outline-none"
               >
                 {roles.map((r) => (
                   <option key={r} value={r}>
@@ -187,7 +187,7 @@ export default function InviteModal({ create, onClose }: Props) {
                 id="invite-team"
                 value={teamId}
                 onChange={(e) => setTeamId(e.target.value)}
-                className="w-full rounded-lg border border-border-subtle bg-white/60 px-3 py-2 text-[13px] text-text-primary focus:border-accent focus:bg-white focus:outline-none"
+                className="w-full rounded-lg border border-line-1 bg-raised px-3 py-2 text-body text-ink-1 focus:border-warm focus:bg-raised focus:outline-none"
               >
                 <option value="">No team</option>
                 {teams.map((t) => (
@@ -201,7 +201,7 @@ export default function InviteModal({ create, onClose }: Props) {
             {error && (
               <p
                 role="alert"
-                className="rounded-lg border border-dismiss/30 bg-dismiss/[0.06] px-3 py-2 text-[12px] text-dismiss"
+                className="rounded-lg border border-alarm/30 bg-alarm/[0.06] px-3 py-2 text-ui text-alarm"
               >
                 {error}
               </p>
@@ -212,14 +212,14 @@ export default function InviteModal({ create, onClose }: Props) {
                 type="button"
                 onClick={onClose}
                 disabled={submitting}
-                className="rounded-full px-4 py-2 text-[13px] text-text-secondary transition-all hover:bg-black/[0.03] hover:text-text-primary disabled:opacity-50"
+                className="rounded-full px-4 py-2 text-body text-ink-2 transition-all hover:bg-tint-2 hover:text-ink-1 disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 type="submit"
                 disabled={submitting || email.trim() === ''}
-                className="rounded-full bg-accent px-4 py-2 text-[13px] font-medium text-white transition-all hover:opacity-90 disabled:opacity-50"
+                className="rounded-full bg-warm px-4 py-2 text-body font-medium text-warm-ink transition-all hover:opacity-90 disabled:opacity-50"
               >
                 {submitting ? 'Inviting…' : 'Send invite'}
               </button>
@@ -258,14 +258,14 @@ export function CopyLink({ url }: { url: string }) {
         value={url}
         aria-label="Invite link"
         onFocus={(e) => e.currentTarget.select()}
-        className="min-w-0 flex-1 rounded-lg border border-border-subtle bg-white/60 px-3 py-2 font-mono text-[12px] text-text-secondary focus:border-accent focus:outline-none"
+        className="min-w-0 flex-1 rounded-lg border border-line-1 bg-raised px-3 py-2 font-mono text-ui text-ink-2 focus:border-warm focus:outline-none"
       />
       <button
         type="button"
         onClick={copy}
-        className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border-subtle bg-white/60 px-3 py-2 text-[12px] font-medium text-text-secondary transition-colors hover:bg-white hover:text-text-primary"
+        className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line-1 bg-raised px-3 py-2 text-ui font-medium text-ink-2 transition-colors hover:bg-raised hover:text-ink-1"
       >
-        {copied ? <Check size={13} className="text-claim" /> : <Copy size={13} />}
+        {copied ? <Check size={13} className="text-ink-2" /> : <Copy size={13} />}
         {copied ? 'Copied' : 'Copy'}
       </button>
     </div>
@@ -285,9 +285,9 @@ function Field({
 }) {
   return (
     <div>
-      <label htmlFor={htmlFor} className="mb-1.5 block text-[12px] font-medium text-text-secondary">
+      <label htmlFor={htmlFor} className="mb-1.5 block text-ui font-medium text-ink-2">
         {label}
-        {required && <span className="ml-0.5 text-accent">*</span>}
+        {required && <span className="ml-0.5 text-warm">*</span>}
       </label>
       {children}
     </div>

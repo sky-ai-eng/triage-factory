@@ -58,10 +58,10 @@ export default function TeamPage() {
   const { teams, lastActingTeamId, loaded, loading, error } = useTeams()
 
   if (!orgId || loading || !loaded) {
-    return <p className="mx-auto max-w-3xl text-[13px] text-text-tertiary">Loading teams…</p>
+    return <p className="mx-auto max-w-3xl text-body text-ink-3">Loading teams…</p>
   }
   if (error) {
-    return <p className="mx-auto max-w-3xl text-[13px] text-dismiss">{error}</p>
+    return <p className="mx-auto max-w-3xl text-body text-alarm">{error}</p>
   }
   // Zero-team safe landing — first-class, not an error. Reachable today via
   // team-less org invites; the archive slice produces it too.
@@ -209,14 +209,14 @@ function TeamPageBody({
     >
       <div className="mb-5 flex shrink-0 items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
-          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
+          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-warm-2 text-warm">
             <Users size={15} />
           </span>
           <div>
-            <h1 className="text-[17px] font-semibold leading-tight text-text-primary">
+            <h1 className="text-section font-semibold leading-tight text-ink-1">
               {team.name}
             </h1>
-            <p className="text-[11px] leading-tight text-text-tertiary">
+            <p className="text-reported leading-tight text-ink-3">
               Members, settings, Slack, and prompts.
             </p>
           </div>
@@ -229,7 +229,7 @@ function TeamPageBody({
         role="tablist"
         aria-label="Team sections"
         onKeyDown={onTabKeyDown}
-        className="mb-5 flex shrink-0 gap-1 border-b border-border-subtle"
+        className="mb-5 flex shrink-0 gap-1 border-b border-line-1"
       >
         {tabs.map((t) => (
           <button
@@ -243,10 +243,10 @@ function TeamPageBody({
             // tablist's arrow-key handler moves focus among the rest.
             tabIndex={tab === t.id ? 0 : -1}
             onClick={() => setTab(t.id)}
-            className={`-mb-px border-b-2 px-3 py-2 text-[13px] font-medium transition-colors ${
+            className={`-mb-px border-b-2 px-3 py-2 text-body font-medium transition-colors ${
               tab === t.id
-                ? 'border-accent text-accent'
-                : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                ? 'border-warm text-warm'
+                : 'border-transparent text-ink-3 hover:text-ink-2'
             }`}
           >
             {t.label}

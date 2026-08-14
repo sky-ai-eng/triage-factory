@@ -19,15 +19,15 @@ export default function SourceBadge({ task, size = 'sm' }: { task: Task; size?: 
 
   // Slack aubergine (#4A154B) at the same tint treatment as the Jira pill.
   const colorCls = isGitHub
-    ? 'bg-black/[0.04] text-text-secondary'
+    ? 'bg-tint-3 text-ink-2'
     : isSlack
       ? 'bg-[#4A154B]/10 text-[#4A154B]'
-      : 'bg-blue-500/10 text-blue-600'
+      : 'bg-ink-3/10 text-ink-3'
 
   if (size === 'lg') {
     return (
       <span
-        className={`text-[11px] font-semibold uppercase tracking-wider px-2.5 py-1 rounded-full ${colorCls}`}
+        className={`text-reported font-semibold uppercase tracking-wider px-2.5 py-1 rounded-full ${colorCls}`}
       >
         {labelLg}
       </span>
@@ -36,7 +36,7 @@ export default function SourceBadge({ task, size = 'sm' }: { task: Task; size?: 
 
   return (
     <span
-      className={`text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${colorCls}`}
+      className={`text-label font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${colorCls}`}
     >
       {label}
     </span>

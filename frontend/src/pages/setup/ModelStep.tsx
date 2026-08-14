@@ -14,10 +14,10 @@ export function OrgModelStep({ state, patch }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
           Cap the model tier
         </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           A hard ceiling for the whole workspace. A team default above the cap is clamped down to it
           — the team is told, but the cap wins.
         </p>
@@ -38,10 +38,10 @@ export function TeamModelStep({ state, patch }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
           This team&rsquo;s default model
         </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           The model this team delegates with by default — clamped down to the workspace cap if it
           exceeds it.
         </p>

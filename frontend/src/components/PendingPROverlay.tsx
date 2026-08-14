@@ -229,7 +229,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
         <>
           {/* Backdrop */}
           <motion.div
-            className="fixed inset-0 z-50 bg-black/20 backdrop-blur-sm"
+            className="fixed inset-0 z-50 bg-scrim backdrop-blur-sm"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -243,7 +243,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
-            className="fixed inset-6 z-50 flex flex-col bg-surface/95 backdrop-blur-2xl border border-border-glass rounded-3xl shadow-2xl shadow-black/[0.08] overflow-hidden"
+            className="fixed inset-6 z-50 flex flex-col bg-ground/95 backdrop-blur-2xl border border-line-1 rounded-3xl shadow-float shadow-black/[0.08] overflow-hidden"
             initial={{ opacity: 0, scale: 0.97, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.97, y: 12 }}
@@ -251,17 +251,17 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
             onClick={(e) => e.stopPropagation()}
           >
             {/* Top bar */}
-            <div className="shrink-0 flex items-center justify-between px-6 py-4 border-b border-border-subtle">
+            <div className="shrink-0 flex items-center justify-between px-6 py-4 border-b border-line-1">
               <div className="flex items-center gap-3">
-                <div className="w-2 h-2 rounded-full bg-snooze animate-pulse" />
+                <div className="w-2 h-2 rounded-full bg-tint-2 animate-pulse" />
                 <h1
                   id={titleId}
-                  className="text-[15px] font-semibold text-text-primary tracking-tight"
+                  className="text-column font-semibold text-ink-1 tracking-tight"
                 >
                   Draft PR
                 </h1>
                 {pr && (
-                  <span className="text-[12px] text-text-tertiary font-mono">
+                  <span className="text-ui text-ink-3 font-mono">
                     {pr.owner}/{pr.repo} #{pr.number}
                   </span>
                 )}
@@ -269,7 +269,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
               <button
                 ref={closeRef}
                 onClick={onClose}
-                className="text-text-tertiary hover:text-text-secondary transition-colors text-lg leading-none px-2 py-1 rounded-lg hover:bg-black/[0.03]"
+                className="text-ink-3 hover:text-ink-2 transition-colors text-lg leading-none px-2 py-1 rounded-lg hover:bg-tint-2"
               >
                 &times;
               </button>
@@ -280,17 +280,17 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
               {loading ? (
                 <div className="flex items-center justify-center h-64">
                   <div className="flex flex-col items-center gap-3">
-                    <div className="w-5 h-5 border-2 border-accent/30 border-t-accent rounded-full animate-spin" />
-                    <span className="text-[12px] text-text-tertiary">Loading PR...</span>
+                    <div className="w-5 h-5 border-2 border-warm/30 border-t-warm rounded-full animate-spin" />
+                    <span className="text-ui text-ink-3">Loading PR...</span>
                   </div>
                 </div>
               ) : error ? (
                 <div className="flex items-center justify-center h-64">
                   <div className="text-center">
-                    <p className="text-[13px] text-dismiss">{error}</p>
+                    <p className="text-body text-alarm">{error}</p>
                     <button
                       onClick={onClose}
-                      className="text-[12px] text-text-tertiary hover:text-text-secondary mt-2 transition-colors"
+                      className="text-ui text-ink-3 hover:text-ink-2 mt-2 transition-colors"
                     >
                       Close
                     </button>
@@ -315,23 +315,23 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
                   />
 
                   {submitError && (
-                    <div className="rounded-xl border border-dismiss/30 bg-dismiss/[0.06] px-4 py-3 text-[12px] text-text-secondary">
-                      <span className="font-semibold text-text-primary">Couldn't open PR:</span>{' '}
+                    <div className="rounded-xl border border-alarm/30 bg-alarm/[0.06] px-4 py-3 text-ui text-ink-2">
+                      <span className="font-semibold text-ink-1">Couldn't open PR:</span>{' '}
                       {submitError}. Your edits are saved on GitHub — you can retry Open PR.
                     </div>
                   )}
 
                   {truncationNote && (
-                    <div className="rounded-xl border border-snooze/30 bg-snooze/[0.06] px-4 py-3 text-[12px] text-text-secondary">
-                      <span className="font-semibold text-text-primary">Diff truncated:</span>{' '}
+                    <div className="rounded-xl border border-line-1 bg-tint-2 px-4 py-3 text-ui text-ink-2">
+                      <span className="font-semibold text-ink-1">Diff truncated:</span>{' '}
                       {truncationNote}. The full PR is on GitHub — the cap only limits what's
                       rendered in this preview.
                     </div>
                   )}
 
                   {diffError && (
-                    <div className="rounded-xl border border-dismiss/30 bg-dismiss/[0.06] px-4 py-3 text-[12px] text-text-secondary">
-                      <span className="font-semibold text-text-primary">Diff unavailable:</span>{' '}
+                    <div className="rounded-xl border border-alarm/30 bg-alarm/[0.06] px-4 py-3 text-ui text-ink-2">
+                      <span className="font-semibold text-ink-1">Diff unavailable:</span>{' '}
                       {diffError}. You can still edit and open the PR — the diff just couldn't be
                       loaded right now.
                     </div>
@@ -358,7 +358,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
 
                   {files.length === 0 && !truncationNote && !diffError && (
                     <div className="text-center py-12">
-                      <p className="text-[13px] text-text-tertiary">No diff available</p>
+                      <p className="text-body text-ink-3">No diff available</p>
                     </div>
                   )}
                 </div>

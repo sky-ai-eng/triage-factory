@@ -135,7 +135,7 @@ export default function PromptsWorkspace({
             ) : (
               <button
                 onClick={openNew}
-                className="rounded-full bg-accent px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-accent/90"
+                className="rounded-full bg-warm px-4 py-2 text-body font-semibold text-warm-ink transition-colors hover:bg-warm/90"
               >
                 New Prompt
               </button>

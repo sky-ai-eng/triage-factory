@@ -204,9 +204,9 @@ export default function CuratorChat({ project, onPatch }: Props) {
   return (
     <section
       className="
-        relative overflow-hidden rounded-2xl border border-border-glass
-        bg-gradient-to-br from-white/70 via-white/50 to-white/35
-        shadow-sm shadow-black/[0.03] backdrop-blur-xl
+        relative overflow-hidden rounded-2xl border border-line-1
+        bg-raised
+        shadow-float shadow-black/[0.03] backdrop-blur-xl
         lg:sticky lg:top-24 lg:h-[calc(100vh-12rem)]
         flex flex-col
       "
@@ -214,7 +214,7 @@ export default function CuratorChat({ project, onPatch }: Props) {
       {/* Decorative diffuse highlight — same vocabulary as the other Cards */}
       <span
         aria-hidden
-        className="pointer-events-none absolute -left-8 -top-8 h-24 w-24 rounded-full bg-white/30 blur-2xl"
+        className="pointer-events-none absolute -left-8 -top-8 h-24 w-24 rounded-full bg-raised blur-2xl"
       />
 
       <ChatHeader
@@ -229,9 +229,9 @@ export default function CuratorChat({ project, onPatch }: Props) {
         className="relative flex-1 overflow-y-auto px-5 py-4 space-y-6"
       >
         {chat.loading ? (
-          <div className="text-[12px] text-text-tertiary">Loading conversation…</div>
+          <div className="text-ui text-ink-3">Loading conversation…</div>
         ) : chat.loadError ? (
-          <div className="rounded-lg border border-dismiss/20 bg-dismiss/5 px-3 py-2 text-[12px] text-dismiss flex items-start gap-2">
+          <div className="rounded-lg border border-alarm/20 bg-alarm/5 px-3 py-2 text-ui text-alarm flex items-start gap-2">
             <AlertCircle size={14} className="shrink-0 mt-0.5" />
             <span>{chat.loadError}</span>
           </div>
@@ -290,14 +290,14 @@ function ChatHeader({
   const status = chat.inFlight?.status ?? 'idle'
   const tone =
     status === 'running'
-      ? 'text-delegate'
+      ? 'text-ink-2'
       : status === 'queued'
-        ? 'text-snooze'
+        ? 'text-ink-2'
         : status === 'failed'
-          ? 'text-dismiss'
+          ? 'text-alarm'
           : status === 'cancelled'
-            ? 'text-text-tertiary'
-            : 'text-claim'
+            ? 'text-ink-3'
+            : 'text-ink-2'
   const dot =
     status === 'running'
       ? '●'
@@ -335,12 +335,12 @@ function ChatHeader({
   }
 
   return (
-    <header className="relative px-5 pt-4 pb-3 border-b border-border-subtle/60">
+    <header className="relative px-5 pt-4 pb-3 border-b border-line-1/60">
       <div className="flex items-center justify-between">
-        <h2 className="text-[13px] font-semibold tracking-tight text-text-primary uppercase">
+        <h2 className="text-body font-semibold tracking-tight text-ink-1 uppercase">
           Curator
         </h2>
-        <div className="flex items-center gap-2 text-[11px]">
+        <div className="flex items-center gap-2 text-reported">
           <button
             type="button"
             onClick={onOpenSkillPicker}
@@ -349,8 +349,8 @@ function ChatHeader({
             className="
               inline-flex items-center gap-1.5
               h-6 px-2 rounded-full
-              text-text-secondary hover:text-text-primary hover:bg-black/[0.04]
-              border border-border-subtle/70
+              text-ink-2 hover:text-ink-1 hover:bg-tint-3
+              border border-line-1/70
               transition-colors
             "
           >
@@ -361,11 +361,11 @@ function ChatHeader({
             <span aria-hidden>{dot}</span>
             <span>{label}</span>
             {status === 'running' && (
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-delegate animate-pulse ml-0.5" />
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-tint-2 animate-pulse ml-0.5" />
             )}
           </span>
           {chat.totalCostUSD > 0 && (
-            <span className="text-text-tertiary tabular-nums">${chat.totalCostUSD.toFixed(3)}</span>
+            <span className="text-ink-3 tabular-nums">${chat.totalCostUSD.toFixed(3)}</span>
           )}
           <button
             type="button"
@@ -380,7 +380,7 @@ function ChatHeader({
             className="
               inline-flex items-center justify-center
               h-6 w-6 rounded-full
-              text-text-tertiary hover:text-text-primary hover:bg-black/[0.04]
+              text-ink-3 hover:text-ink-1 hover:bg-tint-3
               disabled:opacity-30 disabled:cursor-not-allowed
               transition-colors
             "
@@ -397,10 +397,10 @@ function EmptyState() {
   return (
     <div className="h-full flex items-center justify-center px-2">
       <div className="text-center max-w-xs">
-        <div className="text-[15px] font-medium tracking-tight text-text-primary mb-2">
+        <div className="text-column font-medium tracking-tight text-ink-1 mb-2">
           A new conversation.
         </div>
-        <div className="text-[12px] text-text-tertiary leading-relaxed">
+        <div className="text-ui text-ink-3 leading-relaxed">
           The Curator has the project in view — pinned repos, trackers, knowledge.
           <br />
           Ask anything.
@@ -484,7 +484,7 @@ function RequestBlock({
       {request.user_input && <UserBubble text={request.user_input} />}
 
       {request.error_msg && request.status === 'failed' && (
-        <div className="rounded-lg border border-dismiss/20 bg-dismiss/5 px-3 py-2 text-[12px] text-dismiss flex items-start gap-2">
+        <div className="rounded-lg border border-alarm/20 bg-alarm/5 px-3 py-2 text-ui text-alarm flex items-start gap-2">
           <AlertCircle size={12} className="shrink-0 mt-0.5" />
           <span>{request.error_msg}</span>
         </div>
@@ -509,13 +509,13 @@ function RequestBlock({
 
       {/* Soft cancellation marker */}
       {request.status === 'cancelled' && (
-        <div className="text-[11px] text-text-tertiary italic">Cancelled.</div>
+        <div className="text-reported text-ink-3 italic">Cancelled.</div>
       )}
 
       {/* Trailing pulse when running but content is already underway */}
       {request.status === 'running' && hasAssistantContent && isLatest && (
-        <div className="flex items-center gap-1.5 text-[11px] text-text-tertiary">
-          <span className="inline-block w-1.5 h-1.5 rounded-full bg-delegate animate-pulse" />
+        <div className="flex items-center gap-1.5 text-reported text-ink-3">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-tint-2 animate-pulse" />
           <span>thinking…</span>
         </div>
       )}
@@ -529,8 +529,8 @@ function UserBubble({ text }: { text: string }) {
       <div
         className="
           max-w-[85%] rounded-2xl rounded-tr-md
-          bg-accent-soft/70 border border-accent/15
-          px-3.5 py-2 text-[13px] text-text-primary
+          bg-warm-2/70 border border-warm/15
+          px-3.5 py-2 text-body text-ink-1
           whitespace-pre-wrap leading-relaxed
         "
       >
@@ -563,13 +563,13 @@ function AssistantTurn({
       {linkified && (
         <div
           className="
-            text-[13px] text-text-primary leading-relaxed
+            text-body text-ink-1 leading-relaxed
             prose prose-sm max-w-none
             prose-p:my-2 prose-pre:my-2 prose-ul:my-2 prose-ol:my-2
-            prose-code:bg-black/[0.04] prose-code:px-1 prose-code:py-0.5 prose-code:rounded
-            prose-code:text-[12px] prose-code:font-mono prose-code:text-text-primary
-            prose-pre:bg-black/[0.04] prose-pre:text-text-primary prose-pre:rounded-lg
-            prose-a:text-accent prose-a:no-underline hover:prose-a:underline
+            prose-code:bg-tint-3 prose-code:px-1 prose-code:py-0.5 prose-code:rounded
+            prose-code:text-ui prose-code:font-mono prose-code:text-ink-1
+            prose-pre:bg-tint-3 prose-pre:text-ink-1 prose-pre:rounded-lg
+            prose-a:text-warm prose-a:no-underline hover:prose-a:underline
           "
         >
           <Markdown
@@ -622,7 +622,7 @@ function ToolCallCard({
     <div
       className={`
         rounded-lg border overflow-hidden
-        ${isError ? 'border-dismiss/30 bg-dismiss/5' : 'border-border-subtle bg-black/[0.02]'}
+        ${isError ? 'border-alarm/30 bg-alarm/5' : 'border-line-1 bg-tint-2'}
       `}
     >
       <button
@@ -630,33 +630,33 @@ function ToolCallCard({
         onClick={onToggle}
         className="
           w-full flex items-center gap-2 px-3 py-1.5
-          text-left text-[12px]
-          hover:bg-black/[0.02] transition-colors
+          text-left text-ui
+          hover:bg-tint-2 transition-colors
         "
         aria-expanded={expanded}
       >
         {expanded ? (
-          <ChevronDown size={11} className="shrink-0 text-text-tertiary" />
+          <ChevronDown size={11} className="shrink-0 text-ink-3" />
         ) : (
-          <ChevronRight size={11} className="shrink-0 text-text-tertiary" />
+          <ChevronRight size={11} className="shrink-0 text-ink-3" />
         )}
-        <span className={`flex-1 truncate ${isError ? 'text-dismiss' : 'text-text-secondary'}`}>
+        <span className={`flex-1 truncate ${isError ? 'text-alarm' : 'text-ink-2'}`}>
           {label}
         </span>
         {resultPreview && !expanded && (
-          <span className="text-[11px] text-text-tertiary truncate max-w-[40%] shrink-0">
+          <span className="text-reported text-ink-3 truncate max-w-[40%] shrink-0">
             {resultPreview}
           </span>
         )}
         {!result && (
-          <span className="inline-flex items-center gap-1 text-[10px] text-text-tertiary shrink-0">
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-delegate animate-pulse" />
+          <span className="inline-flex items-center gap-1 text-label text-ink-3 shrink-0">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-tint-2 animate-pulse" />
             running
           </span>
         )}
       </button>
       {expanded && (
-        <div className="px-3 pb-2 pt-1 space-y-2 border-t border-border-subtle/60">
+        <div className="px-3 pb-2 pt-1 space-y-2 border-t border-line-1/60">
           <ToolDetail label="Args" content={formatJSONInput(toolCall.input)} />
           {result && (
             <ToolDetail
@@ -672,7 +672,7 @@ function ToolCallCard({
                 key={i}
                 src={b.image_url?.url}
                 alt="tool result"
-                className="max-h-64 max-w-full rounded-lg border border-border-subtle"
+                className="max-h-64 max-w-full rounded-lg border border-line-1"
               />
             ))}
         </div>
@@ -689,12 +689,12 @@ function ToolDetail({ label, content, tone }: { label: string; content: string; 
   const truncated = content.length > MAX ? content.slice(0, MAX) + '\n…' : content
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wider text-text-tertiary mb-1">{label}</div>
+      <div className="text-label uppercase tracking-wider text-ink-3 mb-1">{label}</div>
       <pre
         className={`
-          text-[11px] leading-snug whitespace-pre-wrap break-words font-mono
+          text-reported leading-snug whitespace-pre-wrap break-words font-mono
           max-h-64 overflow-auto
-          ${tone === 'error' ? 'text-dismiss' : 'text-text-secondary'}
+          ${tone === 'error' ? 'text-alarm' : 'text-ink-2'}
         `}
       >
         {truncated}
@@ -706,9 +706,9 @@ function ToolDetail({ label, content, tone }: { label: string; content: string; 
 function StreamingShimmer() {
   return (
     <div className="space-y-2 animate-pulse">
-      <div className="h-3 rounded-full bg-black/[0.05] w-3/4" />
-      <div className="h-3 rounded-full bg-black/[0.05] w-2/3" />
-      <div className="h-3 rounded-full bg-black/[0.05] w-1/2" />
+      <div className="h-3 rounded-full bg-tint-3 w-3/4" />
+      <div className="h-3 rounded-full bg-tint-3 w-2/3" />
+      <div className="h-3 rounded-full bg-tint-3 w-1/2" />
     </div>
   )
 }
@@ -757,18 +757,18 @@ function Composer({
   const buttonInactive = inFlight ? !cancellable : !draft.trim()
 
   return (
-    <div className="relative px-4 pt-3 pb-4 border-t border-border-subtle/60">
+    <div className="relative px-4 pt-3 pb-4 border-t border-line-1/60">
       {sendError && (
-        <div className="mb-2 rounded-lg border border-dismiss/20 bg-dismiss/5 px-2.5 py-1.5 text-[11px] text-dismiss flex items-start gap-1.5">
+        <div className="mb-2 rounded-lg border border-alarm/20 bg-alarm/5 px-2.5 py-1.5 text-reported text-alarm flex items-start gap-1.5">
           <AlertCircle size={11} className="shrink-0 mt-0.5" />
           <span>{sendError}</span>
         </div>
       )}
       <div
         className="
-          flex items-center gap-2 rounded-xl border border-border-subtle
-          bg-white/70 px-3 py-2
-          focus-within:border-accent transition-colors
+          flex items-center gap-2 rounded-xl border border-line-1
+          bg-raised px-3 py-2
+          focus-within:border-warm transition-colors
         "
       >
         <textarea
@@ -779,8 +779,8 @@ function Composer({
           placeholder={inFlight ? 'Curator is working…' : 'Message the Curator…'}
           rows={1}
           className="
-            flex-1 resize-none bg-transparent text-[13px] text-text-primary
-            placeholder:text-text-tertiary leading-relaxed
+            flex-1 resize-none bg-transparent text-body text-ink-1
+            placeholder:text-ink-3 leading-relaxed
             focus:outline-none
           "
         />
@@ -795,15 +795,15 @@ function Composer({
             disabled:opacity-30 disabled:cursor-not-allowed
             ${
               inFlight
-                ? 'bg-dismiss/10 text-dismiss hover:bg-dismiss/20'
-                : 'bg-accent text-white hover:opacity-90'
+                ? 'bg-alarm/10 text-alarm hover:bg-alarm/20'
+                : 'bg-warm text-warm-ink hover:opacity-90'
             }
           `}
         >
           {inFlight ? <Square size={12} fill="currentColor" /> : <Send size={13} />}
         </button>
       </div>
-      <div className="mt-1.5 flex items-center justify-between text-[10px] text-text-tertiary">
+      <div className="mt-1.5 flex items-center justify-between text-label text-ink-3">
         <span>
           <kbd className="font-mono">↵</kbd> send · <kbd className="font-mono">⇧↵</kbd> newline
         </span>

@@ -55,7 +55,7 @@ export function PermissionPrompt({
     >
       <ShieldQuestion size={15} className="shrink-0" style={{ color: tone }} />
       <span
-        className={`shrink-0 font-mono text-[10px] font-semibold leading-none ${
+        className={`shrink-0 font-mono text-label font-semibold leading-none ${
           prompt.title ? 'max-w-[45%] truncate tracking-[0.04em]' : 'uppercase tracking-[0.12em]'
         }`}
         style={{ color: tone }}
@@ -65,7 +65,7 @@ export function PermissionPrompt({
       </span>
       {summary && (
         <span
-          className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-text-secondary"
+          className="min-w-0 flex-1 truncate font-mono text-secondary text-ink-2"
           title={summary}
         >
           {summary}
@@ -74,7 +74,7 @@ export function PermissionPrompt({
       {!summary && <span className="min-w-0 flex-1" />}
       {remaining > 0 && (
         <span
-          className="shrink-0 font-mono text-[10px] tabular-nums text-text-tertiary/80"
+          className="shrink-0 font-mono text-label tabular-nums text-ink-3/80"
           title={`${remaining} more prompt${remaining === 1 ? '' : 's'} queued`}
         >
           +{remaining} more
@@ -82,7 +82,7 @@ export function PermissionPrompt({
       )}
       <div className="flex shrink-0 items-center gap-2">
         <PromptButton
-          tone="var(--color-dismiss)"
+          tone="var(--color-alarm)"
           onClick={() => void resolve('deny')}
           disabled={resolving || !onResolve}
           icon={<X size={11} />}
@@ -126,7 +126,7 @@ function PromptButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="inline-flex items-center gap-1.5 rounded-[4px] px-2.5 py-1 font-mono text-[10px] font-semibold uppercase tracking-[0.1em] transition-colors disabled:cursor-wait disabled:opacity-60"
+      className="inline-flex items-center gap-1.5 rounded-[4px] px-2.5 py-1 font-mono text-label font-semibold uppercase tracking-[0.1em] transition-colors disabled:cursor-wait disabled:opacity-60"
       style={
         solid
           ? { color: 'var(--hmi-screen)', background: tone, boxShadow: `0 0 16px -4px ${tone}` }

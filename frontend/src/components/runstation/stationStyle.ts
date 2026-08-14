@@ -147,7 +147,7 @@ export function stationState(run: Conversation): StationState {
     case 'failed':
       return {
         key: 'failed',
-        light: 'var(--color-dismiss)',
+        light: 'var(--color-alarm)',
         label: 'FAILED',
         live: false,
         scanner: false,

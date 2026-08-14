@@ -147,8 +147,8 @@ export default function GitHubTeamGroup({
         <h2
           className={
             bare
-              ? 'text-[19px] font-medium tracking-tight text-text-primary'
-              : 'text-[13px] font-medium text-text-secondary'
+              ? 'text-[19px] font-medium tracking-tight text-ink-1'
+              : 'text-body font-medium text-ink-2'
           }
         >
           GitHub teams
@@ -156,8 +156,8 @@ export default function GitHubTeamGroup({
         <p
           className={
             bare
-              ? 'text-[13px] leading-relaxed text-text-tertiary'
-              : 'mt-1 text-[12px] leading-relaxed text-text-tertiary'
+              ? 'text-body leading-relaxed text-ink-3'
+              : 'mt-1 text-ui leading-relaxed text-ink-3'
           }
         >
           Assign GitHub teams to this Triage Factory team. When a pull request requests review from
@@ -182,7 +182,7 @@ export default function GitHubTeamGroup({
           unseeded (undefined), so a save skips it rather than clearing the
           stored mappings. Say so, since the checklist's error alone doesn't. */}
       {loadError && (
-        <p className="mt-2 text-[12px] italic text-amber-600">
+        <p className="mt-2 text-ui italic text-warm">
           Couldn&rsquo;t load GitHub teams — existing mappings will be left unchanged. Retry above
           to edit them.
         </p>

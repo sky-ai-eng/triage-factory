@@ -278,8 +278,8 @@ export default function GitHubAccessControl({
           title="Replace your personal access token"
           detail={
             <>
-              Enter the new token, with <code className="text-text-secondary">repo</code> and{' '}
-              <code className="text-text-secondary">read:org</code> scopes. We&rsquo;ll validate it
+              Enter the new token, with <code className="text-ink-2">repo</code> and{' '}
+              <code className="text-ink-2">read:org</code> scopes. We&rsquo;ll validate it
               and show what it can reach before your current token is replaced.
             </>
           }
@@ -336,7 +336,7 @@ export default function GitHubAccessControl({
     return (
       <Frame onCancel={reset} busy={busy}>
         <div className="space-y-1.5">
-          <h3 className="text-[15px] font-medium text-text-primary">Connect an existing App</h3>
+          <h3 className="text-column font-medium text-ink-1">Connect an existing App</h3>
         </div>
         <GitHubAppImportForm
           orgId={orgId}
@@ -371,7 +371,7 @@ export default function GitHubAccessControl({
   if (phase.kind === 'to-app-register') {
     return (
       <Frame onCancel={reset} busy={busy}>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           Register the GitHub App. Your personal access token stays the live credential until you
           install the App and switch over — nothing changes yet.
         </p>
@@ -385,8 +385,8 @@ export default function GitHubAccessControl({
     return (
       <Frame onCancel={reset} busy={busy}>
         <div className="space-y-1.5">
-          <h3 className="text-[15px] font-medium text-text-primary">Install the App</h3>
-          <p className="text-[13px] leading-relaxed text-text-tertiary">
+          <h3 className="text-column font-medium text-ink-1">Install the App</h3>
+          <p className="text-body leading-relaxed text-ink-3">
             GitHub only grants repository access once the App is installed. Install it on your
             account or organization, then continue to review the switch.
           </p>
@@ -395,7 +395,7 @@ export default function GitHubAccessControl({
           installations={installStatus?.installations ?? []}
           installUrl={installUrl}
         />
-        {error && <p className="text-[12px] text-dismiss">{error}</p>}
+        {error && <p className="text-ui text-alarm">{error}</p>}
         {/* Continue is NOT gated on installCount: useGitHubAppInstall swallows
             read failures and can sit at a stale/null status, and toAppPreflight
             runs the authoritative refresh itself (showing its own inline error
@@ -451,10 +451,10 @@ export default function GitHubAccessControl({
   if (phase.kind === 'to-pat-success') {
     return (
       <div className="space-y-4">
-        <div className="rounded-xl border border-claim/15 bg-claim/[0.06] px-4 py-3">
-          <p className="text-[13px] font-medium text-claim">Switched to a personal access token</p>
+        <div className="rounded-xl border border-line-1 bg-tint-2 px-4 py-3">
+          <p className="text-body font-medium text-ink-2">Switched to a personal access token</p>
         </div>
-        <p className="text-[13px] leading-relaxed text-text-secondary">
+        <p className="text-body leading-relaxed text-ink-2">
           The GitHub App still exists on GitHub — delete it there if you no longer need it:
           {phase.settingsUrl ? (
             <>
@@ -463,7 +463,7 @@ export default function GitHubAccessControl({
                 href={phase.settingsUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-accent hover:underline"
+                className="inline-flex items-center gap-1 text-warm hover:underline"
               >
                 App settings on GitHub
                 <ExternalLink size={12} />
@@ -474,7 +474,7 @@ export default function GitHubAccessControl({
             ' open your GitHub App’s settings page.'
           )}
         </p>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           Team members who need to (re)connect their GitHub identity will be asked for a personal
           token instead of one-click OAuth.
         </p>
@@ -496,7 +496,7 @@ export default function GitHubAccessControl({
               reset()
               reload()
             }}
-            className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white transition-colors hover:bg-accent/90"
+            className="rounded-full bg-warm px-6 py-2.5 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90"
           >
             Done
           </button>
@@ -522,7 +522,7 @@ export default function GitHubAccessControl({
         />
       ) : liveApp ? (
         <>
-          <p className="text-[13px] leading-relaxed text-text-tertiary">
+          <p className="text-body leading-relaxed text-ink-3">
             Triage Factory connects to GitHub through your registered App
             {slug ? ` (${slug})` : ''}, polling under its own bot identity across {installCount}{' '}
             installation
@@ -531,7 +531,7 @@ export default function GitHubAccessControl({
           <button
             type="button"
             onClick={() => setPhase({ kind: 'to-pat-token' })}
-            className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary"
+            className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
           >
             Switch to a personal access token…
           </button>
@@ -546,23 +546,23 @@ export default function GitHubAccessControl({
         // section states the fact and points at the only control that actually
         // changes anything, which is the shell the process was started from.
         <>
-          <p className="text-[13px] leading-relaxed text-text-tertiary">
+          <p className="text-body leading-relaxed text-ink-3">
             Triage Factory connects to GitHub with the token in{' '}
-            <code className="text-text-secondary">TRIAGE_FACTORY_GITHUB_BOT_PAT</code>. Environment
+            <code className="text-ink-2">TRIAGE_FACTORY_GITHUB_BOT_PAT</code>. Environment
             variables take precedence over anything stored here, so this token is managed where the
             server is started — unset that variable to manage GitHub access from Settings.
           </p>
         </>
       ) : (
         <>
-          <p className="text-[13px] leading-relaxed text-text-tertiary">
+          <p className="text-body leading-relaxed text-ink-3">
             {s.hasGitHubPat ? (
               <>
                 Triage Factory connects to GitHub with a personal access token
                 {s.githubPatLogin ? (
                   <>
                     , authenticating as{' '}
-                    <span className="font-medium text-text-secondary">@{s.githubPatLogin}</span>
+                    <span className="font-medium text-ink-2">@{s.githubPatLogin}</span>
                   </>
                 ) : null}
                 . Switch to a GitHub App to poll under its own bot identity with support for
@@ -581,7 +581,7 @@ export default function GitHubAccessControl({
               <button
                 type="button"
                 onClick={() => setPhase({ kind: 'rotate-token' })}
-                className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary"
+                className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
               >
                 Replace token…
               </button>
@@ -589,7 +589,7 @@ export default function GitHubAccessControl({
             <button
               type="button"
               onClick={() => setPhase({ kind: 'to-app-source' })}
-              className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary"
+              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1"
             >
               {s.hasGitHubPat ? 'Switch to GitHub App…' : 'Set up a GitHub App…'}
             </button>
@@ -624,7 +624,7 @@ function Frame({
         type="button"
         onClick={onCancel}
         disabled={busy}
-        className="text-[12px] text-text-tertiary underline transition-colors hover:text-text-secondary disabled:opacity-40"
+        className="text-ui text-ink-3 underline transition-colors hover:text-ink-2 disabled:opacity-40"
       >
         {cancelLabel}
       </button>
@@ -647,18 +647,18 @@ function StagedBanner({
   onDiscard: () => void
 }) {
   return (
-    <div className="space-y-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.08] px-4 py-3">
-      <p className="text-[13px] leading-relaxed text-amber-600 dark:text-amber-400">
+    <div className="space-y-3 rounded-xl border border-warm/20 bg-warm/[0.08] px-4 py-3">
+      <p className="text-body leading-relaxed text-warm dark:text-warm">
         GitHub App{slug ? ` (${slug})` : ''} registered but not yet active — finish switching or
         discard. Your personal access token stays the live credential until you switch over.
       </p>
-      {error && <p className="text-[12px] text-dismiss">{error}</p>}
+      {error && <p className="text-ui text-alarm">{error}</p>}
       <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={onFinish}
           disabled={busy}
-          className="rounded-full bg-accent px-5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-40"
+          className="rounded-full bg-warm px-5 py-2 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90 disabled:opacity-40"
         >
           {busy ? 'Working…' : 'Finish switching'}
         </button>
@@ -666,7 +666,7 @@ function StagedBanner({
           type="button"
           onClick={onDiscard}
           disabled={busy}
-          className="rounded-xl px-3 py-2 text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-secondary disabled:opacity-40"
+          className="rounded-xl px-3 py-2 text-body font-medium text-ink-3 transition-colors hover:text-ink-2 disabled:opacity-40"
         >
           Discard
         </button>
@@ -696,12 +696,12 @@ function TokenScreen({
   return (
     <div className="space-y-3">
       <div className="space-y-1.5">
-        <h3 className="text-[15px] font-medium text-text-primary">{title}</h3>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <h3 className="text-column font-medium text-ink-1">{title}</h3>
+        <p className="text-body leading-relaxed text-ink-3">
           {detail ?? (
             <>
-              Enter a token with <code className="text-text-secondary">repo</code> and{' '}
-              <code className="text-text-secondary">read:org</code> scopes. We&rsquo;ll validate it
+              Enter a token with <code className="text-ink-2">repo</code> and{' '}
+              <code className="text-ink-2">read:org</code> scopes. We&rsquo;ll validate it
               and show which repositories it can reach before anything changes.
             </>
           )}
@@ -717,11 +717,11 @@ function TokenScreen({
           if (e.key === 'Enter' && pat.trim() !== '') onSubmit(pat.trim())
         }}
         aria-invalid={!!error || undefined}
-        className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
-          error ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+        className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:outline-none focus:ring-2 focus:ring-warm/30 ${
+          error ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
         }`}
       />
-      {error && <p className="text-[12px] text-dismiss">{error}</p>}
+      {error && <p className="text-ui text-alarm">{error}</p>}
       <Actions
         confirmLabel="Continue"
         onConfirm={() => onSubmit(pat.trim())}
@@ -760,11 +760,11 @@ function AccessDiffScreen({
   return (
     <div className="space-y-3">
       {login && (
-        <p className="text-[13px] text-text-secondary">
-          Validated as <span className="font-medium text-text-primary">@{login}</span>.
+        <p className="text-body text-ink-2">
+          Validated as <span className="font-medium text-ink-1">@{login}</span>.
         </p>
       )}
-      <p className="text-[13px] text-text-secondary">
+      <p className="text-body text-ink-2">
         {diff.reachable} of {diff.tracked} tracked{' '}
         {diff.tracked === 1 ? 'repository stays' : 'repositories stay'} reachable after the {action}
         .
@@ -772,7 +772,7 @@ function AccessDiffScreen({
 
       {needsAck ? (
         <div className="space-y-2.5">
-          <p className="text-[13px] leading-relaxed text-text-tertiary">
+          <p className="text-body leading-relaxed text-ink-3">
             These repositories will stop updating after the {action}. Existing tasks and open work
             are kept. You can untrack them later in each team&rsquo;s repository settings.
           </p>
@@ -780,11 +780,11 @@ function AccessDiffScreen({
             {dark.map((d) => (
               <li
                 key={d.repo}
-                className="flex items-center justify-between gap-3 rounded-xl border border-border-subtle bg-white/40 px-3 py-2"
+                className="flex items-center justify-between gap-3 rounded-xl border border-line-1 bg-raised px-3 py-2"
               >
-                <span className="text-[12px] text-text-primary">{d.repo}</span>
+                <span className="text-ui text-ink-1">{d.repo}</span>
                 <span
-                  className="truncate text-[11px] text-text-tertiary"
+                  className="truncate text-reported text-ink-3"
                   title={d.teams.join(', ')}
                 >
                   {d.teams.length > 0 ? d.teams.join(', ') : 'no team'}
@@ -792,7 +792,7 @@ function AccessDiffScreen({
               </li>
             ))}
           </ul>
-          <label className="flex items-start gap-2 text-[12px] text-text-secondary">
+          <label className="flex items-start gap-2 text-ui text-ink-2">
             <input
               type="checkbox"
               checked={ack}
@@ -806,12 +806,12 @@ function AccessDiffScreen({
           </label>
         </div>
       ) : (
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           All tracked repositories remain reachable after the {action}.
         </p>
       )}
 
-      {error && <p className="text-[12px] text-dismiss">{error}</p>}
+      {error && <p className="text-ui text-alarm">{error}</p>}
       <Actions
         confirmLabel={confirmLabel}
         onConfirm={onConfirm}
@@ -841,7 +841,7 @@ function Actions({
         type="button"
         onClick={onConfirm}
         disabled={busy || confirmDisabled}
-        className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 disabled:opacity-40 disabled:shadow-none"
+        className="rounded-full bg-warm px-6 py-2.5 text-body font-medium text-warm-ink shadow-[0_10px_28px_-10px_var(--color-warm)] transition-all hover:bg-warm/90 disabled:opacity-40 disabled:shadow-none"
       >
         {busy ? 'Working…' : confirmLabel}
       </button>

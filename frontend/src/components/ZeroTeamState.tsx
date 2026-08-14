@@ -16,13 +16,13 @@ export default function ZeroTeamState({ canCreate }: { canCreate: boolean }) {
   const orgHref = useOrgHref()
   return (
     <div className="mx-auto flex max-w-md flex-col items-center px-6 py-20 text-center">
-      <span className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-accent-soft text-accent">
+      <span className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-warm-2 text-warm">
         <Users size={22} />
       </span>
-      <h2 className="text-[17px] font-semibold text-text-primary">
+      <h2 className="text-section font-semibold text-ink-1">
         You&rsquo;re not on a team yet
       </h2>
-      <p className="mt-2 text-[13px] leading-relaxed text-text-tertiary">
+      <p className="mt-2 text-body leading-relaxed text-ink-3">
         {canCreate
           ? 'Create a team to start tracking work, or ask another org admin to add you to an existing one.'
           : 'Ask an org admin to add you to a team. Once you’re on one, your team’s board, prompts, and settings show up here.'}
@@ -30,7 +30,7 @@ export default function ZeroTeamState({ canCreate }: { canCreate: boolean }) {
       {canCreate && (
         <Link
           to={`${orgHref('/org')}?tab=settings`}
-          className="mt-5 inline-flex items-center gap-1.5 rounded-full bg-accent px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-accent/90"
+          className="mt-5 inline-flex items-center gap-1.5 rounded-full bg-warm px-4 py-2 text-body font-semibold text-warm-ink transition-colors hover:bg-warm/90"
         >
           <Plus size={14} />
           Create a team

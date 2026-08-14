@@ -55,20 +55,20 @@ export default function StartFactory() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-surface flex items-center justify-center">
-        <p className="text-text-tertiary text-sm">Loading...</p>
+      <div className="min-h-screen bg-ground flex items-center justify-center">
+        <p className="text-ink-3 text-sm">Loading...</p>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-surface flex items-center justify-center p-4">
-      <div className="w-full max-w-md backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl p-8 space-y-6 shadow-lg shadow-black/[0.04]">
+    <div className="min-h-screen bg-ground flex items-center justify-center p-4">
+      <div className="w-full max-w-md backdrop-blur-xl bg-raised border border-line-1 rounded-2xl p-8 space-y-6 shadow-float shadow-black/[0.04]">
         <div className="space-y-1.5">
-          <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
+          <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">
             Welcome to Triage Factory
           </h1>
-          <p className="text-[13px] text-text-tertiary leading-relaxed">
+          <p className="text-body text-ink-3 leading-relaxed">
             Triage Factory runs entirely on your machine — state lives in a local database and your
             tokens stay in your OS keychain. Get started by setting up your workspace, then connect
             GitHub and (optionally) Jira.
@@ -79,12 +79,12 @@ export default function StartFactory() {
           type="button"
           onClick={start}
           disabled={starting}
-          className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+          className="w-full bg-warm hover:bg-warm/90 disabled:opacity-40 disabled:cursor-not-allowed text-warm-ink font-medium rounded-xl px-4 py-2.5 text-body transition-colors"
         >
           {starting ? 'Starting…' : 'Start your factory'}
         </button>
 
-        {error && <p className="text-[11px] text-red-500 text-center">{error}</p>}
+        {error && <p className="text-reported text-alarm text-center">{error}</p>}
       </div>
     </div>
   )

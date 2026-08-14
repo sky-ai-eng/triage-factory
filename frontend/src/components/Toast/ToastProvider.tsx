@@ -21,10 +21,10 @@ const LEVEL_DURATION: Record<ToastLevel, number> = {
 // index.css — we don't introduce new hues, just reuse the existing
 // dismiss/claim/snooze/accent variables so toasts sit naturally in the UI.
 const LEVEL_STYLE: Record<ToastLevel, { border: string; label: string }> = {
-  info: { border: 'border-l-[var(--color-accent)]', label: 'text-[var(--color-accent)]' },
+  info: { border: 'border-l-[var(--color-warm)]', label: 'text-[var(--color-warm)]' },
   success: { border: 'border-l-[var(--color-claim)]', label: 'text-[var(--color-claim)]' },
   warning: { border: 'border-l-[var(--color-snooze)]', label: 'text-[var(--color-snooze)]' },
-  error: { border: 'border-l-[var(--color-dismiss)]', label: 'text-[var(--color-dismiss)]' },
+  error: { border: 'border-l-[var(--color-alarm)]', label: 'text-[var(--color-alarm)]' },
 }
 
 export default function ToastProvider() {
@@ -49,9 +49,9 @@ export default function ToastProvider() {
             }}
             className={`
               group relative flex items-start gap-3 pl-4 pr-3 py-3 w-[340px]
-              bg-surface-raised/95 backdrop-blur-xl
-              border border-border-glass border-l-4 ${style.border}
-              rounded-xl shadow-lg shadow-black/[0.08]
+              bg-raised/95 backdrop-blur-xl
+              border border-line-1 border-l-4 ${style.border}
+              rounded-xl shadow-float shadow-black/[0.08]
               data-[state=open]:animate-in data-[state=open]:slide-in-from-right-full
               data-[state=closed]:animate-out data-[state=closed]:fade-out data-[state=closed]:slide-out-to-right-full
               data-[swipe=move]:translate-x-[var(--radix-toast-swipe-move-x)]
@@ -62,12 +62,12 @@ export default function ToastProvider() {
             <div className="flex-1 min-w-0">
               {item.title && (
                 <Toast.Title
-                  className={`text-[11px] font-semibold uppercase tracking-wide mb-1 ${style.label}`}
+                  className={`text-reported font-semibold uppercase tracking-wide mb-1 ${style.label}`}
                 >
                   {item.title}
                 </Toast.Title>
               )}
-              <Toast.Description className="text-[13px] text-text-primary leading-snug whitespace-pre-line">
+              <Toast.Description className="text-body text-ink-1 leading-snug whitespace-pre-line">
                 {item.body}
               </Toast.Description>
               {item.action && (
@@ -78,7 +78,7 @@ export default function ToastProvider() {
                       navigate(item.action!.to)
                       toastStore.dismiss(item.id)
                     }}
-                    className={`text-[12px] font-semibold underline-offset-2 hover:underline ${style.label}`}
+                    className={`text-ui font-semibold underline-offset-2 hover:underline ${style.label}`}
                   >
                     {item.action.label}
                   </button>
@@ -87,7 +87,7 @@ export default function ToastProvider() {
             </div>
             <Toast.Close
               aria-label="Dismiss"
-              className="shrink-0 text-text-tertiary hover:text-text-secondary transition-colors p-0.5 -mr-0.5"
+              className="shrink-0 text-ink-3 hover:text-ink-2 transition-colors p-0.5 -mr-0.5"
             >
               <X size={14} />
             </Toast.Close>

@@ -34,8 +34,8 @@ import { captureGitHubIdentityPat } from '../lib/githubIdentity'
 
 function Card({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen bg-surface flex items-center justify-center p-4">
-      <div className="w-full max-w-sm backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl p-8 space-y-6 shadow-lg shadow-black/[0.04]">
+    <div className="min-h-screen bg-ground flex items-center justify-center p-4">
+      <div className="w-full max-w-sm backdrop-blur-xl bg-raised border border-line-1 rounded-2xl p-8 space-y-6 shadow-float shadow-black/[0.04]">
         {children}
       </div>
     </div>
@@ -109,7 +109,7 @@ export default function ConnectGitHub() {
   if (!orgId || state.status === 'loading') {
     return (
       <Card>
-        <p className="text-text-tertiary text-sm">Loading…</p>
+        <p className="text-ink-3 text-sm">Loading…</p>
       </Card>
     )
   }
@@ -121,17 +121,17 @@ export default function ConnectGitHub() {
     return (
       <Card>
         <div className="space-y-1.5">
-          <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
+          <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">
             Finish setup
           </h1>
-          <p className="text-[13px] text-text-tertiary leading-relaxed">
+          <p className="text-body text-ink-3 leading-relaxed">
             We couldn&apos;t check your GitHub connection just now.
           </p>
         </div>
         <button
           type="button"
           onClick={refresh}
-          className="w-full bg-surface-inverse hover:bg-surface-inverse/90 text-text-inverse font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+          className="w-full bg-inverse hover:bg-inverse/90 text-inverse-ink font-medium rounded-xl px-4 py-2.5 text-body transition-colors"
         >
           Try again
         </button>
@@ -178,12 +178,12 @@ export default function ConnectGitHub() {
   return (
     <Card>
       <div className="space-y-1.5">
-        <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
+        <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">
           Connect your GitHub
         </h1>
-        <p className="text-[13px] text-text-tertiary leading-relaxed">
+        <p className="text-body text-ink-3 leading-relaxed">
           One last step. Triage Factory needs to know who you are on{' '}
-          <span className="text-text-secondary font-medium">{host || 'GitHub'}</span> so it can
+          <span className="text-ink-2 font-medium">{host || 'GitHub'}</span> so it can
           match your pull requests and reviews to you. This is a one-time connection.
         </p>
       </div>
@@ -192,8 +192,8 @@ export default function ConnectGitHub() {
         <div
           className={
             banner.tone === 'infra'
-              ? 'rounded-xl bg-amber-500/[0.08] border border-amber-500/20 px-4 py-2.5 text-[12px] text-amber-600 dark:text-amber-400 leading-relaxed'
-              : 'rounded-xl bg-dismiss/[0.08] border border-dismiss/20 px-4 py-2.5 text-[12px] text-dismiss leading-relaxed'
+              ? 'rounded-xl bg-warm/[0.08] border border-warm/20 px-4 py-2.5 text-ui text-warm dark:text-warm leading-relaxed'
+              : 'rounded-xl bg-alarm/[0.08] border border-alarm/20 px-4 py-2.5 text-ui text-alarm leading-relaxed'
           }
         >
           {banner.text}
@@ -204,7 +204,7 @@ export default function ConnectGitHub() {
         <button
           type="button"
           onClick={startConnect}
-          className="w-full flex items-center justify-center gap-2 bg-surface-inverse hover:bg-surface-inverse/90 text-text-inverse font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+          className="w-full flex items-center justify-center gap-2 bg-inverse hover:bg-inverse/90 text-inverse-ink font-medium rounded-xl px-4 py-2.5 text-body transition-colors"
         >
           <GitHubMark />
           Connect GitHub
@@ -215,7 +215,7 @@ export default function ConnectGitHub() {
           is registered (connect_available=false). */}
       <div className="space-y-2">
         <label className="block">
-          <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+          <span className="mb-1.5 block text-reported font-medium uppercase tracking-wide text-ink-3">
             {connect_available
               ? 'Or paste a personal access token'
               : 'Paste a personal access token'}
@@ -233,23 +233,23 @@ export default function ConnectGitHub() {
               if (e.key === 'Enter') void submitPat()
             }}
             aria-invalid={!!patError || undefined}
-            className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 transition-colors ${
-              patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+            className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:outline-none focus:ring-2 focus:ring-warm/30 transition-colors ${
+              patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
             }`}
           />
         </label>
-        {patError && <p className="text-[12px] text-dismiss leading-relaxed">{patError}</p>}
+        {patError && <p className="text-ui text-alarm leading-relaxed">{patError}</p>}
         <button
           type="button"
           onClick={() => void submitPat()}
           disabled={pat.trim() === '' || capturing}
-          className="w-full rounded-xl border border-border-glass px-4 py-2.5 text-[13px] font-medium text-text-secondary hover:text-text-primary hover:border-accent/40 disabled:opacity-40 disabled:hover:border-border-glass transition-colors"
+          className="w-full rounded-xl border border-line-1 px-4 py-2.5 text-body font-medium text-ink-2 hover:text-ink-1 hover:border-warm/40 disabled:opacity-40 disabled:hover:border-line-1 transition-colors"
         >
           {capturing ? 'Verifying…' : 'Verify token'}
         </button>
       </div>
 
-      <p className="text-[11px] text-text-tertiary leading-relaxed">
+      <p className="text-reported text-ink-3 leading-relaxed">
         Either way, Triage Factory only reads your GitHub username — it doesn&apos;t store your
         token or gain access to your repositories. Repository access is configured separately by
         your admin.

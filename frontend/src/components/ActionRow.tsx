@@ -29,12 +29,12 @@ export function ActionRow({ action, note }: { action: ActivityAction; note?: Rea
           own content (flex-auto, not flex-1) so a short target doesn't hold
           half the row back from a long path. */}
       <span className="flex min-w-0 flex-1 items-baseline gap-2">
-        <span className="min-w-0 flex-auto truncate font-mono text-[11px] text-text-secondary">
+        <span className="min-w-0 flex-auto truncate font-mono text-reported text-ink-2">
           {subject}
         </span>
         {detail && (
           <span
-            className="min-w-0 flex-auto truncate font-mono text-[10px] text-text-tertiary"
+            className="min-w-0 flex-auto truncate font-mono text-label text-ink-3"
             title={detail}
           >
             {detail}
@@ -50,7 +50,7 @@ export function ActionRow({ action, note }: { action: ActivityAction; note?: Rea
   )
 
   const rowClass =
-    'flex w-full items-center gap-2 rounded-[4px] border border-border-subtle bg-black/[0.015] px-2 py-1.5 text-left transition-colors hover:bg-black/[0.04]'
+    'flex w-full items-center gap-2 rounded-[4px] border border-line-1 bg-tint-1 px-2 py-1.5 text-left transition-colors hover:bg-tint-3'
 
   // Both row shapes carry an aria-label, which REPLACES their content for a
   // screen reader — so the detail has to be spelled into it or the rows whose
@@ -69,7 +69,7 @@ export function ActionRow({ action, note }: { action: ActivityAction; note?: Rea
           title={`Open on ${action.provider} (new tab)`}
         >
           {body}
-          <ExternalLink size={11} className="shrink-0 text-text-tertiary/70" aria-hidden />
+          <ExternalLink size={11} className="shrink-0 text-ink-3/70" aria-hidden />
         </a>
       </li>
     )
@@ -88,7 +88,7 @@ export function ActionRow({ action, note }: { action: ActivityAction; note?: Rea
 function VerbPill({ label, tone }: { label: string; tone: Tone }) {
   return (
     <span
-      className={`shrink-0 rounded-[3px] px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-[0.06em] ${TONE_TEXT[tone]}`}
+      className={`shrink-0 rounded-[3px] px-1.5 py-0.5 font-mono text-label-sm font-semibold uppercase tracking-[0.06em] ${TONE_TEXT[tone]}`}
       style={{ background: `color-mix(in srgb, ${TONE_VAR[tone]} 12%, transparent)` }}
     >
       {label}
@@ -100,10 +100,10 @@ function VerbPill({ label, tone }: { label: string; tone: Tone }) {
 // PR draft→open), mono with an arrow between.
 function TransitionChip({ from, to }: { from: string; to: string }) {
   return (
-    <span className="hidden shrink-0 items-center gap-1 font-mono text-[9px] text-text-tertiary sm:inline-flex">
+    <span className="hidden shrink-0 items-center gap-1 font-mono text-label-sm text-ink-3 sm:inline-flex">
       <span className="truncate">{from}</span>
       <ArrowRight size={9} className="shrink-0" aria-hidden />
-      <span className="truncate font-semibold text-text-secondary">{to}</span>
+      <span className="truncate font-semibold text-ink-2">{to}</span>
     </span>
   )
 }
@@ -118,7 +118,7 @@ function ActorChip({ name, actorUserID }: { name?: string; actorUserID?: string 
   const Icon = isHuman ? User : Bot
   return (
     <span
-      className="inline-flex max-w-[8rem] shrink-0 items-center gap-1 truncate rounded-[3px] bg-black/[0.04] px-1.5 py-0.5 font-mono text-[9px] text-text-tertiary"
+      className="inline-flex max-w-[8rem] shrink-0 items-center gap-1 truncate rounded-[3px] bg-tint-3 px-1.5 py-0.5 font-mono text-label-sm text-ink-3"
       title={isHuman ? `Authorized by ${label}` : 'Autonomous bot action'}
     >
       <Icon size={9} className="shrink-0" aria-hidden />

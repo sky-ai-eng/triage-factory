@@ -105,19 +105,19 @@ export default function SettingsSection({
         <ChevronRight
           size={15}
           aria-hidden
-          className={`shrink-0 text-text-tertiary transition-transform ${expanded ? 'rotate-90' : ''}`}
+          className={`shrink-0 text-ink-3 transition-transform ${expanded ? 'rotate-90' : ''}`}
         />
-        <span className="text-[14px] font-medium text-text-primary">{title}</span>
+        <span className="text-body font-medium text-ink-1">{title}</span>
         {/* Unsaved indicator — only meaningful while collapsed (the footer
             carries it when open). */}
         {dirty && !expanded && (
           <span
             aria-label="unsaved changes"
-            className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-warm"
           />
         )}
         {!expanded && summary && (
-          <span className="ml-auto truncate text-[12px] text-text-tertiary">{summary}</span>
+          <span className="ml-auto truncate text-ui text-ink-3">{summary}</span>
         )}
       </button>
 
@@ -140,7 +140,7 @@ export default function SettingsSection({
                     type="button"
                     onClick={cancel}
                     disabled={saving}
-                    className="rounded-xl px-3 py-2 text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-secondary disabled:opacity-40"
+                    className="rounded-xl px-3 py-2 text-body font-medium text-ink-3 transition-colors hover:text-ink-2 disabled:opacity-40"
                   >
                     Cancel
                   </button>
@@ -148,7 +148,7 @@ export default function SettingsSection({
                     type="button"
                     onClick={() => void save()}
                     disabled={!dirty || saving || saveDisabled}
-                    className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 disabled:opacity-40 disabled:shadow-none"
+                    className="rounded-full bg-warm px-6 py-2.5 text-body font-medium text-warm-ink shadow-[0_10px_28px_-10px_var(--color-warm)] transition-all hover:bg-warm/90 disabled:opacity-40 disabled:shadow-none"
                   >
                     {saving ? 'Saving…' : saveLabel}
                   </button>

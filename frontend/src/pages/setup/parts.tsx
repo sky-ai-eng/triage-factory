@@ -57,7 +57,7 @@ export function ChoiceCards<T extends string>({
       role="radiogroup"
       aria-label={ariaLabel}
       onKeyDown={onKeyDown}
-      className="grid divide-x divide-[var(--color-border-subtle)]"
+      className="grid divide-x divide-[var(--color-line-1)]"
       style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
     >
       {options.map((opt, i) => {
@@ -74,12 +74,12 @@ export function ChoiceCards<T extends string>({
             aria-checked={isSelected}
             tabIndex={i === tabbable ? 0 : -1}
             onClick={() => onChoose(opt.kind)}
-            className={`group flex flex-col gap-1 rounded-lg text-left outline-none transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent/50 ${pad}`}
+            className={`group flex flex-col gap-1 rounded-lg text-left outline-none transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warm/50 ${pad}`}
           >
             <span className="flex items-center gap-1.5">
               <span
-                className={`text-[14px] font-medium transition-colors ${
-                  isSelected ? 'text-accent' : 'text-text-secondary group-hover:text-text-primary'
+                className={`text-body font-medium transition-colors ${
+                  isSelected ? 'text-warm' : 'text-ink-2 group-hover:text-ink-1'
                 }`}
               >
                 {opt.title}
@@ -87,12 +87,12 @@ export function ChoiceCards<T extends string>({
               <ChevronRight
                 size={14}
                 aria-hidden
-                className="text-accent opacity-0 transition-opacity group-hover:opacity-100"
+                className="text-warm opacity-0 transition-opacity group-hover:opacity-100"
               />
             </span>
-            <span className="text-[11px] leading-snug text-text-tertiary">{opt.detail}</span>
+            <span className="text-reported leading-snug text-ink-3">{opt.detail}</span>
             {opt.status && (
-              <span className="mt-0.5 text-[11px] font-medium leading-snug text-claim">
+              <span className="mt-0.5 text-reported font-medium leading-snug text-ink-2">
                 {opt.status}
               </span>
             )}
@@ -127,7 +127,7 @@ export function UrlField({
   return (
     <div className="space-y-2">
       <label className="block">
-        <span className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+        <span className="mb-2 block text-reported font-medium uppercase tracking-wide text-ink-3">
           {label}
         </span>
         <input
@@ -138,12 +138,12 @@ export function UrlField({
           aria-invalid={invalid || undefined}
           className={`${glassInputClass}${
             invalid
-              ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
+              ? ' !border-[var(--color-alarm)] focus:!border-[var(--color-alarm)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
               : ''
           }`}
         />
       </label>
-      {helpText && <p className="text-[11px] leading-relaxed text-text-tertiary">{helpText}</p>}
+      {helpText && <p className="text-reported leading-relaxed text-ink-3">{helpText}</p>}
     </div>
   )
 }
@@ -172,11 +172,11 @@ export function ReuseCredentialCheckbox({
         type="checkbox"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
-        className="mt-0.5 accent-accent"
+        className="mt-0.5 accent-warm"
       />
       <span className="block">
-        <span className="block text-[13px] text-text-secondary">{label}</span>
-        <span className="mt-0.5 block text-[11px] leading-relaxed text-text-tertiary">{hint}</span>
+        <span className="block text-body text-ink-2">{label}</span>
+        <span className="mt-0.5 block text-reported leading-relaxed text-ink-3">{hint}</span>
       </span>
     </label>
   )
@@ -188,10 +188,10 @@ export function ReuseCredentialCheckbox({
 export function SectionDivider({ title, id }: { title: string; id: string }) {
   return (
     <div className="flex items-center gap-3 mb-2.5 mt-1">
-      <h2 id={id} className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+      <h2 id={id} className="text-reported font-medium uppercase tracking-wide text-ink-3">
         {title}
       </h2>
-      <div className="h-px flex-1 bg-border-subtle" />
+      <div className="h-px flex-1 bg-line-1" />
     </div>
   )
 }
@@ -220,15 +220,15 @@ export function CollapsedStepBar({
       aria-label={complete ? `${title} — completed. Edit.` : `${title} — in progress. Edit.`}
       className="group flex w-full items-baseline gap-2.5 py-1 text-left"
     >
-      <span className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary transition-colors group-hover:text-text-secondary">
+      <span className="text-ui font-medium uppercase tracking-[0.12em] text-ink-3 transition-colors group-hover:text-ink-2">
         {title}
       </span>
       {complete && (
-        <span className="truncate text-[12px] text-text-tertiary/80" title={summary}>
+        <span className="truncate text-ui text-ink-3/80" title={summary}>
           · {summary}
         </span>
       )}
-      <span className="ml-auto text-[11px] text-text-tertiary opacity-0 transition-opacity group-hover:text-accent group-hover:opacity-100">
+      <span className="ml-auto text-reported text-ink-3 opacity-0 transition-opacity group-hover:text-warm group-hover:opacity-100">
         Edit
       </span>
     </button>

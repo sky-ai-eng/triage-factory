@@ -204,9 +204,9 @@ export default function OrgSettings({
 
   if (loadError) {
     return (
-      <div className="px-1 py-3 text-[13px] text-text-secondary">
+      <div className="px-1 py-3 text-body text-ink-2">
         {loadError}{' '}
-        <button type="button" onClick={load} className="text-accent underline">
+        <button type="button" onClick={load} className="text-warm underline">
           Retry
         </button>
       </div>
@@ -214,7 +214,7 @@ export default function OrgSettings({
   }
   if (!loaded) {
     return (
-      <div className="px-1 py-3 text-[13px] text-text-tertiary">Loading organization settings…</div>
+      <div className="px-1 py-3 text-body text-ink-3">Loading organization settings…</div>
     )
   }
 
@@ -301,7 +301,7 @@ export default function OrgSettings({
     : claudeWantsByok && !claudeKeyTyped && !baseline.anthropicConnected
 
   return (
-    <div className="divide-y divide-border-subtle">
+    <div className="divide-y divide-line-1">
       {/* ── GitHub URL ── */}
       <SettingsSection
         title="GitHub URL"
@@ -389,10 +389,10 @@ export default function OrgSettings({
       >
         <div className="space-y-5">
           <div className="space-y-1.5">
-            <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+            <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
               How often should we poll GitHub?
             </h2>
-            <p className="text-[13px] leading-relaxed text-text-tertiary">
+            <p className="text-body leading-relaxed text-ink-3">
               More frequent polling surfaces new PRs and reviews sooner; less frequent is lighter on
               rate limits.
             </p>
@@ -601,10 +601,10 @@ export default function OrgSettings({
         >
           <div className="space-y-5">
             <div className="space-y-1.5">
-              <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+              <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
                 How often should we poll Jira?
               </h2>
-              <p className="text-[13px] leading-relaxed text-text-tertiary">
+              <p className="text-body leading-relaxed text-ink-3">
                 The cadence for the Jira tracker — independent of the GitHub poll interval.
               </p>
             </div>
@@ -656,10 +656,10 @@ export default function OrgSettings({
       >
         <div className="space-y-5">
           <div className="space-y-1.5">
-            <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+            <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
               Cap the org&rsquo;s daily LLM spend
             </h2>
-            <p className="text-[13px] leading-relaxed text-text-tertiary">
+            <p className="text-body leading-relaxed text-ink-3">
               A safety fuse against runaway spend (most often a misconfigured autonomous trigger).
               When today&rsquo;s total LLM spend — measured on the UTC calendar day, across every
               category — reaches this amount, new agent runs, manual and autonomous alike, are
@@ -668,9 +668,9 @@ export default function OrgSettings({
             </p>
           </div>
           <label className="block max-w-[220px]">
-            <span className="mb-1.5 block text-[11px] text-text-tertiary">Daily limit (USD)</span>
+            <span className="mb-1.5 block text-reported text-ink-3">Daily limit (USD)</span>
             <div className="relative">
-              <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[13px] text-text-tertiary">
+              <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-body text-ink-3">
                 $
               </span>
               <input
@@ -689,12 +689,12 @@ export default function OrgSettings({
                   patch({ org: { ...draft.org, max_daily_cost_usd: e.target.value } })
                 }
                 className={`${inputClass} pl-7 ${
-                  dailyCapErr !== null ? 'border-dismiss/60 focus:border-dismiss/60' : ''
+                  dailyCapErr !== null ? 'border-alarm/60 focus:border-alarm/60' : ''
                 }`}
               />
             </div>
             {dailyCapErr !== null && (
-              <span id="daily-cap-error" className="mt-1.5 block text-[11px] text-dismiss">
+              <span id="daily-cap-error" className="mt-1.5 block text-reported text-alarm">
                 {dailyCapErr}
               </span>
             )}
@@ -726,10 +726,10 @@ export default function OrgSettings({
       >
         <div className="space-y-5">
           <div className="space-y-1.5">
-            <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+            <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
               Limit concurrent agent runs
             </h2>
-            <p className="text-[13px] leading-relaxed text-text-tertiary">
+            <p className="text-body leading-relaxed text-ink-3">
               A ceiling on how many agent runs execute at once across the fleet. Use it to protect
               your own downstream — a burst of events can otherwise open many pull requests at once,
               each triggering a CI build, and hammer your GitHub App&rsquo;s rate limits. Runs over
@@ -738,7 +738,7 @@ export default function OrgSettings({
             </p>
           </div>
           <label className="block max-w-[220px]">
-            <span className="mb-1.5 block text-[11px] text-text-tertiary">Max runs at once</span>
+            <span className="mb-1.5 block text-reported text-ink-3">Max runs at once</span>
             <input
               type="number"
               min="0"
@@ -753,11 +753,11 @@ export default function OrgSettings({
                 patch({ org: { ...draft.org, max_concurrent_runs: e.target.value } })
               }
               className={`${inputClass} ${
-                concurrentRunsErr !== null ? 'border-dismiss/60 focus:border-dismiss/60' : ''
+                concurrentRunsErr !== null ? 'border-alarm/60 focus:border-alarm/60' : ''
               }`}
             />
             {concurrentRunsErr !== null && (
-              <span id="concurrent-runs-error" className="mt-1.5 block text-[11px] text-dismiss">
+              <span id="concurrent-runs-error" className="mt-1.5 block text-reported text-alarm">
                 {concurrentRunsErr}
               </span>
             )}
@@ -978,7 +978,7 @@ function ParkedEventsBadge({ state }: { state: UseFailedEvents }) {
   if (n === 0) return <>None parked</>
   return (
     <span className="inline-flex items-center gap-1.5">
-      <span className="rounded-full bg-dismiss/10 px-2 py-0.5 text-[11px] font-medium text-dismiss">
+      <span className="rounded-full bg-alarm/10 px-2 py-0.5 text-reported font-medium text-alarm">
         {n}
       </span>
       never routed
@@ -1022,8 +1022,8 @@ function SkillsImport() {
   return (
     <div className="flex items-center justify-between gap-4">
       <div>
-        <p className="text-[13px] text-text-primary">Import Claude Code Skills</p>
-        <p className="mt-0.5 text-[11px] text-text-tertiary">
+        <p className="text-body text-ink-1">Import Claude Code Skills</p>
+        <p className="mt-0.5 text-reported text-ink-3">
           Import SKILL.md files from ~/.claude/skills/ as delegation prompts
         </p>
       </div>
@@ -1031,7 +1031,7 @@ function SkillsImport() {
         type="button"
         onClick={() => void run()}
         disabled={importing}
-        className="shrink-0 rounded-xl border border-accent/20 px-4 py-2 text-[13px] text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+        className="shrink-0 rounded-xl border border-warm/20 px-4 py-2 text-body text-warm transition-colors hover:border-warm/30 hover:text-warm/80 disabled:opacity-40"
       >
         {importing ? 'Importing…' : 'Import Skills'}
       </button>
@@ -1089,8 +1089,8 @@ function SkillPasteImport() {
   return (
     <div className="space-y-2">
       <div>
-        <p className="text-[13px] text-text-primary">Add a skill from SKILL.md</p>
-        <p className="mt-0.5 text-[11px] text-text-tertiary">
+        <p className="text-body text-ink-1">Add a skill from SKILL.md</p>
+        <p className="mt-0.5 text-reported text-ink-3">
           Paste (or upload) a skill&apos;s markdown — it becomes a prompt in your library, named
           from its <code>name:</code> frontmatter
         </p>
@@ -1100,7 +1100,7 @@ function SkillPasteImport() {
         onChange={(e) => setContent(e.target.value)}
         placeholder={'---\nname: my-skill\ndescription: …\n---\n\nInstructions…'}
         rows={5}
-        className="w-full rounded-xl border border-border-subtle bg-white/60 px-3 py-2 font-mono text-[12px] text-text-primary placeholder:text-text-tertiary/60 focus:outline-none focus:border-accent/40"
+        className="w-full rounded-xl border border-line-1 bg-raised px-3 py-2 font-mono text-ui text-ink-1 placeholder:text-ink-3/60 focus:outline-none focus:border-warm/40"
       />
       <TeamPicker value={team} onChange={setTeam} className="max-w-xs" />
       <div className="flex items-center justify-between gap-4">
@@ -1112,13 +1112,13 @@ function SkillPasteImport() {
             const f = e.target.files?.[0]
             if (f) void readFile(f)
           }}
-          className="text-[11px] text-text-tertiary file:mr-3 file:rounded-lg file:border file:border-border-subtle file:bg-transparent file:px-3 file:py-1 file:text-[11px] file:text-text-secondary"
+          className="text-reported text-ink-3 file:mr-3 file:rounded-lg file:border file:border-line-1 file:bg-transparent file:px-3 file:py-1 file:text-reported file:text-ink-2"
         />
         <button
           type="button"
           onClick={() => void submit()}
           disabled={submitting || !content.trim() || !ready || (multi && !team)}
-          className="shrink-0 rounded-xl border border-accent/20 px-4 py-2 text-[13px] text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+          className="shrink-0 rounded-xl border border-warm/20 px-4 py-2 text-body text-warm transition-colors hover:border-warm/30 hover:text-warm/80 disabled:opacity-40"
         >
           {submitting ? 'Importing…' : 'Import Skill'}
         </button>
@@ -1138,7 +1138,7 @@ function DangerZone() {
         await fetch('/api/integrations', { method: 'DELETE' })
         window.location.reload()
       }}
-      className="rounded-xl border border-dismiss/20 px-4 py-2 text-[13px] text-dismiss transition-colors hover:border-dismiss/30 hover:text-dismiss/80"
+      className="rounded-xl border border-alarm/20 px-4 py-2 text-body text-alarm transition-colors hover:border-alarm/30 hover:text-alarm/80"
     >
       Clear All Tokens
     </button>

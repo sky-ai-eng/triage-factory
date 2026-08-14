@@ -80,7 +80,7 @@ type KindFilter = '' | 'prompt' | 'blueprint'
 
 const kindLabel = (kind: string) => (kind === 'blueprint' ? 'Blueprint' : 'Prompt')
 const kindBadgeClass = (kind: string) =>
-  kind === 'blueprint' ? 'bg-accent/10 text-accent' : 'bg-black/[0.04] text-text-tertiary'
+  kind === 'blueprint' ? 'bg-warm/10 text-warm' : 'bg-tint-3 text-ink-3'
 
 // formatStatsLine renders the TFAC-540 "N teams · M runs · X% success" line,
 // or null when there's nothing worth showing — the no-wrong-fallbacks rule:
@@ -256,18 +256,18 @@ export default function Marketplace() {
   }
 
   const content = loading ? (
-    <div className="text-text-tertiary text-[13px]">Loading marketplace…</div>
+    <div className="text-ink-3 text-body">Loading marketplace…</div>
   ) : loadError ? (
     <ErrorState message={loadError} onRetry={refresh} />
   ) : listings.length === 0 && !filtersActive ? (
     <EmptyState promptsHref={orgHref('/team') + '?tab=prompts'} />
   ) : listings.length === 0 ? (
     <div className="flex flex-col items-center justify-center py-24 text-center">
-      <p className="text-[13px] text-text-secondary mb-4">No listings match your filters.</p>
+      <p className="text-body text-ink-2 mb-4">No listings match your filters.</p>
       <button
         type="button"
         onClick={clearFilters}
-        className="text-[13px] font-medium text-accent hover:opacity-80 transition-opacity"
+        className="text-body font-medium text-warm hover:opacity-80 transition-opacity"
       >
         Clear filters
       </button>
@@ -289,8 +289,8 @@ export default function Marketplace() {
   return (
     <div className="max-w-6xl mx-auto">
       <header className="mb-6">
-        <h1 className="text-2xl font-semibold tracking-tight text-text-primary">Marketplace</h1>
-        <p className="text-[13px] text-text-secondary mt-1">
+        <h1 className="text-2xl font-semibold tracking-tight text-ink-1">Marketplace</h1>
+        <p className="text-body text-ink-2 mt-1">
           Browse prompts and blueprints published by other teams in your org — sorted by installs,
           recommendations, or recency.
         </p>
@@ -312,7 +312,7 @@ export default function Marketplace() {
               value={sort}
               onChange={(e) => setSort(e.target.value as SortOrder)}
               aria-label="Sort listings"
-              className="text-[13px] text-text-secondary bg-white/50 border border-border-subtle rounded-full px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors"
+              className="text-body text-ink-2 bg-raised border border-line-1 rounded-full px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-warm/30 focus:border-warm/40 transition-colors"
             >
               <option value="installs">Most installed</option>
               <option value="votes">Most recommended</option>
@@ -362,17 +362,17 @@ function KindToggle({ value, onChange }: { value: KindFilter; onChange: (v: Kind
     { value: 'blueprint', label: 'Blueprints' },
   ]
   return (
-    <div className="inline-flex items-center gap-1 bg-black/[0.03] rounded-full p-1">
+    <div className="inline-flex items-center gap-1 bg-tint-2 rounded-full p-1">
       {options.map((opt) => (
         <button
           key={opt.value || 'all'}
           type="button"
           onClick={() => onChange(opt.value)}
           aria-pressed={value === opt.value}
-          className={`text-[12px] font-medium px-3 py-1 rounded-full transition-colors ${
+          className={`text-ui font-medium px-3 py-1 rounded-full transition-colors ${
             value === opt.value
-              ? 'bg-white text-text-primary shadow-sm'
-              : 'text-text-tertiary hover:text-text-secondary'
+              ? 'bg-raised text-ink-1 shadow-float'
+              : 'text-ink-3 hover:text-ink-2'
           }`}
         >
           {opt.label}
@@ -396,10 +396,10 @@ function FacetChip({
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`text-[12px] font-medium px-3 py-1 rounded-full border transition-colors whitespace-nowrap shrink-0 ${
+      className={`text-ui font-medium px-3 py-1 rounded-full border transition-colors whitespace-nowrap shrink-0 ${
         active
-          ? 'bg-accent-soft text-accent border-accent/30'
-          : 'bg-white/50 text-text-secondary border-border-subtle hover:bg-black/[0.03]'
+          ? 'bg-warm-2 text-warm border-warm/30'
+          : 'bg-raised text-ink-2 border-line-1 hover:bg-tint-2'
       }`}
     >
       {children}
@@ -425,23 +425,23 @@ function ListingCard({
   return (
     <article
       className="
-        group relative overflow-hidden rounded-2xl border border-border-glass
-        bg-gradient-to-br from-white/70 via-white/50 to-white/35
-        p-5 shadow-sm shadow-black/[0.03] backdrop-blur-xl
+        group relative overflow-hidden rounded-2xl border border-line-1
+        bg-raised
+        p-5 shadow-float shadow-black/[0.03] backdrop-blur-xl
         transition-[box-shadow,border-color] duration-300
-        hover:border-white/90 hover:shadow-md hover:shadow-black/[0.05]
+        hover:border-line-1 hover:shadow-float hover:shadow-black/[0.05]
       "
     >
       <button
         type="button"
         onClick={onOpen}
         aria-label={`View ${listing.name}`}
-        className="absolute inset-0 z-10 rounded-2xl focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className="absolute inset-0 z-10 rounded-2xl focus:outline-none focus-visible:ring-2 focus-visible:ring-warm"
       />
       <div className="relative flex flex-col h-full">
         <div className="flex items-center justify-between gap-2">
           <span
-            className={`inline-flex items-center text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${kindBadgeClass(listing.kind)}`}
+            className={`inline-flex items-center text-label-sm font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${kindBadgeClass(listing.kind)}`}
           >
             {kindLabel(listing.kind)}
           </span>
@@ -453,10 +453,10 @@ function ListingCard({
             }}
             aria-pressed={listing.viewer_voted}
             aria-label={listing.viewer_voted ? 'Remove recommendation' : 'Recommend'}
-            className={`relative z-20 inline-flex items-center gap-1 text-[11px] font-medium px-2 py-1 rounded-full border transition-colors tabular-nums ${
+            className={`relative z-20 inline-flex items-center gap-1 text-reported font-medium px-2 py-1 rounded-full border transition-colors tabular-nums ${
               listing.viewer_voted
-                ? 'bg-accent-soft text-accent border-accent/30'
-                : 'text-text-tertiary border-border-subtle hover:bg-black/[0.03]'
+                ? 'bg-warm-2 text-warm border-warm/30'
+                : 'text-ink-3 border-line-1 hover:bg-tint-2'
             }`}
           >
             <ThumbsUp size={11} />
@@ -464,14 +464,14 @@ function ListingCard({
           </button>
         </div>
 
-        <h3 className="mt-3 text-[14px] font-semibold tracking-tight text-text-primary truncate pr-1">
+        <h3 className="mt-3 text-body font-semibold tracking-tight text-ink-1 truncate pr-1">
           {listing.name}
         </h3>
-        <p className="text-[11px] text-text-tertiary mt-0.5 truncate">
+        <p className="text-reported text-ink-3 mt-0.5 truncate">
           {listing.publisher_team_name || 'Unknown team'}
         </p>
         {listing.description && (
-          <p className="mt-2 text-[12px] leading-relaxed text-text-secondary line-clamp-2">
+          <p className="mt-2 text-ui leading-relaxed text-ink-2 line-clamp-2">
             {listing.description}
           </p>
         )}
@@ -480,17 +480,17 @@ function ListingCard({
           {shownEventTypes.map((et) => (
             <span
               key={et}
-              className="text-[10px] text-text-tertiary bg-black/[0.03] rounded px-1.5 py-0.5"
+              className="text-label text-ink-3 bg-tint-2 rounded px-1.5 py-0.5"
             >
               {catalogById.get(et)?.label ?? et}
             </span>
           ))}
           {extraEventTypes > 0 && (
-            <span className="text-[10px] text-text-tertiary px-1 py-0.5">+{extraEventTypes}</span>
+            <span className="text-label text-ink-3 px-1 py-0.5">+{extraEventTypes}</span>
           )}
         </div>
 
-        <div className="mt-auto pt-3 text-[11px] text-text-tertiary tabular-nums space-y-0.5">
+        <div className="mt-auto pt-3 text-reported text-ink-3 tabular-nums space-y-0.5">
           <div>
             {listing.install_count} install{listing.install_count === 1 ? '' : 's'}
           </div>
@@ -529,7 +529,7 @@ function ListingDrawer({
       {open && (
         <>
           <motion.div
-            className="fixed inset-0 bg-black/20 backdrop-blur-sm z-[70]"
+            className="fixed inset-0 bg-scrim backdrop-blur-sm z-[70]"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -541,15 +541,15 @@ function ListingDrawer({
             role="dialog"
             aria-modal="true"
             aria-label={detail ? detail.name : 'Listing detail'}
-            className="fixed inset-y-0 right-0 z-[70] w-full max-w-xl bg-surface-raised/95 backdrop-blur-2xl border-l border-border-glass shadow-2xl shadow-black/10 flex flex-col"
+            className="fixed inset-y-0 right-0 z-[70] w-full max-w-xl bg-raised/95 backdrop-blur-2xl border-l border-line-1 shadow-float shadow-black/10 flex flex-col"
             initial={{ x: '100%' }}
             animate={{ x: 0 }}
             exit={{ x: '100%' }}
             transition={{ duration: 0.2 }}
           >
-            <div className="px-6 pt-5 pb-3 flex items-center justify-between shrink-0 border-b border-border-subtle">
-              <h2 className="text-[15px] font-semibold text-text-primary flex items-center gap-2 truncate pr-2">
-                <Store size={15} className="text-accent shrink-0" />
+            <div className="px-6 pt-5 pb-3 flex items-center justify-between shrink-0 border-b border-line-1">
+              <h2 className="text-column font-semibold text-ink-1 flex items-center gap-2 truncate pr-2">
+                <Store size={15} className="text-warm shrink-0" />
                 <span className="truncate">{detail?.name ?? 'Loading…'}</span>
               </h2>
               <button
@@ -557,32 +557,32 @@ function ListingDrawer({
                 type="button"
                 onClick={onClose}
                 aria-label="Close"
-                className="text-text-tertiary hover:text-text-secondary transition-colors shrink-0"
+                className="text-ink-3 hover:text-ink-2 transition-colors shrink-0"
               >
                 <X size={18} />
               </button>
             </div>
 
             <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5 min-h-0">
-              {loading && <div className="text-[13px] text-text-tertiary">Loading…</div>}
+              {loading && <div className="text-body text-ink-3">Loading…</div>}
               {detail && (
                 <>
                   <div className="flex items-center gap-2 flex-wrap">
                     <span
-                      className={`inline-flex items-center text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${kindBadgeClass(detail.kind)}`}
+                      className={`inline-flex items-center text-label-sm font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${kindBadgeClass(detail.kind)}`}
                     >
                       {kindLabel(detail.kind)}
                     </span>
-                    <span className="text-[12px] text-text-secondary">
+                    <span className="text-ui text-ink-2">
                       {detail.publisher_team_name || 'Unknown team'}
                     </span>
-                    <span className="text-[11px] text-text-tertiary">
+                    <span className="text-reported text-ink-3">
                       v{detail.current_version}
                     </span>
                   </div>
 
                   {detail.description && (
-                    <p className="text-[13px] text-text-secondary leading-relaxed">
+                    <p className="text-body text-ink-2 leading-relaxed">
                       {detail.description}
                     </p>
                   )}
@@ -592,7 +592,7 @@ function ListingDrawer({
                       {detail.event_types.map((et) => (
                         <span
                           key={et}
-                          className="text-[10px] text-text-tertiary bg-black/[0.03] rounded px-1.5 py-0.5"
+                          className="text-label text-ink-3 bg-tint-2 rounded px-1.5 py-0.5"
                         >
                           {catalogById.get(et)?.label ?? et}
                         </span>
@@ -605,16 +605,16 @@ function ListingDrawer({
                       type="button"
                       onClick={() => onToggleVote(detail)}
                       aria-pressed={detail.viewer_voted}
-                      className={`inline-flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-full border transition-colors tabular-nums ${
+                      className={`inline-flex items-center gap-1.5 text-ui font-medium px-3 py-1.5 rounded-full border transition-colors tabular-nums ${
                         detail.viewer_voted
-                          ? 'bg-accent-soft text-accent border-accent/30'
-                          : 'text-text-secondary border-border-subtle hover:bg-black/[0.03]'
+                          ? 'bg-warm-2 text-warm border-warm/30'
+                          : 'text-ink-2 border-line-1 hover:bg-tint-2'
                       }`}
                     >
                       <ThumbsUp size={12} />
                       {detail.viewer_voted ? 'Recommended' : 'Recommend'} · {detail.vote_count}
                     </button>
-                    <span className="text-[11px] text-text-tertiary tabular-nums">
+                    <span className="text-reported text-ink-3 tabular-nums">
                       {detail.install_count} install{detail.install_count === 1 ? '' : 's'}
                     </span>
                   </div>
@@ -624,33 +624,33 @@ function ListingDrawer({
                   <InstallControl listing={detail} onInstalled={onInstalled} />
 
                   <div>
-                    <h3 className="text-[11px] font-semibold text-text-secondary mb-2 uppercase tracking-wide">
+                    <h3 className="text-reported font-semibold text-ink-2 mb-2 uppercase tracking-wide">
                       Steps
                     </h3>
                     <div className="space-y-3">
                       {detail.current_snapshot.steps.map((step) => (
                         <div
                           key={step.step_index}
-                          className="border border-border-subtle rounded-lg p-3 bg-black/[0.02]"
+                          className="border border-line-1 rounded-lg p-3 bg-tint-2"
                         >
                           <div className="flex items-center justify-between gap-2 mb-1">
-                            <span className="text-[12px] font-medium text-text-primary truncate">
+                            <span className="text-ui font-medium text-ink-1 truncate">
                               {step.name}
                             </span>
-                            <span className="text-[10px] text-text-tertiary shrink-0">
+                            <span className="text-label text-ink-3 shrink-0">
                               {step.model || 'default model'}
                             </span>
                           </div>
                           {step.brief && (
-                            <p className="text-[11px] text-text-tertiary italic mb-2">
+                            <p className="text-reported text-ink-3 italic mb-2">
                               {step.brief}
                             </p>
                           )}
-                          <pre className="text-[11px] font-mono text-text-secondary whitespace-pre-wrap break-words bg-white/60 rounded p-2 max-h-48 overflow-y-auto">
+                          <pre className="text-reported font-mono text-ink-2 whitespace-pre-wrap break-words bg-raised rounded p-2 max-h-48 overflow-y-auto">
                             {step.body}
                           </pre>
                           {step.allowed_tools && (
-                            <p className="text-[10px] text-text-tertiary mt-1">
+                            <p className="text-label text-ink-3 mt-1">
                               Tools: {step.allowed_tools}
                             </p>
                           )}
@@ -661,7 +661,7 @@ function ListingDrawer({
 
                   {detail.versions.length > 0 && (
                     <div>
-                      <h3 className="text-[11px] font-semibold text-text-secondary mb-2 uppercase tracking-wide">
+                      <h3 className="text-reported font-semibold text-ink-2 mb-2 uppercase tracking-wide">
                         Version history
                       </h3>
                       <ul className="space-y-1">
@@ -671,7 +671,7 @@ function ListingDrawer({
                           .map((v) => (
                             <li
                               key={v.version}
-                              className="text-[11px] text-text-tertiary flex items-center justify-between"
+                              className="text-reported text-ink-3 flex items-center justify-between"
                             >
                               <span>v{v.version}</span>
                               <span>{new Date(v.created_at).toLocaleDateString()}</span>
@@ -744,8 +744,8 @@ function InstallControl({
   if (installedTeamId !== null) {
     const teamName = teams.find((t) => t.id === installedTeamId)?.name
     return (
-      <div className="rounded-lg border border-border-subtle bg-black/[0.02] px-3 py-2.5">
-        <p className="text-[12px] text-text-secondary">
+      <div className="rounded-lg border border-line-1 bg-tint-2 px-3 py-2.5">
+        <p className="text-ui text-ink-2">
           Copied{teamName ? ` to ${teamName}` : ''} ·{' '}
           <Link
             // team=<installedTeamId> is TeamPage's one-shot override — without
@@ -754,12 +754,12 @@ function InstallControl({
             // the server's last-acting default) would land on the wrong
             // team's prompts, not the one this install just landed on.
             to={orgHref('/team') + `?tab=prompts&team=${encodeURIComponent(installedTeamId)}`}
-            className="text-accent font-medium hover:opacity-80"
+            className="text-warm font-medium hover:opacity-80"
           >
             Open prompts workspace
           </Link>
         </p>
-        <p className="text-[11px] text-text-tertiary mt-0.5">
+        <p className="text-reported text-ink-3 mt-0.5">
           Next: attach it to a trigger from your team&rsquo;s editor.
         </p>
       </div>
@@ -774,7 +774,7 @@ function InstallControl({
           type="button"
           onClick={() => install(team)}
           disabled={submitting || !ready || !team}
-          className="text-[12px] font-medium text-white bg-accent px-3 py-1.5 rounded-full disabled:opacity-50 hover:opacity-90 transition-all"
+          className="text-ui font-medium text-warm-ink bg-warm px-3 py-1.5 rounded-full disabled:opacity-50 hover:opacity-90 transition-all"
         >
           {submitting ? 'Copying…' : 'Confirm copy'}
         </button>
@@ -787,7 +787,7 @@ function InstallControl({
       type="button"
       onClick={() => (multi ? setExpanded(true) : install(team))}
       disabled={submitting || !ready}
-      className="text-[12px] font-medium text-accent bg-accent-soft px-3 py-1.5 rounded-full hover:opacity-90 transition-all disabled:opacity-50"
+      className="text-ui font-medium text-warm bg-warm-2 px-3 py-1.5 rounded-full hover:opacity-90 transition-all disabled:opacity-50"
     >
       {submitting ? 'Copying…' : 'Copy to my team'}
     </button>
@@ -813,9 +813,9 @@ function ListingStatsBlock({ stats }: { stats: ListingStats | undefined }) {
   const line = formatStatsLine(stats)
   if (!line || !stats) return null
   return (
-    <div className="rounded-lg border border-border-subtle bg-black/[0.02] px-3 py-2 text-[12px] text-text-secondary">
+    <div className="rounded-lg border border-line-1 bg-tint-2 px-3 py-2 text-ui text-ink-2">
       <span className="tabular-nums">{line}</span>
-      <span className="text-text-tertiary"> · {formatFreshness(stats.computed_at)}</span>
+      <span className="text-ink-3"> · {formatFreshness(stats.computed_at)}</span>
     </div>
   )
 }
@@ -823,11 +823,11 @@ function ListingStatsBlock({ stats }: { stats: ListingStats | undefined }) {
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center py-24">
-      <div className="text-text-secondary text-[13px] max-w-md text-center mb-6">{message}</div>
+      <div className="text-ink-2 text-body max-w-md text-center mb-6">{message}</div>
       <button
         type="button"
         onClick={onRetry}
-        className="inline-flex items-center gap-2 rounded-full bg-accent text-white text-[13px] font-medium px-5 py-2.5 transition-all hover:opacity-90"
+        className="inline-flex items-center gap-2 rounded-full bg-warm text-warm-ink text-body font-medium px-5 py-2.5 transition-all hover:opacity-90"
       >
         Try again
       </button>
@@ -838,15 +838,15 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
 function EmptyState({ promptsHref }: { promptsHref: string }) {
   return (
     <div className="flex flex-col items-center justify-center py-24 text-center">
-      <Store size={28} className="text-text-tertiary mb-4" />
-      <h2 className="text-[15px] font-semibold text-text-primary mb-1">No listings yet</h2>
-      <p className="text-[13px] text-text-secondary max-w-md mb-6">
+      <Store size={28} className="text-ink-3 mb-4" />
+      <h2 className="text-column font-semibold text-ink-1 mb-1">No listings yet</h2>
+      <p className="text-body text-ink-2 max-w-md mb-6">
         Publish a prompt or blueprint from your team&rsquo;s prompts workspace to make it
         discoverable by other teams in this org.
       </p>
       <Link
         to={promptsHref}
-        className="inline-flex items-center gap-2 rounded-full bg-accent text-white text-[13px] font-medium px-4 py-2 transition-all hover:opacity-90"
+        className="inline-flex items-center gap-2 rounded-full bg-warm text-warm-ink text-body font-medium px-4 py-2 transition-all hover:opacity-90"
       >
         Go to your team&rsquo;s prompts
       </Link>

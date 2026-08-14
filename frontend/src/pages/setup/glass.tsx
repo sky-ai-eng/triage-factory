@@ -3,9 +3,9 @@
 // motion easing live in glassStyle.ts (a non-component module, so this stays
 // component-only for react-refresh).
 //
-// Material is built from the existing theme tokens: --color-surface-overlay
+// Material is built from the existing theme tokens: --color-raised
 // (the translucent glass fill, already light/dark-aware) over --color-border-
-// glass edges. We paint the ambient orbs with the --color-accent / --color-
+// glass edges. We paint the ambient orbs with the --color-warm / --color-
 // snooze tokens directly via inline radial-gradients rather than bg-gradient-*
 // utilities — index.css strips those in dark mode, and we want the warm glow in
 // both themes.
@@ -24,11 +24,11 @@
 // cached result.
 export function GlassBackdrop() {
   return (
-    <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 overflow-hidden bg-surface">
+    <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 overflow-hidden bg-ground">
       <div
         className="absolute -left-40 -top-48 h-[46rem] w-[46rem] rounded-full blur-[150px]"
         style={{
-          background: 'radial-gradient(circle, var(--color-accent) 0%, transparent 70%)',
+          background: 'radial-gradient(circle, var(--color-warm) 0%, transparent 70%)',
           opacity: 0.16,
         }}
       />

@@ -66,12 +66,12 @@ export function TelemetryRail({
   const dwellMs = queueDwellMs(run, now)
 
   return (
-    <aside className="hidden w-[256px] shrink-0 overflow-y-auto border-l border-border-subtle bg-black/[0.012] px-4 py-4 lg:block">
+    <aside className="hidden w-[256px] shrink-0 overflow-y-auto border-l border-line-1 bg-tint-1 px-4 py-4 lg:block">
       {/* Output gauge — the work product, the headline readout. */}
       <Section label="Output">
         <TokenGauge input={inputTokens} output={outputTokens} light={state.light} />
         {(cacheRead > 0 || cacheWrite > 0) && (
-          <div className="mt-2 flex items-center gap-3 font-mono text-[10px] tabular-nums text-text-tertiary/70">
+          <div className="mt-2 flex items-center gap-3 font-mono text-label tabular-nums text-ink-3/70">
             {cacheRead > 0 && <span>cache·r {compactNum(cacheRead)}</span>}
             {cacheWrite > 0 && <span>cache·w {compactNum(cacheWrite)}</span>}
           </div>
@@ -152,7 +152,7 @@ export function TelemetryRail({
 
       {run.Status === 'completed' && run.ResultSummary && (
         <Section label="Summary" last>
-          <p className="whitespace-pre-line text-[11.5px] leading-relaxed text-text-secondary">
+          <p className="whitespace-pre-line text-secondary leading-relaxed text-ink-2">
             {run.ResultSummary}
           </p>
         </Section>
@@ -160,7 +160,7 @@ export function TelemetryRail({
 
       {run.OutcomeReason && (
         <Section label="Reason" last>
-          <p className="text-[11.5px] leading-relaxed text-text-secondary">{run.OutcomeReason}</p>
+          <p className="text-secondary leading-relaxed text-ink-2">{run.OutcomeReason}</p>
         </Section>
       )}
     </aside>
@@ -179,10 +179,10 @@ function Section({
   return (
     <div className={last ? '' : 'mb-5'}>
       <div className="mb-2 flex items-center gap-2">
-        <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-text-tertiary/70">
+        <span className="font-mono text-label-sm font-semibold uppercase tracking-[0.18em] text-ink-3/70">
           {label}
         </span>
-        <span className="h-px flex-1 bg-border-subtle" />
+        <span className="h-px flex-1 bg-line-1" />
       </div>
       <div className="space-y-1.5">{children}</div>
     </div>
@@ -196,19 +196,19 @@ function TokenGauge({ input, output, light }: { input: number; output: number; l
   const outPct = total > 0 ? (output / total) * 100 : 0
   return (
     <div>
-      <div className="mb-1.5 flex items-baseline justify-between font-mono text-[11px] tabular-nums">
-        <span className="text-text-tertiary/80">
-          <span className="text-text-tertiary/50">↓</span> {compactNum(input)}
+      <div className="mb-1.5 flex items-baseline justify-between font-mono text-reported tabular-nums">
+        <span className="text-ink-3/80">
+          <span className="text-ink-3/50">↓</span> {compactNum(input)}
         </span>
         <span className="font-semibold" style={{ color: light }}>
           <span className="opacity-60">↑</span> {compactNum(output)}
         </span>
       </div>
-      <div className="flex h-1.5 overflow-hidden rounded-full bg-black/[0.06]">
+      <div className="flex h-1.5 overflow-hidden rounded-full bg-tint-3">
         <span
           style={{
             width: `${100 - outPct}%`,
-            background: 'var(--color-text-tertiary)',
+            background: 'var(--color-ink-3)',
             opacity: 0.4,
           }}
         />
@@ -229,18 +229,18 @@ function TokenGauge({ input, output, light }: { input: number; output: number; l
 // crowds the window, so a long run reads "getting tight" at a glance.
 function ContextGauge({ used, limit, light }: { used: number; limit: number; light: string }) {
   const pct = Math.min(100, (used / limit) * 100)
-  const fill = pct >= 85 ? 'var(--color-dismiss)' : light
+  const fill = pct >= 85 ? 'var(--color-alarm)' : light
   return (
     <div>
-      <div className="mb-1.5 flex items-baseline justify-between font-mono text-[11px] tabular-nums">
-        <span className="text-text-tertiary/80">
+      <div className="mb-1.5 flex items-baseline justify-between font-mono text-reported tabular-nums">
+        <span className="text-ink-3/80">
           {compactNum(used)} / {compactNum(limit)}
         </span>
         <span className="font-semibold" style={{ color: fill }}>
           {Math.round(pct)}%
         </span>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-black/[0.06]">
+      <div className="h-1.5 overflow-hidden rounded-full bg-tint-3">
         <span
           className="block h-full rounded-full"
           style={{ width: `${pct}%`, background: fill, boxShadow: `0 0 8px ${tint(fill, 70)}` }}
@@ -268,17 +268,17 @@ function Readout({
   return (
     <div title={title}>
       <div className="flex items-baseline justify-between gap-3">
-        <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.1em] text-text-tertiary/70">
+        <span className="shrink-0 font-mono text-label uppercase tracking-[0.1em] text-ink-3/70">
           {k}
         </span>
         <span
-          className="min-w-0 truncate text-right font-mono text-[11px] tabular-nums"
-          style={{ color: accent ?? 'var(--color-text-primary)' }}
+          className="min-w-0 truncate text-right font-mono text-reported tabular-nums"
+          style={{ color: accent ?? 'var(--color-ink-1)' }}
         >
           {v}
         </span>
       </div>
-      {note && <p className="mt-0.5 text-[10.5px] leading-snug text-text-tertiary/80">{note}</p>}
+      {note && <p className="mt-0.5 text-label leading-snug text-ink-3/80">{note}</p>}
     </div>
   )
 }

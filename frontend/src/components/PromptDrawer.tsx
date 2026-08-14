@@ -300,7 +300,7 @@ export default function PromptDrawer({
         <>
           {/* Backdrop */}
           <motion.div
-            className="fixed inset-0 bg-black/10 backdrop-blur-sm z-40"
+            className="fixed inset-0 bg-scrim backdrop-blur-sm z-40"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -314,7 +314,7 @@ export default function PromptDrawer({
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
-            className="fixed top-0 right-0 bottom-0 z-50 bg-surface-raised border-l border-border-glass shadow-2xl shadow-black/10 flex flex-col"
+            className="fixed top-0 right-0 bottom-0 z-50 bg-raised border-l border-line-1 shadow-float shadow-black/10 flex flex-col"
             style={{ width: Math.min(width, window.innerWidth * 0.9) }}
             initial={{ x: '100%' }}
             animate={{ x: 0 }}
@@ -324,19 +324,19 @@ export default function PromptDrawer({
             {/* Resize handle */}
             <div
               onMouseDown={onMouseDown}
-              className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-accent/20 active:bg-accent/30 transition-colors z-10"
+              className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-warm/20 active:bg-warm/30 transition-colors z-10"
             />
 
             {/* Header */}
-            <div className="px-6 py-5 border-b border-border-subtle flex items-center justify-between shrink-0">
+            <div className="px-6 py-5 border-b border-line-1 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-3">
-                <h2 id={titleId} className="text-[15px] font-semibold text-text-primary">
+                <h2 id={titleId} className="text-column font-semibold text-ink-1">
                   {isNew ? 'New Prompt' : 'Edit Prompt'}
                 </h2>
               </div>
               <button
                 onClick={onClose}
-                className="text-text-tertiary hover:text-text-secondary transition-colors text-lg leading-none px-1"
+                className="text-ink-3 hover:text-ink-2 transition-colors text-lg leading-none px-1"
               >
                 &times;
               </button>
@@ -349,9 +349,9 @@ export default function PromptDrawer({
                   otherwise the modal's own write picker (≥2 teams). */}
               {isNew &&
                 (lockedTeamId ? (
-                  <div className="text-[12px] text-text-tertiary">
+                  <div className="text-ui text-ink-3">
                     Team:{' '}
-                    <span className="font-medium text-text-secondary">
+                    <span className="font-medium text-ink-2">
                       {teams.find((t) => t.id === lockedTeamId)?.name ?? 'current team'}
                     </span>
                   </div>
@@ -360,7 +360,7 @@ export default function PromptDrawer({
                 ))}
               {/* Name */}
               <div>
-                <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                <label className="block text-ui font-medium text-ink-2 mb-1.5">
                   Name
                 </label>
                 <input
@@ -370,13 +370,13 @@ export default function PromptDrawer({
                   onChange={(e) => setName(e.target.value)}
                   disabled={readOnly}
                   placeholder="e.g. Thorough Code Review"
-                  className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors disabled:opacity-60"
+                  className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-60"
                 />
               </div>
 
               {/* Body */}
               <div>
-                <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                <label className="block text-ui font-medium text-ink-2 mb-1.5">
                   Prompt Body
                 </label>
                 <textarea
@@ -385,29 +385,29 @@ export default function PromptDrawer({
                   disabled={readOnly}
                   placeholder="Describe what the agent should do..."
                   rows={16}
-                  className="w-full px-3 py-2.5 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary font-mono leading-relaxed placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors resize-y disabled:opacity-60"
+                  className="w-full px-3 py-2.5 rounded-lg border border-line-1 bg-raised text-body text-ink-1 font-mono leading-relaxed placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors resize-y disabled:opacity-60"
                 />
-                <p className="text-[10px] text-text-tertiary mt-1.5">
+                <p className="text-label text-ink-3 mt-1.5">
                   Every run automatically receives the task's context.
                 </p>
               </div>
 
               <div>
-                <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                <label className="block text-ui font-medium text-ink-2 mb-1.5">
                   Model
                 </label>
                 <select
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
                   disabled={readOnly}
-                  className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors disabled:opacity-60"
+                  className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-60"
                 >
                   <option value="">Default{defaultModel ? ` (${defaultModel})` : ''}</option>
                   <option value="haiku">Haiku (fast, cheap)</option>
                   <option value="sonnet">Sonnet (balanced)</option>
                   <option value="opus">Opus (most capable)</option>
                 </select>
-                <p className="text-[10px] text-text-tertiary mt-1.5">
+                <p className="text-label text-ink-3 mt-1.5">
                   Default tracks the model chosen in Settings — change it there and every prompt
                   using Default follows.
                 </p>
@@ -416,10 +416,10 @@ export default function PromptDrawer({
               {/* Stats */}
               {!isNew && stats && stats.total_runs > 0 && (
                 <div>
-                  <label className="block text-[12px] font-medium text-text-secondary mb-2">
+                  <label className="block text-ui font-medium text-ink-2 mb-2">
                     Performance
                   </label>
-                  <div className="bg-black/[0.02] rounded-lg border border-border-subtle p-3 space-y-3">
+                  <div className="bg-tint-2 rounded-lg border border-line-1 p-3 space-y-3">
                     {/* Stat pills */}
                     <div className="flex gap-2 flex-wrap">
                       <StatPill label="Runs" value={String(stats.total_runs)} />
@@ -429,10 +429,10 @@ export default function PromptDrawer({
                         value={`${Math.round(stats.success_rate * 100)}%`}
                         color={
                           stats.success_rate >= 0.8
-                            ? 'text-claim'
+                            ? 'text-ink-2'
                             : stats.success_rate >= 0.5
-                              ? 'text-amber-600'
-                              : 'text-dismiss'
+                              ? 'text-warm'
+                              : 'text-alarm'
                         }
                       />
                       <StatPill label="Avg time" value={formatDuration(stats.avg_duration_ms)} />
@@ -453,8 +453,8 @@ export default function PromptDrawer({
                                   height: `${Math.max(pct * 100, 4)}%`,
                                   background:
                                     d.count > 0
-                                      ? 'var(--color-accent)'
-                                      : 'var(--color-border-subtle)',
+                                      ? 'var(--color-warm)'
+                                      : 'var(--color-line-1)',
                                   opacity: d.count > 0 ? 0.7 : 0.3,
                                 }}
                                 title={`${d.date}: ${d.count} run${d.count !== 1 ? 's' : ''}`}
@@ -463,14 +463,14 @@ export default function PromptDrawer({
                           })}
                         </div>
                         <div className="flex justify-between mt-1">
-                          <span className="text-[9px] text-text-tertiary">30d ago</span>
-                          <span className="text-[9px] text-text-tertiary">today</span>
+                          <span className="text-label-sm text-ink-3">30d ago</span>
+                          <span className="text-label-sm text-ink-3">today</span>
                         </div>
                       </div>
                     )}
 
                     {/* Last used + totals */}
-                    <div className="flex justify-between text-[10px] text-text-tertiary pt-1 border-t border-border-subtle">
+                    <div className="flex justify-between text-label text-ink-3 pt-1 border-t border-line-1">
                       <span>Total spend: ${stats.total_cost_usd.toFixed(2)}</span>
                       {stats.last_used_at && <span>Last used {formatAge(stats.last_used_at)}</span>}
                     </div>
@@ -482,7 +482,7 @@ export default function PromptDrawer({
               {!isNew && source && (
                 <div className="flex items-center gap-2">
                   <span
-                    className={`text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${source === 'system' ? 'bg-black/[0.04] text-text-tertiary' : 'bg-accent/10 text-accent'}`}
+                    className={`text-label-sm font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${source === 'system' ? 'bg-tint-3 text-ink-3' : 'bg-warm/10 text-warm'}`}
                   >
                     {source}
                   </span>
@@ -494,7 +494,7 @@ export default function PromptDrawer({
                   control renders nothing in local mode). */}
               {!isNew && promptId && (
                 <div>
-                  <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                  <label className="block text-ui font-medium text-ink-2 mb-1.5">
                     Marketplace
                   </label>
                   <MarketplacePublishControl
@@ -508,7 +508,7 @@ export default function PromptDrawer({
             </div>
 
             {/* Footer */}
-            <div className="px-6 py-4 border-t border-border-subtle flex items-center justify-between shrink-0">
+            <div className="px-6 py-4 border-t border-line-1 flex items-center justify-between shrink-0">
               <div>
                 {!isNew && !readOnly && (
                   <button
@@ -519,7 +519,7 @@ export default function PromptDrawer({
                         ? 'Permanently delete this prompt'
                         : 'Hide this prompt — it will not reappear on import'
                     }
-                    className="text-[12px] text-text-tertiary hover:text-red-500 font-medium transition-colors disabled:opacity-50"
+                    className="text-ui text-ink-3 hover:text-alarm font-medium transition-colors disabled:opacity-50"
                   >
                     {deleting
                       ? source === 'user'
@@ -533,16 +533,16 @@ export default function PromptDrawer({
               </div>
 
               <div className="flex items-center gap-3">
-                {error && <span className="text-[12px] text-red-500">{error}</span>}
+                {error && <span className="text-ui text-alarm">{error}</span>}
                 {readOnly ? (
                   // View-only: no Save/Delete; the only action is to dismiss the
                   // inspector. The label reads "Close" (not "Cancel") since there's
                   // nothing to cancel.
                   <>
-                    <span className="text-[11px] font-medium text-text-tertiary">View only</span>
+                    <span className="text-reported font-medium text-ink-3">View only</span>
                     <button
                       onClick={onClose}
-                      className="text-[12px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-1.5 rounded-full transition-colors"
+                      className="text-ui font-semibold text-warm-ink bg-warm hover:bg-warm/90 px-4 py-1.5 rounded-full transition-colors"
                     >
                       Close
                     </button>
@@ -551,14 +551,14 @@ export default function PromptDrawer({
                   <>
                     <button
                       onClick={onClose}
-                      className="text-[12px] text-text-tertiary hover:text-text-secondary font-medium transition-colors"
+                      className="text-ui text-ink-3 hover:text-ink-2 font-medium transition-colors"
                     >
                       Cancel
                     </button>
                     <button
                       onClick={save}
                       disabled={saving || (isNew && !lockedTeamId && !teamsLoaded)}
-                      className="text-[12px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-1.5 rounded-full transition-colors disabled:opacity-50"
+                      className="text-ui font-semibold text-warm-ink bg-warm hover:bg-warm/90 px-4 py-1.5 rounded-full transition-colors disabled:opacity-50"
                     >
                       {saving ? 'Saving...' : isNew ? 'Create' : 'Save'}
                     </button>
@@ -575,9 +575,9 @@ export default function PromptDrawer({
 
 function StatPill({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
-    <div className="bg-white/60 border border-border-subtle rounded-md px-2 py-1">
-      <div className={`text-[12px] font-semibold ${color || 'text-text-primary'}`}>{value}</div>
-      <div className="text-[9px] text-text-tertiary">{label}</div>
+    <div className="bg-raised border border-line-1 rounded-md px-2 py-1">
+      <div className={`text-ui font-semibold ${color || 'text-ink-1'}`}>{value}</div>
+      <div className="text-label-sm text-ink-3">{label}</div>
     </div>
   )
 }

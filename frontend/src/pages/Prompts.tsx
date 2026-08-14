@@ -20,7 +20,7 @@ export default function Prompts() {
       <PromptsWorkspace
         teamId={activeTeam.teamId}
         ready={activeTeam.ready}
-        toolbarLeft={<h1 className="text-[17px] font-semibold text-text-primary">Prompts</h1>}
+        toolbarLeft={<h1 className="text-section font-semibold text-ink-1">Prompts</h1>}
         toolbarRight={<TeamSwitch value={activeTeam.teamId} onChange={activeTeam.setTeamId} />}
       />
     </div>

@@ -207,9 +207,9 @@ const CATEGORY_LABEL: Record<string, string> = {
 
 const CATEGORY_COLOR: Record<string, string> = {
   manual: 'var(--color-delegate)',
-  autonomous: 'var(--color-accent)',
+  autonomous: 'var(--color-warm)',
   curator: 'var(--color-claim)',
-  system_overhead: 'var(--color-text-tertiary)',
+  system_overhead: 'var(--color-ink-3)',
 }
 
 function categoryLabel(category: string): string {
@@ -274,7 +274,7 @@ const tooltipStyle = {
   boxShadow: '0 4px 12px rgba(0,0,0,0.05)',
 } as const
 
-const shimmer = 'animate-pulse bg-black/[0.04] rounded'
+const shimmer = 'animate-pulse bg-tint-3 rounded'
 
 // Instrument is one readout in a band — a tiny etched monospace label + a
 // hairline running off to the edge, then the viz. No box, no fill: the field
@@ -295,10 +295,10 @@ function Instrument({
   return (
     <div className={className}>
       <div className="mb-3 flex items-center gap-2">
-        <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-text-tertiary/70">
+        <span className="font-mono text-label-sm font-semibold uppercase tracking-[0.18em] text-ink-3/70">
           {label}
         </span>
-        <span className="h-px flex-1 bg-border-subtle/70" />
+        <span className="h-px flex-1 bg-line-1/70" />
         {aside}
       </div>
       {children}
@@ -308,7 +308,7 @@ function Instrument({
 
 function ZeroMini({ label = '—' }: { label?: string }) {
   return (
-    <p className="py-6 text-center font-mono text-[10px] uppercase tracking-wider text-text-tertiary/50">
+    <p className="py-6 text-center font-mono text-label uppercase tracking-wider text-ink-3/50">
       {label}
     </p>
   )
@@ -320,7 +320,7 @@ function ZeroMini({ label = '—' }: { label?: string }) {
 function Meter({
   value,
   max,
-  color = 'var(--color-accent)',
+  color = 'var(--color-warm)',
 }: {
   value: number
   max: number
@@ -349,7 +349,7 @@ function InfoHint({ text }: { text: string }) {
           <button
             type="button"
             aria-label="What's this?"
-            className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border border-text-tertiary/30 font-mono text-[8px] leading-none text-text-tertiary/70 transition-colors hover:border-accent hover:text-accent"
+            className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border border-ink-3/30 font-mono text-[8px] leading-none text-ink-3/70 transition-colors hover:border-warm hover:text-warm"
           >
             ?
           </button>
@@ -358,10 +358,10 @@ function InfoHint({ text }: { text: string }) {
           <HintTip.Content
             side="top"
             sideOffset={6}
-            className="z-[100] max-w-[240px] rounded-lg border border-border-glass bg-surface-raised px-3 py-2 text-[12px] leading-relaxed text-text-secondary shadow-lg shadow-black/[0.06]"
+            className="z-[100] max-w-[240px] rounded-lg border border-line-1 bg-raised px-3 py-2 text-ui leading-relaxed text-ink-2 shadow-float shadow-black/[0.06]"
           >
             {text}
-            <HintTip.Arrow className="fill-surface-raised" />
+            <HintTip.Arrow className="fill-raised" />
           </HintTip.Content>
         </HintTip.Portal>
       </HintTip.Root>
@@ -442,16 +442,16 @@ function Donut({
             key={d.key}
             onMouseEnter={() => setActive(d.key)}
             onMouseLeave={() => setActive(null)}
-            className={`-mx-1 flex items-center justify-between gap-2 rounded-[3px] px-1 font-mono text-[11px] transition-colors ${
-              active === d.key ? 'bg-black/[0.04]' : ''
+            className={`-mx-1 flex items-center justify-between gap-2 rounded-[3px] px-1 font-mono text-reported transition-colors ${
+              active === d.key ? 'bg-tint-3' : ''
             }`}
           >
             <span className="flex min-w-0 items-center gap-1.5">
               <span className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: d.color }} />
-              <span className="truncate text-text-secondary">{d.label}</span>
+              <span className="truncate text-ink-2">{d.label}</span>
               {d.hint && <InfoHint text={d.hint} />}
             </span>
-            <span className="shrink-0 tabular-nums text-text-tertiary" title={d.title}>
+            <span className="shrink-0 tabular-nums text-ink-3" title={d.title}>
               {fmtUSD(d.value)} · {pct(d.value, total)}
             </span>
           </li>
@@ -502,14 +502,14 @@ function Gauges({
     <div>
       <ul className="space-y-2.5">
         {shown.map((d) => {
-          const color = d.color ?? 'var(--color-accent)'
+          const color = d.color ?? 'var(--color-warm)'
           return (
             <li key={d.key} className="space-y-1">
-              <div className="flex items-baseline justify-between gap-2 font-mono text-[11px]">
-                <span className="truncate text-text-secondary" title={d.label}>
+              <div className="flex items-baseline justify-between gap-2 font-mono text-reported">
+                <span className="truncate text-ink-2" title={d.label}>
                   {d.label}
                 </span>
-                <span className="shrink-0 tabular-nums text-text-tertiary">{fmtUSD(d.value)}</span>
+                <span className="shrink-0 tabular-nums text-ink-3">{fmtUSD(d.value)}</span>
               </div>
               <Meter value={d.value} max={max} color={color} />
             </li>
@@ -517,7 +517,7 @@ function Gauges({
         })}
       </ul>
       {hidden > 0 && (
-        <p className="mt-2.5 font-mono text-[10px] text-text-tertiary/70">+{hidden} more</p>
+        <p className="mt-2.5 font-mono text-label text-ink-3/70">+{hidden} more</p>
       )}
     </div>
   )
@@ -556,7 +556,7 @@ function Avatar({ name, userId, avatarUrl }: { name: string; userId: string; ava
   return (
     <span
       aria-hidden
-      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[3px] bg-accent/10 font-mono text-[10px] font-semibold text-accent"
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[3px] bg-warm/10 font-mono text-label font-semibold text-warm"
     >
       {initialsOf(name)}
     </span>
@@ -572,7 +572,7 @@ function RosterAvg({ data }: { data: UsageUserBucket[] }) {
   if (rows.length === 0) return null
   const avg = rows.reduce((s, d) => s + d.cost, 0) / rows.length
   return (
-    <span className="shrink-0 font-mono text-[9px] tabular-nums text-text-tertiary/60">
+    <span className="shrink-0 font-mono text-label-sm tabular-nums text-ink-3/60">
       avg {fmtUSD(avg)}
     </span>
   )
@@ -594,11 +594,11 @@ function UserRoster({ data, emptyLabel = '—' }: { data: UsageUserBucket[]; emp
           <div key={d.user_id} className="flex items-center gap-2.5">
             <Avatar name={name} userId={d.user_id} avatarUrl={d.avatar_url} />
             <div className="min-w-0 flex-1">
-              <div className="flex items-baseline justify-between gap-2 font-mono text-[11px]">
-                <span className="truncate text-text-secondary" title={name}>
+              <div className="flex items-baseline justify-between gap-2 font-mono text-reported">
+                <span className="truncate text-ink-2" title={name}>
                   {name}
                 </span>
-                <span className="shrink-0 tabular-nums text-text-tertiary">{fmtUSD(d.cost)}</span>
+                <span className="shrink-0 tabular-nums text-ink-3">{fmtUSD(d.cost)}</span>
               </div>
               <Meter value={d.cost} max={max} />
             </div>
@@ -657,8 +657,8 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
         <AreaChart data={formatted} margin={{ top: 6, right: 2, bottom: 0, left: 2 }}>
           <defs>
             <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--color-accent)" stopOpacity={0.22} />
-              <stop offset="100%" stopColor="var(--color-accent)" stopOpacity={0} />
+              <stop offset="0%" stopColor="var(--color-warm)" stopOpacity={0.22} />
+              <stop offset="100%" stopColor="var(--color-warm)" stopOpacity={0} />
             </linearGradient>
           </defs>
           <XAxis dataKey="ts" type="number" domain={['dataMin', 'dataMax']} hide />
@@ -671,7 +671,7 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
           <Area
             type="monotone"
             dataKey="cost"
-            stroke="var(--color-accent)"
+            stroke="var(--color-warm)"
             strokeWidth={1.5}
             fill={`url(#${gradId})`}
           />
@@ -680,7 +680,7 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
       {/* A single faint baseline grounds the plot without a panel. */}
       <span
         aria-hidden
-        className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-border-subtle"
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-line-1"
       />
     </div>
   )
@@ -690,10 +690,10 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
 // ring's teams and the over-time chart's models both cycle through it. (Org-level
 // slices keep their category color instead.)
 const SERIES_PALETTE = [
-  'var(--color-accent)',
+  'var(--color-warm)',
   'var(--color-delegate)',
   'var(--color-snooze)',
-  'var(--color-dismiss)',
+  'var(--color-alarm)',
   'var(--hmi-cyan)',
   'var(--color-claim)',
 ]
@@ -782,7 +782,7 @@ function modelSeries(byModel: UsageModelBucket[] | undefined): ModelSeries[] {
       key: OTHER_KEY,
       label: 'other',
       cost: rest.reduce((s, m) => s + m.cost, 0),
-      color: 'var(--color-text-tertiary)',
+      color: 'var(--color-ink-3)',
     })
   }
   return out
@@ -847,7 +847,7 @@ function StackedTrace({
       </ResponsiveContainer>
       <span
         aria-hidden
-        className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-border-subtle"
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-line-1"
       />
     </div>
   )
@@ -863,14 +863,14 @@ function ModelKey({ series }: { series: ModelSeries[] }) {
     <ul className="space-y-2.5">
       {series.map((s) => (
         <li key={s.key} className="space-y-1">
-          <div className="flex items-baseline justify-between gap-2 font-mono text-[11px]">
+          <div className="flex items-baseline justify-between gap-2 font-mono text-reported">
             <span className="flex min-w-0 items-center gap-1.5">
               <span className="h-2 w-2 shrink-0 rounded-[2px]" style={{ background: s.color }} />
-              <span className="truncate text-text-secondary" title={s.key}>
+              <span className="truncate text-ink-2" title={s.key}>
                 {s.label}
               </span>
             </span>
-            <span className="shrink-0 tabular-nums text-text-tertiary">{fmtUSD(s.cost)}</span>
+            <span className="shrink-0 tabular-nums text-ink-3">{fmtUSD(s.cost)}</span>
           </div>
           <Meter value={s.cost} max={max} color={s.color} />
         </li>
@@ -913,10 +913,10 @@ function ThroughputInstrument({
         </div>
         <div className="lg:w-[200px] lg:shrink-0">
           <div className="mb-3 flex items-center gap-2">
-            <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-text-tertiary/70">
+            <span className="font-mono text-label-sm font-semibold uppercase tracking-[0.18em] text-ink-3/70">
               by model
             </span>
-            <span className="h-px flex-1 bg-border-subtle/70" />
+            <span className="h-px flex-1 bg-line-1/70" />
           </div>
           <ModelKey series={series} />
         </div>
@@ -949,15 +949,15 @@ function EtchedNote({ msg, tone = 'muted' }: { msg: string; tone?: 'muted' | 'er
   const isErr = tone === 'error'
   return (
     <div
-      className={`flex items-center gap-3 py-4 font-mono text-[10px] ${
+      className={`flex items-center gap-3 py-4 font-mono text-label ${
         isErr
-          ? 'tracking-[0.04em] text-dismiss'
-          : 'uppercase tracking-[0.16em] text-text-tertiary/60'
+          ? 'tracking-[0.04em] text-alarm'
+          : 'uppercase tracking-[0.16em] text-ink-3/60'
       }`}
     >
-      <span className={`h-px w-6 ${isErr ? 'bg-dismiss/40' : 'bg-border-subtle'}`} />
+      <span className={`h-px w-6 ${isErr ? 'bg-alarm/40' : 'bg-line-1'}`} />
       {msg}
-      <span className={`h-px flex-1 ${isErr ? 'bg-dismiss/20' : 'bg-border-subtle'}`} />
+      <span className={`h-px flex-1 ${isErr ? 'bg-alarm/20' : 'bg-line-1'}`} />
     </div>
   )
 }
@@ -990,18 +990,18 @@ function Band({
     <section className="mb-12 last:mb-0">
       <div className="flex items-end gap-4">
         <div className="flex items-baseline gap-2.5 pb-1.5">
-          <span className="font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-text-secondary">
+          <span className="font-mono text-ui font-semibold uppercase tracking-[0.2em] text-ink-2">
             {label}
           </span>
           {right}
         </div>
-        <span className="mb-[9px] h-px flex-1 bg-border-subtle" />
+        <span className="mb-[9px] h-px flex-1 bg-line-1" />
         <div className="pb-0.5 text-right leading-none">
-          <span className="font-mono text-lg font-semibold tabular-nums text-text-primary">
+          <span className="font-mono text-lg font-semibold tabular-nums text-ink-1">
             {loading ? '—' : fmtUSD(total)}
           </span>
           {!loading && !empty && (
-            <span className="ml-3 font-mono text-[10px] tabular-nums text-text-tertiary/80">
+            <span className="ml-3 font-mono text-label tabular-nums text-ink-3/80">
               {fmtUSD(rate)}/day
             </span>
           )}
@@ -1087,7 +1087,7 @@ function TeamSection({
     adminTeams.length > 1 ? (
       <TeamSwitch value={teamId} onChange={setPicked} teams={adminTeams} />
     ) : (
-      <span className="font-mono text-[11px] tracking-[0.06em] text-text-tertiary/80">
+      <span className="font-mono text-reported tracking-[0.06em] text-ink-3/80">
         / {teamName}
       </span>
     )
@@ -1149,16 +1149,16 @@ function CapStatus({
   dirty: boolean
   error: string | null
 }) {
-  const base = 'w-[56px] shrink-0 text-right font-mono text-[9px] uppercase tracking-wider'
-  if (status === 'saving') return <span className={`${base} text-text-tertiary/70`}>saving…</span>
+  const base = 'w-[56px] shrink-0 text-right font-mono text-label-sm uppercase tracking-wider'
+  if (status === 'saving') return <span className={`${base} text-ink-3/70`}>saving…</span>
   if (status === 'error')
     return (
-      <span className={`${base} text-dismiss`} title={error ?? undefined}>
+      <span className={`${base} text-alarm`} title={error ?? undefined}>
         error
       </span>
     )
-  if (dirty) return <span className={`${base} text-accent/80`}>unsaved</span>
-  if (status === 'saved') return <span className={`${base} text-text-tertiary/60`}>saved</span>
+  if (dirty) return <span className={`${base} text-warm/80`}>unsaved</span>
+  if (status === 'saved') return <span className={`${base} text-ink-3/60`}>saved</span>
   return <span className={base} aria-hidden />
 }
 
@@ -1248,15 +1248,15 @@ function CapRow({ team, spend }: { team: UsageTeamCap; spend: number }) {
   const name = team.team_name || team.team_id
   return (
     <div className="flex items-center justify-between gap-3">
-      <span className="flex min-w-0 items-baseline gap-2 font-mono text-[11px]">
-        <span className="truncate text-text-secondary" title={name}>
+      <span className="flex min-w-0 items-baseline gap-2 font-mono text-reported">
+        <span className="truncate text-ink-2" title={name}>
           {name}
         </span>
-        <span className="shrink-0 tabular-nums text-text-tertiary/60">{fmtUSD(spend)}</span>
+        <span className="shrink-0 tabular-nums text-ink-3/60">{fmtUSD(spend)}</span>
       </span>
       <span className="flex shrink-0 items-center gap-2">
         <span className="relative">
-          <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-text-tertiary">
+          <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-reported text-ink-3">
             $
           </span>
           <input
@@ -1276,7 +1276,7 @@ function CapRow({ team, spend }: { team: UsageTeamCap; spend: number }) {
               if (e.key === 'Enter') void save()
             }}
             onBlur={() => void save()}
-            className="w-[108px] rounded-[4px] border border-border-subtle bg-transparent py-1 pl-5 pr-2 font-mono text-[11px] tabular-nums text-text-primary transition-colors focus:border-accent focus:outline-none"
+            className="w-[108px] rounded-[4px] border border-line-1 bg-transparent py-1 pl-5 pr-2 font-mono text-reported tabular-nums text-ink-1 transition-colors focus:border-warm focus:outline-none"
           />
         </span>
         <CapStatus status={status} dirty={dirty} error={error} />
@@ -1306,7 +1306,7 @@ function TeamCaps({
       {teams.map((t) => (
         <CapRow key={t.team_id} team={t} spend={spendByTeam.get(t.team_id) ?? 0} />
       ))}
-      <p className="pt-1 font-mono text-[9px] leading-relaxed text-text-tertiary/55">
+      <p className="pt-1 font-mono text-label-sm leading-relaxed text-ink-3/55">
         Refuses new agent runs for a team once its spend for the UTC day reaches the cap. In-flight
         runs keep going. Blank = no cap.
       </p>
@@ -1343,50 +1343,50 @@ function OrgOpsBand({ since }: { since: string }) {
   return (
     <section className="mb-12">
       <div className="mb-6 flex items-end gap-4">
-        <span className="pb-1.5 font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-text-secondary">
+        <span className="pb-1.5 font-mono text-ui font-semibold uppercase tracking-[0.2em] text-ink-2">
           Operations
         </span>
-        <span className="mb-[9px] h-px flex-1 bg-border-subtle" />
-        <span className="pb-0.5 font-mono text-[10px] uppercase tracking-wider text-text-tertiary/70">
+        <span className="mb-[9px] h-px flex-1 bg-line-1" />
+        <span className="pb-0.5 font-mono text-label uppercase tracking-wider text-ink-3/70">
           queue &amp; run latency · this window
         </span>
       </div>
       <div className="grid grid-cols-2 gap-x-10 gap-y-8 md:grid-cols-3 lg:grid-cols-5">
         <Instrument label="Queue depth">
-          <p className="font-mono text-[22px] font-light tabular-nums text-text-primary">
+          <p className="font-mono text-[22px] font-light tabular-nums text-ink-1">
             {data.queue_depth}
           </p>
-          <p className="mt-1 font-mono text-[10px] text-text-tertiary">
+          <p className="mt-1 font-mono text-label text-ink-3">
             oldest {data.queue_depth > 0 ? fmtOpsDur(data.oldest_wait_seconds) : '—'}
           </p>
         </Instrument>
         <Instrument
           label="Queue wait"
-          aside={<span className="font-mono text-[9px] text-text-tertiary/60">p50 · p95</span>}
+          aside={<span className="font-mono text-label-sm text-ink-3/60">p50 · p95</span>}
         >
-          <p className="font-mono text-[22px] font-light tabular-nums text-text-primary">
+          <p className="font-mono text-[22px] font-light tabular-nums text-ink-1">
             {fmtOpsMs(data.wait_p50_ms)}
           </p>
-          <p className="mt-1 font-mono text-[10px] text-text-tertiary">
+          <p className="mt-1 font-mono text-label text-ink-3">
             p95 {fmtOpsMs(data.wait_p95_ms)}
           </p>
         </Instrument>
         <Instrument
           label="Run duration"
-          aside={<span className="font-mono text-[9px] text-text-tertiary/60">p50 · p95</span>}
+          aside={<span className="font-mono text-label-sm text-ink-3/60">p50 · p95</span>}
         >
-          <p className="font-mono text-[22px] font-light tabular-nums text-text-primary">
+          <p className="font-mono text-[22px] font-light tabular-nums text-ink-1">
             {fmtOpsMs(data.duration_p50_ms)}
           </p>
-          <p className="mt-1 font-mono text-[10px] text-text-tertiary">
+          <p className="mt-1 font-mono text-label text-ink-3">
             p95 {fmtOpsMs(data.duration_p95_ms)}
           </p>
         </Instrument>
         <Instrument label="Runs">
-          <p className="font-mono text-[22px] font-light tabular-nums text-text-primary">
+          <p className="font-mono text-[22px] font-light tabular-nums text-ink-1">
             {data.runs_total}
           </p>
-          <p className="mt-1 font-mono text-[10px] text-text-tertiary">
+          <p className="mt-1 font-mono text-label text-ink-3">
             {data.runs_completed} done · {data.runs_active} active
           </p>
         </Instrument>
@@ -1394,18 +1394,18 @@ function OrgOpsBand({ since }: { since: string }) {
           label="Failures"
           aside={
             <span
-              className={`font-mono text-[9px] tabular-nums ${failRate > 5 ? 'text-dismiss' : 'text-text-tertiary/60'}`}
+              className={`font-mono text-label-sm tabular-nums ${failRate > 5 ? 'text-alarm' : 'text-ink-3/60'}`}
             >
               {failRate.toFixed(1)}%
             </span>
           }
         >
           <p
-            className={`font-mono text-[22px] font-light tabular-nums ${data.runs_failed > 0 ? 'text-dismiss' : 'text-text-primary'}`}
+            className={`font-mono text-[22px] font-light tabular-nums ${data.runs_failed > 0 ? 'text-alarm' : 'text-ink-1'}`}
           >
             {data.runs_failed}
           </p>
-          <p className="mt-1 truncate font-mono text-[10px] text-text-tertiary">
+          <p className="mt-1 truncate font-mono text-label text-ink-3">
             {data.failure_kinds.length > 0
               ? data.failure_kinds.map((f) => f.kind.replace(/_/g, ' ')).join(', ')
               : 'none'}
@@ -1540,8 +1540,8 @@ const ACCESS_REVOCATIONS = new Set([
 
 function accessTone(action: string): string {
   if (action === 'credential_set') return 'var(--color-claim)'
-  if (ACCESS_REVOCATIONS.has(action)) return 'var(--color-dismiss)'
-  return 'var(--color-accent)'
+  if (ACCESS_REVOCATIONS.has(action)) return 'var(--color-alarm)'
+  return 'var(--color-warm)'
 }
 
 // AccessCategoryFilter is the membership/credential/policy toggle, styled like the
@@ -1563,12 +1563,12 @@ function AccessCategoryFilter({
             key={c.key || 'all'}
             type="button"
             onClick={() => onChange(c.key)}
-            className={`relative font-mono text-[11px] tracking-[0.12em] transition-colors ${
-              active ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
+            className={`relative font-mono text-reported tracking-[0.12em] transition-colors ${
+              active ? 'text-warm' : 'text-ink-3 hover:text-ink-2'
             }`}
           >
             {c.label}
-            {active && <span className="absolute -bottom-1.5 left-0 right-0 h-px bg-accent" />}
+            {active && <span className="absolute -bottom-1.5 left-0 right-0 h-px bg-warm" />}
           </button>
         )
       })}
@@ -1581,11 +1581,11 @@ function AccessCategoryFilter({
 function AccessLogRow({ row }: { row: AccessChangeRow }) {
   const actor = row.actor_name || 'Unknown'
   return (
-    <li className="flex items-baseline gap-3 py-2 font-mono text-[11px]">
+    <li className="flex items-baseline gap-3 py-2 font-mono text-reported">
       <time
         dateTime={row.created_at}
         title={row.created_at}
-        className="w-28 shrink-0 tabular-nums text-text-tertiary/70"
+        className="w-28 shrink-0 tabular-nums text-ink-3/70"
       >
         {fmtAccessTime(row.created_at)}
       </time>
@@ -1595,8 +1595,8 @@ function AccessLogRow({ row }: { row: AccessChangeRow }) {
         style={{ background: accessTone(row.action) }}
       />
       <span className="min-w-0 leading-relaxed">
-        <span className="font-semibold text-text-primary">{actor}</span>{' '}
-        <span className="text-text-secondary">{row.action_label}</span>
+        <span className="font-semibold text-ink-1">{actor}</span>{' '}
+        <span className="text-ink-2">{row.action_label}</span>
       </span>
     </li>
   )
@@ -1619,7 +1619,7 @@ function AccessLogPager({
   const start = count === 0 ? 0 : offset + 1
   const end = offset + count
   return (
-    <div className="mt-5 flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-text-tertiary/70">
+    <div className="mt-5 flex items-center justify-between font-mono text-label uppercase tracking-[0.12em] text-ink-3/70">
       <span className="tabular-nums">
         {start}–{end}
       </span>
@@ -1628,7 +1628,7 @@ function AccessLogPager({
           type="button"
           disabled={offset === 0}
           onClick={() => onChange(Math.max(0, offset - ACCESS_LOG_PAGE))}
-          className="tracking-[0.12em] transition-colors enabled:hover:text-text-secondary disabled:opacity-30"
+          className="tracking-[0.12em] transition-colors enabled:hover:text-ink-2 disabled:opacity-30"
         >
           Newer
         </button>
@@ -1636,7 +1636,7 @@ function AccessLogPager({
           type="button"
           disabled={!hasMore}
           onClick={() => onChange(offset + ACCESS_LOG_PAGE)}
-          className="tracking-[0.12em] transition-colors enabled:hover:text-text-secondary disabled:opacity-30"
+          className="tracking-[0.12em] transition-colors enabled:hover:text-ink-2 disabled:opacity-30"
         >
           Older
         </button>
@@ -1668,10 +1668,10 @@ function AccessLogSection() {
   return (
     <section className="mb-12 last:mb-0">
       <div className="flex items-end gap-4">
-        <span className="pb-1.5 font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-text-secondary">
+        <span className="pb-1.5 font-mono text-ui font-semibold uppercase tracking-[0.2em] text-ink-2">
           Access &amp; credential changes
         </span>
-        <span className="mb-[9px] h-px flex-1 bg-border-subtle" />
+        <span className="mb-[9px] h-px flex-1 bg-line-1" />
         <div className="pb-1">
           <AccessCategoryFilter value={category} onChange={pickCategory} />
         </div>
@@ -1689,7 +1689,7 @@ function AccessLogSection() {
           />
         ) : (
           <>
-            <ul className="divide-y divide-border-subtle/40">
+            <ul className="divide-y divide-line-1/40">
               {rows.map((row) => (
                 <AccessLogRow key={row.id} row={row} />
               ))}
@@ -1722,12 +1722,12 @@ function Channel({ value, onChange }: { value: RangeKey; onChange: (r: RangeKey)
             key={r.key}
             type="button"
             onClick={() => onChange(r.key)}
-            className={`relative font-mono text-[11px] tracking-[0.12em] transition-colors ${
-              active ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
+            className={`relative font-mono text-reported tracking-[0.12em] transition-colors ${
+              active ? 'text-warm' : 'text-ink-3 hover:text-ink-2'
             }`}
           >
             {r.label}
-            {active && <span className="absolute -bottom-1.5 left-0 right-0 h-px bg-accent" />}
+            {active && <span className="absolute -bottom-1.5 left-0 right-0 h-px bg-warm" />}
           </button>
         )
       })}
@@ -1738,7 +1738,7 @@ function Channel({ value, onChange }: { value: RangeKey; onChange: (r: RangeKey)
 // ConsoleFrame wraps the bands in the wireframe-industrial framing: rust corner
 // registration ticks (the board's L-bracket DNA, at page scale).
 function ConsoleFrame({ children }: { children: React.ReactNode }) {
-  const tick = 'pointer-events-none absolute h-3 w-3 border-accent/40'
+  const tick = 'pointer-events-none absolute h-3 w-3 border-warm/40'
   return (
     <div className="relative">
       <span aria-hidden className={`${tick} -left-3 -top-3 border-l-[1.5px] border-t-[1.5px]`} />
@@ -1773,10 +1773,10 @@ function LocalConsole({ since, days }: { since: string; days: number }) {
     <div className="space-y-10">
       {/* Headline — the hero number stands in for the removed section header. */}
       <div className="flex items-baseline gap-3">
-        <span className="font-mono text-2xl font-semibold tabular-nums text-text-primary">
+        <span className="font-mono text-2xl font-semibold tabular-nums text-ink-1">
           {fmtUSD(total)}
         </span>
-        <span className="font-mono text-[11px] tabular-nums text-text-tertiary/80">
+        <span className="font-mono text-reported tabular-nums text-ink-3/80">
           {fmtUSD(total / active)}/day
         </span>
       </div>
@@ -1837,8 +1837,8 @@ export default function Usage() {
     <div className="mx-auto max-w-6xl">
       <div className="mb-10 flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight text-text-primary">Usage</h1>
-          <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em] text-text-tertiary/70">
+          <h1 className="text-xl font-semibold tracking-tight text-ink-1">Usage</h1>
+          <p className="mt-1 font-mono text-label uppercase tracking-[0.18em] text-ink-3/70">
             settled llm spend · real dollars
           </p>
         </div>

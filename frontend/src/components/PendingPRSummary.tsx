@@ -104,20 +104,20 @@ export default function PendingPRSummary({
   const saving = savingTitle || savingBody
 
   return (
-    <div className="backdrop-blur-xl bg-surface-raised/70 border border-border-glass rounded-2xl shadow-sm shadow-black/[0.02] overflow-hidden">
+    <div className="backdrop-blur-xl bg-raised/70 border border-line-1 rounded-2xl shadow-float shadow-black/[0.02] overflow-hidden">
       {/* Header */}
       <div className="px-5 pt-5 pb-4">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <h2 className="text-[15px] font-semibold text-text-primary tracking-tight">Draft PR</h2>
-            <p className="text-[12px] text-text-tertiary mt-0.5 font-mono truncate">
+            <h2 className="text-column font-semibold text-ink-1 tracking-tight">Draft PR</h2>
+            <p className="text-ui text-ink-3 mt-0.5 font-mono truncate">
               {owner}/{repo} &middot; {headBranch} &rarr; {baseBranch}
             </p>
             <a
               href={url}
               target="_blank"
               rel="noreferrer"
-              className="text-[10.5px] text-text-tertiary/70 hover:text-accent mt-0.5 font-mono inline-block transition-colors"
+              className="text-label text-ink-3/70 hover:text-warm mt-0.5 font-mono inline-block transition-colors"
             >
               #{number} on GitHub &rarr;
             </a>
@@ -132,7 +132,7 @@ export default function PendingPRSummary({
             <input
               value={titleDraft}
               onChange={(e) => setTitleDraft(e.target.value)}
-              className="w-full text-[14px] font-medium text-text-primary bg-white/40 border border-border-subtle rounded-xl px-4 py-2.5 focus:outline-none focus:border-accent/30 focus:ring-1 focus:ring-accent/10"
+              className="w-full text-body font-medium text-ink-1 bg-raised border border-line-1 rounded-xl px-4 py-2.5 focus:outline-none focus:border-warm/30 focus:ring-1 focus:ring-warm/10"
               placeholder="PR title"
               autoFocus
               onKeyDown={(e) => {
@@ -140,19 +140,19 @@ export default function PendingPRSummary({
                 if (e.key === 'Escape') cancelTitle()
               }}
             />
-            {titleError && <p className="text-[11px] text-dismiss px-1">{titleError}</p>}
+            {titleError && <p className="text-reported text-alarm px-1">{titleError}</p>}
             <div className="flex items-center gap-2 justify-end">
               <button
                 onClick={cancelTitle}
                 disabled={savingTitle}
-                className="text-[11px] text-text-tertiary hover:text-text-secondary px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                className="text-reported text-ink-3 hover:text-ink-2 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 onClick={saveTitle}
                 disabled={savingTitle}
-                className="text-[11px] font-medium text-white bg-accent hover:bg-accent/90 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                className="text-reported font-medium text-warm-ink bg-warm hover:bg-warm/90 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
               >
                 {savingTitle ? 'Saving…' : 'Save'}
               </button>
@@ -164,12 +164,12 @@ export default function PendingPRSummary({
               setTitleDraft(title)
               setEditingTitle(true)
             }}
-            className="bg-white/30 rounded-xl px-4 py-2.5 border border-transparent hover:border-border-subtle transition-colors cursor-text group"
+            className="bg-raised rounded-xl px-4 py-2.5 border border-transparent hover:border-line-1 transition-colors cursor-text group"
           >
-            <span className="text-[14px] font-medium text-text-primary">
-              {title || <span className="text-text-tertiary italic">No title</span>}
+            <span className="text-body font-medium text-ink-1">
+              {title || <span className="text-ink-3 italic">No title</span>}
             </span>
-            <span className="text-[10px] text-text-tertiary/70 ml-2 opacity-0 group-hover:opacity-100 transition-opacity">
+            <span className="text-label text-ink-3/70 ml-2 opacity-0 group-hover:opacity-100 transition-opacity">
               click to edit
             </span>
           </div>
@@ -183,23 +183,23 @@ export default function PendingPRSummary({
             <textarea
               value={bodyDraft}
               onChange={(e) => setBodyDraft(e.target.value)}
-              className="w-full min-h-[120px] text-[13px] leading-relaxed text-text-primary bg-white/40 border border-border-subtle rounded-xl px-4 py-3 resize-y focus:outline-none focus:border-accent/30 focus:ring-1 focus:ring-accent/10 font-mono"
+              className="w-full min-h-[120px] text-body leading-relaxed text-ink-1 bg-raised border border-line-1 rounded-xl px-4 py-3 resize-y focus:outline-none focus:border-warm/30 focus:ring-1 focus:ring-warm/10 font-mono"
               placeholder="PR body (markdown supported)..."
               autoFocus
             />
-            {bodyError && <p className="text-[11px] text-dismiss px-1">{bodyError}</p>}
+            {bodyError && <p className="text-reported text-alarm px-1">{bodyError}</p>}
             <div className="flex items-center gap-2 justify-end">
               <button
                 onClick={cancelBody}
                 disabled={savingBody}
-                className="text-[11px] text-text-tertiary hover:text-text-secondary px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                className="text-reported text-ink-3 hover:text-ink-2 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 onClick={saveBody}
                 disabled={savingBody}
-                className="text-[11px] font-medium text-white bg-accent hover:bg-accent/90 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                className="text-reported font-medium text-warm-ink bg-warm hover:bg-warm/90 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50"
               >
                 {savingBody ? 'Saving…' : 'Save'}
               </button>
@@ -210,7 +210,7 @@ export default function PendingPRSummary({
             <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
               <button
                 onClick={() => setRawView(!rawView)}
-                className="text-[10px] text-text-tertiary hover:text-text-secondary px-1.5 py-0.5 rounded bg-white/60 border border-border-subtle transition-colors"
+                className="text-label text-ink-3 hover:text-ink-2 px-1.5 py-0.5 rounded bg-raised border border-line-1 transition-colors"
               >
                 {rawView ? 'Preview' : 'Raw'}
               </button>
@@ -219,29 +219,29 @@ export default function PendingPRSummary({
                   setBodyDraft(body)
                   setEditingBody(true)
                 }}
-                className="text-[10px] text-text-tertiary hover:text-accent px-1.5 py-0.5 rounded bg-white/60 border border-border-subtle transition-colors"
+                className="text-label text-ink-3 hover:text-warm px-1.5 py-0.5 rounded bg-raised border border-line-1 transition-colors"
               >
                 Edit
               </button>
             </div>
 
-            <div className="bg-white/30 rounded-xl px-4 py-3 border border-transparent hover:border-border-subtle transition-colors min-h-[48px]">
+            <div className="bg-raised rounded-xl px-4 py-3 border border-transparent hover:border-line-1 transition-colors min-h-[48px]">
               {!body ? (
                 <span
                   onClick={() => {
                     setBodyDraft(body)
                     setEditingBody(true)
                   }}
-                  className="text-[13px] text-text-tertiary italic cursor-text"
+                  className="text-body text-ink-3 italic cursor-text"
                 >
                   No description
                 </span>
               ) : rawView ? (
-                <pre className="text-[12.5px] leading-relaxed text-text-secondary font-mono whitespace-pre-wrap">
+                <pre className="text-card-title leading-relaxed text-ink-2 font-mono whitespace-pre-wrap">
                   {body}
                 </pre>
               ) : (
-                <div className="review-markdown text-[13px] leading-relaxed text-text-secondary">
+                <div className="review-markdown text-body leading-relaxed text-ink-2">
                   <Markdown>{body}</Markdown>
                 </div>
               )}
@@ -251,11 +251,11 @@ export default function PendingPRSummary({
       </div>
 
       {/* Footer actions */}
-      <div className="px-5 py-3 border-t border-border-subtle flex items-center justify-end">
+      <div className="px-5 py-3 border-t border-line-1 flex items-center justify-end">
         <div className="flex items-center gap-2">
           <button
             onClick={onClose}
-            className="text-[11px] font-medium text-text-tertiary hover:text-text-primary px-3 py-1.5 rounded-lg transition-colors"
+            className="text-reported font-medium text-ink-3 hover:text-ink-1 px-3 py-1.5 rounded-lg transition-colors"
           >
             Close
           </button>
@@ -269,15 +269,15 @@ export default function PendingPRSummary({
                   ? 'Waiting for your save to land before opening the PR'
                   : undefined
             }
-            className={`flex items-center gap-1.5 text-[12px] font-semibold px-4 py-2 rounded-xl transition-all duration-150 ${
+            className={`flex items-center gap-1.5 text-ui font-semibold px-4 py-2 rounded-xl transition-all duration-150 ${
               submitting || saving || editingTitle || editingBody
-                ? 'bg-accent/50 text-white/70 cursor-not-allowed'
-                : 'text-white bg-claim hover:bg-claim/90'
+                ? 'bg-warm/50 text-warm-ink cursor-not-allowed'
+                : 'text-warm-ink bg-tint-2 hover:bg-tint-2'
             }`}
           >
             {submitting ? (
               <>
-                <span className="inline-block w-3 h-3 border border-white/40 border-t-white rounded-full animate-spin" />
+                <span className="inline-block w-3 h-3 border border-line-1 border-t-white rounded-full animate-spin" />
                 Opening...
               </>
             ) : (

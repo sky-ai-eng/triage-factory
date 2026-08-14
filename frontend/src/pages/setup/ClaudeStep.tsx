@@ -39,10 +39,10 @@ export function OrgClaudeSourceStep({ state, patch, advance }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
           How should runs reach Claude?
         </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           Triage Factory delegates work to Claude Code. Use the credentials already on this machine,
           or bring your own Anthropic or Amazon Bedrock credentials.
         </p>
@@ -97,18 +97,18 @@ export function ClaudeProviderCards({
             onClick={() => onSelect(card.kind)}
             className={`flex flex-col items-start gap-1 rounded-xl border px-3.5 py-3 text-left transition-colors ${
               isSelected
-                ? 'border-accent/50 bg-accent/[0.06] shadow-sm shadow-black/[0.03]'
-                : 'border-border-subtle bg-black/[0.02] hover:border-border-strong'
+                ? 'border-warm/50 bg-warm/[0.06] shadow-float shadow-black/[0.03]'
+                : 'border-line-1 bg-tint-2 hover:border-border-strong'
             }`}
           >
             <span
-              className={`text-[13px] font-medium ${
-                isSelected ? 'text-accent' : 'text-text-primary'
+              className={`text-body font-medium ${
+                isSelected ? 'text-warm' : 'text-ink-1'
               }`}
             >
               {card.title}
             </span>
-            <span className="text-[11px] leading-snug text-text-tertiary">{card.blurb}</span>
+            <span className="text-reported leading-snug text-ink-3">{card.blurb}</span>
           </button>
         )
       })}
@@ -136,7 +136,7 @@ function LabeledInput({
 }) {
   return (
     <label className="block">
-      <span className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+      <span className="mb-2 block text-reported font-medium uppercase tracking-wide text-ink-3">
         {label}
       </span>
       <input
@@ -148,7 +148,7 @@ function LabeledInput({
         autoComplete="off"
         className={`${glassInputClass}${
           invalid
-            ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
+            ? ' !border-[var(--color-alarm)] focus:!border-[var(--color-alarm)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
             : ''
         }`}
       />
@@ -182,13 +182,13 @@ export function AnthropicKeyField({
         secret
         invalid={invalid}
       />
-      <p className="text-[11px] leading-relaxed text-text-tertiary">
+      <p className="text-reported leading-relaxed text-ink-3">
         Create one in the{' '}
         <a
           href="https://console.anthropic.com/settings/keys"
           target="_blank"
           rel="noopener noreferrer"
-          className="text-accent hover:underline"
+          className="text-warm hover:underline"
         >
           Anthropic Console
         </a>
@@ -206,8 +206,8 @@ export function AnthropicKeyField({
 // <details>/<summary> so there's no new dependency or open-state plumbing.
 function KeyHardeningChecklist() {
   return (
-    <div className="space-y-1 rounded-lg border border-border-subtle bg-black/[0.02] px-3 py-2">
-      <p className="text-[11px] font-medium text-text-tertiary">Before you save, harden this key</p>
+    <div className="space-y-1 rounded-lg border border-line-1 bg-tint-2 px-3 py-2">
+      <p className="text-reported font-medium text-ink-3">Before you save, harden this key</p>
       <ul className="space-y-0.5">
         <HardeningItem
           title="Use a dedicated workspace with a spend limit"
@@ -247,23 +247,23 @@ function HardeningItem({
   linkText: string
 }) {
   return (
-    <li className="text-[11px] leading-relaxed text-text-tertiary">
+    <li className="text-reported leading-relaxed text-ink-3">
       <details className="group">
         <summary className="flex cursor-pointer list-none items-center gap-1 marker:content-none">
           <ChevronRight
             size={11}
             aria-hidden
-            className="shrink-0 text-text-tertiary transition-transform group-open:rotate-90"
+            className="shrink-0 text-ink-3 transition-transform group-open:rotate-90"
           />
           <span>{title}</span>
         </summary>
-        <p className="mt-0.5 pl-[15px] text-text-tertiary/85">
+        <p className="mt-0.5 pl-[15px] text-ink-3/85">
           {why}{' '}
           <a
             href={href}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-accent hover:underline"
+            className="text-warm hover:underline"
           >
             {linkText}
           </a>
@@ -293,7 +293,7 @@ function CopyButton({ value, label }: { value: string; label: string }) {
       type="button"
       onClick={() => void copy()}
       aria-label={`Copy ${label}`}
-      className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-border-glass)] px-3 py-2 text-[12px] font-medium text-text-secondary transition-colors hover:text-text-primary"
+      className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-line-1)] px-3 py-2 text-ui font-medium text-ink-2 transition-colors hover:text-ink-1"
     >
       {copied ? <Check size={13} /> : <Copy size={13} />}
       {copied ? 'Copied' : 'Copy'}
@@ -348,7 +348,7 @@ function BedrockRoleFields({
       {/* External ID — read-only, generated by the setup call; the role's trust
           policy must pin it (the confused-deputy guard). */}
       <div className="space-y-1.5">
-        <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+        <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
           External ID
         </span>
         {form.bedrock_external_id ? (
@@ -359,12 +359,12 @@ function BedrockRoleFields({
               value={form.bedrock_external_id}
               aria-label="External ID"
               onFocus={(e) => e.target.select()}
-              className={`${glassInputClass} font-mono text-[12px]`}
+              className={`${glassInputClass} font-mono text-ui`}
             />
             <CopyButton value={form.bedrock_external_id} label="External ID" />
           </div>
         ) : (
-          <p className="text-[11px] leading-relaxed text-text-tertiary">
+          <p className="text-reported leading-relaxed text-ink-3">
             Generated when you run the setup below — add it to the role&apos;s trust policy.
           </p>
         )}
@@ -377,7 +377,7 @@ function BedrockRoleFields({
           type="button"
           onClick={() => void runSetup()}
           disabled={loading}
-          className="inline-flex items-center gap-1.5 rounded-xl border border-accent/20 px-4 py-2 text-[13px] text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+          className="inline-flex items-center gap-1.5 rounded-xl border border-warm/20 px-4 py-2 text-body text-warm transition-colors hover:border-warm/30 hover:text-warm/80 disabled:opacity-40"
         >
           {loading
             ? 'Fetching…'
@@ -386,27 +386,27 @@ function BedrockRoleFields({
               : 'Generate setup / show trust policy'}
         </button>
         {setupError && (
-          <p className="text-[11px] leading-relaxed text-[var(--color-dismiss)]">{setupError}</p>
+          <p className="text-reported leading-relaxed text-[var(--color-alarm)]">{setupError}</p>
         )}
         {callerArn && (
-          <p className="text-[11px] leading-relaxed text-text-tertiary">
+          <p className="text-reported leading-relaxed text-ink-3">
             Triage Factory assumes the role from{' '}
-            <span className="font-mono text-text-secondary">{callerArn}</span> — this identity must
+            <span className="font-mono text-ink-2">{callerArn}</span> — this identity must
             be allowed by the trust policy.
           </p>
         )}
         {trustPolicy && (
           <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+              <span className="text-reported font-medium uppercase tracking-wide text-ink-3">
                 Trust policy
               </span>
               <CopyButton value={trustPolicy} label="trust policy" />
             </div>
-            <pre className="max-h-64 overflow-auto rounded-lg border border-border-subtle bg-black/[0.03] p-3 font-mono text-[11px] leading-relaxed text-text-secondary">
+            <pre className="max-h-64 overflow-auto rounded-lg border border-line-1 bg-tint-2 p-3 font-mono text-reported leading-relaxed text-ink-2">
               {trustPolicy}
             </pre>
-            <p className="text-[11px] leading-relaxed text-text-tertiary">
+            <p className="text-reported leading-relaxed text-ink-3">
               Create the role in IAM with Bedrock permissions, then set this as its trust policy.
             </p>
           </div>
@@ -504,7 +504,7 @@ export function BedrockFields({
           onChange={(v) => onChange({ bedrock_base_url: v })}
           placeholder="https://bedrock-runtime.us-east-1.amazonaws.com"
         />
-        <p className="text-[11px] leading-relaxed text-text-tertiary">
+        <p className="text-reported leading-relaxed text-ink-3">
           Only needed for a VPC interface endpoint, GovCloud, or another endpoint the standard
           regional address can&apos;t reach. The region above still names the request-signing scope.
         </p>
@@ -522,8 +522,8 @@ export function OrgClaudeKeyStep({ state, patch, error }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">Connect Claude</h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Connect Claude</h2>
+        <p className="text-body leading-relaxed text-ink-3">
           The credentials Triage Factory uses to run Claude Code for delegated work.
         </p>
       </div>

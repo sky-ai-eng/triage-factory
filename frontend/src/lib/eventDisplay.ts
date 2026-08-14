@@ -151,7 +151,7 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
 export const FALLBACK_EVENT: EventInfo = {
   label: 'Event',
   description: 'A triage event occurred',
-  color: 'bg-black/5 text-text-tertiary',
+  color: 'bg-black/5 text-ink-3',
 }
 
 export function eventDisplay(eventType?: string): EventInfo {

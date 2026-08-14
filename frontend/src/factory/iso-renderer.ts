@@ -286,7 +286,7 @@ export class IsoScene {
 
     // Grid lines, drawn just above the ground plane so they're
     // visible against it. Tinted with the project accent terracotta
-    // (--color-accent #a85a3a) at very low alpha so the grid carries
+    // (--color-warm #a85a3a) at very low alpha so the grid carries
     // the same warm hue as the rest of the app and station footprint
     // pads — and stays barely-there at normal zoom, only resolving
     // into faint blueprint structure when the camera leans in.
@@ -309,7 +309,7 @@ export class IsoScene {
     // floor when the camera pans. CreatePlane is xy with normal +z,
     // matching our z-up world without needing rotation.
     //
-    // Albedo lifted toward the app's --color-surface (#f7f5f2) for
+    // Albedo lifted toward the app's --color-ground (#f7f5f2) for
     // cohesion with the rest of the UI. Roughness dropped to 0.72 so
     // the floor picks up a faint sheen from the warm key + cool rim
     // lights — reads as polished concrete / warm stone, not matte

@@ -77,8 +77,8 @@ const anchorEase = cubicBezier(...bodyEasePoints)
 
 function Loading() {
   return (
-    <div className="min-h-screen bg-surface flex items-center justify-center">
-      <p className="text-text-tertiary text-sm">Loading…</p>
+    <div className="min-h-screen bg-ground flex items-center justify-center">
+      <p className="text-ink-3 text-sm">Loading…</p>
     </div>
   )
 }
@@ -630,10 +630,10 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
         <div aria-hidden ref={leadRef} />
         <div ref={contentRef}>
           <header className="mb-10 space-y-2">
-            <h1 className="text-[27px] font-semibold tracking-tight text-text-primary">
+            <h1 className="text-page-title font-semibold tracking-tight text-ink-1">
               Set up Triage Factory
             </h1>
-            <p className="text-[14px] leading-relaxed text-text-tertiary">
+            <p className="text-body leading-relaxed text-ink-3">
               A few steps to get your workspace ready. Each one saves as you go.
             </p>
           </header>
@@ -670,7 +670,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                       children (valid list semantics) while staying decorative. */}
                     <li
                       aria-hidden
-                      className="pointer-events-none absolute bottom-3 left-[10px] top-2 w-px list-none bg-[var(--color-border-subtle)]"
+                      className="pointer-events-none absolute bottom-3 left-[10px] top-2 w-px list-none bg-[var(--color-line-1)]"
                     />
                     {entries.map(({ step, index }) => {
                       const isActive = index === activeIndex
@@ -721,7 +721,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                             line behind the glyph). */}
                           <span
                             aria-hidden
-                            className="absolute -left-9 top-px flex h-5 w-[21px] items-center justify-center bg-surface"
+                            className="absolute -left-9 top-px flex h-5 w-[21px] items-center justify-center bg-ground"
                           >
                             {complete && !isActive && !wasOpen ? (
                               <Check
@@ -731,8 +731,8 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                               />
                             ) : (
                               <span
-                                className={`text-[11px] font-semibold tabular-nums ${
-                                  isActive ? 'text-accent' : 'text-text-tertiary'
+                                className={`text-reported font-semibold tabular-nums ${
+                                  isActive ? 'text-warm' : 'text-ink-3'
                                 }`}
                               >
                                 {n}
@@ -772,7 +772,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                 ref={isActive ? keepHeading : undefined}
                                 tabIndex={isActive ? -1 : undefined}
                                 aria-current={isActive ? 'step' : undefined}
-                                className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary outline-none"
+                                className="text-ui font-medium uppercase tracking-[0.12em] text-ink-3 outline-none"
                               >
                                 {step.title}
                               </h3>
@@ -839,14 +839,14 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                 <div ref={keepBodyInner} className="space-y-6 pt-4">
                                   {wiz.activeLoadFailed ? (
                                     <div className="space-y-3">
-                                      <p className="text-[13px] text-text-secondary">
+                                      <p className="text-body text-ink-2">
                                         We couldn&rsquo;t load your current settings for this step.
                                         Retry before saving so nothing is overwritten.
                                       </p>
                                       <button
                                         type="button"
                                         onClick={wiz.retry}
-                                        className="rounded-lg border border-border-subtle bg-white/50 px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:bg-white/80"
+                                        className="rounded-lg border border-line-1 bg-raised px-3 py-1.5 text-ui font-medium text-ink-2 transition-colors hover:bg-raised"
                                       >
                                         Retry
                                       </button>
@@ -864,7 +864,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                   {wiz.error && (
                                     <p
                                       role="alert"
-                                      className="text-[12px] text-[var(--color-dismiss)]"
+                                      className="text-ui text-[var(--color-alarm)]"
                                     >
                                       {wiz.error}
                                     </p>
@@ -912,7 +912,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                   type="button"
                                   onClick={goBack}
                                   disabled={!canGoBack || busy}
-                                  className="rounded-xl px-3 py-2 text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                                  className="rounded-xl px-3 py-2 text-body font-medium text-ink-3 transition-colors hover:text-ink-2 disabled:cursor-not-allowed disabled:opacity-40"
                                 >
                                   Back
                                 </button>
@@ -923,7 +923,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                     type="button"
                                     onClick={goNext}
                                     disabled={busy || wiz.activeLoadFailed}
-                                    className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 hover:shadow-[0_12px_32px_-8px_var(--color-accent)] disabled:opacity-40 disabled:shadow-none"
+                                    className="rounded-full bg-warm px-6 py-2.5 text-body font-medium text-warm-ink shadow-[0_10px_28px_-10px_var(--color-warm)] transition-all hover:bg-warm/90 hover:shadow-[0_12px_32px_-8px_var(--color-warm)] disabled:opacity-40 disabled:shadow-none"
                                   >
                                     {busy
                                       ? 'Saving…'

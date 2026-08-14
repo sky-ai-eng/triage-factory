@@ -70,13 +70,13 @@ export default function ActionList({ runId, refreshKey }: Props) {
   // and this is an audit surface, so blanking it on a transient error is worse
   // than showing a slightly stale copy.
   if (error && actions === null) {
-    return <p className="text-[11.5px] leading-relaxed text-dismiss">{error}</p>
+    return <p className="text-secondary leading-relaxed text-alarm">{error}</p>
   }
   if (actions === null) {
-    return <p className="text-[11.5px] text-text-tertiary/70">Loading actions…</p>
+    return <p className="text-secondary text-ink-3/70">Loading actions…</p>
   }
   if (actions.length === 0) {
-    return <p className="text-[11.5px] text-text-tertiary/70">No external actions yet.</p>
+    return <p className="text-secondary text-ink-3/70">No external actions yet.</p>
   }
 
   return (
@@ -87,7 +87,7 @@ export default function ActionList({ runId, refreshKey }: Props) {
         ))}
       </ul>
       {actions.length >= PAGE && (
-        <p className="mt-1.5 text-[10px] text-text-tertiary/70">
+        <p className="mt-1.5 text-label text-ink-3/70">
           Most recent {PAGE} — older actions are in the activity feed.
         </p>
       )}

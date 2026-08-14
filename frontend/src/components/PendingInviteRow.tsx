@@ -24,20 +24,20 @@ export default function PendingInviteRow({ invite, freshLink, busy, onRevoke, on
   return (
     <li className="px-4 py-3 opacity-80">
       <div className="flex items-center gap-4">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-dashed border-border-glass bg-black/[0.02] text-text-tertiary">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-dashed border-line-1 bg-tint-2 text-ink-3">
           <Mail size={15} />
         </span>
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="truncate text-[13px] font-medium text-text-secondary">
+            <span className="truncate text-body font-medium text-ink-2">
               {invite.email}
             </span>
-            <span className="rounded-full bg-black/[0.04] px-2 py-0.5 text-[10px] font-medium text-text-tertiary">
+            <span className="rounded-full bg-tint-3 px-2 py-0.5 text-label font-medium text-ink-3">
               {invite.role}
             </span>
           </div>
-          <div className="mt-0.5 text-[11px] text-text-tertiary">
+          <div className="mt-0.5 text-reported text-ink-3">
             Pending · invited {timeAgo(invite.created_at)}
           </div>
         </div>
@@ -48,7 +48,7 @@ export default function PendingInviteRow({ invite, freshLink, busy, onRevoke, on
             onClick={onResend}
             disabled={busy}
             title="Rotate the token and get a fresh link"
-            className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-text-tertiary transition-colors hover:bg-black/[0.04] hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-tertiary"
+            className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-ui font-medium text-ink-3 transition-colors hover:bg-tint-3 hover:text-ink-2 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-3"
           >
             <RotateCw size={13} />
             Resend
@@ -58,7 +58,7 @@ export default function PendingInviteRow({ invite, freshLink, busy, onRevoke, on
             onClick={onRevoke}
             disabled={busy}
             title="Revoke this invite"
-            className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] font-medium text-text-tertiary transition-colors hover:bg-dismiss/[0.06] hover:text-dismiss disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-tertiary"
+            className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-ui font-medium text-ink-3 transition-colors hover:bg-alarm/[0.06] hover:text-alarm disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-3"
           >
             <X size={13} />
             Revoke
@@ -68,7 +68,7 @@ export default function PendingInviteRow({ invite, freshLink, busy, onRevoke, on
 
       {freshLink && (
         <div className="mt-2.5 pl-[52px]">
-          <p className="mb-1.5 text-[11px] text-text-tertiary">
+          <p className="mb-1.5 text-reported text-ink-3">
             New link — the previous one no longer works.
           </p>
           <CopyLink url={freshLink} />

@@ -18,7 +18,7 @@ export default function JiraCarryOver() {
   const goToApp = () => navigate('/', { replace: true })
 
   return (
-    <div className="min-h-screen bg-surface flex items-center justify-center p-4">
+    <div className="min-h-screen bg-ground flex items-center justify-center p-4">
       <CarryOverList
         onSave={goToApp}
         onSkip={goToApp}

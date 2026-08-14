@@ -81,12 +81,12 @@ export default function TeamManagementSection() {
   }
 
   return (
-    <section className="rounded-2xl border border-border-subtle bg-white/40 p-5">
+    <section className="rounded-2xl border border-line-1 bg-raised p-5">
       <div className="mb-3 flex items-center gap-2">
-        <Users size={15} className="text-text-tertiary" />
-        <h3 className="text-[14px] font-semibold text-text-primary">Teams</h3>
+        <Users size={15} className="text-ink-3" />
+        <h3 className="text-body font-semibold text-ink-1">Teams</h3>
       </div>
-      <p className="mb-3 text-[12px] text-text-tertiary leading-relaxed">
+      <p className="mb-3 text-ui text-ink-3 leading-relaxed">
         Add a team to split work across groups. Once you belong to more than one team, a team
         selector appears on the factory, board, and queue, and the write modals ask which team new
         work belongs to.
@@ -97,15 +97,15 @@ export default function TeamManagementSection() {
           {teams.map((t) => (
             <li
               key={t.id}
-              className="flex items-center justify-between rounded-lg border border-border-subtle bg-white/50 px-3 py-1.5 text-[13px]"
+              className="flex items-center justify-between rounded-lg border border-line-1 bg-raised px-3 py-1.5 text-body"
             >
-              <span className="text-text-primary">{t.name}</span>
+              <span className="text-ink-1">{t.name}</span>
               <div className="flex items-center gap-3">
-                <span className="text-[11px] text-text-tertiary">{t.slug}</span>
+                <span className="text-reported text-ink-3">{t.slug}</span>
                 <button
                   type="button"
                   onClick={() => setArchiveTarget({ id: t.id, name: t.name })}
-                  className="inline-flex items-center gap-1 text-[12px] font-medium text-dismiss hover:text-dismiss/80"
+                  className="inline-flex items-center gap-1 text-ui font-medium text-alarm hover:text-alarm/80"
                 >
                   <Archive size={12} />
                   Archive…
@@ -123,17 +123,17 @@ export default function TeamManagementSection() {
           onChange={(e) => setName(e.target.value)}
           placeholder="New team name"
           className="
-            flex-1 rounded-lg border border-border-subtle bg-white/60 px-3 py-1.5
-            text-[13px] text-text-primary placeholder:text-text-tertiary
-            focus:border-accent focus:bg-white focus:outline-none
+            flex-1 rounded-lg border border-line-1 bg-raised px-3 py-1.5
+            text-body text-ink-1 placeholder:text-ink-3
+            focus:border-warm focus:bg-raised focus:outline-none
           "
         />
         <button
           type="submit"
           disabled={!name.trim() || creating}
           className="
-            inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-[13px]
-            font-medium text-white hover:bg-accent/90 disabled:opacity-40 transition-colors
+            inline-flex items-center gap-1.5 rounded-lg bg-warm px-3 py-1.5 text-body
+            font-medium text-warm-ink hover:bg-warm/90 disabled:opacity-40 transition-colors
           "
         >
           <Plus size={14} />
@@ -144,11 +144,11 @@ export default function TeamManagementSection() {
       {/* Archived teams (TFAC-448): a reveal toggle + restore buttons. Archived
           teams are hidden from the normal team list, so this is the org-admin
           surface that brings them back. */}
-      <div className="mt-4 border-t border-border-subtle pt-3">
+      <div className="mt-4 border-t border-line-1 pt-3">
         <button
           type="button"
           onClick={() => setShowArchived((v) => !v)}
-          className="text-[12px] font-medium text-text-tertiary transition-colors hover:text-text-secondary"
+          className="text-ui font-medium text-ink-3 transition-colors hover:text-ink-2"
         >
           {showArchived ? 'Hide archived teams' : 'Show archived teams'}
         </button>
@@ -156,29 +156,29 @@ export default function TeamManagementSection() {
         {showArchived && (
           <div className="mt-2">
             {archivedError ? (
-              <p className="text-[12px] text-dismiss">
+              <p className="text-ui text-alarm">
                 {archivedError}{' '}
                 <button type="button" onClick={() => void loadArchived()} className="underline">
                   Retry
                 </button>
               </p>
             ) : archived === null ? (
-              <p className="text-[12px] text-text-tertiary">Loading archived teams…</p>
+              <p className="text-ui text-ink-3">Loading archived teams…</p>
             ) : archived.length === 0 ? (
-              <p className="text-[12px] text-text-tertiary">No archived teams.</p>
+              <p className="text-ui text-ink-3">No archived teams.</p>
             ) : (
               <ul className="space-y-1">
                 {archived.map((t) => (
                   <li
                     key={t.id}
-                    className="flex items-center justify-between rounded-lg border border-border-subtle bg-white/40 px-3 py-1.5 text-[13px]"
+                    className="flex items-center justify-between rounded-lg border border-line-1 bg-raised px-3 py-1.5 text-body"
                   >
-                    <span className="text-text-secondary">{t.name}</span>
+                    <span className="text-ink-2">{t.name}</span>
                     <button
                       type="button"
                       onClick={() => void restore(t)}
                       disabled={restoringId === t.id}
-                      className="inline-flex items-center gap-1 text-[12px] font-medium text-accent hover:text-accent/80 disabled:opacity-40"
+                      className="inline-flex items-center gap-1 text-ui font-medium text-warm hover:text-warm/80 disabled:opacity-40"
                     >
                       <RotateCcw size={12} />
                       {restoringId === t.id ? 'Restoring…' : 'Restore'}

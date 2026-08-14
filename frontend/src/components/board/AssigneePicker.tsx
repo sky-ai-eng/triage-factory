@@ -129,10 +129,10 @@ export default function AssigneePicker({
         }}
         onPointerDown={(e) => e.stopPropagation()}
         title={readOnly ? `Finished by ${currentAssignee.label}` : currentAssignee.label}
-        className={`inline-flex items-center gap-1 text-[10px] font-medium leading-none transition-colors ${
+        className={`inline-flex items-center gap-1 text-label font-medium leading-none transition-colors ${
           readOnly
-            ? 'cursor-default text-text-tertiary'
-            : 'cursor-pointer text-text-secondary hover:text-text-primary'
+            ? 'cursor-default text-ink-3'
+            : 'cursor-pointer text-ink-2 hover:text-ink-1'
         }`}
       >
         <AssigneeAvatar entry={currentAssignee} />
@@ -141,7 +141,7 @@ export default function AssigneePicker({
 
       {open && !readOnly && (
         <div
-          className="absolute z-50 mt-1 right-0 min-w-[180px] bg-surface-raised backdrop-blur-xl border border-border-glass rounded-xl shadow-lg shadow-black/[0.08] py-1"
+          className="absolute z-50 mt-1 right-0 min-w-[180px] bg-raised backdrop-blur-xl border border-line-1 rounded-xl shadow-float shadow-black/[0.08] py-1"
           onClick={(e) => e.stopPropagation()}
           onPointerDown={(e) => e.stopPropagation()}
         >
@@ -158,7 +158,7 @@ export default function AssigneePicker({
           {bot && (
             <PickerRow
               avatar={
-                <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-accent/15 text-accent">
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-warm/15 text-warm">
                   <Bot size={12} aria-hidden />
                 </span>
               }
@@ -202,7 +202,7 @@ export default function AssigneePicker({
             const taskHeldByUser = currentUserID !== '' && (claimedByMe || claimedByOtherUser)
             return (
               <>
-                <div className="my-1 border-t border-border-subtle" />
+                <div className="my-1 border-t border-line-1" />
                 {teammates.map((m) => {
                   const label = m.display_name || m.github_username || m.user_id
                   const isClaimant = task.claimed_by_user_id === m.user_id
@@ -323,7 +323,7 @@ function AssigneeAvatar({ entry }: { entry: AssigneeEntry }) {
     case 'unclaimed':
     default:
       return (
-        <span className="inline-block w-3.5 h-3.5 rounded-full border border-dashed border-text-tertiary" />
+        <span className="inline-block w-3.5 h-3.5 rounded-full border border-dashed border-ink-3" />
       )
   }
 }
@@ -337,9 +337,9 @@ function AvatarCircle({
   tone: 'user' | 'bot'
   small?: boolean
 }) {
-  const size = small ? 'w-3.5 h-3.5 text-[7px]' : 'w-5 h-5 text-[9px]'
+  const size = small ? 'w-3.5 h-3.5 text-[7px]' : 'w-5 h-5 text-label-sm'
   const colors =
-    tone === 'bot' ? 'bg-accent/15 text-accent' : 'bg-text-primary/10 text-text-primary'
+    tone === 'bot' ? 'bg-warm/15 text-warm' : 'bg-ink-1/10 text-ink-1'
   return (
     <span
       className={`inline-flex items-center justify-center rounded-full font-semibold ${size} ${colors}`}
@@ -371,18 +371,18 @@ function PickerRow({
       onClick={onClick}
       disabled={disabled}
       className={`w-full flex items-center gap-2 px-3 py-2 text-left transition-colors ${
-        disabled ? 'cursor-default opacity-60' : 'hover:bg-black/[0.04] cursor-pointer'
-      } ${selected ? 'bg-accent/[0.06]' : ''}`}
+        disabled ? 'cursor-default opacity-60' : 'hover:bg-tint-3 cursor-pointer'
+      } ${selected ? 'bg-warm/[0.06]' : ''}`}
     >
       <span className="shrink-0">{avatar}</span>
       <span className="flex-1 min-w-0">
-        <span className="block text-[12px] font-medium text-text-primary truncate">{label}</span>
+        <span className="block text-ui font-medium text-ink-1 truncate">{label}</span>
         {sublabel && (
-          <span className="block text-[10px] text-text-tertiary truncate">{sublabel}</span>
+          <span className="block text-label text-ink-3 truncate">{sublabel}</span>
         )}
       </span>
       {selected && (
-        <span className="text-accent text-[12px]" aria-hidden>
+        <span className="text-warm text-ui" aria-hidden>
           ✓
         </span>
       )}

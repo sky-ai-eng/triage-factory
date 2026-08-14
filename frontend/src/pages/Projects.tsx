@@ -174,7 +174,7 @@ export default function Projects() {
   }, [])
 
   const content = loading ? (
-    <div className="text-text-tertiary text-[13px]">Loading projects…</div>
+    <div className="text-ink-3 text-body">Loading projects…</div>
   ) : loadError ? (
     <ErrorState message={loadError} onRetry={refresh} />
   ) : projects.length === 0 ? (
@@ -197,8 +197,8 @@ export default function Projects() {
     >
       <header className="flex items-center justify-between mb-8 shrink-0">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-text-primary">Projects</h1>
-          <p className="text-[13px] text-text-secondary mt-1">
+          <h1 className="text-2xl font-semibold tracking-tight text-ink-1">Projects</h1>
+          <p className="text-body text-ink-2 mt-1">
             Group work by concept. Pin repos and tracker projects for the Curator to reason about.
           </p>
         </div>
@@ -211,10 +211,10 @@ export default function Projects() {
             }}
             className="
               inline-flex items-center gap-2 rounded-full
-              border border-border-subtle bg-white/60
-              text-[13px] text-text-secondary font-medium
+              border border-line-1 bg-raised
+              text-body text-ink-2 font-medium
               px-4 py-2 transition-all
-              hover:bg-white hover:text-text-primary
+              hover:bg-raised hover:text-ink-1
             "
           >
             <Upload size={14} />
@@ -226,7 +226,7 @@ export default function Projects() {
               onClick={() => setCreateOpen(true)}
               className="
                 inline-flex items-center gap-2 rounded-full
-                bg-accent text-white text-[13px] font-medium
+                bg-warm text-warm-ink text-body font-medium
                 px-4 py-2 transition-all
                 hover:opacity-90
               "
@@ -241,8 +241,8 @@ export default function Projects() {
       <div className="min-h-0 flex-1 overflow-y-auto pr-1">{content}</div>
 
       {pageDragOver && (
-        <div className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center bg-black/10">
-          <div className="rounded-xl border border-accent bg-accent-soft px-6 py-3 text-[13px] font-medium text-accent shadow-lg">
+        <div className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center bg-scrim">
+          <div className="rounded-xl border border-warm bg-warm-2 px-6 py-3 text-body font-medium text-warm shadow-float">
             Drop .tfproject to import project
           </div>
         </div>
@@ -272,13 +272,13 @@ export default function Projects() {
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center py-24">
-      <div className="text-text-secondary text-[13px] max-w-md text-center mb-6">{message}</div>
+      <div className="text-ink-2 text-body max-w-md text-center mb-6">{message}</div>
       <button
         type="button"
         onClick={onRetry}
         className="
           inline-flex items-center gap-2 rounded-full
-          bg-accent text-white text-[13px] font-medium
+          bg-warm text-warm-ink text-body font-medium
           px-5 py-2.5 transition-all
           hover:opacity-90
         "
@@ -292,7 +292,7 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
 function EmptyState({ onCreate }: { onCreate: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center py-24">
-      <div className="text-text-tertiary text-[13px] max-w-md text-center mb-6">
+      <div className="text-ink-3 text-body max-w-md text-center mb-6">
         Projects bundle pinned repos, a Jira/Linear project, and a knowledge base — the Curator
         works inside that scope when you chat with it.
       </div>
@@ -301,7 +301,7 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
         onClick={onCreate}
         className="
           inline-flex items-center gap-2 rounded-full
-          bg-accent text-white text-[13px] font-medium
+          bg-warm text-warm-ink text-body font-medium
           px-5 py-2.5 transition-all
           hover:opacity-90
         "
@@ -414,7 +414,7 @@ function ProjectImportModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim backdrop-blur-sm"
       onClick={() => {
         if (!submitting) onClose()
       }}
@@ -422,9 +422,9 @@ function ProjectImportModal({
       <div
         className="
           relative w-full max-w-lg
-          rounded-2xl border border-border-glass
-          bg-gradient-to-br from-white/95 via-white/90 to-white/85
-          shadow-xl shadow-black/[0.08] backdrop-blur-xl
+          rounded-2xl border border-line-1
+          bg-raised
+          shadow-float shadow-black/[0.08] backdrop-blur-xl
           p-6
         "
         ref={dialogRef}
@@ -436,18 +436,18 @@ function ProjectImportModal({
       >
         <h2
           id="project-import-title"
-          className="text-lg font-semibold tracking-tight text-text-primary mb-1"
+          className="text-lg font-semibold tracking-tight text-ink-1 mb-1"
         >
           Import project
         </h2>
-        <p className="text-[12px] text-text-tertiary mb-4">
+        <p className="text-ui text-ink-3 mb-4">
           Choose a <code>.tfproject</code> bundle exported from another machine.
         </p>
 
         <form onSubmit={submit} className="space-y-4">
           <label
             htmlFor="project-import-file"
-            className="block text-[12px] font-medium text-text-secondary mb-1.5"
+            className="block text-ui font-medium text-ink-2 mb-1.5"
           >
             Bundle file
           </label>
@@ -500,8 +500,8 @@ function ProjectImportModal({
               transition-colors
               ${
                 dragOver
-                  ? 'border-accent bg-accent-soft/50 ring-2 ring-accent/20'
-                  : 'border-border-subtle bg-white/60'
+                  ? 'border-warm bg-warm-2/50 ring-2 ring-warm/20'
+                  : 'border-line-1 bg-raised'
               }
             `}
           >
@@ -512,9 +512,9 @@ function ProjectImportModal({
               disabled={submitting}
               className="
                 inline-flex items-center rounded-md
-                border border-border-subtle bg-white
-                px-3 py-1.5 text-[12px] font-medium text-text-secondary
-                hover:text-text-primary hover:bg-white/90
+                border border-line-1 bg-raised
+                px-3 py-1.5 text-ui font-medium text-ink-2
+                hover:text-ink-1 hover:bg-raised
                 disabled:opacity-50
               "
             >
@@ -522,8 +522,8 @@ function ProjectImportModal({
             </button>
             <span
               className={`
-                min-w-0 flex-1 truncate text-right text-[13px]
-                ${dragOver && !file ? 'text-accent' : file ? 'text-text-primary' : 'text-text-tertiary'}
+                min-w-0 flex-1 truncate text-right text-body
+                ${dragOver && !file ? 'text-warm' : file ? 'text-ink-1' : 'text-ink-3'}
               `}
               title={file?.name}
             >
@@ -532,7 +532,7 @@ function ProjectImportModal({
           </div>
 
           {error && (
-            <div className="rounded-lg border border-dismiss/20 bg-dismiss/5 px-3 py-2 text-[12px] text-dismiss">
+            <div className="rounded-lg border border-alarm/20 bg-alarm/5 px-3 py-2 text-ui text-alarm">
               {renderImportError(error)}
             </div>
           )}
@@ -543,8 +543,8 @@ function ProjectImportModal({
               onClick={onClose}
               disabled={submitting}
               className="
-                rounded-full px-4 py-2 text-[13px]
-                text-text-secondary hover:text-text-primary hover:bg-black/[0.03]
+                rounded-full px-4 py-2 text-body
+                text-ink-2 hover:text-ink-1 hover:bg-tint-2
                 transition-all disabled:opacity-50
               "
             >
@@ -554,8 +554,8 @@ function ProjectImportModal({
               type="submit"
               disabled={submitting || !file}
               className="
-                rounded-full px-4 py-2 text-[13px] font-medium
-                bg-accent text-white hover:opacity-90
+                rounded-full px-4 py-2 text-body font-medium
+                bg-warm text-warm-ink hover:opacity-90
                 disabled:opacity-50 transition-all
               "
             >
@@ -620,23 +620,23 @@ function ProjectCard({ project, onDelete }: { project: Project; onDelete: () => 
   return (
     <article
       className="
-        group relative overflow-hidden rounded-2xl border border-border-glass
-        bg-gradient-to-br from-white/70 via-white/50 to-white/35
-        p-5 shadow-sm shadow-black/[0.03] backdrop-blur-xl
+        group relative overflow-hidden rounded-2xl border border-line-1
+        bg-raised
+        p-5 shadow-float shadow-black/[0.03] backdrop-blur-xl
         transition-[box-shadow,border-color] duration-300
-        hover:border-white/90 hover:shadow-md hover:shadow-black/[0.05]
+        hover:border-line-1 hover:shadow-float hover:shadow-black/[0.05]
       "
     >
       <span
         aria-hidden
-        className="pointer-events-none absolute -left-8 -top-8 h-24 w-24 rounded-full bg-white/30 blur-2xl"
+        className="pointer-events-none absolute -left-8 -top-8 h-24 w-24 rounded-full bg-raised blur-2xl"
       />
       <Link
         to={orgHref(`/projects/${encodeURIComponent(project.id)}`)}
         aria-label={`Open project ${project.name}`}
         className="
           absolute inset-0 z-10 rounded-2xl
-          focus:outline-none focus-visible:ring-2 focus-visible:ring-accent
+          focus:outline-none focus-visible:ring-2 focus-visible:ring-warm
         "
       />
       <button
@@ -648,23 +648,23 @@ function ProjectCard({ project, onDelete }: { project: Project; onDelete: () => 
           inline-flex items-center justify-center
           h-7 w-7 rounded-full
           opacity-0 group-hover:opacity-100 focus-visible:opacity-100
-          text-text-tertiary hover:text-dismiss hover:bg-dismiss/[0.08]
-          focus:outline-none focus-visible:ring-2 focus-visible:ring-dismiss
+          text-ink-3 hover:text-alarm hover:bg-alarm/[0.08]
+          focus:outline-none focus-visible:ring-2 focus-visible:ring-alarm
           transition-[opacity,color,background-color] duration-200
         "
       >
         <Trash2 size={13} />
       </button>
       <div className="relative">
-        <h3 className="text-[14px] font-semibold tracking-tight text-text-primary truncate pr-8">
+        <h3 className="text-body font-semibold tracking-tight text-ink-1 truncate pr-8">
           {project.name}
         </h3>
         {desc && (
-          <p className="mt-2 text-[12px] leading-relaxed text-text-secondary line-clamp-3">
+          <p className="mt-2 text-ui leading-relaxed text-ink-2 line-clamp-3">
             {desc}
           </p>
         )}
-        <div className="mt-3 text-[11px] text-text-tertiary tabular-nums">
+        <div className="mt-3 text-reported text-ink-3 tabular-nums">
           Updated {formatAge(project.updated_at)}
         </div>
       </div>

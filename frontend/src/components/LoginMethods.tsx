@@ -60,19 +60,19 @@ export default function LoginMethods() {
   }, [])
 
   return (
-    <div className="px-3 py-2 border-b border-border-subtle">
-      <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-text-tertiary">
+    <div className="px-3 py-2 border-b border-line-1">
+      <div className="mb-1.5 text-label font-medium uppercase tracking-wide text-ink-3">
         Login methods
       </div>
 
       {state.status === 'loading' && (
-        <div className="py-0.5 text-[11px] text-text-tertiary">Loading…</div>
+        <div className="py-0.5 text-reported text-ink-3">Loading…</div>
       )}
       {state.status === 'error' && (
-        <div className="py-0.5 text-[11px] text-text-tertiary">Couldn’t load login methods.</div>
+        <div className="py-0.5 text-reported text-ink-3">Couldn’t load login methods.</div>
       )}
       {state.status === 'ready' && state.methods.length === 0 && (
-        <div className="py-0.5 text-[11px] text-text-tertiary">No linked login methods.</div>
+        <div className="py-0.5 text-reported text-ink-3">No linked login methods.</div>
       )}
 
       {state.status === 'ready' && state.methods.length > 0 && (
@@ -82,12 +82,12 @@ export default function LoginMethods() {
             return (
               <li key={`${m.provider}-${m.email ?? ''}-${i}`} className="leading-tight">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-[12px] font-medium text-text-primary">
+                  <span className="text-ui font-medium text-ink-1">
                     {providerLabel(m.provider)}
                   </span>
                   {m.email_verified && (
                     <span
-                      className="inline-flex items-center gap-0.5 text-[10px] text-claim"
+                      className="inline-flex items-center gap-0.5 text-label text-ink-2"
                       title="Verified email"
                     >
                       <Check size={10} aria-hidden />
@@ -96,7 +96,7 @@ export default function LoginMethods() {
                   )}
                   {m.current && (
                     <span
-                      className="text-[10px] text-accent"
+                      className="text-label text-warm"
                       title="The login method backing your current session"
                     >
                       · current
@@ -104,9 +104,9 @@ export default function LoginMethods() {
                   )}
                 </div>
                 {m.email && (
-                  <div className="truncate text-[11px] text-text-tertiary">{m.email}</div>
+                  <div className="truncate text-reported text-ink-3">{m.email}</div>
                 )}
-                {date && <div className="text-[10px] text-text-tertiary">Linked {date}</div>}
+                {date && <div className="text-label text-ink-3">Linked {date}</div>}
               </li>
             )
           })}

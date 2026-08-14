@@ -91,12 +91,12 @@ const CARD_FADE_MASK =
   'linear-gradient(to bottom, transparent 0, #000 8px, #000 calc(100% - 44px), transparent 100%)'
 
 const searchInputClass =
-  'w-full rounded-lg bg-transparent py-1.5 pl-7 pr-7 text-[13px] text-text-primary placeholder:text-text-tertiary outline-none transition-colors focus:bg-[var(--color-surface-overlay)]/40'
+  'w-full rounded-lg bg-transparent py-1.5 pl-7 pr-7 text-body text-ink-1 placeholder:text-ink-3 outline-none transition-colors focus:bg-[var(--color-raised)]/40'
 
 const dateInputClass =
-  'flex-1 rounded-lg bg-[var(--color-surface-overlay)]/70 px-2 py-1 text-[11px] text-text-primary outline-none transition-[box-shadow] focus:shadow-[0_0_0_2px_var(--color-accent-soft)]'
+  'flex-1 rounded-lg bg-[var(--color-raised)]/70 px-2 py-1 text-reported text-ink-1 outline-none transition-[box-shadow] focus:shadow-[0_0_0_2px_var(--color-warm-2)]'
 const timeInputClass =
-  'w-[5.5rem] rounded-lg bg-[var(--color-surface-overlay)]/70 px-2 py-1 text-[11px] text-text-primary outline-none transition-[box-shadow] focus:shadow-[0_0_0_2px_var(--color-accent-soft)] disabled:opacity-40'
+  'w-[5.5rem] rounded-lg bg-[var(--color-raised)]/70 px-2 py-1 text-reported text-ink-1 outline-none transition-[box-shadow] focus:shadow-[0_0_0_2px_var(--color-warm-2)] disabled:opacity-40'
 
 // Split / join the stored datetime-local string ("YYYY-MM-DDTHH:mm") into its
 // date and time halves. The time is optional in the UI — a bare date stores
@@ -236,7 +236,7 @@ export default function BoardColumn({
                         type="button"
                         aria-label={`Collapse ${title}`}
                         onClick={onCollapse}
-                        className="text-text-tertiary/50 transition-colors hover:text-text-secondary"
+                        className="text-ink-3/50 transition-colors hover:text-ink-2"
                       >
                         <ChevronsRightLeft size={14} />
                       </button>
@@ -245,16 +245,16 @@ export default function BoardColumn({
                       <Tooltip.Content
                         side="top"
                         sideOffset={6}
-                        className="z-[100] rounded-lg border border-border-glass bg-surface-raised px-2.5 py-1 text-[12px] text-text-secondary shadow-lg shadow-black/[0.06] animate-in fade-in-0 zoom-in-95"
+                        className="z-[100] rounded-lg border border-line-1 bg-raised px-2.5 py-1 text-ui text-ink-2 shadow-float shadow-black/[0.06] animate-in fade-in-0 zoom-in-95"
                       >
                         Collapse
-                        <Tooltip.Arrow className="fill-surface-raised" />
+                        <Tooltip.Arrow className="fill-raised" />
                       </Tooltip.Content>
                     </Tooltip.Portal>
                   </Tooltip.Root>
                 </Tooltip.Provider>
               )}
-              <h2 className="text-[15px] font-semibold tracking-tight text-text-primary">
+              <h2 className="text-column font-semibold tracking-tight text-ink-1">
                 {title}
               </h2>
             </div>
@@ -266,7 +266,7 @@ export default function BoardColumn({
               <Search
                 size={14}
                 aria-hidden
-                className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 text-text-tertiary"
+                className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 text-ink-3"
               />
               <input
                 type="text"
@@ -281,7 +281,7 @@ export default function BoardColumn({
                   type="button"
                   aria-label="Clear search"
                   onClick={() => onFilterChange({ ...filter, search: '' })}
-                  className="absolute right-1 top-1/2 -translate-y-1/2 text-text-tertiary transition-colors hover:text-text-secondary"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 text-ink-3 transition-colors hover:text-ink-2"
                 >
                   <X size={12} />
                 </button>
@@ -293,14 +293,14 @@ export default function BoardColumn({
               aria-expanded={controlsOpen}
               onClick={() => setControlsOpen((v) => !v)}
               className={`relative shrink-0 rounded-lg p-1.5 transition-colors ${
-                controlsOpen ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
+                controlsOpen ? 'text-warm' : 'text-ink-3 hover:text-ink-2'
               }`}
             >
               <SlidersHorizontal size={15} />
               {hasFilters && (
                 <span
                   aria-hidden
-                  className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-accent"
+                  className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-warm"
                 />
               )}
             </button>
@@ -379,7 +379,7 @@ function TraceLayer({
       height="100%"
       pathLength={100}
       fill="none"
-      stroke="var(--color-accent)"
+      stroke="var(--color-warm)"
       strokeWidth={1}
       strokeLinecap="round"
       strokeDasharray={`${length} ${100 - length}`}
@@ -414,7 +414,7 @@ export function CollapsedColumn({
       onClick={onExpand}
       onHoverStart={() => setHovered(true)}
       onHoverEnd={() => setHovered(false)}
-      className="group flex h-full w-5 shrink-0 cursor-pointer flex-col items-center justify-center gap-3 text-text-tertiary"
+      className="group flex h-full w-5 shrink-0 cursor-pointer flex-col items-center justify-center gap-3 text-ink-3"
       initial={reduce ? false : { opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       transition={reduce ? { duration: 0 } : { ...bodyEase, delay: index * 0.05 }}
@@ -431,14 +431,14 @@ export function CollapsedColumn({
       >
         {count > 0 && (
           <span
-            className="text-[11px] font-medium tabular-nums text-text-tertiary [writing-mode:vertical-rl]"
+            className="text-reported font-medium tabular-nums text-ink-3 [writing-mode:vertical-rl]"
             style={{ textOrientation: 'mixed' }}
           >
             {count}
           </span>
         )}
         <span
-          className="text-[13px] font-medium tracking-wide text-text-secondary decoration-text-tertiary underline-offset-4 [writing-mode:vertical-rl] group-hover:underline"
+          className="text-body font-medium tracking-wide text-ink-2 decoration-ink-3 underline-offset-4 [writing-mode:vertical-rl] group-hover:underline"
           style={{ textOrientation: 'mixed' }}
         >
           {title}
@@ -457,17 +457,17 @@ const SOURCES: { value: SourceFilter; label: string }[] = [
 ]
 
 function pill(selected: boolean): string {
-  return `rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+  return `rounded-full px-2.5 py-1 text-reported font-medium transition-colors ${
     selected
-      ? 'bg-accent/[0.14] text-accent'
-      : 'bg-[var(--color-surface-overlay)]/70 text-text-tertiary hover:text-text-secondary'
+      ? 'bg-warm/[0.14] text-warm'
+      : 'bg-[var(--color-raised)]/70 text-ink-3 hover:text-ink-2'
   }`
 }
 
 function Group({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="space-y-1.5">
-      <p className="text-[10px] font-medium uppercase tracking-wide text-text-tertiary">{label}</p>
+      <p className="text-label font-medium uppercase tracking-wide text-ink-3">{label}</p>
       <div className="flex flex-wrap items-center gap-1.5">{children}</div>
     </div>
   )
@@ -492,7 +492,7 @@ function DateTimeField({
   const { date, time } = splitDT(value)
   return (
     <div className="space-y-1">
-      <span className="block text-[10px] text-text-tertiary">{label}</span>
+      <span className="block text-label text-ink-3">{label}</span>
       <div className="flex items-center gap-1.5">
         <input
           type="date"
@@ -643,7 +643,7 @@ function FilterControls({
           <button
             type="button"
             onClick={() => onChange({ ...filter, after: '', before: '' })}
-            className="text-[11px] text-text-tertiary transition-colors hover:text-text-secondary"
+            className="text-reported text-ink-3 transition-colors hover:text-ink-2"
           >
             Clear dates
           </button>
@@ -655,7 +655,7 @@ function FilterControls({
           type="button"
           disabled={!filterIsActive(filter)}
           onClick={() => onChange({ ...emptyFilter, search: filter.search })}
-          className="text-[11px] text-text-tertiary transition-colors hover:text-text-secondary disabled:opacity-40"
+          className="text-reported text-ink-3 transition-colors hover:text-ink-2 disabled:opacity-40"
         >
           Reset filters
         </button>

@@ -107,33 +107,33 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
 
   return (
     <div className="space-y-5">
-      <p className="text-[13px] leading-relaxed text-text-tertiary">
+      <p className="text-body leading-relaxed text-ink-3">
         Register an Atlassian OAuth app so teammates can connect their Jira account with one click
         instead of pasting an API token. Create a 3LO app in the{' '}
-        <span className="font-medium text-text-secondary">Atlassian developer console</span>, then
+        <span className="font-medium text-ink-2">Atlassian developer console</span>, then
         paste its client ID and secret here. The secret is stored encrypted and never leaves your
         deployment.
       </p>
 
       {/* Current state: a per-org override, the hosted default, or nothing. */}
       {hasOverride && (
-        <div className="rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/40 px-4 py-3 text-[12px] text-text-secondary">
+        <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3 text-ui text-ink-2">
           <div className="flex items-center gap-2">
             <Check size={14} className="text-[var(--color-claim)]" />
-            <span className="font-medium text-text-primary">Atlassian app configured</span>
+            <span className="font-medium text-ink-1">Atlassian app configured</span>
           </div>
-          <p className="mt-1 break-all font-mono text-[11px] text-text-tertiary">
+          <p className="mt-1 break-all font-mono text-reported text-ink-3">
             {status?.app?.client_id}
           </p>
           {status?.app?.registered_by_display_name && (
-            <p className="mt-1 text-[11px] text-text-tertiary">
+            <p className="mt-1 text-reported text-ink-3">
               Added by {status.app.registered_by_display_name}
             </p>
           )}
         </div>
       )}
       {!hasOverride && status?.using_hosted_default && (
-        <div className="rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/40 px-4 py-3 text-[12px] text-text-secondary">
+        <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3 text-ui text-ink-2">
           Using the hosted Atlassian app. Add your own below to override it for this workspace.
         </div>
       )}
@@ -141,7 +141,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
       {showForm && (
         <>
           <label className="block space-y-2">
-            <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+            <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
               Client ID
             </span>
             <input
@@ -155,7 +155,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
           </label>
 
           <label className="block space-y-2">
-            <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+            <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
               Client secret
             </span>
             <input
@@ -170,7 +170,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
 
           {callbackUrl && (
             <div className="space-y-1.5">
-              <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+              <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
                 Callback URL to register on the app
               </span>
               <div className="flex items-center gap-2">
@@ -179,19 +179,19 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
                   readOnly
                   value={callbackUrl}
                   onFocus={(e) => e.target.select()}
-                  className={`${glassInputClass} font-mono text-[12px]`}
+                  className={`${glassInputClass} font-mono text-ui`}
                 />
                 <button
                   type="button"
                   onClick={() => void copyCallback()}
                   aria-label="Copy callback URL"
-                  className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-border-glass)] px-3 py-2 text-[12px] font-medium text-text-secondary transition-colors hover:text-text-primary"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-line-1)] px-3 py-2 text-ui font-medium text-ink-2 transition-colors hover:text-ink-1"
                 >
                   {copied ? <Check size={13} /> : <Copy size={13} />}
                   {copied ? 'Copied' : 'Copy'}
                 </button>
               </div>
-              <p className="text-[11px] leading-relaxed text-text-tertiary">
+              <p className="text-reported leading-relaxed text-ink-3">
                 Add this as a Callback URL (redirect URI) under your Atlassian app&rsquo;s
                 Authorization settings — one-click Connect only works once it&rsquo;s registered
                 there.
@@ -200,7 +200,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
           )}
 
           {error && (
-            <p role="alert" className="text-[12px] leading-relaxed text-[var(--color-dismiss)]">
+            <p role="alert" className="text-ui leading-relaxed text-[var(--color-alarm)]">
               {error}
             </p>
           )}
@@ -210,7 +210,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
               type="button"
               onClick={() => void submit()}
               disabled={!canSubmit}
-              className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 disabled:opacity-40 disabled:shadow-none"
+              className="rounded-full bg-warm px-6 py-2.5 text-body font-medium text-warm-ink shadow-[0_10px_28px_-10px_var(--color-warm)] transition-all hover:bg-warm/90 disabled:opacity-40 disabled:shadow-none"
             >
               {busy ? 'Saving…' : hasOverride ? 'Replace app' : 'Save app'}
             </button>
@@ -223,7 +223,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
                   setClientSecret('')
                   setError(null)
                 }}
-                className="rounded-xl px-3 py-2 text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-secondary"
+                className="rounded-xl px-3 py-2 text-body font-medium text-ink-3 transition-colors hover:text-ink-2"
               >
                 Cancel
               </button>
@@ -237,7 +237,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
           <button
             type="button"
             onClick={() => setReplacing(true)}
-            className="rounded-xl border border-[var(--color-border-glass)] px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:text-text-primary"
+            className="rounded-xl border border-[var(--color-line-1)] px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:text-ink-1"
           >
             Replace
           </button>
@@ -245,7 +245,7 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
             type="button"
             onClick={() => void remove()}
             disabled={busy}
-            className="rounded-xl px-3 py-2 text-[13px] font-medium text-[var(--color-dismiss)] transition-colors hover:opacity-80 disabled:opacity-40"
+            className="rounded-xl px-3 py-2 text-body font-medium text-[var(--color-alarm)] transition-colors hover:opacity-80 disabled:opacity-40"
           >
             Remove
           </button>

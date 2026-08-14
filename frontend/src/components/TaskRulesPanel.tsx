@@ -140,26 +140,26 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
 
           {/* Panel */}
           <motion.div
-            className="fixed top-20 right-4 bottom-4 z-50 w-[340px] bg-surface-raised border border-border-glass rounded-2xl shadow-xl shadow-black/[0.08] flex flex-col overflow-hidden"
+            className="fixed top-20 right-4 bottom-4 z-50 w-[340px] bg-raised border border-line-1 rounded-2xl shadow-float shadow-black/[0.08] flex flex-col overflow-hidden"
             initial={{ x: '100%', opacity: 0 }}
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: '100%', opacity: 0 }}
             transition={{ type: 'spring', damping: 28, stiffness: 300 }}
           >
             {/* Header */}
-            <div className="px-5 pt-5 pb-3 flex items-center justify-between shrink-0 border-b border-border-subtle">
-              <h2 className="text-[15px] font-semibold text-text-primary">Task Rules</h2>
+            <div className="px-5 pt-5 pb-3 flex items-center justify-between shrink-0 border-b border-line-1">
+              <h2 className="text-column font-semibold text-ink-1">Task Rules</h2>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setCreating(true)}
-                  className="flex items-center gap-1 text-[12px] font-semibold text-white bg-accent hover:bg-accent/90 px-3 py-1.5 rounded-full transition-colors"
+                  className="flex items-center gap-1 text-ui font-semibold text-warm-ink bg-warm hover:bg-warm/90 px-3 py-1.5 rounded-full transition-colors"
                 >
                   <Plus size={14} />
                   New Rule
                 </button>
                 <button
                   onClick={onClose}
-                  className="text-text-tertiary hover:text-text-secondary transition-colors"
+                  className="text-ink-3 hover:text-ink-2 transition-colors"
                 >
                   <X size={18} />
                 </button>
@@ -171,14 +171,14 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
               {loading && rules.length === 0 && (
                 <div className="space-y-2 p-2">
                   {[1, 2, 3].map((i) => (
-                    <div key={i} className="h-16 rounded-xl bg-black/[0.03] animate-pulse" />
+                    <div key={i} className="h-16 rounded-xl bg-tint-2 animate-pulse" />
                   ))}
                 </div>
               )}
 
               {!loading && rules.length === 0 && (
                 <div className="text-center py-12 px-4">
-                  <p className="text-[13px] text-text-tertiary">
+                  <p className="text-body text-ink-3">
                     No rules yet. Create one to control what shows up in your queue.
                   </p>
                 </div>
@@ -260,7 +260,7 @@ function SortableRuleRow({
       className="flex items-start gap-1 group cursor-grab active:cursor-grabbing"
     >
       {/* Drag affordance icon */}
-      <div className="mt-3.5 shrink-0 text-text-tertiary/30 group-hover:text-text-tertiary/60 transition-colors">
+      <div className="mt-3.5 shrink-0 text-ink-3/30 group-hover:text-ink-3/60 transition-colors">
         <GripVertical size={14} />
       </div>
 
@@ -271,20 +271,20 @@ function SortableRuleRow({
           forces horizontal scroll. */}
       <button
         onClick={onEdit}
-        className="flex-1 min-w-0 text-left px-3 py-3 rounded-xl hover:bg-black/[0.03] transition-colors"
+        className="flex-1 min-w-0 text-left px-3 py-3 rounded-xl hover:bg-tint-2 transition-colors"
       >
         <div className="flex items-start justify-between gap-3 min-w-0">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 min-w-0">
               <span
-                className={`text-[13px] font-medium truncate min-w-0 ${
-                  rule.enabled ? 'text-text-primary' : 'text-text-tertiary line-through'
+                className={`text-body font-medium truncate min-w-0 ${
+                  rule.enabled ? 'text-ink-1' : 'text-ink-3 line-through'
                 }`}
               >
                 {rule.name}
               </span>
               {rule.source === 'system' && (
-                <span className="text-[10px] font-medium text-text-tertiary bg-black/[0.04] px-1.5 py-0.5 rounded shrink-0">
+                <span className="text-label font-medium text-ink-3 bg-tint-3 px-1.5 py-0.5 rounded shrink-0">
                   SYS
                 </span>
               )}
@@ -293,7 +293,7 @@ function SortableRuleRow({
               <EventBadge eventType={rule.event_type} compact />
             </div>
             {rule.scope_predicate_json && (
-              <p className="text-[11px] text-text-tertiary mt-1 truncate font-mono">
+              <p className="text-reported text-ink-3 mt-1 truncate font-mono">
                 {formatPredicate(rule.scope_predicate_json)}
               </p>
             )}
@@ -304,9 +304,9 @@ function SortableRuleRow({
             <Switch.Root
               checked={rule.enabled}
               onCheckedChange={onToggle}
-              className="relative w-8 h-[18px] rounded-full transition-colors data-[state=checked]:bg-accent data-[state=unchecked]:bg-black/10 cursor-pointer"
+              className="relative w-8 h-[18px] rounded-full transition-colors data-[state=checked]:bg-warm data-[state=unchecked]:bg-line-2 cursor-pointer"
             >
-              <Switch.Thumb className="block w-[14px] h-[14px] rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
+              <Switch.Thumb className="block w-[14px] h-[14px] rounded-full bg-raised shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
             </Switch.Root>
           </div>
         </div>

@@ -127,31 +127,31 @@ export const ACTION_META: Record<string, ActionMeta> = {
   comment_posted: {
     icon: MessageSquare,
     label: 'Comment posted',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'good',
   },
   comment_edited: {
     icon: MessageSquare,
     label: 'Comment edited',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'neutral',
   },
   comment_deleted: {
     icon: MessageSquare,
     label: 'Comment deleted',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'problem',
   },
   reaction_added: {
     icon: SmilePlus,
     label: 'Reaction added',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'good',
   },
   reaction_removed: {
     icon: SmilePlus,
     label: 'Reaction removed',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'neutral',
   },
   workflow_dispatched: {
@@ -166,24 +166,24 @@ export const ACTION_META: Record<string, ActionMeta> = {
     text: 'text-delegate',
     tone: 'problem',
   },
-  label_added: { icon: Tag, label: 'Label added', text: 'text-text-tertiary', tone: 'good' },
-  label_removed: { icon: Tag, label: 'Label removed', text: 'text-text-tertiary', tone: 'neutral' },
+  label_added: { icon: Tag, label: 'Label added', text: 'text-ink-3', tone: 'good' },
+  label_removed: { icon: Tag, label: 'Label removed', text: 'text-ink-3', tone: 'neutral' },
   // Changing which labels the repository offers, as opposed to putting one on
   // an issue. The labels say "definition" out loud because the pair above reads
   // almost identically at a glance, and a deleted definition takes the label off
   // every issue that had it — the more consequential act of the two, hence
   // 'problem' where label_removed is merely neutral.
-  label_defined: { icon: Tag, label: 'Label defined', text: 'text-text-tertiary', tone: 'good' },
+  label_defined: { icon: Tag, label: 'Label defined', text: 'text-ink-3', tone: 'good' },
   label_definition_edited: {
     icon: Tag,
     label: 'Label definition edited',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'neutral',
   },
   label_definition_deleted: {
     icon: Tag,
     label: 'Label definition deleted',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'problem',
   },
   // Repository configuration. One tint for the family, and the tone carries how
@@ -193,68 +193,68 @@ export const ACTION_META: Record<string, ActionMeta> = {
   repo_created: {
     icon: FolderGit2,
     label: 'Repo created',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'good',
   },
   repo_edited: {
     icon: FolderGit2,
     label: 'Repo edited',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'neutral',
   },
   repo_deleted: {
     icon: FolderGit2,
     label: 'Repo deleted',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'problem',
   },
-  repo_forked: { icon: GitFork, label: 'Repo forked', text: 'text-text-tertiary', tone: 'neutral' },
+  repo_forked: { icon: GitFork, label: 'Repo forked', text: 'text-ink-3', tone: 'neutral' },
   repo_archived: {
     icon: Archive,
     label: 'Repo archived',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'attention',
   },
   repo_unarchived: {
     icon: ArchiveRestore,
     label: 'Repo unarchived',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'neutral',
   },
   release_created: {
     icon: Package,
     label: 'Release created',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'good',
   },
   release_edited: {
     icon: Package,
     label: 'Release edited',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'neutral',
   },
   release_deleted: {
     icon: Package,
     label: 'Release deleted',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'problem',
   },
   conversation_locked: {
     icon: Lock,
     label: 'Conversation locked',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'attention',
   },
   conversation_unlocked: {
     icon: LockOpen,
     label: 'Conversation unlocked',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'neutral',
   },
   branch_pushed: {
     icon: GitBranch,
     label: 'Branch pushed',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'good',
   },
   // The push the upstream turned down — nothing landed, so no branch artifact
@@ -264,13 +264,13 @@ export const ACTION_META: Record<string, ActionMeta> = {
   branch_push_failed: {
     icon: GitBranch,
     label: 'Branch push failed',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'problem',
   },
   linked_branch_created: {
     icon: GitBranch,
     label: 'Linked branch created',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'good',
   },
   // The unclassified gh-channel write. It has no verb precisely because the
@@ -279,7 +279,7 @@ export const ACTION_META: Record<string, ActionMeta> = {
   gh_channel_write: {
     icon: Terminal,
     label: 'Raw gh write',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'neutral',
   },
   // A write Triage Factory refused before it reached GitHub. Deliberately not
@@ -290,7 +290,7 @@ export const ACTION_META: Record<string, ActionMeta> = {
   gh_write_denied: {
     icon: ShieldBan,
     label: 'gh write refused',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'attention',
   },
   // The other two per-run gates, sharing gh_write_denied's shield and tone
@@ -302,13 +302,13 @@ export const ACTION_META: Record<string, ActionMeta> = {
   git_denied: {
     icon: ShieldBan,
     label: 'Git op refused',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'attention',
   },
   egress_denied: {
     icon: ShieldBan,
     label: 'Network refused',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'attention',
   },
   // Its GraphQL sibling. Separate because the two rows know different things —
@@ -318,61 +318,61 @@ export const ACTION_META: Record<string, ActionMeta> = {
   graphql_write: {
     icon: Terminal,
     label: 'Raw gh GraphQL write',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'neutral',
   },
-  issue_created: { icon: CircleDot, label: 'Issue created', text: 'text-accent', tone: 'good' },
+  issue_created: { icon: CircleDot, label: 'Issue created', text: 'text-warm', tone: 'good' },
   issue_transitioned: {
     icon: CircleDot,
     label: 'Issue transitioned',
-    text: 'text-accent',
+    text: 'text-warm',
     tone: 'neutral',
   },
   issue_assigned: {
     icon: CircleDot,
     label: 'Issue assigned',
-    text: 'text-accent',
+    text: 'text-warm',
     tone: 'neutral',
   },
-  issue_updated: { icon: CircleDot, label: 'Issue updated', text: 'text-accent', tone: 'neutral' },
-  issue_closed: { icon: CircleDot, label: 'Issue closed', text: 'text-accent', tone: 'problem' },
+  issue_updated: { icon: CircleDot, label: 'Issue updated', text: 'text-warm', tone: 'neutral' },
+  issue_closed: { icon: CircleDot, label: 'Issue closed', text: 'text-warm', tone: 'problem' },
   issue_reopened: {
     icon: CircleDot,
     label: 'Issue reopened',
-    text: 'text-accent',
+    text: 'text-warm',
     tone: 'neutral',
   },
-  issue_deleted: { icon: CircleDot, label: 'Issue deleted', text: 'text-accent', tone: 'problem' },
-  issue_pinned: { icon: Pin, label: 'Issue pinned', text: 'text-accent', tone: 'good' },
-  issue_unpinned: { icon: PinOff, label: 'Issue unpinned', text: 'text-accent', tone: 'neutral' },
+  issue_deleted: { icon: CircleDot, label: 'Issue deleted', text: 'text-warm', tone: 'problem' },
+  issue_pinned: { icon: Pin, label: 'Issue pinned', text: 'text-warm', tone: 'good' },
+  issue_unpinned: { icon: PinOff, label: 'Issue unpinned', text: 'text-warm', tone: 'neutral' },
   issue_transferred: {
     icon: CircleDot,
     label: 'Issue transferred',
-    text: 'text-accent',
+    text: 'text-warm',
     tone: 'attention',
   },
   issue_comment_posted: {
     icon: CircleDot,
     label: 'Issue comment posted',
-    text: 'text-accent',
+    text: 'text-warm',
     tone: 'good',
   },
   slack_message_posted: {
     icon: MessageCircle,
     label: 'Message posted',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'good',
   },
   slack_message_edited: {
     icon: MessageCircle,
     label: 'Message edited',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'neutral',
   },
   slack_reaction_added: {
     icon: SmilePlus,
     label: 'Reaction added',
-    text: 'text-text-tertiary',
+    text: 'text-ink-3',
     tone: 'good',
   },
 }
@@ -380,7 +380,7 @@ export const ACTION_META: Record<string, ActionMeta> = {
 export const FALLBACK_ACTION_META: ActionMeta = {
   icon: CircleDot,
   label: 'action',
-  text: 'text-text-tertiary',
+  text: 'text-ink-3',
   tone: 'neutral',
 }
 

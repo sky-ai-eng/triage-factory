@@ -67,13 +67,13 @@ export default function SSOSettings() {
   }, [reloadKey])
 
   if (loading) {
-    return <p className="text-[13px] text-text-tertiary">Loading SSO settings…</p>
+    return <p className="text-body text-ink-3">Loading SSO settings…</p>
   }
   if (loadError || !resp) {
     return (
-      <div className="text-[13px] text-text-secondary">
+      <div className="text-body text-ink-2">
         {loadError ?? 'Could not load SSO settings.'}{' '}
-        <button type="button" onClick={reload} className="text-accent underline">
+        <button type="button" onClick={reload} className="text-warm underline">
           Retry
         </button>
       </div>
@@ -231,12 +231,12 @@ function ConnectionBlock({
       />
 
       {connection ? (
-        <div className="flex items-center justify-between gap-4 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/40 px-4 py-3">
+        <div className="flex items-center justify-between gap-4 rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3">
           <div className="min-w-0">
-            <p className="text-[13px] font-medium text-text-primary">
+            <p className="text-body font-medium text-ink-1">
               {connection.enabled ? 'Connected · enabled' : 'Connected · disabled'}
             </p>
-            <p className="mt-0.5 truncate font-mono text-[11px] text-text-tertiary">
+            <p className="mt-0.5 truncate font-mono text-reported text-ink-3">
               Provider {connection.provider_id}
             </p>
           </div>
@@ -245,20 +245,20 @@ function ConnectionBlock({
               type="button"
               onClick={runTest}
               title="Open a real sign-in in a new window to confirm the connection works — without enabling it."
-              className="rounded-full border border-accent/20 px-3.5 py-1.5 text-[12px] font-medium text-accent transition-colors hover:border-accent/30 hover:text-accent/80"
+              className="rounded-full border border-warm/20 px-3.5 py-1.5 text-ui font-medium text-warm transition-colors hover:border-warm/30 hover:text-warm/80"
             >
               Test SSO
             </button>
-            <label className="flex cursor-pointer items-center gap-2 text-[12px] text-text-tertiary">
+            <label className="flex cursor-pointer items-center gap-2 text-ui text-ink-3">
               {connection.enabled ? 'Enabled' : 'Disabled'}
               <Switch.Root
                 aria-label="Enable SSO"
                 checked={connection.enabled}
                 disabled={toggling}
                 onCheckedChange={(v) => void toggle(v)}
-                className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-accent data-[state=unchecked]:bg-black/10 disabled:opacity-50"
+                className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-warm data-[state=unchecked]:bg-line-2 disabled:opacity-50"
               >
-                <Switch.Thumb className="block h-[14px] w-[14px] rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
+                <Switch.Thumb className="block h-[14px] w-[14px] rounded-full bg-raised shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
               </Switch.Root>
             </label>
           </div>
@@ -277,13 +277,13 @@ function ConnectionBlock({
                 void connect()
               }
             }}
-            className={`${glassInputClass} font-mono text-[12px]`}
+            className={`${glassInputClass} font-mono text-ui`}
           />
           <button
             type="button"
             onClick={() => void connect()}
             disabled={metadataURL.trim() === '' || connecting}
-            className="shrink-0 rounded-full bg-accent px-5 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 disabled:opacity-40 disabled:shadow-none"
+            className="shrink-0 rounded-full bg-warm px-5 py-2.5 text-body font-medium text-warm-ink shadow-[0_10px_28px_-10px_var(--color-warm)] transition-all hover:bg-warm/90 disabled:opacity-40 disabled:shadow-none"
           >
             {connecting ? 'Connecting…' : 'Connect'}
           </button>
@@ -352,7 +352,7 @@ function DomainsBlock({
           type="button"
           onClick={() => void add()}
           disabled={newDomain.trim() === '' || adding}
-          className="shrink-0 rounded-full border border-accent/20 px-5 py-2.5 text-[13px] font-medium text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+          className="shrink-0 rounded-full border border-warm/20 px-5 py-2.5 text-body font-medium text-warm transition-colors hover:border-warm/30 hover:text-warm/80 disabled:opacity-40"
         >
           {adding ? 'Adding…' : 'Add domain'}
         </button>
@@ -424,10 +424,10 @@ function DomainRow({
   }
 
   return (
-    <li className="rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/40 px-4 py-3">
+    <li className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-[13px] font-medium text-text-primary">
+          <span className="truncate text-body font-medium text-ink-1">
             {domain.domain}
           </span>
           <StatusBadge verified={verified} />
@@ -438,7 +438,7 @@ function DomainRow({
               type="button"
               onClick={() => void verify()}
               disabled={busy}
-              className="rounded-full border border-accent/20 px-3.5 py-1.5 text-[12px] font-medium text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+              className="rounded-full border border-warm/20 px-3.5 py-1.5 text-ui font-medium text-warm transition-colors hover:border-warm/30 hover:text-warm/80 disabled:opacity-40"
             >
               {busy ? 'Verifying…' : 'Verify'}
             </button>
@@ -448,7 +448,7 @@ function DomainRow({
             onClick={() => void remove()}
             disabled={busy}
             aria-label={`Remove ${domain.domain}`}
-            className="inline-flex items-center rounded-full p-1.5 text-text-tertiary transition-colors hover:text-dismiss disabled:opacity-40"
+            className="inline-flex items-center rounded-full p-1.5 text-ink-3 transition-colors hover:text-alarm disabled:opacity-40"
           >
             <Trash2 size={14} />
           </button>
@@ -457,20 +457,20 @@ function DomainRow({
 
       {!verified && (
         <div className="mt-3 space-y-2">
-          <p className="text-[11px] leading-relaxed text-text-tertiary">
+          <p className="text-reported leading-relaxed text-ink-3">
             Create this DNS record at your domain host, then click Verify:
           </p>
           <CopyField label="Host / name" value={domain.txt_host} />
-          <div className="flex items-center gap-2 text-[11px] text-text-tertiary">
+          <div className="flex items-center gap-2 text-reported text-ink-3">
             <span className="font-medium uppercase tracking-wide">Type</span>
-            <span className="font-mono text-text-secondary">TXT</span>
+            <span className="font-mono text-ink-2">TXT</span>
           </div>
           <CopyField label="Value" value={domain.txt_value} />
         </div>
       )}
 
       {message && (
-        <p role="status" className="mt-2 text-[12px] leading-relaxed text-text-secondary">
+        <p role="status" className="mt-2 text-ui leading-relaxed text-ink-2">
           {message}
         </p>
       )}
@@ -547,16 +547,16 @@ function EnforcementBlock({
         hint="Make SSO mandatory for your verified domains. Members on those domains must sign in via SSO instead of GitHub. Off-domain users (e.g. invited externals) are unaffected."
       />
 
-      <div className="flex items-center justify-between gap-4 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/40 px-4 py-3">
+      <div className="flex items-center justify-between gap-4 rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3">
         <div className="min-w-0">
-          <p className="text-[13px] font-medium text-text-primary">
+          <p className="text-body font-medium text-ink-1">
             {enforced ? 'SSO required' : 'SSO optional'}
           </p>
           {!canEnforce && !enforced && blockReason && (
-            <p className="mt-0.5 text-[12px] leading-relaxed text-text-tertiary">{blockReason}</p>
+            <p className="mt-0.5 text-ui leading-relaxed text-ink-3">{blockReason}</p>
           )}
         </div>
-        <label className="flex shrink-0 cursor-pointer items-center gap-2 text-[12px] text-text-tertiary">
+        <label className="flex shrink-0 cursor-pointer items-center gap-2 text-ui text-ink-3">
           {enforced ? 'Required' : 'Optional'}
           <Switch.Root
             aria-label="Require SSO"
@@ -564,9 +564,9 @@ function EnforcementBlock({
             // Allow turning OFF always (recovery); only gate turning ON.
             disabled={toggling || (!enforced && !canEnforce)}
             onCheckedChange={(v) => void toggle(v)}
-            className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-accent data-[state=unchecked]:bg-black/10 disabled:opacity-50"
+            className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-warm data-[state=unchecked]:bg-line-2 disabled:opacity-50"
           >
-            <Switch.Thumb className="block h-[14px] w-[14px] rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
+            <Switch.Thumb className="block h-[14px] w-[14px] rounded-full bg-raised shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
           </Switch.Root>
         </label>
       </div>
@@ -643,10 +643,10 @@ function BreakGlassManager({ enforced }: { enforced: boolean }) {
   }
 
   return (
-    <div className="space-y-2 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/20 px-4 py-3">
+    <div className="space-y-2 rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/20 px-4 py-3">
       <div className="space-y-0.5">
-        <h4 className="text-[12px] font-medium text-text-primary">Break-glass access</h4>
-        <p className="text-[11px] leading-relaxed text-text-tertiary">
+        <h4 className="text-ui font-medium text-ink-1">Break-glass access</h4>
+        <p className="text-reported leading-relaxed text-ink-3">
           These principals can still sign in with GitHub under enforcement — the recovery path if
           your identity provider breaks.{' '}
           {enforced && 'You can’t remove the last one while SSO is required.'}
@@ -658,16 +658,16 @@ function BreakGlassManager({ enforced }: { enforced: boolean }) {
           {principals.map((p) => (
             <li
               key={p.user_id}
-              className="flex items-center justify-between gap-3 rounded-xl bg-[var(--color-surface-overlay)]/40 px-3 py-2"
+              className="flex items-center justify-between gap-3 rounded-xl bg-[var(--color-raised)]/40 px-3 py-2"
             >
-              <span className="min-w-0 truncate text-[12px] text-text-secondary">
+              <span className="min-w-0 truncate text-ui text-ink-2">
                 {p.email || p.display_name || p.user_id}
               </span>
               <button
                 type="button"
                 onClick={() => void remove(p)}
                 aria-label={`Remove ${p.email || p.user_id}`}
-                className="inline-flex shrink-0 items-center rounded-full p-1.5 text-text-tertiary transition-colors hover:text-dismiss"
+                className="inline-flex shrink-0 items-center rounded-full p-1.5 text-ink-3 transition-colors hover:text-alarm"
               >
                 <Trash2 size={13} />
               </button>
@@ -695,7 +695,7 @@ function BreakGlassManager({ enforced }: { enforced: boolean }) {
           type="button"
           onClick={() => void add()}
           disabled={email.trim() === '' || adding}
-          className="shrink-0 rounded-full border border-accent/20 px-4 py-2 text-[12px] font-medium text-accent transition-colors hover:border-accent/30 hover:text-accent/80 disabled:opacity-40"
+          className="shrink-0 rounded-full border border-warm/20 px-4 py-2 text-ui font-medium text-warm transition-colors hover:border-warm/30 hover:text-warm/80 disabled:opacity-40"
         >
           {adding ? 'Adding…' : 'Add'}
         </button>
@@ -709,19 +709,19 @@ function BreakGlassManager({ enforced }: { enforced: boolean }) {
 function BlockHeader({ title, hint }: { title: string; hint: string }) {
   return (
     <div className="space-y-1">
-      <h3 className="text-[13px] font-medium text-text-primary">{title}</h3>
-      <p className="text-[12px] leading-relaxed text-text-tertiary">{hint}</p>
+      <h3 className="text-body font-medium text-ink-1">{title}</h3>
+      <p className="text-ui leading-relaxed text-ink-3">{hint}</p>
     </div>
   )
 }
 
 function StatusBadge({ verified }: { verified: boolean }) {
   return verified ? (
-    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-claim/10 px-2 py-0.5 text-[11px] font-medium text-claim">
+    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-tint-2 px-2 py-0.5 text-reported font-medium text-ink-2">
       <Check size={11} aria-hidden /> Verified
     </span>
   ) : (
-    <span className="inline-flex shrink-0 items-center rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] font-medium text-text-tertiary">
+    <span className="inline-flex shrink-0 items-center rounded-full bg-tint-3 px-2 py-0.5 text-reported font-medium text-ink-3">
       Pending
     </span>
   )
@@ -754,7 +754,7 @@ function CopyField({ label, value, hint }: { label: string; value: string; hint?
   }
   return (
     <div className="space-y-1.5">
-      <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+      <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
         {label}
       </span>
       <div className="flex items-center gap-2">
@@ -764,19 +764,19 @@ function CopyField({ label, value, hint }: { label: string; value: string; hint?
           value={value}
           aria-label={label}
           onFocus={(e) => e.target.select()}
-          className={`${glassInputClass} font-mono text-[12px]`}
+          className={`${glassInputClass} font-mono text-ui`}
         />
         <button
           type="button"
           onClick={() => void copy()}
           aria-label={`Copy ${label}`}
-          className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-border-glass)] px-3 py-2 text-[12px] font-medium text-text-secondary transition-colors hover:text-text-primary"
+          className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-line-1)] px-3 py-2 text-ui font-medium text-ink-2 transition-colors hover:text-ink-1"
         >
           {copied ? <Check size={13} /> : <Copy size={13} />}
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
-      {hint && <p className="text-[11px] leading-relaxed text-text-tertiary">{hint}</p>}
+      {hint && <p className="text-reported leading-relaxed text-ink-3">{hint}</p>}
     </div>
   )
 }

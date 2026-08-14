@@ -778,10 +778,10 @@ const githubPollerStep: WizardStep = {
   render: ({ state, patch }) => (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
           How often should we poll GitHub?
         </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           More frequent polling surfaces new PRs and reviews sooner; less frequent is lighter on
           rate limits.
         </p>
@@ -989,10 +989,10 @@ const jiraPollerStep: WizardStep = {
   render: ({ state, patch }) => (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
           How often should we poll Jira?
         </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           The cadence for the Jira tracker — independent of the GitHub poll interval.
         </p>
       </div>
@@ -1209,7 +1209,7 @@ const reposStep: WizardStep = {
           onSave={() => {}}
           onClose={() => {}}
         />
-        <p className="text-[12px] text-text-tertiary">
+        <p className="text-ui text-ink-3">
           {count} {count === 1 ? 'repository' : 'repositories'} selected.
         </p>
       </div>

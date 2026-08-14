@@ -19,21 +19,21 @@ import { isActiveRun } from '../../lib/runStatus'
 export type Tone = 'rust' | 'active' | 'good' | 'attention' | 'problem' | 'neutral'
 
 export const TONE_VAR: Record<Tone, string> = {
-  rust: 'var(--color-accent)',
+  rust: 'var(--color-warm)',
   active: 'var(--color-delegate)',
   good: 'var(--color-claim)',
   attention: 'var(--color-snooze)',
-  problem: 'var(--color-dismiss)',
-  neutral: 'var(--color-text-tertiary)',
+  problem: 'var(--color-alarm)',
+  neutral: 'var(--color-ink-3)',
 }
 
 export const TONE_TEXT: Record<Tone, string> = {
-  rust: 'text-accent',
+  rust: 'text-warm',
   active: 'text-delegate',
   good: 'text-claim',
   attention: 'text-snooze',
-  problem: 'text-dismiss',
-  neutral: 'text-text-tertiary',
+  problem: 'text-alarm',
+  neutral: 'text-ink-3',
 }
 
 export interface Glow {
@@ -59,9 +59,9 @@ export type StepState = 'done' | 'active' | 'failed' | 'current' | 'pending'
 export const STEP_VAR: Record<StepState, string> = {
   done: 'var(--color-claim)',
   active: 'var(--color-delegate)',
-  failed: 'var(--color-dismiss)',
-  current: 'var(--color-accent)',
-  pending: 'var(--color-text-tertiary)',
+  failed: 'var(--color-alarm)',
+  current: 'var(--color-warm)',
+  pending: 'var(--color-ink-3)',
 }
 
 // formatAge — coarse "just now / 4h / 3d" for the card's age caption.

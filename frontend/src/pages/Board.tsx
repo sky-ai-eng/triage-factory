@@ -1263,7 +1263,7 @@ export default function Board() {
       <>
         <GlassBackdrop />
         <div className="flex items-center justify-center min-h-[70vh]">
-          <p className="text-[13px] text-text-tertiary">Loading board…</p>
+          <p className="text-body text-ink-3">Loading board…</p>
         </div>
       </>
     )
@@ -1273,7 +1273,7 @@ export default function Board() {
   // filter panel — see the `snooze` prop below — not as a header button.)
   const doneHeader = (
     <span
-      className="text-[10px] text-text-tertiary"
+      className="text-label text-ink-3"
       title="Done column shows the last 7 days; older entries are hidden"
     >
       last 7 days
@@ -1726,5 +1726,5 @@ const SortableAgentCard = memo(function SortableAgentCard({
 })
 
 function EmptyColumn({ children }: { children: React.ReactNode }) {
-  return <p className="text-[12px] text-text-tertiary text-center py-12">{children}</p>
+  return <p className="text-ui text-ink-3 text-center py-12">{children}</p>
 }

@@ -108,22 +108,22 @@ export default function ProjectVisibilitySelect({
               transition-colors outline-none
               ${
                 disabled
-                  ? 'cursor-not-allowed border-border-subtle bg-black/[0.02] opacity-50'
+                  ? 'cursor-not-allowed border-line-1 bg-tint-2 opacity-50'
                   : selected
-                    ? 'border-accent bg-accent-soft'
-                    : 'border-border-subtle bg-white/60 hover:bg-white'
+                    ? 'border-warm bg-warm-2'
+                    : 'border-line-1 bg-raised hover:bg-raised'
               }
             `}
           >
             <span
-              className={`inline-flex items-center gap-1.5 text-[12.5px] font-medium ${
-                selected && !disabled ? 'text-accent' : 'text-text-primary'
+              className={`inline-flex items-center gap-1.5 text-card-title font-medium ${
+                selected && !disabled ? 'text-warm' : 'text-ink-1'
               }`}
             >
               <Icon size={12} />
               {opt.label}
             </span>
-            <span className="text-[11px] leading-snug text-text-tertiary">
+            <span className="text-reported leading-snug text-ink-3">
               {opt.disabledHint ?? opt.hint}
             </span>
           </button>
