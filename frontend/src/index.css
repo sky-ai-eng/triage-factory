@@ -19,6 +19,23 @@
    already handles box-sizing and margin reset, so this is only what it
    does not cover. */
 
+/* The shell is a fixed frame with a scrolling body, and it asks for its height
+   with `height: 100%`. A percentage height resolves against the parent, so
+   without an unbroken chain from the viewport down it falls back to content
+   height and the rail grows with whatever page is inside it — which is the
+   opposite of a frame.
+
+   The chain is load-bearing and easy to lose: the design bundle set it in its
+   own harness, and /dev/ui hid its absence here because the gallery mounts the
+   shell in a fixed-height box. Anything taller than the viewport still scrolls
+   normally outside the shell (overflow propagates from body to the viewport);
+   inside it, .sh-body is the scroll container by design. */
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   background: var(--color-ground);
   color: var(--color-ink-1);
@@ -26,6 +43,20 @@ body {
   font-size: var(--text-body);
   line-height: var(--leading-body);
   -webkit-font-smoothing: antialiased;
+}
+
+/* TEMPORARY — remove page by page as each surface is rebuilt.
+   The retired top bar wrapped every page in `main.px-8.py-8`, so all fifteen
+   of them assume a 2rem gutter they do not draw: some rely on it for their
+   margins, and Factory cancels it with -mx-8 -my-8 to go full bleed. The new
+   shell's .sh-body is unpadded on purpose — in the design the frame owns the
+   frame and each page brings its own padding — so this restores exactly what
+   was there rather than leaving every legacy page flush against the rail.
+
+   It lives here and not in ui/shell/shell.css: that file is the design system
+   and stays faithful. This is scaffolding for pages that have not caught up. */
+.sh-body {
+  padding: 2rem;
 }
 
 /* Links take the measurement hue, at zero specificity so any utility class

@@ -233,7 +233,7 @@ export default function PRDashboard() {
   const activePR = activeId ? prMap.get(activeId) : null
 
   return (
-    <div className="max-w-5xl mx-auto flex flex-col" style={{ minHeight: 'calc(100vh - 120px)' }}>
+    <div className="max-w-5xl mx-auto flex flex-col" style={{ minHeight: '100%' }}>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-xl font-semibold text-ink-1">Pull Requests</h1>
         <button

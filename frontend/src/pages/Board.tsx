@@ -1298,7 +1298,7 @@ export default function Board() {
           columns close to the chrome, not floating in a big top gap like the
           form pages do. The team filter takes what it needs; the scroll area
           fills the rest to the page bottom (hard floor on short screens). */}
-      <div className="-mt-4 flex h-[calc(100dvh-7rem)] min-h-[26rem] flex-col">
+      <div className="-mt-4 flex h-[calc(100%+1rem)] min-h-[26rem] flex-col">
         {/* Per-page team filter. Renders nothing at ≤1 team. */}
         {teams.length >= 2 && (
           <div className="flex items-center justify-end px-1 pb-3">

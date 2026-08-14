@@ -411,7 +411,7 @@ export default function Factory() {
         <div
           ref={containerRef}
           className="relative w-full overflow-hidden"
-          style={{ height: 'calc(100vh - 69px)' }}
+          style={{ height: 'calc(100% + 4rem)' }}
         />
         {/* Per-page team filter — narrows the entity belt.
             Gated on ≥2 teams so solo users get no empty overlay box. */}

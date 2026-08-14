@@ -51,7 +51,7 @@ export default function Settings() {
   }
 
   return (
-    <div className="relative min-h-screen px-4 py-10">
+    <div className="relative min-h-full px-4 py-10">
       <GlassBackdrop />
       <div className="mx-auto max-w-2xl">
         <h1 className="mb-8 text-[22px] font-semibold tracking-tight text-ink-1">

@@ -189,7 +189,7 @@ export default function Projects() {
 
   return (
     <div
-      className="max-w-6xl mx-auto h-[calc(100dvh-10rem)] min-h-[24rem] flex flex-col"
+      className="max-w-6xl mx-auto h-full min-h-[24rem] flex flex-col"
       onDragEnter={handlePageDragEnter}
       onDragLeave={handlePageDragLeave}
       onDragOver={handlePageDragOver}

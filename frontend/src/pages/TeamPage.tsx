@@ -204,7 +204,7 @@ function TeamPageBody({
     // below the header + tab strip. Members + Settings stay a narrow column.
     <div
       className={`mx-auto ${
-        promptsTab ? 'flex h-[calc(100vh-8rem)] max-w-6xl flex-col' : 'max-w-3xl'
+        promptsTab ? 'flex h-full max-w-6xl flex-col' : 'max-w-3xl'
       }`}
     >
       <div className="mb-5 flex shrink-0 items-center justify-between gap-3">
