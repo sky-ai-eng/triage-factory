@@ -187,3 +187,24 @@ describe('Shell — drilling narrows, it does not navigate', () => {
     expect(onRoute).toHaveBeenCalledWith('prompts.library')
   })
 })
+
+describe('Shell — a page can ask for the whole screen', () => {
+  it('fades the chrome and takes it out of the tab order, without resizing it', () => {
+    const { rerender } = render(<Shell mode="multi" grants={['org-admin']} />)
+
+    expect(rail()).not.toHaveAttribute('inert')
+    const widthBefore = rail().className
+
+    rerender(<Shell mode="multi" grants={['org-admin']} immersive />)
+
+    // Invisible controls that still take focus are worse than visible ones —
+    // the reader tabs into a rail they cannot see.
+    expect(rail()).toHaveAttribute('inert')
+    expect(document.querySelector('.sh-head')).toHaveAttribute('inert')
+    expect(document.querySelector('.sh')).toHaveAttribute('data-immersive')
+
+    // Nothing changed size. A collapse would reflow the page, which is the
+    // thing an immersive page is usually escaping.
+    expect(rail().className).toBe(widthBefore)
+  })
+})

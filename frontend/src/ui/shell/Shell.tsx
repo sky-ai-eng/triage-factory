@@ -62,6 +62,16 @@ export type ShellProps = {
   theme?: ThemeChoice
   onThemeChange?: (t: ThemeChoice) => void
   onSignOut?: () => void
+  /**
+   * The page has asked for the whole screen. The rail and the header fade and
+   * stop taking input; the layout does not move.
+   *
+   * Fading rather than collapsing is the point. Collapsing would reflow the
+   * page and, for a page that is immersive because it renders continuously,
+   * that reflow is the exact thing it was trying to escape. Nothing here
+   * changes size.
+   */
+  immersive?: boolean
   children?: ReactNode
 }
 
@@ -103,6 +113,7 @@ export function Shell({
   theme = 'system',
   onThemeChange,
   onSignOut,
+  immersive = false,
   children,
 }: ShellProps) {
   const [pinned, setPinned] = useState(() => {
@@ -284,8 +295,7 @@ export function Shell({
   const hits = q ? flat.filter((r) => r.name.toLowerCase().includes(q.toLowerCase())) : flat
   const deepRow = deep ? secs.flatMap((s) => s.rows).find((r) => r.id === deep) || null : null
   const readout = (v: number | null) => (offline || v === null ? '--' : String(v))
-  const queueTip =
-    offline || queued === null ? 'Queue · count unavailable' : `${queued} in queue`
+  const queueTip = offline || queued === null ? 'Queue · count unavailable' : `${queued} in queue`
 
   const enter = (fn: () => void) => (e: ReactKeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -408,8 +418,16 @@ export function Shell({
   )
 
   return (
-    <div className="sh" style={{ position: 'relative' }} ref={rootref}>
-      <div className={'sh-rail' + (open ? ' open' : '')}>
+    <div
+      className="sh"
+      data-immersive={immersive || undefined}
+      style={{ position: 'relative' }}
+      ref={rootref}
+    >
+      {/* `inert` as well as pointer-events, so the faded chrome leaves the tab
+          order too. Invisible controls that still take focus are worse than
+          visible ones — the reader tabs into a rail they cannot see. */}
+      <div className={'sh-rail' + (open ? ' open' : '')} inert={immersive || undefined}>
         <div
           className="sh-mark"
           tabIndex={0}
@@ -653,7 +671,7 @@ export function Shell({
               }
             }}
             onClick={() => {
-                setMe((s) => !s)
+              setMe((s) => !s)
               tipOff()
             }}
             onMouseEnter={(e) => {
@@ -691,7 +709,7 @@ export function Shell({
       )}
 
       <div className="sh-main">
-        <div className="sh-head">
+        <div className="sh-head" inert={immersive || undefined}>
           {/* Crumbs, title and subtitle share a baseline inside one group, and
               the group is centered in the band. Centering them individually
               lines up their boxes rather than their type, and different sizes

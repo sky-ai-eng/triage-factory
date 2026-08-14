@@ -18,6 +18,7 @@ import { toast } from '../components/Toast/toastStore'
 import { createIsoScene, type ClickedStationInfo, type IsoSceneHandle } from '../factory/iso-scene'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { useImmersive } from '../contexts/ChromeContext'
 import {
   useTeams,
   useTeamFilter,
@@ -87,6 +88,11 @@ export default function Factory() {
   const [pendingDelegate, setPendingDelegate] = useState<PendingDelegate | null>(null)
   const [draggingEntity, setDraggingEntity] = useState<FactoryEntity | null>(null)
   const [cinematic, setCinematic] = useState(false)
+
+  // Ask the frame to fade with the rest of the HUD. Declarative rather than a
+  // call in enterCinematic/exitCinematic: navigating away mid-cinematic would
+  // otherwise leave the app with no rail and no explanation.
+  useImmersive(cinematic)
 
   // multi-team. teamFilter is the per-page read scope (narrows the
   // entity belt via ?team_id); delegateTeam is the acting team the
@@ -463,11 +469,16 @@ export default function Factory() {
           </button>
         </div>
         <StationDrawer info={picked} />
-        {/* Exit catcher — full-viewport layer that swallows the first
-            click (so it exits instead of orbiting). The cursor stays
-            visible; key/wheel exits are wired in an effect. */}
+        {/* Exit catcher — swallows the first click (so it exits instead of
+            orbiting). The cursor stays visible; key/wheel exits are wired in an
+            effect.
+
+            Fixed, not absolute: the world now fills the window and the chrome
+            has faded off it, so the whole window is scene. An absolute catcher
+            covered only the page area, which left the strip where the rail used
+            to be as the one place a click did nothing. */}
         {cinematic && (
-          <div className="absolute inset-0 z-40" onPointerDown={exitCinematic} aria-hidden />
+          <div className="fixed inset-0 z-40" onPointerDown={exitCinematic} aria-hidden />
         )}
       </div>
       <DragOverlay dropAnimation={null}>

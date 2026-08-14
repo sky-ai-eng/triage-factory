@@ -26,6 +26,7 @@ export function ShellCard() {
   const [offline, setOffline] = useState(false)
   const [known, setKnown] = useState(true)
   const [route, setRoute] = useState('board')
+  const [immersive, setImmersive] = useState(false)
   const [needs, setNeeds] = useState(7)
 
   const toggle = (g: Grant) =>
@@ -78,6 +79,17 @@ export function ShellCard() {
         {chip(false, 'one settles', () => setNeeds((n) => Math.max(0, n - 1)))}
       </div>
 
+      <p className="gal-note">
+        A page can ask for the whole screen — the factory does it in cinematic
+        mode. The chrome fades and stops taking input, including the tab order,
+        but nothing changes size: a collapse would reflow the page, and a page
+        immersive enough to ask is usually one that renders continuously.
+      </p>
+
+      <div className="gal-chips">
+        {chip(immersive, 'page wants the screen', () => setImmersive((i) => !i))}
+      </div>
+
       <div className="gal-viewport">
         <Shell
           mode={multi ? 'multi' : 'local'}
@@ -89,6 +101,7 @@ export function ShellCard() {
           teams={['platform', 'infra', 'growth', 'docs']}
           route={route}
           onRoute={setRoute}
+          immersive={immersive}
           title="Board"
           subtitle="everything this team is carrying"
           needs={known ? needs : null}

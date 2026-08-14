@@ -9,6 +9,7 @@ import { useOrgRole } from './hooks/useOrgRole'
 import { useTeams } from './hooks/useTeams'
 import { FeatureFleet, useEntitlements } from './hooks/useEntitlements'
 import { getStoredTheme, setTheme as applyStoredTheme } from './lib/theme'
+import { ChromeProvider } from './contexts/ChromeContext'
 
 // The application frame. This file is the ADAPTER: it resolves who the viewer
 // is, translates the design system's route ids into this app's paths, and hands
@@ -151,39 +152,46 @@ export default function Shell() {
   }
 
   return (
-    <UiShell
-      mode={isMulti ? 'multi' : 'local'}
-      grants={grants}
-      flags={{
-        marketplace: isMulti,
-        // Governance has a rail row and a warm alert tail in the design, and no
-        // page. Off until one exists — absent, not disabled, applied to us.
-        governance: false,
-      }}
-      org={activeOrg?.name ?? (isMulti ? '' : 'Triage Factory')}
-      team={teams[0]?.name ?? ''}
-      teams={teamNames}
-      route={route}
-      onRoute={onRoute}
-      // The header band is the shell's; what fills it is the page's. Until
-      // pages supply their own crumbs and title, the rail's name for where you
-      // are is the honest answer — better than an empty band, and replaced page
-      // by page as each one is rebuilt.
-      title={TITLES[route] ?? ''}
-      needs={null}
-      running={null}
-      queued={null}
-      counts={counts}
-      user={
-        isMulti && auth?.me
-          ? { name: auth.me.display_name || auth.me.email || 'You', email: auth.me.email || '' }
-          : null
-      }
-      theme={theme}
-      onThemeChange={onThemeChange}
-      onSignOut={isMulti ? () => void auth?.logout() : undefined}
-    >
-      <Outlet />
-    </UiShell>
+    // The provider wraps the shell rather than sitting inside it, so a page can
+    // ask for the whole screen and have the answer reach the chrome above it.
+    <ChromeProvider>
+      {(immersive) => (
+        <UiShell
+          immersive={immersive}
+          mode={isMulti ? 'multi' : 'local'}
+          grants={grants}
+          flags={{
+            marketplace: isMulti,
+            // Governance has a rail row and a warm alert tail in the design, and no
+            // page. Off until one exists — absent, not disabled, applied to us.
+            governance: false,
+          }}
+          org={activeOrg?.name ?? (isMulti ? '' : 'Triage Factory')}
+          team={teams[0]?.name ?? ''}
+          teams={teamNames}
+          route={route}
+          onRoute={onRoute}
+          // The header band is the shell's; what fills it is the page's. Until
+          // pages supply their own crumbs and title, the rail's name for where you
+          // are is the honest answer — better than an empty band, and replaced page
+          // by page as each one is rebuilt.
+          title={TITLES[route] ?? ''}
+          needs={null}
+          running={null}
+          queued={null}
+          counts={counts}
+          user={
+            isMulti && auth?.me
+              ? { name: auth.me.display_name || auth.me.email || 'You', email: auth.me.email || '' }
+              : null
+          }
+          theme={theme}
+          onThemeChange={onThemeChange}
+          onSignOut={isMulti ? () => void auth?.logout() : undefined}
+        >
+          <Outlet />
+        </UiShell>
+      )}
+    </ChromeProvider>
   )
 }
