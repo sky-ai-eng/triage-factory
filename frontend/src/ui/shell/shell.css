@@ -1,0 +1,861 @@
+/* Shell — the frame every page sits in.
+   Rail, scope, counts, sections, drill-in, palette, page header.
+   The shell owns navigation and the 55px header contract. It owns no page
+   content and no loading state: a skeleton describes the page's own shape,
+   so the page defines it. */
+
+.sh {
+  display: flex;
+  height: 100%;
+  background: var(--color-ground);
+  color: var(--color-ink-1);
+  font-family: var(--font-sans);
+  overflow: hidden;
+}
+
+/* ---- rail ---------------------------------------------------------- */
+
+/* Controls are not prose. Anything you click — glyphs, rows, crumbs, the
+   switcher — opts out of text selection, so a fast double-click reads as two
+   clicks rather than leaving a blue smear behind. Data and copy stay
+   selectable: people legitimately want to copy a figure or a name. */
+.sh-rail,
+.sh-tip,
+.sh-pal-in {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.sh-rail {
+  flex: none;
+  width: 52px;
+  background: var(--color-sunk);
+  border-right: 1px solid var(--color-line-1);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  position: relative;
+}
+.sh-rail.open { width: 208px; }
+
+.sh-mark {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 13px;
+  cursor: pointer;
+  position: relative;
+}
+.sh-mark:hover .sh-scope { color: var(--color-ink-1); }
+.sh-sigil {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 4px;
+  background: var(--color-ink-1);
+  color: var(--color-ground);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 500 9px/1 var(--font-mono);
+  letter-spacing: 0.04em;
+}
+.sh-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  white-space: nowrap;
+  color: var(--color-ink-2);
+  opacity: 0;
+  transition: color 0.18s, opacity 0.16s;
+}
+.sh-rail.open .sh-scope { opacity: 1; }
+.sh-scope b { font: 500 11.5px/1 var(--font-sans); color: var(--color-ink-1); }
+.sh-scope span { font: 400 9.5px/1 var(--font-mono); color: var(--color-ink-4); }
+
+.sh-rule { height: 1px; background: var(--color-line-1); margin: 0 13px; }
+/* only the rule under the switcher — the queue keeps its original spacing */
+.sh-mark + .sh-rule { margin-top: 5px; }
+/* collapsed, the open popover sits between the mark and the rule as a sibling,
+   so the adjacency above stops matching — the rule must not lose its offset
+   just because something opened */
+.sh-pop:not(.in) + .sh-rule { margin-top: 5px; }
+
+/* the queue — an inbox, not a split. One line, one number, one door. */
+.sh-queue {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 13px;
+  cursor: pointer;
+}
+.sh-qico { flex: none; width: 26px; display: flex; justify-content: center; color: var(--color-warm); }
+.sh-qtext {
+  font: 400 11.5px/1 var(--font-sans);
+  color: var(--color-ink-2);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.16s;
+}
+.sh-qtext b { font-weight: 500; color: var(--color-ink-1); display: inline-block; }
+.sh-qchev {
+  margin-left: auto;
+  color: var(--color-ink-4);
+  display: flex;
+  opacity: 0;
+  transition: opacity 0.16s;
+}
+.sh-rail.open .sh-qtext, .sh-rail.open .sh-qchev { opacity: 1; }
+.sh-queue:hover .sh-qtext { color: var(--color-ink-1); }
+.sh-queue:hover .sh-qchev { color: var(--color-ink-2); }
+.sh-queue.on .sh-qtext { color: var(--color-ink-1); }
+.sh-qtext b.tick { animation: sh-tick 0.5s cubic-bezier(0.22, 1, 0.36, 1); }
+.sh-count {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+.sh-dot { flex: none; width: 5px; height: 5px; border-radius: 999px; }
+.sh-dot.warm { background: var(--color-warm); }
+.sh-dot.cool { background: var(--color-cool); box-shadow: 0 0 5px var(--color-cool-glow); }
+.sh-count b { font: 500 10.5px/1 var(--font-mono); }
+.sh-count.warm b { color: var(--color-warm); }
+.sh-count.cool b { color: var(--color-cool); }
+.sh-count span {
+  font: 400 10.5px/1 var(--font-sans);
+  color: var(--color-ink-3);
+  opacity: 0;
+  transition: opacity 0.16s;
+}
+.sh-rail.open .sh-count span { opacity: 1; }
+.sh-count b.tick { animation: sh-tick 0.5s cubic-bezier(0.22, 1, 0.36, 1); }
+@keyframes sh-tick {
+  0% { transform: translateY(-5px); opacity: 0; }
+  100% { transform: none; opacity: 1; }
+}
+
+/* sections */
+/* Scrolls vertically, clips horizontally: the drill-in needs the horizontal
+   clip, but a flex child whose overflow is not visible resolves its automatic
+   minimum size to 0 — so on a short window the nav silently cut its last rows
+   instead of scrolling to them. min-height: 0 makes the shrink deliberate. */
+.sh-nav {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+/* The nav column hides its scrollbar, so it has to say when there is more below. */
+.sh-nav::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 28px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0), var(--color-sunk));
+}
+.sh-nav.more::after { opacity: 1; }
+.sh-cols {
+  display: flex;
+  width: 200%;
+  height: 100%;
+  min-height: 0;
+  transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sh-cols.deep { transform: translateX(-50%); }
+/* The column is the scroller, not the nav: the drill-in slides two columns
+   sideways, so a scroll on the parent would move both at once. Scrollbar hidden
+   because the rail is 52px wide when collapsed and a gutter would eat a glyph —
+   the fade at the foot of the nav is what says there is more. */
+.sh-col {
+  width: 50%;
+  height: 100%;
+  flex: none;
+  padding: 8px 0;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.sh-col::-webkit-scrollbar { display: none; }
+
+/* The heading band is a fixed height in BOTH states, so a glyph sits at the
+   same y whether the rail is open or closed. Closing does not swap the label
+   for a rule — the label SETTLES INTO the rule: it drops to the band's center
+   line as it fades, and the rule opens outward from that same line. One thing
+   changing state, not two things trading places. */
+.sh-sec {
+  position: relative;
+  box-sizing: border-box;
+  height: 27px;
+  font: 400 8.5px/1 var(--font-mono);
+  letter-spacing: 0.09em;
+  color: var(--color-ink-4);
+  white-space: nowrap;
+  /* Closed: the text sits on the center line it is about to become. */
+  padding: 9px 13px 9.5px;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.16s, padding-top 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* No rows above it, so no rule and no drop — it only ever holds a word. */
+.sh-sec.first { height: 22px; padding: 4px 13px 9.5px; }
+/* Open: it lifts to sit above its rows, where a heading belongs. */
+.sh-rail.open .sh-sec { opacity: 1; padding-top: 12px; }
+.sh-rail.open .sh-sec.first { padding-top: 4px; }
+/* The rule is a SIBLING, not the heading's own pseudo-element: the heading
+   fades with opacity, and opacity on a parent takes its pseudo-elements with
+   it — the rule would fade out exactly when it is meant to appear. It carries
+   no height of its own and draws into the band below it. */
+.sh-secline {
+  position: relative;
+  height: 0;
+  margin: 0;
+  background: none;
+}
+.sh-secline::before {
+  content: '';
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  top: 13px;
+  height: 1px;
+  background: var(--color-line-1);
+  transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.14s;
+}
+/* Opening, the rule retracts toward the word that takes its place. */
+.sh-rail.open .sh-secline::before { transform: scaleX(0.34); opacity: 0; }
+
+.sh-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 13px;
+  cursor: pointer;
+  position: relative;
+  white-space: nowrap;
+}
+.sh-row:hover .sh-ico { border-color: var(--color-line-2); color: var(--color-ink-2); }
+.sh-row.on .sh-ico { border-color: var(--color-ink-1); color: var(--color-ink-1); background: var(--color-tint-3); }
+.sh-row.on .sh-name { color: var(--color-ink-1); }
+.sh-ico {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--color-line-1);
+  border-radius: 4px;
+  color: var(--color-ink-4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.18s, color 0.18s, background 0.18s;
+}
+.sh-name {
+  font: 400 12px/1 var(--font-sans);
+  color: var(--color-ink-3);
+  opacity: 0;
+  transition: opacity 0.16s, color 0.18s;
+}
+.sh-rail.open .sh-name { opacity: 1; }
+.sh-tail {
+  margin-left: auto;
+  font: 400 9.5px/1 var(--font-mono);
+  color: var(--color-ink-4);
+  opacity: 0;
+  transition: opacity 0.16s;
+}
+.sh-rail.open .sh-tail { opacity: 1; }
+.sh-tail.warm { color: var(--color-warm); }
+.sh-tail.sh-two { display: flex; gap: 8px; }
+.sh-tail.sh-two span { display: flex; align-items: center; gap: 4px; }
+.sh-tail.sh-two i { width: 5px; height: 5px; border-radius: 999px; background: currentColor; }
+.sh-tail.sh-two .warm { color: var(--color-warm); }
+.sh-alert {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--color-warm);
+}
+/* Collapsed, the alert survives as a dot on the glyph — the count is the
+   detail, but the fact that something changed must not be hidden by width. */
+.sh-rail:not(.open) .sh-alert { display: none; }
+.sh-rail:not(.open) .sh-row.alerting::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--color-warm);
+}
+.sh-tail.sh-two .tick { animation: sh-tick 0.5s cubic-bezier(0.22, 1, 0.36, 1); }
+.sh-tail.sh-two .cool { color: var(--color-cool); }
+/* the rail's own control: quieter than a destination, and always last */
+.sh-toggle .sh-ico { border-style: dashed; }
+.sh-toggle .sh-name { color: var(--color-ink-4); }
+.sh-toggle:hover .sh-name { color: var(--color-ink-2); }
+
+/* collapsed tooltip — the label has to exist somewhere */
+.sh-tip {
+  /* Absolute within .sh — see the note on local() in Shell.tsx. */
+  position: absolute;
+  /* Clear of the 52px rail, not just clear of the glyph: a hint that touches the
+     icon it names reads as attached to it. */
+  left: 66px;
+  transform: translateY(-50%);
+  background: var(--color-raised);
+  border: 1px solid var(--color-line-2);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font: 400 11px/1 var(--font-sans);
+  color: var(--color-ink-1);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 60;
+  border: var(--edge-float);
+  box-shadow: var(--shadow-float);
+  animation: sh-tipin 0.14s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes sh-tipin {
+  from { opacity: 0; transform: translateY(-50%) translateX(-3px); }
+}
+
+.sh-back {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 13px 10px;
+  cursor: pointer;
+  color: var(--color-ink-3);
+  font: 400 11px/1 var(--font-sans);
+  white-space: nowrap;
+}
+.sh-back:hover { color: var(--color-ink-1); }
+.sh-back .sh-name { color: inherit; }
+.sh-back svg { flex: none; }
+/* Out of flow, not just invisible: a nowrap label at opacity 0 is still a 45px
+   flex sibling, and in a 52px rail it shrinks the arrow to nothing. */
+.sh-rail:not(.open) .sh-back .sh-name { display: none; }
+.sh-rail:not(.open) .sh-back { padding-left: 19px; }
+
+.sh-foot { border-top: 1px solid var(--color-line-1); padding: 8px 0 10px; }
+.sh-me {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 13px 0;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sh-av {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--color-tint-3);
+  border: 1px solid var(--color-line-1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 500 9px/1 var(--font-mono);
+  color: var(--color-ink-3);
+}
+
+/* ---- main ---------------------------------------------------------- */
+
+.sh-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.sh-head {
+  height: 55px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--color-line-1);
+}
+.sh-crumb {
+  font: 400 13px/1 var(--font-sans);
+  color: var(--color-ink-3);
+  cursor: pointer;
+}
+.sh-crumb:hover { color: var(--color-ink-1); }
+.sh-sep { font: 400 12px/1 var(--font-mono); color: var(--color-ink-4); }
+.sh-headline {
+  display: flex;
+  align-items: baseline;
+  /* Every segment sits the same distance from its separator. The title's
+     negative margin cancels its own hit-area padding, so the gap is measured
+     between the words either way. */
+  gap: 14px;
+  min-width: 0;
+}
+.sh-title {
+  font: 600 15px/1 var(--font-sans);
+  color: var(--color-ink-1);
+  white-space: nowrap;
+  /* Wide enough for 32 of the widest characters, so the cap is the only limit
+     a typed name meets. */
+  max-width: 440px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The name is edited where it is read. The pencil is held back until the group
+   is hovered or focused, so the head band stays a heading rather than a form. */
+.sh-titlewrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* The target is bigger than the word: the head band has the vertical room,
+     and a 15px string is a small thing to ask someone to hit exactly. */
+  padding: 8px 11px 8px 7px;
+  margin: -8px -11px -8px -7px;
+  border-radius: 4px;
+  cursor: text;
+  color: var(--color-ink-3);
+  outline: none;
+}
+.sh-titlewrap:hover, .sh-titlewrap:focus-visible { background: var(--color-tint-2); }
+.sh-pen { opacity: 0; transition: opacity .12s ease; flex: none; }
+.sh-titlewrap:hover .sh-pen, .sh-titlewrap:focus-visible .sh-pen { opacity: 1; }
+.sh-title-in {
+  padding: 8px 11px 8px 7px;
+  margin: -8px -11px -8px -7px;
+  min-width: 4ch;
+  border: 0;
+  border-radius: 4px;
+  background: var(--color-raised);
+  box-shadow: inset 0 0 0 1px var(--color-warm);
+  outline: none;
+  transition: box-shadow .18s ease, color .18s ease;
+}
+/* A keystroke that the cap swallows leaves no trace otherwise — the field says
+   so for an instant rather than appearing to have stopped listening. */
+.sh-title-in[data-full='1'] {
+  color: var(--color-alarm);
+  box-shadow: inset 0 0 0 1px var(--color-alarm);
+  transition: none;
+}
+/* Baseline-aligned is geometrically right but optically low: 11px mono lowercase
+   has a much smaller x-height than a 15px semibold cap, so a lowercase subtitle
+   like "platform" reads as sitting under the title. Half a pixel of lift settles
+   it without breaking the baseline anywhere it already looks right (figures,
+   which are cap height, barely move). */
+.sh-sub {
+  font: 400 11px/1 var(--font-mono);
+  color: var(--color-ink-4);
+  transform: translateY(-0.5px);
+}
+.sh-act {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.sh-k {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 400 10.5px/1 var(--font-mono);
+  color: var(--color-ink-4);
+  cursor: pointer;
+}
+.sh-k:hover { color: var(--color-ink-2); }
+.sh-body { flex: 1; overflow: auto; }
+
+/* ---- palette ------------------------------------------------------- */
+
+.sh-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(2px);
+  z-index: 40;
+  animation: sh-fade 0.14s linear;
+}
+@keyframes sh-fade { from { opacity: 0; } }
+.sh-pal {
+  position: absolute;
+  top: 84px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 440px;
+  max-width: calc(100% - 48px);
+  background: var(--color-raised);
+  border: 1px solid var(--color-line-2);
+  border-radius: 6px;
+  box-shadow: var(--shadow-float);
+  overflow: hidden;
+  z-index: 41;
+  animation: sh-drop 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes sh-drop { from { opacity: 0; transform: translateX(-50%) translateY(-6px); } }
+.sh-palq {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  padding: 13px 15px;
+  font: 400 13px/1 var(--font-sans);
+  color: var(--color-ink-1);
+  border-bottom: 1px solid var(--color-line-1);
+}
+.sh-palq::placeholder { color: var(--color-ink-4); }
+.sh-pallist { max-height: 264px; overflow-y: auto; padding: 6px 0; }
+.sh-palrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 15px;
+  cursor: pointer;
+}
+.sh-palrow.on { background: var(--color-tint-2); }
+.sh-palrow.on .sh-palname { color: var(--color-ink-1); }
+.sh-palname { font: 400 12.5px/1 var(--font-sans); color: var(--color-ink-2); }
+.sh-palsec {
+  margin-left: auto;
+  font: 400 9px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+  color: var(--color-ink-4);
+}
+.sh-palnone {
+  padding: 14px 15px;
+  font: 400 11.5px/1 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+/* ---- scope switcher ------------------------------------------------ */
+
+/* The switcher is a STRUCTURE, not a panel: a spine with ticks, separated
+   from the page by a soft-edged haze rather than a border. Same treatment as
+   the assignee picker, minus its stem — a stem measures between two entities,
+   and switching scope attaches nothing to anything. */
+.sh-pop {
+  position: absolute;
+  top: 40px;
+  left: 6px;
+  width: 186px;
+  padding: 4px 0 10px;
+  z-index: 30;
+}
+/* Keyed on the popover's OWN state, not the rail's: it is only a rail
+   descendant in one of its two mount points — floating, it lives at the shell
+   root — so "is my ancestor rail open" cannot express its presentation. */
+/* Both panels are only ever regions of the rail — see the note in Shell.tsx.
+   The base rules below are the in-rail case; nothing floats. */
+.sh-haze {
+  position: absolute;
+  left: -46px;
+  right: -44px;
+  top: -40px;
+  bottom: -36px;
+  /* Barely there. This is only the ground the item hazes sit on — it keeps the
+     whole area reading as one field without becoming a rectangle. */
+  backdrop-filter: blur(3px) saturate(0.8);
+  -webkit-backdrop-filter: blur(3px) saturate(0.8);
+  background: color-mix(in srgb, var(--color-ground) 42%, transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 22%, #000 74%, transparent 100%),
+    linear-gradient(to bottom, transparent 0, #000 18%, #000 80%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 22%, #000 74%, transparent 100%),
+    linear-gradient(to bottom, transparent 0, #000 18%, #000 80%, transparent 100%);
+  -webkit-mask-composite: source-in;
+  mask-composite: intersect;
+  animation: sh-fade 0.18s linear;
+  pointer-events: none;
+}
+/* Each line carries its own haze, the way the assignee picker's options do, so
+   the separation follows the text instead of boxing it. Soft on every edge —
+   the field should have no side you could trace. */
+.sh-popo::before,
+.sh-poph::before,
+/* Behind the row's own background, so the tick and spine stay crisp instead of
+   being washed by the field that is meant to sit under them. */
+/* Per-row haze, inset past the spine on the left. It bleeds vertically onto its
+   neighbours by design — that is what keeps the list reading as one soft field
+   — but it must never cross the spine, because a later row paints after an
+   earlier one and would wash the earlier row's spine segment away. */
+.sh-popr::before {
+  content: '';
+  position: absolute;
+  inset: -7px -16px -7px 6px;
+  z-index: -1;
+  backdrop-filter: blur(10px) saturate(0.6);
+  -webkit-backdrop-filter: blur(10px) saturate(0.6);
+  background: color-mix(in srgb, var(--color-ground) 78%, transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 16%, #000 76%, transparent 100%),
+    linear-gradient(to bottom, transparent 0, #000 22%, #000 78%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 16%, #000 76%, transparent 100%),
+    linear-gradient(to bottom, transparent 0, #000 22%, #000 78%, transparent 100%);
+  -webkit-mask-composite: source-in;
+  mask-composite: intersect;
+}
+.sh-popo::before { inset: -12px -16px -6px -12px; }
+@keyframes sh-fade { from { opacity: 0; } }
+.sh-popo {
+  display: none;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 10px 8px 8px;
+  position: relative;
+  animation: sh-opt 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+/* Only the floating popover carries it: collapsed, the rail shows no scope of
+   its own, so the panel has to name where you are. It is also the link home —
+   naming the scope and opening its overview are the same gesture. */
+
+.sh-popo b { font: 500 12px/1 var(--font-sans); color: var(--color-ink-1); }
+.sh-popo span { font: 400 10px/1 var(--font-mono); color: var(--color-ink-4); }
+.sh-poph { width: max-content; }
+.sh-poph {
+  font: 400 8.5px/1 var(--font-mono);
+  letter-spacing: 0.09em;
+  color: var(--color-ink-4);
+  padding: 2px 0 8px 8px;
+  position: relative;
+  animation: sh-opt 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+/* The spine is the list's own axis: it grows once, and every row hangs a tick
+   off it. Measured in CSS rather than the DOM because these rows are a fixed
+   height — unlike the picker, whose labels wrap. */
+/* Ink rather than a hairline token: --color-line-1 is a divider between filled
+   surfaces, and at 1px over a rail it disappears. The spine is structure you
+   are meant to read. */
+.sh-poplist { position: relative; padding-left: 8px; --spine: color-mix(in srgb, var(--color-ink-4) 78%, transparent); }
+.sh-spine { display: none; }
+@keyframes sh-spine { from { transform: scaleY(0); } }
+.sh-popr {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 20px;
+  font: 400 12.5px/1 var(--font-sans);
+  color: var(--color-ink-2);
+  cursor: pointer;
+  white-space: nowrap;
+  /* The tick is drawn as the row's own background, not a pseudo-element: the
+     row's ::before is the haze and its ::after is the current-team dot, so
+     both are already spoken for. */
+  /* Two layers: the horizontal tick, and the vertical spine segment this row
+     contributes. The last row's segment stops at its own tick, which is what
+     makes the corner an L — measuring it off the list's height never does,
+     because the list's padding is not the last row's centre. */
+  background-image: linear-gradient(var(--spine), var(--spine)),
+    linear-gradient(var(--spine), var(--spine));
+  background-repeat: no-repeat, no-repeat;
+  background-position: 0 50%, 0 0;
+  background-size: 9px 1px, 1px 100%;
+  transition: color 0.16s, background-size 0.16s, background-image 0.16s;
+  /* Shrink to the label, so each haze is the width of its own word. */
+  width: max-content;
+  animation: sh-opt 0.2s cubic-bezier(0.22, 1, 0.36, 1) both,
+    sh-tickw 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(0.04s + var(--i) * 0.04s), calc(0.06s + var(--i) * 0.04s);
+}
+@keyframes sh-tickw { from { background-size: 0 1px, 1px 100%; } }
+.sh-popr:last-child { background-size: 9px 1px, 1px 50%; }
+@keyframes sh-opt { from { opacity: 0; transform: translateX(-5px); } }
+/* Focus by quieting the others — the same device the picker uses, and the
+   reason no row needs a highlight rectangle. */
+.sh-poplist:hover .sh-popr { color: var(--color-ink-4); }
+.sh-poplist .sh-popr:hover { color: var(--color-ink-1); }
+.sh-poplist:hover .sh-popr:hover {
+  background-image: linear-gradient(var(--color-warm), var(--color-warm)),
+    linear-gradient(var(--spine), var(--spine));
+  background-size: 13px 1px, 1px 100%;
+}
+.sh-poplist:hover .sh-popr:last-child:hover { background-size: 13px 1px, 1px 50%; }
+.sh-popr.on { color: var(--color-ink-1); }
+.sh-popr.on::after {
+  content: '';
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--color-warm);
+}
+
+
+
+/* Open, the switcher is part of the rail rather than a thing floating over the
+   page: it opens between the mark and the rule and pushes the nav down. */
+.sh-pop.in {
+  position: static;
+  top: auto;
+  left: auto;
+  width: auto;
+  padding: 2px 0 6px 12px;
+  animation: sh-open 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  overflow: hidden;
+}
+.sh-pop.in .sh-popo { display: none; }
+@keyframes sh-open {
+  from {
+    max-height: 0;
+    opacity: 0;
+  }
+  to {
+    max-height: 200px;
+    opacity: 1;
+  }
+}
+
+/* Inside the rail there is nothing behind the list to separate from. */
+.sh-pop.in .sh-haze,
+.sh-pop.in .sh-popr::before { display: none; }
+
+/* ---- identity ------------------------------------------------------- */
+/* The foot's mirror of the scope switcher: opens upward, same vocabulary.
+   A readout with two switches — never a form. */
+.sh-you {
+  position: absolute;
+  left: 59px;
+  bottom: 46px;
+  z-index: 40;
+  width: max-content;
+  min-width: 168px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 2px 0;
+  animation: sh-fade 0.18s linear;
+}
+/* Collapsed, this floats beside the rail exactly as the scope switcher does —
+   whose rows are indented by their own spine and tick. Without matching that
+   indent the identity text sits nearly against the rail's edge while the
+   switcher above it breathes. */
+.sh-you:not(.in) { padding: 2px 0 16px 12px; }
+.sh-you .sh-haze {
+  left: -16px;
+  right: -20px;
+  top: -14px;
+  bottom: -14px;
+}
+.sh-youo { display: flex; flex-direction: column; gap: 3px; position: relative; }
+.sh-youo b { font: 500 12px/1 var(--font-sans); color: var(--color-ink-1); }
+.sh-youo span { font: 400 10px/1 var(--font-mono); color: var(--color-ink-4); }
+/* A readout, so no spine and no ticks — those mean "pick one". */
+.sh-yougr {
+  position: relative;
+  font: 400 9px/1.5 var(--font-mono);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--color-warm);
+  max-width: 168px;
+}
+.sh-youseg {
+  position: relative;
+  display: flex;
+  align-self: stretch;
+  justify-content: space-between;
+  gap: 0;
+  user-select: none;
+}
+.sh-youopt {
+  font: 400 10px/1 var(--font-mono);
+  color: var(--color-ink-4);
+  cursor: pointer;
+  padding-bottom: 3px;
+  border-bottom: 1px solid transparent;
+}
+.sh-youopt:hover { color: var(--color-ink-2); }
+.sh-youopt.on { color: var(--color-ink-1); border-bottom-color: var(--color-warm); }
+.sh-youout {
+  position: relative;
+  font: 400 11.5px/1 var(--font-sans);
+  color: var(--color-ink-3);
+  cursor: pointer;
+  user-select: none;
+}
+.sh-youout:hover { color: var(--color-ink-1); }
+/* Open, it belongs to the rail: no haze, because nothing is behind it. */
+/* Opening in the rail is a region claiming space: the height opens, then each
+   line resolves outward from the left on a short stagger. Closing makes no
+   claim — it just leaves. */
+.sh-youwrap {
+  overflow: hidden;
+  max-height: 0;
+  transition: max-height 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.sh-youwrap.on { max-height: 280px; }
+/* Nothing here is fetched — every line is held in memory, and a reveal where no
+   work is happening is theatre. */
+/* A known label is its own placeholder: condensed and tight, opening to full
+   width. No skeleton, and nothing decodes — none of this is being computed. */
+.sh-youwrap.on .sh-you.in > div { animation: sh-res 0.24s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.sh-youwrap.on .sh-you.in > div:nth-child(1) { animation-delay: 0.14s; }
+.sh-youwrap.on .sh-you.in > div:nth-child(2) { animation-delay: 0.18s; }
+.sh-youwrap.on .sh-you.in > div:nth-child(3) { animation-delay: 0.22s; }
+.sh-youwrap.on .sh-you.in > div:nth-child(4) { animation-delay: 0.26s; }
+.sh-youwrap.on .sh-you.in > div:nth-child(5) { animation-delay: 0.3s; }
+@keyframes sh-res {
+  from { opacity: 0; transform: scaleX(0.74); }
+  to { opacity: 1; transform: scaleX(1); }
+}
+.sh-you.in > div { transform-origin: left center; }
+.sh-you.in {
+  /* Relative for the haze, which is absolutely positioned against it. The
+     floating rule's offsets have to be cleared here, or they shift the panel
+     visually while its layout box stays put. */
+  position: relative;
+  left: auto;
+  right: auto;
+  top: auto;
+  bottom: auto;
+  width: auto;
+  min-width: 0;
+  /* Open, it is a region of the rail rather than a floating panel, so it takes
+     a boundary — the same rule that separates the mark from the nav above. */
+  border-top: 1px solid var(--color-line-1);
+  margin: 8px 13px 8px;
+  padding-top: 12px;
+  padding-bottom: 10px;
+  animation: sh-fade 0.18s linear;
+}
+.sh-me .sh-name { display: flex; flex-direction: column; gap: 3px; }
+.sh-mesub { font: 400 9.5px/1 var(--font-mono); color: var(--color-ink-4); }
+.sh-avp { background: none; border-color: transparent; color: var(--color-ink-3); }
+.sh-me.on .sh-avp, .sh-me:hover .sh-avp { color: var(--color-ink-1); }
+/* Controls opt out of selection; readouts do not. The email is the most
+   copy-worthy string on this surface. */
+.sh-me { user-select: none; }
+
+/* Connection lost. Sits with the foot rows so it reads as a condition of the
+   rail rather than an event in the page, and it is not a control — there is
+   nothing here to click, only something to know. */
+.sh-offrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 13px;
+  cursor: default;
+}
+.sh-offrow .sh-name { color: var(--color-ink-3); }
+.sh-offico {
+  color: var(--color-ink-3);
+  /* The one repeating animation in the rail, and it is earned: a retry loop is
+     genuinely still running. */
+  animation: sh-retry 2.4s ease-in-out infinite;
+}
+.sh-offtail {
+  color: var(--color-ink-4);
+  font: 400 9.5px/1 var(--font-mono);
+}
+@keyframes sh-retry {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* The team list when there is no connection: a stated absence, inert. No spine
+   and no ticks — there is nothing to measure out. */
+.sh-popdead {
+  padding: 4px 0 6px 20px;
+  font: 400 10.5px/1 var(--font-mono);
+  color: var(--color-ink-4);
+}

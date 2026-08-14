@@ -20,6 +20,8 @@
 // reads the resolved value disagrees, and disagreeing is the whole job.
 
 import { useCallback, useEffect, useState } from 'react'
+import AcquireCard from './AcquireCard'
+import ShellCard from './ShellCard'
 import './gallery.css'
 
 type Section = 'color' | 'type' | 'elevation' | 'space' | 'components'
@@ -44,7 +46,7 @@ function Swatch({ token }: { token: string }) {
   const value = resolved(token)
   return (
     <div className="gal-sw">
-      <div className="gal-chip" style={{ background: `var(${token})` }} />
+      <div className="gal-swatch" style={{ background: `var(${token})` }} />
       <div className="gal-meta">
         <span className="gal-name">{token.replace('--color-', '')}</span>
         <span className="gal-val" data-missing={value ? undefined : ''} title={value}>
@@ -298,30 +300,14 @@ export default function UiGallery() {
           <>
             <h1 className="gal-h">Components</h1>
             <p className="gal-sub">
-              Every component in <code>src/ui/</code> gets an entry here, mounted with hand-written
-              props and toggles for the states that matter.
+              Every component in <code>src/ui/</code>, mounted with hand-written props and toggles
+              for the states that matter. Nothing here talks to the network — that is the bar for
+              living in the design system at all, and it is enforced by{' '}
+              <code>eslint-rules/ui-no-app-imports.js</code> rather than asked for. Read the
+              component&rsquo;s <code>.md</code> before changing it.
             </p>
-            <div className="gal-empty">
-              <p>
-                Nothing mounted yet — the token layer landed first, and components arrive on top of
-                it in dependency order: <code>Acquire</code>, then <code>Shell</code>, then the
-                primitives the tables need.
-              </p>
-              <p>
-                The bar for an entry here is the bar for living in <code>src/ui/</code> at all:{' '}
-                <strong>
-                  if it cannot be mounted with hand-written props and no network, it does not belong
-                  in the design system.
-                </strong>{' '}
-                A component that fetches, or that names a task, a run or an org, is a feature
-                component and goes in <code>src/components/</code>. That boundary is enforced by{' '}
-                <code>eslint-rules/ui-no-app-imports.js</code>, so this is a description of what the
-                linter already guarantees rather than a request.
-              </p>
-              <p>
-                See <code>src/ui/CONVENTIONS.md</code> before adding one.
-              </p>
-            </div>
+            <AcquireCard />
+            <ShellCard />
           </>
         )}
       </main>

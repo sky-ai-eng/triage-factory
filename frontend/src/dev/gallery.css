@@ -129,7 +129,7 @@
   overflow: hidden;
 }
 
-.gal-chip {
+.gal-swatch {
   height: 46px;
   border-bottom: 1px solid var(--color-line-1);
 }
@@ -230,4 +230,133 @@
 .gal-empty code {
   font-size: var(--text-reported);
   color: var(--color-ink-2);
+}
+
+/* ── Component cards ──────────────────────────────────────────────────
+   A card is a frame around one component and its toggles. In-flow, so it
+   takes an inset hairline and no cast — the component inside is the thing
+   that may float, not the box describing it. */
+
+.gal-card {
+  box-shadow: var(--shadow-edge);
+  border-radius: var(--radius-inflow);
+  padding: var(--space-8);
+  margin-bottom: var(--space-9);
+}
+
+.gal-cardhead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-6);
+  margin-bottom: var(--space-6);
+}
+
+.gal-cardhead > span:first-child {
+  font-size: var(--text-section);
+  letter-spacing: var(--tracking-section);
+  font-weight: var(--font-weight-medium);
+}
+
+.gal-route {
+  font-family: var(--font-mono);
+  font-size: var(--text-readout);
+  letter-spacing: var(--tracking-readout);
+  color: var(--color-ink-4);
+}
+
+.gal-btn,
+.gal-chip {
+  appearance: none;
+  background: none;
+  border: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-readout);
+  letter-spacing: var(--tracking-readout);
+  color: var(--color-ink-3);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-nested);
+  box-shadow: var(--shadow-edge);
+  transition:
+    color var(--dur-hover) var(--ease-default),
+    box-shadow var(--dur-hover) var(--ease-default);
+}
+
+.gal-btn:hover,
+.gal-chip:hover {
+  color: var(--color-ink-1);
+  box-shadow: var(--shadow-edge-strong);
+}
+
+/* On is a data attribute, not a second class name — the same rule every
+   component in the system follows. */
+.gal-chip[data-on] {
+  color: var(--color-warm);
+  box-shadow: var(--shadow-edge-measure);
+  background: var(--color-warm-1);
+}
+
+.gal-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-7);
+}
+
+.gal-specimens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-9);
+  margin-bottom: var(--space-7);
+}
+
+.gal-spec {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  align-items: flex-start;
+}
+
+.gal-spec-tag {
+  font-family: var(--font-mono);
+  font-size: var(--text-label-sm);
+  letter-spacing: var(--tracking-label-sm);
+  text-transform: uppercase;
+  color: var(--color-ink-4);
+}
+
+/* The shell is mounted at a real size rather than filling the gallery, so its
+   rail reads at the proportions it will have in the app. */
+.gal-viewport {
+  height: 620px;
+  border-radius: var(--radius-inflow);
+  box-shadow: var(--shadow-edge-strong);
+  overflow: hidden;
+  /* The shell measures its overlays against its own root, so it needs to BE
+     the containing block rather than inherit one from the page. */
+  position: relative;
+}
+
+.gal-viewport .sh {
+  height: 100%;
+}
+
+.gal-page {
+  padding: var(--space-9) var(--space-10);
+  max-width: var(--container-measure);
+}
+
+.gal-page p {
+  font-size: var(--text-body);
+  line-height: var(--leading-prose);
+  color: var(--color-ink-2);
+  margin: 0 0 var(--space-6);
+}
+
+.gal-page kbd {
+  font-size: var(--text-reported);
+  color: var(--color-ink-1);
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-nested);
+  box-shadow: var(--shadow-edge);
 }

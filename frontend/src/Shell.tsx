@@ -1,154 +1,189 @@
-import { Link, NavLink, Outlet, useLocation } from 'react-router'
-import { Settings } from 'lucide-react'
+import { useCallback, useMemo, useState } from 'react'
+import { Outlet, useLocation, useNavigate } from 'react-router'
+import UiShell from './ui/shell/Shell'
+import type { Grant, RailCounts } from './ui/shell/routes'
+import type { ThemeChoice } from './ui/shell/Shell'
 import { useOrgHref } from './hooks/useOrgHref'
 import { useOptionalAuth } from './contexts/AuthContext'
 import { useOrgRole } from './hooks/useOrgRole'
+import { useTeams } from './hooks/useTeams'
 import { FeatureFleet, useEntitlements } from './hooks/useEntitlements'
-import OrgPicker from './components/OrgPicker'
-import UserMenu from './components/UserMenu'
+import { getStoredTheme, setTheme as applyStoredTheme } from './lib/theme'
 
-// The base nav shared by both modes. Prompts + Team are mode-dependent (the
-// /team surface is multi-only), so they're spliced in per-mode below.
-const baseNavLeading = [
-  { to: '/', label: 'Factory' },
-  { to: '/triage', label: 'Triage' },
-  { to: '/board', label: 'Board' },
-  { to: '/prs', label: 'PRs' },
-  { to: '/projects', label: 'Projects' },
-  { to: '/repos', label: 'Repos' },
-  // Usage — the spend dashboard (TFAC-479). Everyone gets at least the
-  // personal view; the team/org sections inside the page self-gate on role.
-  { to: '/usage', label: 'Usage' },
-]
+// The application frame. This file is the ADAPTER: it resolves who the viewer
+// is, translates the design system's route ids into this app's paths, and hands
+// the result to src/ui/shell, which knows about tokens and nothing else.
+//
+// The split is not ceremony. It is what lets /dev/ui mount the rail in all four
+// grant permutations side by side, which is the only way the rail's behaviour
+// across grants gets reviewed — and that behaviour IS the design. It also keeps
+// the permission model in one array (ui/shell/routes.ts) that both the rail and
+// the command palette read, so the palette can never offer a page the rail is
+// hiding.
+
+/**
+ * Route id → client path. The design system names destinations; this map is the
+ * only place those names meet React Router.
+ *
+ * Two ids resolve to the same page on purpose: Prompts' Library and Bindings
+ * are one surface today, so both land on /prompts. The reverse map below drops
+ * Bindings so Library is the canonical answer, which is what lights the rail.
+ */
+const PATHS: Record<string, string> = {
+  overview: '/overview',
+  board: '/board',
+  projects: '/projects',
+  factory: '/',
+  repos: '/repos',
+  pulls: '/prs',
+  'prompts.library': '/prompts',
+  'prompts.market': '/marketplace',
+  'prompts.bindings': '/prompts',
+  usage: '/usage',
+  team: '/team',
+  org: '/org',
+  fleet: '/fleet',
+  queue: '/triage',
+  settings: '/settings',
+}
+
+/** Longest path first, so /projects/:id resolves to projects and not to /. */
+const BY_PATH: Array<[string, string]> = Object.entries(PATHS)
+  .filter(([id]) => id !== 'prompts.bindings')
+  .map(([id, path]) => [path, id] as [string, string])
+  .sort((a, b) => b[0].length - a[0].length)
+
+/** Which rail row is lit, given where the browser actually is. */
+function routeIdFor(pathname: string): string {
+  // Multi mode prefixes every path with /orgs/<id>; strip it so one map serves
+  // both deployment shapes rather than two near-identical ones.
+  const rel = pathname.replace(/^\/orgs\/[^/]+/, '') || '/'
+  for (const [path, id] of BY_PATH) {
+    if (path === '/') continue
+    if (rel === path || rel.startsWith(path + '/')) return id
+  }
+  return rel === '/' ? 'factory' : ''
+}
+
+const TITLES: Record<string, string> = {
+  overview: 'Overview',
+  board: 'Board',
+  projects: 'Projects',
+  factory: 'Factory',
+  repos: 'Repositories',
+  pulls: 'Pull requests',
+  'prompts.library': 'Prompts',
+  'prompts.market': 'Marketplace',
+  usage: 'Usage',
+  team: 'Team',
+  org: 'Organization',
+  fleet: 'Fleet',
+  queue: 'Queue',
+  settings: 'Settings',
+}
 
 export default function Shell() {
   const orgHref = useOrgHref()
-  const location = useLocation()
-  // useOptionalAuth returns the multi-mode auth context if present,
-  // null in local mode. The org picker and user menu are multi-only;
-  // local mode hides them.
+  const navigate = useNavigate()
+  const { pathname } = useLocation()
+
+  // useOptionalAuth returns the multi-mode auth context if present, null in
+  // local mode. That absence IS the mode signal — there is no separate flag.
   const auth = useOptionalAuth()
   const isMulti = auth !== null
-  // The /org surface is admin-gated in the nav (owner/admin of the active
-  // org). Non-admins can still deep-link to it for a read-only roster + Leave,
-  // but it doesn't earn a nav slot for them. False in local mode (no auth).
+
   const { isAdmin: orgAdmin } = useOrgRole()
-
-  // Fleet console (TFAC-589) — the sandbox-fleet admin surface. Composes the two
-  // deployment-scoped gates: the operator identity (from /api/me, org-less) AND
-  // the FeatureFleet entitlement. Both must hold; absent otherwise (no upsell
-  // stub), matching the backend's 404-and-hide. Local mode is unlicensed, so the
-  // item never shows there even though the single user is nominally an operator.
+  const { teams } = useTeams()
   const { has, loaded: entLoaded } = useEntitlements()
-  const fleetVisible = entLoaded && has(FeatureFleet) && (auth?.me?.is_operator ?? false)
 
-  // Full-bleed routes (the agent run station) drop the app nav + main padding so
-  // the page owns the whole viewport — it's a focused, open-in-new-tab surface.
-  const fullBleed = /\/runs\/[^/]+\/?$/.test(location.pathname)
+  const [theme, setThemeState] = useState<ThemeChoice>(() => {
+    const stored = getStoredTheme()
+    return stored === 'auto' ? 'system' : stored
+  })
 
-  // The shared pill style for every nav entry. Factored out so the mode-specific
-  // Team/Prompts entries (whose active state we compute by hand, since they
-  // share the /team pathname and differ only by ?tab) match the NavLink ones.
-  const pill = (isActive: boolean) =>
-    `text-body font-medium px-4 py-1.5 rounded-full transition-all duration-200 ${
-      isActive
-        ? 'bg-warm-2 text-warm'
-        : 'text-ink-3 hover:text-ink-2 hover:bg-tint-2'
-    }`
+  const grants = useMemo<Grant[]>(() => {
+    if (!isMulti) return []
+    const g: Grant[] = []
+    if (orgAdmin) g.push('org-admin')
+    // Team admin is per-team and comes from the viewer's own membership row —
+    // an org admin is deliberately NOT a team admin here, which is why this
+    // reads the roles rather than falling back on orgAdmin.
+    if (teams.some((t) => t.role === 'admin')) g.push('team-admin')
+    // The fleet console composes two deployment-scoped gates: the operator
+    // identity from /api/me and the entitlement. Both must hold, matching the
+    // backend's 404-and-hide.
+    if (entLoaded && has(FeatureFleet) && (auth?.me?.is_operator ?? false)) g.push('fleet')
+    return g
+  }, [isMulti, orgAdmin, teams, entLoaded, has, auth])
 
-  // Team + Prompts both live on /team in multi mode (Prompts is the ?tab=prompts
-  // deep-link), so NavLink's pathname-only matching can't tell them apart —
-  // compute their active state from the query here.
-  const onTeam = /\/team\/?$/.test(location.pathname)
-  const promptsTabActive = onTeam && new URLSearchParams(location.search).get('tab') === 'prompts'
-  const teamHomeActive = onTeam && !promptsTabActive
+  const onRoute = useCallback(
+    (id: string) => {
+      const path = PATHS[id]
+      if (path) navigate(orgHref(path))
+    },
+    [navigate, orgHref],
+  )
+
+  const onThemeChange = useCallback((t: ThemeChoice) => {
+    setThemeState(t)
+    // lib/theme's stored vocabulary is light | dark | auto; the rail's third
+    // option is labelled 'system', which is the same idea in the word a reader
+    // expects on a control rather than the one used in storage.
+    applyStoredTheme(t === 'system' ? 'auto' : t)
+  }, [])
+
+  const activeOrg = auth?.orgs?.find((o) => o.id === auth?.serverActiveOrgId) ?? auth?.orgs?.[0]
+  const teamNames = useMemo(() => teams.map((t) => t.name), [teams])
+
+  // Rail tails are facts about destinations, and every one of them needs a
+  // `total` this API does not return yet (backend-needs.md, items 1-8). Absent
+  // rather than zero: a tail reading 0 says "no repositories", which is a claim,
+  // and the rail has no business making it before it knows. Same for the two
+  // live counts and the queue, which pass null and read as `--`.
+  const counts: RailCounts = {}
+
+  const route = routeIdFor(pathname)
+
+  // Full-bleed routes (the agent run station) drop the frame so the page owns
+  // the whole viewport — it is a focused, open-in-new-tab surface.
+  if (/\/runs\/[^/]+\/?$/.test(pathname)) {
+    return <Outlet />
+  }
 
   return (
-    <div className="min-h-screen bg-ground text-ink-1">
-      {!fullBleed && (
-        <nav className="sticky top-0 z-50 backdrop-blur-xl bg-raised border-b border-line-1 px-8 py-4 flex items-center gap-6">
-          <span className="text-base font-semibold tracking-tight text-ink-1">
-            Triage Factory
-          </span>
-          {isMulti && <OrgPicker />}
-          <div className="flex gap-1 flex-1">
-            {baseNavLeading.map((item) => (
-              <NavLink
-                key={item.to}
-                to={orgHref(item.to)}
-                end={item.to === '/'}
-                className={({ isActive }) => pill(isActive)}
-              >
-                {item.label}
-              </NavLink>
-            ))}
-            {/* Team — multi-mode only (the /team surface has no local route).
-                Defaults to the Members tab. */}
-            {isMulti && (
-              <Link
-                to={orgHref('/team')}
-                aria-current={teamHomeActive ? 'page' : undefined}
-                className={pill(teamHomeActive)}
-              >
-                Team
-              </Link>
-            )}
-            {/* Prompts — one-click reach to the binding-graph canvas. In multi
-                mode it deep-links straight to the /team Prompts tab; in local
-                mode it's the standalone /prompts page. */}
-            {isMulti ? (
-              <Link
-                to={orgHref('/team') + '?tab=prompts'}
-                aria-current={promptsTabActive ? 'page' : undefined}
-                className={pill(promptsTabActive)}
-              >
-                Prompts
-              </Link>
-            ) : (
-              <NavLink to={orgHref('/prompts')} className={({ isActive }) => pill(isActive)}>
-                Prompts
-              </NavLink>
-            )}
-            {/* Marketplace — within-org prompt/blueprint browse (TFAC-537),
-                multi-mode only (no local route exists). No org-level toggle
-                gates this: the within-org marketplace is always on for
-                every multi-mode org (org_settings.marketplace_enabled is
-                reserved for the future cross-org gate, TFAC-92 phase 2 /
-                TFAC-539, and is unrelated to this surface). */}
-            {isMulti && (
-              <NavLink to={orgHref('/marketplace')} className={({ isActive }) => pill(isActive)}>
-                Marketplace
-              </NavLink>
-            )}
-            {orgAdmin && (
-              <NavLink to={orgHref('/org')} className={({ isActive }) => pill(isActive)}>
-                Org
-              </NavLink>
-            )}
-            {fleetVisible && (
-              <NavLink to={orgHref('/fleet')} className={({ isActive }) => pill(isActive)}>
-                Fleet
-              </NavLink>
-            )}
-          </div>
-          <NavLink
-            to={orgHref('/settings')}
-            className={({ isActive }) =>
-              `p-2 rounded-full transition-all duration-200 ${
-                isActive
-                  ? 'bg-warm-2 text-warm'
-                  : 'text-ink-3 hover:text-ink-2 hover:bg-tint-2'
-              }`
-            }
-          >
-            <Settings size={16} />
-          </NavLink>
-          {isMulti && <UserMenu />}
-        </nav>
-      )}
-      <main className={fullBleed ? '' : 'px-8 py-8'}>
-        <Outlet />
-      </main>
-    </div>
+    <UiShell
+      mode={isMulti ? 'multi' : 'local'}
+      grants={grants}
+      flags={{
+        marketplace: isMulti,
+        // Governance has a rail row and a warm alert tail in the design, and no
+        // page. Off until one exists — absent, not disabled, applied to us.
+        governance: false,
+      }}
+      org={activeOrg?.name ?? (isMulti ? '' : 'Triage Factory')}
+      team={teams[0]?.name ?? ''}
+      teams={teamNames}
+      route={route}
+      onRoute={onRoute}
+      // The header band is the shell's; what fills it is the page's. Until
+      // pages supply their own crumbs and title, the rail's name for where you
+      // are is the honest answer — better than an empty band, and replaced page
+      // by page as each one is rebuilt.
+      title={TITLES[route] ?? ''}
+      needs={null}
+      running={null}
+      queued={null}
+      counts={counts}
+      user={
+        isMulti && auth?.me
+          ? { name: auth.me.display_name || auth.me.email || 'You', email: auth.me.email || '' }
+          : null
+      }
+      theme={theme}
+      onThemeChange={onThemeChange}
+      onSignOut={isMulti ? () => void auth?.logout() : undefined}
+    >
+      <Outlet />
+    </UiShell>
   )
 }

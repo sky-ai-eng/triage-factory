@@ -28,6 +28,7 @@ import Projects from './pages/Projects'
 import ProjectDetail from './pages/ProjectDetail'
 import Fleet from './pages/Fleet'
 import Usage from './pages/Usage'
+import Overview from './pages/Overview'
 import Login from './pages/Login'
 import Onboarding from './pages/Onboarding'
 import InviteAccept from './pages/InviteAccept'
@@ -151,6 +152,10 @@ function LocalRoutes() {
         }
       >
         <Route path="/" element={<Factory />} />
+        {/* Overview is a stub page behind a real route: the rail's first row
+            and the scope switcher both point here, and a nav row that 404s is
+            worse than one that says "not yet". */}
+        <Route path="/overview" element={<Overview />} />
         <Route path="/triage" element={<Cards />} />
         <Route path="/board" element={<Board />} />
         <Route path="/runs/:runID" element={<RunDetail />} />
@@ -237,6 +242,7 @@ function MultiRoutes() {
             }
           >
             <Route index element={<Factory />} />
+            <Route path="overview" element={<Overview />} />
             <Route path="triage" element={<Cards />} />
             <Route path="board" element={<Board />} />
             <Route path="runs/:runID" element={<RunDetail />} />

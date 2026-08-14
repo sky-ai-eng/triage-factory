@@ -29,8 +29,12 @@ Consequences worth stating plainly:
 
 - A `ui` component never imports `lib/api`, `hooks/*`, `contexts/*` or
   `types.ts`. It takes data as props and reports events as callbacks.
-- `Shell` is **not** a `ui` component. There is exactly one of it, and it knows
-  routes, grants and deployment mode. It lives at `src/Shell.tsx`.
+- `Shell` **is** a `ui` component, and its router is not. The rail, the palette
+  and the header take route ids and report them through `onRoute`; the adapter
+  at `src/Shell.tsx` maps those ids to paths and supplies the counts. Splitting
+  it that way is what lets `/dev/ui` mount all four grant permutations at once,
+  which is the only way the rail's behaviour across grants gets reviewed — and
+  that behaviour is the design, not decoration on top of it.
 - A component that needs org state does not get an exception. It gets a prop.
 
 ## Every component folder
