@@ -296,3 +296,48 @@ func TestListInstallations_CapturesSuspension(t *testing.T) {
 		}
 	}
 }
+
+// TestListInstallations_CapturesRepositorySelection pins the field the parse
+// used to name in a comment as deliberately discarded. It is what says whether
+// scope drift is even POSSIBLE for an installation: an 'all' grant reaches
+// everything the account owns, so a tracked repository there cannot sit outside
+// it, and "no drift" under that grant means something different from "no drift"
+// under a selection. A payload that omits it reads back as "" — not established
+// — because the mirror's write rule fills that in rather than erasing what a
+// previous pass learned.
+func TestListInstallations_CapturesRepositorySelection(t *testing.T) {
+	key := newTestKey(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[
+			{"id": 100, "account": {"login": "acme-eng", "type": "Organization"}, "repository_selection": "selected"},
+			{"id": 200, "account": {"login": "solo-dev", "type": "User"}, "repository_selection": "all"},
+			{"id": 300, "account": {"login": "third-co", "type": "Organization"}}
+		]`))
+	}))
+	defer srv.Close()
+
+	m, err := githubapp.NewMinter(githubapp.Config{
+		PrivateKey: key,
+		AppID:      424242,
+		APIBase:    srv.URL,
+		HTTPClient: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewMinter: %v", err)
+	}
+
+	insts, err := m.ListInstallations(context.Background())
+	if err != nil {
+		t.Fatalf("ListInstallations: %v", err)
+	}
+	if len(insts) != 3 {
+		t.Fatalf("got %d installations, want 3", len(insts))
+	}
+	for i, want := range []string{"selected", "all", ""} {
+		if insts[i].RepositorySelection != want {
+			t.Errorf("inst[%d].RepositorySelection = %q, want %q", i, insts[i].RepositorySelection, want)
+		}
+	}
+}

@@ -78,19 +78,41 @@ func (c *Client) ListUserRepos(ctx context.Context) ([]UserRepo, error) {
 // maxFetchPages is reached (TFAC-571) — an installation grant beyond 1,000
 // repos truncates with a logged WARN rather than silently under-covering the
 // poll's tracked-repo intersection.
+//
+// A partial list is fine for the poller: the intersection it computes just
+// covers fewer repos this cycle. Callers for whom a partial list would be a
+// WRONG answer rather than a smaller one — the grant mirror, whose whole
+// contract is "this is everything the App can reach" — must use
+// ListInstallationReposComplete instead.
 func (c *Client) ListInstallationRepos(ctx context.Context) ([]UserRepo, error) {
+	repos, _, err := c.ListInstallationReposComplete(ctx)
+	return repos, err
+}
+
+// ListInstallationReposComplete is ListInstallationRepos plus the one bit the
+// slice cannot carry: whether the listing is the WHOLE grant.
+//
+// Completeness is not a detail for a mirror. A truncated answer written as if it
+// were complete makes every repository past the cut look revoked, and the
+// difference between "the App cannot reach this" and "we stopped reading"
+// is the difference between a security finding and a lie. Two things can make an
+// answer partial: the page cap, and GitHub reporting a total_count the pages
+// never reached (an empty page arriving early). Both report complete=false, and
+// the caller's correct response is to leave the previous answer in place.
+func (c *Client) ListInstallationReposComplete(ctx context.Context) ([]UserRepo, bool, error) {
 	var all []UserRepo
+	total := -1 // -1 until GitHub has told us; a grant of 0 is a legitimate answer
 
 	for page := 1; ; page++ {
 		if page > maxFetchPages {
 			githubLog.Warn("installation repos list truncated at page cap; some repos may be missing from the poll's tracked-repo intersection",
 				"resource", "installation/repositories", "page_cap", maxFetchPages)
-			break
+			return all, false, nil
 		}
 		path := fmt.Sprintf("/installation/repositories?per_page=100&page=%d", page)
 		data, err := c.Get(ctx, path)
 		if err != nil {
-			return nil, fmt.Errorf("fetch installation repositories page %d: %w", page, err)
+			return nil, false, fmt.Errorf("fetch installation repositories page %d: %w", page, err)
 		}
 
 		var resp struct {
@@ -98,8 +120,9 @@ func (c *Client) ListInstallationRepos(ctx context.Context) ([]UserRepo, error) 
 			Repositories []UserRepo `json:"repositories"`
 		}
 		if err := json.Unmarshal(data, &resp); err != nil {
-			return nil, fmt.Errorf("parse installation repositories page %d: %w", page, err)
+			return nil, false, fmt.Errorf("parse installation repositories page %d: %w", page, err)
 		}
+		total = resp.TotalCount
 
 		if len(resp.Repositories) == 0 {
 			break
@@ -110,7 +133,9 @@ func (c *Client) ListInstallationRepos(ctx context.Context) ([]UserRepo, error) 
 		}
 	}
 
-	return all, nil
+	// Ran out of pages before reaching the count GitHub advertised. Rare, and
+	// benign for the poller, but for a mirror it is precisely a partial fetch.
+	return all, total >= 0 && len(all) >= total, nil
 }
 
 // CheckRepoAccess probes GET /repos/{owner}/{repo} to decide whether this

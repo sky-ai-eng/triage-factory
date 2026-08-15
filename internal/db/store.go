@@ -250,6 +250,14 @@ type Stores struct {
 	// org_github_apps for the same manifest-flow path.
 	GitHubApps GitHubAppsStore
 
+	// InstallationRepos owns installation_repositories — the mirror of what
+	// each App installation can reach, kept correct by pull so the org page can
+	// name reach without purpose and scope drift. Admin-pool-only in Postgres
+	// (the reconcile is the sole writer, like the installation rows it hangs
+	// off). Not in TxStores: the reconcile owns its own scoped transaction and
+	// nothing else writes the table.
+	InstallationRepos InstallationReposStore
+
 	// GitHubDeliveries owns github_webhook_deliveries — the dedup record of
 	// GitHub App webhook deliveries the receiver has already applied, so an
 	// operator-triggered redelivery doesn't re-run the installation upsert or

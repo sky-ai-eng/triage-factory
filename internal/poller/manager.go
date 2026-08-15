@@ -42,8 +42,27 @@ type Manager struct {
 	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules; discovery polls the org-wide union (every team's rules)
 	githubGroups db.TeamGitHubGroupsStore // GitHub-team → TF-team mappings; reconciled (stale-team prune) each GitHub cycle
 	secrets      db.SecretStore           // integration creds via SecretStore (keychain in local, vault in multi)
-	apps         db.GitHubAppsStore       // per-org App installations + local-NAT backfill for per-installation polling
+	apps         db.GitHubAppsStore       // per-org App installations, read per cycle to fan the poll out across them
 	resolver     ghclient.Resolver        // per-cycle, per-installation GitHub client resolution (App installation token → PAT)
+
+	// ReconcileGrant refreshes the org's App-installation mirror — which
+	// installations exist, how wide each grant is, and which repositories each
+	// reaches — from GitHub, before this cycle reads any of it. nil disables
+	// the pass (tests, and any embedder that hasn't wired it).
+	//
+	// It runs inside the poll cycle rather than off the poll-completion
+	// sentinel every other background pass hangs from, for a reason the
+	// sentinel cannot serve: a cycle that finds no installations reports
+	// degraded and returns WITHOUT emitting a completion, so a subscriber would
+	// never fire for exactly the org whose mirror is broken. Running here also
+	// means the installations this cycle is about to fan out over are the ones
+	// GitHub reports right now, not the ones it reported a cycle ago.
+	//
+	// Leader gating comes from the poller itself: in multi mode the scheduler
+	// runs only on the brain-lease holder, and in local mode it always runs.
+	// That is the same gate the tracker, the drain worker and the sweeper sit
+	// behind, so no second mechanism is introduced for this one pass.
+	ReconcileGrant func(ctx context.Context, orgID string) error
 
 	// OnError fires when a poll cycle returns an error. Source is "github"
 	// or "jira"; orgID identifies the tenant whose cycle errored (empty
@@ -460,6 +479,20 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		trace.WithAttributes(telemetry.Source("github"), telemetry.OrgID(orgID)))
 	defer span.End()
 
+	// Refresh what the App can reach before reading any of it, and BEFORE the
+	// tracked-set gate below: an org that tracks nothing is precisely the org
+	// where "the App can reach repositories nobody asked for" is largest, so
+	// skipping the pass there would blind the finding in the case that needs it
+	// most. Best-effort — a mirror TF fails to refresh is one it refreshes next
+	// cycle, and never a reason to skip the poll the caller actually came for.
+	// The reconcile leaves the previous answer in place on any failure, so a
+	// stale mirror is the worst outcome here.
+	if m.ReconcileGrant != nil {
+		if err := m.ReconcileGrant(ctx, orgID); err != nil {
+			githubLog.WarnContext(ctx, "installation mirror reconcile failed", "org", orgID, "error", err)
+		}
+	}
+
 	repos, err := m.repos.ListConfiguredNamesSystem(ctx, orgID)
 	if err != nil {
 		span.SetStatus(codes.Error, "load configured repos")
@@ -504,21 +537,16 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		return
 	}
 
+	// Already reconciled against GET /app/installations at the top of this
+	// cycle, in BOTH modes. It used to be reconciled here and only when
+	// isLocal, on the reasoning that webhooks can't reach a laptop — which left
+	// multi mode converging on deliveries alone, and GitHub never re-sends one
+	// it failed to deliver. An org that missed its `created` delivery then read
+	// as installed on no accounts forever: degraded below, cycle skipped, repo
+	// picker blank, with nothing on a timer to correct it.
 	installs, err := m.apps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		githubLog.Warn("list installations failed", "org", orgID, "error", err)
-	}
-
-	// Local-NAT bonus: webhooks don't reach a local instance, so the
-	// installation mirror can't be kept fresh by the webhook receiver. The App
-	// is active here (appActive gate above), so backfill from the API on the
-	// cycle and re-read.
-	if isLocal {
-		if berr := m.apps.BackfillInstallationsFromAPI(ctx, orgID); berr != nil {
-			githubLog.Warn("installation backfill failed", "org", orgID, "error", berr)
-		} else if installs, err = m.apps.ListInstallationsForOrgSystem(ctx, orgID); err != nil {
-			githubLog.Warn("re-list installations after backfill failed", "org", orgID, "error", err)
-		}
 	}
 
 	// Active App installed on no accounts. Under XOR there is no PAT to fall

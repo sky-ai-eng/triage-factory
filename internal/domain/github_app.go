@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 type OrgGitHubApp struct {
 	OrgID            string
@@ -86,9 +90,85 @@ type OrgGitHubAppInstallation struct {
 	// payload's suspended_by user object. Display provenance only — nothing
 	// resolves on it — and "" when the source named no one.
 	SuspendedBy string
+	// RepositorySelection is RepositorySelectionAll or
+	// RepositorySelectionSelected — whether the grant is every repository on the
+	// account or an enumerated set. It is what says whether scope drift is even
+	// POSSIBLE for this installation: an 'all' grant reaches everything the
+	// account owns, so a tracked repository on that account cannot sit outside
+	// it, and "no drift found" there means something different from "no drift
+	// found" under a selective grant.
+	//
+	// "" means unknown — a row mirrored before this was captured — and takes the
+	// account id's fill-in-only write rule rather than the login's overwrite
+	// one, because a writer that omits it is a writer that did not look.
+	RepositorySelection string
+}
+
+// The two values GitHub reports for an installation's repository_selection.
+const (
+	RepositorySelectionAll      = "all"
+	RepositorySelectionSelected = "selected"
+)
+
+// NormalizeRepositorySelection canonicalizes GitHub's repository_selection for
+// storage. Empty means the caller didn't say, which is a supported state (the
+// column is nullable and NULL reads back as ""). Anything outside GitHub's two
+// values is refused rather than stored: the CHECK constraint would refuse it
+// anyway, and failing here names the bad value instead of surfacing a driver
+// error from three layers down.
+func NormalizeRepositorySelection(selection string) (string, error) {
+	s := strings.ToLower(strings.TrimSpace(selection))
+	switch s {
+	case "", RepositorySelectionAll, RepositorySelectionSelected:
+		return s, nil
+	default:
+		return "", fmt.Errorf("unknown repository selection %q", selection)
+	}
 }
 
 // Suspended reports whether the installation is currently suspended. The
 // timestamp is the state (there is no separate flag to fall out of step with
 // it), so every reader asks this rather than re-deriving the zero check.
 func (i OrgGitHubAppInstallation) Suspended() bool { return !i.SuspendedAt.IsZero() }
+
+// GrantsEveryRepository reports whether this installation's grant covers every
+// repository on the account. Callers asking "can this installation drift?" ask
+// this rather than comparing the string, and an unknown selection ("") answers
+// false — the conservative side, since it renders as "we have not established
+// that drift is impossible" rather than as an all-clear.
+func (i OrgGitHubAppInstallation) GrantsEveryRepository() bool {
+	return i.RepositorySelection == RepositorySelectionAll
+}
+
+// InstallationRepository is one entry in an installation's repository grant —
+// a repository the App can reach through that installation, whether or not any
+// team tracks it.
+//
+// It is deliberately NOT a RepoProfile: the grant is a cache of an external
+// fact, rebuilt in full on every reconcile, while a repository row is a registry
+// of a TF entity that worktrees, entities and clone state hang off. A grant
+// entry with no registry row behind it is the normal case — it is exactly what
+// "reach without purpose" means — so this type carries everything a reader
+// needs without a join.
+type InstallationRepository struct {
+	OrgID          string
+	InstallationID string
+	// Source is the provider that issued the repository (RepoSourceGitHub
+	// today); empty on a struct built without one, which the stores normalize on
+	// write. It exists so the join to the registry is written against the same
+	// key the registry is keyed under, not against a literal.
+	Source string
+	Owner  string
+	Repo   string
+	// ExternalID is GitHub's own repository id, which
+	// GET /installation/repositories returns for every entry. "" when the source
+	// sent none, which is a supported state: the slug matches anyway.
+	ExternalID string
+	// ObservedAt is when the reconcile that wrote this row ran. Display
+	// provenance for "the grant as of…", never a join key.
+	ObservedAt time.Time
+}
+
+// Slug renders the entry as the "owner/repo" string every slug-keyed column and
+// store method uses.
+func (r InstallationRepository) Slug() string { return r.Owner + "/" + r.Repo }

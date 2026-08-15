@@ -6025,10 +6025,28 @@ CREATE TABLE public.org_github_app_installations (
     -- re-install clears them alongside removed_at.
     suspended_at timestamp with time zone,
     suspended_by text,
+    -- Whether the grant is every repository on the account or an enumerated
+    -- selection. GitHub reports it on the installation object
+    -- (GET /app/installations and every installation webhook payload).
+    --
+    -- It is what says whether drift is even POSSIBLE for a given installation.
+    -- Without it the org page cannot distinguish "nothing is drifting" from
+    -- "drift is impossible here", and those need different copy: an 'all'
+    -- installation reaches everything the account owns, so a tracked repository
+    -- on that account can never sit outside the grant.
+    --
+    -- NULL means "not learned yet" — a row mirrored before the first reconcile
+    -- — never "no selection". The CHECK admits NULL for exactly that reason and
+    -- refuses anything outside GitHub's two values, so a typo cannot reach the
+    -- column and be read later as a third state.
+    repository_selection text,
     CONSTRAINT org_github_app_installations_account_type_check
         CHECK ((account_type = ANY (ARRAY['Organization'::text, 'User'::text]))),
     CONSTRAINT org_github_app_installations_github_host_check
-        CHECK ((github_host <> ''::text))
+        CHECK ((github_host <> ''::text)),
+    CONSTRAINT org_github_app_installations_repository_selection_check
+        CHECK ((repository_selection IS NULL
+                OR repository_selection = ANY (ARRAY['all'::text, 'selected'::text])))
 );
 
 -- What github_host deliberately does NOT get is a
@@ -6102,6 +6120,123 @@ GRANT ALL ON TABLE public.org_github_app_installations TO anon;
 GRANT ALL ON TABLE public.org_github_app_installations TO authenticated;
 GRANT ALL ON TABLE public.org_github_app_installations TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_github_app_installations TO tf_app;
+
+
+-- The set of repositories a GitHub App installation can reach, mirrored so it
+-- can be compared against the set TF actually tracks.
+--
+-- GET /installation/repositories is already called once per installation per
+-- poll cycle to compute the tracked-granted intersection, and the answer is
+-- then discarded. Nothing can therefore compute, server-side, either of the two
+-- states an operator needs to see:
+--
+--   * reach without purpose — the App can reach a repository no team tracks,
+--     which means TF holds write access to code nobody asked it to touch;
+--   * scope drift — a team tracks a repository outside the grant, which means
+--     that repository is silently unpollable.
+--
+-- Both are security findings rather than cosmetics, and neither is derivable
+-- from state TF keeps today.
+--
+-- # Why this is its own table and not a column on repo_profiles
+--
+-- The relationship really is 1:N — a repository belongs to one GitHub account,
+-- an account has at most one installation of a given App, and a workspace has
+-- exactly one App — so a nullable granted_installation_id on the repository row
+-- would be relationally correct. It is still wrong, for four reasons:
+--
+--  1. It changes what a repository row means. That table is the repositories TF
+--     works with; the grant deliberately contains repositories nobody tracks,
+--     which is the entire content of reach without purpose. Merging them makes
+--     an "all repositories" installation on a 3,000-repo org mint 3,000 rows
+--     that the profiler and every context loader then iterate.
+--  2. Two lifecycles, two owners, contradictory answers to "exists".
+--     Repository identity is TF-owned and durable — worktrees, entities, clone
+--     state and a hand-set base_branch hang off it. Grant membership is
+--     GitHub-owned and ephemeral: revoked from a selective grant it must
+--     vanish, while the repository row must survive because a task may
+--     reference it.
+--  3. The never-empty invariant gets harder. As its own table that invariant is
+--     a scoped transaction over rows only the reconcile writes. As a column it
+--     is a wide UPDATE nulling a field across a table five subsystems write.
+--  4. It re-introduces the provider-specific column the repository-identity
+--     work designed out: an installation id is a GitHub App concept, and GitLab
+--     has none.
+--
+-- The framing: the grant is a CACHE of an external fact; the repository row is a
+-- REGISTRY of a TF entity. This table is rebuilt in full every pass, needs no
+-- durable identity, and survives nothing.
+CREATE TABLE public.installation_repositories (
+    org_id uuid NOT NULL,
+    installation_id text NOT NULL,
+    -- source: the provider that issued this repository, carried so the join to
+    -- the registry can be written against the same key the registry is keyed
+    -- under (org_id, source, lower(owner), lower(repo)) rather than against a
+    -- literal. It is not part of this table's own key: every row here hangs off
+    -- a GitHub App installation, so 'github' is the only value it can hold.
+    source text DEFAULT 'github'::text NOT NULL,
+    owner text NOT NULL,
+    repo text NOT NULL,
+    -- external_id: GitHub's own repository id, present because
+    -- GET /installation/repositories returns whole repository objects. It is
+    -- what lets a grant entry and a registry row be matched by id even when
+    -- their slugs momentarily disagree mid-rename. Nullable, and NULL is a
+    -- supported state rather than a gap to backfill: a row without an id is
+    -- matched by slug exactly as it would be anyway.
+    external_id text,
+    -- observed_at: when this pass recorded the row. Display provenance ("the
+    -- grant as of…"), never a join key and never a staleness gate — the whole
+    -- table is replaced atomically, so every row in one installation's mirror
+    -- carries the same instant.
+    observed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+-- Host scoping is inherited through this FK rather than stored: an installation
+-- id is unique per GitHub deployment, and the installation row is the thing that
+-- records which deployment that is.
+ALTER TABLE ONLY public.installation_repositories
+    ADD CONSTRAINT installation_repositories_installation_fkey
+    FOREIGN KEY (org_id, installation_id)
+    REFERENCES public.org_github_app_installations (org_id, installation_id) ON DELETE CASCADE;
+
+-- The natural key, folded, for the reason repo_profiles_identity states: GitHub
+-- identifiers are case-insensitive, so a case-sensitive index behind a
+-- case-insensitive guard admits duplicates whenever two writers race — neither
+-- sees the other's uncommitted row and their keys then differ. The database has
+-- to be the thing that refuses.
+CREATE UNIQUE INDEX installation_repositories_identity
+    ON public.installation_repositories USING btree (org_id, installation_id, lower(owner), lower(repo));
+
+-- The registry join, and the drift queries that run over it. Deliberately the
+-- same shape as repo_profiles_identity — (org_id, source, lower(owner),
+-- lower(repo)) — so the two sides of "is this granted repository tracked?" are
+-- keyed identically and either can drive the join.
+CREATE INDEX installation_repositories_registry_join
+    ON public.installation_repositories USING btree (org_id, source, lower(owner), lower(repo));
+
+ALTER TABLE public.installation_repositories ENABLE ROW LEVEL SECURITY;
+
+-- Same posture as the installation rows this table hangs off: the mirror is
+-- GitHub-side state written exclusively by the reconcile on the admin pool, so
+-- app-pool members read it and never write it. There is no user gesture that
+-- adds or removes a grant entry — that happens on GitHub, and TF discovers it.
+CREATE POLICY installation_repositories_select ON public.installation_repositories FOR SELECT TO tf_app
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+CREATE POLICY installation_repositories_insert ON public.installation_repositories FOR INSERT TO tf_app
+    WITH CHECK (false);
+
+CREATE POLICY installation_repositories_update ON public.installation_repositories FOR UPDATE TO tf_app
+    USING (false);
+
+CREATE POLICY installation_repositories_delete ON public.installation_repositories FOR DELETE TO tf_app
+    USING (false);
+
+GRANT ALL ON TABLE public.installation_repositories TO postgres;
+GRANT ALL ON TABLE public.installation_repositories TO anon;
+GRANT ALL ON TABLE public.installation_repositories TO authenticated;
+GRANT ALL ON TABLE public.installation_repositories TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.installation_repositories TO tf_app;
 
 
 -- GitHub webhook delivery dedup: github_webhook_deliveries. The receiver read

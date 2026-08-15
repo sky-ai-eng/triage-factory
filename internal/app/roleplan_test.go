@@ -57,6 +57,7 @@ func TestExecutorPlan_ExcludesEveryBrainAndHTTPSubsystem(t *testing.T) {
 		{"server extension workers", p.serveHTTP},
 		{"dashboard backfiller", p.serveHTTP},
 		{"pollers + tracker", p.brain},
+		{"App-installation grant mirror reconcile", p.brain},
 		{"event router + drain workers", p.brain},
 		{"AI scorer manager", p.brain},
 		{"repo-profiler manager", p.brain},

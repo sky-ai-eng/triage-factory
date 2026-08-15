@@ -172,7 +172,8 @@ func listInstallations(ctx context.Context, q queryer, orgID string) ([]domain.O
 	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT installation_id, org_id, account_type, account_id, account_login,
-		       github_host, installed_at, suspended_at, suspended_by
+		       github_host, installed_at, suspended_at, suspended_by,
+		       repository_selection
 		  FROM org_github_app_installations
 		 WHERE org_id = $1 AND removed_at IS NULL
 		 ORDER BY account_login
@@ -188,15 +189,17 @@ func listInstallations(ctx context.Context, q queryer, orgID string) ([]domain.O
 			accountID   sql.NullString
 			suspendedAt sql.NullTime
 			suspendedBy sql.NullString
+			selection   sql.NullString
 		)
 		if err := rows.Scan(
 			&inst.InstallationID, &inst.OrgID, &inst.AccountType,
 			&accountID, &inst.AccountLogin, &inst.GitHubHost, &inst.InstalledAt,
-			&suspendedAt, &suspendedBy,
+			&suspendedAt, &suspendedBy, &selection,
 		); err != nil {
 			return nil, fmt.Errorf("scan org_github_app_installations: %w", err)
 		}
-		inst.AccountID = accountID.String // NULL → "" (account id not yet captured)
+		inst.RepositorySelection = selection.String // NULL → "" (grant width not yet learned)
+		inst.AccountID = accountID.String           // NULL → "" (account id not yet captured)
 		inst.SuspendedAt = suspendedAt.Time
 		inst.SuspendedBy = suspendedBy.String
 		out = append(out, inst)
@@ -234,16 +237,27 @@ func listInstallations(ctx context.Context, q queryer, orgID string) ([]domain.O
 // current host reports is on the current host by construction. The normalize
 // is what keeps the NOT NULL column out of the empty string — a struct built
 // without a host is one whose org configured no base URL, which is github.com.
+//
+// repository_selection takes the account id's fill-in-only rule rather than the
+// login's. Unlike the host and the suspension state, a writer here genuinely can
+// not know it: the /app/installations listing reports it on every pass, but a
+// caller that built the struct from something narrower did not look, and
+// treating that silence as "unknown" would erase a width already learned. NULL
+// therefore means "not established", never "no selection".
 func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) error {
 	var installedAt sql.NullTime
 	if !inst.InstalledAt.IsZero() {
 		installedAt = sql.NullTime{Time: inst.InstalledAt, Valid: true}
 	}
-	_, err := s.admin.ExecContext(ctx, `
+	selection, err := domain.NormalizeRepositorySelection(inst.RepositorySelection)
+	if err != nil {
+		return fmt.Errorf("upsert org_github_app_installations: %w", err)
+	}
+	_, err = s.admin.ExecContext(ctx, `
 		INSERT INTO org_github_app_installations
 			(installation_id, org_id, account_type, account_id, account_login, github_host,
-			 installed_at, removed_at, suspended_at, suspended_by)
-		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now()), NULL, $8, $9)
+			 installed_at, removed_at, suspended_at, suspended_by, repository_selection)
+		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now()), NULL, $8, $9, $10)
 		ON CONFLICT (org_id, installation_id) DO UPDATE SET
 			account_type  = EXCLUDED.account_type,
 			account_login = EXCLUDED.account_login,
@@ -251,10 +265,12 @@ func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.Or
 			github_host   = EXCLUDED.github_host,
 			removed_at    = NULL,
 			suspended_at  = EXCLUDED.suspended_at,
-			suspended_by  = EXCLUDED.suspended_by
+			suspended_by  = EXCLUDED.suspended_by,
+			repository_selection = COALESCE(EXCLUDED.repository_selection,
+			                                org_github_app_installations.repository_selection)
 	`, inst.InstallationID, inst.OrgID, inst.AccountType, nullString(inst.AccountID), inst.AccountLogin,
 		db.EffectiveGitHubHost(inst.GitHubHost), installedAt,
-		nullTime(inst.SuspendedAt), nullString(inst.SuspendedBy))
+		nullTime(inst.SuspendedAt), nullString(inst.SuspendedBy), nullString(selection))
 	if err != nil {
 		return fmt.Errorf("upsert org_github_app_installations: %w", err)
 	}
@@ -294,12 +310,36 @@ func nullTime(t time.Time) any {
 	return t
 }
 
+// MarkInstallationRemoved soft-removes the installation and drops its grant
+// mirror in one transaction. The mirror is a cache of what the installation
+// could reach; an uninstalled installation reaches nothing, so keeping the rows
+// would leave the org page able to report reach the App no longer has. The
+// installation row itself survives as history, which is the asymmetry the
+// mirror-as-cache / row-as-registry split exists for.
+//
+// Written here rather than left to the reconcile so a `deleted` webhook clears
+// the grant at the moment it arrives instead of a poll interval later; the
+// reconcile's own soft-remove arm gets the same clear for free. This is the one
+// place outside InstallationReposStore that writes installation_repositories,
+// and it does so because the two writes are one fact.
 func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, orgID, installationID string) error {
-	_, err := s.admin.ExecContext(ctx, `
-		UPDATE org_github_app_installations
-		   SET removed_at = now()
-		 WHERE org_id = $1 AND installation_id = $2 AND removed_at IS NULL
-	`, orgID, installationID)
+	if !isValidUUID(orgID) {
+		return nil
+	}
+	err := inTx(ctx, s.admin, func(tx queryer) error {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE org_github_app_installations
+			   SET removed_at = now()
+			 WHERE org_id = $1 AND installation_id = $2 AND removed_at IS NULL
+		`, orgID, installationID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `
+			DELETE FROM installation_repositories
+			 WHERE org_id = $1 AND installation_id = $2
+		`, orgID, installationID)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("mark org_github_app_installations removed: %w", err)
 	}

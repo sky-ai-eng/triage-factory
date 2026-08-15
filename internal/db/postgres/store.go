@@ -300,6 +300,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// no-claims reads the webhook receiver + backfill need; secrets
 		// for the backfill's App-PEM GetSystem read.
 		GitHubApps: newGitHubAppsStore(app, admin, secrets),
+		// InstallationRepos: admin pool only. The grant mirror carries the same
+		// RLS posture as the installation rows it hangs off — app-pool members
+		// read it, every app-pool write is denied — so the reconcile is the sole
+		// writer and there is no app-pool caller to wire.
+		InstallationRepos: newInstallationReposStore(admin),
 		// GitHubDeliveries: admin pool only. The webhook receiver is pre-auth,
 		// and github_webhook_deliveries has RLS enabled with no policy at all,
 		// so there is no app-pool caller to wire.

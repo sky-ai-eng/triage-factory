@@ -1,0 +1,236 @@
+// Package grantmirror keeps TF's picture of a GitHub App's reach correct by
+// pull: which installations exist, how wide each one's grant is, and exactly
+// which repositories each can touch.
+//
+// # Why pull, and why this is not a webhook feature
+//
+// GitHub does not auto-retry webhook deliveries at all. A lost
+// `installation_repositories` delivery therefore leaves a push-maintained
+// mirror stale permanently and invisibly, and local mode — behind NAT, with no
+// delivery path whatsoever — never had one to lose. So the pull is the
+// contract and webhooks are a latency optimization on top of it, which is also
+// what lets both modes stop needing different truth.
+//
+// # What it produces
+//
+// Two states the org page must draw, neither derivable from anything else TF
+// stores:
+//
+//   - REACH WITHOUT PURPOSE — the App can reach a repository no team tracks. TF
+//     holds write access to code nobody asked it to touch.
+//   - SCOPE DRIFT — a team tracks a repository outside the grant, so that
+//     repository is silently unpolled.
+//
+// # The negative space
+//
+// A failed or partial fetch NEVER empties the mirror. Every failure arm below
+// leaves the previous answer in place, because a mirror that silently empties
+// renders reach without purpose as a false all-clear — strictly worse than a
+// stale one. That is why a suspended installation is skipped rather than
+// reconciled (403s are not evidence of a narrowed grant), why a truncated
+// listing is refused rather than written, and why a per-installation failure
+// touches nothing at all rather than writing what it managed to read.
+//
+// The mirror is also never consulted on the token-minting path. It exists for
+// display and drift computation; minting continues through the resolver and
+// GitHub's own enforcement, because moving the team boundary out of GitHub and
+// into TF is exactly what the credential model forbids.
+package grantmirror
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github"
+)
+
+// grantLister is the half of a resolved GitHub client this package uses. Named
+// as an interface so tests can drive the reconcile without an HTTP server, and
+// narrow on purpose: the reconcile reads a grant and does nothing else with the
+// credential it was handed.
+type grantLister interface {
+	ListInstallationReposComplete(ctx context.Context) ([]github.UserRepo, bool, error)
+}
+
+// clientSource resolves the per-installation client the grant is read through.
+// It is satisfied by github.Resolver via resolverSource below.
+type clientSource interface {
+	grantListerFor(ctx context.Context, orgID, accountLogin string) (grantLister, error)
+}
+
+type resolverSource struct{ resolver github.Resolver }
+
+func (s resolverSource) grantListerFor(ctx context.Context, orgID, accountLogin string) (grantLister, error) {
+	return s.resolver.ClientFor(ctx, orgID, accountLogin)
+}
+
+// Reconciler refreshes one org's installation mirror. It is stateless — every
+// credential is resolved fresh per pass through the resolver — so a config
+// change that hot-swaps credentials is honored without rebuilding it, and one
+// instance serves every org.
+//
+// # Cadence, and the deliberate absence of a TTL
+//
+// The pass runs once per org per GitHub poll cycle, so the ORG'S OWN POLL
+// INTERVAL is the cadence. It carries no TTL of its own, unlike the repo
+// profiler whose staleness gate protects a run of LLM calls: this costs one
+// GET /app/installations plus one GET /installation/repositories per live
+// installation — the second of which the same cycle is about to make anyway to
+// compute its tracked-granted intersection. A TTL on top of a poll-driven
+// trigger could only make the mirror STALER than the interval the operator
+// configured, while adding a second number to reason about when the page says
+// "as of".
+type Reconciler struct {
+	apps    db.GitHubAppsStore
+	mirror  db.InstallationReposStore
+	clients clientSource
+}
+
+// NewReconciler builds a Reconciler over the App-installation store, the grant
+// mirror, and the per-(org, account) GitHub client resolver — App installation
+// token in multi, keychain PAT in local, exactly as every other GitHub-facing
+// background pass resolves.
+func NewReconciler(apps db.GitHubAppsStore, mirror db.InstallationReposStore, resolver github.Resolver) *Reconciler {
+	return &Reconciler{apps: apps, mirror: mirror, clients: resolverSource{resolver: resolver}}
+}
+
+// RunOrg reconciles one org: first that the set of installations TF believes in
+// is the set GitHub reports, then what each of those installations can reach.
+//
+// Existence comes first and is not optional. It used to be reconciled by pull in
+// LOCAL MODE ONLY — the poller's backfill was gated on it, on the reasoning that
+// webhooks cannot reach a laptop — which left multi mode with no timer-driven
+// convergence at all: the mirror moved only on a delivery, the Settings refresh
+// button, or the cutover preflight. An org whose deliveries never arrive then
+// reports zero installations, the poll cycle reports degraded and skips
+// entirely, and the repository picker blanks. Reconciling existence here, in
+// both modes, is what removes that failure mode, and it costs one extra
+// reconcile against a response the grant pass needs in hand anyway: the same
+// GET /app/installations that reports each installation's repository_selection.
+//
+// Per-installation failures do not abort the pass — one account's expired
+// credential must not stop another account's grant from refreshing — but the
+// first is returned once the loop finishes so the failure is visible to the
+// caller rather than only to the log.
+func (r *Reconciler) RunOrg(ctx context.Context, orgID string) error {
+	// A store failure here is the one thing that stops the pass: without a
+	// trustworthy installation set, "GitHub no longer reports this" and "we
+	// could not ask" are indistinguishable, and acting on the second as if it
+	// were the first is how a mirror empties itself. A no-op for an org with no
+	// registered App.
+	if err := r.apps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
+		return fmt.Errorf("reconcile installations: %w", err)
+	}
+
+	// A registered-but-inactive App is one staged mid PAT→App switch. Its
+	// installations must still be discovered — the cutover preflight verifies
+	// them before the bit flips, which is why the existence reconcile above has
+	// no active gate — but its tier-1 mint is switched off, so every grant read
+	// below would resolve to the org PAT and take a guaranteed 403 from an
+	// endpoint that accepts installation tokens only. Asking anyway would spend
+	// a request per installation per cycle to log an error that says nothing.
+	app, err := r.apps.GetForOrgSystem(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("read app registration: %w", err)
+	}
+	if app == nil || !app.Active {
+		return nil
+	}
+
+	insts, err := r.apps.ListInstallationsForOrgSystem(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("list installations: %w", err)
+	}
+
+	var firstErr error
+	fail := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	for _, inst := range insts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := r.reconcileInstallation(ctx, orgID, inst); err != nil {
+			grantMirrorLog.ErrorContext(ctx, "reconcile installation grant failed",
+				"org", orgID, "installation", inst.InstallationID, "account", inst.AccountLogin, "error", err)
+			fail(err)
+		}
+	}
+	return firstErr
+}
+
+// reconcileInstallation refreshes one installation's grant, or leaves it
+// exactly as it was. There is no third outcome: every early return here is a
+// deliberate decision to keep the previous answer.
+func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) error {
+	// A suspended installation refuses every token minted from it, so the grant
+	// cannot be read — but the grant still EXISTS, unchanged, and resumes intact
+	// on unsuspend. Reconciling it would turn a 403 into "this installation now
+	// reaches nothing", which is a false all-clear on the one finding that
+	// matters most. Skipped, not failed: nothing here is wrong.
+	if inst.Suspended() {
+		return nil
+	}
+
+	client, err := r.clients.grantListerFor(ctx, orgID, inst.AccountLogin)
+	if err != nil {
+		return fmt.Errorf("resolve client: %w", err)
+	}
+
+	repos, complete, err := client.ListInstallationReposComplete(ctx)
+	if err != nil {
+		return fmt.Errorf("list installation repositories: %w", err)
+	}
+	if !complete {
+		// A truncated listing read as a whole one makes every repository past
+		// the cut look revoked. Refusing to write it costs a stale mirror;
+		// writing it manufactures a finding.
+		grantMirrorLog.WarnContext(ctx, "installation grant listing incomplete; keeping the previous mirror",
+			"org", orgID, "installation", inst.InstallationID, "account", inst.AccountLogin, "read", len(repos))
+		return nil
+	}
+
+	entries := make([]domain.InstallationRepository, 0, len(repos))
+	for _, repo := range repos {
+		owner, name, ok := splitFullName(repo.FullName)
+		if !ok {
+			// A grant entry TF cannot name is one it cannot compare against the
+			// tracked set either. Dropping it silently would understate reach,
+			// so it is logged; failing the whole pass over one malformed entry
+			// would be worse, since the other entries are fine.
+			grantMirrorLog.WarnContext(ctx, "installation grant entry has an unusable full_name; skipping",
+				"org", orgID, "installation", inst.InstallationID, "full_name", repo.FullName)
+			continue
+		}
+		entries = append(entries, domain.InstallationRepository{
+			OrgID:          orgID,
+			InstallationID: inst.InstallationID,
+			Source:         domain.RepoSourceGitHub,
+			Owner:          owner,
+			Repo:           name,
+			// The listing returns whole repository objects, so the id costs
+			// nothing here. It is what lets a grant entry and a registry row be
+			// matched by id when their slugs momentarily disagree mid-rename.
+			ExternalID: repo.ExternalID(),
+		})
+	}
+
+	return r.mirror.ReplaceForInstallationSystem(ctx, orgID, inst.InstallationID, entries)
+}
+
+// splitFullName splits GitHub's "owner/repo" into its halves. It refuses
+// anything that is not exactly two non-empty segments rather than guessing:
+// this string becomes half of a unique key, and a wrong guess would key a grant
+// entry the tracked set can never match.
+func splitFullName(fullName string) (owner, repo string, ok bool) {
+	owner, repo, ok = strings.Cut(fullName, "/")
+	if !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
+		return "", "", false
+	}
+	return owner, repo, true
+}
