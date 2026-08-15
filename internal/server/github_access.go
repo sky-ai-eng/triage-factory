@@ -133,6 +133,13 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx := r.Context()
 
+	// TODO(TFAC-817): this read-check-write is not serialized against the other
+	// credential transitions, and the checks below are separated from the write
+	// by a GitHub round-trip. A concurrent discard or switch-to-pat can delete
+	// the registration in that window; SetActive then silently updates zero rows
+	// while the PAT delete still fires, leaving the org with no credential at
+	// all. The other three transitions take githubAppRegRMWLockSalt and re-read
+	// inside the critical section — this one must too.
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -267,6 +274,10 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// TODO(TFAC-817): unserialized read-check-write, and the PAT validation
+	// below puts a network round-trip between this check and the teardown it
+	// guards — take githubAppRegRMWLockSalt and re-read inside the critical
+	// section, as the PAT-bind handler does.
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -382,6 +393,10 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx := r.Context()
 
+	// TODO(TFAC-817): unserialized read-check-write — a concurrent cutover can
+	// activate the App after this 409 guard reads it as staged, so the teardown
+	// below can tear down a registration that has since become live. Take
+	// githubAppRegRMWLockSalt and re-read inside the critical section.
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)

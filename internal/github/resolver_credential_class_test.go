@@ -170,6 +170,91 @@ func TestResolver_StagedApp_IsBYOAppClassOnPATTier(t *testing.T) {
 	}
 }
 
+// TestResolver_ResolvesOrgSettingsOncePerCall pins the cost of storing the
+// credential class next to the host.
+//
+// Both facts live on org_settings, and every entry point that resolves a
+// credential needs both — so reading the row once per resolution rather than
+// once per fact is what keeps the class from doubling the settings round-trips
+// on the polling paths, which resolve per org per cycle.
+//
+// It is also a correctness property, not only a cost one: two reads could
+// straddle a credential transition and pair one state's host with another
+// state's class. One read is one snapshot.
+func TestResolver_ResolvesOrgSettingsOncePerCall(t *testing.T) {
+	gh := newGHTestServer(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name  string
+		class domain.GitHubCredentialClass
+		app   *domain.OrgGitHubApp
+		insts []domain.OrgGitHubAppInstallation
+		call  func(r Resolver) error
+	}{
+		{"ClientFor_pat", domain.GitHubCredentialClassPAT, nil, nil, func(r Resolver) error {
+			_, err := r.ClientFor(ctx, "org-1", "acme")
+			return err
+		}},
+		{"ClientFor_app", domain.GitHubCredentialClassBYOApp, activeApp(), []domain.OrgGitHubAppInstallation{installOn("acme")}, func(r Resolver) error {
+			_, err := r.ClientFor(ctx, "org-1", "acme")
+			return err
+		}},
+		{"ClientForRepo_pat", domain.GitHubCredentialClassPAT, nil, nil, func(r Resolver) error {
+			_, err := r.ClientForRepo(ctx, "org-1", "acme", "api")
+			return err
+		}},
+		{"TokenFor_pat", domain.GitHubCredentialClassPAT, nil, nil, func(r Resolver) error {
+			_, err := r.TokenFor(ctx, "org-1", "acme")
+			return err
+		}},
+		{"TokenForRepoScoped_pat", domain.GitHubCredentialClassPAT, nil, nil, func(r Resolver) error {
+			_, err := r.(ScopedResolver).TokenForRepoScoped(ctx, "org-1", "acme", "api", nil)
+			return err
+		}},
+		{"TokenForReposScoped_pat", domain.GitHubCredentialClassPAT, nil, nil, func(r Resolver) error {
+			_, err := r.(ScopedResolver).TokenForReposScoped(ctx, "org-1", "acme", []string{"api"}, nil)
+			return err
+		}},
+		{"ClientForRepoScoped_pat", domain.GitHubCredentialClassPAT, nil, nil, func(r Resolver) error {
+			_, _, err := r.(ScopedRepoResolver).ClientForRepoScoped(ctx, "org-1", "acme", "api", nil)
+			return err
+		}},
+		{"HasAnyCredential_pat", domain.GitHubCredentialClassPAT, nil, nil, func(r Resolver) error {
+			_, err := r.(ScopedResolver).HasAnyCredential(ctx, "org-1")
+			return err
+		}},
+		{"OrgIdentityFor_pat", domain.GitHubCredentialClassPAT, nil, nil, func(r Resolver) error {
+			r.OrgIdentityFor(ctx, "org-1")
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orgs := &fakeOrgs{base: gh.srv.URL, class: tc.class}
+			r := NewResolver(
+				// Both credentials present, so the App arm can actually mint and
+				// the count reflects a completed resolution rather than an early
+				// bail-out.
+				&fakeSecrets{vals: map[string]string{
+					integrations.KeyGitHubPAT: "ghp_test",
+					"pem":                     testPEM(t),
+				}},
+				&fakeApps{app: tc.app, insts: tc.insts},
+				orgs,
+				&fakeAgents{},
+				nil,
+			)
+			if err := tc.call(r); err != nil {
+				t.Fatalf("call: %v", err)
+			}
+			if orgs.settingsReads != 1 {
+				t.Errorf("org_settings read %d times for one resolution; want exactly 1 — the host and the credential class come off the same row",
+					orgs.settingsReads)
+			}
+		})
+	}
+}
+
 // TestResolver_CredentialClassReadError_Propagates pins that an unreadable
 // settings row is an error, not a guess. The org has a PAT, so falling back to
 // the old inference would silently succeed — and would be wrong for any org

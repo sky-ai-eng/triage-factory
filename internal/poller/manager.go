@@ -785,10 +785,17 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 // The first question is the org's credential CLASS, not whether an
 // org_github_apps row exists: "no row" is the shape of a PAT org and would
 // equally be the shape of an org riding a deployment-level shared App, whose
-// installations this cycle would then poll as a PAT it doesn't have. Every
-// false here routes the cycle to the PAT path, so each one is stated
-// deliberately — an unknown class or an unreadable settings row logs and skips
-// rather than quietly polling as something the org may not be.
+// installations this probe would then never fan out over.
+//
+// False does NOT mean "poll with a PAT" — it means "don't fan out per
+// installation". The credential itself is chosen one layer down, by
+// resolver.ClientFor in pollGitHubPAT, which reads the class again and REFUSES
+// an unknown or unreadable one (ErrUnknownCredentialClass) instead of falling
+// to a PAT. That error isn't ErrNoGitHubCredentials, so the cycle reports
+// degraded health and polls nothing. So the error returns below are not a
+// fail-open toward PAT, even though a false is what they produce: no path from
+// here can poll an org under a credential system it isn't in. They are still
+// logged, because the cycle they cost is worth seeing.
 func (m *Manager) orgHasRegisteredApp(ctx context.Context, orgID string) bool {
 	if m.apps == nil {
 		return false

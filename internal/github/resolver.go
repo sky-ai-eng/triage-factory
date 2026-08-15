@@ -280,14 +280,15 @@ func (r *resolver) newObservedClient(orgID, base, token string) *Client {
 }
 
 func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client, error) {
-	base, err := r.githubBaseFor(ctx, orgID)
+	oc, err := r.orgContextFor(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}
+	base := oc.base
 
 	// App XOR PAT (see activeApp): an active App is the org's credential — mint
 	// its installation token for target or fail; never borrow a PAT.
-	app, err := r.activeApp(ctx, orgID)
+	app, err := r.activeApp(ctx, orgID, oc.class)
 	if err != nil {
 		return nil, err
 	}
@@ -330,14 +331,15 @@ func (r *resolver) ClientForRepo(ctx context.Context, orgID, owner, repo string)
 // IdentityApp/IdentityPAT also track which credential the org has, not a
 // per-repo fallback choice.
 func (r *resolver) ClientForRepoWithIdentity(ctx context.Context, orgID, owner, repo string) (*Client, Identity, error) {
-	base, err := r.githubBaseFor(ctx, orgID)
+	oc, err := r.orgContextFor(ctx, orgID)
 	if err != nil {
 		return nil, IdentityUnknown, err
 	}
+	base := oc.base
 
 	// Active App → the App client for owner/repo (gated on coverage), or an
 	// error. Never a PAT.
-	app, err := r.activeApp(ctx, orgID)
+	app, err := r.activeApp(ctx, orgID, oc.class)
 	if err != nil {
 		return nil, IdentityUnknown, err
 	}
@@ -373,6 +375,14 @@ func (r *resolver) ClientForRepoWithIdentity(ctx context.Context, orgID, owner, 
 // github.com.
 func (r *resolver) githubBaseFor(ctx context.Context, orgID string) (string, error) {
 	set, setErr := r.orgs.GetSettingsSystem(ctx, orgID)
+	return r.baseFrom(ctx, orgID, set, setErr)
+}
+
+// baseFrom is githubBaseFor's precedence logic over an ALREADY-READ settings
+// row, so a caller that needs the host and the credential class gets both from
+// one read of one row. setErr is the error from that read, threaded in rather
+// than swallowed because the fallback order turns on it.
+func (r *resolver) baseFrom(ctx context.Context, orgID string, set domain.OrgSettings, setErr error) (string, error) {
 	if setErr == nil && set.GitHubBaseURL != "" {
 		return ResolveBaseURL(set.GitHubBaseURL), nil
 	}
@@ -394,15 +404,44 @@ func (r *resolver) githubBaseFor(ctx context.Context, orgID string) (string, err
 	return DefaultBaseURL, nil
 }
 
-// credentialClassFor reads which credential system the org's GitHub access
-// belongs to. The class is stated on org_settings, never inferred from the
-// presence of an org_github_apps row — see domain.GitHubCredentialClass for
-// why a missing row cannot mean one thing.
+// orgGitHubContext is the pair of facts a resolution needs from the org's
+// settings row: which host to talk to, and which credential system the org is
+// in. They travel together because they are read together — see orgContextFor.
+type orgGitHubContext struct {
+	base  string
+	class domain.GitHubCredentialClass
+}
+
+// orgContextFor reads org_settings ONCE and derives both the host and the
+// credential class from that single row.
 //
-// A read error propagates. Every caller here already reads org_settings through
-// githubBaseFor first, which propagates the same failure for the same reason: a
-// source that decides which credential to use must not be guessed at, because
-// guessing pairs a real tenant credential with the wrong system.
+// One read, for two reasons. It halves the per-resolution settings round-trips
+// on the polling-heavy paths, where every entry point needs both. And it makes
+// the pair a consistent snapshot: two reads could straddle a credential
+// transition and hand back one state's host with another state's class.
+//
+// The class is stated on org_settings, never inferred from the presence of an
+// org_github_apps row — see domain.GitHubCredentialClass for why a missing row
+// cannot mean one thing. A settings read error therefore fails the resolution
+// even when the base survived it via the github_url secret fallback: the host
+// has a second source and the class does not, and a source that decides which
+// credential to use must never be guessed at.
+func (r *resolver) orgContextFor(ctx context.Context, orgID string) (orgGitHubContext, error) {
+	set, setErr := r.orgs.GetSettingsSystem(ctx, orgID)
+	base, err := r.baseFrom(ctx, orgID, set, setErr)
+	if err != nil {
+		return orgGitHubContext{}, err
+	}
+	if setErr != nil {
+		return orgGitHubContext{}, fmt.Errorf("resolve github credential class for org %s: %w", orgID, setErr)
+	}
+	return orgGitHubContext{base: base, class: set.GitHubCredentialClass}, nil
+}
+
+// credentialClassFor reads the credential class alone, for the two entry points
+// that resolve no host (HasAnyCredential, OrgIdentityFor). Resolving a base they
+// would discard can cost an extra secret read, so they don't go through
+// orgContextFor.
 func (r *resolver) credentialClassFor(ctx context.Context, orgID string) (domain.GitHubCredentialClass, error) {
 	set, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
@@ -431,11 +470,11 @@ func (r *resolver) credentialClassFor(ctx context.Context, orgID string) (domain
 // that is right only by accident. A class this build doesn't know is refused
 // outright rather than resolved as PAT — an org must fail where someone sees
 // it, not quietly act on a credential it does not have.
-func (r *resolver) activeApp(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error) {
-	class, err := r.credentialClassFor(ctx, orgID)
-	if err != nil {
-		return nil, err
-	}
+//
+// class arrives as a resolved parameter rather than a read of its own, so it is
+// the same value the caller resolved its base URL alongside — one settings row,
+// one snapshot, one decision.
+func (r *resolver) activeApp(ctx context.Context, orgID string, class domain.GitHubCredentialClass) (*domain.OrgGitHubApp, error) {
 	switch class {
 	case domain.GitHubCredentialClassPAT:
 		return nil, nil
@@ -541,15 +580,16 @@ func (r *resolver) appScopedToken(ctx context.Context, orgID string, app *domain
 // credential instead of a *Client — see the Resolver interface doc for why
 // (the host-side git clone needs the token as an HTTPS auth header).
 func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubapp.Token, error) {
-	base, err := r.githubBaseFor(ctx, orgID)
+	oc, err := r.orgContextFor(ctx, orgID)
 	if err != nil {
 		return githubapp.Token{}, err
 	}
+	base := oc.base
 
 	// App XOR PAT (see activeApp): an active App is the org's credential —
 	// resolve its installation token (shared cache + mint path with ClientFor)
 	// or fail; never fall to a PAT.
-	app, err := r.activeApp(ctx, orgID)
+	app, err := r.activeApp(ctx, orgID, oc.class)
 	if err != nil {
 		return githubapp.Token{}, err
 	}
@@ -585,11 +625,12 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 // org with no active App uses the PAT, returned unscoped (a PAT can't be
 // narrowed; Layers 2/3 enforce it). All-miss: ErrNoGitHubCredentials.
 func (r *resolver) TokenForRepoScoped(ctx context.Context, orgID, owner, repo string, permissions map[string]string) (githubapp.Token, error) {
-	base, err := r.githubBaseFor(ctx, orgID)
+	oc, err := r.orgContextFor(ctx, orgID)
 	if err != nil {
 		return githubapp.Token{}, err
 	}
-	app, err := r.activeApp(ctx, orgID)
+	base := oc.base
+	app, err := r.activeApp(ctx, orgID, oc.class)
 	if err != nil {
 		return githubapp.Token{}, err
 	}
@@ -614,11 +655,12 @@ func (r *resolver) TokenForRepoScoped(ctx context.Context, orgID, owner, repo st
 // degrading to an unscoped PAT); only a no-active-App org uses the PAT,
 // returned unscoped (a PAT can't be narrowed). All-miss: ErrNoGitHubCredentials.
 func (r *resolver) TokenForReposScoped(ctx context.Context, orgID, owner string, repos []string, permissions map[string]string) (githubapp.Token, error) {
-	base, err := r.githubBaseFor(ctx, orgID)
+	oc, err := r.orgContextFor(ctx, orgID)
 	if err != nil {
 		return githubapp.Token{}, err
 	}
-	app, err := r.activeApp(ctx, orgID)
+	base := oc.base
+	app, err := r.activeApp(ctx, orgID, oc.class)
 	if err != nil {
 		return githubapp.Token{}, err
 	}
@@ -663,11 +705,12 @@ func (r *resolver) appReposScopedToken(ctx context.Context, orgID string, app *d
 // repo the run is authorized for. Same App-XOR-PAT resolution as
 // TokenForRepoScoped.
 func (r *resolver) ClientForRepoScoped(ctx context.Context, orgID, owner, repo string, permissions map[string]string) (*Client, Identity, error) {
-	base, err := r.githubBaseFor(ctx, orgID)
+	oc, err := r.orgContextFor(ctx, orgID)
 	if err != nil {
 		return nil, IdentityUnknown, err
 	}
-	app, err := r.activeApp(ctx, orgID)
+	base := oc.base
+	app, err := r.activeApp(ctx, orgID, oc.class)
 	if err != nil {
 		return nil, IdentityUnknown, err
 	}
@@ -696,7 +739,13 @@ func (r *resolver) ClientForRepoScoped(ctx context.Context, orgID, owner, repo s
 // PAT-tier read error propagates so a transient secret-store outage isn't
 // misreported as "no credential".
 func (r *resolver) HasAnyCredential(ctx context.Context, orgID string) (bool, error) {
-	app, err := r.activeApp(ctx, orgID)
+	// Class alone: this probe resolves no host, so it skips orgContextFor and
+	// the base resolution (and possible secret read) it would discard.
+	class, err := r.credentialClassFor(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	app, err := r.activeApp(ctx, orgID, class)
 	if err != nil {
 		return false, err
 	}

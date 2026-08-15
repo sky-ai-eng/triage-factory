@@ -67,9 +67,14 @@ type fakeOrgs struct {
 	// settingsErr makes the settings row unreadable, the state the resolver
 	// must refuse to guess past rather than fall back to an inference.
 	settingsErr error
+	// settingsReads counts reads of the org_settings row. The host and the
+	// credential class both live on it, and one resolution must not fetch it
+	// twice — see TestResolver_ResolvesOrgSettingsOncePerCall.
+	settingsReads int
 }
 
 func (f *fakeOrgs) GetSettingsSystem(_ context.Context, _ string) (domain.OrgSettings, error) {
+	f.settingsReads++
 	if f.settingsErr != nil {
 		return domain.OrgSettings{}, f.settingsErr
 	}
