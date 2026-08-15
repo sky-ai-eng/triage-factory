@@ -46,7 +46,8 @@ func TestGitHubHostNormalizationAgrees(t *testing.T) {
 			}
 			if got := db.EffectiveGitHubHost(tc.base); got != identity {
 				t.Errorf("db.EffectiveGitHubHost(%q) = %q; want the identity table's %q — "+
-					"two spellings of one host make the installation row uncomparable",
+					"two spellings of one host never match, so the installation row "+
+					"cannot be compared against anything",
 					tc.base, got, identity)
 			}
 		})
