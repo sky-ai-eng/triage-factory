@@ -589,6 +589,14 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := spawner.SendMessage(r.Context(), orgID, conversationID, userID, body.Text); err != nil {
+		// A run deleted between the visibility read above and the routing read
+		// is a 404 like any other absent run — same body as the gate's own 404,
+		// not a 409 that would send the client re-reading state that no longer
+		// exists. Mirrors handleAgentStop's ErrNoActiveRun mapping.
+		if errors.Is(err, delegate.ErrRunNotFound) {
+			notFound(w, "run")
+			return
+		}
 		writeJSON(w, steerErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}

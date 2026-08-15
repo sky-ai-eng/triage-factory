@@ -362,15 +362,18 @@ func TestSendMessage_CompletedFinishIsResumable(t *testing.T) {
 	}
 }
 
-// TestSendMessage_MissingRunNotSteerable: an unknown run id (no process, no
-// row) is not steerable.
-func TestSendMessage_MissingRunNotSteerable(t *testing.T) {
+// TestSendMessage_MissingRunNotFound: an unknown run id (no process, no row)
+// answers "not found" rather than "not steerable" — the two sentinels ask for
+// different client reactions, and the endpoint maps this one to 404 so a run
+// deleted between its visibility read and this routing read doesn't read as a
+// conflict worth re-reading.
+func TestSendMessage_MissingRunNotFound(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "ghost", runmode.LocalDefaultUserID, "hi")
-	if !errors.Is(err, ErrRunNotSteerable) {
-		t.Errorf("err = %v, want ErrRunNotSteerable", err)
+	if !errors.Is(err, ErrRunNotFound) {
+		t.Errorf("err = %v, want ErrRunNotFound", err)
 	}
 }
 

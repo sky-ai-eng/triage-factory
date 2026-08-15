@@ -36,6 +36,16 @@ import (
 // state.
 var ErrRunNotSteerable = errors.New("run is not steerable")
 
+// ErrRunNotFound is returned by SendMessage when the conversation does not
+// exist under the caller's org at routing time. Distinct from
+// ErrRunNotSteerable because the two ask for different client reactions: a
+// missing run is a 404 (nothing left to re-read), while an unsteerable one is
+// a 409 (refresh and re-read). The message endpoint authorizes visibility
+// before routing, so reaching this normally means the run was deleted between
+// that read and this one — answering "conflict" would send the client chasing
+// state that no longer exists.
+var ErrRunNotFound = errors.New("run not found")
+
 // The SDK-only resume preconditions, as errors rather than formatted strings so
 // the one ladder can hand them back by name. Each is a row that cannot be
 // resumed at all — no session to re-invoke, no tree to re-invoke it in, no
@@ -281,7 +291,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 		return fmt.Errorf("load run: %w", err)
 	}
 	if run == nil {
-		return ErrRunNotSteerable
+		return ErrRunNotFound
 	}
 	// The one case a queued row cannot serve, and the reason the split exists at
 	// all: an SDK conversation in flight (claimed, setting up or running) holds
