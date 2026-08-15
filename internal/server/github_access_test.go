@@ -348,23 +348,35 @@ func TestGitHubAppDiscard_Active(t *testing.T) {
 // TestGitHubAppDiscard_AppGoesLiveUnderTheGuard is the discard half of the
 // serialization the three transitions share: a cutover commits between the
 // discard's read and its teardown, so the staged App the 409 guard cleared is
-// live by the time the teardown would run. Discarding it would remove the org's
-// only credential — the PAT is already gone, deleted by that same cutover.
+// live by the time the teardown would run.
+//
+// The fixture commits BOTH halves of the cutover's transaction — the active
+// flip and the PAT delete — because it is the second half that sets the stake.
+// Once the PAT is gone the App is the org's only credential, so a discard that
+// proceeds on the stale "staged" answer isn't tearing down an abandoned switch,
+// it is taking the workspace's GitHub access with it.
 //
 // The guard has to be re-evaluated under the lock for the refusal to happen at
-// all; against the unserialized handler the stale "staged" answer stands and
-// the teardown commits.
+// all; against the unserialized handler the stale answer stands and the
+// teardown commits.
 func TestGitHubAppDiscard_AppGoesLiveUnderTheGuard(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
-	seedLocalApp(t, s, false) // staged
+	seedLocalApp(t, s, false) // staged, behind a live PAT
 	seedInstallation(t, s, 1, "acme")
+	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT, "ghp_live", ""); err != nil {
+		t.Fatalf("seed pat: %v", err)
+	}
 
 	var apps db.GitHubAppsStore
 	hook := &ghAppsRaceHook{afterGet: func() {
-		if err := apps.SetActive(context.Background(), runmode.LocalDefaultOrgID, true); err != nil {
+		ctx := context.Background()
+		if err := apps.SetActive(ctx, runmode.LocalDefaultOrgID, true); err != nil {
 			t.Errorf("concurrent cutover: set active: %v", err)
+		}
+		if _, err := s.secrets.Delete(ctx, runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT); err != nil {
+			t.Errorf("concurrent cutover: delete pat: %v", err)
 		}
 	}}
 	apps = hookGitHubApps(s, hook)
@@ -374,9 +386,15 @@ func TestGitHubAppDiscard_AppGoesLiveUnderTheGuard(t *testing.T) {
 		t.Fatalf("discard of an App that went live under the guard = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 
+	// The fixture's cutover really did leave the App as the only credential —
+	// without this the assertions below would pass on a weaker interleaving than
+	// the one under test.
+	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "" {
+		t.Fatalf("PAT = %q, want it deleted by the fixture's cutover", v)
+	}
 	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
 	if app == nil {
-		t.Fatal("the now-live App was torn down by a discard that read it as staged")
+		t.Fatal("the now-live App was torn down by a discard that read it as staged — the org has no GitHub credential at all")
 	}
 	if !app.Active {
 		t.Errorf("app.Active = false, want true — the fixture's cutover should have stuck")
