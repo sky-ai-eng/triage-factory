@@ -266,6 +266,9 @@ type Conversation struct {
 	// router queue: a replayed event whose first run already committed
 	// conflicts on the fence and is skipped. Forward-only provenance —
 	// written via ConversationStore.CreateIfNotFiredSystem, not hydrated by Get.
+	// TODO(TFAC-828): that method name resolves to nothing, and the store
+	// attribution may be wrong too — BlueprintStore owns the real
+	// CreateRunIfNotFiredSystem. Resolve both together.
 	TriggeringEventID string
 
 	// ActorAgentID is the agents.id the spawner stamped at run start.

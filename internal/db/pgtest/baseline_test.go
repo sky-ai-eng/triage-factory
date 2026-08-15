@@ -2694,7 +2694,7 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 // is the current-claimant state; both set is forbidden.
 //
 // This is the schema-level invariant the claim-flip helpers
-// (SetTaskClaimedByAgent / SetTaskClaimedByUser) rely on: each does a
+// (SetClaimedByAgent / SetClaimedByUser) rely on: each does a
 // single UPDATE that sets one column AND clears the other in the same
 // statement, so the XOR is never temporarily violated. A direct SQL
 // attempt to set both at once must be rejected.

@@ -172,6 +172,10 @@ type DelegateOpts struct {
 	// rejects an empty value (it would bind NULL and silently skip the fence)
 	// with ErrFenceRequiresEventAndTrigger. Manual delegation never sets this
 	// field; it uses the unfenced Create, which doesn't write the column.
+	// TODO(TFAC-828): CreateIfNotFiredSystem names nothing in the tree —
+	// BlueprintStore.CreateRunIfNotFiredSystem is the nearest real method.
+	// Resolve the name (and which store owns the fenced insert) here and at
+	// the domain.Conversation twin.
 	TriggeringEventID string
 
 	// CreatorUserID is the user who initiated this Delegate call.

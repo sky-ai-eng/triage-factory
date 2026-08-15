@@ -997,7 +997,7 @@ func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 // anti-steal guarantee: if a different user already owns the task,
 // the swipe-claim handler must refuse with 409 rather than
 // overwriting the other user's claim. The previous unconditional
-// SetTaskClaimedByUser would have silently stolen the row.
+// SetClaimedByUser would have silently stolen the row.
 //
 // At N=1 local mode this can't happen via real user gestures, but
 // the helper-level race-safety is load-bearing for multi-mode and
