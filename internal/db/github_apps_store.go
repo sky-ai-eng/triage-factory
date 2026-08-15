@@ -107,6 +107,13 @@ type GitHubAppsStore interface {
 	// names the account, and is never re-emptied), while AccountLogin is
 	// overwritten unconditionally so a rename reaches the mirror.
 	//
+	// GitHubHost takes the login's rule too, and is normalized on the way in
+	// (EffectiveGitHubHost): both writers resolve it from the org's
+	// github_base_url, which is the only thing it can be, so the value they
+	// carry is always current and an empty one means "the org configured no
+	// base URL" — the public host. That fold is what keeps the NOT NULL column
+	// free of empty strings no matter which writer built the struct.
+	//
 	// The suspension fields are overwritten unconditionally, like the login
 	// and unlike the id: both callers see GitHub's whole answer for the
 	// installation (the reconcile lists it, the webhook is told about it), so

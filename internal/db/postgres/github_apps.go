@@ -172,7 +172,7 @@ func listInstallations(ctx context.Context, q queryer, orgID string) ([]domain.O
 	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT installation_id, org_id, account_type, account_id, account_login,
-		       installed_at, suspended_at, suspended_by
+		       github_host, installed_at, suspended_at, suspended_by
 		  FROM org_github_app_installations
 		 WHERE org_id = $1 AND removed_at IS NULL
 		 ORDER BY account_login
@@ -191,7 +191,7 @@ func listInstallations(ctx context.Context, q queryer, orgID string) ([]domain.O
 		)
 		if err := rows.Scan(
 			&inst.InstallationID, &inst.OrgID, &inst.AccountType,
-			&accountID, &inst.AccountLogin, &inst.InstalledAt,
+			&accountID, &inst.AccountLogin, &inst.GitHubHost, &inst.InstalledAt,
 			&suspendedAt, &suspendedBy,
 		); err != nil {
 			return nil, fmt.Errorf("scan org_github_app_installations: %w", err)
@@ -228,6 +228,12 @@ func listInstallations(ctx context.Context, q queryer, orgID string) ([]domain.O
 // revives comes back unsuspended in the same statement that clears removed_at,
 // so a re-install can never inherit the suspension of the installation it
 // replaced.
+//
+// github_host is normalized on the way in and overwritten like the login: both
+// writers derive it from the org's github_base_url, so an installation the
+// current host reports is on the current host by construction. The normalize
+// is what keeps the NOT NULL column out of the empty string — a struct built
+// without a host is one whose org configured no base URL, which is github.com.
 func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) error {
 	var installedAt sql.NullTime
 	if !inst.InstalledAt.IsZero() {
@@ -235,17 +241,19 @@ func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.Or
 	}
 	_, err := s.admin.ExecContext(ctx, `
 		INSERT INTO org_github_app_installations
-			(installation_id, org_id, account_type, account_id, account_login, installed_at,
-			 removed_at, suspended_at, suspended_by)
-		VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), NULL, $7, $8)
+			(installation_id, org_id, account_type, account_id, account_login, github_host,
+			 installed_at, removed_at, suspended_at, suspended_by)
+		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now()), NULL, $8, $9)
 		ON CONFLICT (org_id, installation_id) DO UPDATE SET
 			account_type  = EXCLUDED.account_type,
 			account_login = EXCLUDED.account_login,
 			account_id    = COALESCE(EXCLUDED.account_id, org_github_app_installations.account_id),
+			github_host   = EXCLUDED.github_host,
 			removed_at    = NULL,
 			suspended_at  = EXCLUDED.suspended_at,
 			suspended_by  = EXCLUDED.suspended_by
-	`, inst.InstallationID, inst.OrgID, inst.AccountType, nullString(inst.AccountID), inst.AccountLogin, installedAt,
+	`, inst.InstallationID, inst.OrgID, inst.AccountType, nullString(inst.AccountID), inst.AccountLogin,
+		db.EffectiveGitHubHost(inst.GitHubHost), installedAt,
 		nullTime(inst.SuspendedAt), nullString(inst.SuspendedBy))
 	if err != nil {
 		return fmt.Errorf("upsert org_github_app_installations: %w", err)

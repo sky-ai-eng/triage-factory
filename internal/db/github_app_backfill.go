@@ -45,9 +45,10 @@ func githubAPIBase(base string) string {
 // DiscoverAppInstallations reads the org's App PEM via SecretStore.GetSystem
 // (claims-free, for the system/background backfill caller), mints an
 // app-level JWT, and lists the App's installations through
-// GET {apiBase}/app/installations. The returned rows carry orgID and are
-// ready to hand to GitHubAppsStore.UpsertInstallation — the per-org App
-// owns every installation it reports (v1 is per-org Apps only).
+// GET {apiBase}/app/installations. The returned rows carry orgID and the
+// normalized baseURL they were listed from, and are ready to hand to
+// GitHubAppsStore.UpsertInstallation — the per-org App owns every installation
+// it reports (v1 is per-org Apps only).
 //
 // Shared by both store backends so the JWT-mint + HTTP-list + secret-read
 // logic lives in one place; each backend supplies the DB read of
@@ -84,6 +85,12 @@ func DiscoverAppInstallations(ctx context.Context, secrets SecretStore, orgID, a
 		return nil, err
 	}
 
+	// One host for the whole listing: these installations were just enumerated
+	// through this org's App key against this base URL, so the deployment they
+	// live on is the one we asked, resolved to the same string the identity
+	// rows for that GitHub are keyed under.
+	host := EffectiveGitHubHost(baseURL)
+
 	out := make([]domain.OrgGitHubAppInstallation, 0, len(raw))
 	for _, in := range raw {
 		// A zero account id means GitHub's payload omitted it; it maps to ""
@@ -99,6 +106,7 @@ func DiscoverAppInstallations(ctx context.Context, secrets SecretStore, orgID, a
 			AccountType:    in.AccountType,
 			AccountID:      accountID,
 			AccountLogin:   in.AccountLogin,
+			GitHubHost:     host,
 			InstalledAt:    in.CreatedAt,
 			// Suspension rides in from the listing, so the reconcile converges a
 			// suspend (or unsuspend) whose webhook this deployment never saw —
