@@ -347,13 +347,111 @@ func repositoryInfoJSON(query, name string) string {
 	// gh decodes some of these responses strictly, so the owner carries its node
 	// id only for the commands that selected one.
 	owner := `{"login":"` + confOwner + `"}`
-	if strings.Contains(strings.ReplaceAll(query, " ", ""), "owner{id") {
+	if ownerSelectsID(query) {
 		owner = `{"id":"U_octo","login":"` + confOwner + `"}`
 	}
 	return `{"data":{"repository":{"id":"R_repo","name":"` + name + `","owner":` + owner + `,` +
 		`"description":"d","isArchived":` + strconv.FormatBool(name == confArchivedRepo) + `,` +
 		`"defaultBranchRef":{"name":"main"},"viewerPermission":"WRITE","hasIssuesEnabled":true,"hasWikiEnabled":true,` +
 		`"mergeCommitAllowed":true,"rebaseMergeAllowed":true,"squashMergeAllowed":true,"visibility":"PUBLIC"}}}`
+}
+
+// ownerSelectsID reports whether a repository query asked for its owner's node
+// id, which is the one field of that response the fixture cannot get away with
+// answering the same way for everyone: gh decodes some of these strictly and
+// rejects a field it did not select, while the commands that do select it are
+// the ones that go on to write.
+//
+// It reads the selection rather than matching a spelling of it. A GraphQL
+// document may be formatted across lines and may order its fields however it
+// likes, and a check that handled only today's single-line `owner{id,login}`
+// would answer "no" for a release that reformatted — leaving the fixture
+// answering the wrong shape, which surfaces as a conformance failure with
+// nothing in its message pointing here.
+//
+// So the document is reduced to tokens. GraphQL separates fields by whitespace
+// OR by commas and treats braces as punctuation, which is why neither a
+// whitespace collapse (it fuses `id` and `login` into one name) nor a comma
+// split (it never sees a newline-separated selection) is enough on its own.
+func ownerSelectsID(query string) bool {
+	tokens := strings.Fields(strings.NewReplacer("{", " { ", "}", " } ", ",", " ").Replace(query))
+	for i, token := range tokens {
+		if token != "owner" || i+1 >= len(tokens) || tokens[i+1] != "{" {
+			continue
+		}
+		// Only the owner's own selection counts, so the scan tracks depth: an
+		// id under something nested inside it is that thing's id.
+		depth := 0
+		for _, field := range tokens[i+1:] {
+			switch {
+			case field == "{":
+				depth++
+			case field == "}":
+				depth--
+			case field == "id" && depth == 1:
+				return true
+			}
+			if depth == 0 {
+				break
+			}
+		}
+	}
+	return false
+}
+
+// TestOwnerSelectsID pins that rule against the two documents the pinned gh
+// sends today and against the formattings it is free to send tomorrow. It is a
+// test of a fixture, which is worth having for this one thing: when the fixture
+// answers the wrong shape, what fails is a command's audit row, and nothing in
+// that failure would send a reader here.
+func TestOwnerSelectsID(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query string
+		want  bool
+	}{
+		{
+			// `gh repo archive`, verbatim.
+			name:  "the archive finder selects it",
+			query: `query RepositoryInfo($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {name,owner{id,login},isArchived,id} }`,
+			want:  true,
+		},
+		{
+			// `gh repo create --template`, verbatim: the id it wants is the
+			// repository's, not the owner's.
+			name:  "the create finder does not",
+			query: `fragment repo on Repository { id name owner { login } hasIssuesEnabled description hasWikiEnabled viewerPermission defaultBranchRef { name } } query RepositoryInfo($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ...repo } }`,
+			want:  false,
+		},
+		{
+			name:  "formatted across lines",
+			query: "query RepositoryInfo {\n\trepository {\n\t\towner {\n\t\t\tid\n\t\t\tlogin\n\t\t}\n\t}\n}",
+			want:  true,
+		},
+		{
+			name:  "formatted across lines without it",
+			query: "query RepositoryInfo {\n\trepository {\n\t\towner {\n\t\t\tlogin\n\t\t}\n\t}\n}",
+			want:  false,
+		},
+		{
+			name:  "selected last",
+			query: `query RepositoryInfo { repository { owner{login,id} } }`,
+			want:  true,
+		},
+		{
+			// The repository's own id, which is not the owner's and must not be
+			// read as one.
+			name:  "a sibling id is not the owner's",
+			query: `query RepositoryInfo { repository {name,owner{login},id} }`,
+			want:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ownerSelectsID(tc.query); got != tc.want {
+				t.Errorf("ownerSelectsID = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 // objectFromVariables resolves the catalog entry a request addressed, so one
