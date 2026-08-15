@@ -391,7 +391,7 @@ func (r *resolver) activeApp(ctx context.Context, orgID string) *domain.OrgGitHu
 // TokenCache with ClientFor so the API client and the host-side git clone
 // resolve identically.
 func (r *resolver) appToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, target, base string) (githubapp.Token, error) {
-	inst, ok := r.installationFor(ctx, orgID, target)
+	inst, ok := r.installationFor(ctx, orgID, accountByLogin(target))
 	if !ok {
 		return githubapp.Token{}, fmt.Errorf("%w: org=%s: app has no unambiguous installation for %q", ErrNoGitHubCredentials, orgID, target)
 	}
@@ -443,7 +443,7 @@ func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app *doma
 // written there would later be served to an unscoped caller. A scoped mint is
 // ~once per (run, repo); the gitproxy keeps its own per-repo cache.
 func (r *resolver) appScopedToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, owner, repo, base string, permissions map[string]string) (githubapp.Token, error) {
-	inst, ok := r.installationFor(ctx, orgID, owner)
+	inst, ok := r.installationFor(ctx, orgID, accountByLogin(owner))
 	if !ok {
 		return githubapp.Token{}, fmt.Errorf("%w: org=%s: app has no installation for %q", ErrNoGitHubCredentials, orgID, owner)
 	}
@@ -551,7 +551,7 @@ func (r *resolver) TokenForReposScoped(ctx context.Context, orgID, owner string,
 // installation TokenCache (keyed by installation only) so a scoped token is
 // never served to an unscoped caller.
 func (r *resolver) appReposScopedToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, owner string, repos []string, base string, permissions map[string]string) (githubapp.Token, error) {
-	inst, ok := r.installationFor(ctx, orgID, owner)
+	inst, ok := r.installationFor(ctx, orgID, accountByLogin(owner))
 	if !ok {
 		return githubapp.Token{}, fmt.Errorf("%w: org=%s: app has no installation for %q", ErrNoGitHubCredentials, orgID, owner)
 	}
@@ -675,12 +675,39 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	return "", "", false
 }
 
-// installationFor selects the App installation whose account matches target.
-// Account logins are case-insensitive on GitHub, so the match is too. An
-// empty target only resolves when there's exactly one installation (an
+// accountRef names the GitHub account whose installation a caller needs. The
+// two fields are the two halves of an account's identity and they age
+// differently: Login is the handle, which its owner can rename at any time,
+// and ID is GitHub's numeric account id, which they cannot. A caller that
+// holds only a repo owner supplies the login (accountByLogin); a caller that
+// knows the account's id supplies both.
+type accountRef struct {
+	ID    string
+	Login string
+}
+
+// accountByLogin is the ref for a caller that knows an account only by its
+// handle — every public resolver entry point today, since ClientFor and
+// friends take a GitHub target login. Such a ref matches exactly as the
+// resolver always has.
+func accountByLogin(login string) accountRef { return accountRef{Login: login} }
+
+// installationFor selects the App installation serving target.
+//
+// The numeric account id decides whenever both the ref and the mirrored row
+// carry one: it is the half of the account's identity that a rename leaves
+// alone, so an installation whose account_login has not yet caught up with a
+// rename still resolves, and one that merely inherited a freed login can never
+// answer for the account that gave it up. When either side has no id — a row
+// mirrored before ids were captured, or a caller that knows only a handle —
+// the match falls back to the case-insensitive login compare (GitHub logins
+// are case-insensitive, so the compare is too), which is the whole of the
+// behaviour for a ref with no id.
+//
+// An empty ref only resolves when there's exactly one installation (an
 // unambiguous choice); otherwise it returns no match and the caller falls
 // through to PAT.
-func (r *resolver) installationFor(ctx context.Context, orgID, target string) (domain.OrgGitHubAppInstallation, bool) {
+func (r *resolver) installationFor(ctx context.Context, orgID string, target accountRef) (domain.OrgGitHubAppInstallation, bool) {
 	insts, err := r.apps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		ghResolverLog.Warn("list installations failed; skipping tier1",
@@ -690,14 +717,27 @@ func (r *resolver) installationFor(ctx context.Context, orgID, target string) (d
 	if len(insts) == 0 {
 		return domain.OrgGitHubAppInstallation{}, false
 	}
-	if target == "" {
+	if target.ID == "" && target.Login == "" {
 		if len(insts) == 1 {
 			return insts[0], true
 		}
 		return domain.OrgGitHubAppInstallation{}, false
 	}
+	if target.ID != "" {
+		for _, in := range insts {
+			if in.AccountID == target.ID {
+				return in, true
+			}
+		}
+	}
 	for _, in := range insts {
-		if strings.EqualFold(in.AccountLogin, target) {
+		// A row whose id is known and differs is a different account, whatever
+		// it is currently called — skip it rather than let a colliding login
+		// answer for the wrong one.
+		if target.ID != "" && in.AccountID != "" && in.AccountID != target.ID {
+			continue
+		}
+		if strings.EqualFold(in.AccountLogin, target.Login) {
 			return in, true
 		}
 	}

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -533,7 +534,7 @@ func TestGitHubIdentityStatus(t *testing.T) {
 
 	// Bind via the store under the resolved origin (what the gate reads).
 	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
-		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), ghesHost, "octocat", "connect_oauth")
+		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), ghesHost, "octocat", "", "connect_oauth")
 	}); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
@@ -563,7 +564,7 @@ func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
 	seedOrgGitHubHost(t, rig, orgA.String(), "https://github.com")
 
 	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
-		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), "https://github.com", "corp-login", "connect_oauth")
+		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), "https://github.com", "corp-login", "", "connect_oauth")
 	}); err != nil {
 		t.Fatalf("seed connect identity: %v", err)
 	}
@@ -758,5 +759,46 @@ func TestGitHubIdentityPAT_HostUnreachable_Returns502(t *testing.T) {
 	}
 	if login, _ := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, deadURL); login != "" {
 		t.Errorf("identity row written despite unreachable host: %q", login)
+	}
+}
+
+// TestGitHubIdentityPAT_CapturesNumericUserID pins the second of the two
+// writers of user_github_identities.github_user_id (the Connect OAuth callback
+// is the other): the whoami that proves the token also reports which account it
+// is, and both halves of that answer are persisted. The login is what the rest
+// of the product matches on today; the id is what stays true if the user
+// renames.
+func TestGitHubIdentityPAT_CapturesNumericUserID(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/user" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":583231,"login":"octo-pat"}`)
+	}))
+	t.Cleanup(ghStub.Close)
+	seedLocalOrgGitHubHost(t, s, ghStub.URL)
+
+	rec := doJSON(t, s, "POST",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
+		map[string]any{"pat": "ghp_secret_token"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	var githubUserID sql.NullString
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT github_user_id FROM user_github_identities WHERE user_id = ? AND github_base_url = ?`,
+		runmode.LocalDefaultUserID, ghStub.URL).Scan(&githubUserID); err != nil {
+		t.Fatalf("read github_user_id: %v", err)
+	}
+	if githubUserID.String != "583231" {
+		t.Errorf("github_user_id = %q, want %q", githubUserID.String, "583231")
 	}
 }

@@ -124,7 +124,7 @@ func (s *gitHubAppsStore) DeleteForOrg(ctx context.Context, orgID string) error 
 
 func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT installation_id, org_id, account_type, account_login, installed_at
+		SELECT installation_id, org_id, account_type, account_id, account_login, installed_at
 		  FROM org_github_app_installations
 		 WHERE org_id = ? AND removed_at IS NULL
 		 ORDER BY account_login
@@ -136,13 +136,17 @@ func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID str
 
 	out := make([]domain.OrgGitHubAppInstallation, 0)
 	for rows.Next() {
-		var inst domain.OrgGitHubAppInstallation
+		var (
+			inst      domain.OrgGitHubAppInstallation
+			accountID sql.NullString
+		)
 		if err := rows.Scan(
 			&inst.InstallationID, &inst.OrgID, &inst.AccountType,
-			&inst.AccountLogin, &inst.InstalledAt,
+			&accountID, &inst.AccountLogin, &inst.InstalledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan org_github_app_installations: %w", err)
 		}
+		inst.AccountID = accountID.String // NULL → "" (account id not yet captured)
 		out = append(out, inst)
 	}
 	return out, rows.Err()
@@ -158,7 +162,9 @@ func (s *gitHubAppsStore) ListInstallationsForOrgSystem(ctx context.Context, org
 // UpsertInstallation mirrors one installation, idempotent on installation_id.
 // installed_at is set only on insert (defaulting to CURRENT_TIMESTAMP for a
 // zero InstalledAt) and preserved on conflict; removed_at is cleared so a
-// reinstall revives the row.
+// reinstall revives the row. account_login is overwritten (a rename must
+// reach the mirror) while account_id is only ever filled in, never blanked —
+// see the Postgres impl for why.
 func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) error {
 	var installedAt sql.NullTime
 	if !inst.InstalledAt.IsZero() {
@@ -166,13 +172,14 @@ func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.Or
 	}
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO org_github_app_installations
-			(installation_id, org_id, account_type, account_login, installed_at, removed_at)
-		VALUES (?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), NULL)
+			(installation_id, org_id, account_type, account_id, account_login, installed_at, removed_at)
+		VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), NULL)
 		ON CONFLICT(org_id, installation_id) DO UPDATE SET
 			account_type  = excluded.account_type,
 			account_login = excluded.account_login,
+			account_id    = COALESCE(excluded.account_id, org_github_app_installations.account_id),
 			removed_at    = NULL
-	`, inst.InstallationID, inst.OrgID, inst.AccountType, inst.AccountLogin, installedAt)
+	`, inst.InstallationID, inst.OrgID, inst.AccountType, nullStringValue(inst.AccountID), inst.AccountLogin, installedAt)
 	if err != nil {
 		return fmt.Errorf("upsert org_github_app_installations: %w", err)
 	}

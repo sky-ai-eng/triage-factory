@@ -1778,10 +1778,16 @@ CREATE TABLE public.users (
 -- without an authenticated round-trip to the host. Today's writers (pat,
 -- login_claim) always stamp it. An absent row is a durable, supported state
 -- (the NULL-degrades-gracefully contract).
+-- github_user_id is the account's numeric GitHub id, stored as text like every
+-- other GitHub-issued id in this schema. login is renameable; this is not, so
+-- the pair records who the user is as well as what they are currently called.
+-- Nullable: a row bound before this was captured keeps working off the login
+-- alone and fills the id in on the next capture.
 CREATE TABLE public.user_github_identities (
     user_id uuid NOT NULL,
     github_base_url text NOT NULL,
     login text NOT NULL,
+    github_user_id text,
     source text NOT NULL,
     verified_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -2826,6 +2832,19 @@ CREATE INDEX team_agents_team_idx ON public.team_agents USING btree (team_id);
 -- join + RLS membership check read it straight from the index. lower() on
 -- both axes mirrors TracksRepoSystem's case-insensitive match.
 CREATE INDEX team_github_repos_lower_owner_repo_idx ON public.team_github_repos USING btree (lower(owner), lower(repo), team_id);
+
+
+--
+-- Name: user_github_identities_login_lookup_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+-- Serves the reverse (host, login) → user lookup the routing subscribers run.
+-- lower(login) because GitHub logins are case-insensitive while the writers
+-- persist them as captured, so a verbatim compare silently misses on
+-- capitalisation — the same reason user_identities_link_lookup_idx keys on
+-- lower(email). github_base_url leads: identity is host-scoped, so every
+-- lookup pins it.
+CREATE INDEX user_github_identities_login_lookup_idx ON public.user_github_identities USING btree (github_base_url, lower(login));
 
 
 --
@@ -5914,10 +5933,19 @@ CREATE POLICY org_github_apps_delete ON public.org_github_apps FOR DELETE TO tf_
 -- numeric installation IDs overlap, so the PK is composite (org_id,
 -- installation_id): a webhook/backfill for one org can never collide with
 -- or rewrite another org's row.
+-- account_id is GitHub's numeric id for the installed-on account, stored as
+-- text like every other GitHub-issued id in this schema (entities.source_id,
+-- installation_id above). It is the half of the account's identity a rename
+-- does not change, so credential resolution matches on it and account_login
+-- is left to be what it is good at: the handle the UI renders. Nullable —
+-- a row mirrored before this was captured carries NULL and resolves by login
+-- exactly as it did; the next reconcile or webhook that names the account
+-- fills it in.
 CREATE TABLE public.org_github_app_installations (
     installation_id text NOT NULL,
     org_id uuid NOT NULL,
     account_type text NOT NULL,
+    account_id text,
     account_login text NOT NULL,
     installed_at timestamp with time zone DEFAULT now() NOT NULL,
     removed_at timestamp with time zone,

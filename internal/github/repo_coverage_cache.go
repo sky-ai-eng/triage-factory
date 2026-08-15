@@ -16,8 +16,12 @@ import (
 const repoCoverageTTL = 5 * time.Minute
 
 // repoCoverageCache memoizes ClientForRepo's installation-grant probe, keyed by
-// (orgID, owner/repo). An account login maps 1:1 to an installation, so the
-// owner/repo pair is a sufficient key without the installation ID.
+// (orgID, owner/repo). Within one org an account login maps to at most one
+// active installation — the mirror's partial unique on (org_id, account_login)
+// WHERE removed_at IS NULL makes it so — which is what lets the owner/repo pair
+// serve as a key without the installation id. Note what that rests on: a login
+// is a renameable handle, so the key is stable only for as long as the handle
+// keeps pointing at the same account (see below).
 //
 // It caches the POSITIVE answer only — "this repo is in the grant." That choice
 // is deliberate:
@@ -36,6 +40,13 @@ const repoCoverageTTL = 5 * time.Minute
 // it. There's no webhook for grant edits regardless, and an installation removal
 // needs no eviction here — once it's gone tier1AppClient stops resolving, so
 // ClientForRepo skips the tier-1 block and never reads a stale entry.
+//
+// A login changing hands (one account renames away, another claims the freed
+// handle) is the same staleness in a rarer shape: an entry probed against the
+// old account's installation is reused for the new one's until the TTL expires.
+// It self-heals on the same clock, and only ever in the permissive direction on
+// a probe TF made itself — never a token handed to the wrong account, since the
+// token comes from installationFor, not from here.
 type repoCoverageCache struct {
 	mu      sync.Mutex
 	expires map[string]time.Time

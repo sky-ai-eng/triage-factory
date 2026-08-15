@@ -35,7 +35,7 @@ func TestHandleTeamMembers_LocalSingleEntry(t *testing.T) {
 	// Seed the host-scoped identity at the empty host — the test
 	// server's org_settings has no github_base_url configured, so the
 	// handler resolves host="" and looks up (user, "").
-	if err := s.users.UpsertGitHubIdentity(t.Context(), runmode.LocalDefaultUserID, "", "AidanAllchin", "pat"); err != nil {
+	if err := s.users.UpsertGitHubIdentity(t.Context(), runmode.LocalDefaultUserID, "", "AidanAllchin", "", "pat"); err != nil {
 		t.Fatalf("seed github identity: %v", err)
 	}
 

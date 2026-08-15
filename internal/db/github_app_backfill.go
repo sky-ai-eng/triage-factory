@@ -86,10 +86,18 @@ func DiscoverAppInstallations(ctx context.Context, secrets SecretStore, orgID, a
 
 	out := make([]domain.OrgGitHubAppInstallation, 0, len(raw))
 	for _, in := range raw {
+		// A zero account id means GitHub's payload omitted it; it maps to ""
+		// (and then to a SQL NULL), so the row keeps whatever id it already
+		// had rather than being blanked by a partial answer.
+		var accountID string
+		if in.AccountID != 0 {
+			accountID = strconv.FormatInt(in.AccountID, 10)
+		}
 		out = append(out, domain.OrgGitHubAppInstallation{
 			InstallationID: strconv.FormatInt(in.ID, 10),
 			OrgID:          orgID,
 			AccountType:    in.AccountType,
+			AccountID:      accountID,
 			AccountLogin:   in.AccountLogin,
 			InstalledAt:    in.CreatedAt,
 		})

@@ -153,3 +153,47 @@ func TestListInstallations_HTTPError(t *testing.T) {
 		t.Fatal("ListInstallations on 403 = nil err; want error")
 	}
 }
+
+// TestListInstallations_CapturesAccountID pins that the account's numeric id
+// survives the parse alongside its login. The two are not interchangeable: the
+// login is what the account is currently called and the id is which account it
+// is, and only the second is stable across a rename — so dropping the id here
+// would leave the mirror with no durable way to identify what it is holding.
+// A payload that omits it (older GHES, a trimmed fixture) yields 0, which
+// callers map to "unknown" rather than to an account.
+func TestListInstallations_CapturesAccountID(t *testing.T) {
+	key := newTestKey(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[
+			{"id": 100, "account": {"id": 1234, "login": "acme-eng", "type": "Organization"}, "created_at": "2026-01-02T03:04:05Z"},
+			{"id": 200, "account": {"login": "solo-dev", "type": "User"}, "created_at": "2026-02-03T04:05:06Z"}
+		]`))
+	}))
+	defer srv.Close()
+
+	m, err := githubapp.NewMinter(githubapp.Config{
+		PrivateKey: key,
+		AppID:      424242,
+		APIBase:    srv.URL,
+		HTTPClient: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewMinter: %v", err)
+	}
+
+	insts, err := m.ListInstallations(context.Background())
+	if err != nil {
+		t.Fatalf("ListInstallations: %v", err)
+	}
+	if len(insts) != 2 {
+		t.Fatalf("got %d installations, want 2", len(insts))
+	}
+	if insts[0].AccountID != 1234 {
+		t.Errorf("inst[0].AccountID = %d, want 1234", insts[0].AccountID)
+	}
+	if insts[1].AccountID != 0 {
+		t.Errorf("inst[1].AccountID = %d for a payload without one, want 0", insts[1].AccountID)
+	}
+}

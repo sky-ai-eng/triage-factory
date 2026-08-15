@@ -99,9 +99,13 @@ type Token struct {
 // Installation is one App installation discovered via GET /app/installations:
 // a GitHub account (user or org) on which the App is installed. AccountType
 // is GitHub's verbatim "User" / "Organization"; CreatedAt is the installation's
-// created_at (zero if GitHub omitted it).
+// created_at (zero if GitHub omitted it). AccountID is the account's numeric
+// id — the half of the account's identity that a rename does not change, so it
+// is what the installation mirror keys credential resolution on; 0 when GitHub
+// omitted it.
 type Installation struct {
 	ID           int64
+	AccountID    int64
 	AccountLogin string
 	AccountType  string
 	CreatedAt    time.Time
@@ -416,10 +420,12 @@ func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64
 // installationListItem is the subset of an /app/installations array entry
 // we keep. GitHub returns far more (permissions, events, repository_selection);
 // installation mirroring only needs the id, the account it's installed on,
-// and when it was created.
+// and when it was created. Both halves of the account's identity are kept —
+// the numeric id (stable) and the login (renameable, and what the UI renders).
 type installationListItem struct {
 	ID      int64 `json:"id"`
 	Account struct {
+		ID    int64  `json:"id"`
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	} `json:"account"`
@@ -471,6 +477,7 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 		for _, it := range page {
 			out = append(out, Installation{
 				ID:           it.ID,
+				AccountID:    it.Account.ID,
 				AccountLogin: it.Account.Login,
 				AccountType:  it.Account.Type,
 				CreatedAt:    it.CreatedAt.UTC(),
