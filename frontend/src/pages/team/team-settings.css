@@ -4,59 +4,316 @@
 .ts {
   display: flex;
   flex-direction: column;
-  gap: var(--space-10);
-  max-width: 1080px;
+  gap: var(--space-8);
 }
 
-/* The header band: the team's headline figures, carried on every view. */
-.ts-band {
+/* ── Title block ──────────────────────────────────────────────────────
+   The name and the headline figures share a baseline: the name is what you
+   are configuring, the figures are what it currently amounts to. */
+
+.ts-top {
   display: flex;
-  gap: var(--space-11);
-  padding-bottom: var(--space-8);
-  border-bottom: 1px solid var(--color-line-1);
+  align-items: flex-end;
+  gap: var(--space-10);
+}
+
+.ts-id {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-right: auto;
+}
+
+.ts-name {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.05;
+  font-weight: var(--font-weight-semi);
+  letter-spacing: var(--tracking-page-title);
+  color: var(--color-ink-1);
+}
+
+.ts-created {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--color-ink-3);
+}
+
+.ts-figs {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-9);
+}
+
+.ts-div {
+  flex: none;
+  width: 1px;
+  height: 32px;
+  background: var(--color-line-1);
 }
 
 .ts-fig {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 5px;
+  align-items: flex-end;
+  /* A figure is not a control unless it goes somewhere. */
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  text-align: right;
+}
+
+.ts-fig-go {
+  cursor: pointer;
 }
 
 /* Mono and tabular: the figure came from the system, so it aligns with every
    other figure in the product. */
 .ts-fig-v {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-medium);
   font-size: 24px;
-  line-height: var(--leading-tight);
+  line-height: 1;
   color: var(--color-ink-1);
+}
+
+.ts-fig-v[data-tone='warm'] {
+  color: var(--color-warm);
 }
 
 .ts-fig-l {
   font-family: var(--font-mono);
-  font-size: var(--text-label);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
-  color: var(--color-ink-4);
+  font-size: 9.5px;
+  line-height: 1.3;
+  color: var(--color-ink-3);
 }
 
-.ts-sec {
+/* The chevron a figure or a panel head wears when it goes somewhere. Drawn
+   from two borders rather than a glyph, so it inherits weight from the rule
+   around it. */
+.ts-chev {
+  flex: none;
+  align-self: center;
+  width: 5px;
+  height: 5px;
+  border-right: 1.3px solid var(--color-warm);
+  border-top: 1.3px solid var(--color-warm);
+  transform: rotate(45deg);
+}
+
+/* ── The band ─────────────────────────────────────────────────────────
+   Two panels, and each one is a control: it opens into the region the roster
+   occupies rather than stacking a section under the page. */
+
+.ts-band {
+  display: grid;
+  grid-template-columns: 1fr 1.15fr;
+  padding-top: var(--space-8);
+  border-top: 1px solid var(--color-line-1);
+}
+
+.ts-panel {
+  appearance: none;
+  background: none;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
+  padding: 0;
 }
 
-.ts-h {
-  margin: 0;
+.ts-panel-right {
+  padding-left: 34px;
+  border-left: 1px solid var(--color-line-1);
+}
+
+.ts-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-5);
+}
+
+.ts-panel-t {
   font-family: var(--font-mono);
-  font-size: var(--text-label);
-  font-weight: var(--font-weight-regular);
-  letter-spacing: var(--tracking-label);
-  text-transform: uppercase;
+  font-size: 9.5px;
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0.14em;
+  color: var(--color-ink-3);
+  white-space: nowrap;
+}
+
+/* A dotted leader, so the head reads as one line rather than two ends. */
+.ts-lead {
+  flex: 1;
+  border-bottom: 1px dotted color-mix(in srgb, var(--color-line-2) 60%, var(--color-line-1));
+  transform: translateY(-3px);
+}
+
+.ts-lead-flex {
+  flex: 1;
+}
+
+.ts-panel-n {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--color-ink-2);
+  white-space: nowrap;
+}
+
+/* ── A measured row: a name, a value, and a hatched track ─────────────── */
+
+.ts-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.ts-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ts-row-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+}
+
+.ts-row-n {
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--color-ink-1);
+}
+
+.ts-row-tag {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.3;
   color: var(--color-ink-4);
 }
 
-.ts-note {
+.ts-row-v {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: var(--color-ink-2);
+}
+
+/* Hatched, not empty: an unfilled track still says a measurement belongs here.
+   The hatch is drawn structure, so it survives either ground. */
+.ts-meter {
+  display: flex;
+  height: 5px;
+  background: repeating-linear-gradient(-45deg, var(--color-line-2) 0 1px, transparent 1px 4px);
+}
+
+.ts-meter-fill {
+  height: 5px;
+  background: var(--color-warm);
+}
+
+/* ── The flow: sources converging on one stream ───────────────────────── */
+
+.ts-flow {
+  display: flex;
+  align-items: stretch;
+  height: 118px;
+}
+
+.ts-flow-list {
+  flex: none;
+  width: 150px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 1px 0;
+}
+
+.ts-flow-svg {
+  flex: 1;
+  height: 118px;
+  display: block;
+}
+
+.ts-flow-svg path {
+  fill: none;
+  stroke: var(--color-warm);
+  stroke-width: 1.5;
+  opacity: 0.8;
+}
+
+.ts-flow-stats {
+  flex: none;
+  width: 150px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-4);
+  padding-left: 18px;
+}
+
+.ts-stat {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+}
+
+.ts-stat-v {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-medium);
+  font-size: 17px;
+  line-height: 1;
+  color: var(--color-ink-1);
+}
+
+.ts-stat-v[data-tone='warm'] {
+  color: var(--color-warm);
+}
+
+.ts-stat-l {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.3;
+  color: var(--color-ink-3);
+}
+
+/* ── The region under the band ────────────────────────────────────────── */
+
+.ts-region {
+  min-height: 120px;
+}
+
+/* Five cards on an even grid. NOT flex-wrap: SourceCard carries no width of
+   its own, so under flex each card sized to its own content and the two
+   "coming soon" cards — which hold the longest notes — came out wider than the
+   three live ones. A grid makes the tracks equal, so the surface distinguishes
+   them rather than the length of their sentences. */
+.ts-sources {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(212px, 1fr));
+  gap: var(--space-6);
+  align-items: stretch;
+}
+
+.ts-note,
+.ts-error,
+.ts-empty {
   margin: 0;
   font-size: var(--text-secondary);
   line-height: var(--leading-prose);
@@ -65,65 +322,74 @@
 }
 
 .ts-error {
-  margin: 0;
-  font-size: var(--text-secondary);
   color: var(--color-alarm);
 }
 
-.ts-empty {
-  font-size: var(--text-body);
-  color: var(--color-ink-3);
-}
+/* ── Danger ───────────────────────────────────────────────────────────
+   Full page width. The measure belongs to the paragraph inside it, not to the
+   card: a card that stops two fifths across reads as unfinished. */
 
-/* Five cards on an even grid. NOT flex-wrap: SourceCard carries no width of
-   its own, so under flex each card sized to its own content and the two
-   "coming soon" cards — which hold the longest notes — came out visibly wider
-   than the three live ones. A grid makes the tracks equal and the surface, not
-   the sentence length, the thing that distinguishes them. */
-.ts-sources {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(212px, 1fr));
-  gap: var(--space-6);
-  align-items: stretch;
-}
-
-/* In-flow, so an inset hairline and no cast. The frame is warm rather than
-   alarm: the card is not itself dangerous, the verb inside it is. */
 .ts-danger {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-9);
-  padding: var(--space-8);
+  padding: var(--space-6) var(--space-8) var(--space-7);
   border-radius: var(--radius-inflow);
-  box-shadow: var(--shadow-edge-alarm);
-}
-
-.ts-danger .ts-note {
-  max-width: var(--container-measure);
+  background: color-mix(in srgb, var(--color-alarm) 6%, var(--color-ground));
+  border: 1px solid color-mix(in srgb, var(--color-alarm) 15%, var(--color-ground));
 }
 
 .ts-danger-h {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0.14em;
+  color: var(--color-alarm);
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-alarm) 15%, var(--color-ground));
+}
+
+.ts-danger-b {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-9);
+  padding-top: var(--space-6);
+}
+
+.ts-danger-b > div:first-child {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ts-danger-t {
   font-size: var(--text-card-title);
-  letter-spacing: var(--tracking-card-title);
+  line-height: 1.4;
+  font-weight: var(--font-weight-medium);
   color: var(--color-ink-1);
-  margin-bottom: var(--space-3);
+}
+
+.ts-danger-p {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--color-ink-2);
+  max-width: var(--container-measure);
 }
 
 .ts-danger-btn {
   flex: none;
   appearance: none;
-  background: none;
-  border: 0;
   font: inherit;
-  font-size: var(--text-ui);
+  font-size: 11.5px;
+  line-height: 1;
   color: var(--color-alarm);
-  padding: var(--space-3) var(--space-5);
+  padding: var(--space-4) var(--space-6);
   border-radius: var(--radius-nested);
-  box-shadow: inset 0 0 0 1px var(--color-alarm-1);
-  transition: box-shadow var(--dur-hover) var(--ease-default);
+  background: color-mix(in srgb, var(--color-alarm) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-alarm) 22%, transparent);
+  transition: border-color var(--dur-hover) var(--ease-default);
 }
 
 .ts-danger-btn:hover {
-  box-shadow: inset 0 0 0 1px var(--color-alarm);
+  border-color: var(--color-alarm);
 }
