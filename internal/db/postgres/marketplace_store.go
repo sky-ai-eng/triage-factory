@@ -640,7 +640,7 @@ const recomputePromptListingStatsPG = `
 
 // recomputeBlueprintListingStatsPG mirrors recomputePromptListingStatsPG for
 // kind=blueprint listings: copies live in blueprints (not prompts), runs
-// live in blueprint_runs.blueprint_id (not runs.prompt_id) filtered to
+// live in blueprint_runs.blueprint_id (not conversations.prompt_id) filtered to
 // blueprintRunTerminalStatusesSQL instead of runTerminalStatusesSQL —
 // everything else, including the terminal-only rationale, is identical.
 const recomputeBlueprintListingStatsPG = `

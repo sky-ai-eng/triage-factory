@@ -68,7 +68,7 @@ type CuratorStore interface {
 	// for the project, minting one when none exists: type='curator',
 	// visibility='private', origin='curator', trigger_type='manual', status
 	// NULL, team_id snapshotted from the project row (point-in-time, like
-	// runs.team_id — curator spend attributes to the project's team via the
+	// conversations.team_id — curator spend attributes to the project's team via the
 	// llm_spend view).
 	GetOrCreateConversation(ctx context.Context, orgID, projectID, creatorUserID string) (*domain.Conversation, error)
 

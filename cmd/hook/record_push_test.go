@@ -21,9 +21,9 @@ type pushDetails struct {
 	New bool   `json:"new"`
 }
 
-// newTestStores opens an in-memory SQLite, migrates it, and seeds one runs
-// row the artifacts FK (run_id) can point at. Returns the stores plus the
-// run id to wire into RunInfo.
+// newTestStores opens an in-memory SQLite, migrates it, and seeds one
+// conversations row the artifacts FK (run_id) can point at. Returns the
+// stores plus the run id to wire into RunInfo.
 func newTestStores(t *testing.T) (db.Stores, string) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")

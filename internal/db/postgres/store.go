@@ -241,7 +241,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// teardown's UpsertAgentMemorySystem and the run-start
 		// GetMemoriesForEntitySystem both fire without a JWT-claims
 		// context. conversation_memory_all RLS gates the app side via an
-		// EXISTS subquery against runs; admin bypasses RLS, and
+		// EXISTS subquery against conversations; admin bypasses RLS, and
 		// org_id stays in every WHERE clause as defense in depth.
 		TaskMemory: newTaskMemoryStore(app, admin),
 		// RunWorktrees wires both pools: app for cmd/exec workspace

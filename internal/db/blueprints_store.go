@@ -154,9 +154,10 @@ func DedupPreserveOrder(ids []string) []string {
 //   - blueprint_steps      — ordered membership list for a blueprint.
 //   - blueprint_runs       — one row per multi-step delegateBlueprint instance,
 //     owning the worktree shared across every step.
-//   - runs                — read-only here (per-step state lives on runs;
-//     RunsForBlueprint returns the slice of step rows linked to a blueprint_run).
-//     Step advancement reads each step run's terminal runs.outcome (see
+//   - conversations       — read-only here (per-step state lives on
+//     conversations; RunsForBlueprint returns the slice of step rows linked
+//     to a blueprint_run).
+//     Step advancement reads each step run's terminal conversations.outcome (see
 //     delegate.decideBlueprintStep); there is no separate verdict channel.
 //
 // Audiences:
@@ -471,6 +472,10 @@ type BlueprintStore interface {
 	// (already running for an `open` resume, or finalized by a racing
 	// path). Runs inside the same tx as MarkResuming so the run flip and
 	// the blueprint re-open commit atomically.
+	// TODO(TFAC-828): MarkResuming exists nowhere in the tree — the
+	// conversation lifecycle writes are Complete / ParkOpen (+ System /
+	// ForClaimSystem). Establish whether this is a rename or a stale
+	// atomicity claim before trusting the same-tx guarantee stated here.
 	ReopenRunForResume(ctx context.Context, orgID string, id string) (reopened bool, err error)
 
 	// SetRunCurrentStepSystem stamps the blueprint_run's durable

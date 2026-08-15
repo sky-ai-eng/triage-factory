@@ -127,7 +127,7 @@ type Router struct {
 	bootEpoch  int64
 
 	// drainLocks serializes DrainTask calls per task. Without this, the
-	// window between a pop and MarkPendingFiringFired/Skipped lets a
+	// window between a pop and MarkFired/MarkSkipped lets a
 	// concurrent drain (typically spawned by a fast-terminating run that
 	// the first drain just fired) pop the same row and double-fire it. The
 	// mutex closes the window: a second drain blocks until the first marks

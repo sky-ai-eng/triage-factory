@@ -470,10 +470,11 @@ func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
 	})
 }
 
-// TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome pins the channel
-// that replaced the old per-step verdict: a step run's terminal runs.outcome
-// (and outcome_reason) round-trips through RunsForBlueprint, which is what the
-// run-detail handler renders and what the orchestrator advances on.
+// TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome pins the
+// channel that replaced the old per-step verdict: a step run's terminal
+// conversations.outcome (and outcome_reason) round-trips through
+// RunsForBlueprint, which is what the run-detail handler renders and what
+// the orchestrator advances on.
 func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)

@@ -292,7 +292,7 @@ func TestArtifactStore_Postgres_RLS_WritePath(t *testing.T) {
 	ctx := context.Background()
 
 	// conversation_id left empty (NULL) so this isolates artifacts_insert, not the
-	// runs FK/RLS interplay.
+	// conversations FK/RLS interplay.
 	mkArtifact := func(key string) domain.Artifact {
 		return domain.Artifact{
 			OrgID: orgA, TeamID: teamA,
@@ -495,7 +495,7 @@ func TestArtifactStore_Postgres_UpsertSystem_BypassesRLS(t *testing.T) {
 	ctx := context.Background()
 
 	// conversation_id left empty (NULL) so this isolates the write-policy/pool routing
-	// from the runs FK.
+	// from the conversations FK.
 	art := domain.Artifact{
 		OrgID: orgID, TeamID: teamID,
 		Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue,
@@ -1090,7 +1090,7 @@ func TestArtifactStore_Postgres_UpdateReviewDetailsIfPending(t *testing.T) {
 }
 
 // seedPgArtifactRun mints a minimal run the artifacts.conversation_id FK can point
-// at. origin is non-'blueprint' so runs_origin_requires_parents doesn't
+// at. origin is non-'blueprint' so conversations_origin_requires_parents doesn't
 // demand a parent chain; trigger_type='manual' needs a non-NULL creator.
 func seedPgArtifactRun(t *testing.T, h *pgtest.Harness, orgID, teamID, userID string) string {
 	t.Helper()

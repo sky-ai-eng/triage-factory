@@ -16,7 +16,7 @@ import (
 )
 
 // fleetFixture mints a full org/team/task/prompt/blueprint chain and one
-// EnqueueRun'd runs row against real Postgres — the two-Spawner harness
+// EnqueueRun'd conversations row against real Postgres — the two-Spawner harness
 // TFAC-586 calls for ("the reaper needs it anyway"): boot-overlap,
 // reaper-requeue, fence, and drain scenarios all start from the same
 // realistic shape, then diverge in how they manipulate/observe it.

@@ -14,9 +14,10 @@ import (
 
 // seedPgRunWithMemory inserts a completed run (visibility as given) plus one
 // authored conversation_memory row and its primary conversation_memory_entities join on entityID.
-// origin='interactive' sidesteps runs_origin_requires_parents so no task /
-// prompt / blueprint parentage is needed — MemoryLoad reads only runs.visibility
-// + runs.team_id off the run, never its lineage.
+// origin='interactive' sidesteps conversations_origin_requires_parents
+// so no task / prompt / blueprint parentage is needed — MemoryLoad
+// reads only conversations.visibility + conversations.team_id off the
+// run, never its lineage.
 func seedPgRunWithMemory(t *testing.T, h *pgtest.Harness, stores db.Stores, orgID, teamID, creatorID, entityID, visibility, narrative string) string {
 	t.Helper()
 	runID := uuid.New().String()

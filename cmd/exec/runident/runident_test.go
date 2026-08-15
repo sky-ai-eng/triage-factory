@@ -34,7 +34,7 @@ func newStores(t *testing.T) (db.Stores, *sql.DB) {
 }
 
 // seedBlueprintRun mints a fresh blueprint + blueprint_run for taskID
-// and returns its id. runs.blueprint_run_id is NOT NULL, so every
+// and returns its id. conversations.blueprint_run_id is NOT NULL, so every
 // seeded run needs a parent blueprint_run. SQLite blueprint_runs has no
 // org_id/creator_user_id columns; org_id on blueprints takes its
 // local-sentinel DEFAULT.
@@ -123,7 +123,7 @@ func TestResolveRunIdentity_ManualRun(t *testing.T) {
 	if ident.RunID != "m1" {
 		t.Errorf("RunID = %q, want m1", ident.RunID)
 	}
-	// TeamID rides off runs.team_id (TFAC-458) — the local-mode RunInfo
+	// TeamID rides off conversations.team_id (TFAC-458) — the local-mode RunInfo
 	// source the capture writers stamp artifacts.team_id from. Create lands
 	// every local run on the sole team.
 	if ident.TeamID != runmode.LocalDefaultTeamID {
@@ -145,18 +145,18 @@ func TestResolveRunIdentity_EventTriggeredRun(t *testing.T) {
 	if ident.UserID != "" {
 		t.Errorf("event-triggered UserID should be empty (schema NULL); got %q", ident.UserID)
 	}
-	// TeamID is populated regardless of trigger type — it's runs.team_id
+	// TeamID is populated regardless of trigger type — it's conversations.team_id
 	// (NOT NULL), not the creator pairing (TFAC-458).
 	if ident.TeamID != runmode.LocalDefaultTeamID {
 		t.Errorf("TeamID = %q, want %q", ident.TeamID, runmode.LocalDefaultTeamID)
 	}
 }
 
-// TestResolveRunIdentity_TeamIDFromRow pins that TeamID is read straight off
-// the run's row (runs.team_id), not synthesized from a constant: a run whose
-// team_id has been moved off the local sentinel resolves to that exact value.
-// This is the local-resolver half of the TFAC-458 "RunInfo carries TeamID"
-// contract the capture writers depend on.
+// TestResolveRunIdentity_TeamIDFromRow pins that TeamID is read straight
+// off the run's row (conversations.team_id), not synthesized from a
+// constant: a run whose team_id has been moved off the local sentinel
+// resolves to that exact value. This is the local-resolver half of the
+// TFAC-458 "RunInfo carries TeamID" contract the capture writers depend on.
 func TestResolveRunIdentity_TeamIDFromRow(t *testing.T) {
 	stores, conn := newStores(t)
 	seedRun(t, stores, conn, "t1", "manual")
@@ -171,6 +171,6 @@ func TestResolveRunIdentity_TeamIDFromRow(t *testing.T) {
 		t.Fatalf("ResolveRunIdentity: %v", err)
 	}
 	if ident.TeamID != customTeam {
-		t.Errorf("TeamID = %q, want %q (must reflect runs.team_id, not a constant)", ident.TeamID, customTeam)
+		t.Errorf("TeamID = %q, want %q (must reflect conversations.team_id, not a constant)", ident.TeamID, customTeam)
 	}
 }

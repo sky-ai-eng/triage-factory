@@ -630,7 +630,7 @@ func gitAuthorizeOutcome(dec gitproxy.Decision) string {
 
 // sidecarProvisionFor builds the callback BringUpRunSidecar invokes with the
 // sidecar's published public key. It publishes that key onto the run's claim
-// (runs.cred_pubkey) and fires the cred_request doorbell — so the brain seals
+// (claims.cred_pubkey) and fires the cred_request doorbell — so the brain seals
 // THIS run's bundle to the sidecar's per-run key, not the claiming instance's
 // key — then polls run_credentials for the OPAQUE sealed bytes and hands them
 // back. The orchestrator never opens them; only the sidecar holds the matching

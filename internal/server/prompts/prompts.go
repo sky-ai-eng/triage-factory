@@ -60,15 +60,17 @@ func InvalidModelError() string {
 	return `model must be "" or one of: ` + strings.Join(allowedModelOverrides, ", ")
 }
 
-// SoftDeleteBySource soft-deletes a prompt according to its source and returns
-// the resulting status. System / imported prompts are hidden (kept out of the
-// re-import set); user (and any other) prompts get deleted_at stamped. Both are
-// soft — runs.prompt_id and blueprint_steps.step_prompt_id are RESTRICT FKs, and
-// historical timelines resolve the prompt via the ...System reads — so the row
-// survives as audit. Shared by the prompt-delete delete-pairing (a prompt taking
-// its sole-owner blueprint) and the blueprint-delete cascade (a blueprint taking
-// its step prompts), the two halves of the same pairing, so the source dispatch
-// lives in one place. The caller must have already fetched p.
+// SoftDeleteBySource soft-deletes a prompt according to its source and
+// returns the resulting status. System / imported prompts are hidden (kept
+// out of the re-import set); user (and any other) prompts get deleted_at
+// stamped. Both are soft — conversations.prompt_id and
+// blueprint_steps.step_prompt_id are RESTRICT FKs, and historical timelines
+// resolve the prompt via the ...System reads — so the row survives as
+// audit. Shared by the prompt-delete delete-pairing (a prompt taking its
+// sole-owner blueprint) and the blueprint-delete cascade (a blueprint
+// taking its step prompts), the two halves of the same pairing, so the
+// source dispatch lives in one place. The caller must have already fetched
+// p.
 func SoftDeleteBySource(ctx context.Context, tx db.TxStores, orgID string, p *domain.Prompt) (status string, err error) {
 	if p.Source == "system" || p.Source == "imported" {
 		if e := tx.Prompts.Hide(ctx, orgID, p.ID); e != nil {

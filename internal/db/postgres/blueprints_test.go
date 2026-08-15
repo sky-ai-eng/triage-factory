@@ -190,7 +190,7 @@ func TestBlueprintStore_Postgres_ReplaceAndListSteps(t *testing.T) {
 }
 
 // TestBlueprintStore_Postgres_RunLifecycle exercises CreateRun → GetRun →
-// RunsForBlueprint (surfacing the step run's terminal runs.outcome) →
+// RunsForBlueprint (surfacing the step run's terminal conversations.outcome) →
 // TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild pins the
 // atomic guarantee: flipping a blueprint_run to a terminal status parks any
 // still-mid-flight child run in the same transaction (stamping parked_at), so
@@ -981,7 +981,7 @@ func seedPgTask(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
 	return taskID
 }
 
-// seedPgRun inserts a runs row linked to a blueprint_run for verdict /
+// seedPgRun inserts a conversations row linked to a blueprint_run for verdict /
 // step-to-blueprint resolution tests.
 func seedPgRun(t *testing.T, h *pgtest.Harness, orgID, userID, taskID, promptID, blueprintRunID string, stepIdx int) string {
 	t.Helper()

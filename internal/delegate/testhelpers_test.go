@@ -34,10 +34,11 @@ func newDelegateTestDB(t *testing.T) *sql.DB {
 	return database
 }
 
-// seedRunBlueprint mints a blueprint + blueprint_run for taskID and returns the
-// blueprint_run id, so run fixtures can satisfy runs.blueprint_run_id NOT NULL.
-// The suffix keeps ids unique + deterministic per fixture; the ids are distinct
-// from makeRunBlueprintStep's ("bp-"/"bpr-") so a test can re-point a run onto a
+// seedRunBlueprint mints a blueprint + blueprint_run for taskID and returns
+// the blueprint_run id, so run fixtures can satisfy
+// conversations.blueprint_run_id NOT NULL. The suffix keeps ids unique +
+// deterministic per fixture; the ids are distinct from
+// makeRunBlueprintStep's ("bp-"/"bpr-") so a test can re-point a run onto a
 // specific blueprint_run without colliding with the one seedRun attached.
 func seedRunBlueprint(t *testing.T, database *sql.DB, suffix, taskID string) string {
 	t.Helper()
@@ -59,8 +60,8 @@ func seedRunBlueprint(t *testing.T, database *sql.DB, suffix, taskID string) str
 // seedRun inserts a run (plus its entity/event/task/blueprint fixtures)
 // with the requested id, session id, and worktree path.
 // We bypass the spawner's Delegate flow because these tests don't need
-// a real goroutine — only a row in the runs table. Every run is a
-// blueprint step now (runs.blueprint_run_id NOT NULL), so it mints a 1-step
+// a real goroutine — only a row in the conversations table. Every run is a
+// blueprint step now (conversations.blueprint_run_id NOT NULL), so it mints a 1-step
 // blueprint_run and links the run to it.
 func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath string) {
 	t.Helper()

@@ -549,7 +549,7 @@ const (
 //     runs hold (close all draft PRs, dismiss all pending reviews) and
 //     write the discard verdict to conversation_memory.human_content, so a
 //     returned-to-queue task leaves no stranded GitHub draft / pending
-//     review. Decoupled from run lifecycle — it never flips runs.status.
+//     review. Decoupled from run lifecycle — it never flips conversations.status.
 //
 //   - Jira reversal: if the task is Jira-backed and we have a
 //     SourceStatus snapshot (recorded at claim time), unassign and
@@ -606,11 +606,12 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 // pending review (finalized or not) has its GitHub pending review deleted +
 // flipped to dismissed. Pushed branches are kept (retention is separate).
 //
-// Decoupled from run lifecycle (TFAC-379): this never flips runs.status. A live
-// run is cancelled by the caller (swipeTeardownRuns' spawner.Cancel pass) — the
-// process teardown owns that transition; a terminal run simply stays terminal.
-// Keyed on the task's runs (ListForTask spans the blueprint's step runs and any
-// standalone run) rather than on a run status.
+// Decoupled from run lifecycle (TFAC-379): this never flips
+// conversations.status. A live run is cancelled by the caller
+// (swipeTeardownRuns' spawner.Cancel pass) — the process teardown owns that
+// transition; a terminal run simply stays terminal. Keyed on the task's
+// runs (ListForTask spans the blueprint's step runs and any standalone run)
+// rather than on a run status.
 //
 // outcome shapes the discard note baked into conversation_memory.human_content so the next
 // agent reading memory can distinguish "still on the docket, the human just

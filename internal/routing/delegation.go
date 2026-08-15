@@ -69,10 +69,11 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 	// consumers that must agree: the bot-disabled-team gate, the run's actor
 	// (frozen onto blueprint_runs.actor_agent_id via DelegateOpts), and the
 	// task's claim (the AgentClaimStamp each commitment carries). Resolving
-	// once guarantees runs.actor_agent_id and tasks.claimed_by_agent_id are the
-	// same id with no second lookup to drift, and it's available at step-0
-	// enqueue — which is what lets the claim ride the run insert's own
-	// transaction instead of following it as a separate write.
+	// once guarantees conversations.actor_agent_id and
+	// tasks.claimed_by_agent_id are the same id with no second lookup to
+	// drift, and it's available at step-0 enqueue — which is what lets the
+	// claim ride the run insert's own transaction instead of following it as a
+	// separate write.
 	//
 	// Nil r.agents is pre-D-Claims test wiring: skip the gate, leave agentID
 	// empty (the run records no actor, the claim stamp is the zero value and
@@ -218,7 +219,7 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 	}
 
 	// Consolidate the owner team to the acting team BEFORE firing. An
-	// auto-fired run inherits runs.team_id from tasks.team_id at insert,
+	// auto-fired run inherits conversations.team_id from tasks.team_id at insert,
 	// and the claim (which also consolidates the owner) lands inside that
 	// same insert — so without this, a run fired by a team other than the
 	// creation-time owner (e.g. the owner had auto-delegation disabled and
@@ -618,7 +619,7 @@ func (r *Router) DrainTask(orgID, taskID string) {
 	// fired by an earlier drain can spawn a second DrainTask goroutine
 	// that pops the same pending_firings row before the first drain
 	// transitions it out of 'pending' — leading to duplicate fireDelegate
-	// calls. The MarkPendingFiringFired/Skipped guards on
+	// calls. The MarkFired/MarkSkipped guards on
 	// status='pending' protect the row's own mutation but cannot un-fire
 	// the duplicate run. This mutex closes the window: the second drain
 	// blocks until the first releases, by which point the firing has

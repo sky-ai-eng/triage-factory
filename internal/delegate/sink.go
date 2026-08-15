@@ -12,7 +12,7 @@ import (
 )
 
 // runSink adapts an agentproc invocation to the delegate's storage:
-// session ids land on runs.session_id, parsed messages land in
+// session ids land on conversations.sdk_session_id, parsed messages land in
 // messages, and both fan out to the websocket so the UI can
 // react in real time.
 //

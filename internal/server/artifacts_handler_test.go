@@ -397,9 +397,9 @@ func TestArtifactDismiss_TaskLessRunClosesNoTask(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	// A task-less, blueprint-less interactive run: origin='interactive' with NULL
-	// task_id and NULL blueprint_run_id (tolerated by runs_origin_requires_parents
-	// only for origin <> 'blueprint').
+	// A task-less, blueprint-less interactive run: origin='interactive' with
+	// NULL task_id and NULL blueprint_run_id (tolerated by
+	// conversations_origin_requires_parents only for origin <> 'blueprint').
 	execSQL(t, srv.db, `INSERT INTO conversations (id, status, trigger_type, origin, outcome, team_id, visibility) VALUES ('r_int', 'completed', 'manual', 'interactive', 'abort', ?, 'team')`, runmode.LocalDefaultTeamID)
 	a := domain.NewPullRequestArtifact("acme/api", 42, "PR_node", "feature/x", "main", "https://example.test/acme/api/pull/42", "Proposed title", "Proposed body", true)
 	a.ConversationID = "r_int"

@@ -300,11 +300,11 @@ type agentResult struct {
 	// and the completion block in internal/agentprompt.
 	Outcome string `json:"outcome"`
 	// Summary is the natural-language "what I did" — required on a
-	// finish/continue. Maps to runs.result_summary.
+	// finish/continue. Maps to conversations.result_summary.
 	Summary string `json:"summary"`
 	// Reason is the natural-language "why I stopped / what a human needs
 	// to do" — required on (and only meaningful for) an abort outcome. Maps
-	// to runs.outcome_reason, kept distinct from Summary.
+	// to conversations.outcome_reason, kept distinct from Summary.
 	Reason string         `json:"reason"`
 	Links  map[string]any `json:"links"` // keyed URLs (pr_review, pr, jira_issues)
 }

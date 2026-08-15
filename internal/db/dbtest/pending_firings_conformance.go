@@ -56,11 +56,11 @@ type PendingFiringsSeeder struct {
 	// competing claim rather than a synthetic one.
 	ClaimTaskForUser func(t *testing.T, taskID string)
 
-	// RunForTask inserts a run against the taskID and returns the
-	// runID. Used by MarkFired tests to satisfy fired_run_id's FK to
-	// runs(id). Status / trigger_type aren't load-bearing here —
-	// the conformance suite only needs a real run row to point at;
-	// the per-task firing gate's runs-shaped half is owned by
+	// RunForTask inserts a blueprint_run against the taskID and returns
+	// its id. Used by MarkFired tests to satisfy fired_run_id's FK to
+	// blueprint_runs(id). Status / trigger_type aren't load-bearing here —
+	// the conformance suite only needs a real row to point at; the
+	// per-task firing gate's conversations-shaped half is owned by
 	// ConversationStore and tested there.
 	RunForTask func(t *testing.T, taskID string) string
 }
@@ -373,10 +373,10 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 		row, _ := s.PopForTask(ctx, orgID, tup.TaskID)
 
-		// MarkFired references a real run row in Postgres
+		// MarkFired references a real blueprint_run row in Postgres
 		// (fired_run_id has FK with ON DELETE on (fired_run_id, org_id)
-		// referencing runs(id, org_id)). The seeder's run-insert
-		// helpers produce valid run ids.
+		// referencing blueprint_runs(id, org_id)). The seeder's
+		// run-insert helpers produce valid blueprint_run ids.
 		runID := seed.RunForTask(t, tup.TaskID)
 		if err := s.MarkFired(ctx, orgID, row.ID, runID); err != nil {
 			t.Fatalf("MarkFired: %v", err)

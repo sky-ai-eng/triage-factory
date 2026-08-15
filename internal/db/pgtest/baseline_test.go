@@ -1657,7 +1657,7 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	}
 
 	// Bob (same org, NOT the run/task creator) must see ZERO of these
-	// child rows — tasks_select and runs_select gate on creator, so
+	// child rows — tasks_select and conversations_select gate on creator, so
 	// the EXISTS-on-parent in each child policy returns false for him.
 	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
 		for _, table := range []string{"task_events", "messages", "conversation_memory", "conversation_memory_entities", "conversation_worktrees"} {
@@ -2110,11 +2110,12 @@ func seedBlueprint(t *testing.T, h *Harness, orgID, creatorID, name string) stri
 	return id
 }
 
-// seedBlueprintRun mints a blueprint + blueprint_run for taskID so a runs row
-// can reference blueprint_runs(id). The column is nullable, but the
-// runs_origin_requires_parents CHECK requires it (plus task_id/prompt_id) to be
-// set when origin='blueprint' (the default). Returns the blueprint_run id.
-// Admin-pool insert (creator routing isn't under test here).
+// seedBlueprintRun mints a blueprint + blueprint_run for taskID so a
+// conversations row can reference blueprint_runs(id). The column is
+// nullable, but the conversations_origin_requires_parents CHECK requires it
+// (plus task_id/prompt_id) to be set when origin='blueprint' (the default).
+// Returns the blueprint_run id. Admin-pool insert (creator routing isn't
+// under test here).
 func seedBlueprintRun(t *testing.T, h *Harness, orgID, creatorID, taskID string) string {
 	t.Helper()
 	bpID := seedBlueprint(t, h, orgID, creatorID, "bp-"+taskID[:8])
@@ -2601,9 +2602,9 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 	`, orgA, entityA).Scan(&evtID); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
-	// Parent task + prompt + blueprint_run for the runs INSERT case below.
-	// blueprint_run_id must be set so the runs row clears the
-	// runs_origin_requires_parents CHECK (origin defaults to 'blueprint');
+	// Parent task + prompt + blueprint_run for the conversations INSERT case below.
+	// blueprint_run_id must be set so the conversations row clears the
+	// conversations_origin_requires_parents CHECK (origin defaults to 'blueprint');
 	// otherwise the INSERT would fail at the CHECK level and never exercise
 	// the RLS admin gate this test is asserting.
 	parentTaskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
@@ -2693,7 +2694,7 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 // is the current-claimant state; both set is forbidden.
 //
 // This is the schema-level invariant the claim-flip helpers
-// (SetTaskClaimedByAgent / SetTaskClaimedByUser) rely on: each does a
+// (SetClaimedByAgent / SetClaimedByUser) rely on: each does a
 // single UPDATE that sets one column AND clears the other in the same
 // statement, so the XOR is never temporarily violated. A direct SQL
 // attempt to set both at once must be rejected.

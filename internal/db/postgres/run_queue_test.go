@@ -471,9 +471,9 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 
 // TestRunQueueStore_Postgres_EnqueueStampsActorAgent is the Postgres parity of
 // the SQLite actor-stamp test: EnqueueRun (both the manual and event branches)
-// persists runs.actor_agent_id, and ConversationStore.GetSystem JOINs agents to
-// surface the display name as ActorAgentName. A run with no actor reads back
-// with both fields empty.
+// persists conversations.actor_agent_id, and ConversationStore.GetSystem
+// JOINs agents to surface the display name as ActorAgentName. A run with
+// no actor reads back with both fields empty.
 func TestRunQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

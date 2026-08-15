@@ -7,7 +7,7 @@
 // between a control request (interrupt / steer / cancel) and that process:
 // at N=1 the in-process impl resolves the handle here; horizontal scaling
 // swaps it for a DB-signal to the executor that owns the run's lease
-// (runs.executor_id), with no change at the call sites.
+// (claims.executor_id), with no change at the call sites.
 
 package delegate
 

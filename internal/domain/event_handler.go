@@ -98,7 +98,7 @@ const (
 )
 
 // TriggerTypeEvent is the V1 trigger_type value carried by triggers
-// (event_handlers with kind='trigger'). Persisted only on the runs
-// row (runs.trigger_type); the column was dropped from
+// (event_handlers with kind='trigger'). Persisted only on the
+// conversations row (conversations.trigger_type); the column was dropped from
 // the prior prompt_triggers table during unification.
 const TriggerTypeEvent = "event"

@@ -30,9 +30,9 @@ func seedDraftPRArtifact(t *testing.T, s *Spawner, runID string) {
 // --- decideBlueprintStep: the advancement decision matrix ------------------
 
 // TestDecideBlueprintStep pins the position-gated mapping from a completed
-// step's runs.outcome to the orchestrator's next move — the logic that
+// step's conversations.outcome to the orchestrator's next move — the logic that
 // replaced the chain-verdict switch. It is the single place advancement /
-// finish / abort flow through runs.outcome, so the whole matrix is covered
+// finish / abort flow through conversations.outcome, so the whole matrix is covered
 // here without spawning an agent.
 func TestDecideBlueprintStep(t *testing.T) {
 	cases := []struct {
@@ -52,7 +52,7 @@ func TestDecideBlueprintStep(t *testing.T) {
 		{"finish final finishes", "finish", true, blueprintStepFinish, ""},
 
 		// abort always leaves the task open; the reason comes from
-		// runs.outcome_reason at the call site (empty synthetic reason here).
+		// conversations.outcome_reason at the call site (empty synthetic reason here).
 		{"abort non-final aborts", "abort", false, blueprintStepAbort, ""},
 		{"abort final aborts", "abort", true, blueprintStepAbort, ""},
 

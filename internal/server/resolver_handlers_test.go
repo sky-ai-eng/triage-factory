@@ -78,7 +78,7 @@ func captureLog(t *testing.T) *bytes.Buffer {
 
 func seedDraftPRArtifact(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
-	// artifacts.run_id REFERENCES runs(id), so mint a full
+	// artifacts.conversation_id REFERENCES conversations(id), so mint a full
 	// entity→event→prompt→task→blueprint_run→run chain and hang the draft PR
 	// artifact off it. The owner/repo the resolver keys on are encoded in the
 	// artifact's target (owner/repo#number), independent of the entity's source.

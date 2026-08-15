@@ -115,7 +115,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 		return nil, err
 	}
 	// memory_missing is derived from a LEFT JOIN to conversation_memory rather
-	// than read off a column on runs: "the agent has not
+	// than read off a column on conversations: "the agent has not
 	// produced its memory file" === "no conversation_memory row exists, OR the
 	// row's agent_content is NULL/whitespace." NULLIF(TRIM(...), '')
 	// collapses both empty strings (legacy carry-over from before

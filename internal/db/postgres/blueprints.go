@@ -918,8 +918,8 @@ func getRunForBlueprintRun(ctx context.Context, q queryer, getRun func(context.C
 	return br, stepIndex, nil
 }
 
-// readRunBlueprintPointer reads runs.blueprint_run_id + blueprint_step_index
-// for a single run.
+// readRunBlueprintPointer reads conversations.blueprint_run_id +
+// blueprint_step_index for a single run.
 func readRunBlueprintPointer(ctx context.Context, q queryer, orgID, runID string) (string, *int, error) {
 	var (
 		blueprintRunID sql.NullString
@@ -981,15 +981,15 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 	//
 	// RLS scope: the admin pool bypasses RLS; on the app pool the child-cancel
 	// runs under the caller's claims, but a blueprint's child steps share its
-	// team, so runs_update admits them — the cancel covers every child the parent
-	// flip's actor owns. The narrow residual is a child the caller somehow can't
-	// see under RLS: it stays non-terminal (not an error — RLS filters the row,
-	// it doesn't fail), and the admin-pool boot reconcile is the backstop that
-	// heals it. Without this whole guard a cancel that raced the dispatcher's
-	// claim/setup window — or a parked `open` step the
-	// sequence-cancel path skips — would strand a child 'running', keeping the
-	// dispatcher on phantom work and pinning its feature branch in a worktree,
-	// requeuing forever.
+	// team, so conversations_update admits them — the cancel covers every
+	// child the parent flip's actor owns. The narrow residual is a child the
+	// caller somehow can't see under RLS: it stays non-terminal (not an error
+	// — RLS filters the row, it doesn't fail), and the admin-pool boot
+	// reconcile is the backstop that heals it. Without this whole guard a
+	// cancel that raced the dispatcher's claim/setup window — or a parked
+	// `open` step the sequence-cancel path skips — would strand a child
+	// 'running', keeping the dispatcher on phantom work and pinning its
+	// feature branch in a worktree, requeuing forever.
 	var changed bool
 	var parkedChildIDs []string
 	err := inTx(ctx, q, func(tx queryer) error {

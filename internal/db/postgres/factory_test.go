@@ -76,8 +76,8 @@ func seedPgFactoryOrg(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	return orgID, userID
 }
 
-// seedPgFactoryPrompt inserts a user-source prompt that runs can FK
-// into. team_id is read from the org's default team (created by
+// seedPgFactoryPrompt inserts a user-source prompt that conversations can
+// FK into. team_id is read from the org's default team (created by
 // seedPgFactoryOrg via seedPgDefaultTeam). source='user' satisfies
 // prompts_system_has_no_creator (creator must be non-NULL).
 func seedPgFactoryPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
@@ -169,7 +169,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 		},
 		Run: func(t *testing.T, taskID, status string) string {
 			t.Helper()
-			// runs.blueprint_run_id is NOT NULL — mint a 1-step blueprint_run for
+			// conversations.blueprint_run_id is NOT NULL — mint a 1-step blueprint_run for
 			// the task first (the firing unit), then link the run to it.
 			bpID := uuid.New().String()
 			if _, err := conn.Exec(`

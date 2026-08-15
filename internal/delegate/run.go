@@ -944,9 +944,9 @@ func (s *Spawner) processCompletion(
 
 	// Task disposition (close on finish, leave-open on abort) is the
 	// orchestrator's job now, not the step's: runBlueprint reads this run's
-	// terminal runs.outcome and routes through terminateBlueprint, which owns the
-	// terminal column. A step completion must never close the task here — the
-	// next step may be about to run.
+	// terminal conversations.outcome and routes through terminateBlueprint,
+	// which owns the terminal column. A step completion must never close the
+	// task here — the next step may be about to run.
 	if status == "failed" {
 		s.broadcastRunFailed(orgID, runID, failureKind)
 	} else {

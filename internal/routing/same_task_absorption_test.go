@@ -171,10 +171,11 @@ func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task 
 	if err != nil {
 		t.Fatalf("seed active run: %v", err)
 	}
-	// stubDelegateRun returns the blueprint_run id, not the runs.id the
-	// injection seam targets (staged_agent_injections.run_id FKs to
-	// runs(id)) — resolve the real run row it minted (one run per
-	// blueprint_run in the stub, step_index 0).
+	// stubDelegateRun returns the blueprint_run id, not the conversations.id
+	// the injection seam targets (a staged injection is an undelivered
+	// messages row, whose conversation_id FKs conversations(id)) — resolve
+	// the real run row it minted (one run per blueprint_run in the stub,
+	// step_index 0).
 	if err := database.QueryRow(`SELECT id FROM conversations WHERE blueprint_run_id = ?`, blueprintRunID).Scan(&activeRunID); err != nil {
 		t.Fatalf("resolve seeded run id: %v", err)
 	}

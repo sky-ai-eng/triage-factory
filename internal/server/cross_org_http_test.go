@@ -203,7 +203,7 @@ func seedProjectInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, name st
 func seedRunInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix string) string {
 	t.Helper()
 	taskID := seedTaskInOrg(t, r, orgID, userID, suffix)
-	// prompts.id is text (not uuid); pass the slug directly. runs.prompt_id
+	// prompts.id is text (not uuid); pass the slug directly. conversations.prompt_id
 	// FKs into prompts(id, org_id) so the ID stored here is what the run
 	// references below.
 	promptID := "p-" + suffix + "-" + uuid.NewString()[:8]
@@ -230,7 +230,7 @@ func seedRunInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix stri
 
 // seedBlueprintRunInOrg mints a blueprint + manual blueprint_run for the
 // given task in the given org via the admin pool, returning the
-// blueprint_run id. runs.blueprint_run_id is NOT NULL and FKs
+// blueprint_run id. conversations.blueprint_run_id is NOT NULL and FKs
 // blueprint_runs(id, org_id), so every multi-tenant run fixture needs a
 // parent blueprint_run first. Manual trigger_type requires
 // creator_user_id NOT NULL (blueprint_runs_creator_matches_trigger_type).

@@ -61,7 +61,7 @@ type Store interface {
 	ReapDeadExecutors(ctx context.Context, staleThreshold time.Duration, maxAttempts int) (Counts, error)
 
 	// DeleteStaleInstances tombstones registry rows whose heartbeat is
-	// older than staleAfter (own DB time). runs.executor_id carries no FK
+	// older than staleAfter (own DB time). claims.executor_id carries no FK
 	// to instances (by design — verified by a dedicated test), so this
 	// never touches audit history; a resurrected id simply re-registers at
 	// a fresh boot_epoch 1.

@@ -37,7 +37,7 @@ func newTestDB(t *testing.T) *sql.DB {
 }
 
 // seedBlueprintRun mints a fresh blueprint + blueprint_run for taskID
-// and returns its id. runs.blueprint_run_id is NOT NULL, so every
+// and returns its id. conversations.blueprint_run_id is NOT NULL, so every
 // seeded run needs a parent blueprint_run. SQLite blueprint_runs has no
 // org_id/creator_user_id columns; org_id on blueprints takes its
 // local-sentinel DEFAULT.
@@ -151,8 +151,9 @@ func TestBuild_KindNounRendersInDisclaimer(t *testing.T) {
 }
 
 // TestBuild_HappyPath_UsesStoredCostAndDuration covers the canonical
-// post-run case: TotalCostUSD and DurationMs were populated by
-// CompleteConversation. The footer reads them directly with no "~" prefix.
+// post-run case: TotalCostUSD and DurationMs both resolved from settled
+// ledger/telemetry rows. The footer reads them directly with no "~"
+// prefix.
 func TestBuild_HappyPath_UsesStoredCostAndDuration(t *testing.T) {
 	database := newTestDB(t)
 	completedAt := time.Date(2026, 1, 1, 12, 1, 30, 0, time.UTC)
@@ -184,7 +185,7 @@ func TestBuild_HappyPath_UsesStoredCostAndDuration(t *testing.T) {
 
 // TestBuild_LegacyFallback_FlagsApproximateCost covers the
 // still-running CLI path: TotalCostUSD is nil. Footer falls back to
-// RunTokenTotals (which returns zeros if there are no agent_messages
+// TokenTotalsSystem (which returns zeros if there are no messages
 // rows) and prefixes Cost with "~" to flag the estimate.
 func TestBuild_LegacyFallback_FlagsApproximateCost(t *testing.T) {
 	database := newTestDB(t)

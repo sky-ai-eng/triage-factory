@@ -369,8 +369,9 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 		}
 
 		// System and imported prompts are soft-deleted via Hide; user prompts via
-		// Delete (also soft — runs.prompt_id is RESTRICT). Both leave the row +
-		// its runs so historical timelines still resolve the prompt.
+		// Delete (also soft — conversations.prompt_id is RESTRICT). Both leave
+		// the row + the conversations referencing it so historical timelines
+		// still resolve the prompt.
 		var de error
 		status, de = prompts.SoftDeleteBySource(r.Context(), tx, orgID, prompt)
 		return de

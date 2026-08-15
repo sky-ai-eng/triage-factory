@@ -131,11 +131,12 @@ type TaskMemoryStore interface {
 	// which fires inside the runAgent goroutine with no JWT-claims
 	// context. org_id stays in the WHERE clause as defense in depth.
 	//
-	// teamID is the materializing run's owning team (runs.team_id).
+	// teamID is the materializing run's owning team (conversations.team_id).
 	// The admin pool bypasses RLS, so the app-pool variant's team
-	// scoping (conversation_memory_all → runs_select) is hand-rolled here: the
-	// result is restricted to memory whose parent run that team can see
-	// — team-visible runs owned by teamID plus any org-visible run —
+	// scoping (conversation_memory_all → conversations_select) is
+	// hand-rolled here: the result is restricted to memory whose parent
+	// run that team can see — team-visible runs owned by teamID plus
+	// any org-visible run —
 	// matching what a member of that team sees in the UI (TFAC-506).
 	// Without this, the System path returned ALL of the org's memory
 	// for the entity, leaking other teams' run narratives into a run

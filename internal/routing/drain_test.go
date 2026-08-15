@@ -17,9 +17,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// stubDelegator records every Delegate call and creates a real run row
-// each time so MarkPendingFiringFired's FK to runs(id) is satisfied. Used
-// by the drain race test to count fire attempts under concurrency.
+// stubDelegator records every Delegate call and creates a real
+// blueprint_run row each time so MarkFired's FK to
+// blueprint_runs(id) is satisfied. Used by the drain race test to count
+// fire attempts under concurrency.
 type stubDelegator struct {
 	db    *sql.DB
 	calls int64
@@ -39,12 +40,13 @@ func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (
 	return stubDelegateRun(s.db, task, opts)
 }
 
-// stubDelegateRun mirrors the production Delegate path for the router tests: it
-// mints a blueprint_run (fenced on (triggering_event_id, trigger_id) for event
-// triggers — the relocated replay fence) and a linked run row (runs.blueprint_run_id
-// is NOT NULL). Returns the blueprint_run id, or delegate.ErrAlreadyFired when an
-// event replay trips the fence. No worktree/agent is stood up — only the DB rows
-// the router's ErrAlreadyFired + run-count assertions read.
+// stubDelegateRun mirrors the production Delegate path for the router
+// tests: it mints a blueprint_run (fenced on (triggering_event_id,
+// trigger_id) for event triggers — the relocated replay fence) and a linked
+// run row (conversations.blueprint_run_id is NOT NULL). Returns the
+// blueprint_run id, or delegate.ErrAlreadyFired when an event replay trips
+// the fence. No worktree/agent is stood up — only the DB rows the router's
+// ErrAlreadyFired + run-count assertions read.
 func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	store := sqlitestore.New(database)
 	// opts.ExplicitBlueprintID is a blueprint id; the run row's prompt_id FK
@@ -401,7 +403,7 @@ func TestDrainTask_EmptyQueue(t *testing.T) {
 // TestDrainTask_ConcurrentDrainsDoNotDoubleFire is the regression test
 // for the pop-fire-mark race: without per-task serialization, a fast-
 // terminating run fired by drainer A could trigger drainer B before A
-// reached MarkPendingFiringFired, and B would pop the same still-pending
+// reached MarkFired, and B would pop the same still-pending
 // row and call Delegate again. With the per-task mutex, the second
 // drainer blocks until the first marks the firing terminal, then sees
 // nothing pending and returns clean.
@@ -482,7 +484,7 @@ func TestRunDrainSweeper_PicksUpStuckFiring(t *testing.T) {
 	// Poll for completion: sweeper must drain within a generous window.
 	// Wait for the firing's final status rather than just stub.calls,
 	// because the sweeper increments calls inside Delegate and only
-	// then runs MarkPendingFiringFired — observing calls==1 alone
+	// then runs MarkFired — observing calls==1 alone
 	// doesn't tell us the row has been transitioned. Under -race the
 	// gap between the two becomes large enough to flake. 1s gives
 	// ~100 ticks; if status hasn't reached 'fired' by then something

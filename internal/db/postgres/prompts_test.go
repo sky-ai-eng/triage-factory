@@ -212,8 +212,9 @@ func seedPgRunsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID stri
 		t.Fatalf("seed task: %v", err)
 	}
 
-	// runs.blueprint_run_id is NOT NULL — mint one blueprint_run for the task
-	// that all these runs link to (the runs are step/retry rows for prompt stats).
+	// conversations.blueprint_run_id is NOT NULL — mint one blueprint_run
+	// for the task that all these runs link to (the runs are step/retry
+	// rows for prompt stats).
 	bpID := uuid.New().String()
 	if _, err := conn.Exec(`
 		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, source, name, created_at, updated_at)

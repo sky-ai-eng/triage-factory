@@ -90,15 +90,16 @@ func TestSetupSlack_WorktreeLessAndNoClassificationWait(t *testing.T) {
 	}
 }
 
-// TestSetupSlack_PersistsWorktreePath pins that the run-root is stamped onto
-// runs.worktree_path via SetWorktreePathSystem, same as setupJira — required
-// for resume (`claude --resume` keys session storage off cwd).
+// TestSetupSlack_PersistsWorktreePath pins that the run-root is stamped
+// onto conversations.worktree_path via SetWorktreePathSystem, same as
+// setupJira — required for resume (`claude --resume` keys session storage
+// off cwd).
 func TestSetupSlack_PersistsWorktreePath(t *testing.T) {
 	s, database, task := slackTaskFixture(t, "persist")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
-	// Seed a minimal runs row for SetWorktreePathSystem's UPDATE to hit.
+	// Seed a minimal conversations row for SetWorktreePathSystem's UPDATE to hit.
 	ensureTestPrompt(t, database, domain.Prompt{ID: "persist-prompt", Name: "T", Body: "x", Source: "user"})
 	brID := seedRunBlueprint(t, database, "persist", task.ID)
 	stepIdx := 0
@@ -120,7 +121,7 @@ func TestSetupSlack_PersistsWorktreePath(t *testing.T) {
 		t.Fatalf("read persisted worktree_path: %v", err)
 	}
 	if wtPath != cfg.wtPath {
-		t.Errorf("persisted runs.worktree_path = %q, want %q", wtPath, cfg.wtPath)
+		t.Errorf("persisted conversations.worktree_path = %q, want %q", wtPath, cfg.wtPath)
 	}
 }
 

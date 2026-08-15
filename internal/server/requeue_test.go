@@ -121,10 +121,11 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 // assertion across the requeue (`queued` + "returned to the triage queue") and
 // dismiss (`dismissed` + "dismissed the task entirely") paths.
 //
-// Decoupled-lifecycle invariant (TFAC-379): teardown NEVER flips runs.status —
-// the completed run stays completed. The live-run cancellation that the old park
-// model folded in here is now the spawner's job (only a still-running run is
-// cancelled, by swipeTeardownRuns), so a terminal run is left untouched.
+// Decoupled-lifecycle invariant (TFAC-379): teardown NEVER flips
+// conversations.status — the completed run stays completed. The live-run
+// cancellation that the old park model folded in here is now the spawner's
+// job (only a still-running run is cancelled, by swipeTeardownRuns), so a
+// terminal run is left untouched.
 func assertPendingApprovalCleanedUp(
 	t *testing.T,
 	database *sql.DB,
@@ -142,7 +143,7 @@ func assertPendingApprovalCleanedUp(
 	}
 
 	// The run is untouched by the resolve — it stays terminal (completed). A
-	// resolve must never flip runs.status.
+	// resolve must never flip conversations.status.
 	var runStatus string
 	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&runStatus); err != nil {
 		t.Fatalf("scan run: %v", err)
@@ -996,7 +997,7 @@ func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 // anti-steal guarantee: if a different user already owns the task,
 // the swipe-claim handler must refuse with 409 rather than
 // overwriting the other user's claim. The previous unconditional
-// SetTaskClaimedByUser would have silently stolen the row.
+// SetClaimedByUser would have silently stolen the row.
 //
 // At N=1 local mode this can't happen via real user gestures, but
 // the helper-level race-safety is load-bearing for multi-mode and

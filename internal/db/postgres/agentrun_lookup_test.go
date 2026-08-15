@@ -27,7 +27,7 @@ func TestConversationStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID(t *te
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	// Stage the entity + event + task + run chain so the runs row
+	// Stage the entity + event + task + run chain so the conversations row
 	// exists with the real Postgres UUID in org_id.
 	entityID := uuid.New().String()
 	eventID := uuid.New().String()

@@ -10,9 +10,9 @@ import (
 
 // seedRunOnTeam inserts a minimal non-blueprint run owned by teamID with the
 // given status, via the admin pool. origin='manual' sidesteps the
-// runs_origin_requires_parents CHECK (no blueprint_run/task/prompt needed);
+// conversations_origin_requires_parents CHECK (no blueprint_run/task/prompt needed);
 // trigger_type='manual' pairs with a non-NULL creator per
-// runs_creator_matches_trigger_type.
+// conversations_creator_matches_trigger_type.
 func seedRunOnTeam(t *testing.T, h *Harness, orgID, creatorID, teamID, status string) string {
 	t.Helper()
 	var id string

@@ -31,7 +31,7 @@ const humanFeedbackSeparator = "\n\n---\n" + humanFeedbackHeader
 //
 //   - q: app pool (tf_app, RLS-active). Request-handler equivalents
 //     (review submit, PR submit, swipe-discard cleanup) route here.
-//     RLS policy conversation_memory_all (an EXISTS subquery against runs)
+//     RLS policy conversation_memory_all (an EXISTS subquery against conversations)
 //     gates the statement; the caller must be inside WithTx so
 //     request.jwt.claims is set.
 //
@@ -143,7 +143,7 @@ func (s *taskMemoryStore) GetMemoriesForEntity(ctx context.Context, orgID, entit
 
 // GetMemoriesForEntitySystem reads on the admin pool (BYPASSRLS), so the
 // team scoping the app-pool variant inherits from RLS (conversation_memory_all
-// delegates to runs_select) is hand-rolled here off the materializing
+// delegates to conversations_select) is hand-rolled here off the materializing
 // run's owning team_id. See getMemoriesForEntityTeamScoped + TFAC-506.
 func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
 	return getMemoriesForEntityTeamScoped(ctx, s.admin, orgID, entityID, teamID)
@@ -165,7 +165,7 @@ func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string
 // getMemoriesForEntityTeamScoped is the admin-pool (BYPASSRLS) read that
 // reproduces, without RLS, the team scoping the app-pool path gets for
 // free: a JOIN to the parent run plus the visibility branches of
-// runs_select. The materializing run has no JWT-claims context, so we
+// conversations_select. The materializing run has no JWT-claims context, so we
 // scope by its owning team_id directly — return the memory whose parent
 // run that team can see: any org-visible run, plus team-visible runs the
 // team owns. Private-visibility runs are excluded (creator-scoped, no

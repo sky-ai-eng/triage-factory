@@ -44,7 +44,7 @@ func newTestDB(t *testing.T) (db.Stores, *sql.DB) {
 }
 
 // seedBlueprintRun mints a fresh blueprint + blueprint_run for taskID
-// and returns the blueprint_run id. runs.blueprint_run_id is NOT NULL,
+// and returns the blueprint_run id. conversations.blueprint_run_id is NOT NULL,
 // so every seeded run needs a parent blueprint_run. SQLite
 // blueprint_runs has no org_id/creator_user_id columns; org_id on
 // blueprints takes its local-sentinel DEFAULT.

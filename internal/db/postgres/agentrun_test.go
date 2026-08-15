@@ -79,7 +79,7 @@ func seedPgConversationOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, agen
 }
 
 // seedPgConversationPrompt inserts a user-source prompt the conformance
-// suite's runs FK into. Stable id `p_agentrun_test` matches the
+// suite's conversations FK into. Stable id `p_agentrun_test` matches the
 // constant the shared harness expects.
 func seedPgConversationPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
 	t.Helper()
@@ -359,9 +359,9 @@ func TestConversationStore_Postgres_CrossOrgLeakage(t *testing.T) {
 // above wires both pools against AdminDB to prove the defense-in-depth
 // WHERE-clause filter is intact, this test runs the store through the
 // app pool under tf_app with real JWT claims so the actual
-// runs_select / runs_insert policies are exercised. Same-org reads
+// conversations_select / conversations_insert policies are exercised. Same-org reads
 // succeed; cross-org reads are silently filtered (USING); cross-org
-// Create raises 42501 from runs_insert WITH CHECK.
+// Create raises 42501 from conversations_insert WITH CHECK.
 func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -468,6 +468,9 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 // MarkResuming) wrapped in SyntheticClaimsWithTx must pass RLS under
 // tf_app and land the expected status. Mirrors the spawner's per-call-site
 // branch:
+//
+// TODO(TFAC-828): MarkResuming names nothing in the tree; resolve it to
+// the lifecycle write this test actually exercises.
 //
 //	if triggerType == "manual" {
 //	    s.tx.SyntheticClaimsWithTx(...) // this path

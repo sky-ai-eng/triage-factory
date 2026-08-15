@@ -518,9 +518,9 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 // unassigned team-pool signal), that when the highest-priority owner team has
 // auto-delegation disabled and a lower-priority team fires the bot, the owner
 // is consolidated to the acting team BEFORE the run is created — so the run
-// (which inherits runs.team_id from tasks.team_id) is attributed to the team
-// that acted, not the stale owner. The stub records the task's owner team at
-// Delegate time.
+// (which inherits conversations.team_id from tasks.team_id) is attributed
+// to the team that acted, not the stale owner. The stub records the task's
+// owner team at Delegate time.
 // (Author-centric github events and assignee-centric jira events route
 // owner-only, so this cross-team consolidation lives on the handler-team
 // path — jira:issue:available being the canonical multi-team event there.)

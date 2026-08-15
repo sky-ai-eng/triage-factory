@@ -103,7 +103,7 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB) dbtest.PendingFiringsSeeder {
 			t.Fatalf("seed entity: %v", err)
 		}
 
-		// prompt: triggers + runs both FK to prompts(id).
+		// prompt: triggers + conversations both FK to prompts(id).
 		// source='user' requires creator_user_id non-null per the
 		// prompts_system_has_no_creator CHECK.
 		if _, err := conn.Exec(`
