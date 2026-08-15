@@ -266,6 +266,37 @@ func TestHandleEventHandlerToggle_FlipsEnabled(t *testing.T) {
 	}
 }
 
+// TestHandleEventHandlerToggle_RequiresEnabled pins that an absent `enabled`
+// is rejected rather than read as false. A non-pointer bool made `{}` a
+// silent disable with a 200 — a body a client sends by mistake turning a
+// user's rule off. The explicit `{"enabled": false}` disable is covered by
+// TestHandleEventHandlerToggle_FlipsEnabled above and must keep working.
+func TestHandleEventHandlerToggle_RequiresEnabled(t *testing.T) {
+	s := newTestServer(t)
+	id := createUserRule(t, s)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+id+"/toggle", map[string]any{})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("toggle with empty body = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	// The rule is untouched — a rule created through the API starts enabled.
+	listRec := doJSON(t, s, http.MethodGet, "/api/event-handlers?kind=rule", nil)
+	var got []map[string]any
+	_ = json.Unmarshal(listRec.Body.Bytes(), &got)
+	var found bool
+	for _, h := range got {
+		if h["id"] == id {
+			found = true
+			if h["enabled"] != true {
+				t.Errorf("after a refused toggle, enabled=%v want true (unchanged)", h["enabled"])
+			}
+		}
+	}
+	if !found {
+		t.Error("created rule missing from list")
+	}
+}
+
 // --- DELETE /api/event-handlers/{id} -------------------------------------
 
 func TestHandleEventHandlerDelete_UserRowHardDeletes(t *testing.T) {

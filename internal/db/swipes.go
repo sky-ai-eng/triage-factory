@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -23,13 +24,21 @@ type SwipeStore interface {
 	// RecordSwipe inserts a swipe_events row and transitions the
 	// task's lifecycle (status + snooze_until) in one tx. Action
 	// → status mapping: "dismiss" → dismissed, "complete" → done,
-	// "snooze" → snoozed (timestamp comes from SnoozeTask though,
-	// not this method); "claim" and "delegate" map to status='queued'
+	// "snooze" → snoozed (with snoozeUntil as the wake time);
+	// "claim" and "delegate" map to status='queued'
 	// — those are responsibility-axis actions and don't move
 	// lifecycle, but the no-op coercion is kept for defensive
 	// idempotency. Unknown action defaults to 'queued' so a
 	// misuse doesn't silently strand the task. Returns the new
 	// task status the handler echoes back in the JSON response.
+	//
+	// snoozeUntil is the wake time and is REQUIRED for action
+	// "snooze" — a nil pointer there returns
+	// ErrSnoozeUntilRequired rather than writing the row, so no
+	// caller can persist status='snoozed' with snooze_until NULL
+	// (an indefinite snooze the wake sweep never returns to the
+	// queue). It is ignored for every other action, which clears
+	// snooze_until as before.
 	//
 	// The audit contract: the handler calls this AFTER
 	// any responsibility-axis mutation has accepted (for claim/
@@ -37,7 +46,7 @@ type SwipeStore interface {
 	// A refused claim/delegate is never audited. For dismiss/
 	// snooze/complete the action IS the state change, so this
 	// method is the audit + lifecycle write in one step.
-	RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int) (string, error)
+	RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int, snoozeUntil *time.Time) (string, error)
 
 	// SnoozeTask is the snooze-specific swipe: writes a 'snooze'
 	// swipe_events row + sets tasks.snooze_until and
@@ -65,3 +74,9 @@ type SwipeStore interface {
 	// visible in the swipe-history view.
 	UndoLastSwipe(ctx context.Context, orgID string, taskID string) error
 }
+
+// ErrSnoozeUntilRequired is returned by RecordSwipe when action is
+// "snooze" but no wake time was supplied. The wake sweep requeues on
+// snooze_until, so a snoozed row without one is parked forever —
+// every dialect refuses the write rather than persisting it.
+var ErrSnoozeUntilRequired = errors.New("db: snooze requires a wake time")

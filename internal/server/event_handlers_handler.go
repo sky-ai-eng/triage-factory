@@ -559,12 +559,20 @@ func (eh *eventHandlersHandler) handleEventHandlerToggle(w http.ResponseWriter, 
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
+	// Enabled is a pointer so an absent field stays distinguishable from an
+	// explicit false: a non-pointer bool zero-values an empty body into a
+	// disable, silently turning the handler off with a 200.
 	var req struct {
-		Enabled bool `json:"enabled"`
+		Enabled *bool `json:"enabled"`
 	}
 	if !decodeJSON(w, r, &req, "") {
 		return
 	}
+	if req.Enabled == nil {
+		badRequest(w, "enabled is required")
+		return
+	}
+	enabled := *req.Enabled
 	// Viewers can't enable/disable a rule/trigger (TFAC-447).
 	if !eh.gateHandlerWrite(w, r, orgID, userID, id) {
 		return
@@ -579,7 +587,7 @@ func (eh *eventHandlersHandler) handleEventHandlerToggle(w http.ResponseWriter, 
 		if existing == nil {
 			return nil
 		}
-		return tx.EventHandlers.SetEnabled(r.Context(), orgID, id, req.Enabled)
+		return tx.EventHandlers.SetEnabled(r.Context(), orgID, id, enabled)
 	}); err != nil {
 		internalError(w, "event_handlers", err)
 		return
@@ -588,7 +596,7 @@ func (eh *eventHandlersHandler) handleEventHandlerToggle(w http.ResponseWriter, 
 		notFound(w, "event handler")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "enabled": req.Enabled})
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "enabled": enabled})
 }
 
 // POST /api/event-handlers/{id}/promote

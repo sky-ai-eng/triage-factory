@@ -9,7 +9,6 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1390,11 +1389,21 @@ func sanitizeKnowledgeFilename(raw string) (string, string) {
 // resolveKnowledgePath maps a URL path parameter to an absolute file
 // path inside the project's knowledge-base directory and validates
 // that the resolved path stays within. Two layers of defense:
-//  1. URL-decode + sanitize via sanitizeKnowledgeFilename, which
-//     rejects "..", path separators, and leading dots.
+//  1. sanitizeKnowledgeFilename, which rejects "..", path separators,
+//     and leading dots.
 //  2. Resolve to absolute via filepath.Join(kbDir, name) and re-check
 //     the result has kbDir as its prefix. Belt-and-suspenders against
 //     anything the sanitizer might miss on a future filesystem.
+//
+// rawPath is r.PathValue("path"), which the mux has ALREADY
+// percent-decoded — so it is the filename, verbatim, and decoding it
+// again here would be a second decode the client never encoded for.
+// That mismatch put the listing and the per-file routes at odds: a
+// file listed as "notes%20final.md", correctly requested as
+// "notes%2520final.md", second-decoded into a different name and
+// 404'd, and "100%.md" failed the second decode outright as a 400.
+// The listing's names are the names; a client encodes each exactly
+// once.
 //
 // Errors that include filesystem detail (KnowledgeDir's UserHomeDir
 // failure, etc.) are logged server-side; the returned message is
@@ -1414,13 +1423,18 @@ func resolveKnowledgePath(orgID, projectID, rawPath string) (string, string, int
 		return "", "", http.StatusInternalServerError, "failed to resolve knowledge dir"
 	}
 	kbDir := filepath.Join(root, "knowledge-base")
-	decoded, err := url.PathUnescape(rawPath)
-	if err != nil {
-		return "", "", http.StatusBadRequest, "invalid path encoding"
-	}
-	name, errMsg := sanitizeKnowledgeFilename(decoded)
+	name, errMsg := sanitizeKnowledgeFilename(rawPath)
 	if errMsg != "" {
 		return "", "", http.StatusBadRequest, errMsg
+	}
+	// The sanitizer strips path components (its upload callers need that for
+	// browser multipart filenames), but here the delivered value must already
+	// BE the name: the knowledge base is flat and the listing never emits a
+	// name with a separator in it. Refuse anything the sanitizer had to
+	// rewrite — an encoded separator ("a%2Fb.md", which the mux hands over as
+	// "a/b.md") would otherwise quietly serve a file the request never named.
+	if name != rawPath {
+		return "", "", http.StatusBadRequest, "filename cannot contain path separators"
 	}
 	full := filepath.Join(kbDir, name)
 	rel, err := filepath.Rel(kbDir, full)
