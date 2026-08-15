@@ -131,6 +131,52 @@ func TestListInstallations_FollowsPagination(t *testing.T) {
 	}
 }
 
+// TestListInstallations_RefusesOffOriginPagination pins that a rel="next"
+// pointing somewhere other than the configured API host is refused rather than
+// followed.
+//
+// The next request would carry the App's signed JWT in an Authorization header,
+// so following an attacker- or misconfiguration-supplied host hands that
+// credential over and makes this process fetch a URL of the remote's choosing —
+// and the API base can be an arbitrary GHES host. The refusal is an error, not
+// a quiet stop: a truncated listing presented as a complete one would drive the
+// reconcile to soft-remove every installation it didn't see.
+func TestListInstallations_RefusesOffOriginPagination(t *testing.T) {
+	var reached bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer other.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", fmt.Sprintf(`<%s/app/installations?page=2>; rel="next"`, other.URL))
+		_, _ = w.Write([]byte(`[{"id": 1, "account": {"login": "page-one", "type": "User"}}]`))
+	}))
+	defer srv.Close()
+
+	m, err := githubapp.NewMinter(githubapp.Config{
+		PrivateKey: newTestKey(t),
+		AppID:      1,
+		APIBase:    srv.URL,
+		HTTPClient: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewMinter: %v", err)
+	}
+
+	insts, err := m.ListInstallations(context.Background())
+	if err == nil {
+		t.Fatalf("ListInstallations = %+v, nil err; want a refusal on the off-origin Link", insts)
+	}
+	if insts != nil {
+		t.Errorf("installations=%+v alongside the error; want none", insts)
+	}
+	if reached {
+		t.Error("the other host was fetched; the App JWT must never leave the configured API host")
+	}
+}
+
 // TestListInstallations_HTTPError pins that a non-200 surfaces an error
 // with the status + truncated body rather than a silent empty slice.
 func TestListInstallations_HTTPError(t *testing.T) {

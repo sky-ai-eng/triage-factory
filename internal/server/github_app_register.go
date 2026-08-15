@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -222,10 +223,13 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 	// NAT'd deployments we substitute an inert public placeholder
 	// (example.com is IANA-reserved for exactly this) and keep it inactive
 	// — it must never receive deliveries, and installation discovery there
-	// runs via API backfill instead.
+	// runs via API backfill instead. The placeholder is a shared constant
+	// rather than a literal because the webhook-health probe recognizes it:
+	// an App wearing our own sentinel is "not configured", which is the
+	// correct state for a local deployment and not a fault.
 	hookURL := publicURL + "/api/webhooks/github/" + orgID
 	if !reachable {
-		hookURL = "https://example.com/triage-factory-webhook-unconfigured"
+		hookURL = githubapp.PlaceholderHookURL
 	}
 	manifest["hook_attributes"] = map[string]any{
 		"url":    hookURL,
@@ -536,9 +540,15 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 
 	secretKeys := []string{clientSecretKey, pemKey}
 
-	// A hookless App (the manifest omitted hook_attributes for a
-	// non-public deployment) comes back with no webhook secret. Leave the
-	// ref empty and store nothing rather than writing an empty Vault entry.
+	// The webhook secret is optional on the way back. The manifest ALWAYS
+	// emits hook_attributes — GitHub rejects a blank hook url outright — so a
+	// non-public deployment registers the inert placeholder above with
+	// active:false, and whether GitHub returns a webhook_secret for a hook in
+	// that shape is not established. Treat it as absent-or-present either way:
+	// leave the ref empty and store nothing rather than writing an empty Vault
+	// entry, which the receiver would read as a key every caller can sign with.
+	// Absence is no longer silent — the webhook-health probe reports the
+	// placeholder as "not configured".
 	hasWebhookSecret := strings.TrimSpace(convResp.WebhookSecret) != ""
 	var webhookSecretKey string
 	if hasWebhookSecret {
@@ -722,9 +732,12 @@ func exchangeManifestCode(ctx context.Context, conversionURL string) (*manifestC
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	// webhook_secret is absent when the manifest omitted hook_attributes
-	// (hookless local/NAT'd Apps), so it's not load-bearing. client_id,
-	// client_secret, and pem always must be present.
+	// webhook_secret is not required here. The manifest always carries a
+	// hook_attributes block, but a deployment GitHub cannot reach gets the
+	// inactive placeholder one, and whether a conversion returns a secret for
+	// that is unverified — so this tolerates its absence instead of asserting
+	// either behaviour. client_id, client_secret, and pem always must be
+	// present.
 	if strings.TrimSpace(out.ClientID) == "" ||
 		strings.TrimSpace(out.ClientSecret) == "" ||
 		strings.TrimSpace(out.PEM) == "" {

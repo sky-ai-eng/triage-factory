@@ -43,9 +43,18 @@ curl -fsS http://localhost:3000/readyz | jq .
 
 An org absent from `rate_limit.github` has no observation yet this process (never
 polled, or its host omits rate-limit headers — e.g. GHES with rate limiting
-disabled), not zero remaining budget. Webhook-delivery freshness has no equivalent
-section yet — webhook ingestion invariants (dedup, reconciliation linkage) haven't
-landed, so there is no state to report.
+disabled), not zero remaining budget.
+
+Webhook delivery health is deliberately **not** here. Workspace Settings →
+GitHub access reports it per workspace — whether the App's webhook is
+configured, points at this deployment, and is being accepted — by asking GitHub
+directly (`/app/hook/config` + `/app/hook/deliveries`) rather than by waiting for
+a delivery. It stays off `/readyz` for two reasons: that endpoint is
+unauthenticated and carries no tenant configuration, and a workspace whose App is
+hookless is degraded in its **installation mirror**, not in this process's health
+— polling, task creation, and content processing are unaffected, and reporting a
+GitHub-side misconfiguration as a failing check would take a pod out of rotation
+for something no restart can fix.
 
 Alert on `age_seconds > 3 × interval_seconds` for whichever source/org you care
 about — that threshold is yours to pick; `/readyz` reports the raw numbers rather

@@ -52,10 +52,55 @@ export interface GitHubAppInfo {
   active: boolean
 }
 
+// GitHubAppWebhookState is the backend's answer to "is GitHub actually
+// delivering this App's webhooks here?", probed against the App's own webhook
+// configuration and delivery history (never inferred from a stored secret,
+// which is true in neither direction).
+//
+//   - not_configured: no webhook, or the inert placeholder a deployment GitHub
+//     can't reach registers. The NORMAL state in local mode — not a fault.
+//   - pointing_elsewhere: the App has a webhook, and it isn't this deployment.
+//   - delivering_rejected: GitHub is delivering here and the receiver refuses.
+//   - no_deliveries: configured for this deployment, nothing in GitHub's
+//     30-day window. Ordinary for a new or quiet App.
+//   - healthy: the most recent delivery was accepted.
+//   - unavailable: this GitHub host doesn't expose the App-webhook endpoints
+//     (GHES below 3.2), so the question can't be answered.
+export type GitHubAppWebhookState =
+  | 'not_configured'
+  | 'pointing_elsewhere'
+  | 'delivering_rejected'
+  | 'no_deliveries'
+  | 'healthy'
+  | 'unavailable'
+
+// GitHubAppWebhookHealth is the probe's answer as facts, not copy — the panel
+// composes the message, because the likely cause of a rejection depends on the
+// status code (a 401 reads differently from a failure to connect).
+//
+// secret_configured is GitHub's masked presence bit for the App's own webhook
+// secret. It never carries the value, and TF never compares one: the delivery
+// status codes are what prove a secret matches.
+export interface GitHubAppWebhookHealth {
+  state: GitHubAppWebhookState
+  // Origin (scheme://host) the App delivers to, '' when nothing is configured.
+  hook_host: string
+  secret_configured: boolean
+  // RFC3339 of the most recent delivery, '' when there is none.
+  last_delivery_at: string
+  // What the receiving endpoint answered on that delivery; 0 when GitHub could
+  // not connect at all.
+  last_delivery_status_code: number
+  checked_at: string
+}
+
 export interface GitHubAppStatus {
   app: GitHubAppInfo | null
   installations: GitHubAppInstallation[]
   using_hosted_default: boolean
+  // null when there's no App, no deployment identity to compare a hook URL
+  // against, or no probe answer yet. Absent means NOT KNOWN — never "fine".
+  webhook_health: GitHubAppWebhookHealth | null
   // The absolute redirect_uri the App owner must register on the App for per-user
   // "Connect GitHub" OAuth to work. Same URL a manifest-created App already has
   // registered (harmless there); load-bearing for a bring-your-own App whose
@@ -85,6 +130,36 @@ export async function refreshGitHubAppInstallations(orgId: string): Promise<GitH
     )
   } catch (e) {
     throw asError(e, 'Could not refresh the GitHub App installations.')
+  }
+}
+
+// GitHubWebhookReplayResult reports what the repair did. candidates is how many
+// failed installation deliveries GitHub still holds in its 30-day window, which
+// is what makes `replayed: 0` legible — nothing to replay reads very differently
+// from nothing accepted.
+export interface GitHubWebhookReplayResult {
+  candidates: number
+  replayed: number
+  failed: number
+}
+
+// replayGitHubWebhookDeliveries asks GitHub to redeliver the App's failed
+// installation deliveries, healing an installation mirror that went stale while
+// the receiver was rejecting them (a missing or mismatched webhook secret). Only
+// failed deliveries are replayed, and the receiver dedups on the delivery GUID a
+// redelivery shares with its original, so this cannot double-apply anything.
+//
+// POST /api/orgs/{org_id}/github/app/webhook/replay
+export async function replayGitHubWebhookDeliveries(
+  orgId: string,
+): Promise<GitHubWebhookReplayResult> {
+  try {
+    return await apiJSON<GitHubWebhookReplayResult>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/app/webhook/replay`,
+      { method: 'POST' },
+    )
+  } catch (e) {
+    throw asError(e, 'Could not replay the missed webhook deliveries.')
   }
 }
 

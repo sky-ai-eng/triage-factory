@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -89,7 +90,7 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 				Slug:   "acme-bot",
 				Active: tc.active,
 			}
-			resp := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, app, nil, "", "")
+			resp := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, app, nil, "", "", nil)
 			if resp.App == nil {
 				t.Fatal("App=nil, want the mapped registration")
 			}
@@ -109,7 +110,7 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 		resp := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, nil, []domain.OrgGitHubAppInstallation{
 			{InstallationID: "456", AccountType: "Organization", AccountLogin: "acme"},
 			{InstallationID: "789", AccountType: "Organization", AccountLogin: "beta", SuspendedAt: suspendedAt, SuspendedBy: "octocat"},
-		}, "", "")
+		}, "", "", nil)
 		if len(resp.Installations) != 2 {
 			t.Fatalf("installations=%d, want 2", len(resp.Installations))
 		}
@@ -124,6 +125,48 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 		}
 		if got.SuspendedBy != "octocat" {
 			t.Errorf("suspended_by=%q, want %q", got.SuspendedBy, "octocat")
+		}
+	})
+
+	// The payload also carries the App-webhook probe's answer, so the panel can
+	// tell an App that receives deliveries from one that receives none. The
+	// distinction the block has to preserve is between "no answer yet" and any
+	// answer at all: a null must never be renderable as healthy.
+	t.Run("webhook health", func(t *testing.T) {
+		app := &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "123", Slug: "acme-bot", Active: true}
+
+		unprobed := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, app, nil, "", "", nil)
+		if unprobed.WebhookHealth != nil {
+			t.Errorf("webhook_health=%+v with no probe answer, want null", unprobed.WebhookHealth)
+		}
+
+		health := &githubAppWebhookHealth{
+			State:                  string(githubapp.WebhookStateRejected),
+			HookHost:               "https://tf.example.org",
+			SecretConfigured:       true,
+			LastDeliveryAt:         "2026-08-15T12:00:00Z",
+			LastDeliveryStatusCode: 401,
+			CheckedAt:              "2026-08-15T12:01:00Z",
+		}
+		resp := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, app, nil, "", "", health)
+		if resp.WebhookHealth == nil {
+			t.Fatal("webhook_health=null, want the probe answer")
+		}
+		if resp.WebhookHealth.State != string(githubapp.WebhookStateRejected) {
+			t.Errorf("state=%q, want %q", resp.WebhookHealth.State, githubapp.WebhookStateRejected)
+		}
+		if resp.WebhookHealth.LastDeliveryStatusCode != 401 {
+			t.Errorf("last_delivery_status_code=%d, want 401", resp.WebhookHealth.LastDeliveryStatusCode)
+		}
+		if resp.WebhookHealth.HookHost != "https://tf.example.org" {
+			t.Errorf("hook_host=%q, want the configured origin", resp.WebhookHealth.HookHost)
+		}
+
+		// An unknown credential class renders no App, and must not describe the
+		// webhooks of a registration it just declined to render.
+		unknown := newGitHubAppStatusResponse(domain.GitHubCredentialClass("mystery"), app, nil, "", "", health)
+		if unknown.WebhookHealth != nil {
+			t.Errorf("webhook_health=%+v for an unknown credential class, want null", unknown.WebhookHealth)
 		}
 	})
 }

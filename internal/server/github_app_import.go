@@ -577,7 +577,12 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		// as the literal rather than re-read, since the import IS what put the
 		// org in the BYO-App system.
 		githubAppStatusResponse: newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, created, insts,
-			s.registrantDisplayName(ctx, orgID, userID, created), s.connectCallbackURLSafe(orgID)),
+			s.registrantDisplayName(ctx, orgID, userID, created), s.connectCallbackURLSafe(orgID),
+			// No webhook health: nothing has probed this App yet, and the block
+			// is deliberately absent rather than optimistic. The panel's next
+			// status read runs the first probe — the import form's own copy is
+			// what names the cost of a blank webhook secret at this moment.
+			nil),
 		Permissions:           rows,
 		ClientSecretStored:    hasClientSecret,
 		ClientSecretValidated: clientSecretValidated,

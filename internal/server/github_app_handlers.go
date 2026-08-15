@@ -27,6 +27,13 @@ type githubAppStatusResponse struct {
 	// when no deployment identity is configured (deployCfg nil — e.g. a unit-test
 	// server); the field is only actioned by an admin enabling OAuth.
 	ConnectCallbackURL string `json:"connect_callback_url"`
+	// WebhookHealth is whether GitHub is actually delivering this App's
+	// webhooks to this deployment — null when there is no App, no deployment
+	// identity to compare a hook URL against, or no probe answer yet. Its
+	// absence is "not known", never "fine": a registered App that receives
+	// nothing is the case this exists to make visible. See
+	// github_webhook_health.go.
+	WebhookHealth *githubAppWebhookHealth `json:"webhook_health"`
 }
 
 type githubAppInfo struct {
@@ -67,7 +74,9 @@ type githubAppInstallation struct {
 // registeredByName may be empty when the registrant is unknown or the lookup
 // was skipped. connectCallbackURL is the org's Connect OAuth redirect_uri (or
 // "" when no deployment identity is configured), carried so the import/connect
-// form can show the exact URL the App owner must register.
+// form can show the exact URL the App owner must register. health is the last
+// known App-webhook probe answer, or nil when none is known — a nil is rendered
+// as an absent block rather than as a healthy one.
 //
 // class decides using_hosted_default, which is the one field on this payload
 // that a nil app cannot answer for. A nil app means "no registration of your
@@ -76,10 +85,11 @@ type githubAppInstallation struct {
 // classes this build knows are the org's OWN credential, so both report false;
 // the reserved shared-App class is the arm that would report true, and it gets
 // to be a visible new case rather than a silent inherited default.
-func newGitHubAppStatusResponse(class domain.GitHubCredentialClass, app *domain.OrgGitHubApp, insts []domain.OrgGitHubAppInstallation, registeredByName, connectCallbackURL string) githubAppStatusResponse {
+func newGitHubAppStatusResponse(class domain.GitHubCredentialClass, app *domain.OrgGitHubApp, insts []domain.OrgGitHubAppInstallation, registeredByName, connectCallbackURL string, health *githubAppWebhookHealth) githubAppStatusResponse {
 	resp := githubAppStatusResponse{
 		Installations:      make([]githubAppInstallation, 0, len(insts)),
 		ConnectCallbackURL: connectCallbackURL,
+		WebhookHealth:      health,
 	}
 	switch class {
 	case domain.GitHubCredentialClassPAT, domain.GitHubCredentialClassBYOApp:
@@ -92,6 +102,10 @@ func newGitHubAppStatusResponse(class domain.GitHubCredentialClass, app *domain.
 		// panel that says "no App configured" for an org whose credential system
 		// this build can't name would invite an admin to register a second one.
 		githubAppLog.Error("unknown github credential class in status payload; rendering app:null", "class", class)
+		// Nothing is claimed about an App this build can't name, webhook health
+		// included — a health block beside app:null would describe a
+		// registration the payload just declined to render.
+		resp.WebhookHealth = nil
 		return resp
 	}
 	if app != nil {
@@ -183,7 +197,7 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(class, app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID)))
+	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(class, app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID), s.webhookHealthDTO(ctx, orgID, app)))
 }
 
 // connectCallbackURLSafe returns the org's Connect OAuth callback URL, or ""
@@ -272,7 +286,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 		internalError(w, "github-app", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(class, app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID)))
+	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(class, app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID), s.webhookHealthDTO(ctx, orgID, app)))
 }
 
 // handleGitHubAppInstallURL returns the GitHub deep-link the panel's

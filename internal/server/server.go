@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
@@ -286,6 +287,21 @@ type Server struct {
 	// lock, so it is what stops one that started before a rotation from
 	// writing the pre-rotation secret back afterwards.
 	webhookSecretGen uint64
+
+	// webhookHealthMu guards the per-org cache of the App-webhook probe — is
+	// GitHub actually delivering this org's webhooks here, and is the receiver
+	// accepting them. Unlike the secret cache above, this one is not a
+	// throughput measure: it is what keeps two GitHub round trips off the
+	// Settings status read, and what preserves the last known answer when a
+	// probe fails. Keys are org ids from membership-checked reads, so the key
+	// set is the deployment's own orgs rather than anything a caller chooses.
+	// See github_webhook_health.go.
+	webhookHealthMu sync.Mutex
+	webhookHealth   map[string]*webhookHealthEntry // key: orgID
+	// hookProbe substitutes the GitHub half of that probe. Nil in production
+	// (the real App-JWT reads run); set by tests, which have no GitHub to ask
+	// and need to drive the failure path deterministically.
+	hookProbe func(ctx context.Context, orgID string, app *domain.OrgGitHubApp, expectedURL string) (githubapp.WebhookHealth, error)
 
 	// preAuthLimiter is the per-IP token-bucket cap on the pre-auth
 	// allowlist routes (TFAC-433). Those mounts run before any session
@@ -1262,6 +1278,12 @@ func (s *Server) routes() {
 	// mode-agnostic. Mutating: it reconciles the installation mirror via the
 	// same API backfill the poller runs, so it rides apiMutating (CSRF).
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/installations/refresh", s.handleGitHubAppInstallationsRefresh)
+	// Replay the App's failed installation webhook deliveries — the repair for
+	// an org whose receiver was rejecting them (no webhook secret, or the wrong
+	// one) while its installation mirror went stale. Admin-only, and mutating
+	// in the sense that matters: it asks GitHub to deliver again, so it rides
+	// apiMutating (CSRF).
+	s.apiMutating("POST /api/orgs/{org_id}/github/app/webhook/replay", s.handleGitHubAppWebhookReplay)
 
 	// GitHub access either/or transitions. GitHub access is
 	// strictly App XOR PAT per org; these commit the switches and surface the
