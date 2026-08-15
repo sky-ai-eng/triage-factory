@@ -488,6 +488,14 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		}); err != nil {
 			return err
 		}
+		// The org is now in the BYO-App credential system — including when the
+		// App is STAGED behind a still-live PAT. Same reasoning as the manifest
+		// register path: the class names which system the org is in, Active
+		// names which credential is live, and this transaction is what keeps
+		// the two from disagreeing.
+		if err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+			return fmt.Errorf("set github credential class: %w", err)
+		}
 		// Store the PEM verbatim (req.PEM, not a trimmed copy): a private key's
 		// internal newlines are load-bearing, ParsePrivateKey tolerates the
 		// surrounding whitespace, and the resolver reads it back through the same
@@ -560,7 +568,10 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, githubAppImportResponse{
-		githubAppStatusResponse: newGitHubAppStatusResponse(created, insts,
+		// The class the transaction above just committed for this org — passed
+		// as the literal rather than re-read, since the import IS what put the
+		// org in the BYO-App system.
+		githubAppStatusResponse: newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, created, insts,
 			s.registrantDisplayName(ctx, orgID, userID, created), s.connectCallbackURLSafe(orgID)),
 		Permissions:           rows,
 		ClientSecretStored:    hasClientSecret,

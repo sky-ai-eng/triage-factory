@@ -59,10 +59,41 @@ func (f *fakeApps) ListInstallationsForOrgSystem(_ context.Context, _ string) ([
 type fakeOrgs struct {
 	db.OrgsStore
 	base string
+	// class is the org's GitHub credential class. Empty is not a value the real
+	// store can return (the column is NOT NULL DEFAULT 'pat', and a missing row
+	// falls back to domain.DefaultOrgSettings) — newTestResolver fills it in
+	// from the fixture's App before the resolver ever reads it.
+	class domain.GitHubCredentialClass
+	// settingsErr makes the settings row unreadable, the state the resolver
+	// must refuse to guess past rather than fall back to an inference.
+	settingsErr error
 }
 
 func (f *fakeOrgs) GetSettingsSystem(_ context.Context, _ string) (domain.OrgSettings, error) {
-	return domain.OrgSettings{GitHubBaseURL: f.base}, nil
+	if f.settingsErr != nil {
+		return domain.OrgSettings{}, f.settingsErr
+	}
+	return domain.OrgSettings{GitHubBaseURL: f.base, GitHubCredentialClass: f.class}, nil
+}
+
+// newTestResolver wires a resolver from the package's fakes, defaulting the
+// org's credential class to the one the fixture's App presence implies: an
+// org_github_apps row means byo_app, no row means pat.
+//
+// That pairing is not a convenience — it is the production invariant. The
+// registration and the class are written in one transaction, so an org with an
+// App always has class byo_app (staged or live), and a fixture that names an
+// App without it would be modelling a state the product cannot reach. A test
+// that wants the two to disagree sets fakeOrgs.class explicitly and this leaves
+// it alone.
+func newTestResolver(secrets db.SecretStore, apps *fakeApps, orgs *fakeOrgs, agents db.AgentStore, cache TokenCache) Resolver {
+	if orgs.class == "" {
+		orgs.class = domain.GitHubCredentialClassPAT
+		if apps != nil && apps.app != nil {
+			orgs.class = domain.GitHubCredentialClassBYOApp
+		}
+	}
+	return NewResolver(secrets, apps, orgs, agents, cache)
 }
 
 type fakeAgents struct {
@@ -170,7 +201,7 @@ func installOn(login string) domain.OrgGitHubAppInstallation {
 
 func TestResolver_Tier3_PATWhenNoApp(t *testing.T) {
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: nil}, // no registered App
 		&fakeOrgs{base: gh.srv.URL},
@@ -195,7 +226,7 @@ func TestResolver_Tier3_PATWhenNoApp(t *testing.T) {
 
 func TestResolver_Tier1_AppInstallationToken(t *testing.T) {
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 		&fakeOrgs{base: gh.srv.URL},
@@ -231,7 +262,7 @@ func TestResolver_Tier1_AppInstallationToken(t *testing.T) {
 func TestResolver_ClientForRepo_AppCoversRepo(t *testing.T) {
 	gh := newGHTestServer(t)
 	gh.installRepos = []string{"acme/widget", "acme/gadget"}
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 		&fakeOrgs{base: gh.srv.URL},
@@ -259,7 +290,7 @@ func TestResolver_ClientForRepo_AppCoversRepo(t *testing.T) {
 func TestResolver_ClientForRepo_AppDoesNotCoverRepo_Errors(t *testing.T) {
 	gh := newGHTestServer(t)
 	gh.installRepos = []string{"acme/widget"} // "acme/other" is not granted
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 		&fakeOrgs{base: gh.srv.URL},
@@ -279,7 +310,7 @@ func TestResolver_ClientForRepo_AppDoesNotCoverRepo_Errors(t *testing.T) {
 func TestResolver_ClientForRepo_CoverageProbeIndeterminate_FailsOpen(t *testing.T) {
 	gh := newGHTestServer(t)
 	gh.repoProbe5xx = true // GET /repos/{owner}/{repo} → 500
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 		&fakeOrgs{base: gh.srv.URL},
@@ -313,7 +344,7 @@ func TestResolver_ClientForRepo_CoverageProbeIndeterminate_FailsOpen(t *testing.
 func TestResolver_ClientForRepo_CachesCoverage(t *testing.T) {
 	gh := newGHTestServer(t)
 	gh.installRepos = []string{"acme/widget"}
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 		&fakeOrgs{base: gh.srv.URL},
@@ -338,7 +369,7 @@ func TestResolver_ClientForRepo_CachesCoverage(t *testing.T) {
 func TestResolver_ClientForRepo_DoesNotCacheNonCoverage(t *testing.T) {
 	gh := newGHTestServer(t)
 	gh.installRepos = []string{"acme/widget"} // "acme/other" not granted
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 		&fakeOrgs{base: gh.srv.URL},
@@ -362,7 +393,7 @@ func TestResolver_ClientForRepo_DoesNotCacheNonCoverage(t *testing.T) {
 func TestResolver_ClientForRepo_CoverageExpires(t *testing.T) {
 	gh := newGHTestServer(t)
 	gh.installRepos = []string{"acme/widget"}
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 		&fakeOrgs{base: gh.srv.URL},
@@ -398,7 +429,7 @@ func TestResolver_ClientForRepo_CoverageExpires(t *testing.T) {
 // ClientFor — the repo-grain check only adds work when an App is installed.
 func TestResolver_ClientForRepo_NoApp_PAT(t *testing.T) {
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: nil},
 		&fakeOrgs{base: gh.srv.URL},
@@ -431,7 +462,7 @@ func TestResolver_ClientForRepoWithIdentity_ReportsTier(t *testing.T) {
 	t.Run("app covers repo → IdentityApp", func(t *testing.T) {
 		gh := newGHTestServer(t)
 		gh.installRepos = []string{"acme/widget"}
-		r := NewResolver(
+		r := newTestResolver(
 			&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 			&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 			&fakeOrgs{base: gh.srv.URL},
@@ -456,7 +487,7 @@ func TestResolver_ClientForRepoWithIdentity_ReportsTier(t *testing.T) {
 	t.Run("active App does not cover repo → error, no PAT", func(t *testing.T) {
 		gh := newGHTestServer(t)
 		gh.installRepos = []string{"acme/widget"} // "acme/other" not granted
-		r := NewResolver(
+		r := newTestResolver(
 			&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 			&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 			&fakeOrgs{base: gh.srv.URL},
@@ -474,7 +505,7 @@ func TestResolver_ClientForRepoWithIdentity_ReportsTier(t *testing.T) {
 
 	t.Run("no app → IdentityPAT", func(t *testing.T) {
 		gh := newGHTestServer(t)
-		r := NewResolver(
+		r := newTestResolver(
 			&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
 			&fakeApps{app: nil},
 			&fakeOrgs{base: gh.srv.URL},
@@ -492,7 +523,7 @@ func TestResolver_ClientForRepoWithIdentity_ReportsTier(t *testing.T) {
 
 	t.Run("no credentials → IdentityUnknown + error", func(t *testing.T) {
 		gh := newGHTestServer(t)
-		r := NewResolver(
+		r := newTestResolver(
 			&fakeSecrets{vals: map[string]string{}}, // no PAT, no App
 			&fakeApps{app: nil},
 			&fakeOrgs{base: gh.srv.URL},
@@ -514,7 +545,7 @@ func TestResolver_ClientForRepoWithIdentity_ReportsTier(t *testing.T) {
 // and the API client don't each mint a separate token.
 func TestResolver_TokenFor_Tier1_SharesMintCacheWithClientFor(t *testing.T) {
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 		&fakeOrgs{base: gh.srv.URL},
@@ -550,7 +581,7 @@ func TestResolver_TokenFor_Tier1_SharesMintCacheWithClientFor(t *testing.T) {
 // With no App, TokenFor falls through to the PAT tier and returns it as the
 // credential, with a zero expiry (PATs have no mint lifetime).
 func TestResolver_TokenFor_Tier3_PAT(t *testing.T) {
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: nil},
 		&fakeOrgs{base: "https://github.com"},
@@ -572,7 +603,7 @@ func TestResolver_TokenFor_Tier3_PAT(t *testing.T) {
 // No App and no PAT → ErrNoGitHubCredentials, same sentinel ClientFor returns
 // so callers can distinguish "not configured" from a backend error.
 func TestResolver_TokenFor_NoCredentials(t *testing.T) {
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{}},
 		&fakeApps{app: nil},
 		&fakeOrgs{base: "https://github.com"},
@@ -587,7 +618,7 @@ func TestResolver_TokenFor_NoCredentials(t *testing.T) {
 // A secret-store read failure on the PAT tier must propagate, not be
 // misreported as ErrNoGitHubCredentials — mirrors ClientFor's contract.
 func TestResolver_TokenFor_PATReadError_Propagates(t *testing.T) {
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{err: errVaultDown},
 		&fakeApps{app: nil},
 		&fakeOrgs{base: "https://github.com"},
@@ -605,7 +636,7 @@ func TestResolver_TokenFor_PATReadError_Propagates(t *testing.T) {
 
 func TestResolver_Tier1_EmptyTargetSingleInstall(t *testing.T) {
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t)}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 		&fakeOrgs{base: gh.srv.URL},
@@ -626,7 +657,7 @@ func TestResolver_Tier1_EmptyTargetSingleInstall(t *testing.T) {
 // told its GitHub is disconnected re-authorizes a connection that was fine.
 func TestResolver_EmptyTargetMultiInstall_Errors(t *testing.T) {
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme"), installOn("globex")}},
 		&fakeOrgs{base: gh.srv.URL},
@@ -650,7 +681,7 @@ func TestResolver_EmptyTargetMultiInstall_Errors(t *testing.T) {
 // than the prior silent PAT fallback.
 func TestResolver_TargetNoMatch_Errors(t *testing.T) {
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 		&fakeOrgs{base: gh.srv.URL},
@@ -671,7 +702,7 @@ var errVaultDown = errors.New("vault unavailable")
 // real error, not be misreported as ErrNoGitHubCredentials — the dashboard
 // maps the former to 500 and the latter to a "GitHub not configured" 503.
 func TestResolver_PATReadError_Propagates(t *testing.T) {
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{err: errVaultDown},
 		&fakeApps{app: nil},
 		&fakeOrgs{base: "https://github.com"}, // base resolves from settings, no secret read
@@ -691,7 +722,7 @@ func TestResolver_PATReadError_Propagates(t *testing.T) {
 // resolver must NOT default to github.com (which would send a possibly-GHES
 // PAT to the wrong host) — it must propagate the error.
 func TestResolver_BaseReadError_Propagates(t *testing.T) {
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{err: errVaultDown},
 		&fakeApps{app: nil},
 		&fakeOrgs{base: ""}, // settings empty → resolver reads the github_url secret, which errors
@@ -708,7 +739,7 @@ func TestResolver_BaseReadError_Propagates(t *testing.T) {
 }
 
 func TestResolver_NoCredentials(t *testing.T) {
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{}}, // no PAT
 		&fakeApps{app: nil},                     // no App
 		&fakeOrgs{base: "https://github.com"},
@@ -726,7 +757,7 @@ func TestResolver_NoCredentials(t *testing.T) {
 // / local-mode case) rather than defaulting to public github.com.
 func TestResolver_BaseURLFallbackToSecret(t *testing.T) {
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{
 			integrations.KeyGitHubURL: gh.srv.URL, // host lives only in the secret
 			integrations.KeyGitHubPAT: "ghp_test",
@@ -756,7 +787,7 @@ func TestResolver_BaseURLFallbackToSecret(t *testing.T) {
 // org IS configured, the credential just couldn't be minted.
 func TestResolver_AppMintFails_Errors(t *testing.T) {
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}}, // PEM absent
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 		&fakeOrgs{base: gh.srv.URL},
@@ -797,7 +828,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 	t.Run("App tier resolves <slug>[bot] live, plain email when bot id unknown", func(t *testing.T) {
 		// No PAT secret: the App tier must resolve without one (it short-circuits
 		// before the PAT-presence gate). BotUserID unset (0) → plain noreply form.
-		r := NewResolver(
+		r := newTestResolver(
 			&fakeSecrets{},
 			&fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot"}},
 			&fakeOrgs{},
@@ -811,7 +842,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 	t.Run("App tier with bot_user_id -> numeric-id noreply email", func(t *testing.T) {
 		// TFAC-474: a stored bot user id yields the numeric-id form, the only form
 		// that links a bot's commits to its account on github.com.
-		r := NewResolver(
+		r := newTestResolver(
 			&fakeSecrets{},
 			&fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot", BotUserID: 41898282}},
 			&fakeOrgs{},
@@ -823,7 +854,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 	})
 
 	t.Run("App preferred over stored PAT login", func(t *testing.T) {
-		r := NewResolver(
+		r := newTestResolver(
 			withPAT(),
 			&fakeApps{app: &domain.OrgGitHubApp{Active: true, Slug: "acme-bot", BotUserID: 999}},
 			&fakeOrgs{},
@@ -835,7 +866,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 	})
 
 	t.Run("inactive App falls through to stored PAT login", func(t *testing.T) {
-		r := NewResolver(
+		r := newTestResolver(
 			withPAT(),
 			&fakeApps{app: &domain.OrgGitHubApp{Active: false, Slug: "acme-bot", BotUserID: 12345}},
 			&fakeOrgs{},
@@ -848,7 +879,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 	})
 
 	t.Run("PAT tier (no App) resolves stored login with plain email", func(t *testing.T) {
-		r := NewResolver(
+		r := newTestResolver(
 			withPAT(),
 			&fakeApps{app: nil},
 			&fakeOrgs{},
@@ -864,7 +895,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		// PAT must NOT resurface once the PAT is gone (no App, empty secrets), or
 		// OrgIdentityFor would stamp a stale identity for an org with no GitHub
 		// credential at all.
-		r := NewResolver(
+		r := newTestResolver(
 			&fakeSecrets{}, // PAT cleared — github_org_login is now stale
 			&fakeApps{app: nil},
 			&fakeOrgs{},
@@ -878,7 +909,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 	})
 
 	t.Run("neither yields ok=false", func(t *testing.T) {
-		r := NewResolver(
+		r := newTestResolver(
 			&fakeSecrets{},
 			&fakeApps{app: nil},
 			&fakeOrgs{},
@@ -898,7 +929,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 func TestResolver_TokenForRepoScoped_AppXorPAT(t *testing.T) {
 	t.Run("active App mints scoped, ignores a present PAT", func(t *testing.T) {
 		gh := newGHTestServer(t)
-		r := NewResolver(
+		r := newTestResolver(
 			&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 			&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 			&fakeOrgs{base: gh.srv.URL},
@@ -916,7 +947,7 @@ func TestResolver_TokenForRepoScoped_AppXorPAT(t *testing.T) {
 
 	t.Run("active App, no installation for owner → error, not PAT", func(t *testing.T) {
 		gh := newGHTestServer(t)
-		r := NewResolver(
+		r := newTestResolver(
 			&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 			&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 			&fakeOrgs{base: gh.srv.URL},
@@ -929,7 +960,7 @@ func TestResolver_TokenForRepoScoped_AppXorPAT(t *testing.T) {
 	})
 
 	t.Run("no active App → PAT, unscoped", func(t *testing.T) {
-		r := NewResolver(
+		r := newTestResolver(
 			&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
 			&fakeApps{app: nil},
 			&fakeOrgs{base: "https://github.com"},
@@ -971,7 +1002,7 @@ func TestResolver_HasAnyCredential(t *testing.T) {
 			if c.pat != "" {
 				vals[integrations.KeyGitHubPAT] = c.pat
 			}
-			r := NewResolver(&fakeSecrets{vals: vals}, &fakeApps{app: c.app, insts: c.insts}, &fakeOrgs{base: "https://github.com"}, &fakeAgents{}, nil)
+			r := newTestResolver(&fakeSecrets{vals: vals}, &fakeApps{app: c.app, insts: c.insts}, &fakeOrgs{base: "https://github.com"}, &fakeAgents{}, nil)
 			got, err := r.(ScopedResolver).HasAnyCredential(context.Background(), "org-1")
 			if err != nil {
 				t.Fatalf("HasAnyCredential: %v", err)
@@ -995,7 +1026,7 @@ func TestResolver_HasAnyCredential(t *testing.T) {
 // (no signed JWT means the private key was never parsed or loaded).
 func TestResolver_ScopedMint_DisabledSecretStore_FailsLoudlyWithoutLoadingKey(t *testing.T) {
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{err: db.ErrSecretStoreUnavailable}, // the executor's disabled secret store
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
 		&fakeOrgs{base: gh.srv.URL},

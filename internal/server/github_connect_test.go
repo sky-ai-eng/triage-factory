@@ -205,6 +205,11 @@ func seedGitHubApp(t *testing.T, rig *authRig, orgID, userID, clientID, clientSe
 		}); err != nil {
 			return err
 		}
+		// The class registration writes alongside the row, in the same
+		// transaction — a fixture that skips it models an unreachable state.
+		if err := tx.Orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+			return err
+		}
 		return tx.Secrets.Put(context.Background(), orgID, ref, clientSecret, "test client secret")
 	}); err != nil {
 		t.Fatalf("seed github app: %v", err)

@@ -154,6 +154,14 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		if err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
 		}
+		// The org is now in the PAT credential system. Written here, in the same
+		// transaction as the token itself, so the class can never outlive or
+		// precede the credential it describes — a crash between two separate
+		// writes would leave the class lying. UpdateSettings above does not carry
+		// it (it deliberately doesn't own the column), hence the separate call.
+		if err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
+			return fmt.Errorf("set github credential class: %w", err)
+		}
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
@@ -221,6 +229,11 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	keepHost := app != nil
 
+	// The credential class is deliberately untouched by this handler. It names
+	// which credential SYSTEM the org is in, not whether that system currently
+	// holds a token: an org that unbinds its PAT is still a PAT org with nothing
+	// bound, and an org keeping a registration (keepHost) is still a BYO-App org.
+	// Neither disconnect moves the org between systems.
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		creds, _ := integrations.Load(ctx, tx.Secrets, orgID)
 		had := creds.GitHubPAT != ""

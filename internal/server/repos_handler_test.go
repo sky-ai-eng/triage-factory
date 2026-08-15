@@ -101,6 +101,7 @@ func seedApp(t *testing.T, s *Server, stub *httptest.Server, installs []domain.O
 	}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
+	seedBYOAppCredentialClass(t, s, org)
 	for _, inst := range installs {
 		inst.OrgID = org
 		if err := s.githubApps.UpsertInstallation(ctx, inst); err != nil {

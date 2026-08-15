@@ -965,6 +965,26 @@ CREATE TABLE public.org_settings (
     -- "coming soon" in org settings until the TFAC-539 launch flip; UI +
     -- enforcement of this column are that ticket's concern, not this one's.
     marketplace_enabled boolean DEFAULT false NOT NULL,
+    -- Which credential system this org's GitHub access belongs to: 'pat' or
+    -- 'byo_app' today, 'managed_app' (the deployment's own shared App) reserved.
+    --
+    -- Stated rather than inferred, because "no org_github_apps row" cannot mean
+    -- one thing: that table holds one row per org keyed on a UNIQUE app_id, so
+    -- an org riding a deployment-level shared App has no row either, and every
+    -- site reading a missing row as PAT would hand such an org a credential it
+    -- does not have. The class names WHICH SYSTEM the org is in;
+    -- org_github_apps.active names WHICH CREDENTIAL IS LIVE — orthogonal, and
+    -- visibly so during the staged window of a PAT→App switch, where the class
+    -- is already byo_app while the PAT is still the live credential.
+    --
+    -- App-validated, not CHECK-constrained, matching max_llm_model_tier above:
+    -- admitting a new class must cost no DDL on either backend.
+    --
+    -- Not owned by the settings writer. OrgsStore.UpdateSettings deliberately
+    -- omits this column from both halves of its upsert so a bulk settings save
+    -- can never reset it; the credential transitions write it via
+    -- SetGitHubCredentialClass inside their own transaction.
+    github_credential_class text DEFAULT 'pat'::text NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT org_settings_github_clone_protocol_check CHECK ((github_clone_protocol = ANY (ARRAY['https'::text, 'ssh'::text])))
 );

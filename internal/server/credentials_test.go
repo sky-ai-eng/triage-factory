@@ -221,6 +221,9 @@ func seedLocalGitHubApp(t *testing.T, s *Server, clientID string, active bool) {
 	`, runmode.LocalDefaultOrgID, "app-"+clientID, clientID, act); err != nil {
 		t.Fatalf("seed org_github_apps: %v", err)
 	}
+	// Registration writes the credential class with the row; the setup gate
+	// reads the class to decide whether there is an App to count at all.
+	seedBYOAppCredentialClass(t, s, runmode.LocalDefaultOrgID)
 }
 
 // TestIntegrationsStatus_SetupCompleteGate_AppPath pins that a registered,

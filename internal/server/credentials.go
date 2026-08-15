@@ -319,10 +319,30 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		}
 		// GitHub access can be satisfied by a registered GitHub App (the
 		// multi-mode path) rather than a PAT, so the setup-complete gate must
-		// count an App as "GitHub configured." Best-effort: a read failure
-		// here leaves appRegistered false and the PAT signal still stands.
-		if app, ae := tx.GitHubApps.GetForOrg(r.Context(), orgID); ae == nil && app != nil {
-			appRegistered = app.Active && app.ClientID != ""
+		// count an App as "GitHub configured."
+		//
+		// Whether there is an App to count is the org's credential class, not
+		// the presence of a registration row — a rowless org is a PAT org today
+		// and would equally be an org on a deployment-level shared App, which
+		// this gate would then report as unconfigured and send back through
+		// setup it doesn't need. Best-effort throughout: any read failure, or a
+		// class this build doesn't know, leaves appRegistered false and the PAT
+		// signal still stands, exactly as a failed App read always has.
+		orgSet, se := tx.Orgs.GetSettings(r.Context(), orgID)
+		if se != nil {
+			setupLog.Warn("read org settings failed; github-configured gate falls back to the pat signal", "org", orgID, "error", se)
+			return nil
+		}
+		switch orgSet.GitHubCredentialClass {
+		case domain.GitHubCredentialClassPAT:
+			// No App to count; creds.GitHubPAT below is the whole signal.
+		case domain.GitHubCredentialClassBYOApp:
+			if app, ae := tx.GitHubApps.GetForOrg(r.Context(), orgID); ae == nil && app != nil {
+				appRegistered = app.Active && app.ClientID != ""
+			}
+		default:
+			setupLog.Warn("unknown github credential class; github-configured gate falls back to the pat signal",
+				"org", orgID, "class", orgSet.GitHubCredentialClass)
 		}
 		return nil
 	}); err != nil {

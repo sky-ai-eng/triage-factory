@@ -32,6 +32,18 @@ var ErrNoGitHubCredentials = errors.New("github: no credentials resolved for org
 // enterprise, and from then on "no specific account" has no answer.
 var ErrAmbiguousInstallation = errors.New("github: app has multiple installations and no target account")
 
+// ErrUnknownCredentialClass is returned when the org's stored credential class
+// is not one this build understands — a class written by a newer peer, or a
+// hand-edited row. Like ErrAmbiguousInstallation it deliberately does NOT wrap
+// ErrNoGitHubCredentials: the org's credential may be perfectly present, and
+// this build simply cannot tell which system to reach for.
+//
+// Refusing is the point. The alternative — treating an unrecognised class as
+// PAT, which is what inferring from a missing org_github_apps row amounted to —
+// resolves the wrong credential system silently, in the direction nobody
+// watches. An error surfaces at the call site instead.
+var ErrUnknownCredentialClass = errors.New("github: unknown credential class for org")
+
 // Identity classifies which credential tier a resolver call selected: a GitHub
 // App installation token (a bot / service-account identity acting as itself)
 // or a borrowed PAT (a real user's personal access token, lent to the org).
@@ -275,7 +287,11 @@ func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client
 
 	// App XOR PAT (see activeApp): an active App is the org's credential — mint
 	// its installation token for target or fail; never borrow a PAT.
-	if app := r.activeApp(ctx, orgID); app != nil {
+	app, err := r.activeApp(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if app != nil {
 		tok, terr := r.appToken(ctx, orgID, app, target, base)
 		if terr != nil {
 			return nil, terr
@@ -321,7 +337,11 @@ func (r *resolver) ClientForRepoWithIdentity(ctx context.Context, orgID, owner, 
 
 	// Active App → the App client for owner/repo (gated on coverage), or an
 	// error. Never a PAT.
-	if app := r.activeApp(ctx, orgID); app != nil {
+	app, err := r.activeApp(ctx, orgID)
+	if err != nil {
+		return nil, IdentityUnknown, err
+	}
+	if app != nil {
 		return r.appClientForRepo(ctx, orgID, app, owner, repo, base)
 	}
 
@@ -374,10 +394,26 @@ func (r *resolver) githubBaseFor(ctx context.Context, orgID string) (string, err
 	return DefaultBaseURL, nil
 }
 
-// activeApp returns the org's registered App when it is active (the org's git
-// credential is an App), else nil. A read error is treated as "no active App"
-// so resolution can still try the PAT tier — the same best-effort posture the
-// resolver has always taken on the App read.
+// credentialClassFor reads which credential system the org's GitHub access
+// belongs to. The class is stated on org_settings, never inferred from the
+// presence of an org_github_apps row — see domain.GitHubCredentialClass for
+// why a missing row cannot mean one thing.
+//
+// A read error propagates. Every caller here already reads org_settings through
+// githubBaseFor first, which propagates the same failure for the same reason: a
+// source that decides which credential to use must not be guessed at, because
+// guessing pairs a real tenant credential with the wrong system.
+func (r *resolver) credentialClassFor(ctx context.Context, orgID string) (domain.GitHubCredentialClass, error) {
+	set, err := r.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return "", fmt.Errorf("resolve github credential class for org %s: %w", orgID, err)
+	}
+	return set.GitHubCredentialClass, nil
+}
+
+// activeApp returns the org's registered App when the org is in the BYO-App
+// credential system AND that App is active (so the App is the live git
+// credential), else nil — meaning the PAT tier.
 //
 // This is the App-XOR-PAT gate. An org's git credential is its active App OR a
 // borrowed PAT, never both stably: the migration flow deletes the PAT at App
@@ -387,17 +423,45 @@ func (r *resolver) githubBaseFor(ctx context.Context, orgID string) (string, err
 // mints from it or fails, and NONE falls through to a PAT (which for an
 // active-App org would mean a decommissioning, unscoped credential). The PAT
 // tier is reached only when there is no active App.
-func (r *resolver) activeApp(ctx context.Context, orgID string) *domain.OrgGitHubApp {
-	app, err := r.apps.GetForOrgSystem(ctx, orgID)
+//
+// Which arm runs is decided by the org's credential CLASS, not by whether an
+// App row happens to exist. The distinction is the entire point: "no row" is
+// the shape of a PAT org today and would equally be the shape of an org riding
+// a deployment-level shared App, so inferring PAT from a missing row is a guess
+// that is right only by accident. A class this build doesn't know is refused
+// outright rather than resolved as PAT — an org must fail where someone sees
+// it, not quietly act on a credential it does not have.
+func (r *resolver) activeApp(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error) {
+	class, err := r.credentialClassFor(ctx, orgID)
 	if err != nil {
-		ghResolverLog.Warn("read app registration failed; treating org as no-active-App (PAT tier)",
-			"org", orgID, "error", err)
-		return nil
+		return nil, err
 	}
-	if app == nil || !app.Active {
-		return nil
+	switch class {
+	case domain.GitHubCredentialClassPAT:
+		return nil, nil
+
+	case domain.GitHubCredentialClassBYOApp:
+		app, err := r.apps.GetForOrgSystem(ctx, orgID)
+		if err != nil {
+			// Best-effort on the App READ specifically, unchanged: the org whose
+			// registration can't be read may be mid-switch, with a staged App and a
+			// live PAT that resolves perfectly well, and a store blip shouldn't take
+			// that org's polling down. A cutover-completed org has no PAT left, so
+			// this path ends in ErrNoGitHubCredentials either way.
+			ghResolverLog.Warn("read app registration failed; falling back to the PAT tier for this resolution",
+				"org", orgID, "error", err)
+			return nil, nil
+		}
+		// nil or staged (active=false) is the PAT tier: during a PAT→App switch
+		// the org is already in the App system while the PAT is still live.
+		if app == nil || !app.Active {
+			return nil, nil
+		}
+		return app, nil
+
+	default:
+		return nil, fmt.Errorf("%w: org=%s class=%q", ErrUnknownCredentialClass, orgID, class)
 	}
-	return app
 }
 
 // appToken resolves the org's App installation token for target (the account
@@ -485,7 +549,11 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 	// App XOR PAT (see activeApp): an active App is the org's credential —
 	// resolve its installation token (shared cache + mint path with ClientFor)
 	// or fail; never fall to a PAT.
-	if app := r.activeApp(ctx, orgID); app != nil {
+	app, err := r.activeApp(ctx, orgID)
+	if err != nil {
+		return githubapp.Token{}, err
+	}
+	if app != nil {
 		return r.appToken(ctx, orgID, app, target, base)
 	}
 
@@ -521,7 +589,11 @@ func (r *resolver) TokenForRepoScoped(ctx context.Context, orgID, owner, repo st
 	if err != nil {
 		return githubapp.Token{}, err
 	}
-	if app := r.activeApp(ctx, orgID); app != nil {
+	app, err := r.activeApp(ctx, orgID)
+	if err != nil {
+		return githubapp.Token{}, err
+	}
+	if app != nil {
 		return r.appScopedToken(ctx, orgID, app, owner, repo, base, permissions)
 	}
 	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
@@ -546,7 +618,11 @@ func (r *resolver) TokenForReposScoped(ctx context.Context, orgID, owner string,
 	if err != nil {
 		return githubapp.Token{}, err
 	}
-	if app := r.activeApp(ctx, orgID); app != nil {
+	app, err := r.activeApp(ctx, orgID)
+	if err != nil {
+		return githubapp.Token{}, err
+	}
+	if app != nil {
 		return r.appReposScopedToken(ctx, orgID, app, owner, repos, base, permissions)
 	}
 	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
@@ -591,7 +667,11 @@ func (r *resolver) ClientForRepoScoped(ctx context.Context, orgID, owner, repo s
 	if err != nil {
 		return nil, IdentityUnknown, err
 	}
-	if app := r.activeApp(ctx, orgID); app != nil {
+	app, err := r.activeApp(ctx, orgID)
+	if err != nil {
+		return nil, IdentityUnknown, err
+	}
+	if app != nil {
 		tok, terr := r.appScopedToken(ctx, orgID, app, owner, repo, base, permissions)
 		if terr != nil {
 			return nil, IdentityUnknown, terr
@@ -616,7 +696,11 @@ func (r *resolver) ClientForRepoScoped(ctx context.Context, orgID, owner, repo s
 // PAT-tier read error propagates so a transient secret-store outage isn't
 // misreported as "no credential".
 func (r *resolver) HasAnyCredential(ctx context.Context, orgID string) (bool, error) {
-	if app := r.activeApp(ctx, orgID); app != nil {
+	app, err := r.activeApp(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	if app != nil {
 		insts, err := r.apps.ListInstallationsForOrgSystem(ctx, orgID)
 		if err != nil {
 			return false, fmt.Errorf("list installations for org %s: %w", orgID, err)
@@ -628,6 +712,23 @@ func (r *resolver) HasAnyCredential(ctx context.Context, orgID string) (bool, er
 		return false, fmt.Errorf("resolve github pat for org %s: %w", orgID, err)
 	}
 	return pat != "", nil
+}
+
+// appForIdentity returns the App registration OrgIdentityFor should consider
+// for class, or nil when the class has no App behind it. Split out so the
+// class switch is a switch — the arm a future shared-App class needs is a new
+// case here, not a condition threaded into the identity expression.
+func (r *resolver) appForIdentity(ctx context.Context, orgID string, class domain.GitHubCredentialClass) (*domain.OrgGitHubApp, error) {
+	switch class {
+	case domain.GitHubCredentialClassPAT:
+		return nil, nil
+	case domain.GitHubCredentialClassBYOApp:
+		return r.apps.GetForOrgSystem(ctx, orgID)
+	default:
+		// Unreachable: the caller gates on Known() first. Kept explicit so an
+		// added class fails here rather than silently resolving as PAT.
+		return nil, fmt.Errorf("%w: org=%s class=%q", ErrUnknownCredentialClass, orgID, class)
+	}
 }
 
 // BaseURLFor exposes githubBaseFor to callers outside the package that need
@@ -645,13 +746,28 @@ func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error)
 // door like the rest of the resolver. A read error on either tier is
 // non-fatal — it falls through, and an all-miss returns ok=false so the caller
 // stamps no identity rather than a fabricated one.
+//
+// Which tier is even eligible follows the org's credential CLASS, the same gate
+// activeApp uses, so the identity stamped on a commit always describes the
+// credential system that produced it. A class this build doesn't know (or that
+// can't be read) yields no identity at all rather than the PAT tier's login:
+// the whole posture of this function is to refuse a fabricated identity, and
+// under an unrecognised class the PAT login would be exactly that.
 func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool) {
+	class, err := r.credentialClassFor(ctx, orgID)
+	if err != nil || !class.Known() {
+		ghResolverLog.Warn("resolve credential class failed or unknown; stamping no org identity",
+			"org", orgID, "class", class, "error", err)
+		return "", "", false
+	}
+
 	// App tier: the org's registered App acts as "<slug>[bot]". The slug comes
 	// from the App registration, resolved live — no stored column, and
 	// installation-independent (the bot is one global account however many
 	// installations the App has). A staged/inactive App or a read error skips to
-	// PAT rather than claiming an identity the org isn't acting as.
-	if app, err := r.apps.GetForOrgSystem(ctx, orgID); err == nil && app != nil && app.Active && app.Slug != "" {
+	// PAT rather than claiming an identity the org isn't acting as — during a
+	// PAT→App switch the org is in the App system but still committing as its PAT.
+	if app, err := r.appForIdentity(ctx, orgID, class); err == nil && app != nil && app.Active && app.Slug != "" {
 		name = app.Slug + "[bot]"
 		// The numeric-id noreply form links a bot's commits to its account on
 		// github.com (contribution graph + Verified co-author badge); the plain

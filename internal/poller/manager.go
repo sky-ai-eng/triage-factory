@@ -777,19 +777,51 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	m.recordGitHubCursor(orgID, resumeFrom, rl)
 }
 
-// orgHasRegisteredApp reports whether the org has an active GitHub App
-// registration. Used to gate the local-NAT installation backfill so orgs
-// without an App don't pay a no-op API round-trip each cycle.
+// orgHasRegisteredApp reports whether the org's live GitHub credential is an
+// active App of its own. It is the poll cycle's App-vs-PAT dispatch gate (and,
+// downstream of that, what keeps a PAT org from paying a no-op installation
+// backfill round-trip each cycle).
+//
+// The first question is the org's credential CLASS, not whether an
+// org_github_apps row exists: "no row" is the shape of a PAT org and would
+// equally be the shape of an org riding a deployment-level shared App, whose
+// installations this cycle would then poll as a PAT it doesn't have. Every
+// false here routes the cycle to the PAT path, so each one is stated
+// deliberately — an unknown class or an unreadable settings row logs and skips
+// rather than quietly polling as something the org may not be.
 func (m *Manager) orgHasRegisteredApp(ctx context.Context, orgID string) bool {
 	if m.apps == nil {
 		return false
 	}
-	app, err := m.apps.GetForOrgSystem(ctx, orgID)
-	if err != nil {
-		githubLog.Warn("read app registration failed", "org", orgID, "error", err)
+	if m.orgs == nil {
+		// Wiring fault, not an org state: NewManager always supplies the store.
+		// Loud, because the consequence is a cycle that polls as a PAT.
+		githubLog.Error("orgs store not wired; cannot resolve credential class, polling as PAT", "org", orgID)
 		return false
 	}
-	return app != nil && app.Active
+	set, err := m.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		githubLog.Warn("read org settings failed; polling as PAT this cycle", "org", orgID, "error", err)
+		return false
+	}
+	switch set.GitHubCredentialClass {
+	case domain.GitHubCredentialClassPAT:
+		return false
+	case domain.GitHubCredentialClassBYOApp:
+		app, err := m.apps.GetForOrgSystem(ctx, orgID)
+		if err != nil {
+			githubLog.Warn("read app registration failed", "org", orgID, "error", err)
+			return false
+		}
+		// A staged App (active=false, mid PAT→App switch) is a BYO-App org whose
+		// live credential is still the PAT — the class and the Active bit
+		// answering their two different questions.
+		return app != nil && app.Active
+	default:
+		githubLog.Warn("unknown github credential class; polling as PAT this cycle",
+			"org", orgID, "class", set.GitHubCredentialClass)
+		return false
+	}
 }
 
 // intersectConfigured returns the configured repos reachable through one

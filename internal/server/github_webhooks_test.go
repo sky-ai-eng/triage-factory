@@ -35,6 +35,10 @@ func seedWebhookApp(t *testing.T, s *Server) {
 	`, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("seed org_github_apps: %v", err)
 	}
+	// The receiver resolves which secret verifies a delivery from the org's
+	// credential class, so a registration row alone isn't the state a
+	// registration leaves — the class is written with it.
+	seedBYOAppCredentialClass(t, s, runmode.LocalDefaultOrgID)
 	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, "wh_ref", testWebhookSecret, ""); err != nil {
 		t.Fatalf("seed webhook secret: %v", err)
 	}

@@ -175,6 +175,76 @@ type OrgSettings struct {
 	// instead (TFAC-92 phase 2 / TFAC-539). NOT NULL DEFAULT false on both
 	// backends — no NULL-round-trip subtlety like the fields above.
 	MarketplaceEnabled bool
+
+	// GitHubCredentialClass names which credential system this org's GitHub
+	// access belongs to. See the GitHubCredentialClass type doc for the values
+	// and the invariant.
+	//
+	// READ-ONLY THROUGH THIS STRUCT. UpdateSettings does NOT own the column and
+	// deliberately omits it from its upsert's column lists, so a bulk settings
+	// save leaves whatever the credential transitions wrote. Setting this field
+	// and calling UpdateSettings silently does nothing; the only writer is
+	// OrgsStore.SetGitHubCredentialClass, called from the credential
+	// transitions inside their own transaction.
+	GitHubCredentialClass GitHubCredentialClass
+}
+
+// GitHubCredentialClass names which credential system an org's GitHub access
+// belongs to. It is a projection of the credential choice the user already
+// made — binding a PAT, registering or importing an App — never a separate
+// setting, and there is no product surface that picks it.
+//
+// It exists because the class cannot be inferred from the presence of an
+// org_github_apps row. A row is absent for a PAT org today, and it would also
+// be absent for an org riding a deployment-level shared App (org_github_apps
+// is keyed one row per org with a UNIQUE app_id, so N orgs cannot each hold a
+// row pointing at one shared app). Reading "no row" as "PAT" is therefore an
+// inference that is right by accident, and every site that makes it would be
+// silently wrong the day a second rowless class exists — degrading an org to a
+// credential it does not have rather than failing where someone would notice.
+//
+// The class names WHICH CREDENTIAL SYSTEM the org is in; org_github_apps.active
+// names WHICH CREDENTIAL IS LIVE. They are orthogonal, and the staged window of
+// a PAT→App switch is where they visibly differ: the class is byo_app from the
+// moment the App is registered, while the PAT stays live until cutover. Do not
+// collapse them.
+//
+// Values are app-validated, not CHECK-constrained — the same convention the
+// other open-set text columns follow (org_settings.max_llm_model_tier,
+// prompts.source), so a new class costs no DDL on either backend.
+//
+// "managed_app" — an org riding the deployment's own shared App — is a reserved
+// future value. Nothing writes it today and it deliberately has no constant
+// here: a constant is a thing a writer can reach for, and the shared App needs
+// a resolver tier, a scoped reconcile, and a static webhook path before any org
+// may legitimately carry the value. Until then it must be unreachable rather
+// than merely unused. That is also why every switch on this type carries an
+// explicit unknown arm that refuses instead of falling through to the pat arm:
+// a build that meets a class it does not know must fail where it is seen.
+type GitHubCredentialClass string
+
+const (
+	// GitHubCredentialClassPAT — the org's GitHub credential is a personal
+	// access token in the secret store. No org_github_apps row exists.
+	GitHubCredentialClassPAT GitHubCredentialClass = "pat"
+
+	// GitHubCredentialClassBYOApp — the org brought its own GitHub App and owns
+	// its private key; an org_github_apps row exists. Set at registration /
+	// import, including while the App is still staged behind a live PAT.
+	GitHubCredentialClassBYOApp GitHubCredentialClass = "byo_app"
+)
+
+// Known reports whether c is a class this build understands. A stored value
+// that isn't — a future class written by a newer peer, a hand-edited row — is
+// never coerced to a default; callers refuse instead, so an org resolves no
+// credential rather than the wrong one.
+func (c GitHubCredentialClass) Known() bool {
+	switch c {
+	case GitHubCredentialClassPAT, GitHubCredentialClassBYOApp:
+		return true
+	default:
+		return false
+	}
 }
 
 // DefaultOrgSettings returns the NOT NULL DEFAULT values from the
@@ -195,6 +265,10 @@ func DefaultOrgSettings() OrgSettings {
 		GitHubPollInterval:  5 * time.Minute,
 		GitHubCloneProtocol: "ssh",
 		JiraPollInterval:    5 * time.Minute,
+		// Matches the column's NOT NULL DEFAULT 'pat'. An org with no
+		// settings row has bound no credential at all, and "the PAT system,
+		// with nothing in it yet" is the state a fresh org is in.
+		GitHubCredentialClass: GitHubCredentialClassPAT,
 	}
 }
 

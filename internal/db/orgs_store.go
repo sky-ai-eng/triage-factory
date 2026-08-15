@@ -85,5 +85,30 @@ type OrgsStore interface {
 	// column. An empty GitHubCloneProtocol substitutes "ssh" — the
 	// column CHECK rejects empty strings. Postgres routes through
 	// the app pool (org_settings_update RLS gates by org admin).
+	//
+	// It does NOT write github_credential_class: that column is owned by the
+	// credential transitions, not by the settings writer, so
+	// updates.GitHubCredentialClass is ignored and an existing value survives
+	// every settings save. See SetGitHubCredentialClass.
 	UpdateSettings(ctx context.Context, orgID string, updates domain.OrgSettings) error
+
+	// SetGitHubCredentialClass writes ONLY org_settings.github_credential_class
+	// — which credential system the org's GitHub access belongs to. Surgical by
+	// design: it is called from inside the credential transitions' own
+	// transactions (PAT bind, App register / import, cutover, switch-to-PAT,
+	// discard), so the class and the credential change it describes commit
+	// together and no crash can land between them.
+	//
+	// It is deliberately NOT reachable through UpdateSettings. Folding the
+	// column into that upsert's column lists — which reads as tidiness — would
+	// reset the class to the struct's zero value on every bulk settings save,
+	// quietly converting a BYO-App org to PAT.
+	//
+	// The partial INSERT relies on the schema DEFAULT clauses for every other
+	// column when no row exists yet, and ON CONFLICT touches only the class, so
+	// the org's other settings are never clobbered. Postgres routes through the
+	// app pool — every caller is an org-admin-gated handler already inside a
+	// claims-bound transaction, which is exactly what org_settings_insert /
+	// org_settings_update require.
+	SetGitHubCredentialClass(ctx context.Context, orgID string, class domain.GitHubCredentialClass) error
 }

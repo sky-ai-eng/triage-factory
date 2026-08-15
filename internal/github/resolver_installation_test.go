@@ -29,7 +29,7 @@ func installOnAccount(installationID, accountID, login string) domain.OrgGitHubA
 func installResolver(t *testing.T, insts ...domain.OrgGitHubAppInstallation) (*resolver, *ghTestServer) {
 	t.Helper()
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t)}},
 		&fakeApps{app: activeApp(), insts: insts},
 		&fakeOrgs{base: gh.srv.URL},
@@ -210,7 +210,7 @@ func TestInstallationFor_AmbiguityNamesTheCount(t *testing.T) {
 func TestInstallationFor_ReadFailurePropagates(t *testing.T) {
 	errMirrorDown := errors.New("installation mirror unavailable")
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: activeApp(), listErr: errMirrorDown},
 		&fakeOrgs{base: gh.srv.URL},
@@ -245,7 +245,7 @@ func TestInstallationFor_ReadFailurePropagates(t *testing.T) {
 // succeeds against repositories the caller never meant to touch.
 func TestResolver_MultiInstallationMintsPerAccount(t *testing.T) {
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t)}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{
 			installOnAccount("456", "1234", "acme"),
@@ -272,7 +272,7 @@ func TestResolver_MultiInstallationMintsPerAccount(t *testing.T) {
 // nothing.
 func TestResolver_MintsForAnInstallationMirroredWithoutAnAccountID(t *testing.T) {
 	gh := newGHTestServer(t)
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOnAccount("456", "", "acme")}},
 		&fakeOrgs{base: gh.srv.URL},
