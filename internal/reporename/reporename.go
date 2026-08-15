@@ -82,9 +82,10 @@ func Apply(ctx context.Context, repos db.RepoStore, resolver ghclient.Resolver, 
 }
 
 // invalidateCoverage drops the cached App-grant coverage decision for BOTH
-// slugs. The old one now vouches for a name that resolves to nothing; the new
-// one must be re-probed rather than inherit whatever this process last decided
-// about a repository that happened to be called that.
+// slugs. The cache keys on the slug and holds positives only, so a rename
+// leaves each entry vouching for the wrong repository: the old slug's for one
+// that no longer answers to that name, the new slug's for whatever repository
+// was called that before. Both are re-probed rather than inherited.
 func invalidateCoverage(resolver ghclient.Resolver, orgID, from, to string) {
 	inv, ok := resolver.(ghclient.RepoCoverageInvalidator)
 	if !ok {

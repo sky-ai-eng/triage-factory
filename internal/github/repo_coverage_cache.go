@@ -48,11 +48,15 @@ const repoCoverageTTL = 5 * time.Minute
 // a probe TF made itself — never a token handed to the wrong account, since the
 // token comes from installationFor, not from here.
 //
-// One event evicts rather than waits: a repository rename. Both slugs go
-// stale at once and in opposite directions — the old one's entry answers for
-// a name that no longer resolves, and the new one may hold a NEGATIVE history
-// TF probed before the repository was called that — and unlike a grant edit,
-// TF is the process that just learned about it. See RepoCoverageInvalidator.
+// One event evicts rather than waits: a repository rename. An entry says a
+// SLUG is covered, which is only a statement about a repository for as long as
+// that slug denotes the same one — and a rename moves exactly that. So both
+// slugs go stale at once, each as a positive now vouching for the wrong thing:
+// the old one for a name this repository no longer answers to (and which
+// another may claim), the new one — if TF ever probed it — for whatever
+// repository held that name before. Unlike a grant edit, TF is the process
+// that just learned about it, so waiting out the TTL is a choice rather than
+// the only option. See RepoCoverageInvalidator.
 type repoCoverageCache struct {
 	mu      sync.Mutex
 	expires map[string]time.Time
@@ -115,11 +119,12 @@ func coverageKey(orgID, owner, repo string) string {
 // ScopedResolver / RateLimitReader: a Resolver that doesn't implement it (a
 // test fake) has no cache to evict from, so the caller type-asserts and skips.
 //
-// The one caller is the rename handler. Coverage is keyed on the slug, and a
-// rename invalidates the entry for BOTH names at once: the old slug's positive
-// now vouches for a name that resolves to nothing, and the new slug must be
-// re-probed rather than inheriting whatever this process last decided about a
-// repository that happened to be called that.
+// The one caller is the rename handler. Coverage is keyed on the slug, so a
+// rename invalidates the entry for BOTH names at once. The cache holds
+// positives only, and after the rename each of them vouches for the wrong
+// repository: the old slug's for one that no longer answers to that name, the
+// new slug's for whatever repository was called that before. Both have to be
+// re-probed rather than inherited.
 type RepoCoverageInvalidator interface {
 	InvalidateRepoCoverage(orgID, owner, repo string)
 }

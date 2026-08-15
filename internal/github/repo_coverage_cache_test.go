@@ -3,10 +3,12 @@ package github
 import "testing"
 
 // A rename is the one event that evicts a coverage entry rather than waiting
-// out the TTL, and it evicts BOTH slugs. They go stale in opposite directions:
-// the old name's positive vouches for something that no longer resolves, and
-// the new name may carry a decision this process made about whatever was
-// called that before.
+// out the TTL, and it evicts BOTH slugs. An entry is a positive about a slug,
+// which only stands in for a repository while that slug denotes the same one:
+// after the rename the old name's positive vouches for a repository that no
+// longer answers to it, and the new name's — if this process ever probed it —
+// for whatever was called that before. Both are seeded here as positives,
+// because a positive is the only thing this cache holds.
 func TestRepoCoverageCache_ForgetDropsOneSlug(t *testing.T) {
 	c := newRepoCoverageCache()
 	c.markCovered("org-1", "octo", "api")

@@ -37,9 +37,9 @@ func TestApply_RenamesOnlyWhatMoved(t *testing.T) {
 	if len(store.attempts) != 1 || store.attempts[0].ExternalID != "1" {
 		t.Fatalf("attempts = %+v, want only the moved repository", store.attempts)
 	}
-	// Both slugs go stale at once and in opposite directions, so both are
-	// evicted — the old one vouches for a name that resolves to nothing, the
-	// new one may hold a decision about a different repository.
+	// The cache keys on the slug, so both entries now vouch for the wrong
+	// repository — the old slug's for one that no longer answers to that name,
+	// the new slug's for whatever was called that before — and both are evicted.
 	want := []string{"octo/api", "octo/platform-api"}
 	if len(resolver.forgotten) != 2 || resolver.forgotten[0] != want[0] || resolver.forgotten[1] != want[1] {
 		t.Errorf("evicted %v, want %v", resolver.forgotten, want)
