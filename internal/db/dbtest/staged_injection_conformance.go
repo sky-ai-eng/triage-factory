@@ -13,7 +13,8 @@ import (
 //   - the wired StagedInjectionStore impl,
 //   - the orgID to pass to every call,
 //   - a StagedInjectionSeeder the harness uses to stage the run FK chain
-//     (staged_agent_injections FKs to runs; backends seed runs differently).
+//     (a staged injection is a messages row, whose conversation_id FKs
+//     conversations; backends seed conversations differently).
 type StagedInjectionStoreFactory func(t *testing.T) (store db.StagedInjectionStore, orgID string, seed StagedInjectionSeeder)
 
 // StagedInjectionSeeder is a bag of callbacks the conformance suite uses to stage

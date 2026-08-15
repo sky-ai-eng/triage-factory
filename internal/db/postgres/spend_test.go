@@ -73,7 +73,8 @@ func TestSpendStore_Postgres_RLS_ViewSecurityInvoker(t *testing.T) {
 	pgtest.AddOrgMember(t, h, bob, orgA, teamB, "member", "member")
 	orgB, carol, _ := pgtest.SeedOrgWithUser(t, h, "carol")
 
-	// orgA fixtures: an agent + a team project the runs/curator rows FK into, plus
+	// orgA fixtures: an agent + a team project the delegation/curator
+	// conversations FK into, plus
 	// a null-team org project. The RLS curator fixtures below use the default
 	// (null-team) project — curator visibility is creator-scoped regardless of
 	// team_id, so the snapshot value (NULL here) doesn't affect these assertions.

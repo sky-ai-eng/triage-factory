@@ -16,9 +16,9 @@ import (
 //   - the teamID Create should attribute prompts to. Every prompt is
 //     team-scoped, so the seeder threads it; SQLite pins the local sentinel,
 //     Postgres binds the test team.
-//   - a RunSeeder hook that lets the harness create runs rows the
+//   - a RunSeeder hook that lets the harness create conversations rows the
 //     Stats subtests need. The harness doesn't know how to create
-//     runs directly (RunStore lands in wave 3b); the backend test
+//     conversations directly (RunStore lands in wave 3b); the backend test
 //     owns that wiring against its own connection. Each backend
 //     translates a logical fixture (promptID + N runs at given
 //     timestamps) into its own schema's INSERT shape.

@@ -15,8 +15,8 @@ import (
 //   - the wired TaskMemoryStore impl,
 //   - the orgID to pass to every call,
 //   - a TaskMemorySeeder the harness uses to drop the entity + run FK
-//     chain (conversation_memory FKs to runs which FKs to tasks which FKs to
-//     events which FKs to entities — the backends seed those rows
+//     chain (conversation_memory FKs to conversations which FKs to tasks
+//     which FKs to events which FKs to entities — the backends seed those rows
 //     differently and the conformance harness shouldn't bake one
 //     shape's schema into the assertions).
 type TaskMemoryStoreFactory func(t *testing.T) (store db.TaskMemoryStore, orgID string, seed TaskMemorySeeder)

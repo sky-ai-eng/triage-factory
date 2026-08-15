@@ -373,10 +373,10 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 		row, _ := s.PopForTask(ctx, orgID, tup.TaskID)
 
-		// MarkFired references a real run row in Postgres
+		// MarkFired references a real blueprint_run row in Postgres
 		// (fired_run_id has FK with ON DELETE on (fired_run_id, org_id)
-		// referencing runs(id, org_id)). The seeder's run-insert
-		// helpers produce valid run ids.
+		// referencing blueprint_runs(id, org_id)). The seeder's
+		// run-insert helpers produce valid blueprint_run ids.
 		runID := seed.RunForTask(t, tup.TaskID)
 		if err := s.MarkFired(ctx, orgID, row.ID, runID); err != nil {
 			t.Fatalf("MarkFired: %v", err)

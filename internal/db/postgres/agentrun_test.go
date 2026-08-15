@@ -79,7 +79,7 @@ func seedPgConversationOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, agen
 }
 
 // seedPgConversationPrompt inserts a user-source prompt the conformance
-// suite's runs FK into. Stable id `p_agentrun_test` matches the
+// suite's conversations FK into. Stable id `p_agentrun_test` matches the
 // constant the shared harness expects.
 func seedPgConversationPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
 	t.Helper()

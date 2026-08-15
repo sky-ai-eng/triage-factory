@@ -292,7 +292,7 @@ func TestArtifactStore_Postgres_RLS_WritePath(t *testing.T) {
 	ctx := context.Background()
 
 	// conversation_id left empty (NULL) so this isolates artifacts_insert, not the
-	// runs FK/RLS interplay.
+	// conversations FK/RLS interplay.
 	mkArtifact := func(key string) domain.Artifact {
 		return domain.Artifact{
 			OrgID: orgA, TeamID: teamA,
@@ -495,7 +495,7 @@ func TestArtifactStore_Postgres_UpsertSystem_BypassesRLS(t *testing.T) {
 	ctx := context.Background()
 
 	// conversation_id left empty (NULL) so this isolates the write-policy/pool routing
-	// from the runs FK.
+	// from the conversations FK.
 	art := domain.Artifact{
 		OrgID: orgID, TeamID: teamID,
 		Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue,

@@ -154,8 +154,9 @@ func DedupPreserveOrder(ids []string) []string {
 //   - blueprint_steps      — ordered membership list for a blueprint.
 //   - blueprint_runs       — one row per multi-step delegateBlueprint instance,
 //     owning the worktree shared across every step.
-//   - runs                — read-only here (per-step state lives on runs;
-//     RunsForBlueprint returns the slice of step rows linked to a blueprint_run).
+//   - conversations       — read-only here (per-step state lives on
+//     conversations; RunsForBlueprint returns the slice of step rows linked
+//     to a blueprint_run).
 //     Step advancement reads each step run's terminal conversations.outcome (see
 //     delegate.decideBlueprintStep); there is no separate verdict channel.
 //

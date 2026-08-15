@@ -2602,7 +2602,7 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 	`, orgA, entityA).Scan(&evtID); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
-	// Parent task + prompt + blueprint_run for the runs INSERT case below.
+	// Parent task + prompt + blueprint_run for the conversations INSERT case below.
 	// blueprint_run_id must be set so the conversations row clears the
 	// conversations_origin_requires_parents CHECK (origin defaults to 'blueprint');
 	// otherwise the INSERT would fail at the CHECK level and never exercise

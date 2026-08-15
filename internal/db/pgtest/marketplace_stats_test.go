@@ -37,7 +37,7 @@ func publishBlueprintAsTeamWriter(t *testing.T, h *Harness, orgID, userID, teamI
 }
 
 // seedMarketplaceStatsTask inserts the minimal entity+event+task chain a
-// runs/blueprint_runs row needs (both carry a NOT NULL task_id, and
+// conversations/blueprint_runs row needs (both carry a NOT NULL task_id, and
 // blueprint_runs additionally needs blueprint_id — see
 // internal/db/postgres/prompts_test.go's seedPgRunsForStats, which this
 // mirrors). Writes go through h.AdminDB — this is test fixture setup, not

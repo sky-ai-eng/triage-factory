@@ -76,8 +76,8 @@ func seedPgFactoryOrg(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	return orgID, userID
 }
 
-// seedPgFactoryPrompt inserts a user-source prompt that runs can FK
-// into. team_id is read from the org's default team (created by
+// seedPgFactoryPrompt inserts a user-source prompt that conversations can
+// FK into. team_id is read from the org's default team (created by
 // seedPgFactoryOrg via seedPgDefaultTeam). source='user' satisfies
 // prompts_system_has_no_creator (creator must be non-NULL).
 func seedPgFactoryPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string) string {

@@ -673,7 +673,7 @@ func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.
 	// creator_user_id is paired with trigger_type by the
 	// blueprint_runs_creator_matches_trigger_type CHECK: NULL for event-fired
 	// runs (no human author), the sentinel local user for manual runs. Mirrors
-	// the runs insert and the Postgres createRunManual/createRunEventTriggered
+	// the conversations insert and the Postgres createRunManual/createRunEventTriggered
 	// split (which are one method here — SQLite is N=1, single connection).
 	var creatorUserID any
 	if br.TriggerType != domain.BlueprintTriggerEvent {

@@ -31,7 +31,7 @@ const humanFeedbackSeparator = "\n\n---\n" + humanFeedbackHeader
 //
 //   - q: app pool (tf_app, RLS-active). Request-handler equivalents
 //     (review submit, PR submit, swipe-discard cleanup) route here.
-//     RLS policy conversation_memory_all (an EXISTS subquery against runs)
+//     RLS policy conversation_memory_all (an EXISTS subquery against conversations)
 //     gates the statement; the caller must be inside WithTx so
 //     request.jwt.claims is set.
 //

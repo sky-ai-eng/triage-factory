@@ -72,7 +72,8 @@ func (s *Spawner) wakeDispatcher() {
 }
 
 // RunDispatcher is the run-queue drain loop — the queue-driven orchestrator's
-// worker. On boot it reconciles runs/blueprint_runs stranded by a crash, then
+// worker. On boot it reconciles conversations/blueprint_runs stranded by a
+// crash, then
 // claims queued steps and drives each through runAgent + the reactor until ctx
 // is cancelled. A nil RunQueueStore makes this a logged no-op.
 func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration) {
