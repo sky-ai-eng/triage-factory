@@ -156,7 +156,17 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	fresh, err := s.githubDeliveries.MarkDeliveredSystem(r.Context(), deliveryInstallationID(body), deliveryID)
+	// The installation half of the dedup key. An installation delivery was just
+	// parsed in full and its id validated non-zero, so it is already in hand;
+	// only the other events pay a narrow sniff of the body for it.
+	var installationID string
+	if install != nil {
+		installationID = strconv.FormatInt(install.Installation.ID, 10)
+	} else {
+		installationID = deliveryInstallationID(body)
+	}
+
+	fresh, err := s.githubDeliveries.MarkDeliveredSystem(r.Context(), installationID, deliveryID)
 	if err != nil {
 		internalError(w, "github-webhook", err)
 		return
@@ -182,10 +192,11 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// deliveryInstallationID reads the installation id out of a delivery body for
+// deliveryInstallationID sniffs the installation id out of a delivery body for
 // the dedup key. Every App-scoped event carries the installation object
-// whatever its event name, so this one parse serves the lifecycle events and
-// the content events alike.
+// whatever its event name, so one narrow envelope serves them all — except the
+// installation events themselves, whose caller already holds the fully parsed
+// payload and passes its id straight through.
 //
 // Returns "" — keying the delivery on its GUID alone — for a delivery that
 // names no installation (github_app_authorization, for one) and for a body
