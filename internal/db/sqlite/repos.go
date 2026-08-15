@@ -144,12 +144,20 @@ func findRepoProfileByRef(ctx context.Context, q queryer, source string, ref dom
 // all create through it, so no create path can write a row without the
 // identity columns, and all three agree on what "already exists" means.
 //
-// The NOT EXISTS guard is case-INSENSITIVE, which the unique index cannot be:
-// a repository already present under different casing keeps its row (and its
-// cached profile, base branch, clone state, ETag) rather than gaining a second
-// one. The ON CONFLICT behind it is the race backstop, for two creators that
-// both passed the guard with the same casing — a row that already exists is
-// the caller's answer, never something a create rewrites.
+// "Already exists" is case-INSENSITIVE, because GitHub identifiers are, while
+// the unique index is not: a repository already present under different casing
+// keeps its row (and its cached profile, base branch, clone state, ETag)
+// rather than gaining a second one. The ON CONFLICT behind the guard covers
+// the same-casing repeat.
+//
+// A guard the index cannot enforce is a race wherever writers overlap, and the
+// Postgres impl takes a per-repository advisory lock for exactly that reason.
+// Here there is nothing to serialize. Local mode pins the pool to a single
+// connection (internal/db.Open), so this process's statements never overlap;
+// across processes SQLite's write lock makes the guarded INSERT atomic, and a
+// reader-turned-writer inside a transaction is failed with SQLITE_BUSY rather
+// than allowed to write against a stale read. Same asymmetry as the tracked-set
+// reconcile, whose per-org lock likewise has no analogue on this side.
 func insertRepoProfileRow(ctx context.Context, q queryer, ref domain.RepoRef) error {
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {

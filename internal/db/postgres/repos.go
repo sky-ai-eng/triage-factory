@@ -123,38 +123,52 @@ func getOrCreateRepoProfile(ctx context.Context, q queryer, orgID string, ref do
 	if err != nil {
 		return nil, err
 	}
-	existing, err := findRepoProfileByRef(ctx, q, orgID, source, ref)
+	// One transaction around lookup → create → re-read, so the answer this
+	// returns is the row that exists at a single point in time rather than
+	// three separate ones. A caller that already has a tx keeps it (inTx
+	// passes a *sql.Tx through), which is also what puts the create's advisory
+	// lock in the caller's scope.
+	var out *domain.RepoProfile
+	err = inTx(ctx, q, func(tx queryer) error {
+		existing, err := findRepoProfileByRef(ctx, tx, orgID, source, ref)
+		if err != nil {
+			return err
+		}
+		if existing == nil {
+			if err := insertRepoProfileRow(ctx, tx, orgID, ref); err != nil {
+				return err
+			}
+			// Re-read rather than RETURNING: the INSERT is guarded and
+			// DO NOTHING, so this is also what returns the winner's row when
+			// a concurrent creator got there first.
+			created, err := findRepoProfileByRef(ctx, tx, orgID, source, ref)
+			if err != nil {
+				return err
+			}
+			if created == nil {
+				return fmt.Errorf("repo_profiles row for %s vanished immediately after insert", ref.Slug())
+			}
+			out = created
+			return nil
+		}
+		// The row stands as it is, except for an id the caller just learned.
+		if ref.ExternalID != "" && existing.ExternalID != ref.ExternalID {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE repo_profiles
+				   SET external_id = $1
+				 WHERE org_id = $2 AND source = $3 AND owner = $4 AND repo = $5
+			`, ref.ExternalID, orgID, source, existing.Owner, existing.Repo); err != nil {
+				return fmt.Errorf("record external id for %s: %w", ref.Slug(), err)
+			}
+			existing.ExternalID = ref.ExternalID
+		}
+		out = existing
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if existing == nil {
-		if err := insertRepoProfileRow(ctx, q, orgID, ref); err != nil {
-			return nil, err
-		}
-		// Re-read rather than RETURNING: the INSERT is a DO NOTHING, so this
-		// is also what returns the winner's row when a concurrent creator got
-		// there first.
-		created, err := findRepoProfileByRef(ctx, q, orgID, source, ref)
-		if err != nil {
-			return nil, err
-		}
-		if created == nil {
-			return nil, fmt.Errorf("repo_profiles row for %s vanished immediately after insert", ref.Slug())
-		}
-		return created, nil
-	}
-	// The row stands as it is, except for an id the caller just learned.
-	if ref.ExternalID != "" && existing.ExternalID != ref.ExternalID {
-		if _, err := q.ExecContext(ctx, `
-			UPDATE repo_profiles
-			   SET external_id = $1
-			 WHERE org_id = $2 AND source = $3 AND owner = $4 AND repo = $5
-		`, ref.ExternalID, orgID, source, existing.Owner, existing.Repo); err != nil {
-			return nil, fmt.Errorf("record external id for %s: %w", ref.Slug(), err)
-		}
-		existing.ExternalID = ref.ExternalID
-	}
-	return existing, nil
+	return out, nil
 }
 
 // findRepoProfileByRef looks a repository up by provider identity, matching
@@ -181,30 +195,59 @@ func findRepoProfileByRef(ctx context.Context, q queryer, orgID, source string, 
 // all create through it, so no create path can write a row without the
 // identity columns, and all three agree on what "already exists" means.
 //
-// The NOT EXISTS guard is case-INSENSITIVE, which the unique index cannot be:
-// a repository already present under different casing keeps its row (and its
-// cached profile, base branch, clone state, ETag) rather than gaining a second
-// one. The ON CONFLICT behind it is the race backstop, for two creators that
-// both passed the guard with the same casing — a row that already exists is
-// the caller's answer, never something a create rewrites.
+// # Why the lock, and why the guard is not enough on its own
+//
+// "Already exists" is case-INSENSITIVE, because GitHub identifiers are. The
+// unique index is not and cannot be — the natural key stores the casing the
+// repository is spelled with, and folding it in the index would refuse two
+// pre-existing rows that differ only in case rather than reconciling them.
+//
+// That gap is a live race, not a theoretical one. Two transactions creating
+// the same repository under different casing cannot see each other's uncommitted
+// rows, so both pass NOT EXISTS; their keys then differ, so ON CONFLICT catches
+// neither and both rows land — two rows for one GitHub repository, which is
+// exactly what this function exists to prevent. The ON CONFLICT only closes the
+// same-casing half of the race.
+//
+// So the create serializes on the repository's case-folded identity. The lock
+// is transaction-scoped, and inTx is what guarantees there is a transaction to
+// scope it to: a caller composing us into its own tx (the reconcile,
+// SetConfigured) holds it to their commit, and a bare call gets one of its own.
+// A blocked creator resumes after the winner commits, and — READ COMMITTED, so
+// its INSERT statement takes a fresh snapshot — then sees the winner's row and
+// no-ops.
+//
+// The key is hashtextextended over the folded identity, the same 64-bit
+// advisory space the tracked-set reconcile's per-org lock uses. A hash
+// collision between the two costs one spurious serialization, never
+// correctness. Lock order is always org-then-repository, so the reconcile
+// taking both cannot cycle.
 func insertRepoProfileRow(ctx context.Context, q queryer, orgID string, ref domain.RepoRef) error {
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {
 		return err
 	}
-	if _, err := q.ExecContext(ctx, `
-		INSERT INTO repo_profiles (org_id, source, owner, repo, external_id)
-		SELECT $1, $2, $3, $4, NULLIF($5, '')
-		WHERE NOT EXISTS (
-		    SELECT 1 FROM repo_profiles
-		    WHERE org_id = $1 AND source = $2
-		      AND lower(owner) = lower($3) AND lower(repo) = lower($4)
-		)
-		ON CONFLICT (org_id, source, owner, repo) DO NOTHING
-	`, orgID, source, ref.Owner, ref.Repo, ref.ExternalID); err != nil {
-		return fmt.Errorf("insert repo_profiles[%s]: %w", ref.Slug(), err)
-	}
-	return nil
+	return inTx(ctx, q, func(tx queryer) error {
+		if _, err := tx.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':' || lower($3) || '/' || lower($4), 0))`,
+			orgID, source, ref.Owner, ref.Repo,
+		); err != nil {
+			return fmt.Errorf("lock repo identity[%s]: %w", ref.Slug(), err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO repo_profiles (org_id, source, owner, repo, external_id)
+			SELECT $1, $2, $3, $4, NULLIF($5, '')
+			WHERE NOT EXISTS (
+			    SELECT 1 FROM repo_profiles
+			    WHERE org_id = $1 AND source = $2
+			      AND lower(owner) = lower($3) AND lower(repo) = lower($4)
+			)
+			ON CONFLICT (org_id, source, owner, repo) DO NOTHING
+		`, orgID, source, ref.Owner, ref.Repo, ref.ExternalID); err != nil {
+			return fmt.Errorf("insert repo_profiles[%s]: %w", ref.Slug(), err)
+		}
+		return nil
+	})
 }
 
 func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {

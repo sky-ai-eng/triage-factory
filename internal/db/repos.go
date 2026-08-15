@@ -147,10 +147,12 @@ type RepoStore interface {
 	// a repository is brought into the table by the side that polls and
 	// tracks, never by a running agent's pod.
 	//
-	// Two concurrent creators race benignly: the loser's INSERT conflicts and
-	// it re-reads the winner's row. The one race the unique cannot see is two
-	// creators disagreeing on casing; on the tracking path the reconcile's
-	// per-org lock is what keeps that from arising.
+	// Concurrent creators of the same repository resolve to one row, whatever
+	// casing each of them spelled it with. That is enforced by the create
+	// itself and not by anything the caller has to hold — the unique index is
+	// case-sensitive and so cannot see the case-differing race, which is
+	// precisely why the impls serialize on the case-folded identity instead of
+	// leaning on it.
 	GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.RepoProfile, error)
 
 	// UpdateCloneStatus records the outcome of an EnsureBareClone
