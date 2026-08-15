@@ -446,9 +446,7 @@ function OverviewRow({ ov }: { ov: FleetOverview | null }) {
         aside={<span className="font-mono text-label-sm text-ink-3/60">p50 · p95</span>}
       >
         <Stat value={fmtMs(r.duration_p50_ms)} />
-        <p className="mt-1 font-mono text-label text-ink-3">
-          p95 {fmtMs(r.duration_p95_ms)}
-        </p>
+        <p className="mt-1 font-mono text-label text-ink-3">p95 {fmtMs(r.duration_p95_ms)}</p>
       </Instrument>
     </div>
   )
@@ -513,10 +511,7 @@ function RunsBand({ ov }: { ov: FleetOverview | null }) {
       >
         <div className="flex flex-wrap items-center gap-2">
           {versions.map((v) => (
-            <span
-              key={v.version}
-              className="font-mono text-reported tabular-nums text-ink-2"
-            >
+            <span key={v.version} className="font-mono text-reported tabular-nums text-ink-2">
               {v.version || '—'}
               <span className="ml-1 text-ink-3/60">×{v.count}</span>
             </span>
@@ -524,8 +519,7 @@ function RunsBand({ ov }: { ov: FleetOverview | null }) {
         </div>
         {spend && (
           <p className="mt-3 font-mono text-label uppercase tracking-wider text-ink-3/70">
-            spend {r.window_hours}h ·{' '}
-            <span className="text-ink-2">{fmtUSD(spend.total_usd)}</span>
+            spend {r.window_hours}h · <span className="text-ink-2">{fmtUSD(spend.total_usd)}</span>
           </p>
         )}
       </Instrument>
@@ -789,9 +783,7 @@ function SandboxRow({ claim }: { claim: FleetSandboxClaim }) {
         <td className="py-1.5 pr-3 text-right align-top text-ink-2">
           {fmtDuration(claim.duration_seconds)}
         </td>
-        <td className="py-1.5 pr-3 text-right align-top text-ink-2">
-          {fmtMem(claim.peak_mem_mb)}
-        </td>
+        <td className="py-1.5 pr-3 text-right align-top text-ink-2">{fmtMem(claim.peak_mem_mb)}</td>
         <td className="py-1.5 pr-3 text-right align-top text-ink-2">
           {claim.cpu_usec != null ? `${coreMinutes(claim.cpu_usec).toFixed(2)}` : '—'}
         </td>
@@ -893,10 +885,7 @@ function QueueBand({ q }: { q: FleetBacklog | null }) {
     <div className="space-y-3">
       {q.by_org.slice(0, 8).map((o) => (
         <div key={o.org_id} className="flex items-center gap-3">
-          <span
-            className="w-40 shrink-0 truncate font-mono text-label text-ink-3"
-            title={o.org_id}
-          >
+          <span className="w-40 shrink-0 truncate font-mono text-label text-ink-3" title={o.org_id}>
             {shortId(o.org_id)}
           </span>
           <div className="flex-1">

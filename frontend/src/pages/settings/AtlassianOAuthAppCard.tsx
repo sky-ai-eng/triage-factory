@@ -110,9 +110,8 @@ export default function AtlassianOAuthAppCard({ orgId }: { orgId: string }) {
       <p className="text-body leading-relaxed text-ink-3">
         Register an Atlassian OAuth app so teammates can connect their Jira account with one click
         instead of pasting an API token. Create a 3LO app in the{' '}
-        <span className="font-medium text-ink-2">Atlassian developer console</span>, then
-        paste its client ID and secret here. The secret is stored encrypted and never leaves your
-        deployment.
+        <span className="font-medium text-ink-2">Atlassian developer console</span>, then paste its
+        client ID and secret here. The secret is stored encrypted and never leaves your deployment.
       </p>
 
       {/* Current state: a per-org override, the hosted default, or nothing. */}

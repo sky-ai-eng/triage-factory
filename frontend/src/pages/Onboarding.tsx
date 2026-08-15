@@ -196,8 +196,8 @@ export default function Onboarding() {
             </h1>
             <p className="text-body text-ink-3 leading-relaxed">
               You&apos;re signed in as{' '}
-              <span className="text-ink-2 font-medium">{accountLabel}</span>. This instance
-              is configured to require an invitation before granting access.
+              <span className="text-ink-2 font-medium">{accountLabel}</span>. This instance is
+              configured to require an invitation before granting access.
             </p>
             <p className="text-body text-ink-3 leading-relaxed">
               Contact your administrator to request an invite, then refresh or log back in with the

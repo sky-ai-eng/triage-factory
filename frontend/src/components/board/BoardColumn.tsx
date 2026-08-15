@@ -254,9 +254,7 @@ export default function BoardColumn({
                   </Tooltip.Root>
                 </Tooltip.Provider>
               )}
-              <h2 className="text-column font-semibold tracking-tight text-ink-1">
-                {title}
-              </h2>
+              <h2 className="text-column font-semibold tracking-tight text-ink-1">{title}</h2>
             </div>
             {headerExtra}
           </div>

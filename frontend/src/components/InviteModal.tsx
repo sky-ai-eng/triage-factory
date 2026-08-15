@@ -114,10 +114,7 @@ export default function InviteModal({ create, onClose }: Props) {
       >
         <header className="mb-5 flex items-start justify-between">
           <div>
-            <h2
-              id="invite-modal-title"
-              className="text-lg font-semibold tracking-tight text-ink-1"
-            >
+            <h2 id="invite-modal-title" className="text-lg font-semibold tracking-tight text-ink-1">
               {created ? 'Invite created' : 'Invite to organization'}
             </h2>
             <p className="mt-0.5 text-ui text-ink-3">

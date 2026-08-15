@@ -103,9 +103,7 @@ export default function LoginMethods() {
                     </span>
                   )}
                 </div>
-                {m.email && (
-                  <div className="truncate text-reported text-ink-3">{m.email}</div>
-                )}
+                {m.email && <div className="truncate text-reported text-ink-3">{m.email}</div>}
                 {date && <div className="text-label text-ink-3">Linked {date}</div>}
               </li>
             )

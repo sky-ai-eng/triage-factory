@@ -341,9 +341,7 @@ export default function TaskRuleEditor({
 
                   {/* Name */}
                   <div>
-                    <label className="block text-ui font-medium text-ink-2 mb-1.5">
-                      Name
-                    </label>
+                    <label className="block text-ui font-medium text-ink-2 mb-1.5">Name</label>
                     <input
                       type="text"
                       value={name}
@@ -376,9 +374,7 @@ export default function TaskRuleEditor({
                   <div>
                     <label className="block text-ui font-medium text-ink-2 mb-1.5">
                       Default priority{' '}
-                      <span className="text-ink-3 font-normal">
-                        ({priority.toFixed(2)})
-                      </span>
+                      <span className="text-ink-3 font-normal">({priority.toFixed(2)})</span>
                     </label>
                     <Slider
                       value={priority}

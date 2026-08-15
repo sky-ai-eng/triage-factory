@@ -337,9 +337,7 @@ function ChatHeader({
   return (
     <header className="relative px-5 pt-4 pb-3 border-b border-line-1/60">
       <div className="flex items-center justify-between">
-        <h2 className="text-body font-semibold tracking-tight text-ink-1 uppercase">
-          Curator
-        </h2>
+        <h2 className="text-body font-semibold tracking-tight text-ink-1 uppercase">Curator</h2>
         <div className="flex items-center gap-2 text-reported">
           <button
             type="button"
@@ -640,9 +638,7 @@ function ToolCallCard({
         ) : (
           <ChevronRight size={11} className="shrink-0 text-ink-3" />
         )}
-        <span className={`flex-1 truncate ${isError ? 'text-alarm' : 'text-ink-2'}`}>
-          {label}
-        </span>
+        <span className={`flex-1 truncate ${isError ? 'text-alarm' : 'text-ink-2'}`}>{label}</span>
         {resultPreview && !expanded && (
           <span className="text-reported text-ink-3 truncate max-w-[40%] shrink-0">
             {resultPreview}

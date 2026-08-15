@@ -484,8 +484,7 @@ function StatusDonut({ stats }: { stats: Stats }) {
 }
 
 function MergedTimeline({ data }: { data: { date: string; count: number }[] }) {
-  if (data.length === 0)
-    return <p className="text-ui text-ink-3 text-center py-4">No data</p>
+  if (data.length === 0) return <p className="text-ui text-ink-3 text-center py-4">No data</p>
 
   const formatted = data.map((d) => ({
     ...d,
@@ -537,8 +536,7 @@ function MergedTimeline({ data }: { data: { date: string; count: number }[] }) {
 
 function ReviewBalance({ given, received }: { given: number; received: number }) {
   const total = given + received
-  if (total === 0)
-    return <p className="text-ui text-ink-3 text-center py-4">No reviews yet</p>
+  if (total === 0) return <p className="text-ui text-ink-3 text-center py-4">No reviews yet</p>
 
   const givenPct = (given / total) * 100
   const net = given - received
@@ -587,10 +585,7 @@ function TotalsSummary({ stats }: { stats: Stats }) {
           <span className="text-ink-3">{stats.awaiting} open</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <span
-            className="w-1.5 h-1.5 rounded-full"
-            style={{ background: 'var(--color-ink-3)' }}
-          />
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'var(--color-ink-3)' }} />
           <span className="text-ink-3">{stats.draft} draft</span>
         </div>
       </div>

@@ -113,12 +113,8 @@ export default function Login() {
     <div className="min-h-screen bg-ground flex items-center justify-center p-4">
       <div className="w-full max-w-sm backdrop-blur-xl bg-raised border border-line-1 rounded-2xl p-8 space-y-6 shadow-float shadow-black/[0.04]">
         <div className="space-y-1.5">
-          <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">
-            Triage Factory
-          </h1>
-          <p className="text-body text-ink-3 leading-relaxed">
-            Enter your work email to continue.
-          </p>
+          <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">Triage Factory</h1>
+          <p className="text-body text-ink-3 leading-relaxed">Enter your work email to continue.</p>
         </div>
 
         {auth.status === 'error' && auth.error && (
@@ -167,10 +163,7 @@ export default function Login() {
 
         <form onSubmit={onSubmit} className="space-y-3">
           <div className="space-y-1.5">
-            <label
-              htmlFor="login-email"
-              className="block text-ui font-medium text-ink-2"
-            >
+            <label htmlFor="login-email" className="block text-ui font-medium text-ink-2">
               Work email
             </label>
             <input

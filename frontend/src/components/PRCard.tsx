@@ -104,10 +104,7 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
         {/* Labels */}
         <div className="hidden sm:flex gap-1.5 shrink-0">
           {(pr.labels || []).slice(0, 2).map((l) => (
-            <span
-              key={l}
-              className="text-label text-ink-3 bg-tint-3 rounded-full px-2 py-0.5"
-            >
+            <span key={l} className="text-label text-ink-3 bg-tint-3 rounded-full px-2 py-0.5">
               {l}
             </span>
           ))}

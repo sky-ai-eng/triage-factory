@@ -258,8 +258,7 @@ export default function GitHubAppImportForm({
       {!isLocal && (
         <label className="block space-y-2">
           <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
-            Webhook secret{' '}
-            <span className="font-normal normal-case text-ink-3">(optional)</span>
+            Webhook secret <span className="font-normal normal-case text-ink-3">(optional)</span>
           </span>
           <input
             type="password"
@@ -336,9 +335,7 @@ function PermissionTable({ rows }: { rows: GitHubAppPermissionRow[] }) {
             <div className="flex items-center gap-2">
               <span className="flex-1 text-ink-1">{p.permission}</span>
               <span className="w-16 text-right text-ink-3">{p.required}</span>
-              <span
-                className={`w-16 text-right ${p.granted ? 'text-ink-2' : 'text-ink-3'}`}
-              >
+              <span className={`w-16 text-right ${p.granted ? 'text-ink-2' : 'text-ink-3'}`}>
                 {p.granted || '—'}
               </span>
               <span className="flex w-4 justify-end">

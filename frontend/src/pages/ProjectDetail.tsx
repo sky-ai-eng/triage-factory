@@ -256,9 +256,7 @@ export default function ProjectDetail() {
         >
           <ArrowLeft size={14} /> Projects
         </Link>
-        <div className="text-ink-2 text-body">
-          Project not found. It may have been deleted.
-        </div>
+        <div className="text-ink-2 text-body">Project not found. It may have been deleted.</div>
       </div>
     )
   }
@@ -272,9 +270,7 @@ export default function ProjectDetail() {
         >
           <ArrowLeft size={14} /> Projects
         </Link>
-        <div className="text-ink-2 text-body mb-3">
-          {loadError ?? 'Failed to load project.'}
-        </div>
+        <div className="text-ink-2 text-body mb-3">{loadError ?? 'Failed to load project.'}</div>
         <button
           type="button"
           onClick={() => {
@@ -1425,9 +1421,7 @@ function ProjectExportModal({
                 </div>
               ))}
               {preview && preview.files.length === 0 && (
-                <div className="px-3 py-2 text-ui text-ink-3 italic">
-                  No files to export.
-                </div>
+                <div className="px-3 py-2 text-ui text-ink-3 italic">No files to export.</div>
               )}
             </div>
             <div className="text-ui text-ink-2">
@@ -1710,9 +1704,7 @@ function Card({
 
 function Chip({ label, tone }: { label: string; tone: 'accent' | 'muted' }) {
   const cls =
-    tone === 'accent'
-      ? 'bg-warm-2 text-warm'
-      : 'bg-tint-2 text-ink-2 border border-line-1'
+    tone === 'accent' ? 'bg-warm-2 text-warm' : 'bg-tint-2 text-ink-2 border border-line-1'
   return (
     <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-reported ${cls}`}>
       {label}

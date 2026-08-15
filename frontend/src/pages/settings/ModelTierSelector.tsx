@@ -78,11 +78,7 @@ export default function ModelTierSelector({
           filled = selected
         }
 
-        const textClass = selected
-          ? 'text-warm'
-          : aboveCap
-            ? 'text-ink-3'
-            : 'text-ink-2'
+        const textClass = selected ? 'text-warm' : aboveCap ? 'text-ink-3' : 'text-ink-2'
         const railClass = selected
           ? 'bg-warm shadow-[0_0_10px_-1px_var(--color-warm)]'
           : filled
@@ -111,9 +107,7 @@ export default function ModelTierSelector({
               {opt.label}
             </span>
             {opt.hint && (
-              <span className="mt-0.5 block text-reported leading-snug text-ink-3">
-                {opt.hint}
-              </span>
+              <span className="mt-0.5 block text-reported leading-snug text-ink-3">{opt.hint}</span>
             )}
             <span
               aria-hidden

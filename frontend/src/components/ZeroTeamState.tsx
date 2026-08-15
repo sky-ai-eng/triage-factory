@@ -19,9 +19,7 @@ export default function ZeroTeamState({ canCreate }: { canCreate: boolean }) {
       <span className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-warm-2 text-warm">
         <Users size={22} />
       </span>
-      <h2 className="text-section font-semibold text-ink-1">
-        You&rsquo;re not on a team yet
-      </h2>
+      <h2 className="text-section font-semibold text-ink-1">You&rsquo;re not on a team yet</h2>
       <p className="mt-2 text-body leading-relaxed text-ink-3">
         {canCreate
           ? 'Create a team to start tracking work, or ask another org admin to add you to an existing one.'

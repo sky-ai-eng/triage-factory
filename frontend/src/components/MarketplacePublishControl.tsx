@@ -319,9 +319,7 @@ function PublishDialog({
                 )}
 
                 <div>
-                  <label className="block text-ui font-medium text-ink-2 mb-1.5">
-                    Name
-                  </label>
+                  <label className="block text-ui font-medium text-ink-2 mb-1.5">Name</label>
                   <input
                     ref={nameRef}
                     type="text"
@@ -332,9 +330,7 @@ function PublishDialog({
                 </div>
 
                 <div>
-                  <label className="block text-ui font-medium text-ink-2 mb-1.5">
-                    Description
-                  </label>
+                  <label className="block text-ui font-medium text-ink-2 mb-1.5">Description</label>
                   <textarea
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
@@ -345,9 +341,7 @@ function PublishDialog({
                 </div>
 
                 <div>
-                  <label className="block text-ui font-medium text-ink-2 mb-1.5">
-                    Event types
-                  </label>
+                  <label className="block text-ui font-medium text-ink-2 mb-1.5">Event types</label>
                   <div className="max-h-[160px] overflow-y-auto space-y-1 border border-line-1 rounded-lg p-2 bg-tint-2">
                     {catalog.length === 0 && (
                       <div className="text-reported text-ink-3 px-1 py-1">Loading…</div>

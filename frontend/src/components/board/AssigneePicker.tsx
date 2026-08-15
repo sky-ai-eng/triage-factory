@@ -130,9 +130,7 @@ export default function AssigneePicker({
         onPointerDown={(e) => e.stopPropagation()}
         title={readOnly ? `Finished by ${currentAssignee.label}` : currentAssignee.label}
         className={`inline-flex items-center gap-1 text-label font-medium leading-none transition-colors ${
-          readOnly
-            ? 'cursor-default text-ink-3'
-            : 'cursor-pointer text-ink-2 hover:text-ink-1'
+          readOnly ? 'cursor-default text-ink-3' : 'cursor-pointer text-ink-2 hover:text-ink-1'
         }`}
       >
         <AssigneeAvatar entry={currentAssignee} />
@@ -338,8 +336,7 @@ function AvatarCircle({
   small?: boolean
 }) {
   const size = small ? 'w-3.5 h-3.5 text-[7px]' : 'w-5 h-5 text-label-sm'
-  const colors =
-    tone === 'bot' ? 'bg-warm/15 text-warm' : 'bg-ink-1/10 text-ink-1'
+  const colors = tone === 'bot' ? 'bg-warm/15 text-warm' : 'bg-ink-1/10 text-ink-1'
   return (
     <span
       className={`inline-flex items-center justify-center rounded-full font-semibold ${size} ${colors}`}
@@ -377,9 +374,7 @@ function PickerRow({
       <span className="shrink-0">{avatar}</span>
       <span className="flex-1 min-w-0">
         <span className="block text-ui font-medium text-ink-1 truncate">{label}</span>
-        {sublabel && (
-          <span className="block text-label text-ink-3 truncate">{sublabel}</span>
-        )}
+        {sublabel && <span className="block text-label text-ink-3 truncate">{sublabel}</span>}
       </span>
       {selected && (
         <span className="text-warm text-ui" aria-hidden>

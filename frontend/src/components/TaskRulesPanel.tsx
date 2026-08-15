@@ -157,10 +157,7 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
                   <Plus size={14} />
                   New Rule
                 </button>
-                <button
-                  onClick={onClose}
-                  className="text-ink-3 hover:text-ink-2 transition-colors"
-                >
+                <button onClick={onClose} className="text-ink-3 hover:text-ink-2 transition-colors">
                   <X size={18} />
                 </button>
               </div>

@@ -163,9 +163,7 @@ export default function DiffFile({
         </svg>
 
         {/* File path */}
-        <span className="text-card-title font-mono text-ink-1 truncate flex-1">
-          {displayPath}
-        </span>
+        <span className="text-card-title font-mono text-ink-1 truncate flex-1">{displayPath}</span>
 
         {/* Comment count */}
         {commentCount > 0 && (

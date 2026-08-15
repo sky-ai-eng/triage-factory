@@ -862,10 +862,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                   )}
 
                                   {wiz.error && (
-                                    <p
-                                      role="alert"
-                                      className="text-ui text-[var(--color-alarm)]"
-                                    >
+                                    <p role="alert" className="text-ui text-[var(--color-alarm)]">
                                       {wiz.error}
                                     </p>
                                   )}

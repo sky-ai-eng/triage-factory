@@ -131,9 +131,7 @@ export default function PollerTimingGroup({
 
   return (
     <Section>
-      {showHeading && (
-        <h2 className="text-body font-medium text-ink-2 mb-4">Poller timing</h2>
-      )}
+      {showHeading && <h2 className="text-body font-medium text-ink-2 mb-4">Poller timing</h2>}
       <div className="space-y-3">
         {showGitHub && (
           <Field label="GitHub poll interval">

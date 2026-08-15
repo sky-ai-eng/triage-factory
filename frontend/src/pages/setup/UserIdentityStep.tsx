@@ -44,8 +44,7 @@ export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
             <GitHubMark />
           </span>
           <p className="text-body text-ink-2">
-            Connected as{' '}
-            <span className="font-medium text-ink-1">@{state.userIdentityLogin}</span>
+            Connected as <span className="font-medium text-ink-1">@{state.userIdentityLogin}</span>
             <span className="text-ink-3"> on {host}</span>
           </p>
         </div>
@@ -62,14 +61,12 @@ export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
-          Connect your GitHub
-        </h2>
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Connect your GitHub</h2>
         <p className="text-body leading-relaxed text-ink-3">
           Triage Factory needs to know who you are on{' '}
-          <span className="font-medium text-ink-2">{host}</span> so it can match your pull
-          requests and reviews to you. This reads only your username — it doesn&rsquo;t grant access
-          to your repositories.
+          <span className="font-medium text-ink-2">{host}</span> so it can match your pull requests
+          and reviews to you. This reads only your username — it doesn&rsquo;t grant access to your
+          repositories.
         </p>
       </div>
 

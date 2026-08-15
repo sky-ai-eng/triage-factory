@@ -177,9 +177,7 @@ export default function SlackChannelPicker({
                   }
                 }}
                 className={`flex items-start gap-3 rounded-xl px-3 py-2.5 transition-colors ${
-                  disabled
-                    ? 'cursor-not-allowed opacity-60'
-                    : 'cursor-pointer hover:bg-tint-2'
+                  disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:bg-tint-2'
                 } ${checked ? 'bg-warm/[0.04]' : ''}`}
               >
                 <span

@@ -360,9 +360,7 @@ export default function PromptDrawer({
                 ))}
               {/* Name */}
               <div>
-                <label className="block text-ui font-medium text-ink-2 mb-1.5">
-                  Name
-                </label>
+                <label className="block text-ui font-medium text-ink-2 mb-1.5">Name</label>
                 <input
                   ref={nameRef}
                   type="text"
@@ -376,9 +374,7 @@ export default function PromptDrawer({
 
               {/* Body */}
               <div>
-                <label className="block text-ui font-medium text-ink-2 mb-1.5">
-                  Prompt Body
-                </label>
+                <label className="block text-ui font-medium text-ink-2 mb-1.5">Prompt Body</label>
                 <textarea
                   value={body}
                   onChange={(e) => setBody(e.target.value)}
@@ -393,9 +389,7 @@ export default function PromptDrawer({
               </div>
 
               <div>
-                <label className="block text-ui font-medium text-ink-2 mb-1.5">
-                  Model
-                </label>
+                <label className="block text-ui font-medium text-ink-2 mb-1.5">Model</label>
                 <select
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
@@ -416,9 +410,7 @@ export default function PromptDrawer({
               {/* Stats */}
               {!isNew && stats && stats.total_runs > 0 && (
                 <div>
-                  <label className="block text-ui font-medium text-ink-2 mb-2">
-                    Performance
-                  </label>
+                  <label className="block text-ui font-medium text-ink-2 mb-2">Performance</label>
                   <div className="bg-tint-2 rounded-lg border border-line-1 p-3 space-y-3">
                     {/* Stat pills */}
                     <div className="flex gap-2 flex-wrap">
@@ -452,9 +444,7 @@ export default function PromptDrawer({
                                 style={{
                                   height: `${Math.max(pct * 100, 4)}%`,
                                   background:
-                                    d.count > 0
-                                      ? 'var(--color-warm)'
-                                      : 'var(--color-line-1)',
+                                    d.count > 0 ? 'var(--color-warm)' : 'var(--color-line-1)',
                                   opacity: d.count > 0 ? 0.7 : 0.3,
                                 }}
                                 title={`${d.date}: ${d.count} run${d.count !== 1 ? 's' : ''}`}
@@ -494,9 +484,7 @@ export default function PromptDrawer({
                   control renders nothing in local mode). */}
               {!isNew && promptId && (
                 <div>
-                  <label className="block text-ui font-medium text-ink-2 mb-1.5">
-                    Marketplace
-                  </label>
+                  <label className="block text-ui font-medium text-ink-2 mb-1.5">Marketplace</label>
                   <MarketplacePublishControl
                     kind="prompt"
                     sourceId={promptId}

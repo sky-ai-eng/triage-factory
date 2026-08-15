@@ -101,9 +101,7 @@ export default function ProjectEntitiesPanel({ projectId }: Props) {
       </header>
 
       <div className="flex-1 overflow-y-auto px-2 py-2 min-h-0">
-        {isLoading && (
-          <p className="text-ui text-ink-3 text-center py-8">Loading entities…</p>
-        )}
+        {isLoading && <p className="text-ui text-ink-3 text-center py-8">Loading entities…</p>}
         {loadError && !isLoading && (
           <p className="text-ui text-alarm text-center py-8">{loadError}</p>
         )}

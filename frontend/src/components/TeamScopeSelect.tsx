@@ -86,9 +86,7 @@ export default function TeamScopeSelect({ value, onChange, className = '' }: Pro
           >
             <span className="flex flex-col">
               <span className="text-ink-1">All my teams</span>
-              <span className="text-label text-ink-3">
-                union of every team you&rsquo;re on
-              </span>
+              <span className="text-label text-ink-3">union of every team you&rsquo;re on</span>
             </span>
             {value.length === 0 && <Check size={13} className="shrink-0 text-warm" />}
           </button>

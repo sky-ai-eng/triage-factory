@@ -183,15 +183,11 @@ function BranchPicker({
         <button
           type="button"
           className={`group inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-reported transition-colors ${
-            open
-              ? 'bg-warm/10 text-warm'
-              : 'text-ink-3 hover:text-ink-2 hover:bg-tint-2'
+            open ? 'bg-warm/10 text-warm' : 'text-ink-3 hover:text-ink-2 hover:bg-tint-2'
           }`}
         >
           <GitBranch size={11} strokeWidth={2} />
-          <span className={usingDefault ? 'text-ink-3' : 'text-ink-2'}>
-            {effective}
-          </span>
+          <span className={usingDefault ? 'text-ink-3' : 'text-ink-2'}>{effective}</span>
           <ChevronDown size={10} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
         </button>
       </Popover.Trigger>
@@ -234,9 +230,7 @@ function BranchPicker({
                     }`}
                   >
                     <span className="truncate">{b}</span>
-                    {isDefault && (
-                      <span className="shrink-0 text-label text-ink-3">default</span>
-                    )}
+                    {isDefault && <span className="shrink-0 text-label text-ink-3">default</span>}
                   </button>
                 )
               })
@@ -494,9 +488,7 @@ function RepoCard({
       {/* Header row */}
       <header className="relative flex items-center gap-3">
         <StatusDot state={state} />
-        <h3 className="text-body font-semibold tracking-tight text-ink-1 truncate">
-          {profile.id}
-        </h3>
+        <h3 className="text-body font-semibold tracking-tight text-ink-1 truncate">{profile.id}</h3>
         {profile.clone_status === 'failed' && <CloneFailedBadge profile={profile} />}
         <div className="ml-auto flex items-center gap-3">
           {profile.can_edit ? (
@@ -518,9 +510,7 @@ function RepoCard({
           <>
             <p
               ref={bodyRef}
-              className={`text-ui leading-relaxed text-ink-2 ${
-                expanded ? '' : 'line-clamp-3'
-              }`}
+              className={`text-ui leading-relaxed text-ink-2 ${expanded ? '' : 'line-clamp-3'}`}
             >
               {profile.profile_text}
             </p>
@@ -868,9 +858,7 @@ export default function Repos() {
       <header className="mb-6 flex items-start justify-between gap-6">
         <div>
           <div className="flex items-baseline gap-2">
-            <h1 className="text-[22px] font-semibold tracking-tight text-ink-1">
-              Repositories
-            </h1>
+            <h1 className="text-[22px] font-semibold tracking-tight text-ink-1">Repositories</h1>
             {profiles.length > 0 && (
               <span className="text-reported tabular-nums text-ink-3">
                 {profiledCount}/{profiles.length} profiled
@@ -967,11 +955,7 @@ function ActionButton({
       className={`
         inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-ui font-medium
         transition-colors disabled:opacity-40 disabled:hover:bg-transparent
-        ${
-          accent
-            ? 'text-warm hover:bg-warm/[0.08]'
-            : 'text-ink-2 hover:text-ink-1 hover:bg-tint-2'
-        }
+        ${accent ? 'text-warm hover:bg-warm/[0.08]' : 'text-ink-2 hover:text-ink-1 hover:bg-tint-2'}
       `}
     >
       {icon}

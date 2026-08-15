@@ -312,9 +312,7 @@ export function GitHubAppInstallStep({ orgId, state }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
-          Install the App
-        </h2>
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Install the App</h2>
         <p className="text-body leading-relaxed text-ink-3">
           The App is registered, but GitHub only grants repository access once it&rsquo;s installed.
           Install it on your account or organization, choose all or selected repositories, then come

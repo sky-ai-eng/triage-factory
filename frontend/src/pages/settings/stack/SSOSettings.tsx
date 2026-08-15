@@ -427,9 +427,7 @@ function DomainRow({
     <li className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3">
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-body font-medium text-ink-1">
-            {domain.domain}
-          </span>
+          <span className="truncate text-body font-medium text-ink-1">{domain.domain}</span>
           <StatusBadge verified={verified} />
         </div>
         <div className="flex shrink-0 items-center gap-1.5">

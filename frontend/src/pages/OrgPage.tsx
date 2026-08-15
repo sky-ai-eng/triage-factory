@@ -130,9 +130,7 @@ function OrgPageBody({ orgId }: { orgId: string }) {
           <Users size={15} />
         </span>
         <div>
-          <h1 className="text-section font-semibold leading-tight text-ink-1">
-            Organization
-          </h1>
+          <h1 className="text-section font-semibold leading-tight text-ink-1">Organization</h1>
           <p className="text-reported leading-tight text-ink-3">People and settings.</p>
         </div>
       </div>

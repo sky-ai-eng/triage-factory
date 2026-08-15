@@ -276,9 +276,7 @@ function LabelPlate({
           {task && <SourceTag task={task} />}
           {task && <EventTag eventType={task.event_type} />}
           {task?.source_id && (
-            <span className="truncate font-mono text-reported text-ink-3/80">
-              {task.source_id}
-            </span>
+            <span className="truncate font-mono text-reported text-ink-3/80">{task.source_id}</span>
           )}
         </div>
 

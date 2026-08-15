@@ -279,8 +279,8 @@ export default function GitHubAccessControl({
           detail={
             <>
               Enter the new token, with <code className="text-ink-2">repo</code> and{' '}
-              <code className="text-ink-2">read:org</code> scopes. We&rsquo;ll validate it
-              and show what it can reach before your current token is replaced.
+              <code className="text-ink-2">read:org</code> scopes. We&rsquo;ll validate it and show
+              what it can reach before your current token is replaced.
             </>
           }
           busy={busy}
@@ -548,9 +548,9 @@ export default function GitHubAccessControl({
         <>
           <p className="text-body leading-relaxed text-ink-3">
             Triage Factory connects to GitHub with the token in{' '}
-            <code className="text-ink-2">TRIAGE_FACTORY_GITHUB_BOT_PAT</code>. Environment
-            variables take precedence over anything stored here, so this token is managed where the
-            server is started — unset that variable to manage GitHub access from Settings.
+            <code className="text-ink-2">TRIAGE_FACTORY_GITHUB_BOT_PAT</code>. Environment variables
+            take precedence over anything stored here, so this token is managed where the server is
+            started — unset that variable to manage GitHub access from Settings.
           </p>
         </>
       ) : (
@@ -701,8 +701,8 @@ function TokenScreen({
           {detail ?? (
             <>
               Enter a token with <code className="text-ink-2">repo</code> and{' '}
-              <code className="text-ink-2">read:org</code> scopes. We&rsquo;ll validate it
-              and show which repositories it can reach before anything changes.
+              <code className="text-ink-2">read:org</code> scopes. We&rsquo;ll validate it and show
+              which repositories it can reach before anything changes.
             </>
           )}
         </p>
@@ -783,10 +783,7 @@ function AccessDiffScreen({
                 className="flex items-center justify-between gap-3 rounded-xl border border-line-1 bg-raised px-3 py-2"
               >
                 <span className="text-ui text-ink-1">{d.repo}</span>
-                <span
-                  className="truncate text-reported text-ink-3"
-                  title={d.teams.join(', ')}
-                >
+                <span className="truncate text-reported text-ink-3" title={d.teams.join(', ')}>
                   {d.teams.length > 0 ? d.teams.join(', ') : 'no team'}
                 </span>
               </li>

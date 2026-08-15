@@ -111,9 +111,7 @@ export default function ConnectJira() {
     return (
       <Card>
         <div className="space-y-1.5">
-          <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">
-            Finish setup
-          </h1>
+          <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">Finish setup</h1>
           <p className="text-body text-ink-3 leading-relaxed">
             We couldn&apos;t check your Jira connection just now.
           </p>
@@ -179,14 +177,11 @@ export default function ConnectJira() {
   return (
     <Card>
       <div className="space-y-1.5">
-        <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">
-          Connect your Jira
-        </h1>
+        <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">Connect your Jira</h1>
         <p className="text-body text-ink-3 leading-relaxed">
           One last step. Triage Factory acts as you on{' '}
-          <span className="text-ink-2 font-medium">{host || 'Jira'}</span> — so the tickets
-          it claims and updates are attributed to you, not a shared bot. This is a one-time
-          connection.
+          <span className="text-ink-2 font-medium">{host || 'Jira'}</span> — so the tickets it
+          claims and updates are attributed to you, not a shared bot. This is a one-time connection.
         </p>
       </div>
 

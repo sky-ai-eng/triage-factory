@@ -80,10 +80,10 @@ export function ShellCard() {
       </div>
 
       <p className="gal-note">
-        A page can ask for the whole screen — the factory does it in cinematic
-        mode. The chrome fades and stops taking input, including the tab order,
-        but nothing changes size: a collapse would reflow the page, and a page
-        immersive enough to ask is usually one that renders continuously.
+        A page can ask for the whole screen — the factory does it in cinematic mode. The chrome
+        fades and stops taking input, including the tab order, but nothing changes size: a collapse
+        would reflow the page, and a page immersive enough to ask is usually one that renders
+        continuously.
       </p>
 
       <div className="gal-chips">

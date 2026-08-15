@@ -304,10 +304,7 @@ export default function Cards() {
                       ? 'Delegated'
                       : 'Snoozed'}
               </span>
-              <button
-                onClick={undo}
-                className="text-sm text-warm hover:text-warm/80 font-medium"
-              >
+              <button onClick={undo} className="text-sm text-warm hover:text-warm/80 font-medium">
                 Undo
               </button>
             </motion.div>
@@ -492,9 +489,7 @@ function SwipeCard({
         {task.priority_reasoning && task.priority_score != null ? (
           <div className="flex items-start gap-2 mb-3 shrink-0">
             <PriorityGauge value={task.priority_score} />
-            <p className="text-body text-ink-3 leading-relaxed">
-              {task.priority_reasoning}
-            </p>
+            <p className="text-body text-ink-3 leading-relaxed">{task.priority_reasoning}</p>
           </div>
         ) : isScoring ? (
           <div className="flex items-start gap-2 mb-3 shrink-0">

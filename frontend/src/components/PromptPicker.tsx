@@ -448,9 +448,7 @@ export default function PromptPicker({
                   ) : selected ? (
                     <div className="flex-1 overflow-y-auto px-5 py-4">
                       <div className="flex items-center gap-2">
-                        <h3 className="text-column font-semibold text-ink-1">
-                          {selected.name}
-                        </h3>
+                        <h3 className="text-column font-semibold text-ink-1">{selected.name}</h3>
                         {selected.id === selectedId && (
                           <span className="text-label-sm font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-warm/10 text-warm shrink-0">
                             In use
@@ -507,9 +505,7 @@ export default function PromptPicker({
                           {selected.body}
                         </p>
                       ) : (
-                        <p className="mt-3 text-ui italic text-ink-3">
-                          No description.
-                        </p>
+                        <p className="mt-3 text-ui italic text-ink-3">No description.</p>
                       )}
                     </div>
                   ) : (

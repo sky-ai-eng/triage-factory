@@ -121,9 +121,7 @@ export default function ConnectGitHub() {
     return (
       <Card>
         <div className="space-y-1.5">
-          <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">
-            Finish setup
-          </h1>
+          <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">Finish setup</h1>
           <p className="text-body text-ink-3 leading-relaxed">
             We couldn&apos;t check your GitHub connection just now.
           </p>
@@ -178,13 +176,11 @@ export default function ConnectGitHub() {
   return (
     <Card>
       <div className="space-y-1.5">
-        <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">
-          Connect your GitHub
-        </h1>
+        <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">Connect your GitHub</h1>
         <p className="text-body text-ink-3 leading-relaxed">
           One last step. Triage Factory needs to know who you are on{' '}
-          <span className="text-ink-2 font-medium">{host || 'GitHub'}</span> so it can
-          match your pull requests and reviews to you. This is a one-time connection.
+          <span className="text-ink-2 font-medium">{host || 'GitHub'}</span> so it can match your
+          pull requests and reviews to you. This is a one-time connection.
         </p>
       </div>
 

@@ -492,9 +492,7 @@ function LiveFeed({ lines, isActive }: { lines: FeedLine[]; isActive: boolean })
             className="flex items-baseline gap-2 py-[1.5px] font-mono text-label leading-relaxed"
           >
             <span className="shrink-0 tabular-nums text-ink-3/45">{l.time}</span>
-            <span
-              className={`truncate ${latest ? 'text-ink-2' : 'text-ink-3/70'}`}
-            >
+            <span className={`truncate ${latest ? 'text-ink-2' : 'text-ink-3/70'}`}>
               {latest && isActive && <span className="text-ink-2">› </span>}
               {l.text}
             </span>

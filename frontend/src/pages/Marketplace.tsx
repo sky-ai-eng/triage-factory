@@ -478,10 +478,7 @@ function ListingCard({
 
         <div className="mt-3 flex flex-wrap gap-1">
           {shownEventTypes.map((et) => (
-            <span
-              key={et}
-              className="text-label text-ink-3 bg-tint-2 rounded px-1.5 py-0.5"
-            >
+            <span key={et} className="text-label text-ink-3 bg-tint-2 rounded px-1.5 py-0.5">
               {catalogById.get(et)?.label ?? et}
             </span>
           ))}
@@ -576,15 +573,11 @@ function ListingDrawer({
                     <span className="text-ui text-ink-2">
                       {detail.publisher_team_name || 'Unknown team'}
                     </span>
-                    <span className="text-reported text-ink-3">
-                      v{detail.current_version}
-                    </span>
+                    <span className="text-reported text-ink-3">v{detail.current_version}</span>
                   </div>
 
                   {detail.description && (
-                    <p className="text-body text-ink-2 leading-relaxed">
-                      {detail.description}
-                    </p>
+                    <p className="text-body text-ink-2 leading-relaxed">{detail.description}</p>
                   )}
 
                   {detail.event_types.length > 0 && (
@@ -642,9 +635,7 @@ function ListingDrawer({
                             </span>
                           </div>
                           {step.brief && (
-                            <p className="text-reported text-ink-3 italic mb-2">
-                              {step.brief}
-                            </p>
+                            <p className="text-reported text-ink-3 italic mb-2">{step.brief}</p>
                           )}
                           <pre className="text-reported font-mono text-ink-2 whitespace-pre-wrap break-words bg-raised rounded p-2 max-h-48 overflow-y-auto">
                             {step.body}

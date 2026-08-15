@@ -126,12 +126,11 @@ export default function GitHubAccessGroup({
               classic PAT
             </a>{' '}
             with <code className="text-ink-2">repo</code> and{' '}
-            <code className="text-ink-2">read:org</code> scopes — the token Triage
-            Factory&rsquo;s bots poll your organization with.{' '}
-            <code className="text-ink-2">read:org</code> lets them resolve your
-            organization&rsquo;s team memberships so review requests routed to teams (e.g.
-            CODEOWNERS) surface as tasks — without it, only PRs that name a reviewer directly are
-            visible.
+            <code className="text-ink-2">read:org</code> scopes — the token Triage Factory&rsquo;s
+            bots poll your organization with. <code className="text-ink-2">read:org</code> lets them
+            resolve your organization&rsquo;s team memberships so review requests routed to teams
+            (e.g. CODEOWNERS) surface as tasks — without it, only PRs that name a reviewer directly
+            are visible.
           </p>
         </Field>
         {/* Clone protocol is local-mode-only: multi-mode deployments

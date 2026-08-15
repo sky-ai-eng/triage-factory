@@ -67,8 +67,8 @@ const G = {
 } as const
 
 /** Every mark the rail can draw. Exported as a TYPE so a row cannot name
-  * a glyph that was never drawn — the governance alert did exactly that,
-  * and rendered nothing at all. */
+ * a glyph that was never drawn — the governance alert did exactly that,
+ * and rendered nothing at all. */
 export type GlyphName = keyof typeof G
 
 export function Ico({ d, size = 16 }: { d: GlyphName; size?: number }) {

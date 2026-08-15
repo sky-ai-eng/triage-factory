@@ -659,11 +659,7 @@ function ProjectCard({ project, onDelete }: { project: Project; onDelete: () => 
         <h3 className="text-body font-semibold tracking-tight text-ink-1 truncate pr-8">
           {project.name}
         </h3>
-        {desc && (
-          <p className="mt-2 text-ui leading-relaxed text-ink-2 line-clamp-3">
-            {desc}
-          </p>
-        )}
+        {desc && <p className="mt-2 text-ui leading-relaxed text-ink-2 line-clamp-3">{desc}</p>}
         <div className="mt-3 text-reported text-ink-3 tabular-nums">
           Updated {formatAge(project.updated_at)}
         </div>

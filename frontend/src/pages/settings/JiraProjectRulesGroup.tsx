@@ -148,9 +148,7 @@ export default function JiraProjectRulesGroup({
     <>
       {bare ? (
         <div className="mb-4 space-y-1.5">
-          <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
-            Jira projects
-          </h2>
+          <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Jira projects</h2>
           <p className="text-body leading-relaxed text-ink-3">
             Track Jira projects and map each one&rsquo;s statuses to pickup / in-progress / done.
           </p>

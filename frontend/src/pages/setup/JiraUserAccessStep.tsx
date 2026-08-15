@@ -42,9 +42,7 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
     return (
       <div className="space-y-5">
         <div className="space-y-1.5">
-          <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
-            Your Jira access
-          </h2>
+          <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Your Jira access</h2>
           <p className="text-body leading-relaxed text-ink-3">
             So Triage Factory can act as you on Jira — claiming and updating tickets under your
             name, not a shared bot.
@@ -55,8 +53,7 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
             <JiraMark />
           </span>
           <p className="text-body text-ink-2">
-            Connected as{' '}
-            <span className="font-medium text-ink-1">{state.jiraUserAccount}</span>
+            Connected as <span className="font-medium text-ink-1">{state.jiraUserAccount}</span>
             <span className="text-ink-3"> on {host}</span>
           </p>
         </div>
@@ -67,13 +64,10 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
-          Connect your Jira
-        </h2>
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Connect your Jira</h2>
         <p className="text-body leading-relaxed text-ink-3">
-          Triage Factory acts as you on{' '}
-          <span className="font-medium text-ink-2">{host}</span> — so the tickets it claims
-          and updates are attributed to you, not a shared bot.
+          Triage Factory acts as you on <span className="font-medium text-ink-2">{host}</span> — so
+          the tickets it claims and updates are attributed to you, not a shared bot.
           {connectAvailable
             ? ' Authorize with Atlassian, or paste a token, to link your account.'
             : ' Paste your personal Jira token to link your account.'}

@@ -190,11 +190,7 @@ export default function GitHubTeamChecklist({
         )}
         {bare ? (
           // Rail-underline filters — borderless, blended (no segmented box).
-          <div
-            role="tablist"
-            aria-label="Team filter"
-            className="flex items-center gap-5 text-ui"
-          >
+          <div role="tablist" aria-label="Team filter" className="flex items-center gap-5 text-ui">
             {segments.map((s) => {
               const active = mode === s.mode
               return (

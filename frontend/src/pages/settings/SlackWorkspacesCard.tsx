@@ -482,9 +482,7 @@ function ConnectFlow({
       <div className="space-y-4 rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/20 px-4 py-4">
         {onCollapse && (
           <div className="flex items-center justify-between">
-            <span className="text-ui font-medium text-ink-2">
-              Add another workspace
-            </span>
+            <span className="text-ui font-medium text-ink-2">Add another workspace</span>
             <button
               type="button"
               onClick={onCollapse}
@@ -511,11 +509,11 @@ function ConnectFlow({
           Two ways to receive events:{' '}
           <strong className="font-medium text-ink-2">Socket Mode</strong> works anywhere —
           localhost, behind a firewall, no public URL — and is the usual choice;{' '}
-          <strong className="font-medium text-ink-2">Events API</strong> needs a public
-          HTTPS URL Slack can reach. Copy the matching manifest into &ldquo;Create an app from a
+          <strong className="font-medium text-ink-2">Events API</strong> needs a public HTTPS URL
+          Slack can reach. Copy the matching manifest into &ldquo;Create an app from a
           manifest,&rdquo; install it to your workspace, then paste the credentials below — hover a{' '}
-          <HelpCircle size={11} className="inline align-[-1px] text-ink-3" /> for where each
-          lives in Slack.
+          <HelpCircle size={11} className="inline align-[-1px] text-ink-3" /> for where each lives
+          in Slack.
         </p>
 
         <label className="block space-y-2">
@@ -557,8 +555,7 @@ function ConnectFlow({
           </label>
           <label className="block space-y-2">
             <span className="flex items-center gap-1.5 text-reported font-medium uppercase tracking-wide text-ink-3">
-              App-level token{' '}
-              <span className="normal-case text-ink-3/70">(Socket Mode)</span>
+              App-level token <span className="normal-case text-ink-3/70">(Socket Mode)</span>
               <FieldHelp>
                 Slack app → <strong>Basic Information</strong> → <strong>App-Level Tokens</strong> →
                 Generate Token &amp; Scopes with the <code>connections:write</code> scope (starts{' '}

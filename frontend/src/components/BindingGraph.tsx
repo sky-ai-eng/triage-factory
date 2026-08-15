@@ -2056,9 +2056,7 @@ function BindingGraphInner({
           >
             <div className="flex items-center gap-2 mb-2.5">
               <Trash2 size={14} className="text-alarm shrink-0" />
-              <h3 className="text-body font-semibold text-ink-1">
-                Delete {deleteSummary}?
-              </h3>
+              <h3 className="text-body font-semibold text-ink-1">Delete {deleteSummary}?</h3>
             </div>
             <ul className="text-ui text-ink-2 space-y-1 mb-3 max-h-[180px] overflow-y-auto">
               {deleteConfirm.blueprints.map((b) => (

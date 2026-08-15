@@ -152,9 +152,7 @@ export default function InviteAccept() {
   if (!preview || preview.status !== 'valid') {
     return (
       <Card title="This invitation isn’t available">
-        <p className="text-body leading-relaxed text-ink-3">
-          {terminalMessage(preview?.status)}
-        </p>
+        <p className="text-body leading-relaxed text-ink-3">{terminalMessage(preview?.status)}</p>
       </Card>
     )
   }

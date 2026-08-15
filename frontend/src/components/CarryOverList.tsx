@@ -258,9 +258,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
       <div className="flex-1 overflow-y-auto px-6 min-h-0">
         {polling && assigned === null && available === null && (
           <div className="space-y-1 py-2">
-            <p className="text-ui text-ink-3 text-center pb-2">
-              Fetching your tickets…
-            </p>
+            <p className="text-ui text-ink-3 text-center pb-2">Fetching your tickets…</p>
             {[1, 2, 3, 4, 5].map((i) => (
               <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-xl">
                 <div className="flex-1 space-y-1.5">
@@ -300,9 +298,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         )}
 
         {isEmpty && (
-          <p className="text-body text-ink-3 text-center py-12">
-            No existing work to carry over.
-          </p>
+          <p className="text-body text-ink-3 text-center py-12">No existing work to carry over.</p>
         )}
 
         {!polling && !error && totalCount > 0 && (
@@ -391,9 +387,7 @@ function Section({
   return (
     <div>
       <div className="px-1 pb-1.5">
-        <h3 className="text-ui font-semibold text-ink-2 uppercase tracking-wide">
-          {title}
-        </h3>
+        <h3 className="text-ui font-semibold text-ink-2 uppercase tracking-wide">{title}</h3>
         <p className="text-reported text-ink-3 mt-0.5">{caption}</p>
       </div>
       <div className="space-y-0.5">
@@ -440,9 +434,7 @@ function TicketRow({
             {ticket.issue_key}
             <ExternalLink size={10} />
           </a>
-          <span className="text-body font-medium text-ink-1 truncate">
-            {ticket.summary}
-          </span>
+          <span className="text-body font-medium text-ink-1 truncate">{ticket.summary}</span>
         </div>
         <MetadataLine ticket={ticket} />
         {failure && (

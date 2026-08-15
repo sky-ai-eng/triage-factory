@@ -111,9 +111,7 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
   // Waiting on the acting team — shown before the team resolves so the
   // user doesn't pick repos that won't match the team they submit under.
   if (disabled) {
-    return (
-      <div className="text-ui text-ink-3 py-2">Select a team to choose its repos.</div>
-    )
+    return <div className="text-ui text-ink-3 py-2">Select a team to choose its repos.</div>
   }
 
   if (loading) {

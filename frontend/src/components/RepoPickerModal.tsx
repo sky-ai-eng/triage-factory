@@ -349,9 +349,7 @@ export default function RepoPickerModal({
                     )}
                   </div>
                   {repo.description && (
-                    <p className="text-reported text-ink-3 truncate mt-0.5">
-                      {repo.description}
-                    </p>
+                    <p className="text-reported text-ink-3 truncate mt-0.5">{repo.description}</p>
                   )}
                 </div>
               </button>

@@ -106,9 +106,7 @@ export default function TrackerProjectPickers({
     <div className="space-y-3">
       <div>
         <div className="flex items-center justify-between mb-1">
-          <span className="text-reported font-medium text-ink-3 uppercase tracking-wide">
-            Jira
-          </span>
+          <span className="text-reported font-medium text-ink-3 uppercase tracking-wide">Jira</span>
           {!loading && !jiraEnabled && (
             <Link to={orgHref('/settings')} className="text-reported text-warm hover:underline">
               Configure Jira
@@ -163,9 +161,7 @@ export default function TrackerProjectPickers({
             Linear
           </span>
         </div>
-        <div className="text-ui text-ink-3 py-1 italic">
-          Linear integration coming soon.
-        </div>
+        <div className="text-ui text-ink-3 py-1 italic">Linear integration coming soon.</div>
         {/* Hidden input so the parent's controlled-state plumbing doesn't
             need a special-case for "Linear is always empty" — when the
             integration ships, this swaps in a real <select> and the

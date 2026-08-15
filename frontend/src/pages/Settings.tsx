@@ -54,9 +54,7 @@ export default function Settings() {
     <div className="relative min-h-full px-4 py-10">
       <GlassBackdrop />
       <div className="mx-auto max-w-2xl">
-        <h1 className="mb-8 text-[22px] font-semibold tracking-tight text-ink-1">
-          Settings
-        </h1>
+        <h1 className="mb-8 text-[22px] font-semibold tracking-tight text-ink-1">Settings</h1>
 
         <div className="space-y-8">
           {/* Org + Team groups — local mode only. Multi mode relocates Org to

@@ -86,11 +86,7 @@ export default function TrackersStep({ state, patch }: StepContext) {
               }`}
             >
               <span className="flex items-center gap-1.5">
-                <span
-                  className={`text-body font-medium ${
-                    selected ? 'text-warm' : 'text-ink-1'
-                  }`}
-                >
+                <span className={`text-body font-medium ${selected ? 'text-warm' : 'text-ink-1'}`}>
                   {card.title}
                 </span>
                 {card.disabled && (

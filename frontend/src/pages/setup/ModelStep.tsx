@@ -14,9 +14,7 @@ export function OrgModelStep({ state, patch }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
-          Cap the model tier
-        </h2>
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Cap the model tier</h2>
         <p className="text-body leading-relaxed text-ink-3">
           A hard ceiling for the whole workspace. A team default above the cap is clamped down to it
           — the team is told, but the cap wins.

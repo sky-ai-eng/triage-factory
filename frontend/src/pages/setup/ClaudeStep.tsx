@@ -101,11 +101,7 @@ export function ClaudeProviderCards({
                 : 'border-line-1 bg-tint-2 hover:border-border-strong'
             }`}
           >
-            <span
-              className={`text-body font-medium ${
-                isSelected ? 'text-warm' : 'text-ink-1'
-              }`}
-            >
+            <span className={`text-body font-medium ${isSelected ? 'text-warm' : 'text-ink-1'}`}>
               {card.title}
             </span>
             <span className="text-reported leading-snug text-ink-3">{card.blurb}</span>
@@ -391,8 +387,8 @@ function BedrockRoleFields({
         {callerArn && (
           <p className="text-reported leading-relaxed text-ink-3">
             Triage Factory assumes the role from{' '}
-            <span className="font-mono text-ink-2">{callerArn}</span> — this identity must
-            be allowed by the trust policy.
+            <span className="font-mono text-ink-2">{callerArn}</span> — this identity must be
+            allowed by the trust policy.
           </p>
         )}
         {trustPolicy && (

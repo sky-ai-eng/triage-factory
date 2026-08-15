@@ -30,9 +30,7 @@ export default function PendingInviteRow({ invite, freshLink, busy, onRevoke, on
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="truncate text-body font-medium text-ink-2">
-              {invite.email}
-            </span>
+            <span className="truncate text-body font-medium text-ink-2">{invite.email}</span>
             <span className="rounded-full bg-tint-3 px-2 py-0.5 text-label font-medium text-ink-3">
               {invite.role}
             </span>

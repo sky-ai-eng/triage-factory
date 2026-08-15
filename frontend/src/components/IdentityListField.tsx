@@ -251,17 +251,11 @@ function VariantA({
         onClick={handleToggle}
         disabled={!hasIdentity}
         className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-ui font-medium border transition-colors ${
-          isOn
-            ? 'bg-warm/10 text-warm border-warm/25'
-            : 'text-ink-3 border-line-1 hover:text-ink-2'
+          isOn ? 'bg-warm/10 text-warm border-warm/25' : 'text-ink-3 border-line-1 hover:text-ink-2'
         } ${!hasIdentity ? 'opacity-50 cursor-not-allowed' : ''}`}
         aria-pressed={isOn}
       >
-        <span
-          className={`inline-block w-2 h-2 rounded-full ${
-            isOn ? 'bg-warm' : 'bg-ink-3/40'
-          }`}
-        />
+        <span className={`inline-block w-2 h-2 rounded-full ${isOn ? 'bg-warm' : 'bg-ink-3/40'}`} />
         {isOn ? labels.toggleOnLabel : labels.toggleOffLabel}
       </button>
       {hasIdentity ? (
@@ -475,9 +469,7 @@ function VariantB({
             <span
               key={h}
               className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-reported border ${
-                m
-                  ? 'bg-warm/10 text-warm border-warm/25'
-                  : 'bg-ink-3 text-ink-3 border-ink-3'
+                m ? 'bg-warm/10 text-warm border-warm/25' : 'bg-ink-3 text-ink-3 border-ink-3'
               }`}
               title={m ? `${m.display}${m.isSelf ? ' (you)' : ''}` : `External handle: ${h}`}
             >
@@ -550,9 +542,7 @@ function VariantB({
                 >
                   <span className="text-body text-ink-1">
                     {m.display_name || id}
-                    {m.is_current_user && (
-                      <span className="ml-1 text-label text-ink-3">(you)</span>
-                    )}
+                    {m.is_current_user && <span className="ml-1 text-label text-ink-3">(you)</span>}
                   </span>
                   <span className="text-reported font-mono text-ink-3">{id}</span>
                 </li>

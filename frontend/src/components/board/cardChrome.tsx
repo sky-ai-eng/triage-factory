@@ -247,9 +247,7 @@ export function AttentionRow({
           <span className={`text-label font-semibold uppercase tracking-wider ${TONE_TEXT[tone]}`}>
             {kicker}
           </span>
-          {message && (
-            <span className="truncate text-ui leading-snug text-ink-1">{message}</span>
-          )}
+          {message && <span className="truncate text-ui leading-snug text-ink-1">{message}</span>}
         </span>
       </span>
       <span className={`shrink-0 text-ui font-semibold ${TONE_TEXT[tone]}`} aria-hidden>

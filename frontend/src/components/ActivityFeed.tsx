@@ -517,10 +517,7 @@ function FeedSkeleton() {
   return (
     <ul className="space-y-1.5">
       {[0, 1, 2, 3].map((i) => (
-        <li
-          key={i}
-          className="h-8 animate-pulse rounded-[4px] border border-line-1 bg-tint-2"
-        />
+        <li key={i} className="h-8 animate-pulse rounded-[4px] border border-line-1 bg-tint-2" />
       ))}
     </ul>
   )
@@ -534,9 +531,7 @@ function FeedNote({ msg, tone = 'muted' }: { msg: string; tone?: 'muted' | 'erro
   return (
     <div
       className={`flex items-center gap-3 py-4 font-mono text-label ${
-        isErr
-          ? 'tracking-[0.04em] text-alarm'
-          : 'uppercase tracking-[0.16em] text-ink-3/60'
+        isErr ? 'tracking-[0.04em] text-alarm' : 'uppercase tracking-[0.16em] text-ink-3/60'
       }`}
     >
       <span className={`h-px w-6 ${isErr ? 'bg-alarm/40' : 'bg-line-1'}`} />

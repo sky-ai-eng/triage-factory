@@ -82,11 +82,7 @@ export default function PredicateEditor({ eventType, value, onChange }: Predicat
   }
 
   if (fields.length === 0) {
-    return (
-      <p className="text-ui text-ink-3 italic">
-        No filterable fields for this event type.
-      </p>
-    )
+    return <p className="text-ui text-ink-3 italic">No filterable fields for this event type.</p>
   }
 
   return (
@@ -117,9 +113,7 @@ function FieldRow({ field, eventType, value, onChange }: FieldRowProps) {
   return (
     <div>
       <div className="flex items-center gap-1.5 mb-1.5">
-        <label className="text-ui font-medium text-ink-2">
-          {humanize(field.name)}
-        </label>
+        <label className="text-ui font-medium text-ink-2">{humanize(field.name)}</label>
         {field.description && (
           <Tooltip.Root>
             <Tooltip.Trigger asChild>

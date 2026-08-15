@@ -212,8 +212,7 @@ export default function RunDetail() {
     return () => window.removeEventListener('keydown', onKey)
   }, [navigate, orgHref])
 
-  if (loading)
-    return <FloorMessage tone="text-ink-3">Spinning up the station…</FloorMessage>
+  if (loading) return <FloorMessage tone="text-ink-3">Spinning up the station…</FloorMessage>
 
   // Order matters: a 5xx leaves `run` null AND sets `error`; checking notFound
   // first would mask the real failure behind a misleading "not found".

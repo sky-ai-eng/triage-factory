@@ -213,9 +213,7 @@ export default function OrgSettings({
     )
   }
   if (!loaded) {
-    return (
-      <div className="px-1 py-3 text-body text-ink-3">Loading organization settings…</div>
-    )
+    return <div className="px-1 py-3 text-body text-ink-3">Loading organization settings…</div>
   }
 
   // The StepContext every /setup body consumes — the live draft + patch, with

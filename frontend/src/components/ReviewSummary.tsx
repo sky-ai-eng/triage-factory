@@ -187,9 +187,7 @@ export default function ReviewSummary({
       <div className="px-5 pt-5 pb-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-column font-semibold text-ink-1 tracking-tight">
-              Review Preview
-            </h2>
+            <h2 className="text-column font-semibold text-ink-1 tracking-tight">Review Preview</h2>
             <p className="text-ui text-ink-3 mt-0.5">
               {owner}/{repo} #{prNumber}
             </p>

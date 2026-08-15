@@ -77,9 +77,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
             )}
 
             <div className="flex items-center justify-between">
-              <span className="font-mono text-reported tracking-wide text-ink-3/80">
-                {age}
-              </span>
+              <span className="font-mono text-reported tracking-wide text-ink-3/80">{age}</span>
 
               <div className="flex items-center gap-3">
                 {delegateFailed && onRetry && (

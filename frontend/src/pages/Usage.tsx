@@ -516,9 +516,7 @@ function Gauges({
           )
         })}
       </ul>
-      {hidden > 0 && (
-        <p className="mt-2.5 font-mono text-label text-ink-3/70">+{hidden} more</p>
-      )}
+      {hidden > 0 && <p className="mt-2.5 font-mono text-label text-ink-3/70">+{hidden} more</p>}
     </div>
   )
 }
@@ -950,9 +948,7 @@ function EtchedNote({ msg, tone = 'muted' }: { msg: string; tone?: 'muted' | 'er
   return (
     <div
       className={`flex items-center gap-3 py-4 font-mono text-label ${
-        isErr
-          ? 'tracking-[0.04em] text-alarm'
-          : 'uppercase tracking-[0.16em] text-ink-3/60'
+        isErr ? 'tracking-[0.04em] text-alarm' : 'uppercase tracking-[0.16em] text-ink-3/60'
       }`}
     >
       <span className={`h-px w-6 ${isErr ? 'bg-alarm/40' : 'bg-line-1'}`} />
@@ -1087,9 +1083,7 @@ function TeamSection({
     adminTeams.length > 1 ? (
       <TeamSwitch value={teamId} onChange={setPicked} teams={adminTeams} />
     ) : (
-      <span className="font-mono text-reported tracking-[0.06em] text-ink-3/80">
-        / {teamName}
-      </span>
+      <span className="font-mono text-reported tracking-[0.06em] text-ink-3/80">/ {teamName}</span>
     )
 
   return (
@@ -1367,9 +1361,7 @@ function OrgOpsBand({ since }: { since: string }) {
           <p className="font-mono text-[22px] font-light tabular-nums text-ink-1">
             {fmtOpsMs(data.wait_p50_ms)}
           </p>
-          <p className="mt-1 font-mono text-label text-ink-3">
-            p95 {fmtOpsMs(data.wait_p95_ms)}
-          </p>
+          <p className="mt-1 font-mono text-label text-ink-3">p95 {fmtOpsMs(data.wait_p95_ms)}</p>
         </Instrument>
         <Instrument
           label="Run duration"

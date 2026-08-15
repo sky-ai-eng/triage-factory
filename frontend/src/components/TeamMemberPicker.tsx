@@ -174,9 +174,7 @@ function PickerModal({
           {candidates !== null && candidates.length > 0 && (
             <>
               <label className="block">
-                <span className="mb-1 block text-ui font-medium text-ink-2">
-                  Member
-                </span>
+                <span className="mb-1 block text-ui font-medium text-ink-2">Member</span>
                 <select
                   value={selected}
                   disabled={submitting}

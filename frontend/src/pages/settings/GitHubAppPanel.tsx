@@ -125,9 +125,7 @@ export default function GitHubAppPanel({
 
   const inner = (
     <>
-      {showHeading && (
-        <h2 className="text-body font-medium text-ink-2 mb-1">GitHub access</h2>
-      )}
+      {showHeading && <h2 className="text-body font-medium text-ink-2 mb-1">GitHub access</h2>}
       <p className="text-reported text-ink-3 mb-4 leading-relaxed">
         A GitHub App connects Triage Factory to your organization under its own bot identity and
         supports multiple installations. A Personal Access Token is the simpler alternative — you
@@ -186,8 +184,7 @@ export default function GitHubAppPanel({
                   </p>
                 )}
                 <p>
-                  Installations:{' '}
-                  <span className="text-ink-2">{status.installations.length}</span>
+                  Installations: <span className="text-ink-2">{status.installations.length}</span>
                 </p>
                 {status.installations.length > 0 && (
                   <div className="space-y-1 pt-2">

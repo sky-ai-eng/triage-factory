@@ -254,9 +254,7 @@ export default function ReviewComment({
           ) : (
             <div className="space-y-1.5 text-card-title leading-relaxed text-ink-2">
               {renderBody(body)}
-              {error && (
-                <p className="text-label text-alarm">Couldn't delete: {error}. Retry.</p>
-              )}
+              {error && <p className="text-label text-alarm">Couldn't delete: {error}. Retry.</p>}
             </div>
           )}
         </div>

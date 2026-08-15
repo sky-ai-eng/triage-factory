@@ -686,9 +686,7 @@ export default function TeamSettings({
           <div>
             <div className="flex items-baseline justify-between gap-2">
               <p className="text-body text-ink-1">Grace window</p>
-              <span className="text-ui text-ink-3 tabular-nums">
-                {absentGraceSeconds}s
-              </span>
+              <span className="text-ui text-ink-3 tabular-nums">{absentGraceSeconds}s</span>
             </div>
             <p className="mt-0.5 text-reported text-ink-3">
               How long to wait for someone to appear before denying ({graceMin}s–{graceMax}s)

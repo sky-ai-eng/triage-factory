@@ -199,10 +199,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
             >
               New project
             </h2>
-            <p
-              id="project-create-modal-description"
-              className="text-ui text-ink-3 mt-0.5"
-            >
+            <p id="project-create-modal-description" className="text-ui text-ink-3 mt-0.5">
               You can add or change everything later.
             </p>
           </div>

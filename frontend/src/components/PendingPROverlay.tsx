@@ -254,10 +254,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
             <div className="shrink-0 flex items-center justify-between px-6 py-4 border-b border-line-1">
               <div className="flex items-center gap-3">
                 <div className="w-2 h-2 rounded-full bg-tint-2 animate-pulse" />
-                <h1
-                  id={titleId}
-                  className="text-column font-semibold text-ink-1 tracking-tight"
-                >
+                <h1 id={titleId} className="text-column font-semibold text-ink-1 tracking-tight">
                   Draft PR
                 </h1>
                 {pr && (

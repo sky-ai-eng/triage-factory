@@ -284,9 +284,7 @@ function Section({
   return (
     <div>
       <div className="px-1 pb-1.5">
-        <h3 className="text-ui font-semibold text-ink-2 uppercase tracking-wide">
-          {title}
-        </h3>
+        <h3 className="text-ui font-semibold text-ink-2 uppercase tracking-wide">{title}</h3>
         <p className="text-reported text-ink-3 mt-0.5">{caption}</p>
       </div>
       <ul className="space-y-0.5">
@@ -332,9 +330,7 @@ function CandidateRow({ candidate, checked, failure, onToggle }: RowProps) {
       />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 text-body">
-          <span className="text-ink-3 text-reported uppercase tracking-wide">
-            {sourceLabel}
-          </span>
+          <span className="text-ink-3 text-reported uppercase tracking-wide">{sourceLabel}</span>
           <a
             href={candidate.url}
             target="_blank"

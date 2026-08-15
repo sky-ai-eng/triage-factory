@@ -192,9 +192,7 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
                   {/* The raw event type, not a friendly label: this is the
                       string an operator greps the logs and the trigger config
                       for. */}
-                  <td className="px-3 py-2 font-mono text-reported text-ink-1">
-                    {e.event_type}
-                  </td>
+                  <td className="px-3 py-2 font-mono text-reported text-ink-1">{e.event_type}</td>
                   <td className="px-3 py-2 text-ink-2">
                     <span className="font-mono text-reported">{entityLabel(e)}</span>
                     {e.entity_title && (
