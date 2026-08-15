@@ -43,15 +43,27 @@ func seedSteerRun(t *testing.T, database *sql.DB, suffix, status string) string 
 	return rn
 }
 
-// TestHandleMessage_RecordsThenConflictsOnTerminal drives the message
-// endpoint against a failed run: the run is visible (so it's recorded, not a
-// 404), the user message lands in the transcript, then SendMessage reports it
-// not steerable → 409. Asserts the 409 and the recorded row (role/subtype/body).
+// messageRowCount counts the transcript rows a conversation holds.
+func messageRowCount(t *testing.T, database *sql.DB, runID string) int {
+	t.Helper()
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id=?`, runID).Scan(&n); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	return n
+}
+
+// TestHandleMessage_TerminalConflictRecordsNothing drives the message endpoint
+// against a failed run: the run is visible (so the answer is a 409, not a 404)
+// and the refused send leaves no transcript row — the previous record-first
+// ordering durably recorded and broadcast the message before routing could
+// refuse it, so the sender saw an error toast while their words scrolled onto
+// every watcher's transcript as the run's latest activity.
 //
 // `failed` rather than `completed` because that is what "terminal" means to
 // the steering gate now: a conversation that concluded takes a follow-up, and
 // only one whose infrastructure died has nothing left to say a message to.
-func TestHandleMessage_RecordsThenConflictsOnTerminal(t *testing.T) {
+func TestHandleMessage_TerminalConflictRecordsNothing(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 	runID := seedSteerRun(t, s.db, "msg", "failed")
@@ -60,13 +72,57 @@ func TestHandleMessage_RecordsThenConflictsOnTerminal(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (a terminal run is not steerable)", rec.Code)
 	}
+	if n := messageRowCount(t, s.db, runID); n != 0 {
+		t.Errorf("messages recorded = %d, want 0 — a refused send must leave no transcript row", n)
+	}
+}
 
-	var role, subtype, content string
-	if err := s.db.QueryRow(`SELECT role, subtype, content FROM messages WHERE conversation_id=?`, runID).Scan(&role, &subtype, &content); err != nil {
+// TestHandleMessage_OrphanedRunningConflictRecordsNothing pins the window that
+// made the old ordering user-visible: a run whose row still says `running` but
+// with no live process registered anywhere (server restarted mid-run, or the
+// process died before a status write). The composer keys off DB status, so it
+// looks live and every send lands here. The send must 409 with nothing
+// recorded — not paint the message onto the transcript it will never reach.
+func TestHandleMessage_OrphanedRunningConflictRecordsNothing(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
+	runID := seedSteerRun(t, s.db, "orphan", "running")
+
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/message", map[string]string{"text": "how is it going?"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (running with no live process is a conflict)", rec.Code)
+	}
+	if n := messageRowCount(t, s.db, runID); n != 0 {
+		t.Errorf("messages recorded = %d, want 0 — a refused send must leave no transcript row", n)
+	}
+}
+
+// TestHandleMessage_ParkedSDKRecordsExactlyOnce: a follow-up accepted onto a
+// parked SDK run lands as exactly one transcript row — the undelivered queue
+// row the resume dispatch will carry into the prompt. When the endpoint also
+// wrote its own optimistic row, every accepted SDK follow-up appeared twice in
+// the transcript (the endpoint's delivered row plus the queue's pending one).
+func TestHandleMessage_ParkedSDKRecordsExactlyOnce(t *testing.T) {
+	s := newTestServer(t)
+	withEmptyBlobStore(t, s)
+	runID := seedSteerRun(t, s.db, "once", "open")
+	execSQL(t, s.db, `UPDATE conversations SET sdk_session_id='sess-once', worktree_path=?, model='m' WHERE id=?`, t.TempDir(), runID)
+
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/message", map[string]string{"text": "pick this back up"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var role, content string
+	var delivered bool
+	if err := s.db.QueryRow(`SELECT role, delivered, content FROM messages WHERE conversation_id=?`, runID).Scan(&role, &delivered, &content); err != nil {
 		t.Fatalf("read recorded message: %v", err)
 	}
-	if role != "user" || subtype != "" || content != "pick this back up" {
-		t.Errorf("recorded message = {role:%q subtype:%q content:%q}, want {user, blank, pick this back up}", role, subtype, content)
+	if role != "user" || delivered || content != "pick this back up" {
+		t.Errorf("recorded message = {role:%q delivered:%v content:%q}, want the one undelivered user row", role, delivered, content)
+	}
+	if n := messageRowCount(t, s.db, runID); n != 1 {
+		t.Errorf("messages recorded = %d, want exactly 1 — the queue row is the transcript record", n)
 	}
 }
 

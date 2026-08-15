@@ -362,15 +362,144 @@ func TestSendMessage_CompletedFinishIsResumable(t *testing.T) {
 	}
 }
 
-// TestSendMessage_MissingRunNotSteerable: an unknown run id (no process, no
-// row) is not steerable.
-func TestSendMessage_MissingRunNotSteerable(t *testing.T) {
+// TestSendMessage_MissingRunNotFound: an unknown run id (no process, no row)
+// answers "not found" rather than "not steerable" — the two sentinels ask for
+// different client reactions, and the endpoint maps this one to 404 so a run
+// deleted between its visibility read and this routing read doesn't read as a
+// conflict worth re-reading.
+func TestSendMessage_MissingRunNotFound(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "ghost", runmode.LocalDefaultUserID, "hi")
-	if !errors.Is(err, ErrRunNotSteerable) {
-		t.Errorf("err = %v, want ErrRunNotSteerable", err)
+	if !errors.Is(err, ErrRunNotFound) {
+		t.Errorf("err = %v, want ErrRunNotFound", err)
+	}
+}
+
+// TestSendMessage_SteerRecordsAfterDelivery: the live-steer path writes the
+// transcript row the steer itself never does — one delivered user row,
+// attributed to the sender — and writes it only once the process has taken
+// the text. A live steer injects into the process without touching the queue,
+// so without this write the steered turn would be missing from the transcript
+// entirely.
+func TestSendMessage_SteerRecordsAfterDelivery(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-rec", "sess-rec", "/tmp/wt-rec")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	fc := &fakeController{}
+	s.controller = fc
+	s.registerProc(runmode.LocalDefaultOrgID, "r-rec", &agentproc.LiveRun{})
+
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-rec", runmode.LocalDefaultUserID, "hello"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if fc.steerCalls != 1 {
+		t.Fatalf("steer calls = %d, want 1", fc.steerCalls)
+	}
+
+	var role, userID, content string
+	var delivered bool
+	if err := database.QueryRow(`SELECT role, delivered, COALESCE(user_id, ''), content FROM messages WHERE conversation_id='r-rec'`).Scan(&role, &delivered, &userID, &content); err != nil {
+		t.Fatalf("read recorded message: %v", err)
+	}
+	if role != "user" || !delivered || userID != runmode.LocalDefaultUserID || content != "hello" {
+		t.Errorf("recorded message = {role:%q delivered:%v user:%q content:%q}, want one delivered user row attributed to the sender",
+			role, delivered, userID, content)
+	}
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id='r-rec'`).Scan(&n); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("messages recorded = %d, want exactly 1", n)
+	}
+}
+
+// TestSendMessage_EmptyInputsRefusedBeforeSteer: the validation gate sits
+// ahead of the routing, so the live-steer arm refuses an empty message and an
+// empty user id exactly as the queued follow-up path does — nothing reaches
+// the process and nothing is recorded.
+func TestSendMessage_EmptyInputsRefusedBeforeSteer(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-blank", "sess-blank", "/tmp/wt-blank")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	fc := &fakeController{}
+	s.controller = fc
+	s.registerProc(runmode.LocalDefaultOrgID, "r-blank", &agentproc.LiveRun{})
+
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-blank", runmode.LocalDefaultUserID, ""); err == nil {
+		t.Error("expected an error for an empty message")
+	}
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-blank", "", "hello"); err == nil {
+		t.Error("expected an error for an empty user id")
+	}
+	if fc.steerCalls != 0 {
+		t.Errorf("steer calls = %d, want 0 — a refused input must never reach the process", fc.steerCalls)
+	}
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id='r-blank'`).Scan(&n); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("messages recorded = %d, want 0", n)
+	}
+}
+
+// TestSendMessage_SteerRecordSurvivesRequestCancellation: the bookkeeping
+// insert runs detached from the request's cancellation. A client that
+// disconnects (or a handler that times out) right after the controller accepts
+// the steer must not cost the transcript its only record of a turn the agent
+// is already acting on.
+func TestSendMessage_SteerRecordSurvivesRequestCancellation(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-gone", "sess-gone", "/tmp/wt-gone")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	fc := &fakeController{}
+	s.controller = fc
+	s.registerProc(runmode.LocalDefaultOrgID, "r-gone", &agentproc.LiveRun{})
+
+	// A ctx already canceled when SendMessage runs is the post-steer
+	// disconnect at its sharpest: the fake controller (like a real steer whose
+	// delivery beat the disconnect) still accepts, and everything after it
+	// sees only the canceled ctx.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.SendMessage(ctx, runmode.LocalDefaultOrgID, "r-gone", runmode.LocalDefaultUserID, "keep going"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	var content string
+	if err := database.QueryRow(`SELECT content FROM messages WHERE conversation_id='r-gone'`).Scan(&content); err != nil {
+		t.Fatalf("read recorded message: %v", err)
+	}
+	if content != "keep going" {
+		t.Errorf("recorded content = %q, want %q", content, "keep going")
+	}
+}
+
+// TestSendMessage_RefusedSteerRecordsNothing: a running SDK run with no live
+// process anywhere — the orphaned window a restart leaves behind — refuses the
+// send with ErrNoLiveProcess and writes no transcript row. This is the window
+// where the message endpoint's old record-first ordering showed a user their
+// words in the transcript alongside the error toast for the same send.
+func TestSendMessage_RefusedSteerRecordsNothing(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-orphan", "sess-orphan", "/tmp/wt-orphan")
+	// Status stays `running` (seedRun's default) and no process is registered:
+	// the default inProcessController answers the steer with ErrNoLiveProcess.
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-orphan", runmode.LocalDefaultUserID, "hello?")
+	if !errors.Is(err, ErrNoLiveProcess) {
+		t.Errorf("err = %v, want ErrNoLiveProcess", err)
+	}
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id='r-orphan'`).Scan(&n); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("messages recorded = %d, want 0 — a refused steer must leave no row behind", n)
 	}
 }
 

@@ -5,7 +5,14 @@
 // found in — with exactly one exception, which is what SendMessage routes on:
 // an SDK conversation being driven right now holds its session inside a live
 // process that drains no queue, so the only way to reach it is to tell that
-// process.
+// process (and then record the row the steer itself never writes).
+//
+// Delivery-first, on every arm: a queued row is refused before it is written
+// when nothing will ever read it, and a steered message is recorded only after
+// the live process takes it. A transcript row therefore exists iff the agent
+// received the message or a claim will carry it — a refused send is the 409
+// and nothing else, with no orphaned row behind it for watchers to read as
+// the run's latest activity.
 //
 // The server never reaches into s.procs itself; this file owns that decision so
 // the horizontal-scaling swap (a run's process living on another executor)
@@ -28,6 +35,16 @@ import (
 // Callers map it to 409 Conflict so the client refreshes and re-reads the run's
 // state.
 var ErrRunNotSteerable = errors.New("run is not steerable")
+
+// ErrRunNotFound is returned by SendMessage when the conversation does not
+// exist under the caller's org at routing time. Distinct from
+// ErrRunNotSteerable because the two ask for different client reactions: a
+// missing run is a 404 (nothing left to re-read), while an unsteerable one is
+// a 409 (refresh and re-read). The message endpoint authorizes visibility
+// before routing, so reaching this normally means the run was deleted between
+// that read and this one — answering "conflict" would send the client chasing
+// state that no longer exists.
+var ErrRunNotFound = errors.New("run not found")
 
 // The SDK-only resume preconditions, as errors rather than formatted strings so
 // the one ladder can hand them back by name. Each is a row that cannot be
@@ -223,7 +240,8 @@ func isCurrentBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
 //
 //   - an SDK conversation with a live process, whether that process is in this
 //     pod's registry or on another executor → Steer it in place through the
-//     control seam.
+//     control seam, then record + broadcast the row the steer itself never
+//     writes (recordSteeredMessage).
 //   - everything else → queueFollowUp: write the undelivered row, and (if the
 //     conversation is parked) wake a claim for it.
 //
@@ -232,6 +250,17 @@ func isCurrentBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
 // trigger (a follow-up is user-initiated even when the run that earned it was
 // not).
 func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text string) error {
+	// One validation gate for every arm, ahead of the routing: a live steer
+	// must refuse exactly the inputs a queued follow-up refuses. Checked here
+	// rather than in queueFollowUp so the steer arms can't hand a blank user
+	// turn to a live process, or deliver a message there is no actor to
+	// attribute the transcript row to.
+	if text == "" {
+		return fmt.Errorf("send: empty message")
+	}
+	if userID == "" {
+		return fmt.Errorf("send: empty user id")
+	}
 	// Fast path: the run's process is in THIS pod's registry → steer in place
 	// with no DB read. Self-selecting — it hits in local mode and on the pod that
 	// owns the process, and is a cheap miss on a multi control pod (whose
@@ -245,7 +274,11 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 	// Claude-session resume it never had. Anything that starts registering
 	// handles from a second driver has to re-read the runtime here first.
 	if s.getProc(runID) != nil {
-		return s.Steer(ctx, runID, text)
+		if err := s.Steer(ctx, runID, text); err != nil {
+			return err
+		}
+		s.recordSteeredMessage(ctx, orgID, runID, userID, text)
+		return nil
 	}
 	// No LOCAL process. Route on the conversation's runtime and STATUS, not on
 	// whether the process happens to sit in this pod's memory — using the local
@@ -258,7 +291,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 		return fmt.Errorf("load run: %w", err)
 	}
 	if run == nil {
-		return ErrRunNotSteerable
+		return ErrRunNotFound
 	}
 	// The one case a queued row cannot serve, and the reason the split exists at
 	// all: an SDK conversation in flight (claimed, setting up or running) holds
@@ -271,9 +304,53 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 	// the controller is local-only, so an active run absent from this (sole)
 	// process's registry is a genuine race → ErrNoLiveProcess.
 	if run.Runtime != domain.ConversationRuntimeNative && domain.IsActiveRunStatus(run.Status) {
-		return s.Steer(ctx, runID, text)
+		if err := s.Steer(ctx, runID, text); err != nil {
+			return err
+		}
+		s.recordSteeredMessage(ctx, orgID, runID, userID, text)
+		return nil
 	}
 	return s.queueFollowUp(ctx, orgID, *run, userID, text)
+}
+
+// recordSteeredMessage writes the transcript row for a message a live SDK
+// process just took, and broadcasts it to watchers. A live steer is the one
+// delivery that writes no row of its own — the text goes into the process,
+// not the queue — so this is the only place a steered turn reaches the
+// transcript.
+//
+// After delivery on purpose. A row written before the steer outlives a
+// refusal as a message the transcript swears the agent saw, painted onto
+// every watcher's board next to the sender's own error toast. This order can
+// at worst lose the bookkeeping for a message that WAS delivered — which is
+// also why an insert failure logs instead of surfacing: failing the request
+// would tell the user a message the agent is already acting on didn't send.
+//
+// The row is delivered (nothing will come back to drain it) and attributed to
+// the sender, same as pendingUserInput; the DB-assigned id is stamped before
+// the broadcast because the client dedups and orders by id.
+func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, runID, userID, text string) {
+	if s.tx == nil {
+		return
+	}
+	// Detached from the request's cancellation (values kept): the message is
+	// already in front of the agent, so a requester who hung up or timed out
+	// right after the controller accepted the steer must not cost the
+	// transcript its only record of the turn.
+	ctx = context.WithoutCancel(ctx)
+	msg := &domain.Message{ConversationID: runID, UserID: userID, Role: "user", Content: text}
+	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
+		id, iErr := ts.Conversations.InsertMessage(ctx, orgID, msg)
+		if iErr != nil {
+			return iErr
+		}
+		msg.ID = int(id)
+		return nil
+	}); err != nil {
+		delegateLog.Warn("record steered user message failed; the message itself was already delivered", "run", runID, "error", err)
+		return
+	}
+	s.broadcastMessage(orgID, runID, msg)
 }
 
 // queueFollowUp is the follow-up path: it records the user's message as an
@@ -297,14 +374,8 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 // the gap before the claim; Spawner.dispatchResumeClaim composes it immediately
 // before delivery instead.
 func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, run domain.Conversation, userID, text string) error {
-	if text == "" {
-		return fmt.Errorf("send: empty message")
-	}
-	// Every write below routes under the sending user's synthetic claims, so the
-	// identity has to be here rather than resolved later.
-	if userID == "" {
-		return fmt.Errorf("send: empty user id")
-	}
+	// text and userID arrive validated: SendMessage, the sole caller, refuses
+	// both empties at its entry so every arm answers them identically.
 
 	// The gate, refused BEFORE the row is written: a queued message nothing will
 	// ever deliver is worse than a refusal. followUpBlock is the same walk the
@@ -342,15 +413,11 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, run domain.Co
 	}); err != nil {
 		return fmt.Errorf("queue follow-up: %w", err)
 	}
-	// Broadcast only for a native conversation, and the reason is upstream of
-	// here: the message endpoint records and broadcasts its own optimistic user
-	// row for an SDK conversation (a live SDK steer writes none, so the
-	// transcript would otherwise lose the turn) and skips it for a native one,
-	// whose single input door is this row. Doing it again here would put the
-	// same sentence in front of the user twice.
-	if run.Runtime == domain.ConversationRuntimeNative {
-		s.broadcastMessage(orgID, run.ID, msg)
-	}
+	// Broadcast for both runtimes: the row above is the message's one
+	// transcript record — the endpoint writes nothing, and the live-steer
+	// path's recordSteeredMessage only runs when a process took the text
+	// directly instead of through this queue.
+	s.broadcastMessage(orgID, run.ID, msg)
 
 	if !wake {
 		// A driver already exists (or is about to claim) and drains before its
