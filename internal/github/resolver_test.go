@@ -84,6 +84,7 @@ func testPEM(t *testing.T) string {
 type ghTestServer struct {
 	srv          *httptest.Server
 	mintCalls    int32
+	mintedFor    []string // installation ids the mints were requested against, in order
 	lastProbe    string   // Authorization header seen on the /probe call
 	installRepos []string // full names the repo-access probe treats as granted
 	repoProbes   int32    // count of GET /repos/{owner}/{repo} coverage probes
@@ -94,8 +95,13 @@ func newGHTestServer(t *testing.T) *ghTestServer {
 	t.Helper()
 	g := &ghTestServer{}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v3/app/installations/", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v3/app/installations/", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&g.mintCalls, 1)
+		// POST /app/installations/{id}/access_tokens — the id is which account
+		// the minted token will act as, so recording it lets a test assert the
+		// resolver picked the installation it meant to.
+		id, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/api/v3/app/installations/"), "/")
+		g.mintedFor = append(g.mintedFor, id)
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token":      "ghs_minted",
@@ -593,7 +599,9 @@ func TestResolver_Tier1_EmptyTargetSingleInstall(t *testing.T) {
 }
 
 // An ambiguous empty target with multiple installs can't pick an installation.
-// App XOR PAT — an active-App org errors rather than borrowing the (stale) PAT.
+// App XOR PAT — an active-App org errors rather than borrowing the (stale) PAT
+// — and the error says ambiguous rather than no-credentials, since a workspace
+// told its GitHub is disconnected re-authorizes a connection that was fine.
 func TestResolver_EmptyTargetMultiInstall_Errors(t *testing.T) {
 	gh := newGHTestServer(t)
 	r := NewResolver(
@@ -603,8 +611,12 @@ func TestResolver_EmptyTargetMultiInstall_Errors(t *testing.T) {
 		&fakeAgents{},
 		nil,
 	)
-	if _, err := r.ClientFor(context.Background(), "org-1", ""); !errors.Is(err, ErrNoGitHubCredentials) {
-		t.Fatalf("ClientFor err = %v, want ErrNoGitHubCredentials (ambiguous target, active App, no PAT fallback)", err)
+	_, err := r.ClientFor(context.Background(), "org-1", "")
+	if !errors.Is(err, ErrAmbiguousInstallation) {
+		t.Fatalf("ClientFor err = %v, want ErrAmbiguousInstallation (empty target, two installations)", err)
+	}
+	if errors.Is(err, ErrNoGitHubCredentials) {
+		t.Errorf("ClientFor err = %v; ambiguity must not read as missing credentials", err)
 	}
 	if gh.mintCalls != 0 {
 		t.Errorf("ambiguous empty target should not mint; mintCalls=%d", gh.mintCalls)

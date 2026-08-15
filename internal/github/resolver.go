@@ -19,6 +19,19 @@ import (
 // PAT. Handlers map it to a "GitHub not configured" response.
 var ErrNoGitHubCredentials = errors.New("github: no credentials resolved for org")
 
+// ErrAmbiguousInstallation is returned when resolution reaches an App with
+// more than one installation and the call named no account to choose between
+// them. It deliberately does NOT wrap ErrNoGitHubCredentials: the workspace's
+// credential is present and working, and telling a user their GitHub is
+// disconnected when the real fault is a caller that didn't say which account it
+// meant sends them to re-authorize something that was never broken.
+//
+// One installation per workspace is what a private BYO App produces, so the
+// empty target went unnoticed for as long as that was the only shape. An
+// enterprise-owned internal App installs once per GitHub org in the
+// enterprise, and from then on "no specific account" has no answer.
+var ErrAmbiguousInstallation = errors.New("github: app has multiple installations and no target account")
+
 // Identity classifies which credential tier a resolver call selected: a GitHub
 // App installation token (a bot / service-account identity acting as itself)
 // or a borrowed PAT (a real user's personal access token, lent to the org).
@@ -121,9 +134,11 @@ type ScopedRepoResolver interface {
 //
 // githubTarget is the GitHub account login (org or user) the work concerns —
 // e.g. the owner of the repo being acted on. It selects which installation's
-// token to mint in tier 1. Empty target = "no specific account"; tier 1
-// then only fires when the org has exactly one installation (otherwise it's
-// ambiguous and the resolver falls through to PAT).
+// token to mint in tier 1. Empty target = "no specific account", which only one
+// installation can answer for: with exactly one there is nothing to choose and
+// tier 1 fires, and past that resolution fails with ErrAmbiguousInstallation
+// rather than guessing an account. Every caller acting on a repository can name
+// the account, because the repository determines it — the owner is the target.
 //
 // All store reads use the ...System (claims-free) door: credential
 // resolution is a system operation and the orgID is already authorized by
@@ -391,9 +406,9 @@ func (r *resolver) activeApp(ctx context.Context, orgID string) *domain.OrgGitHu
 // TokenCache with ClientFor so the API client and the host-side git clone
 // resolve identically.
 func (r *resolver) appToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, target, base string) (githubapp.Token, error) {
-	inst, ok := r.installationFor(ctx, orgID, accountByLogin(target))
-	if !ok {
-		return githubapp.Token{}, fmt.Errorf("%w: org=%s: app has no unambiguous installation for %q", ErrNoGitHubCredentials, orgID, target)
+	inst, err := r.installationFor(ctx, orgID, accountByLogin(target))
+	if err != nil {
+		return githubapp.Token{}, err
 	}
 	tok, err := r.installationToken(ctx, orgID, app, inst, base)
 	if err != nil {
@@ -443,9 +458,9 @@ func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app *doma
 // written there would later be served to an unscoped caller. A scoped mint is
 // ~once per (run, repo); the gitproxy keeps its own per-repo cache.
 func (r *resolver) appScopedToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, owner, repo, base string, permissions map[string]string) (githubapp.Token, error) {
-	inst, ok := r.installationFor(ctx, orgID, accountByLogin(owner))
-	if !ok {
-		return githubapp.Token{}, fmt.Errorf("%w: org=%s: app has no installation for %q", ErrNoGitHubCredentials, orgID, owner)
+	inst, err := r.installationFor(ctx, orgID, accountByLogin(owner))
+	if err != nil {
+		return githubapp.Token{}, err
 	}
 	minter, err := r.minterFor(ctx, orgID, app, base)
 	if err != nil {
@@ -551,9 +566,9 @@ func (r *resolver) TokenForReposScoped(ctx context.Context, orgID, owner string,
 // installation TokenCache (keyed by installation only) so a scoped token is
 // never served to an unscoped caller.
 func (r *resolver) appReposScopedToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, owner string, repos []string, base string, permissions map[string]string) (githubapp.Token, error) {
-	inst, ok := r.installationFor(ctx, orgID, accountByLogin(owner))
-	if !ok {
-		return githubapp.Token{}, fmt.Errorf("%w: org=%s: app has no installation for %q", ErrNoGitHubCredentials, orgID, owner)
+	inst, err := r.installationFor(ctx, orgID, accountByLogin(owner))
+	if err != nil {
+		return githubapp.Token{}, err
 	}
 	minter, err := r.minterFor(ctx, orgID, app, base)
 	if err != nil {
@@ -692,6 +707,22 @@ type accountRef struct {
 // resolver always has.
 func accountByLogin(login string) accountRef { return accountRef{Login: login} }
 
+// String names the account a resolution error is about, in whichever halves the
+// caller held. The empty ref renders as the absence it is, so a failure that
+// came of naming no account reads that way in a log line.
+func (a accountRef) String() string {
+	switch {
+	case a.Login != "" && a.ID != "":
+		return strconv.Quote(a.Login) + " (id " + a.ID + ")"
+	case a.Login != "":
+		return strconv.Quote(a.Login)
+	case a.ID != "":
+		return "id " + a.ID
+	default:
+		return "(no account)"
+	}
+}
+
 // installationFor selects the App installation serving target.
 //
 // The numeric account id decides whenever both the ref and the mirrored row
@@ -704,44 +735,49 @@ func accountByLogin(login string) accountRef { return accountRef{Login: login} }
 // are case-insensitive, so the compare is too), which is the whole of the
 // behaviour for a ref with no id.
 //
-// An empty ref only resolves when there's exactly one installation (an
-// unambiguous choice); otherwise it returns no match and the caller falls
-// through to PAT.
-func (r *resolver) installationFor(ctx context.Context, orgID string, target accountRef) (domain.OrgGitHubAppInstallation, bool) {
+// An empty ref means "no specific account", which one installation can answer
+// for and several cannot: with exactly one there is nothing to choose between,
+// so it is returned; with more than one the call is ambiguous and the error
+// says so (ErrAmbiguousInstallation), because the fault is a caller that didn't
+// name an account rather than a workspace missing a credential. Guessing is not
+// an option on offer — a token minted from the wrong account either 422s at
+// GitHub or, worse, succeeds against somebody else's repositories.
+func (r *resolver) installationFor(ctx context.Context, orgID string, target accountRef) (domain.OrgGitHubAppInstallation, error) {
 	insts, err := r.apps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		ghResolverLog.Warn("list installations failed; skipping tier1",
 			"org", orgID, "error", err)
-		return domain.OrgGitHubAppInstallation{}, false
-	}
-	if len(insts) == 0 {
-		return domain.OrgGitHubAppInstallation{}, false
+		return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: list installations: %v", ErrNoGitHubCredentials, orgID, err)
 	}
 	if target.ID == "" && target.Login == "" {
 		if len(insts) == 1 {
-			return insts[0], true
+			return insts[0], nil
 		}
-		return domain.OrgGitHubAppInstallation{}, false
+		if len(insts) > 1 {
+			return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: %d installations to choose from", ErrAmbiguousInstallation, orgID, len(insts))
+		}
 	}
 	if target.ID != "" {
 		for _, in := range insts {
 			if in.AccountID == target.ID {
-				return in, true
+				return in, nil
 			}
 		}
 	}
 	for _, in := range insts {
 		// A row whose id is known and differs is a different account, whatever
 		// it is currently called — skip it rather than let a colliding login
-		// answer for the wrong one.
+		// answer for the wrong one. An empty login matches nothing for the same
+		// reason: two accounts neither side can name are two unknowns, not a
+		// pair, and the empty target was already answered above.
 		if target.ID != "" && in.AccountID != "" && in.AccountID != target.ID {
 			continue
 		}
-		if strings.EqualFold(in.AccountLogin, target.Login) {
-			return in, true
+		if target.Login != "" && strings.EqualFold(in.AccountLogin, target.Login) {
+			return in, nil
 		}
 	}
-	return domain.OrgGitHubAppInstallation{}, false
+	return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: app has no installation for %s", ErrNoGitHubCredentials, orgID, target)
 }
 
 // installationToken returns a cached token for the installation or mints a
