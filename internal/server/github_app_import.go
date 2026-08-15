@@ -544,6 +544,11 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	githubAppLog.Info("imported app",
 		"app_id", canonicalAppID, "slug", app.Slug, "owner_login", app.OwnerLogin, "owner_type", app.OwnerType, "org", orgID, "active", !staged)
 
+	// An imported App brings its own webhook secret, so the receiver's cached
+	// resolution for this org is out of date the moment the row lands. Same
+	// reasoning as the manifest register path.
+	s.invalidateWebhookSecret(orgID)
+
 	// Post-commit hooks, same as the cutover/credentials paths: a fresh import is
 	// immediately the live credential, so re-due polling + re-profile under it. A
 	// staged import doesn't change the live credential (the PAT stays live), but

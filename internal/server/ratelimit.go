@@ -46,10 +46,16 @@ const (
 
 // Signed-webhook pre-auth rate-limit tuning. A route in this tier
 // authenticates every request itself via a cryptographic signature (Slack's
-// Events API receiver today) before any side effect, so the anti-recon
-// rationale behind the tight human-login tier above doesn't apply — a
-// forged request fails signature verification regardless of how generous
-// this budget is. What this tier actually defends is the failure mode where
+// Events API receiver and the per-org GitHub App receiver) before any side
+// effect, so the anti-recon rationale behind the tight human-login tier above
+// doesn't apply — a forged request fails signature verification regardless of
+// how generous this budget is. What it does bound is the work spent GETTING to
+// that rejection: the GitHub receiver has to resolve the org's webhook secret
+// (settings row, registration row, vault) before it can check a signature at
+// all, which is why a cheap per-IP cap in front of it is worth having even
+// though nothing forged gets past it.
+//
+// The numbers, though, are sized by the opposite failure mode — the one where
 // the budget is too TIGHT: Slack's own delivery cap is 30k events/hr per
 // (app, workspace) ≈ 8.3 req/s average, well past the 1 req/s human tier, so
 // sharing that tier would 429 legitimate deliveries from a subscribed
@@ -59,7 +65,10 @@ const (
 // numbers here are sized to clear that ceiling with real headroom (several
 // apps/workspaces potentially sharing one of Slack's small set of static
 // egress IPs) rather than to resist recon — cheap pre-verification
-// rejection at this rate is the actual DoS defense on this route.
+// rejection at this rate is the actual DoS defense on this route. GitHub's
+// deliveries clear it by a wide margin too: a busy org's App fans out from
+// GitHub's hook egress at a small fraction of this rate, and a redelivery
+// backlog lands inside the burst.
 const (
 	// signedWebhookRatePerSec is the sustained per-IP token refill. Well
 	// above Slack's ~8.3 req/s per-(app,workspace) average so a legitimate
@@ -209,9 +218,10 @@ func (s *Server) preAuthRateLimit(next http.Handler) http.Handler {
 
 // signedWebhookRateLimit caps per-IP request rate on pre-auth mounts that
 // authenticate every request themselves via a cryptographic signature
-// before any side effect (the Slack Events API receiver; see
-// signedWebhookRatePerSec above for why this is a separate, much
-// higher-throughput tier than preAuthRateLimit's human-login budget).
+// before any side effect (the Slack Events API receiver and the per-org
+// GitHub App receiver; see signedWebhookRatePerSec above for why this is a
+// separate, much higher-throughput tier than preAuthRateLimit's human-login
+// budget).
 // Same no-op-in-local-mode and 429/Retry-After contract as preAuthRateLimit.
 func (s *Server) signedWebhookRateLimit(next http.Handler) http.Handler {
 	return rateLimitWith(s.signedWebhookLimiter, next)
