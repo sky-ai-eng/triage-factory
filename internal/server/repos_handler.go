@@ -35,29 +35,56 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	// Decide App-vs-PAT here rather than widening the resolver (which
 	// deliberately hides which tier resolved): this handler is the one consumer
 	// that must branch, so it reads the App registration + installations
-	// itself. Both reads use the System door (the orgID is already authorized
-	// by middleware); a read error degrades to the PAT path rather than
-	// blanking the picker.
+	// itself.
+	//
+	// WHICH source to read is the org's credential class, not whether an App
+	// registration happens to exist — a rowless org is a PAT org today and would
+	// equally be an org on a deployment-level shared App, which this handler
+	// would then render from the wrong source. An unreadable or unrecognised
+	// class fails the request: the picker's whole job is to show the grant, and
+	// showing the wrong org's idea of a grant is worse than showing an error.
+	class, err := s.githubCredentialClass(r.Context(), orgID)
+	if err != nil {
+		reposLog.Error("resolve github credential class failed", "org", orgID, "error", err)
+		internalError(w, "repos", err)
+		return
+	}
+
 	var (
 		app      *domain.OrgGitHubApp
 		insts    []domain.OrgGitHubAppInstallation
 		instsErr error
 	)
-	if s.githubApps != nil {
-		// Both reads degrade to the PAT path on error (per above) rather than
-		// blanking the picker, but log either failure — these silent points are
-		// what made the original dead-end untraceable (TFAC-324). instsErr is
-		// also load-bearing below: a failed installations read leaves insts nil,
-		// which must not masquerade as a positive "installed on zero accounts".
-		var appErr error
-		app, appErr = s.githubApps.GetForOrgSystem(r.Context(), orgID)
-		if appErr != nil {
-			reposLog.Warn("read app registration failed, falling back to pat path", "org", orgID, "error", appErr)
+	switch class {
+	case domain.GitHubCredentialClassPAT:
+		// Nothing to read: a PAT org has no App and no installations, and both
+		// stay nil so the PAT path below runs exactly as it did pre-App.
+
+	case domain.GitHubCredentialClassBYOApp:
+		if s.githubApps != nil {
+			// Both reads degrade to the PAT path on error rather than blanking the
+			// picker, but log either failure — these silent points are what made the
+			// original dead-end untraceable (TFAC-324). instsErr is also load-bearing
+			// below: a failed installations read leaves insts nil, which must not
+			// masquerade as a positive "installed on zero accounts".
+			var appErr error
+			app, appErr = s.githubApps.GetForOrgSystem(r.Context(), orgID)
+			if appErr != nil {
+				reposLog.Warn("read app registration failed, falling back to pat path", "org", orgID, "error", appErr)
+			}
+			insts, instsErr = s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
+			if instsErr != nil {
+				reposLog.Warn("list installations failed, falling back to pat path", "org", orgID, "error", instsErr)
+			}
 		}
-		insts, instsErr = s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
-		if instsErr != nil {
-			reposLog.Warn("list installations failed, falling back to pat path", "org", orgID, "error", instsErr)
-		}
+
+	default:
+		// Unreachable: githubCredentialClass already refused an unknown class.
+		// Kept explicit so a class added to the type without a decision here
+		// fails visibly rather than rendering the picker from the PAT source.
+		reposLog.Error("unhandled github credential class", "org", orgID, "class", class)
+		internalError(w, "repos", ErrUnknownGitHubCredentialClass)
+		return
 	}
 
 	var repos []ghclient.UserRepo
@@ -99,6 +126,11 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 			// Surface that as its own 400 the picker can key install guidance
 			// off, instead of the generic "not configured" that reads as
 			// "add a PAT". This is the first-run dead-end TFAC-324 unblocks.
+			//
+			// A non-nil app here means the class switch above put it there, so
+			// this message is only ever offered to an org that really is in the
+			// BYO-App system — "install your App" is never shown to a PAT org
+			// that merely failed to bind a token.
 			//
 			// instsErr == nil is load-bearing: only a *successful* read of zero
 			// installations means "not installed". A failed read also leaves

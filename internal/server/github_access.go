@@ -133,6 +133,13 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx := r.Context()
 
+	// TODO(TFAC-817): this read-check-write is not serialized against the other
+	// credential transitions, and the checks below are separated from the write
+	// by a GitHub round-trip. A concurrent discard or switch-to-pat can delete
+	// the registration in that window; SetActive then silently updates zero rows
+	// while the PAT delete still fires, leaving the org with no credential at
+	// all. The other three transitions take githubAppRegRMWLockSalt and re-read
+	// inside the critical section — this one must too.
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -188,6 +195,22 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		}
 		if _, err := tx.Secrets.Delete(ctx, orgID, integrations.KeyGitHubPAT); err != nil {
 			return fmt.Errorf("delete org pat: %w", err)
+		}
+		// The class is already byo_app — registration set it, staged or not, and
+		// a cutover only flips WHICH credential is live within a system the org
+		// was already in. Re-asserting it is the cheap half of a check that
+		// costs nothing and catches the one bug this column invites: a settings
+		// save that reset the class out from under the registration. Warn rather
+		// than fail — a class that drifted is a reason to fix the class, never a
+		// reason to refuse the cutover and strand the org mid-switch.
+		if set, err := tx.Orgs.GetSettings(ctx, orgID); err != nil {
+			return fmt.Errorf("read org settings: %w", err)
+		} else if set.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
+			githubAppLog.Warn("credential class disagreed with the registration at cutover; re-asserting",
+				"org", orgID, "found", set.GitHubCredentialClass, "want", domain.GitHubCredentialClassBYOApp)
+		}
+		if err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+			return fmt.Errorf("set github credential class: %w", err)
 		}
 		// The cutover IS the credential change — the App goes live and
 		// the PAT is destroyed in this one transaction. Record both sides, so
@@ -251,6 +274,10 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// TODO(TFAC-817): unserialized read-check-write, and the PAT validation
+	// below puts a network round-trip between this check and the teardown it
+	// guards — take githubAppRegRMWLockSalt and re-read inside the critical
+	// section, as the PAT-bind handler does.
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -301,6 +328,12 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		}
 		if err := tx.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
 			return fmt.Errorf("delete app: %w", err)
+		}
+		// The App registration is gone and the PAT saved above is the org's
+		// credential — the org has moved between credential systems, so the class
+		// moves with it, in this same transaction.
+		if err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
+			return fmt.Errorf("set github credential class: %w", err)
 		}
 		// Secrets last. If this fails after DeleteForOrg has committed (in
 		// Postgres the registration-row delete is in this tx; in local mode the
@@ -360,6 +393,10 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx := r.Context()
 
+	// TODO(TFAC-817): unserialized read-check-write — a concurrent cutover can
+	// activate the App after this 409 guard reads it as staged, so the teardown
+	// below can tear down a registration that has since become live. Take
+	// githubAppRegRMWLockSalt and re-read inside the critical section.
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -385,6 +422,14 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		if err := tx.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
 			return fmt.Errorf("delete app: %w", err)
+		}
+		// No App registration remains — org_github_apps holds at most one row per
+		// org, and DeleteForOrg just removed it — so the org is back to the PAT
+		// system it never stopped running on (the staged App was never live; the
+		// PAT stayed the credential throughout). Unconditional for that reason,
+		// and in this transaction so the row and the class go together.
+		if err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
+			return fmt.Errorf("set github credential class: %w", err)
 		}
 		if err := teardownAppSecrets(ctx, tx, orgID, app); err != nil {
 			return err

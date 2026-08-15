@@ -581,6 +581,15 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		}); err != nil {
 			return err
 		}
+		// The org is now in the BYO-App credential system — including when the
+		// App is STAGED behind a still-live PAT. The class names which system
+		// the org is in; the Active bit above names which credential is live.
+		// Two orthogonal facts, and this is the window where they differ.
+		// Written in this transaction so the class and the registration it
+		// describes can never disagree.
+		if err := tx.Orgs.SetGitHubCredentialClass(r.Context(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+			return fmt.Errorf("set github credential class: %w", err)
+		}
 		if err := tx.Secrets.Put(r.Context(), orgID, clientSecretKey, convResp.ClientSecret, "GitHub App client secret"); err != nil {
 			return fmt.Errorf("vault put client_secret: %w", err)
 		}

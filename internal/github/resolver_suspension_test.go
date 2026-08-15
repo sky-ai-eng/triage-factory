@@ -17,7 +17,7 @@ func suspensionResolver(t *testing.T, inst domain.OrgGitHubAppInstallation) (*re
 	t.Helper()
 	gh := newGHTestServer(t)
 	cache := NewMemoryTokenCache()
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{"pem": testPEM(t)}},
 		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{inst}},
 		&fakeOrgs{base: gh.srv.URL},

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -78,6 +79,29 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Binding a PAT is only ever right for an org this build can place in a
+	// credential system it knows. A class it can't name is refused outright
+	// rather than treated as "no App row, so nothing to conflict with" — that
+	// inference is the one this column exists to remove, and here it would
+	// resolve to a WRITE: an org whose credential lives somewhere this build
+	// can't see would silently acquire a PAT and be recorded as a PAT org.
+	//
+	// Only the unknown arm needs saying. A byo_app org is caught by the App-row
+	// gate below with its own, more useful message, and a pat org is exactly who
+	// this endpoint is for.
+	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
+		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
+			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "this workspace's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here",
+				"field": "pat",
+			})
+			return
+		}
+		internalError(w, "github-access", err)
+		return
+	}
+
 	// GitHub access is strictly App XOR PAT per org: an org on an App switches
 	// credentials through the dedicated switch flow, which tears the App down
 	// atomically. Binding a PAT underneath a live App would leave two live
@@ -122,8 +146,22 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 
-	// The authoritative XOR gate: re-read inside the critical section, because
-	// the advisory check above raced everything that happened during validation.
+	// The authoritative gates: BOTH re-read inside the critical section, because
+	// the advisory checks above raced everything that happened during validation.
+	// The class first — it decides whether the App-row question is even the right
+	// one to be asking — then the XOR gate itself.
+	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
+		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
+			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "this workspace's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here",
+				"field": "pat",
+			})
+			return
+		}
+		internalError(w, "github-access", err)
+		return
+	}
 	if app, err := s.githubApps.GetForOrgSystem(ctx, orgID); err != nil {
 		internalError(w, "github-access", err)
 		return
@@ -153,6 +191,14 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		orgSet.GitHubBaseURL = baseURL
 		if err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
+		}
+		// The org is now in the PAT credential system. Written here, in the same
+		// transaction as the token itself, so the class can never outlive or
+		// precede the credential it describes — a crash between two separate
+		// writes would leave the class lying. UpdateSettings above does not carry
+		// it (it deliberately doesn't own the column), hence the separate call.
+		if err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
+			return fmt.Errorf("set github credential class: %w", err)
 		}
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
 			ActorUserID: userID,
@@ -221,6 +267,11 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	keepHost := app != nil
 
+	// The credential class is deliberately untouched by this handler. It names
+	// which credential SYSTEM the org is in, not whether that system currently
+	// holds a token: an org that unbinds its PAT is still a PAT org with nothing
+	// bound, and an org keeping a registration (keepHost) is still a BYO-App org.
+	// Neither disconnect moves the org between systems.
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		creds, _ := integrations.Load(ctx, tx.Secrets, orgID)
 		had := creds.GitHubPAT != ""

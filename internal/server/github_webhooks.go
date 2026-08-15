@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -66,15 +67,43 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the org's webhook secret via the system (claims-free) path —
-	// the handler has only a trusted org_id from the URL, no JWT.
+	// Which secret verifies this delivery follows from the org's credential
+	// class. A per-org registration's own webhook secret is the BYO-App answer;
+	// a PAT org has no App and therefore no deliveries to verify, so the route
+	// does not exist for it. Reading a missing registration row as "PAT" would
+	// be an inference that holds only while PAT is the single rowless shape —
+	// an org on a deployment-level shared App has no row either, and its
+	// deliveries verify against a deployment secret this arm never reaches.
+	//
+	// System (claims-free) read throughout: the handler is pre-auth and has
+	// only a trusted org_id from the URL. An unknown or unreadable class is
+	// refused before any secret lookup.
+	class, err := s.githubCredentialClass(r.Context(), orgID)
+	if err != nil {
+		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
+			// Nothing to verify against — same answer as a PAT org, and
+			// deliberately indistinguishable from one on the wire.
+			githubAppLog.Warn("webhook delivery for org with unknown credential class", "org", orgID)
+			http.NotFound(w, r)
+			return
+		}
+		internalError(w, "github-webhook", err)
+		return
+	}
+	if class != domain.GitHubCredentialClassBYOApp {
+		// A PAT org has no App and so no webhook to receive. Not an error —
+		// this endpoint simply doesn't exist for it.
+		http.NotFound(w, r)
+		return
+	}
+
 	app, err := s.githubApps.GetForOrgSystem(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "github-webhook", err)
 		return
 	}
 	if app == nil || app.WebhookSecretRef == "" {
-		// No registered App (or a hookless one) for this org — there's
+		// No registration row (or a hookless App) behind the class — there's
 		// nothing to verify against, so this endpoint doesn't exist for it.
 		http.NotFound(w, r)
 		return

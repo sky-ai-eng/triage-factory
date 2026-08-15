@@ -405,6 +405,7 @@ func TestRunGitHubCycleForOrg_UnresolvedInstallationDoesNotFalselyResetCursor(t 
 	if err := stores.Repos.SetConfigured(ctx, org, repos); err != nil {
 		t.Fatalf("SetConfigured: %v", err)
 	}
+	seedBYOAppCredentialClass(t, stores, org)
 
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)
@@ -415,6 +416,7 @@ func TestRunGitHubCycleForOrg_UnresolvedInstallationDoesNotFalselyResetCursor(t 
 		tasks:    stores.Tasks,
 		entities: stores.Entities,
 		repos:    stores.Repos,
+		orgs:     stores.Orgs,
 		apps: &fakeInstallsStore{
 			app: &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: true},
 			installs: []domain.OrgGitHubAppInstallation{

@@ -89,7 +89,7 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 				Slug:   "acme-bot",
 				Active: tc.active,
 			}
-			resp := newGitHubAppStatusResponse(app, nil, "", "")
+			resp := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, app, nil, "", "")
 			if resp.App == nil {
 				t.Fatal("App=nil, want the mapped registration")
 			}
@@ -106,7 +106,7 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 	// is a field it cannot adopt.
 	t.Run("installation suspension", func(t *testing.T) {
 		suspendedAt := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
-		resp := newGitHubAppStatusResponse(nil, []domain.OrgGitHubAppInstallation{
+		resp := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, nil, []domain.OrgGitHubAppInstallation{
 			{InstallationID: "456", AccountType: "Organization", AccountLogin: "acme"},
 			{InstallationID: "789", AccountType: "Organization", AccountLogin: "beta", SuspendedAt: suspendedAt, SuspendedBy: "octocat"},
 		}, "", "")
@@ -187,6 +187,7 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 	`, orgA.String(), alice.String()); err != nil {
 		t.Fatalf("seed org_github_apps: %v", err)
 	}
+	seedPGBYOAppCredentialClass(t, rig, orgA.String())
 	if _, err := rig.h.AdminDB.Exec(`
 		INSERT INTO org_github_app_installations
 			(installation_id, org_id, account_type, account_login)
@@ -292,6 +293,7 @@ func TestGitHubAppInstallationsRefresh_Success(t *testing.T) {
 		},
 	}
 	s.githubApps = fake
+	seedBYOAppCredentialClass(t, s, runmode.LocalDefaultOrgID)
 
 	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
 	if rec.Code != http.StatusOK {
@@ -322,6 +324,7 @@ func TestGitHubAppInstallationsRefresh_BackfillError(t *testing.T) {
 		backfillErr: errors.New("github unreachable"),
 	}
 	s.githubApps = fake
+	seedBYOAppCredentialClass(t, s, runmode.LocalDefaultOrgID)
 
 	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
 	if rec.Code != http.StatusBadGateway {
@@ -378,6 +381,7 @@ func TestGitHubAppInstallationsRefresh_MultiMode_AdminGate(t *testing.T) {
 	`, orgA.String(), alice.String()); err != nil {
 		t.Fatalf("seed org_github_apps: %v", err)
 	}
+	seedPGBYOAppCredentialClass(t, rig, orgA.String())
 
 	path := "/api/orgs/" + orgA.String() + "/github/app/installations/refresh"
 
@@ -404,4 +408,20 @@ func TestGitHubAppInstallationsRefresh_MultiMode_AdminGate(t *testing.T) {
 			t.Errorf("admin status=%d, want 502 (gate passes, backfill fails on the missing PEM)", resp.StatusCode)
 		}
 	})
+}
+
+// seedPGBYOAppCredentialClass records the BYO-App credential class for a
+// Postgres-rig org, which is what an App registration writes in the same
+// transaction as the org_github_apps row. A fixture that inserts the row
+// directly has to write this too — the handlers gate on the class before they
+// look for a registration at all.
+func seedPGBYOAppCredentialClass(t *testing.T, rig *authRig, orgID string) {
+	t.Helper()
+	if _, err := rig.h.AdminDB.Exec(`
+		INSERT INTO org_settings (org_id, github_credential_class)
+		VALUES ($1, 'byo_app')
+		ON CONFLICT (org_id) DO UPDATE SET github_credential_class = 'byo_app'
+	`, orgID); err != nil {
+		t.Fatalf("seed org_settings credential class: %v", err)
+	}
 }

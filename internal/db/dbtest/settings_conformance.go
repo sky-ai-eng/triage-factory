@@ -66,6 +66,11 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			MaxDailyCostUSD:       12.50,
 			MaxConcurrentRuns:     8,
 			MarketplaceEnabled:    true,
+			// Read-only through this struct: UpdateSettings doesn't own
+			// github_credential_class, so the row keeps its schema default and
+			// the read hands it back. Stated as the expected value rather than
+			// left zero, because "" is not something the store can return.
+			GitHubCredentialClass: domain.GitHubCredentialClassPAT,
 		}
 		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
@@ -111,6 +116,96 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if got.MarketplaceEnabled {
 			t.Errorf("MarketplaceEnabled = true after disabling, want false")
+		}
+	})
+
+	// github_credential_class names which credential system an org's GitHub
+	// access belongs to. It is owned by the credential transitions, not by the
+	// settings writer, and this case pins both halves of that: the dedicated
+	// writer round-trips, and a bulk settings save leaves what it wrote alone.
+	//
+	// The second half is the one that matters. Adding the column to
+	// UpdateSettings' upsert lists looks like tidiness and would instead reset
+	// the class to the struct's zero value on every settings save — silently
+	// converting a BYO-App org to PAT, with no error and nothing in the log.
+	// That is the specific regression this case exists to catch, on both
+	// backends.
+	t.Run("OrgSettings_GitHubCredentialClass_OwnedByTransitionsNotSettingsSave", func(t *testing.T) {
+		stores, ids := factory(t)
+
+		// A fresh org is in the PAT system — the column's schema default, which
+		// GetSettings must surface rather than an empty string.
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (fresh): %v", err)
+		}
+		if got.GitHubCredentialClass != domain.GitHubCredentialClassPAT {
+			t.Errorf("fresh org class = %q; want %q (the column default)", got.GitHubCredentialClass, domain.GitHubCredentialClassPAT)
+		}
+
+		// The dedicated writer round-trips, materializing the row from schema
+		// defaults if the org has none yet.
+		if err := stores.Orgs.SetGitHubCredentialClass(ctx, ids.OrgID, domain.GitHubCredentialClassBYOApp); err != nil {
+			t.Fatalf("SetGitHubCredentialClass: %v", err)
+		}
+		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (after set): %v", err)
+		}
+		if got.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
+			t.Fatalf("after SetGitHubCredentialClass, class = %q; want %q", got.GitHubCredentialClass, domain.GitHubCredentialClassBYOApp)
+		}
+
+		// THE NEGATIVE SPACE. A bulk settings save — the shape a
+		// POST /api/settings/org handler produces, read-modify-write over the
+		// whole struct — changes an unrelated field and must leave the class
+		// exactly as the transition wrote it.
+		save := got
+		save.GitHubBaseURL = "https://ghe.example.com"
+		save.MaxConcurrentRuns = 4
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, save); err != nil {
+			t.Fatalf("UpdateSettings (bulk save): %v", err)
+		}
+		after, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (after bulk save): %v", err)
+		}
+		if after.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
+			t.Errorf("a settings save reset the credential class to %q; want %q preserved — the column belongs to the credential transitions, not to UpdateSettings",
+				after.GitHubCredentialClass, domain.GitHubCredentialClassBYOApp)
+		}
+		if after.GitHubBaseURL != "https://ghe.example.com" || after.MaxConcurrentRuns != 4 {
+			t.Errorf("the settings save didn't apply its own fields: base=%q concurrent=%d", after.GitHubBaseURL, after.MaxConcurrentRuns)
+		}
+
+		// A save that explicitly carries a DIFFERENT class in the struct is
+		// still ignored — the field is read-only through this writer, so a
+		// caller cannot move an org between credential systems by saving
+		// settings. This is the same assertion from the attacker's side.
+		save = after
+		save.GitHubCredentialClass = domain.GitHubCredentialClassPAT
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, save); err != nil {
+			t.Fatalf("UpdateSettings (class in struct): %v", err)
+		}
+		after, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (after class in struct): %v", err)
+		}
+		if after.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
+			t.Errorf("UpdateSettings honoured the struct's class (%q); want %q — the column must be unreachable through the settings writer",
+				after.GitHubCredentialClass, domain.GitHubCredentialClassBYOApp)
+		}
+
+		// And the transition can move it back, so the column isn't write-once.
+		if err := stores.Orgs.SetGitHubCredentialClass(ctx, ids.OrgID, domain.GitHubCredentialClassPAT); err != nil {
+			t.Fatalf("SetGitHubCredentialClass (back to pat): %v", err)
+		}
+		after, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (after switch back): %v", err)
+		}
+		if after.GitHubCredentialClass != domain.GitHubCredentialClassPAT {
+			t.Errorf("class after switch-back = %q; want %q", after.GitHubCredentialClass, domain.GitHubCredentialClassPAT)
 		}
 	})
 
@@ -286,6 +381,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			MaxLLMModelTier:     "haiku",
 			MaxDailyCostUSD:     5,
 			MaxConcurrentRuns:   3,
+			// Not written by UpdateSettings; the row's default reads back.
+			GitHubCredentialClass: domain.GitHubCredentialClassPAT,
 		}
 		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, first); err != nil {
 			t.Fatalf("first UpdateSettings: %v", err)

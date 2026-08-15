@@ -128,6 +128,24 @@ func seedLocalApp(t *testing.T, s *Server, active bool) {
 	}); err != nil {
 		t.Fatalf("create app: %v", err)
 	}
+	// Staged (active=false) or live, a registered App means the org is in the
+	// BYO-App credential system — registration writes both in one transaction.
+	seedBYOAppCredentialClass(t, s, org)
+}
+
+// seedBYOAppCredentialClass records that the org is in the BYO-App credential
+// system, which is what registering or importing an App writes in the same
+// transaction as the registration row.
+//
+// A fixture that inserts an org_github_apps row directly has to write this too,
+// or it is modelling a state the product cannot reach — an org with an App and
+// a class saying it has none. The handlers dispatch on the class, so without it
+// such a fixture is served as a PAT org.
+func seedBYOAppCredentialClass(t *testing.T, s *Server, orgID string) {
+	t.Helper()
+	if err := s.orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+		t.Fatalf("set github credential class: %v", err)
+	}
 }
 
 func seedInstallation(t *testing.T, s *Server, id int64, login string) {

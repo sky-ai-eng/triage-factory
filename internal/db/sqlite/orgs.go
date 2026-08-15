@@ -94,18 +94,21 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		maxDailyCost                             sql.NullFloat64
 		maxConcurrentRuns                        sql.NullInt64
 		marketplaceEnabled                       bool
+		credentialClass                          string
 	)
 	err := q.QueryRowContext(ctx, `
 		SELECT github_base_url, github_poll_interval, github_clone_protocol,
 		       jira_base_url, jira_poll_interval,
 		       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
-		       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled
+		       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
+		       github_credential_class
 		FROM org_settings WHERE org_id = ?
 	`, orgID).Scan(
 		&ghURL, &ghInterval, &cloneProto,
 		&jiraURL, &jiraInterval,
 		&anthRef, &bedRef, &maxTier,
 		&maxDailyCost, &maxConcurrentRuns, &marketplaceEnabled,
+		&credentialClass,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Provisioning is meant to seed an org_settings row at org-
@@ -148,9 +151,23 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		MaxDailyCostUSD:       maxDailyCost.Float64, // NULL → 0 (no cap)
 		MaxConcurrentRuns:     concurrentRuns,
 		MarketplaceEnabled:    marketplaceEnabled,
+		// Surfaced verbatim, never coerced to a known value: callers switch on
+		// it and refuse what they don't recognise, which is the whole point of
+		// storing the class instead of inferring it.
+		GitHubCredentialClass: domain.GitHubCredentialClass(credentialClass),
 	}, nil
 }
 
+// UpdateSettings upserts every org_settings column this writer owns.
+//
+// github_credential_class is deliberately absent from BOTH the INSERT column
+// list and the ON CONFLICT SET list, and must stay that way. Absent from both,
+// the column takes its DEFAULT on insert and is left untouched on update —
+// exactly the behaviour required, because the class is owned by the credential
+// transitions (SetGitHubCredentialClass), not by the settings writer. Adding it
+// here would look like tidiness and would instead reset the class to the
+// struct's zero value on every bulk settings save, silently converting a
+// BYO-App org to PAT. u.GitHubCredentialClass is read-only; it is ignored here.
 func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.OrgSettings) error {
 	cloneProto := u.GitHubCloneProtocol
 	if cloneProto == "" {
@@ -193,6 +210,28 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 	)
 	if err != nil {
 		return fmt.Errorf("upsert org_settings: %w", err)
+	}
+	return nil
+}
+
+// SetGitHubCredentialClass upserts ONLY org_settings.github_credential_class —
+// which credential system the org's GitHub access belongs to. See the
+// OrgsStore interface doc for why this is a separate writer from
+// UpdateSettings. SQLite is N=1 / no RLS so it's a plain write; the Postgres
+// twin runs on the app pool under the caller's claims.
+//
+// The partial INSERT relies on the schema DEFAULT clauses for every other
+// org_settings column when no row exists yet, and ON CONFLICT touches only the
+// class, so the org's other settings are never clobbered.
+func (s *orgsStore) SetGitHubCredentialClass(ctx context.Context, orgID string, class domain.GitHubCredentialClass) error {
+	if _, err := s.q.ExecContext(ctx, `
+		INSERT INTO org_settings (org_id, github_credential_class, updated_at)
+		VALUES (?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(org_id) DO UPDATE SET
+			github_credential_class = excluded.github_credential_class,
+			updated_at = CURRENT_TIMESTAMP
+	`, orgID, string(class)); err != nil {
+		return fmt.Errorf("set org github credential class: %w", err)
 	}
 	return nil
 }
