@@ -245,6 +245,80 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		}
 	})
 
+	t.Run("SetConfigured_resubmission_under_different_casing_keeps_the_row", func(t *testing.T) {
+		// SetConfigured is a full-set replace: anything not in the submitted
+		// list is deleted. Deciding membership case-SENSITIVELY makes a
+		// resubmission under different casing look like "this repo was
+		// dropped and a different one added" — the row is deleted and a bare
+		// one created in its place, so an AI profile, a user's base branch,
+		// the clone outcome and the poller's ETag all disappear because
+		// someone capitalized the slug differently. GitHub identifiers are
+		// case-insensitive; the two spellings were never two repositories.
+		s, orgID := mk(t)
+		profiled := time.Now().UTC().Truncate(time.Second)
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "Acme/Api", Owner: "Acme", Repo: "Api",
+			Description: "Api service", ProfileText: "accumulated profile",
+			CloneURL: "git@github.com:Acme/Api.git", DefaultBranch: "main",
+			ExternalID: "1296269", ProfiledAt: &profiled,
+			HasReadme: true, HasClaudeMd: true,
+		}); err != nil {
+			t.Fatalf("seed profiled row: %v", err)
+		}
+		if err := s.UpdateBaseBranch(ctx, orgID, "Acme/Api", "develop"); err != nil {
+			t.Fatalf("UpdateBaseBranch: %v", err)
+		}
+		if err := s.UpdateCloneStatus(ctx, orgID, "Acme", "Api", "ok", "", ""); err != nil {
+			t.Fatalf("UpdateCloneStatus: %v", err)
+		}
+		etagAt := profiled.Add(time.Hour)
+		if err := s.SetPullsPollStateSystem(ctx, orgID, "Acme/Api", `"etag-v1"`, etagAt); err != nil {
+			t.Fatalf("SetPullsPollStateSystem: %v", err)
+		}
+
+		// The same repository, resubmitted lowercased, alongside a genuinely
+		// new one — so this exercises the replace path rather than a no-op.
+		if err := s.SetConfigured(ctx, orgID, []string{"acme/api", "octo/new"}); err != nil {
+			t.Fatalf("SetConfigured: %v", err)
+		}
+
+		if n, _ := s.CountConfigured(ctx, orgID); n != 2 {
+			t.Fatalf("rows = %d, want 2 — a casing difference is not a drop plus an add", n)
+		}
+		got, err := s.Get(ctx, orgID, "acme/api")
+		if err != nil || got == nil {
+			t.Fatalf("Get after resubmission: got=%v err=%v", got, err)
+		}
+		if got.ID != "Acme/Api" {
+			t.Errorf("id = %q, want Acme/Api — stored casing is sticky", got.ID)
+		}
+		if got.ProfileText != "accumulated profile" || got.Description != "Api service" {
+			t.Errorf("profile lost by the resubmission: %+v", got)
+		}
+		if !got.HasReadme || !got.HasClaudeMd {
+			t.Errorf("doc flags lost by the resubmission: readme=%v claude=%v", got.HasReadme, got.HasClaudeMd)
+		}
+		if got.BaseBranch != "develop" {
+			t.Errorf("BaseBranch = %q, want develop — a user setting must survive a re-save", got.BaseBranch)
+		}
+		if got.CloneURL != "git@github.com:Acme/Api.git" || got.CloneStatus != "ok" {
+			t.Errorf("clone state lost by the resubmission: %+v", got)
+		}
+		if got.ExternalID != "1296269" {
+			t.Errorf("ExternalID = %q, want it kept — identity does not survive a delete+create", got.ExternalID)
+		}
+		if got.ProfiledAt == nil {
+			t.Error("ProfiledAt is nil — the repo would re-profile from scratch, ignoring the TTL")
+		}
+		etag, polledAt, err := s.GetPullsPollStateSystem(ctx, orgID, "Acme/Api")
+		if err != nil {
+			t.Fatalf("GetPullsPollStateSystem: %v", err)
+		}
+		if etag != `"etag-v1"` || polledAt == nil {
+			t.Errorf("poll state = (%q, %v), want it kept — losing it re-lists every open PR", etag, polledAt)
+		}
+	})
+
 	t.Run("SetConfigured_skips_malformed_entries", func(t *testing.T) {
 		// "no-slash" and "trailing/" produce empty halves which the
 		// impl silently skips. The valid entry alongside still lands.

@@ -250,10 +250,18 @@ func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames [
 		return err
 	}
 	return inTx(ctx, s.q, func(tx queryer) error {
-		// Build set of desired repos.
+		// Build the desired set case-folded, and compare folded — the same
+		// rule the tracked-set reconcile uses, and for the same reason.
+		// A case-SENSITIVE compare turns a resubmission under different
+		// casing ("Owner/Repo" then "owner/repo") into a delete of a
+		// repository that is still selected, followed by a create of a bare
+		// row: the profile text, doc flags, clone URL and status, base branch
+		// and poll ETag all go, silently, because a person capitalized it
+		// differently. GitHub identifiers are case-insensitive, so the two
+		// spellings were never two repositories.
 		desired := make(map[string]bool, len(repoNames))
 		for _, name := range repoNames {
-			desired[name] = true
+			desired[strings.ToLower(name)] = true
 		}
 
 		// Delete repos no longer selected.
@@ -262,7 +270,7 @@ func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames [
 			return err
 		}
 		for _, id := range existing {
-			if !desired[id] {
+			if !desired[strings.ToLower(id)] {
 				if _, err := tx.ExecContext(ctx, `DELETE FROM repo_profiles WHERE id = ?`, id); err != nil {
 					return err
 				}
@@ -271,7 +279,10 @@ func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames [
 
 		// Create skeleton rows for new repos through the shared insert, so
 		// they carry the same identity columns the tracked-set reconcile
-		// writes. A repo already present is left exactly as it stands.
+		// writes. A repo already present is left exactly as it stands — the
+		// insert conflicts on the folded identity index and does nothing, so
+		// a resubmission under different casing keeps the stored casing and
+		// every cached column with it.
 		for _, name := range repoNames {
 			owner, repo := splitRepoSlug(name)
 			if owner == "" || repo == "" {
