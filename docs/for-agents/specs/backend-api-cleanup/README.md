@@ -44,11 +44,12 @@ effect is setting a column is a PATCH in disguise (see R5).
 A bad call fails. Concretely:
 
 - Unknown body fields are rejected (strict decoding), not ignored.
-- A field that is invalid is a 400/422 with the field named — never
-  clamped, defaulted, case-folded, or dropped.
-- Query params parse strictly: a malformed value is a 400, not a
-  fallback to the default (a corrupt filter must never *widen* a result
-  set).
+- A field that is invalid is rejected with the field named — never
+  clamped, defaulted, case-folded, or dropped. (Which status a given
+  rejection carries is R4's concern; R2 only demands that it fail.)
+- Query params parse strictly: a malformed value is rejected, not
+  resolved to the default (a corrupt filter must never *widen* a
+  result set).
 - Enums validate against the full vocabulary; a typo is an error, not a
   fall-through to the default arm.
 - A response never claims success for work that didn't happen
