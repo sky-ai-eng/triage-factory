@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -23,7 +24,7 @@ import (
 // # Synthetic uuid vs natural "owner/repo" id
 //
 // The Postgres schema gives repo_profiles a synthetic uuid PK plus a
-// UNIQUE(org_id, owner, repo) natural key. The store interface
+// UNIQUE(org_id, source, owner, repo) natural key. The store interface
 // surfaces every repo by its "owner/repo" string — that's what every
 // caller passes and what domain.RepoProfile.ID returns. So this impl:
 //
@@ -33,7 +34,10 @@ import (
 //     identical shapes between backends — the synthetic uuid never
 //     leaks across the boundary.
 //
-// Upsert uses ON CONFLICT (org_id, owner, repo) for the same reason.
+// Upsert uses ON CONFLICT (org_id, source, owner, repo) for the same
+// reason. The slug-keyed reads leave source out of the WHERE clause:
+// they match a repo without naming a provider, which is unambiguous
+// while GitHub is the only one that issues repositories.
 //
 // # Pool split
 //
@@ -65,17 +69,25 @@ func (s *repoStore) UpsertSystem(ctx context.Context, orgID string, p domain.Rep
 }
 
 func upsertRepoProfile(ctx context.Context, q queryer, orgID string, p domain.RepoProfile) error {
+	source, err := domain.NormalizeRepoSource(p.Source)
+	if err != nil {
+		return err
+	}
 	// On conflict refresh profiling metadata only — base_branch and
 	// clone-status fields are user/clone-hook owned and shouldn't be
 	// clobbered by a re-profile. Matches the SQLite impl's exclude
-	// list verbatim.
-	_, err := q.ExecContext(ctx, `
+	// list verbatim, including external_id refreshing only when the writer
+	// actually has an id (an empty one never clears a stored one) and source
+	// staying put as the create-time identity column it is — here it is part
+	// of the conflict target, so a conflicting row already agrees on it.
+	_, err = q.ExecContext(ctx, `
 		INSERT INTO repo_profiles
-		  (org_id, owner, repo, description, has_readme, has_claude_md, has_agents_md,
+		  (org_id, source, owner, repo, external_id, description, has_readme, has_claude_md, has_agents_md,
 		   profile_text, clone_url, default_branch, profiled_at)
-		VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7,
-		        NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''), $11)
-		ON CONFLICT (org_id, owner, repo) DO UPDATE SET
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, $8, $9,
+		        NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13)
+		ON CONFLICT (org_id, source, owner, repo) DO UPDATE SET
+		  external_id    = COALESCE(EXCLUDED.external_id, repo_profiles.external_id),
 		  description    = EXCLUDED.description,
 		  has_readme     = EXCLUDED.has_readme,
 		  has_claude_md  = EXCLUDED.has_claude_md,
@@ -86,13 +98,113 @@ func upsertRepoProfile(ctx context.Context, q queryer, orgID string, p domain.Re
 		  profiled_at    = EXCLUDED.profiled_at,
 		  updated_at     = now()
 	`,
-		orgID, p.Owner, p.Repo,
+		orgID, source, p.Owner, p.Repo,
+		p.ExternalID,
 		p.Description,
 		p.HasReadme, p.HasClaudeMd, p.HasAgentsMd,
 		p.ProfileText, p.CloneURL, p.DefaultBranch,
 		p.ProfiledAt,
 	)
 	return err
+}
+
+func (s *repoStore) GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.RepoProfile, error) {
+	return getOrCreateRepoProfile(ctx, s.admin, orgID, ref)
+}
+
+// getOrCreateRepoProfile is the store method's body, taking a queryer so it
+// composes inside a caller's transaction. Its create half is
+// insertRepoProfileRow, which the tracked-set reconcile in
+// team_github_repos.go calls directly — that reconcile runs under the caller's
+// app-pool tx and its own per-org advisory lock, so it needs the insert
+// without this function's separate lookup round-trip.
+func getOrCreateRepoProfile(ctx context.Context, q queryer, orgID string, ref domain.RepoRef) (*domain.RepoProfile, error) {
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := findRepoProfileByRef(ctx, q, orgID, source, ref)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		if err := insertRepoProfileRow(ctx, q, orgID, ref); err != nil {
+			return nil, err
+		}
+		// Re-read rather than RETURNING: the INSERT is a DO NOTHING, so this
+		// is also what returns the winner's row when a concurrent creator got
+		// there first.
+		created, err := findRepoProfileByRef(ctx, q, orgID, source, ref)
+		if err != nil {
+			return nil, err
+		}
+		if created == nil {
+			return nil, fmt.Errorf("repo_profiles row for %s vanished immediately after insert", ref.Slug())
+		}
+		return created, nil
+	}
+	// The row stands as it is, except for an id the caller just learned.
+	if ref.ExternalID != "" && existing.ExternalID != ref.ExternalID {
+		if _, err := q.ExecContext(ctx, `
+			UPDATE repo_profiles
+			   SET external_id = $1
+			 WHERE org_id = $2 AND source = $3 AND owner = $4 AND repo = $5
+		`, ref.ExternalID, orgID, source, existing.Owner, existing.Repo); err != nil {
+			return nil, fmt.Errorf("record external id for %s: %w", ref.Slug(), err)
+		}
+		existing.ExternalID = ref.ExternalID
+	}
+	return existing, nil
+}
+
+// findRepoProfileByRef looks a repository up by provider identity, matching
+// owner/repo case-INSENSITIVELY (GitHub identifiers are). Returns nil when the
+// repository has no row.
+func findRepoProfileByRef(ctx context.Context, q queryer, orgID, source string, ref domain.RepoRef) (*domain.RepoProfile, error) {
+	row := q.QueryRowContext(ctx, `
+		SELECT `+repoProfileFullColumns+`
+		FROM repo_profiles
+		WHERE org_id = $1 AND source = $2 AND lower(owner) = lower($3) AND lower(repo) = lower($4)
+	`, orgID, source, ref.Owner, ref.Repo)
+	p, err := pgScanRepoProfileFull(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// insertRepoProfileRow is the single INSERT that brings a repository into
+// repo_profiles — get-or-create, SetConfigured, and the tracked-set reconcile
+// all create through it, so no create path can write a row without the
+// identity columns, and all three agree on what "already exists" means.
+//
+// The NOT EXISTS guard is case-INSENSITIVE, which the unique index cannot be:
+// a repository already present under different casing keeps its row (and its
+// cached profile, base branch, clone state, ETag) rather than gaining a second
+// one. The ON CONFLICT behind it is the race backstop, for two creators that
+// both passed the guard with the same casing — a row that already exists is
+// the caller's answer, never something a create rewrites.
+func insertRepoProfileRow(ctx context.Context, q queryer, orgID string, ref domain.RepoRef) error {
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return err
+	}
+	if _, err := q.ExecContext(ctx, `
+		INSERT INTO repo_profiles (org_id, source, owner, repo, external_id)
+		SELECT $1, $2, $3, $4, NULLIF($5, '')
+		WHERE NOT EXISTS (
+		    SELECT 1 FROM repo_profiles
+		    WHERE org_id = $1 AND source = $2
+		      AND lower(owner) = lower($3) AND lower(repo) = lower($4)
+		)
+		ON CONFLICT (org_id, source, owner, repo) DO NOTHING
+	`, orgID, source, ref.Owner, ref.Repo, ref.ExternalID); err != nil {
+		return fmt.Errorf("insert repo_profiles[%s]: %w", ref.Slug(), err)
+	}
+	return nil
 }
 
 func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
@@ -105,9 +217,7 @@ func (s *repoStore) ListSystem(ctx context.Context, orgID string) ([]domain.Repo
 
 func listRepoProfiles(ctx context.Context, q queryer, orgID string) ([]domain.RepoProfile, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT owner, repo, description, has_readme, has_claude_md, has_agents_md,
-		       profile_text, clone_url, default_branch, base_branch, profiled_at,
-		       clone_status, clone_error, clone_error_kind
+		SELECT `+repoProfileFullColumns+`
 		FROM repo_profiles
 		WHERE org_id = $1
 		ORDER BY owner, repo
@@ -147,9 +257,7 @@ const repoProfileTrackedByViewerTeams = `EXISTS (
 
 func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT rp.owner, rp.repo, rp.description, rp.has_readme, rp.has_claude_md, rp.has_agents_md,
-		       rp.profile_text, rp.clone_url, rp.default_branch, rp.base_branch, rp.profiled_at,
-		       rp.clone_status, rp.clone_error, rp.clone_error_kind
+		SELECT `+repoProfileFullColumnsAliased+`
 		FROM repo_profiles rp
 		WHERE rp.org_id = $1
 		  AND `+repoProfileTrackedByViewerTeams+`
@@ -246,18 +354,15 @@ func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames [
 			}
 		}
 
-		// Upsert skeleton rows for new repos. ON CONFLICT just bumps
-		// updated_at — preserves any existing profile data.
+		// Create skeleton rows for new repos through the shared insert, so
+		// they carry the same identity columns the tracked-set reconcile
+		// writes. A repo already present is left exactly as it stands.
 		for _, name := range repoNames {
 			owner, repo := splitRepoSlug(name)
 			if owner == "" || repo == "" {
 				continue
 			}
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO repo_profiles (org_id, owner, repo)
-				VALUES ($1, $2, $3)
-				ON CONFLICT (org_id, owner, repo) DO UPDATE SET updated_at = now()
-			`, orgID, owner, repo); err != nil {
+			if err := insertRepoProfileRow(ctx, tx, orgID, domain.RepoRef{Owner: owner, Repo: repo}); err != nil {
 				return err
 			}
 		}
@@ -355,9 +460,7 @@ func getRepoProfile(ctx context.Context, q queryer, orgID, repoID string) (*doma
 		return nil, nil
 	}
 	row := q.QueryRowContext(ctx, `
-		SELECT owner, repo, description, has_readme, has_claude_md, has_agents_md,
-		       profile_text, clone_url, default_branch, base_branch, profiled_at,
-		       clone_status, clone_error, clone_error_kind
+		SELECT `+repoProfileFullColumns+`
 		FROM repo_profiles WHERE org_id = $1 AND owner = $2 AND repo = $3
 	`, orgID, owner, repo)
 	p, err := pgScanRepoProfileFull(row)
@@ -432,18 +535,33 @@ type pgRowScanner interface {
 	Scan(dest ...any) error
 }
 
-// pgScanRepoProfileFull reads the 14-column projection shared by
-// Get and List (no id column — the natural key is reconstructed
+// repoProfileFullColumns is the projection pgScanRepoProfileFull reads, named
+// once so the queries that share it cannot drift out of column order.
+// repoProfileFullColumnsAliased is the same list qualified for the `rp` alias
+// ListTeamScoped's semi-join needs.
+const (
+	repoProfileFullColumns = `owner, repo, source, external_id, description, has_readme, has_claude_md, has_agents_md,
+		       profile_text, clone_url, default_branch, base_branch, profiled_at,
+		       clone_status, clone_error, clone_error_kind`
+
+	repoProfileFullColumnsAliased = `rp.owner, rp.repo, rp.source, rp.external_id, rp.description, rp.has_readme, rp.has_claude_md, rp.has_agents_md,
+		       rp.profile_text, rp.clone_url, rp.default_branch, rp.base_branch, rp.profiled_at,
+		       rp.clone_status, rp.clone_error, rp.clone_error_kind`
+)
+
+// pgScanRepoProfileFull reads the projection shared by Get, List, and the
+// get-or-create lookup (no id column — the natural key is reconstructed
 // from owner + "/" + repo so callers see the "owner/repo" form
 // uniformly across backends).
 func pgScanRepoProfileFull(row pgRowScanner) (domain.RepoProfile, error) {
 	var p domain.RepoProfile
-	var description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind sql.NullString
+	var externalID, description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind sql.NullString
 	var profiledAt sql.NullTime
-	if err := row.Scan(&p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind); err != nil {
+	if err := row.Scan(&p.Owner, &p.Repo, &p.Source, &externalID, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind); err != nil {
 		return p, err
 	}
 	p.ID = p.Owner + "/" + p.Repo
+	p.ExternalID = externalID.String
 	p.Description = description.String
 	p.ProfileText = profileText.String
 	p.CloneURL = cloneURL.String

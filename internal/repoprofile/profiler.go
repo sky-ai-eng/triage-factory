@@ -237,9 +237,17 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 
 		prof := domain.RepoProfile{
-			ID:            name,
-			Owner:         owner,
-			Repo:          repo,
+			ID:     name,
+			Owner:  owner,
+			Repo:   repo,
+			Source: domain.RepoSourceGitHub,
+			// The repository id GitHub just sent on the same response the
+			// clone URL and default branch came from. This is the only place
+			// TF learns it — it is not worth a request of its own, and a row
+			// without one behaves exactly as it always has — so a repo whose
+			// meta fetch failed (skipped above) or that is inside its profile
+			// TTL simply keeps whatever id it already had.
+			ExternalID:    meta.ExternalID(),
 			HasReadme:     readme != "",
 			HasClaudeMd:   claudeMd != "",
 			HasAgentsMd:   agentsMd != "",

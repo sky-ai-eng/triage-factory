@@ -214,3 +214,67 @@ func pgStrsEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// Tracking is what brings a repository into repo_profiles — not profiling —
+// so the row the reconcile mints has to be a complete identity row from the
+// moment it exists. The store's own get-or-create and this path share one
+// INSERT precisely so a row cannot differ by which of them created it.
+func TestTeamGitHubRepos_TrackedRowCarriesIdentity(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA,
+			[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}})
+	}); err != nil {
+		t.Fatalf("ReplaceForTeam: %v", err)
+	}
+
+	got, err := stores.Repos.GetSystem(ctx, orgA, "acme/api")
+	if err != nil || got == nil {
+		t.Fatalf("GetSystem after tracking: got=%v err=%v — tracking must create the row immediately", got, err)
+	}
+	if got.Source != domain.RepoSourceGitHub {
+		t.Errorf("source = %q, want %q", got.Source, domain.RepoSourceGitHub)
+	}
+	if got.ExternalID != "" {
+		t.Errorf("external id = %q, want empty — tracking learns no id, and none is invented", got.ExternalID)
+	}
+	if got.ProfiledAt != nil {
+		t.Error("the freshly tracked row is already profiled; it should be bare until the profiler runs")
+	}
+
+	// Get-or-create over the row tracking just made is a read: same row, and
+	// the surrogate uuid PK is untouched.
+	var uuidBefore string
+	if err := h.AdminDB.QueryRow(
+		`SELECT id::text FROM repo_profiles WHERE org_id = $1 AND owner = 'acme' AND repo = 'api'`, orgA,
+	).Scan(&uuidBefore); err != nil {
+		t.Fatalf("read surrogate id: %v", err)
+	}
+	if _, err := stores.Repos.GetOrCreateSystem(ctx, orgA, domain.RepoRef{Owner: "Acme", Repo: "API"}); err != nil {
+		t.Fatalf("GetOrCreateSystem: %v", err)
+	}
+	var uuidAfter string
+	var rows int
+	if err := h.AdminDB.QueryRow(
+		`SELECT count(*) FROM repo_profiles WHERE org_id = $1`, orgA,
+	).Scan(&rows); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("repo_profiles rows = %d, want 1 — a casing difference is not a second repository", rows)
+	}
+	if err := h.AdminDB.QueryRow(
+		`SELECT id::text FROM repo_profiles WHERE org_id = $1`, orgA,
+	).Scan(&uuidAfter); err != nil {
+		t.Fatalf("re-read surrogate id: %v", err)
+	}
+	if uuidAfter != uuidBefore {
+		t.Errorf("surrogate id moved from %s to %s — get-or-create must not re-key an existing row", uuidBefore, uuidAfter)
+	}
+}

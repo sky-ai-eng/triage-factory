@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -147,9 +148,24 @@ func (c *Client) CheckRepoAccess(ctx context.Context, owner, repo string) (reach
 
 // RepoMeta is a subset of the GitHub repo object.
 type RepoMeta struct {
+	// ID is GitHub's own numeric id for the repository — the half of its
+	// identity a rename or a transfer does not move, unlike owner/repo. It
+	// rides along on the response the default branch and clone URL already
+	// come from, so recording it costs no extra request.
+	ID            int64  `json:"id"`
 	DefaultBranch string `json:"default_branch"`
 	CloneURL      string `json:"clone_url"`
 	SSHURL        string `json:"ssh_url"`
+}
+
+// ExternalID renders RepoMeta.ID the way repo_profiles.external_id stores it:
+// decimal text, empty when GitHub sent no id (a response shape we never expect
+// but also never want to persist as the string "0", which is not a repository).
+func (m RepoMeta) ExternalID() string {
+	if m.ID == 0 {
+		return ""
+	}
+	return strconv.FormatInt(m.ID, 10)
 }
 
 // GetRepoMeta fetches the default branch and clone URL for a repository.

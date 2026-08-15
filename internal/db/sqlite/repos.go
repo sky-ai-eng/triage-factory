@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -34,10 +35,19 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.RepoProfi
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO repo_profiles (id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, profiled_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+	source, err := domain.NormalizeRepoSource(p.Source)
+	if err != nil {
+		return err
+	}
+	// source is absent from the conflict list: it is a create-time identity
+	// column, not profiling metadata. external_id refreshes only when the
+	// writer actually has one — COALESCE over the NULLIF keeps an empty
+	// write from clearing an id already learned.
+	_, err = s.q.ExecContext(ctx, `
+		INSERT INTO repo_profiles (id, owner, repo, source, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, profiled_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 		ON CONFLICT(id) DO UPDATE SET
+			external_id    = COALESCE(excluded.external_id, repo_profiles.external_id),
 			description    = excluded.description,
 			has_readme     = excluded.has_readme,
 			has_claude_md  = excluded.has_claude_md,
@@ -48,7 +58,8 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.RepoProfi
 			profiled_at    = excluded.profiled_at,
 			updated_at     = datetime('now')
 	`,
-		p.ID, p.Owner, p.Repo,
+		p.ID, p.Owner, p.Repo, source,
+		nullIfEmpty(p.ExternalID),
 		nullIfEmpty(p.Description),
 		p.HasReadme, p.HasClaudeMd, p.HasAgentsMd,
 		nullIfEmpty(p.ProfileText),
@@ -59,12 +70,114 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.RepoProfi
 	return err
 }
 
+func (s *repoStore) GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.RepoProfile, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	return getOrCreateRepoProfile(ctx, s.q, ref)
+}
+
+// getOrCreateRepoProfile is the store method's body, taking a queryer so it
+// composes inside a caller's transaction. Its create half is
+// insertRepoProfileRow, which the tracked-set reconcile in
+// team_github_repos.go calls directly — that reconcile has already computed
+// which repos are new, so it skips the lookup rather than the insert.
+func getOrCreateRepoProfile(ctx context.Context, q queryer, ref domain.RepoRef) (*domain.RepoProfile, error) {
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := findRepoProfileByRef(ctx, q, source, ref)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		if err := insertRepoProfileRow(ctx, q, ref); err != nil {
+			return nil, err
+		}
+		// Re-read rather than synthesizing the row: the INSERT is a
+		// DO NOTHING, so this is also what returns the winner's row when a
+		// concurrent creator got there first.
+		created, err := findRepoProfileByRef(ctx, q, source, ref)
+		if err != nil {
+			return nil, err
+		}
+		if created == nil {
+			return nil, fmt.Errorf("repo_profiles row for %s vanished immediately after insert", ref.Slug())
+		}
+		return created, nil
+	}
+	// The row stands as it is, except for an id the caller just learned.
+	if ref.ExternalID != "" && existing.ExternalID != ref.ExternalID {
+		if _, err := q.ExecContext(ctx,
+			`UPDATE repo_profiles SET external_id = ?, updated_at = datetime('now') WHERE id = ?`,
+			ref.ExternalID, existing.ID,
+		); err != nil {
+			return nil, fmt.Errorf("record external id for %s: %w", ref.Slug(), err)
+		}
+		existing.ExternalID = ref.ExternalID
+	}
+	return existing, nil
+}
+
+// findRepoProfileByRef looks a repository up by provider identity, matching
+// owner/repo case-INSENSITIVELY (GitHub identifiers are). Returns nil when the
+// repository has no row.
+func findRepoProfileByRef(ctx context.Context, q queryer, source string, ref domain.RepoRef) (*domain.RepoProfile, error) {
+	row := q.QueryRowContext(ctx, `
+		SELECT `+repoProfileFullColumns+`
+		FROM repo_profiles
+		WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, source, ref.Owner, ref.Repo)
+	p, err := scanRepoProfileFull(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// insertRepoProfileRow is the single INSERT that brings a repository into
+// repo_profiles — get-or-create, SetConfigured, and the tracked-set reconcile
+// all create through it, so no create path can write a row without the
+// identity columns, and all three agree on what "already exists" means.
+//
+// The NOT EXISTS guard is case-INSENSITIVE, which the unique index cannot be:
+// a repository already present under different casing keeps its row (and its
+// cached profile, base branch, clone state, ETag) rather than gaining a second
+// one. The ON CONFLICT behind it is the race backstop, for two creators that
+// both passed the guard with the same casing — a row that already exists is
+// the caller's answer, never something a create rewrites.
+func insertRepoProfileRow(ctx context.Context, q queryer, ref domain.RepoRef) error {
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return err
+	}
+	if _, err := q.ExecContext(ctx, `
+		INSERT INTO repo_profiles (id, owner, repo, source, external_id, updated_at)
+		SELECT ?, ?, ?, ?, ?, datetime('now')
+		WHERE NOT EXISTS (
+			SELECT 1 FROM repo_profiles
+			WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+		)
+		ON CONFLICT(id) DO NOTHING
+	`,
+		ref.Slug(), ref.Owner, ref.Repo, source, nullIfEmpty(ref.ExternalID),
+		source, ref.Owner, ref.Repo,
+	); err != nil {
+		return fmt.Errorf("insert repo_profiles[%s]: %w", ref.Slug(), err)
+	}
+	return nil
+}
+
 func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind
+		SELECT `+repoProfileFullColumns+`
 		FROM repo_profiles
 		ORDER BY id
 	`)
@@ -147,19 +260,15 @@ func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames [
 			}
 		}
 
-		// Upsert skeleton rows for new repos. Preserves any existing
-		// profile data on the row that's already there — only
-		// updated_at gets bumped.
+		// Create skeleton rows for new repos through the shared insert, so
+		// they carry the same identity columns the tracked-set reconcile
+		// writes. A repo already present is left exactly as it stands.
 		for _, name := range repoNames {
 			owner, repo := splitRepoSlug(name)
 			if owner == "" || repo == "" {
 				continue
 			}
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO repo_profiles (id, owner, repo, updated_at)
-				VALUES (?, ?, ?, datetime('now'))
-				ON CONFLICT(id) DO UPDATE SET updated_at = datetime('now')
-			`, name, owner, repo); err != nil {
+			if err := insertRepoProfileRow(ctx, tx, domain.RepoRef{Owner: owner, Repo: repo}); err != nil {
 				return err
 			}
 		}
@@ -233,7 +342,7 @@ func (s *repoStore) Get(ctx context.Context, orgID, repoID string) (*domain.Repo
 		return nil, err
 	}
 	row := s.q.QueryRowContext(ctx, `
-		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind
+		SELECT `+repoProfileFullColumns+`
 		FROM repo_profiles WHERE id = ?
 	`, repoID)
 	p, err := scanRepoProfileFull(row)
@@ -327,16 +436,21 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-// scanRepoProfileFull reads the 15-column repo_profiles row shape
-// shared by Get and List. Distinct from ListWithContent's narrower
-// projection — that one skips the clone_* columns.
+// repoProfileFullColumns is the projection scanRepoProfileFull reads, named
+// once so the three queries that share it cannot drift out of column order.
+const repoProfileFullColumns = `id, owner, repo, source, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind`
+
+// scanRepoProfileFull reads the repo_profiles row shape shared by Get, List,
+// and the get-or-create lookup. Distinct from ListWithContent's narrower
+// projection — that one skips the identity and clone_* columns.
 func scanRepoProfileFull(row rowScanner) (domain.RepoProfile, error) {
 	var p domain.RepoProfile
-	var description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind sql.NullString
+	var externalID, description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind sql.NullString
 	var profiledAt sql.NullTime
-	if err := row.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind); err != nil {
+	if err := row.Scan(&p.ID, &p.Owner, &p.Repo, &p.Source, &externalID, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind); err != nil {
 		return p, err
 	}
+	p.ExternalID = externalID.String
 	p.Description = description.String
 	p.ProfileText = profileText.String
 	p.CloneURL = cloneURL.String

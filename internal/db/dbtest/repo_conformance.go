@@ -34,6 +34,9 @@ type RepoStoreFactory func(t *testing.T) (store db.RepoStore, orgID string)
 //   - CountConfigured returns the row count.
 //   - UpdateBaseBranch + UpdateCloneStatus mutate only the targeted
 //     fields.
+//   - GetOrCreateSystem mints a row for an untracked repository, is
+//     idempotent, never duplicates or rewrites an existing (profiled)
+//     one, matches case-insensitively, and records an external id.
 func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -361,6 +364,252 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		s, orgID := mk(t)
 		if err := s.UpdateCloneStatus(ctx, orgID, "ghost", "repo", "ok", "", ""); err != nil {
 			t.Errorf("UpdateCloneStatus on absent repo should be a no-op, got %v", err)
+		}
+	})
+
+	t.Run("GetOrCreate_creates_then_is_idempotent", func(t *testing.T) {
+		// The core of the primitive: the first call mints the row, every
+		// call after it hands back the same one. "Same" is checked by
+		// identity (the store surfaces "owner/repo" as the id on both
+		// backends) AND by row count, because the failure this guards is a
+		// second row for the same repository, which a per-call Get would
+		// happily read past.
+		s, orgID := mk(t)
+		ref := domain.RepoRef{Owner: "octo", Repo: "widget"}
+
+		first, err := s.GetOrCreateSystem(ctx, orgID, ref)
+		if err != nil || first == nil {
+			t.Fatalf("GetOrCreateSystem (create): got=%v err=%v", first, err)
+		}
+		if first.ID != "octo/widget" || first.Owner != "octo" || first.Repo != "widget" {
+			t.Errorf("created row identity = %+v, want octo/widget", first)
+		}
+		if first.Source != domain.RepoSourceGitHub {
+			t.Errorf("created row source = %q, want %q — an unset source means GitHub", first.Source, domain.RepoSourceGitHub)
+		}
+		if first.ExternalID != "" {
+			t.Errorf("created row external id = %q, want empty — nothing fetched one", first.ExternalID)
+		}
+		if first.ProfileText != "" || first.ProfiledAt != nil {
+			t.Errorf("created row should be bare, got %+v", first)
+		}
+
+		for i := 0; i < 3; i++ {
+			again, err := s.GetOrCreateSystem(ctx, orgID, ref)
+			if err != nil || again == nil {
+				t.Fatalf("GetOrCreateSystem (repeat %d): got=%v err=%v", i, again, err)
+			}
+			if again.ID != first.ID {
+				t.Errorf("repeat %d returned id %q, want %q", i, again.ID, first.ID)
+			}
+		}
+		if n, err := s.CountConfigured(ctx, orgID); err != nil {
+			t.Fatalf("CountConfigured: %v", err)
+		} else if n != 1 {
+			t.Errorf("rows after 4 get-or-creates = %d, want 1", n)
+		}
+	})
+
+	t.Run("GetOrCreate_does_not_duplicate_or_rewrite_a_profiled_repo", func(t *testing.T) {
+		// The negative space. A repository that has been profiled, given a
+		// base branch, and cloned must come back from get-or-create exactly
+		// as it stands — one row, same id, every cached column intact.
+		s, orgID := mk(t)
+		profiled := time.Now().UTC().Truncate(time.Second)
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "octo/widget", Owner: "octo", Repo: "widget",
+			Description: "Widget service", ProfileText: "Service profile body",
+			CloneURL: "git@github.com:octo/widget.git", DefaultBranch: "main",
+			ProfiledAt: &profiled,
+		}); err != nil {
+			t.Fatalf("seed profiled row: %v", err)
+		}
+		if err := s.UpdateBaseBranch(ctx, orgID, "octo/widget", "develop"); err != nil {
+			t.Fatalf("UpdateBaseBranch: %v", err)
+		}
+		if err := s.UpdateCloneStatus(ctx, orgID, "octo", "widget", "ok", "", ""); err != nil {
+			t.Fatalf("UpdateCloneStatus: %v", err)
+		}
+
+		got, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "widget"})
+		if err != nil || got == nil {
+			t.Fatalf("GetOrCreateSystem: got=%v err=%v", got, err)
+		}
+		if got.ID != "octo/widget" {
+			t.Errorf("id = %q, want octo/widget — get-or-create must not re-key an existing row", got.ID)
+		}
+		if got.ProfileText != "Service profile body" || got.Description != "Widget service" {
+			t.Errorf("profile clobbered: %+v", got)
+		}
+		if got.BaseBranch != "develop" {
+			t.Errorf("BaseBranch = %q, want develop", got.BaseBranch)
+		}
+		if got.CloneStatus != "ok" {
+			t.Errorf("CloneStatus = %q, want ok", got.CloneStatus)
+		}
+		if got.ProfiledAt == nil {
+			t.Error("ProfiledAt is nil — a get-or-create must not un-profile a repo")
+		}
+		if n, _ := s.CountConfigured(ctx, orgID); n != 1 {
+			t.Errorf("rows = %d, want 1 — the profiled repo must not be duplicated", n)
+		}
+	})
+
+	t.Run("GetOrCreate_matches_case_insensitively", func(t *testing.T) {
+		// GitHub identifiers are case-insensitive and the unique index is
+		// not, so a caller spelling a tracked repo differently must find the
+		// existing row rather than mint a second one for the same repository.
+		// Stored casing is sticky, exactly as the tracked-set reconcile
+		// leaves it.
+		s, orgID := mk(t)
+		if err := s.SetConfigured(ctx, orgID, []string{"Acme/Api"}); err != nil {
+			t.Fatalf("SetConfigured: %v", err)
+		}
+		got, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "API"})
+		if err != nil || got == nil {
+			t.Fatalf("GetOrCreateSystem (mismatched case): got=%v err=%v", got, err)
+		}
+		if got.ID != "Acme/Api" {
+			t.Errorf("id = %q, want Acme/Api — stored casing is sticky", got.ID)
+		}
+		if n, _ := s.CountConfigured(ctx, orgID); n != 1 {
+			t.Errorf("rows = %d, want 1 — a casing difference is not a second repository", n)
+		}
+	})
+
+	t.Run("GetOrCreate_records_the_external_id", func(t *testing.T) {
+		// A create carries the id straight onto the new row; a later call
+		// that learned one fills a row that has none. An empty id never
+		// clears a stored one — a caller without an id has learned nothing.
+		s, orgID := mk(t)
+
+		withID, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
+			Owner: "octo", Repo: "created-with-id", ExternalID: "1296269",
+		})
+		if err != nil || withID == nil {
+			t.Fatalf("GetOrCreateSystem (create with id): got=%v err=%v", withID, err)
+		}
+		if withID.ExternalID != "1296269" {
+			t.Errorf("created external id = %q, want 1296269", withID.ExternalID)
+		}
+
+		if _, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "backfilled"}); err != nil {
+			t.Fatalf("GetOrCreateSystem (create bare): %v", err)
+		}
+		filled, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
+			Owner: "octo", Repo: "backfilled", ExternalID: "555",
+		})
+		if err != nil || filled == nil {
+			t.Fatalf("GetOrCreateSystem (fill id): got=%v err=%v", filled, err)
+		}
+		if filled.ExternalID != "555" {
+			t.Errorf("filled external id = %q, want 555", filled.ExternalID)
+		}
+		// Round-trips through a plain read, not just the return value.
+		if got, _ := s.Get(ctx, orgID, "octo/backfilled"); got == nil || got.ExternalID != "555" {
+			t.Errorf("Get after fill = %+v, want external id 555", got)
+		}
+
+		kept, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "backfilled"})
+		if err != nil || kept == nil {
+			t.Fatalf("GetOrCreateSystem (no id): got=%v err=%v", kept, err)
+		}
+		if kept.ExternalID != "555" {
+			t.Errorf("external id after an id-less call = %q, want 555 — an empty id clears nothing", kept.ExternalID)
+		}
+	})
+
+	t.Run("GetOrCreate_refuses_an_unknown_source", func(t *testing.T) {
+		// source is app-validated rather than CHECK-constrained, so this
+		// function IS the validation. A typo must not reach the row and key
+		// a repository under a provider nothing resolves.
+		s, orgID := mk(t)
+		if _, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
+			Source: "gitlob", Owner: "octo", Repo: "widget",
+		}); err == nil {
+			t.Error("GetOrCreateSystem accepted an unknown source; want an error")
+		}
+		if n, _ := s.CountConfigured(ctx, orgID); n != 0 {
+			t.Errorf("rows = %d, want 0 — a refused source must not write", n)
+		}
+	})
+
+	t.Run("Upsert_round_trips_identity_and_refreshes_the_external_id", func(t *testing.T) {
+		// The profiler's write path: it learns the id from the same
+		// /repos/{owner}/{repo} response it takes the clone URL from, so a
+		// re-profile carrying an id refreshes it while one carrying none
+		// leaves the stored id alone.
+		s, orgID := mk(t)
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "octo/widget", Owner: "octo", Repo: "widget",
+			Source: domain.RepoSourceGitHub, ExternalID: "1296269",
+			ProfileText: "v1", DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		got, _ := s.Get(ctx, orgID, "octo/widget")
+		if got == nil || got.Source != domain.RepoSourceGitHub || got.ExternalID != "1296269" {
+			t.Fatalf("identity did not round-trip: %+v", got)
+		}
+
+		// A re-profile that carries no id keeps the one on the row.
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "octo/widget", Owner: "octo", Repo: "widget",
+			ProfileText: "v2", DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("re-Upsert without id: %v", err)
+		}
+		got, _ = s.Get(ctx, orgID, "octo/widget")
+		if got == nil || got.ExternalID != "1296269" {
+			t.Errorf("external id after an id-less re-profile = %+v, want 1296269 preserved", got)
+		}
+		if got.ProfileText != "v2" {
+			t.Errorf("profile text = %q, want v2 — the re-profile still lands", got.ProfileText)
+		}
+
+		// One that carries a different id takes it: GitHub is authoritative
+		// for what the slug resolves to now.
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "octo/widget", Owner: "octo", Repo: "widget",
+			ExternalID: "77", ProfileText: "v3", DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("re-Upsert with a new id: %v", err)
+		}
+		got, _ = s.Get(ctx, orgID, "octo/widget")
+		if got == nil || got.ExternalID != "77" {
+			t.Errorf("external id after a re-profile that carried one = %+v, want 77", got)
+		}
+	})
+
+	t.Run("Upsert_refuses_an_unknown_source", func(t *testing.T) {
+		s, orgID := mk(t)
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "octo/widget", Owner: "octo", Repo: "widget", Source: "gitlob",
+		}); err == nil {
+			t.Error("Upsert accepted an unknown source; want an error")
+		}
+		if n, _ := s.CountConfigured(ctx, orgID); n != 0 {
+			t.Errorf("rows = %d, want 0 — a refused source must not write", n)
+		}
+	})
+
+	t.Run("SetConfigured_creates_rows_with_the_identity_columns", func(t *testing.T) {
+		// The tracked-set create path and the get-or-create create path are
+		// the same INSERT, so a row minted by tracking is indistinguishable
+		// from one minted by get-or-create.
+		s, orgID := mk(t)
+		if err := s.SetConfigured(ctx, orgID, []string{"octo/widget"}); err != nil {
+			t.Fatalf("SetConfigured: %v", err)
+		}
+		got, err := s.Get(ctx, orgID, "octo/widget")
+		if err != nil || got == nil {
+			t.Fatalf("Get: got=%v err=%v", got, err)
+		}
+		if got.Source != domain.RepoSourceGitHub {
+			t.Errorf("tracked row source = %q, want %q", got.Source, domain.RepoSourceGitHub)
+		}
+		if got.ExternalID != "" {
+			t.Errorf("tracked row external id = %q, want empty — tracking learns no id", got.ExternalID)
 		}
 	})
 

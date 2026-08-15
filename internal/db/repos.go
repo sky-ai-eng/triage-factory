@@ -24,11 +24,16 @@ import (
 // string as repoID — that's what callers pass and what
 // domain.RepoProfile.ID returns. SQLite stores that string directly
 // in the id column. Postgres uses a synthetic uuid id internally
-// plus a UNIQUE(org_id, owner, repo) natural key; the Postgres impl
-// splits the passed-in "owner/repo" and queries by (org_id, owner,
-// repo) so callers never see the synthetic uuid. The synthetic id
-// exists because the PG style is "every table has a uuid PK" — not
-// because callers need it.
+// plus a UNIQUE(org_id, source, owner, repo) natural key; the
+// Postgres impl splits the passed-in "owner/repo" and queries by
+// (org_id, owner, repo) so callers never see the synthetic uuid. The
+// synthetic id exists because the PG style is "every table has a uuid
+// PK" — not because callers need it.
+//
+// source is absent from the slug-keyed methods deliberately: they
+// match a repo without naming one, which is unambiguous while GitHub
+// is the only provider that issues repositories. The methods that DO
+// name one take a domain.RepoRef.
 type RepoStore interface {
 	// Upsert inserts or updates a repo profile. On conflict it
 	// refreshes profiling metadata (description, has_readme,
@@ -36,6 +41,13 @@ type RepoStore interface {
 	// default_branch, profiled_at) but PRESERVES user-configured
 	// base_branch and clone-status fields — those are mutated by
 	// dedicated methods and shouldn't be clobbered by a re-profile.
+	//
+	// p.Source normalizes through domain.NormalizeRepoSource (empty means
+	// GitHub) and is a create-time identity column: a conflicting write
+	// leaves it alone. p.ExternalID refreshes the stored id when non-empty
+	// and leaves it alone when empty — the profiler reads the id off the
+	// same /repos/{owner}/{repo} response it takes default_branch and
+	// clone_url from, and a caller with no id has learned nothing to write.
 	Upsert(ctx context.Context, orgID string, p domain.RepoProfile) error
 
 	// List returns every configured repo, including those without
@@ -105,6 +117,41 @@ type RepoStore interface {
 	// Get returns a single repo profile by "owner/repo" id, or nil
 	// if not configured.
 	Get(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error)
+
+	// GetOrCreateSystem returns the row for one repository, minting a bare
+	// one if it does not exist yet. It is the single primitive that brings
+	// a repository into the table: the tracked-set reconcile
+	// (TeamGitHubReposStore.ReplaceForTeam) and SetConfigured create their
+	// rows through the same INSERT, so a repository row can never exist
+	// without the identity columns the create sets.
+	//
+	// Get-or-create, not upsert. An existing row is returned as it stands —
+	// same id, same profile text, same base branch, same clone and poll
+	// state — with exactly one exception: external_id takes ref's value
+	// when ref carries one. That is the same rule Upsert applies, and it is
+	// one rule rather than two: a non-empty id the caller just read off a
+	// provider payload is what that provider currently says the slug
+	// resolves to, and an empty one means the caller learned nothing, so it
+	// never clears a stored id.
+	//
+	// The lookup is case-INSENSITIVE on owner/repo (GitHub identifiers are),
+	// matching the reconcile: a caller spelling a tracked repo differently
+	// gets the existing row rather than minting a second one for the same
+	// repository. Stored casing is therefore sticky. ref.Source normalizes
+	// through domain.NormalizeRepoSource — empty means GitHub, an unknown
+	// value is an error rather than a row.
+	//
+	// System (claims-free) variant only: the callers that learn about a
+	// repository are background jobs. Control-plane ones — the executor's
+	// Postgres role holds SELECT and UPDATE on repo_profiles, not INSERT, so
+	// a repository is brought into the table by the side that polls and
+	// tracks, never by a running agent's pod.
+	//
+	// Two concurrent creators race benignly: the loser's INSERT conflicts and
+	// it re-reads the winner's row. The one race the unique cannot see is two
+	// creators disagreeing on casing; on the tracking path the reconcile's
+	// per-org lock is what keeps that from arising.
+	GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.RepoProfile, error)
 
 	// UpdateCloneStatus records the outcome of an EnsureBareClone
 	// attempt for the given repo. status is "ok" | "failed" |
