@@ -205,6 +205,16 @@ React 19 + Vite + TypeScript + Tailwind v4. Router routes live in `frontend/src/
 
   The alternative to a marker is doing the work now. Choosing to defer is fine; leaving the deferral untracked is not, and neither is inventing an id to satisfy the format. If nothing covers it, file it first or say so and let the user decide — a `TODO` pointing somewhere that does not describe the gap is worse than no `TODO` at all, because it looks tracked.
 
+## API design
+
+Rules for every `/api/*` route, existing or new. The backend cleanup spec (`docs/for-agents/specs/backend-api-cleanup/`) holds the full audit of where the current surface deviates and the remediation order — when you touch a handler listed there, converge it; never add a new deviation. The frontend follows the same contract from the other side: one shared error parser and one pagination hook in the API client, no per-call ad-hoc parsing.
+
+- **One intent per route.** A route does one nameable thing with a fixed body schema. No discriminator field that changes which other fields are meaningful (`action`, `kind`, `auth_method` switching arms), no field whose *emptiness* selects a second behavior (blank-means-delete, blank-means-keep). If two operations need different required fields, validation, or response shapes, they are two routes. Verb routes (`POST /…/{id}/approve`) are only for effects a field write can't express — external API calls, multi-row atomic transitions, process control.
+- **Bad calls fail.** Strict body decoding (unknown fields are a 400). Invalid values are rejected with the field named — never clamped, defaulted, case-folded, or silently dropped. Query params parse strictly: a malformed filter is a 400, and must never *widen* a result set by falling back. Never report success for work that didn't happen.
+- **Uniform reads.** Every resource: `GET /…/<resource>/{id}`, `GET /…/<resource>/by-name/{name}` where a unique name exists, and `POST /…/<resource>/list` taking `page_size`/`page_token` and returning `{items, next_page_token, total_count}`. No bare-array lists, no unbounded fetch-the-world queries, no hardcoded store LIMITs that truncate silently. Store-layer pagination work is the accepted cost. Reads are side-effect-free and resource-pure.
+- **One error shape.** `{"errors": [{"reason": "SCREAMING_SNAKE_CODE", "message": "prose", "field": "optional"}]}` — always a list; validation reports *every* failing field, not the first. `reason` is a stable machine code; `field` appears only for payload-field faults; the HTTP status is blanket. No plain-text bodies on `/api/*`, no 200-with-error, no raw driver/upstream strings in multi mode. Statuses are principled and consistent across routes for the same fault class (including the 404-vs-403 disclosure rule above).
+- **Updates are PATCH on the resource.** `PATCH /…/<resource>/{id}`, field-by-field: absent = keep, explicit `null` = clear (decode via `json.RawMessage` so the two are distinguishable — `repos_handler.go` is the reference). No full-replace PUT that's really a partial write, no POST-as-update, no verb route for what is a column flip, no per-route clearing dialects (empty-string sentinels, zero-means-null, uncleareable fields).
+
 ## Reference docs
 
 - `docs/concepts/tracked-events.md` — GitHub/Jira event taxonomy + snapshot field list.
