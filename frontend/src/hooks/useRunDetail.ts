@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Message, Conversation, Artifact, Task, WSEvent } from '../types'
-import { readError } from '../lib/api'
+import { apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
 import { isActiveRun, isPermissionTerminalStatus } from '../lib/runStatus'
 import { useWebSocket } from './useWebSocket'
 import { usePermissionQueues } from './usePermissionQueues'
@@ -220,10 +220,9 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // on lastRunIDRef so a slow fetch for a since-navigated-away run is discarded
   // rather than clobbering the current run's artifacts.
   const refetchArtifacts = useCallback((id: string) => {
-    fetch(`/api/agent/conversations/${id}/artifacts`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: Artifact[] | null) => {
-        if (data && id === lastRunIDRef.current) setArtifacts(data)
+    apiJSON<Artifact[]>(`/api/agent/conversations/${id}/artifacts`)
+      .then((data) => {
+        if (id === lastRunIDRef.current) setArtifacts(data)
       })
       .catch(() => {})
   }, [])
@@ -235,10 +234,9 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   const softRefresh = useCallback(() => {
     if (!runID) return
     const id = runID
-    fetch(`/api/agent/conversations/${id}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: Conversation | null) => {
-        if (data && id === lastRunIDRef.current) setRun(data)
+    apiJSON<Conversation>(`/api/agent/conversations/${id}`)
+      .then((data) => {
+        if (id === lastRunIDRef.current) setRun(data)
       })
       .catch(() => {})
     refetchArtifacts(id)
@@ -304,80 +302,72 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
     setError(null)
     ;(async () => {
       try {
-        const runRes = await fetch(`/api/agent/conversations/${runID}`)
-        if (runRes.status === 404) {
-          if (!cancelled) {
-            setNotFound(true)
-            setLoading(false)
-          }
-          return
-        }
-        if (!runRes.ok) {
-          if (!cancelled) setError(await readError(runRes, 'Failed to load run'))
-          return
-        }
-        const runData = (await runRes.json()) as Conversation
+        const runData = await apiJSON<Conversation>(`/api/agent/conversations/${runID}`)
         if (cancelled) return
         setRun(runData)
         // The artifact set drives the approval list; pull it in the same load so
         // the cards are ready when the run paints (best-effort, non-blocking).
         refetchArtifacts(runID)
 
-        // Parallel: messages + task.
-        const [msgsRes, taskRes] = await Promise.all([
-          fetch(`/api/agent/conversations/${runID}/messages`),
-          runData.TaskID ? fetch(`/api/tasks/${runData.TaskID}`) : Promise.resolve(null),
+        // Parallel: messages + task. The task read carries its failure rather
+        // than throwing it, because the two are independent — a run whose task
+        // row has gone still has a transcript worth rendering, and letting the
+        // task 404 reject the pair would blank it.
+        const [msgs, taskRow] = await Promise.all([
+          apiJSON<Message[]>(`/api/agent/conversations/${runID}/messages`),
+          runData.TaskID
+            ? apiJSON<Task>(`/api/tasks/${runData.TaskID}`).catch((err: unknown) => ({
+                taskError: httpErrorMessage(err, 'Could not load the task.'),
+              }))
+            : null,
         ])
         if (cancelled) return
 
-        if (msgsRes.ok) {
-          const msgs = (await msgsRes.json()) as Message[]
-          if (!cancelled) {
-            // The fetched transcript's stamped rows become the baselines the
-            // fold counts from: a websocket replay of any of them can't be
-            // folded in a second time, and folding resumes from here.
-            //
-            // Treating the whole transcript as already covered is an
-            // approximation, not an identity. The run row is read first and the
-            // transcript second, so a row written between the two reads is in
-            // the transcript but outside the SUM the run row carries — seeding
-            // it here means its figures are never folded, and the readouts sit
-            // that row low until the next run refetch replaces them with a
-            // fresh SUM. That is the deliberate direction: reading the
-            // transcript first would invert the race into a row the SUM covers
-            // but the baseline doesn't, and a replay of it would fold dollars
-            // and tokens that are already counted. Under-reporting for one
-            // round trip self-corrects on the next read; over-reporting
-            // compounds. Closing it properly needs the run row to say which
-            // message id its SUM runs through, which the wire doesn't carry.
-            const seededCost = new Set<number>()
-            const seededTokens = new Set<number>()
-            for (const m of msgs) {
-              if (m.cost_usd != null) seededCost.add(m.id)
-              if (tokenDelta(m) !== null) seededTokens.add(m.id)
-            }
-            costBaseline.current = seededCost
-            tokenBaseline.current = seededTokens
-            // A whole read: the transcript is complete through its last row,
-            // so repairs start asking from there.
-            completeThroughRef.current = maxMessageID(msgs)
-            // Merge by id rather than replacing. If a websocket
-            // `message` event arrived between the run fetch starting and
-            // the messages fetch resolving, a wholesale replace would
-            // erase that newer row until the next refetch.
-            setMessages((prev) => mergeMessages(prev, msgs))
-          }
-        } else if (!cancelled) {
-          setError(await readError(msgsRes, 'Failed to load messages'))
+        // The fetched transcript's stamped rows become the baselines the
+        // fold counts from: a websocket replay of any of them can't be
+        // folded in a second time, and folding resumes from here.
+        //
+        // Treating the whole transcript as already covered is an
+        // approximation, not an identity. The run row is read first and the
+        // transcript second, so a row written between the two reads is in
+        // the transcript but outside the SUM the run row carries — seeding
+        // it here means its figures are never folded, and the readouts sit
+        // that row low until the next run refetch replaces them with a
+        // fresh SUM. That is the deliberate direction: reading the
+        // transcript first would invert the race into a row the SUM covers
+        // but the baseline doesn't, and a replay of it would fold dollars
+        // and tokens that are already counted. Under-reporting for one
+        // round trip self-corrects on the next read; over-reporting
+        // compounds. Closing it properly needs the run row to say which
+        // message id its SUM runs through, which the wire doesn't carry.
+        const seededCost = new Set<number>()
+        const seededTokens = new Set<number>()
+        for (const m of msgs) {
+          if (m.cost_usd != null) seededCost.add(m.id)
+          if (tokenDelta(m) !== null) seededTokens.add(m.id)
         }
-        if (taskRes && taskRes.ok) {
-          const t = (await taskRes.json()) as Task
-          if (!cancelled) setTask(t)
-        } else if (taskRes && !cancelled) {
-          setError(await readError(taskRes, 'Failed to load task'))
-        }
+        costBaseline.current = seededCost
+        tokenBaseline.current = seededTokens
+        // A whole read: the transcript is complete through its last row,
+        // so repairs start asking from there.
+        completeThroughRef.current = maxMessageID(msgs)
+        // Merge by id rather than replacing. If a websocket
+        // `message` event arrived between the run fetch starting and
+        // the messages fetch resolving, a wholesale replace would
+        // erase that newer row until the next refetch.
+        setMessages((prev) => mergeMessages(prev, msgs))
+
+        if (taskRow && 'taskError' in taskRow) setError(taskRow.taskError)
+        else if (taskRow) setTask(taskRow)
       } catch (err) {
-        if (!cancelled) setError((err as Error).message)
+        if (cancelled) return
+        // A 404 is this run's own not-found state, not a failed read — the
+        // station renders "no such run" rather than an error banner.
+        if (err instanceof HttpError && err.status === 404) {
+          setNotFound(true)
+          return
+        }
+        setError(httpErrorMessage(err, 'Could not load the run.'))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -419,10 +409,9 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
       const settled = !isActiveRun(current)
       if (settled && !sawActiveRef.current) return
       const sinceID = completeThroughRef.current
-      fetch(`/api/agent/conversations/${runID}/messages?since_id=${sinceID}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((rows: Message[] | null) => {
-          if (cancelled || rows === null || runID !== lastRunIDRef.current) return
+      apiJSON<Message[]>(`/api/agent/conversations/${runID}/messages?since_id=${sinceID}`)
+        .then((rows) => {
+          if (cancelled || runID !== lastRunIDRef.current) return
           // The closing read landed, so stop asking. Only a real response
           // counts — a failed one leaves the flag up so the next tick retries,
           // which is the difference between closing the transcript out and
@@ -448,17 +437,17 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
     }
     const poll = () => {
       reconcileMessages()
-      fetch(`/api/agent/conversations/${runID}/artifacts/refresh`, { method: 'POST' })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((data: { updated?: number } | null) => {
+      apiJSON<{ updated?: number }>(`/api/agent/conversations/${runID}/artifacts/refresh`, {
+        method: 'POST',
+      })
+        .then((data) => {
           if (cancelled || !data?.updated) return
           // A transition landed — pull the run row + its artifact set fresh in
           // case the websocket broadcast was missed (the WS handler does the same
           // on its event), so the derived approval surface can't go stale.
-          fetch(`/api/agent/conversations/${runID}`)
-            .then((r) => (r.ok ? r.json() : null))
-            .then((run: Conversation | null) => {
-              if (!cancelled && run) setRun(run)
+          apiJSON<Conversation>(`/api/agent/conversations/${runID}`)
+            .then((run) => {
+              if (!cancelled) setRun(run)
             })
             .catch(() => {})
           if (!cancelled) refetchArtifacts(runID)
@@ -506,13 +495,12 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           if (resumable !== undefined) {
             setRun((prev) => (prev ? { ...prev, resumable } : prev))
           }
-          fetch(`/api/agent/conversations/${runID}`)
-            .then((r) => (r.ok ? r.json() : null))
-            .then((data: Conversation | null) => {
+          apiJSON<Conversation>(`/api/agent/conversations/${runID}`)
+            .then((data) => {
               // Guard the async write against a navigation that landed while the
               // fetch was in flight (same guard refetchArtifacts uses), so an
               // old run's row can't clobber the new run's state.
-              if (data && runID === lastRunIDRef.current) setRun(data)
+              if (runID === lastRunIDRef.current) setRun(data)
             })
             .catch(() => {})
           // A status flip can resolve the last artifact (terminal-on-last) or
@@ -525,10 +513,9 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           // its derived approval signal (has_unresolved_artifacts + counts)
           // updates, and the artifact set so the approval list repaints. The
           // run's own status is unchanged, so no permission-queue drop here.
-          fetch(`/api/agent/conversations/${runID}`)
-            .then((r) => (r.ok ? r.json() : null))
-            .then((data: Conversation | null) => {
-              if (data && runID === lastRunIDRef.current) setRun(data)
+          apiJSON<Conversation>(`/api/agent/conversations/${runID}`)
+            .then((data) => {
+              if (runID === lastRunIDRef.current) setRun(data)
             })
             .catch(() => {})
           refetchArtifacts(runID)

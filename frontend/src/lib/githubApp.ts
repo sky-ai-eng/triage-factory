@@ -4,8 +4,18 @@
 // flow) — see startGitHubAppRegistration. The endpoints are org-scoped
 // under /api/orgs/{org_id}/github/app.
 
-import { readError } from './api'
+import { apiFetch, apiJSON, HttpError, httpErrorMessage } from './apiClient'
 import { isHttpUrl } from './reachability'
+
+// asError turns any failed call into an Error carrying the clean user-facing
+// string — the server's `{ error }` verbatim (e.g. cutover's 409 "install the
+// App before switching"), else the caller's fallback. Every function here is
+// consumed by a panel that renders `err.message` straight into the UI, so a
+// raw HttpError — whose message embeds the whole response body — must not
+// escape this module.
+function asError(e: unknown, fallback: string): Error {
+  return new Error(httpErrorMessage(e, fallback))
+}
 
 // Local mode runs single-org against the synthetic sentinel org. Mirrors
 // runmode.LocalDefaultOrgID on the backend; the org-scoped App endpoints
@@ -54,9 +64,11 @@ export interface GitHubAppStatus {
 }
 
 export async function getGitHubAppStatus(orgId: string): Promise<GitHubAppStatus> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app`)
-  if (!res.ok) throw new Error(await readError(res, 'Failed to load GitHub App status'))
-  return (await res.json()) as GitHubAppStatus
+  try {
+    return await apiJSON<GitHubAppStatus>(`/api/orgs/${encodeURIComponent(orgId)}/github/app`)
+  } catch (e) {
+    throw asError(e, 'Could not load GitHub App status.')
+  }
 }
 
 // refreshGitHubAppInstallations reconciles the org's App installation mirror
@@ -66,18 +78,25 @@ export async function getGitHubAppStatus(orgId: string): Promise<GitHubAppStatus
 // reads a mirror a brand-new install hasn't touched yet, so the wizard's install
 // step and Settings' "Check installation" action POST here to actually find it.
 export async function refreshGitHubAppInstallations(orgId: string): Promise<GitHubAppStatus> {
-  const res = await fetch(
-    `/api/orgs/${encodeURIComponent(orgId)}/github/app/installations/refresh`,
-    { method: 'POST' },
-  )
-  if (!res.ok) throw new Error(await readError(res, 'Failed to refresh GitHub App installations'))
-  return (await res.json()) as GitHubAppStatus
+  try {
+    return await apiJSON<GitHubAppStatus>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/app/installations/refresh`,
+      { method: 'POST' },
+    )
+  } catch (e) {
+    throw asError(e, 'Could not refresh the GitHub App installations.')
+  }
 }
 
 export async function getGitHubAppInstallURL(orgId: string): Promise<string> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/install-url`)
-  if (!res.ok) throw new Error(await readError(res, 'Failed to load install URL'))
-  const body = (await res.json()) as { url: string }
+  let body: { url: string }
+  try {
+    body = await apiJSON<{ url: string }>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/app/install-url`,
+    )
+  } catch (e) {
+    throw asError(e, 'Could not load the install URL.')
+  }
   // The URL is backend-derived from the org's GitHub base URL. Reject any
   // non-http(s) scheme here, at the single source, so neither an <a href>
   // (RepoPickerModal) nor window.open (Settings) can ever be handed a
@@ -150,30 +169,42 @@ export async function importGitHubApp(
   orgId: string,
   input: GitHubAppImportInput,
 ): Promise<GitHubAppImportOutcome> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/import`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-  })
-  if (res.ok) {
-    return { ok: true, result: (await res.json()) as GitHubAppImportResult }
-  }
+  const fallback = 'Could not import the GitHub App.'
   try {
-    const body = (await res.json()) as {
-      error?: string
-      permissions?: GitHubAppPermissionRow[]
-      blocking?: boolean
-      field?: string
+    const result = await apiJSON<GitHubAppImportResult>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/app/import`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      },
+    )
+    return { ok: true, result }
+  } catch (e) {
+    // The failure body is structured, not just a message: the permission table
+    // is what the form renders on a gap. httpErrorMessage would give us the
+    // `error` string alone, so read the body off the HttpError directly and
+    // fall back to it only when the shape isn't there.
+    if (e instanceof HttpError) {
+      try {
+        const body = JSON.parse(e.body) as {
+          error?: string
+          permissions?: GitHubAppPermissionRow[]
+          blocking?: boolean
+          field?: string
+        }
+        return {
+          ok: false,
+          error: body.error || fallback,
+          permissions: body.permissions,
+          blocking: body.blocking,
+          field: body.field,
+        }
+      } catch {
+        // Body wasn't JSON — fall through.
+      }
     }
-    return {
-      ok: false,
-      error: body.error || 'Failed to import the GitHub App.',
-      permissions: body.permissions,
-      blocking: body.blocking,
-      field: body.field,
-    }
-  } catch {
-    return { ok: false, error: 'Failed to import the GitHub App.' }
+    return { ok: false, error: httpErrorMessage(e, fallback) }
   }
 }
 
@@ -237,20 +268,6 @@ export interface SwitchToPatResult {
   github_app_settings_url: string
 }
 
-// switchError returns the backend's clean user-facing `error` message (no
-// fallback prefix), so an inline error reads as the server wrote it (e.g.
-// cutover's 409 "install the App before switching"). Falls back to a generic
-// line when the body carries no error field.
-async function switchError(res: Response, fallback: string): Promise<string> {
-  try {
-    const body = (await res.clone().json()) as { error?: string }
-    if (body && typeof body.error === 'string' && body.error) return body.error
-  } catch {
-    // Non-JSON body — use the fallback.
-  }
-  return fallback
-}
-
 // cutoverToApp commits a staged PAT→App switch: the backend reconciles
 // installations, verifies ≥1, then activates the App and deletes the PAT
 // atomically. Rejects with the backend's message — notably the 409 "install
@@ -258,10 +275,13 @@ async function switchError(res: Response, fallback: string): Promise<string> {
 //
 // POST /api/orgs/{org_id}/github/app/cutover
 export async function cutoverToApp(orgId: string): Promise<void> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/cutover`, {
-    method: 'POST',
-  })
-  if (!res.ok) throw new Error(await switchError(res, 'Failed to switch to the GitHub App.'))
+  try {
+    await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/cutover`, {
+      method: 'POST',
+    })
+  } catch (e) {
+    throw asError(e, 'Could not switch to the GitHub App.')
+  }
 }
 
 // cutoverPreflight returns the inform-only reachability diff for a PAT→App
@@ -271,9 +291,13 @@ export async function cutoverToApp(orgId: string): Promise<void> {
 //
 // GET /api/orgs/{org_id}/github/app/cutover-preflight
 export async function cutoverPreflight(orgId: string): Promise<AccessDiff> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/cutover-preflight`)
-  if (!res.ok) throw new Error(await switchError(res, 'Failed to check repository reachability.'))
-  return (await res.json()) as AccessDiff
+  try {
+    return await apiJSON<AccessDiff>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/app/cutover-preflight`,
+    )
+  } catch (e) {
+    throw asError(e, 'Could not check repository reachability.')
+  }
 }
 
 // switchToPat performs the App→PAT switch — a full App teardown. The backend
@@ -282,14 +306,18 @@ export async function cutoverPreflight(orgId: string): Promise<AccessDiff> {
 //
 // POST /api/orgs/{org_id}/github/access/switch-to-pat
 export async function switchToPat(orgId: string, pat: string): Promise<SwitchToPatResult> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/access/switch-to-pat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pat }),
-  })
-  if (!res.ok)
-    throw new Error(await switchError(res, 'Failed to switch to a personal access token.'))
-  return (await res.json()) as SwitchToPatResult
+  try {
+    return await apiJSON<SwitchToPatResult>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/access/switch-to-pat`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pat }),
+      },
+    )
+  } catch (e) {
+    throw asError(e, 'Could not switch to a personal access token.')
+  }
 }
 
 // patPreflight validates a candidate PAT and returns the inform-only
@@ -298,13 +326,18 @@ export async function switchToPat(orgId: string, pat: string): Promise<SwitchToP
 //
 // POST /api/orgs/{org_id}/github/access/pat-preflight
 export async function patPreflight(orgId: string, pat: string): Promise<PatPreflight> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/access/pat-preflight`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pat }),
-  })
-  if (!res.ok) throw new Error(await switchError(res, 'That token could not be validated.'))
-  return (await res.json()) as PatPreflight
+  try {
+    return await apiJSON<PatPreflight>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/access/pat-preflight`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pat }),
+      },
+    )
+  } catch (e) {
+    throw asError(e, 'That token could not be validated.')
+  }
 }
 
 // discardStagedApp tears down a STAGED App registration — the exit for an
@@ -313,8 +346,9 @@ export async function patPreflight(orgId: string, pat: string): Promise<PatPrefl
 //
 // DELETE /api/orgs/{org_id}/github/app
 export async function discardStagedApp(orgId: string): Promise<void> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app`, {
-    method: 'DELETE',
-  })
-  if (!res.ok) throw new Error(await switchError(res, 'Failed to discard the staged GitHub App.'))
+  try {
+    await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app`, { method: 'DELETE' })
+  } catch (e) {
+    throw asError(e, 'Could not discard the staged GitHub App.')
+  }
 }

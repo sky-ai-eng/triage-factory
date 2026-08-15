@@ -8,11 +8,13 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -167,6 +169,51 @@ func setOrgGitHubBase(t *testing.T, s *Server, base string) {
 	}
 }
 
+// ghAppsRaceHook wraps the App store and fires a one-shot hook right after one
+// of the two reads the credential transitions guard on returns. It stands in
+// for a concurrent transition committing inside the window a handler's pre-lock
+// read is stale across — the window that is real because two of the three
+// handlers put a GitHub round-trip in it, and that no amount of test
+// concurrency could pin down deterministically.
+//
+// The hook runs after the wrapped read has already produced its answer, so the
+// handler receives the PRE-mutation row and then proceeds into a world where it
+// no longer holds. Only the first call is hooked; the re-read inside the
+// critical section sees the mutation, which is the whole point.
+type ghAppsRaceHook struct {
+	db.GitHubAppsStore
+	afterGet  func() // fires once, after the first GetForOrgSystem
+	afterList func() // fires once, after the first ListInstallationsForOrgSystem
+	getOnce   sync.Once
+	listOnce  sync.Once
+}
+
+func (g *ghAppsRaceHook) GetForOrgSystem(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error) {
+	app, err := g.GitHubAppsStore.GetForOrgSystem(ctx, orgID)
+	if err == nil && g.afterGet != nil {
+		g.getOnce.Do(g.afterGet)
+	}
+	return app, err
+}
+
+func (g *ghAppsRaceHook) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
+	insts, err := g.GitHubAppsStore.ListInstallationsForOrgSystem(ctx, orgID)
+	if err == nil && g.afterList != nil {
+		g.listOnce.Do(g.afterList)
+	}
+	return insts, err
+}
+
+// hookGitHubApps installs the race hook on the server and returns the store it
+// wrapped, so a hook body can mutate the row without recursing back through
+// itself.
+func hookGitHubApps(s *Server, hook *ghAppsRaceHook) db.GitHubAppsStore {
+	orig := s.githubApps
+	hook.GitHubAppsStore = orig
+	s.githubApps = hook
+	return orig
+}
+
 func getSecret(t *testing.T, s *Server, key string) string {
 	t.Helper()
 	v, err := s.secrets.Get(context.Background(), runmode.LocalDefaultOrgID, key)
@@ -298,6 +345,65 @@ func TestGitHubAppDiscard_Active(t *testing.T) {
 	}
 }
 
+// TestGitHubAppDiscard_AppGoesLiveUnderTheGuard is the discard half of the
+// serialization the three transitions share: a cutover commits between the
+// discard's read and its teardown, so the staged App the 409 guard cleared is
+// live by the time the teardown would run.
+//
+// The fixture commits BOTH halves of the cutover's transaction — the active
+// flip and the PAT delete — because it is the second half that sets the stake.
+// Once the PAT is gone the App is the org's only credential, so a discard that
+// proceeds on the stale "staged" answer isn't tearing down an abandoned switch,
+// it is taking the workspace's GitHub access with it.
+//
+// The guard has to be re-evaluated under the lock for the refusal to happen at
+// all; against the unserialized handler the stale answer stands and the
+// teardown commits.
+func TestGitHubAppDiscard_AppGoesLiveUnderTheGuard(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedLocalApp(t, s, false) // staged, behind a live PAT
+	seedInstallation(t, s, 1, "acme")
+	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT, "ghp_live", ""); err != nil {
+		t.Fatalf("seed pat: %v", err)
+	}
+
+	var apps db.GitHubAppsStore
+	hook := &ghAppsRaceHook{afterGet: func() {
+		ctx := context.Background()
+		if err := apps.SetActive(ctx, runmode.LocalDefaultOrgID, true); err != nil {
+			t.Errorf("concurrent cutover: set active: %v", err)
+		}
+		if _, err := s.secrets.Delete(ctx, runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT); err != nil {
+			t.Errorf("concurrent cutover: delete pat: %v", err)
+		}
+	}}
+	apps = hookGitHubApps(s, hook)
+
+	rec := doJSON(t, s, http.MethodDelete, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("discard of an App that went live under the guard = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The fixture's cutover really did leave the App as the only credential —
+	// without this the assertions below would pass on a weaker interleaving than
+	// the one under test.
+	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "" {
+		t.Fatalf("PAT = %q, want it deleted by the fixture's cutover", v)
+	}
+	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
+	if app == nil {
+		t.Fatal("the now-live App was torn down by a discard that read it as staged — the org has no GitHub credential at all")
+	}
+	if !app.Active {
+		t.Errorf("app.Active = false, want true — the fixture's cutover should have stuck")
+	}
+	if v := getSecret(t, s, "github_app_1_pem"); v == "" {
+		t.Error("the live App's private key was destroyed by the discard")
+	}
+}
+
 // --- cutover -------------------------------------------------------------
 
 func TestGitHubAppCutover_NoApp404(t *testing.T) {
@@ -372,6 +478,53 @@ func TestGitHubAppCutover_Success(t *testing.T) {
 	}
 }
 
+// TestGitHubAppCutover_RegistrationVanishesUnderTheGuard is the interleaving
+// that costs the org every credential it has. A discard commits while the
+// cutover is inside BackfillInstallationsFromAPI — seconds, not microseconds —
+// so by the time the cutover writes, the registration it verified is gone.
+// SetActive is an unchecked UPDATE and flips nothing; the PAT delete is
+// unconditional and lands. The org ends with no App, no PAT, and an audit row
+// saying the App became its credential.
+//
+// The lock is what makes the re-read possible, but the re-read is what refuses:
+// the PAT surviving is the assertion that matters.
+func TestGitHubAppCutover_RegistrationVanishesUnderTheGuard(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	stub := newGitHubAccessStub(t, ghAccessStub{
+		appInstalls: []stubInstall{{ID: 1, Login: "acme"}},
+	})
+	setOrgGitHubBase(t, s, stub.URL)
+	seedLocalApp(t, s, false) // staged
+	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT, "ghp_live", ""); err != nil {
+		t.Fatalf("seed pat: %v", err)
+	}
+
+	// Hooked on the installation read rather than the App read, so the discard
+	// lands after the backfill: mutating earlier would leave nothing for the
+	// backfill to reconcile and the handler would refuse for the ordinary
+	// no-installations reason instead of the one under test.
+	var apps db.GitHubAppsStore
+	hook := &ghAppsRaceHook{afterList: func() {
+		if err := apps.DeleteForOrg(context.Background(), runmode.LocalDefaultOrgID); err != nil {
+			t.Errorf("concurrent discard: delete app: %v", err)
+		}
+	}}
+	apps = hookGitHubApps(s, hook)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cutover of a registration discarded under the guard = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The whole point: the refused cutover must not have taken the credential
+	// the org is still running on down with it.
+	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "ghp_live" {
+		t.Errorf("PAT = %q, want ghp_live — the cutover destroyed the org's only remaining credential", v)
+	}
+}
+
 // --- switch to PAT -------------------------------------------------------
 
 // TestGitHubAccessSwitchToPAT_Success validates the PAT, stores it, and tears
@@ -437,6 +590,39 @@ func TestGitHubAccessSwitchToPAT_NoApp404(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("switch-to-pat with no app = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestGitHubAccessSwitchToPAT_RegistrationVanishesUnderTheGuard runs a discard
+// through the window auth.ValidateGitHub opens between this handler's 404 guard
+// and its teardown. What survives the window is not just the guard's answer but
+// the row itself — the refs teardownAppSecrets deletes ride on it, so a stale
+// pass tears down secrets by the identity of a registration that no longer
+// exists and reports a 200 for an App it did not remove.
+func TestGitHubAccessSwitchToPAT_RegistrationVanishesUnderTheGuard(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	stub := newGitHubAccessStub(t, ghAccessStub{login: "octocat"})
+	setOrgGitHubBase(t, s, stub.URL)
+	seedLocalApp(t, s, false) // staged — a switch-to-pat is valid from here too
+	seedInstallation(t, s, 1, "acme")
+
+	var apps db.GitHubAppsStore
+	hook := &ghAppsRaceHook{afterGet: func() {
+		if err := apps.DeleteForOrg(context.Background(), runmode.LocalDefaultOrgID); err != nil {
+			t.Errorf("concurrent discard: delete app: %v", err)
+		}
+	}}
+	apps = hookGitHubApps(s, hook)
+
+	rec := doJSON(t, s, http.MethodPost,
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("switch-to-pat for a registration discarded under the guard = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "" {
+		t.Errorf("PAT = %q, want nothing stored — the switch reported 404 and must not have committed", v)
 	}
 }
 

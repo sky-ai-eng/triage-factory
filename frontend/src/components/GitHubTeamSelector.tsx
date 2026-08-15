@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { RotateCw } from 'lucide-react'
 import GitHubTeamChecklist from './GitHubTeamChecklist'
 import { keyOf, type GitHubTeamCandidate } from '../lib/githubTeams'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 // Re-exported for callers that still import the candidate shape from the
 // wizard (e.g. Setup's onContinue handler). The canonical definition lives
@@ -74,15 +75,9 @@ export default function GitHubTeamSelector({
     setLoading(true)
     setError('')
     try {
-      const url = `/api/settings/team/${encodeURIComponent(teamId)}/github-groups?include_membership=true`
-      const res = await fetch(url)
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        console.error('Failed to fetch teams:', data.error || `HTTP ${res.status}`)
-        setError('Failed to fetch GitHub teams')
-        return
-      }
-      const data: GroupsResponse = await res.json()
+      const data = await apiJSON<GroupsResponse>(
+        `/api/settings/team/${encodeURIComponent(teamId)}/github-groups?include_membership=true`,
+      )
       const list = data.candidates ?? []
       setCandidates(list)
       // Seed the checkboxes once, unless the user has already started
@@ -99,7 +94,7 @@ export default function GitHubTeamSelector({
       }
     } catch (err) {
       console.error('Failed to fetch teams:', err)
-      setError('Failed to fetch GitHub teams')
+      setError(httpErrorMessage(err, 'Could not fetch your GitHub teams.'))
     } finally {
       setLoading(false)
     }

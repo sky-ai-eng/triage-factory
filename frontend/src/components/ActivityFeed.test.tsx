@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ActivityFeed from './ActivityFeed'
 import type { ActivityAction, ActivityArtifact } from '../types'
+import { jsonBody } from '../test/apiResponse'
 
 const action = (over: Partial<ActivityAction>): ActivityAction => ({
   id: 'x1',
@@ -33,7 +34,7 @@ const artifact = (over: Partial<ActivityArtifact>): ActivityArtifact => ({
 function stubByView(actionsRows: ActivityAction[], objectsRows: ActivityArtifact[] = []) {
   const fetchMock = vi.fn().mockImplementation((url: string) => {
     const rows = String(url).includes('view=objects') ? objectsRows : actionsRows
-    return Promise.resolve({ ok: true, json: () => Promise.resolve(rows) })
+    return Promise.resolve({ ok: true, ...jsonBody(rows) })
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -110,12 +111,12 @@ describe('ActivityFeed', () => {
     const fetchMock = vi.fn().mockImplementation((url: string) => {
       if (String(url).includes('view=objects')) {
         return new Promise((resolve) => {
-          releaseObjects = (rows) => resolve({ ok: true, json: () => Promise.resolve(rows) })
+          releaseObjects = (rows) => resolve({ ok: true, ...jsonBody(rows) })
         })
       }
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve([action({ id: 'pr', target: 'org/repo#1' })]),
+        ...jsonBody([action({ id: 'pr', target: 'org/repo#1' })]),
       })
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -197,8 +198,8 @@ describe('ActivityFeed', () => {
     const page2 = [action({ id: 'p2-0', target: 'org/repo#999' })]
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(page1) })
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(page2) })
+      .mockResolvedValueOnce({ ok: true, ...jsonBody(page1) })
+      .mockResolvedValueOnce({ ok: true, ...jsonBody(page2) })
     vi.stubGlobal('fetch', fetchMock)
 
     render(<ActivityFeed baseUrl="/api/usage/teams/t1/activity" />)
@@ -216,13 +217,11 @@ describe('ActivityFeed', () => {
       vi.fn().mockResolvedValue({
         ok: false,
         status: 500,
-        text: () => Promise.resolve(''),
-        clone: () => ({ json: () => Promise.resolve({ error: 'boom' }) }),
+        text: () => Promise.resolve(JSON.stringify({ error: 'boom' })),
       }),
     )
     render(<ActivityFeed baseUrl="/api/usage/teams/t1/activity" />)
-    await waitFor(() =>
-      expect(screen.getByText(/Couldn't load activity: boom/)).toBeInTheDocument(),
-    )
+    // The server's message reaches the user verbatim — no fallback prefix.
+    await waitFor(() => expect(screen.getByText('boom')).toBeInTheDocument())
   })
 })

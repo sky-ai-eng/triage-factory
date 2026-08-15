@@ -15,7 +15,7 @@ import PendingPROverlay from '../components/PendingPROverlay'
 import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import { GlassBackdrop } from './setup/glass'
 import { toast } from '../components/Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 // RunDetail — the data shell for the full-screen run station. It loads the run +
 // task + messages (live over websocket via useRunDetail), wires the real
@@ -82,36 +82,31 @@ export default function RunDetail() {
       return
     }
     let cancelled = false
-    fetch(`/api/blueprint-runs/${run.blueprint_run_id}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then(
-        (
-          data: {
-            steps?: Array<{ step: BlueprintStep; run?: Conversation | null }>
-          } | null,
-        ) => {
-          if (cancelled || !data?.steps) return
-          setChainStepLabels(
-            data.steps.map((s) => ({ name: s.step?.name ?? '', brief: s.step?.brief ?? '' })),
-          )
-          const padded: Conversation[] = data.steps.map((s, i) => {
-            if (s.run) return s.run
-            // Synthetic row for a step that hasn't been spawned; its status is
-            // empty because it has no run, not a name outside the vocabulary.
-            return {
-              ID: `__pending-${run.blueprint_run_id}-${i}`,
-              TaskID: run.TaskID,
-              Status: '',
-              Model: '',
-              StartedAt: '',
-              ResultSummary: '',
-              blueprint_run_id: run.blueprint_run_id,
-              blueprint_step_index: i,
-            } as unknown as Conversation
-          })
-          setChainSteps(padded)
-        },
-      )
+    apiJSON<{ steps?: Array<{ step: BlueprintStep; run?: Conversation | null }> }>(
+      `/api/blueprint-runs/${run.blueprint_run_id}`,
+    )
+      .then((data) => {
+        if (cancelled || !data?.steps) return
+        setChainStepLabels(
+          data.steps.map((s) => ({ name: s.step?.name ?? '', brief: s.step?.brief ?? '' })),
+        )
+        const padded: Conversation[] = data.steps.map((s, i) => {
+          if (s.run) return s.run
+          // Synthetic row for a step that hasn't been spawned; its status is
+          // empty because it has no run, not a name outside the vocabulary.
+          return {
+            ID: `__pending-${run.blueprint_run_id}-${i}`,
+            TaskID: run.TaskID,
+            Status: '',
+            Model: '',
+            StartedAt: '',
+            ResultSummary: '',
+            blueprint_run_id: run.blueprint_run_id,
+            blueprint_step_index: i,
+          } as unknown as Conversation
+        })
+        setChainSteps(padded)
+      })
       .catch((err) => console.warn('Failed to load blueprint chain steps:', err))
     return () => {
       cancelled = true
@@ -127,10 +122,9 @@ export default function RunDetail() {
     if (!run || stopPending) return
     setStopPending(true)
     try {
-      const res = await fetch(`/api/agent/conversations/${run.ID}/stop`, { method: 'POST' })
-      if (!res.ok) toast.error(await readError(res, 'Failed to stop run'))
+      await apiFetch(`/api/agent/conversations/${run.ID}/stop`, { method: 'POST' })
     } catch (err) {
-      toast.error(`Failed to stop run: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not stop the run.'))
     } finally {
       setStopPending(false)
     }
@@ -143,14 +137,13 @@ export default function RunDetail() {
     async (text: string) => {
       if (!run) return
       try {
-        const res = await fetch(`/api/agent/conversations/${run.ID}/message`, {
+        await apiFetch(`/api/agent/conversations/${run.ID}/message`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text }),
         })
-        if (!res.ok) toast.error(await readError(res, 'Failed to send message'))
       } catch (err) {
-        toast.error(`Failed to send message: ${(err as Error).message}`)
+        toast.error(httpErrorMessage(err, 'Could not send the message.'))
       }
     },
     [run],
@@ -163,14 +156,10 @@ export default function RunDetail() {
     if (!run?.TaskID) return
     setRequeueBusy(true)
     try {
-      const res = await fetch(`/api/tasks/${run.TaskID}/requeue`, { method: 'POST' })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to return to queue'))
-        return
-      }
+      await apiFetch(`/api/tasks/${run.TaskID}/requeue`, { method: 'POST' })
       navigate(orgHref('/board'))
     } catch (err) {
-      toast.error(`Failed to return to queue: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not return the task to the queue.'))
     } finally {
       setRequeueBusy(false)
     }

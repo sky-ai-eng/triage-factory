@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { apiJSON } from '../lib/apiClient'
 
 interface TeamSettingsResponse {
   jira_projects: { key: string }[]
@@ -60,14 +61,10 @@ export default function TrackerProjectPickers({
     setLoading(true)
     const load = async () => {
       try {
-        const res = await fetch(`/api/settings/team/${encodeURIComponent(settingsTeam)}`, {
-          signal: controller.signal,
-        })
-        if (controller.signal.aborted) return
-        if (!res.ok) {
-          return
-        }
-        const data: TeamSettingsResponse = await res.json()
+        const data = await apiJSON<TeamSettingsResponse>(
+          `/api/settings/team/${encodeURIComponent(settingsTeam)}`,
+          { signal: controller.signal },
+        )
         if (controller.signal.aborted) return
         const keys = (data.jira_projects || []).map((p) => p.key)
         setJiraEnabled(keys.length > 0)

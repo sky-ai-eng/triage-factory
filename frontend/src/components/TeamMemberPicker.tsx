@@ -80,7 +80,7 @@ function PickerModal({
   useEffect(() => {
     let alive = true
     Promise.all([
-      apiJSON<{ members: OrgMemberApiRow[] }>('/members', { org: orgId }),
+      apiJSON<{ members: OrgMemberApiRow[] }>(`/api/orgs/${encodeURIComponent(orgId)}/members`),
       apiJSON<{ members: TeamRosterApiRow[] }>(`/api/teams/${teamId}/members`),
     ])
       .then(([org, team]) => {

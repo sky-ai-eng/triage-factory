@@ -6,6 +6,7 @@ import { useActiveOrgId } from '../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID, getGitHubAppStatus, getGitHubAppInstallURL } from '../lib/githubApp'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import SearchField from './SearchField'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 interface GitHubRepo {
   full_name: string
@@ -142,28 +143,20 @@ export default function RepoPickerModal({
     setLoading(true)
     setError('')
     try {
-      const res = await fetch('/api/github/repos')
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        console.error('Failed to fetch repos:', data.error || `HTTP ${res.status}`)
-        // TFAC-324's distinct 400: an active App installed on zero accounts (and
-        // no PAT to borrow) dead-ends the picker here. Point the user at the
-        // install affordance rather than the generic "couldn't fetch" copy.
-        if (data.error === 'GitHub App is not installed on any account') {
-          setError(
-            'Your GitHub App isn’t installed on any account yet. Install it from the “Install the App” step (or the App installation section in Settings), then try again.',
-          )
-        } else {
-          setError('Failed to fetch repositories')
-        }
-        return
-      }
-      const data: GitHubRepo[] = await res.json()
+      const data = await apiJSON<GitHubRepo[]>('/api/github/repos')
       setRepos(data)
       onReposFetched?.(data)
     } catch (err) {
       console.error('Failed to fetch repos:', err)
-      setError('Failed to fetch repositories')
+      // TFAC-324's distinct 400: an active App installed on zero accounts (and
+      // no PAT to borrow) dead-ends the picker here. Point the user at the
+      // install affordance rather than the generic "couldn't fetch" copy.
+      const message = httpErrorMessage(err, 'Failed to fetch repositories')
+      setError(
+        message === 'GitHub App is not installed on any account'
+          ? 'Your GitHub App isn’t installed on any account yet. Install it from the “Install the App” step (or the App installation section in Settings), then try again.'
+          : 'Failed to fetch repositories',
+      )
     } finally {
       setLoading(false)
     }

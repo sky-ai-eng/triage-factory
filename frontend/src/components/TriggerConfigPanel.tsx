@@ -8,7 +8,7 @@ import EventBadge from './EventBadge'
 import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
 import { toast } from './Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { blueprintsBase, handlersBase } from '../lib/scope'
 
 interface TriggerConfigPanelProps {
@@ -54,8 +54,7 @@ export default function TriggerConfigPanel({
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    fetch('/api/event-types')
-      .then((r) => (r.ok ? r.json() : []))
+    apiJSON<EventType[]>('/api/event-types')
       .then((data) => {
         if (!cancelled && Array.isArray(data)) setEventTypes(data)
       })
@@ -86,9 +85,8 @@ export default function TriggerConfigPanel({
 
     // Resolve the bound blueprint's name for the badge — blueprints expose
     // only a list endpoint, so fetch the list and find by id.
-    fetch(blueprintsBase())
-      .then((r) => (r.ok ? r.json() : []))
-      .then((list: Array<{ id: string; name: string }>) => {
+    apiJSON<Array<{ id: string; name: string }>>(blueprintsBase())
+      .then((list) => {
         const match = Array.isArray(list)
           ? list.find((b) => b.id === trigger.blueprint_id)
           : undefined
@@ -105,20 +103,15 @@ export default function TriggerConfigPanel({
     if (!trigger) return
     setEnabled(checked)
     try {
-      const res = await fetch(`${handlerBase}/${encodeURIComponent(trigger.id)}/toggle`, {
+      await apiFetch(`${handlerBase}/${encodeURIComponent(trigger.id)}/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: checked }),
       })
-      if (!res.ok) {
-        setEnabled(!checked)
-        toast.error(await readError(res, 'Failed to toggle trigger'))
-        return
-      }
       onRefresh?.()
     } catch (err) {
       setEnabled(!checked)
-      toast.error(`Failed to toggle trigger: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not toggle the trigger.'))
     }
   }
 
@@ -132,18 +125,14 @@ export default function TriggerConfigPanel({
         min_autonomy_suitability: minAutonomy,
         applies_to_unowned: appliesToUnowned,
       }
-      const res = await fetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, {
+      await apiFetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      if (res.ok) {
-        onSaved()
-      } else {
-        toast.error(await readError(res, 'Failed to save trigger'))
-      }
+      onSaved()
     } catch (err) {
-      toast.error(`Failed to save trigger: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not save the trigger.'))
     } finally {
       setSaving(false)
     }
@@ -152,16 +141,10 @@ export default function TriggerConfigPanel({
   const handleDelete = async () => {
     if (!trigger) return
     try {
-      const res = await fetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, {
-        method: 'DELETE',
-      })
-      if (res.ok) {
-        onDeleted()
-      } else {
-        toast.error(await readError(res, 'Failed to delete trigger'))
-      }
+      await apiFetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, { method: 'DELETE' })
+      onDeleted()
     } catch (err) {
-      toast.error(`Failed to delete trigger: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not delete the trigger.'))
     }
   }
 

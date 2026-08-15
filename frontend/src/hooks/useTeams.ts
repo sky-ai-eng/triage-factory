@@ -1,6 +1,6 @@
 import { useSyncExternalStore, useCallback, useEffect, useRef, useState } from 'react'
 import type { TeamsResponse, TeamSummary } from '../types'
-import { readError } from '../lib/api'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 // Shared store for GET /api/teams — the data source for the multi-team
 // selectors (the per-page read filter and the write-time picker) plus the
@@ -57,10 +57,8 @@ function load(): Promise<void> {
   if (inFlight) return inFlight
   const gen = generation
   setState({ loading: true, error: null })
-  inFlight = fetch('/api/teams')
-    .then(async (r) => {
-      if (!r.ok) throw new Error(await readError(r, 'Failed to load teams'))
-      const data = (await r.json()) as TeamsResponse
+  inFlight = apiJSON<TeamsResponse>('/api/teams')
+    .then((data) => {
       if (gen !== generation) return // superseded — a newer invalidation won
       setState({
         teams: data.teams ?? [],
@@ -72,7 +70,7 @@ function load(): Promise<void> {
     })
     .catch((err) => {
       if (gen !== generation) return
-      setState({ loading: false, error: err instanceof Error ? err.message : String(err) })
+      setState({ loading: false, error: httpErrorMessage(err, 'Could not load teams.') })
     })
     .finally(() => {
       // Only clear if it's still ours — supersedeInFlight may have already
@@ -149,14 +147,11 @@ export function useTeams(): UseTeams {
   }, [])
 
   const createTeam = useCallback(async (name: string): Promise<TeamSummary> => {
-    const res = await fetch('/api/teams', {
+    const created = await apiJSON<TeamSummary>('/api/teams', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify({ name }),
     })
-    if (!res.ok) throw new Error(await readError(res, 'Failed to create team'))
-    const created = (await res.json()) as TeamSummary
     // Supersede so the reload reflects the just-created team rather than a
     // pre-create fetch that may still be in flight.
     supersedeInFlight()

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { X } from 'lucide-react'
 import type { Project, ProjectVisibility } from '../types'
-import { readError } from '../lib/api'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from './Toast/toastStore'
 import RepoMultiSelect from './RepoMultiSelect'
@@ -123,7 +123,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
       const controller = new AbortController()
       abortRef.current = controller
       try {
-        const res = await fetch('/api/projects', {
+        const created = await apiJSON<Project>('/api/projects', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -137,11 +137,6 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
           }),
           signal: controller.signal,
         })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to create project'))
-          return
-        }
-        const created: Project = await res.json()
         // Sync the cache to the team this write landed on (the backend
         // resolver has already persisted it as the last-written default).
         if (team) noteWrittenTeam(team)
@@ -151,7 +146,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
         // Ignore abort — the close path that triggered it is
         // responsible for any user-facing feedback.
         if ((err as { name?: string })?.name === 'AbortError') return
-        toast.error(`Failed to create project: ${err instanceof Error ? err.message : String(err)}`)
+        toast.error(httpErrorMessage(err, 'Could not create the project.'))
       } finally {
         abortRef.current = null
         setSubmitting(false)

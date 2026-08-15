@@ -6,7 +6,7 @@ import RepoPickerModal from '../components/RepoPickerModal'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 // Repo tracking is per-team; writes go to the team's repos
 // endpoint. This page is pre-team-context, so it targets the org's
@@ -117,13 +117,11 @@ function BranchPicker({
 
       setLoading(true)
       try {
-        const res = await fetch(
+        const list = await apiJSON<string[]>(
           `/api/repos/${profile.owner}/${profile.repo}/branches?q=${encodeURIComponent(q)}`,
           { signal: controller.signal },
         )
-        if (res.ok && mountedRef.current) {
-          setBranches((await res.json()) as string[])
-        }
+        if (mountedRef.current) setBranches(list)
       } catch (err) {
         // AbortError is expected when a newer request supersedes this one;
         // the superseding call already set loading=true and will handle
@@ -687,16 +685,15 @@ export default function Repos() {
       // (GET /api/repos), but the *selection* — what Save/Re-profile writes
       // back to the default team — must come from the default team's own
       // tracked set, never the union (see TEAM_REPOS_PATH).
-      const [profilesRes, teamRes] = await Promise.all([
-        fetch('/api/repos'),
-        fetch(TEAM_REPOS_PATH),
+      // Each settles on its own: the cards are worth painting even when the
+      // team read fails, and a failed team read must not be mistaken for an
+      // empty tracked set (see setTeamLoadFailed below).
+      const [profiles, team] = await Promise.all([
+        apiJSON<RepoProfile[]>('/api/repos').catch(() => null),
+        apiJSON<{ repos?: string[] }>(TEAM_REPOS_PATH).catch(() => null),
       ])
-      if (profilesRes.ok) {
-        const data: RepoProfile[] = await profilesRes.json()
-        setProfiles(data)
-      }
-      if (teamRes.ok) {
-        const team: { repos?: string[] } = await teamRes.json()
+      if (profiles) setProfiles(profiles)
+      if (team) {
         setSelectedRepos(team.repos ?? [])
         setTeamLoadFailed(false)
       } else {
@@ -714,8 +711,7 @@ export default function Repos() {
 
   useEffect(() => {
     fetchData()
-    fetch('/api/settings/org')
-      .then((r) => (r.ok ? r.json() : null))
+    apiJSON<{ github_base_url?: string }>('/api/settings/org')
       .then((data) => {
         const url = data?.github_base_url
         if (typeof url === 'string' && url) {
@@ -780,20 +776,16 @@ export default function Repos() {
   const handleSaveRepos = async (repos: string[]) => {
     setSaving(true)
     try {
-      const res = await fetch(TEAM_REPOS_PATH, {
+      await apiFetch(TEAM_REPOS_PATH, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repos }),
       })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to save repositories'))
-      } else {
-        toast.success('Repositories updated — profiling will run shortly')
-        setSelectedRepos(repos)
-        setTimeout(fetchData, 5000)
-      }
+      toast.success('Repositories updated — profiling will run shortly')
+      setSelectedRepos(repos)
+      setTimeout(fetchData, 5000)
     } catch (err) {
-      toast.error(`Could not save repositories: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not save the repositories.'))
     } finally {
       setSaving(false)
       setPickerOpen(false)
@@ -810,19 +802,15 @@ export default function Repos() {
     }
     setSaving(true)
     try {
-      const res = await fetch(TEAM_REPOS_PATH, {
+      await apiFetch(TEAM_REPOS_PATH, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repos: selectedRepos }),
       })
-      if (res.ok) {
-        toast.success('Re-profiling started')
-        setTimeout(fetchData, 8000)
-      } else {
-        toast.error(await readError(res, 'Failed to start re-profile'))
-      }
+      toast.success('Re-profiling started')
+      setTimeout(fetchData, 8000)
     } catch (err) {
-      toast.error(`Could not start re-profile: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not start the re-profile.'))
     } finally {
       setSaving(false)
     }
@@ -830,20 +818,16 @@ export default function Repos() {
 
   const handleBranchChange = (profile: RepoProfile) => async (branch: string) => {
     try {
-      const res = await fetch(`/api/repos/${profile.owner}/${profile.repo}`, {
+      await apiFetch(`/api/repos/${profile.owner}/${profile.repo}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ base_branch: branch || null }),
       })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to update base branch'))
-        return
-      }
       setProfiles((prev) =>
         prev.map((p) => (p.id === profile.id ? { ...p, base_branch: branch } : p)),
       )
     } catch (err) {
-      toast.error(`Failed to update base branch: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not update the base branch.'))
     }
   }
 

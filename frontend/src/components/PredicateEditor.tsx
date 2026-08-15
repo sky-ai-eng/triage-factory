@@ -3,6 +3,7 @@ import * as Tooltip from '@radix-ui/react-tooltip'
 import { Info } from 'lucide-react'
 import type { FieldSchema } from '../types'
 import IdentityListField from './IdentityListField'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 interface PredicateEditorProps {
   eventType: string
@@ -29,11 +30,7 @@ export default function PredicateEditor({ eventType, value, onChange }: Predicat
     setLoading(true)
     setError('')
 
-    fetch(`/api/event-schemas/${encodeURIComponent(eventType)}`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`Failed to load schema for ${eventType}`)
-        return r.json()
-      })
+    apiJSON<{ fields?: FieldSchema[] }>(`/api/event-schemas/${encodeURIComponent(eventType)}`)
       .then((data) => {
         if (!cancelled) {
           setFields(data.fields || [])
@@ -42,7 +39,7 @@ export default function PredicateEditor({ eventType, value, onChange }: Predicat
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(err.message)
+          setError(httpErrorMessage(err, `Could not load the schema for ${eventType}.`))
           setFields([])
           setLoading(false)
         }

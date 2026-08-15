@@ -7,7 +7,7 @@ import { useOrgHref } from '../hooks/useOrgHref'
 import ArtifactList from './ArtifactList'
 import RequestedReviewerBadge from './RequestedReviewerBadge'
 import { toast } from './Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiFetch, httpErrorMessage } from '../lib/apiClient'
 import {
   chainPosition,
   completionKind,
@@ -194,12 +194,11 @@ export default function AgentCard({
                     type="button"
                     onClick={async () => {
                       try {
-                        const res = await fetch(`/api/agent/conversations/${run.ID}/stop`, {
+                        await apiFetch(`/api/agent/conversations/${run.ID}/stop`, {
                           method: 'POST',
                         })
-                        if (!res.ok) toast.error(await readError(res, 'Failed to stop run'))
                       } catch (err) {
-                        toast.error(`Failed to stop run: ${(err as Error).message}`)
+                        toast.error(httpErrorMessage(err, 'Could not stop the run.'))
                       }
                     }}
                     className="inline-flex items-center text-dismiss/40 transition-colors hover:text-dismiss"

@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/zalando/go-keyring"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
@@ -46,7 +50,14 @@ func seedWebhookApp(t *testing.T, s *Server) {
 }
 
 func sign(body []byte) string {
-	mac := hmac.New(sha256.New, []byte(testWebhookSecret))
+	return signWith(testWebhookSecret, body)
+}
+
+// signWith is sign for a delivery keyed by some other secret — what a rotation
+// test needs, since the whole question there is which of two secrets the
+// receiver is currently verifying against.
+func signWith(secret string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
@@ -210,15 +221,67 @@ func TestGitHubWebhook_NonInstallationEvent_PublishesToBus(t *testing.T) {
 	}
 }
 
-func TestGitHubWebhook_NoAppRegistered_404(t *testing.T) {
+// TestGitHubWebhook_NoApp_IndistinguishableFromBadSignature closes the
+// org-existence oracle. The receiver is pre-auth, so anything its reply reveals
+// is revealed to anyone: a 404 for "this org has no App" against a 401 for
+// "your signature is wrong" lets an unauthenticated caller walk a list of org
+// ids and learn which workspaces have a GitHub App registered. Both refusals
+// have to be the same answer, byte for byte — status, body, and the headers
+// that would otherwise differ (a 404 carries a Content-Type the bare 401 does
+// not).
+func TestGitHubWebhook_NoApp_IndistinguishableFromBadSignature(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+
+	body := []byte(`{"action":"created","installation":{"id":1,"account":{"login":"x","type":"User"}}}`)
+
+	noApp := newTestServer(t) // no app seeded — the org has nothing to verify against
+	noAppRec := postWebhook(noApp, "installation", sign(body), body)
+
+	badSig := newTestServer(t)
+	seedWebhookApp(t, badSig)
+	badSigRec := postWebhook(badSig, "installation", "sha256=deadbeef", body)
+
+	if noAppRec.Code != http.StatusUnauthorized {
+		t.Errorf("no-App status = %d, want 401 (same as a bad signature)", noAppRec.Code)
+	}
+	if badSigRec.Code != http.StatusUnauthorized {
+		t.Errorf("bad-signature status = %d, want 401", badSigRec.Code)
+	}
+	if noAppRec.Code != badSigRec.Code {
+		t.Errorf("statuses differ: no-App %d vs bad-signature %d", noAppRec.Code, badSigRec.Code)
+	}
+	if noAppRec.Body.String() != badSigRec.Body.String() {
+		t.Errorf("bodies differ: no-App %q vs bad-signature %q", noAppRec.Body.String(), badSigRec.Body.String())
+	}
+	if noAppRec.Body.Len() != 0 {
+		t.Errorf("no-App 401 has body %q, want empty", noAppRec.Body.String())
+	}
+	if got, want := noAppRec.Header(), badSigRec.Header(); !reflect.DeepEqual(got, want) {
+		t.Errorf("headers differ: no-App %v vs bad-signature %v", got, want)
+	}
+}
+
+// TestGitHubWebhook_PATOrg_IndistinguishableFromBadSignature is the same
+// invariant for the org that HAS a registered App row but is not in the App
+// credential system. It gets the same 401 — the receiver's reply never
+// distinguishes which credential system an org is in either.
+func TestGitHubWebhook_PATOrg_IndistinguishableFromBadSignature(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
-	// No app seeded.
+	seedWebhookApp(t, s)
+	// Flip the class out from under the registration: a PAT org has no App and
+	// so no deliveries to verify, whatever rows exist.
+	if err := s.orgs.SetGitHubCredentialClass(context.Background(), runmode.LocalDefaultOrgID, domain.GitHubCredentialClassPAT); err != nil {
+		t.Fatalf("set credential class: %v", err)
+	}
 
 	body := []byte(`{"action":"created","installation":{"id":1,"account":{"login":"x","type":"User"}}}`)
 	rec := postWebhook(s, "installation", sign(body), body)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (no registered app)", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (indistinguishable from a bad signature)", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("401 response has body %q, want empty", rec.Body.String())
 	}
 }
 
@@ -661,5 +724,249 @@ func TestGitHubWebhook_InstallationCreated_CapturesAccountID(t *testing.T) {
 	}
 	if got[0].AccountLogin != "acme" {
 		t.Errorf("AccountLogin = %q, want %q", got[0].AccountLogin, "acme")
+	}
+}
+
+// --- rate limiting -------------------------------------------------------
+
+// retuneSignedWebhookLimiter re-tunes the server's live signed-webhook limiter
+// in place and freezes its clock, so a test can reach the burst boundary in a
+// few requests instead of a hundred.
+//
+// In place, not swapped: routes() passed the limiter POINTER to the wrapper
+// when the route was mounted, so assigning a new limiter to the field after New
+// would leave the mounted route consulting the old one and the test asserting
+// nothing.
+func retuneSignedWebhookLimiter(t *testing.T, s *Server, rate, burst float64, clk *time.Time) {
+	t.Helper()
+	s.signedWebhookLimiter.rate = rate
+	s.signedWebhookLimiter.burst = burst
+	s.signedWebhookLimiter.now = func() time.Time { return *clk }
+}
+
+// TestGitHubWebhook_RateLimited is the ticket's headline: the receiver is
+// mounted THROUGH the signed-webhook limiter, so a flood against a valid org
+// URL is throttled. The positive half matters as much as the 429 — a delivery
+// inside the budget still lands, and the budget refills — because a limiter
+// that throttled real deliveries would take webhook ingest down with it.
+func TestGitHubWebhook_RateLimited(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+
+	clk := time.Now()
+	retuneSignedWebhookLimiter(t, s, signedWebhookRatePerSec, 3, &clk)
+
+	// One account per installation: the mirror holds at most one live row per
+	// (org, account_login), so reusing a login across ids would fail the
+	// upsert for reasons that have nothing to do with rate limiting.
+	delivery := func(id int) []byte {
+		return []byte(`{"action":"created","installation":{"id":` + strconv.Itoa(id) +
+			`,"account":{"login":"acme-` + strconv.Itoa(id) + `","type":"Organization"}}}`)
+	}
+	post := func(id int) *httptest.ResponseRecorder {
+		body := delivery(id)
+		return postWebhook(s, "installation", sign(body), body)
+	}
+
+	// The burst: legitimate, correctly-signed deliveries pass and are applied.
+	for i := 1; i <= 3; i++ {
+		if rec := post(i); rec.Code != http.StatusNoContent {
+			t.Fatalf("delivery %d = %d, want 204; body=%s", i, rec.Code, rec.Body.String())
+		}
+	}
+
+	// One past the budget: refused, and refused BEFORE the handler — the
+	// installation this delivery describes was never written.
+	rec := post(99)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("over-budget delivery = %d, want 429", rec.Code)
+	}
+	if ra := rec.Header().Get("Retry-After"); ra == "" {
+		t.Error("429 carries no Retry-After header")
+	}
+	for _, inst := range installations(t, s) {
+		if inst.InstallationID == "99" {
+			t.Error("a throttled delivery reached the handler and wrote installation 99")
+		}
+	}
+
+	// The budget refills, so a throttled sender recovers rather than being
+	// locked out.
+	clk = clk.Add(time.Second)
+	if rec := post(99); rec.Code != http.StatusNoContent {
+		t.Fatalf("delivery after refill = %d, want 204", rec.Code)
+	}
+}
+
+// TestGitHubWebhook_NotRateLimitedInLocalMode asserts the limiter is inert in
+// local mode, directly and on this route rather than by reading the wrapper. A
+// local install is N=1 — one user, one workspace, their own laptop — so there
+// is nothing to throttle and a cap could only cost them deliveries. Driven with
+// the PRODUCTION burst untouched: 3x more requests than the multi-mode budget
+// would allow, all of them served.
+func TestGitHubWebhook_NotRateLimitedInLocalMode(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+
+	body := []byte(`{"action":"synchronize","number":7}`)
+	for i := 0; i < int(signedWebhookBurst)*3; i++ {
+		rec := postWebhook(s, "pull_request", sign(body), body)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("local-mode delivery %d = %d, want 204 (no limiting at N=1)", i+1, rec.Code)
+		}
+	}
+}
+
+// --- the webhook-secret cache --------------------------------------------
+
+// countingSecrets counts GetSystem reads against the wrapped store — the vault
+// traffic the receiver's secret cache exists to keep off an unauthenticated
+// flood.
+type countingSecrets struct {
+	db.SecretStore
+	mu sync.Mutex
+	n  int
+}
+
+func (c *countingSecrets) GetSystem(ctx context.Context, orgID, key string) (string, error) {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	return c.SecretStore.GetSystem(ctx, orgID, key)
+}
+
+func (c *countingSecrets) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+// TestGitHubWebhook_SecretCached_UnderFloodOfForgedDeliveries is why the cache
+// is in this ticket rather than a later one. Every request to this pre-auth
+// route resolves the org's webhook secret BEFORE it can check a signature, so
+// without a cache a flood of garbage aimed at one org URL turns into a vault
+// read per request — the rate limiter caps the rate, and this caps the cost of
+// each one that gets through.
+func TestGitHubWebhook_SecretCached_UnderFloodOfForgedDeliveries(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+
+	counter := &countingSecrets{SecretStore: s.secrets}
+	s.secrets = counter
+
+	body := []byte(`{"action":"created","installation":{"id":4242,"account":{"login":"acme","type":"Organization"}}}`)
+	for i := 0; i < 50; i++ {
+		if rec := postWebhook(s, "installation", "sha256=deadbeef", body); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("forged delivery %d = %d, want 401", i+1, rec.Code)
+		}
+	}
+	if got := counter.count(); got != 1 {
+		t.Errorf("50 forged deliveries cost %d vault reads, want 1 (the cache miss that filled the entry)", got)
+	}
+}
+
+// TestGitHubWebhook_NoAppSecretCached_UnderFlood is the same property for the
+// org that has nothing to verify against. The negative is worth caching for
+// exactly the reason the positive is: an unauthenticated caller picks the org
+// id in the URL, so the cheapest flood to mount is one aimed at an org with no
+// App at all, and that must not cost a settings read plus a registration read
+// per request either.
+func TestGitHubWebhook_NoAppSecretCached_UnderFlood(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	// No app seeded.
+
+	body := []byte(`{"action":"created","installation":{"id":1,"account":{"login":"x","type":"User"}}}`)
+	for i := 0; i < 10; i++ {
+		if rec := postWebhook(s, "installation", sign(body), body); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("delivery %d to an org with no App = %d, want 401", i+1, rec.Code)
+		}
+	}
+	if _, _, ok := s.webhookSecretCacheGet(runmode.LocalDefaultOrgID); !ok {
+		t.Error("no cached entry after a flood at an org with no App; every request re-read the stores")
+	}
+}
+
+// TestGitHubWebhook_TeardownInvalidatesCachedSecret is one half of "the cache
+// never serves a stale secret past a rotation": the App is torn down through
+// the real discard route, and the secret that verified deliveries a moment ago
+// stops verifying them immediately — not at the end of the TTL.
+func TestGitHubWebhook_TeardownInvalidatesCachedSecret(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedLocalApp(t, s, false) // staged, so the discard route accepts it
+
+	body := []byte(`{"action":"synchronize","number":7}`)
+	sig := signWith("webhook-secret", body) // the secret seedLocalApp stores
+	if rec := postWebhook(s, "pull_request", sig, body); rec.Code != http.StatusNoContent {
+		t.Fatalf("delivery before teardown = %d, want 204 (the cache is primed by this)", rec.Code)
+	}
+
+	rec := doJSON(t, s, http.MethodDelete, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("discard = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	if rec := postWebhook(s, "pull_request", sig, body); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("delivery after teardown = %d, want 401 — the destroyed secret is still verifying deliveries", rec.Code)
+	}
+}
+
+// TestGitHubWebhook_RegistrationInvalidatesCachedSecret is the other half, and
+// the one a cache-only-positives design would fail: a delivery that arrives
+// before the App is registered caches "this org verifies nothing", and GitHub
+// starts delivering the moment registration completes. Without invalidation on
+// the write path, every one of those first deliveries is rejected until the
+// entry expires.
+func TestGitHubWebhook_RegistrationInvalidatesCachedSecret(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	// GitHub's manifest-conversion endpoint, handing back the webhook secret
+	// the registration will store.
+	const registeredSecret = "wh-from-github"
+	convStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":4242,"slug":"tf","client_id":"Iv1.x","client_secret":"cs",` +
+			`"pem":"-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",` +
+			`"webhook_secret":"` + registeredSecret + `"}`))
+	}))
+	t.Cleanup(convStub.Close)
+
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+	s.SetDeployConfig("http://localhost:3000", key)
+	setOrgGitHubBase(t, s, convStub.URL)
+
+	// A delivery lands while the org still has no App — this is what fills the
+	// cache with the negative.
+	body := []byte(`{"action":"synchronize","number":7}`)
+	if rec := postWebhook(s, "pull_request", signWith(registeredSecret, body), body); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("pre-registration delivery = %d, want 401", rec.Code)
+	}
+
+	state := appRegisterState{
+		OrgID: runmode.LocalDefaultOrgID, OwnerType: "user",
+		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
+	}
+	signed, err := state.sign(key)
+	if err != nil {
+		t.Fatalf("sign state: %v", err)
+	}
+	if rec := doJSON(t, s, http.MethodGet,
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/register/callback?code=c&state="+signed, nil); rec.Code != http.StatusFound {
+		t.Fatalf("register callback = %d, want 302; body=%s", rec.Code, rec.Body.String())
+	}
+
+	if rec := postWebhook(s, "pull_request", signWith(registeredSecret, body), body); rec.Code != http.StatusNoContent {
+		t.Fatalf("first delivery after registration = %d, want 204 — the pre-registration negative is still cached", rec.Code)
 	}
 }

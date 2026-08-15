@@ -2,12 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import ActionList from './ActionList'
 import type { ActivityAction } from '../types'
+import { jsonBody } from '../test/apiResponse'
 
 // One fetch mock returning the given rows for GET …/actions.
 function mockActions(actions: ActivityAction[]) {
   const fetchMock = vi.fn().mockResolvedValue({
     ok: true,
-    json: () => Promise.resolve(actions),
+    ...jsonBody(actions),
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -36,7 +37,7 @@ describe('ActionList', () => {
 
     expect(await screen.findByText('Comment posted')).toBeInTheDocument()
     expect(screen.getByText('Branch pushed')).toBeInTheDocument()
-    expect(fetchMock).toHaveBeenCalledWith('/api/agent/conversations/r1/actions')
+    expect(fetchMock).toHaveBeenCalledWith('/api/agent/conversations/r1/actions', expect.anything())
   })
 
   it('shows an unclassified write as the request it actually was', async () => {
@@ -116,19 +117,16 @@ describe('ActionList', () => {
   it('surfaces a failed load instead of an empty audit list', async () => {
     // "No external actions yet" on a failed fetch would be a false statement
     // about a governance surface — worse than an error.
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue({ ok: false, status: 500, json: () => Promise.resolve({}) }),
-    )
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500, ...jsonBody({}) }))
     render(<ActionList runId="r1" />)
-    expect(await screen.findByText(/Couldn't load actions/)).toBeInTheDocument()
+    expect(await screen.findByText(/Couldn't load this run's actions\./)).toBeInTheDocument()
   })
 
   it('keeps the rows it has when a soft refetch fails', async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve([action({ id: 'a1' })]) })
-      .mockResolvedValueOnce({ ok: false, status: 500, json: () => Promise.resolve({}) })
+      .mockResolvedValueOnce({ ok: true, ...jsonBody([action({ id: 'a1' })]) })
+      .mockResolvedValueOnce({ ok: false, status: 500, ...jsonBody({}) })
     vi.stubGlobal('fetch', fetchMock)
 
     const { rerender } = render(<ActionList runId="r1" refreshKey="running:1" />)

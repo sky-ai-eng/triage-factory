@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react'
 import { Layers } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt } from '../types'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import { apiJSON } from '../lib/apiClient'
 import TeamPicker from './TeamPicker'
 
 interface Props {
@@ -159,7 +160,7 @@ export default function PromptPicker({
     const load = async () => {
       // The 'prompts' source is already a flat list carrying bodies + models.
       if (source !== 'blueprints') {
-        const data: Prompt[] = await fetch(`/api/prompts${q}`).then((r) => r.json())
+        const data = await apiJSON<Prompt[]>(`/api/prompts${q}`)
         if (!cancelled) setItems(data.map((p) => ({ ...p })))
         return
       }
@@ -170,11 +171,9 @@ export default function PromptPicker({
       // former per-blueprint N+1. A failed steps fetch degrades to empty
       // compositions rather than breaking the picker.
       const [blueprints, promptList, allSteps] = await Promise.all([
-        fetch(`/api/blueprints${q}`).then((r) => r.json() as Promise<Blueprint[]>),
-        fetch(`/api/prompts${q}`).then((r) => r.json() as Promise<Prompt[]>),
-        fetch(`/api/blueprint-steps${q}`)
-          .then((r) => r.json() as Promise<BlueprintStep[]>)
-          .catch(() => [] as BlueprintStep[]),
+        apiJSON<Blueprint[]>(`/api/blueprints${q}`),
+        apiJSON<Prompt[]>(`/api/prompts${q}`),
+        apiJSON<BlueprintStep[]>(`/api/blueprint-steps${q}`).catch(() => [] as BlueprintStep[]),
       ])
       const promptById = new Map(promptList.map((p): [string, Prompt] => [p.id, p]))
       const stepsByBlueprint = new Map<string, BlueprintStep[]>()

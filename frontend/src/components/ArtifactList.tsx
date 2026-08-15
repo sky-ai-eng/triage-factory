@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Artifact } from '../types'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { toast } from './Toast/toastStore'
 import { ArtifactRow } from './ArtifactRow'
 
@@ -64,21 +64,14 @@ export default function ArtifactList({
   const load = useCallback(async () => {
     const gen = ++generation.current
     try {
-      const res = await fetch(`/api/agent/conversations/${runId}/artifacts`)
-      if (!res.ok) {
-        // readError keeps the context ("Couldn't load artifacts: …") and
-        // degrades through the server's JSON `error`, a non-JSON text body,
-        // then the bare status code — never a context-less raw message.
-        throw new Error(await readError(res, "Couldn't load artifacts"))
-      }
-      const data = (await res.json()) as Artifact[]
+      const data = await apiJSON<Artifact[]>(`/api/agent/conversations/${runId}/artifacts`)
       if (generation.current === gen) {
         setArtifacts(data ?? [])
         setError(null)
       }
     } catch (err) {
       if (generation.current === gen) {
-        setError(err instanceof Error ? err.message : String(err))
+        setError(httpErrorMessage(err, "Couldn't load this run's artifacts."))
       }
     }
   }, [runId])
@@ -119,18 +112,14 @@ export default function ArtifactList({
     if (dismissing[a.id]) return
     setDismissing((m) => ({ ...m, [a.id]: true }))
     try {
-      const res = await fetch(`/api/artifacts/${a.id}/dismiss`, { method: 'POST' })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to dismiss'))
-        return
-      }
+      await apiFetch(`/api/artifacts/${a.id}/dismiss`, { method: 'POST' })
       // Resolution is async + non-blocking: it touches only the GitHub object +
       // artifact row, never the run. Reload in place (the row flips to its
       // resolved state) and let the owner re-derive the projection.
       await load()
       onResolved?.()
     } catch (err) {
-      toast.error(`Failed to dismiss: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not dismiss the artifact.'))
     } finally {
       setDismissing((m) => {
         const next = { ...m }

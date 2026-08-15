@@ -6,6 +6,7 @@ import tseslint from 'typescript-eslint'
 import prettier from 'eslint-config-prettier'
 import { defineConfig, globalIgnores } from 'eslint/config'
 import noGhostRunStatus from './eslint-rules/no-ghost-run-status.js'
+import noRawApiFetch from './eslint-rules/no-raw-api-fetch.js'
 
 export default defineConfig([
   globalIgnores(['dist']),
@@ -27,9 +28,13 @@ export default defineConfig([
     // branches on them, which is where the retired statuses actually lived.
     plugins: {
       'run-status': { rules: { 'no-ghost-run-status': noGhostRunStatus } },
+      // lib/apiClient is the only door to /api — see the rule's header for the
+      // three behaviours a raw fetch opts out of.
+      api: { rules: { 'no-raw-api-fetch': noRawApiFetch } },
     },
     rules: {
       'run-status/no-ghost-run-status': 'error',
+      'api/no-raw-api-fetch': 'error',
       '@typescript-eslint/no-unused-vars': [
         'error',
         {

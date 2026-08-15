@@ -8,6 +8,7 @@ import TriggerConfigPanel from './TriggerConfigPanel'
 import ViewOnlyBadge from './ViewOnlyBadge'
 import { useTeamRole } from '../hooks/useTeamRole'
 import type { TriggerHandler, RuleHandler } from '../types'
+import { apiJSON } from '../lib/apiClient'
 
 // PromptsWorkspace is the single-team prompt/auto-delegation editor: the
 // BindingGraph canvas plus the drawers that create/edit prompts, triggers, and
@@ -96,21 +97,11 @@ export default function PromptsWorkspace({
       const teamQuery = teamId ? `&team_id=${encodeURIComponent(teamId)}` : ''
       try {
         const [triggersRes, rulesRes] = await Promise.all([
-          fetch(`/api/event-handlers?kind=trigger${teamQuery}`).then((r) => {
-            if (!r.ok) throw new Error()
-            return r.json()
-          }),
-          fetch(`/api/event-handlers?kind=rule${teamQuery}`).then((r) => {
-            if (!r.ok) throw new Error()
-            return r.json()
-          }),
+          apiJSON<TriggerHandler[]>(`/api/event-handlers?kind=trigger${teamQuery}`),
+          apiJSON<RuleHandler[]>(`/api/event-handlers?kind=rule${teamQuery}`),
         ])
-        const hasTrigger = (triggersRes as TriggerHandler[]).some(
-          (t) => t.event_type === eventType && t.enabled,
-        )
-        const hasRule = (rulesRes as RuleHandler[]).some(
-          (r) => r.event_type === eventType && r.enabled,
-        )
+        const hasTrigger = triggersRes.some((t) => t.event_type === eventType && t.enabled)
+        const hasRule = rulesRes.some((r) => r.event_type === eventType && r.enabled)
         if (!hasTrigger && !hasRule) {
           setBannerEventType(eventType)
         }

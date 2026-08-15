@@ -26,6 +26,7 @@ import { CSS } from '@dnd-kit/utilities'
 import PRCard from '../components/PRCard'
 import { useWebSocket } from '../hooks/useWebSocket'
 import type { WSEvent } from '../types'
+import { apiFetch, apiJSON } from '../lib/apiClient'
 
 export interface PRSummary {
   number: number
@@ -82,14 +83,10 @@ export default function PRDashboard() {
   const hasLoadedOnce = useRef(false)
   const fetchAll = useCallback(async () => {
     if (!hasLoadedOnce.current) setLoading(true)
-    const parseOrThrow = async (r: Response, label: string) => {
-      if (!r.ok) throw new Error(`${label}: HTTP ${r.status}`)
-      return r.json()
-    }
     try {
       const [prsRes, statsRes] = await Promise.all([
-        fetch('/api/dashboard/prs').then((r) => parseOrThrow(r, 'prs')),
-        fetch('/api/dashboard/stats').then((r) => parseOrThrow(r, 'stats')),
+        apiJSON<PRSummary[]>('/api/dashboard/prs'),
+        apiJSON<Stats>('/api/dashboard/stats'),
       ])
       setPrs(prsRes)
       setStats(statsRes)
@@ -214,16 +211,13 @@ export default function PRDashboard() {
 
     // Hit the API
     try {
-      const res = await fetch(`/api/dashboard/prs/${pr.number}/draft?repo=${pr.repo}`, {
+      await apiFetch(`/api/dashboard/prs/${pr.number}/draft?repo=${pr.repo}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ draft: makeDraft }),
       })
-      if (!res.ok) {
-        // Revert on failure
-        setPrs((prev) => prev.map((p) => (prKey(p) === id ? { ...p, draft: !makeDraft } : p)))
-      }
     } catch {
+      // Revert on failure
       setPrs((prev) => prev.map((p) => (prKey(p) === id ? { ...p, draft: !makeDraft } : p)))
     }
 

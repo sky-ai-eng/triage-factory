@@ -14,7 +14,7 @@
 // current token" contract to remember. If the user didn't type a token, don't
 // call this — the stored one is untouched because nothing asked it to change.
 
-import { readError } from '../../lib/api'
+import { apiFetch, httpErrorMessage } from '../../lib/apiClient'
 
 // CredentialResult carries the bind/unbind outcome. `login` is the identity the
 // bound credential resolved to (GitHub only, and only on a bind) — the caller
@@ -71,21 +71,20 @@ async function credentialRequest(
   body?: unknown,
 ): Promise<CredentialResult> {
   try {
-    const res = await fetch(url, {
+    // A DELETE may answer 204 with no body, so this reads the response itself
+    // rather than going through apiJSON, and parses best-effort.
+    const res = await apiFetch(url, {
       method,
       ...(body === undefined
         ? {}
         : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
     })
-    if (!res.ok) {
-      return { ok: false, error: await readError(res, 'Request failed') }
-    }
     const parsed = (await res.json().catch(() => null)) as {
       warning?: string
       login?: string
     } | null
     return { ok: true, warning: parsed?.warning, login: parsed?.login }
-  } catch {
-    return { ok: false, error: 'Could not reach the server.' }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not reach the server.') }
   }
 }

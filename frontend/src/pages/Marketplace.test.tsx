@@ -11,6 +11,7 @@ import type { EventType } from '../types'
 vi.mock('../hooks/useOrgHref', () => ({ useOrgHref: () => (path: string) => path }))
 
 import Marketplace from './Marketplace'
+import { jsonBody } from '../test/apiResponse'
 
 const EVENT_TYPES: EventType[] = [
   {
@@ -84,18 +85,18 @@ function mockFetchRouter(opts: {
     const url = String(input)
     const path = url.split('?')[0]
     if (path === '/api/event-types') {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(EVENT_TYPES) })
+      return Promise.resolve({ ok: true, ...jsonBody(EVENT_TYPES) })
     }
     if (path === '/api/marketplace/listings') {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(opts.listings ?? []) })
+      return Promise.resolve({ ok: true, ...jsonBody(opts.listings ?? []) })
     }
     if (/^\/api\/marketplace\/listings\/[^/]+\/vote$/.test(path)) {
-      return Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve(null) })
+      return Promise.resolve({ ok: true, status: 204, ...jsonBody(null) })
     }
     if (/^\/api\/marketplace\/listings\/[^/]+$/.test(path)) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(opts.detail ?? null) })
+      return Promise.resolve({ ok: true, ...jsonBody(opts.detail ?? null) })
     }
-    return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) })
+    return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -293,9 +294,10 @@ describe('Marketplace', () => {
       expect(screen.getByRole('button', { name: 'Remove recommendation' })).toHaveTextContent('3')
 
       await waitFor(() => {
-        expect(fetchMock).toHaveBeenCalledWith('/api/marketplace/listings/l1/vote', {
-          method: 'PUT',
-        })
+        expect(fetchMock).toHaveBeenCalledWith(
+          '/api/marketplace/listings/l1/vote',
+          expect.objectContaining({ method: 'PUT' }),
+        )
       })
     })
 
@@ -318,9 +320,10 @@ describe('Marketplace', () => {
       expect(screen.getByRole('button', { name: 'Recommend' })).toHaveTextContent('2')
 
       await waitFor(() => {
-        expect(fetchMock).toHaveBeenCalledWith('/api/marketplace/listings/l1/vote', {
-          method: 'DELETE',
-        })
+        expect(fetchMock).toHaveBeenCalledWith(
+          '/api/marketplace/listings/l1/vote',
+          expect.objectContaining({ method: 'DELETE' }),
+        )
       })
     })
 
@@ -329,13 +332,12 @@ describe('Marketplace', () => {
         const url = String(input)
         const path = url.split('?')[0]
         if (path === '/api/event-types') {
-          return Promise.resolve({ ok: true, json: () => Promise.resolve([]) })
+          return Promise.resolve({ ok: true, ...jsonBody([]) })
         }
         if (path === '/api/marketplace/listings' && !url.includes('/vote')) {
           return Promise.resolve({
             ok: true,
-            json: () =>
-              Promise.resolve([listing({ id: 'l1', vote_count: 1, viewer_voted: false })]),
+            ...jsonBody([listing({ id: 'l1', vote_count: 1, viewer_voted: false })]),
           })
         }
         if (path.endsWith('/vote')) {
@@ -343,10 +345,9 @@ describe('Marketplace', () => {
             ok: false,
             status: 500,
             text: () => Promise.resolve(''),
-            clone: () => ({ json: () => Promise.reject(new Error('not json')) }),
           })
         }
-        return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) })
+        return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })
       })
       vi.stubGlobal('fetch', fetchMock)
       renderPage()

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { apiJSON, HttpError } from '../lib/apiClient'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import type { JiraIdentityStatus } from '../types'
 
 export type JiraIdentityState =
@@ -32,18 +32,18 @@ export function useJiraIdentity(orgId: string | null): UseJiraIdentity {
       if (!orgId) return
       setState({ status: 'loading' })
       try {
-        const data = await apiJSON<JiraIdentityStatus>('/jira/identity', { org: orgId, signal })
+        const data = await apiJSON<JiraIdentityStatus>(
+          `/api/orgs/${encodeURIComponent(orgId)}/jira/identity`,
+          { signal },
+        )
         if (signal?.aborted) return
         setState({ status: 'ready', data })
       } catch (err) {
         if (signal?.aborted) return
-        const msg =
-          err instanceof HttpError
-            ? `HTTP ${err.status}`
-            : err instanceof Error
-              ? err.message
-              : String(err)
-        setState({ status: 'error', error: msg })
+        setState({
+          status: 'error',
+          error: httpErrorMessage(err, 'Could not load your Jira identity.'),
+        })
       }
     },
     [orgId],
