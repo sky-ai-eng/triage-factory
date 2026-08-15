@@ -54,6 +54,28 @@ Two consequences worth keeping: `mutate` describes the row after the verb (or
 returns `null` to drop it), and `onCommit` is the only place a request belongs.
 Starting a second action commits the first rather than stacking snapshots.
 
+**Everything the table can apply, `onCommit` must be able to send.** It receives
+the picked option alongside the action id, because a caller that can apply a
+role change has to be able to send one — without it the screen shows a change
+the server never hears about, and a refresh silently reverts it. That is the
+failure this model invites if the handler is not exhaustive, and it is silent.
+
+**A window can end three ways, and all three owe the request.** `reason` says
+which:
+
+| | |
+| --- | --- |
+| `window` | it ran out, or a second action cut it short |
+| `navigation` | the table unmounted with a window still open |
+| `unload` | the page is going away |
+
+The last two used to drop the request — the reader watched the row go and
+nothing was sent. They flush now. On `unload` the caller must set
+`keepalive: true` on the request, or the browser kills it with the document;
+`sendBeacon` is not a substitute, since it is POST-only and cannot express a
+PATCH or a DELETE. An undone window sends nothing, however it ends, and several
+endings racing send exactly once.
+
 ## The treatment
 
 **A page is a fixed frame.** Paging, not a scroller: the row under the cursor

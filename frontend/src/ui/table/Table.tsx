@@ -82,7 +82,27 @@ export type TableProps = {
   footer?: ReactNode
   selectable?: boolean
   mutate?: ((row: TableRow, actionId: string, pick?: PickerOption) => TableRow | null) | null
-  onCommit?: ((actionId: string, ids: Array<string | number>) => void) | null
+  /**
+   * The only place a request belongs. Called once, when the undo window closes
+   * — never when it opens, because the whole point is that an undone action is
+   * never sent.
+   *
+   * `pick` is the option a picker verb resolved to, because a caller that can
+   * APPLY a role change has to be able to SEND it; without it the table shows a
+   * change the server never hears about.
+   *
+   * `reason` says why the window closed, because the answer changes the
+   * transport. On 'unload' an ordinary fetch is killed with the page: use
+   * `keepalive: true` (not sendBeacon, which is POST-only and cannot express a
+   * PATCH or a DELETE).
+   */
+  onCommit?:
+    | ((
+        actionId: string,
+        ids: Array<string | number>,
+        ctx: { pick?: PickerOption; reason: TableCommitReason },
+      ) => void)
+    | null
   emptyLabel?: string
   /**
    * Pages, not a scroller: a long estate read in fixed-height screens, so the
@@ -148,6 +168,18 @@ type PagerButton = {
   label?: string
 }
 
+/**
+ * Why the undo window closed.
+ *
+ *   window     — it ran out, or a second action cut it short. The normal path.
+ *   navigation — the table unmounted with a window still open. The action was
+ *                applied on screen, so dropping it here would silently discard
+ *                a change the reader watched happen.
+ *   unload     — the page is going away. Same obligation, less time: an
+ *                ordinary fetch dies with the document.
+ */
+export type TableCommitReason = 'window' | 'navigation' | 'unload'
+
 /** The held mutation: applied to what you see, not yet sent. */
 type TablePending = {
   actionId: string
@@ -155,6 +187,8 @@ type TablePending = {
   snapshot: TableRow[]
   label: string
   left: number
+  /** The picked option, carried so onCommit can send what mutate applied. */
+  pick?: PickerOption
 }
 
 // A type supplies defaults; the column overrides them.
@@ -222,6 +256,29 @@ export function Table({
 
   const anchor = useRef<string | number | null>(null)
   const timer = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // The pending mutation, mirrored where a cleanup function and an unload
+  // listener can reach it — neither can read state, and both have to be able to
+  // send what is owed.
+  const pendingRef = useRef<TablePending | null>(null)
+  const commitRef = useRef(onCommit)
+  useEffect(() => {
+    pendingRef.current = pending
+    commitRef.current = onCommit
+  })
+
+  /**
+   * Send what is owed, once. Everything that ends a window goes through here so
+   * there is exactly one place a request is made and exactly one place the
+   * pending is cleared — a second caller finds it already gone.
+   */
+  const commitPending = useCallback((reason: TableCommitReason) => {
+    const p = pendingRef.current
+    if (!p) return
+    pendingRef.current = null
+    if (timer.current) clearInterval(timer.current)
+    commitRef.current?.(p.actionId, p.ids, { pick: p.pick, reason })
+  }, [])
 
   // Adjusted during render, not in an effect: an effect would paint the
   // previous rows once and then replace them, which on a table that just
@@ -583,15 +640,15 @@ export function Table({
   // Committing early (a second action, or the bar's own Do it now) must not
   // leave a timer running against a snapshot nobody can reach any more.
   const finish = useCallback(() => {
-    if (timer.current) clearInterval(timer.current)
-    setPending((p) => {
-      if (p && onCommit) onCommit(p.actionId, p.ids)
-      return null
-    })
-  }, [onCommit])
+    commitPending('window')
+    setPending(null)
+  }, [commitPending])
 
   const undo = useCallback(() => {
     if (timer.current) clearInterval(timer.current)
+    // Cleared here too, or the unmount flush would send an action the reader
+    // just took back.
+    pendingRef.current = null
     setPending((p) => {
       if (p) setWorking(p.snapshot)
       return null
@@ -616,31 +673,37 @@ export function Table({
         snapshot,
         label: action.message ? action.message(ids.length, pick) : ids.length + ' rows changed',
         left: UNDO_MS,
+        pick,
       })
       if (timer.current) clearInterval(timer.current)
       const started = Date.now()
       timer.current = setInterval(() => {
         const left = UNDO_MS - (Date.now() - started)
         if (left <= 0) {
-          if (timer.current) clearInterval(timer.current)
-          setPending((p) => {
-            if (p && onCommit) onCommit(p.actionId, p.ids)
-            return null
-          })
+          commitPending('window')
+          setPending(null)
         } else {
           setPending((p) => (p ? { ...p, left } : p))
         }
       }, 100)
     },
-    [n, selIds, working, mutate, pending, finish, onCommit],
+    [n, selIds, working, mutate, pending, finish, commitPending],
   )
 
-  useEffect(
-    () => () => {
+  // Two ways a window can end without the timer reaching zero, and both owe the
+  // same request. Dropping it would discard a change the reader watched land.
+  //
+  // `pagehide` rather than `beforeunload`: it fires on the bfcache path and on
+  // mobile Safari, where beforeunload does not.
+  useEffect(() => {
+    const onHide = () => commitPending('unload')
+    window.addEventListener('pagehide', onHide)
+    return () => {
+      window.removeEventListener('pagehide', onHide)
       if (timer.current) clearInterval(timer.current)
-    },
-    [],
-  )
+      commitPending('navigation')
+    }
+  }, [commitPending])
 
   // Bound to locals before the JSX. A narrowing on `bar.picker` does not
   // survive into the callbacks below — a property access could in principle

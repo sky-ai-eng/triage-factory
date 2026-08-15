@@ -109,6 +109,25 @@ export default function TeamSettings() {
   const { roleForTeam } = useTeamRole()
   const isAdmin = roleForTeam(teamId) === 'admin'
 
+  // The two writes this page makes, defined once. `keepalive` keeps the request
+  // alive past the document on the unload path; sendBeacon cannot be used here
+  // because it is POST-only and these are a PATCH and a DELETE.
+  const sendRole = useCallback(
+    (userId: string, role: string, keepalive = false) =>
+      apiFetch(`/api/teams/${teamId}/members/${userId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role }),
+        keepalive,
+      }),
+    [teamId],
+  )
+  const sendRemove = useCallback(
+    (userId: string, keepalive = false) =>
+      apiFetch(`/api/teams/${teamId}/members/${userId}`, { method: 'DELETE', keepalive }),
+    [teamId],
+  )
+
   const adapter = useMemo<MemberRosterAdapter>(
     () => ({
       roles: TEAM_ROLES,
@@ -128,18 +147,17 @@ export default function TeamSettings() {
           isCurrentUser: m.is_current_user,
         }))
       },
+      // The hook's own mutation choreography goes through the same two writers,
+      // so there is one implementation and two entry points rather than two
+      // implementations that can drift.
       async changeRole(userId, role) {
-        await apiFetch(`/api/teams/${teamId}/members/${userId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role }),
-        })
+        await sendRole(userId, role)
       },
       async remove(userId) {
-        await apiFetch(`/api/teams/${teamId}/members/${userId}`, { method: 'DELETE' })
+        await sendRemove(userId)
       },
     }),
-    [teamId],
+    [teamId, sendRole, sendRemove],
   )
 
   const { members, loading, error } = useMemberRoster(adapter)
@@ -339,8 +357,22 @@ export default function TeamSettings() {
               if (id === 'remove') return null
               return { ...row, role: pick ? pick.id : row.role }
             }}
-            onCommit={(id, ids) => {
-              if (id === 'remove') ids.map(String).forEach((u) => void adapter.remove(u))
+            // The only place a request is made. Every action the table can
+            // apply has to be sent from here — a verb that is applied on screen
+            // and never sent leaves the reader looking at a change the server
+            // has not heard about, which a refresh silently reverts.
+            //
+            // On unload the fetch is given `keepalive`, or the browser kills it
+            // with the document. sendBeacon is not an option: it is POST-only,
+            // and these are a PATCH and a DELETE.
+            onCommit={(id, ids, { pick, reason }) => {
+              const alive = reason === 'unload'
+              const list = ids.map(String)
+              if (id === 'remove') {
+                list.forEach((u) => void sendRemove(u, alive))
+              } else if (id === 'role' && pick) {
+                list.forEach((u) => void sendRole(u, pick.id, alive))
+              }
             }}
           />
         )

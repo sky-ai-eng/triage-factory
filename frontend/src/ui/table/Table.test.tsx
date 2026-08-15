@@ -102,7 +102,11 @@ describe('Table — the undo model', () => {
     act(() => {
       vi.advanceTimersByTime(10_000)
     })
-    expect(onCommit).toHaveBeenCalledWith('drop', ['1'])
+    expect(onCommit).toHaveBeenCalledWith(
+      'drop',
+      ['1'],
+      expect.objectContaining({ reason: 'window' }),
+    )
   })
 
   it('undo puts the rows back and never sends', () => {
@@ -266,5 +270,149 @@ describe('Table — the draft page', () => {
     expect(onAdd).toHaveBeenCalledTimes(2)
     expect(onAdd.mock.calls[0][0].name).toBe('dara')
     expect(onAdd.mock.calls[1][0].name).toBe('devi')
+  })
+})
+
+describe('Table — what is owed gets sent', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  function selectAndAct(label: string) {
+    fireEvent.click(screen.getAllByRole('checkbox')[1])
+    fireEvent.pointerDown(screen.getByRole('button', { name: label }), {
+      button: 0,
+      clientX: 0,
+      clientY: 0,
+    })
+    act(() => {
+      vi.advanceTimersByTime(300)
+    })
+  }
+
+  it('hands the picked option to onCommit, so a caller can send what it applied', () => {
+    const onCommit = vi.fn()
+    render(
+      <Table
+        columns={COLS}
+        rows={ROWS}
+        barPosition="inline"
+        bar={{
+          picker: {
+            label: 'Role',
+            options: [{ id: 'admin', name: 'Team admin' }],
+            action: { id: 'role', label: 'role' },
+          },
+        }}
+        mutate={(row, _id, pick) => ({ ...row, team: pick ? pick.id : row.team })}
+        onCommit={onCommit}
+      />,
+    )
+
+    fireEvent.click(screen.getAllByRole('checkbox')[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Change role' }))
+    fireEvent.click(screen.getByRole('option', { name: /Team admin/ }))
+    act(() => {
+      vi.advanceTimersByTime(10_500)
+    })
+
+    // Without the pick, a caller can apply a role change and has no way to send
+    // it — the screen says it happened and the server never hears.
+    expect(onCommit).toHaveBeenCalledWith(
+      'role',
+      ['1'],
+      expect.objectContaining({ pick: expect.objectContaining({ id: 'admin' }), reason: 'window' }),
+    )
+  })
+
+  it('sends a still-open window when the table unmounts', () => {
+    const onCommit = vi.fn()
+    const { unmount } = render(
+      <Table
+        columns={COLS}
+        rows={ROWS}
+        barPosition="inline"
+        bar={{ actions: [{ id: 'drop', label: 'Stop watching' }] }}
+        mutate={() => null}
+        onCommit={onCommit}
+      />,
+    )
+
+    selectAndAct('Stop watching')
+    expect(onCommit).not.toHaveBeenCalled()
+
+    // Navigating away mid-window used to drop it silently — the reader watched
+    // the row go and the server never heard.
+    unmount()
+    expect(onCommit).toHaveBeenCalledWith(
+      'drop',
+      ['1'],
+      expect.objectContaining({ reason: 'navigation' }),
+    )
+  })
+
+  it('sends a still-open window when the page is going away', () => {
+    const onCommit = vi.fn()
+    render(
+      <Table
+        columns={COLS}
+        rows={ROWS}
+        barPosition="inline"
+        bar={{ actions: [{ id: 'drop', label: 'Stop watching' }] }}
+        mutate={() => null}
+        onCommit={onCommit}
+      />,
+    )
+
+    selectAndAct('Stop watching')
+    fireEvent(window, new Event('pagehide'))
+
+    // The reason is what lets the caller switch transport: an ordinary fetch is
+    // killed with the document.
+    expect(onCommit).toHaveBeenCalledWith(
+      'drop',
+      ['1'],
+      expect.objectContaining({ reason: 'unload' }),
+    )
+  })
+
+  it('sends nothing at all once undone, however the window ends', () => {
+    const onCommit = vi.fn()
+    const { unmount } = render(
+      <Table
+        columns={COLS}
+        rows={ROWS}
+        barPosition="inline"
+        bar={{ actions: [{ id: 'drop', label: 'Stop watching' }] }}
+        mutate={() => null}
+        onCommit={onCommit}
+      />,
+    )
+
+    selectAndAct('Stop watching')
+    fireEvent.click(screen.getByRole('button', { name: /Undo/ }))
+
+    fireEvent(window, new Event('pagehide'))
+    unmount()
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('sends exactly once when several endings race', () => {
+    const onCommit = vi.fn()
+    const { unmount } = render(
+      <Table
+        columns={COLS}
+        rows={ROWS}
+        barPosition="inline"
+        bar={{ actions: [{ id: 'drop', label: 'Stop watching' }] }}
+        mutate={() => null}
+        onCommit={onCommit}
+      />,
+    )
+
+    selectAndAct('Stop watching')
+    fireEvent(window, new Event('pagehide'))
+    unmount()
+
+    expect(onCommit).toHaveBeenCalledTimes(1)
   })
 })
