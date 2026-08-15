@@ -2162,18 +2162,6 @@ ALTER TABLE ONLY public.prompts
 
 
 --
--- Name: repo_profiles repo_profiles_org_id_source_owner_repo_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
--- The natural key includes source: two providers may issue the same
--- owner/repo spelling, and they are different repositories. On a single-source
--- table this selects exactly the rows (org_id, owner, repo) did, so widening
--- it neither splits nor merges anything that exists today.
-ALTER TABLE ONLY public.repo_profiles
-    ADD CONSTRAINT repo_profiles_org_id_source_owner_repo_key UNIQUE (org_id, source, owner, repo);
-
-
---
 -- Name: repo_profiles repo_profiles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2531,9 +2519,28 @@ CREATE INDEX idx_pending_firings_entity_pending ON public.pending_firings USING 
 -- Name: idx_repo_profiles_org_owner_repo; Type: INDEX; Schema: public; Owner: -
 --
 
--- Kept alongside the (org_id, source, owner, repo) unique: every store read
--- looks a repository up by slug without naming a source, which the unique's
--- own index cannot serve on its leading columns.
+-- The repository natural key. It includes source because two providers may
+-- issue the same owner/repo spelling and those are different repositories, and
+-- it folds case because GitHub identifiers are case-insensitive, so "one
+-- repository" has always meant one row per folded slug. A key that did not fold
+-- would leave that invariant to the writers, and a writer is exactly what
+-- fails: an INSERT guarded by a case-insensitive NOT EXISTS over a
+-- case-sensitive index admits two rows whenever two transactions race, because
+-- neither sees the other's uncommitted row and their keys then differ. Here the
+-- second writer conflicts instead — blocking on the first while it is in
+-- flight — so the create path needs no lock of its own.
+--
+-- An expression key has to be an index rather than a UNIQUE constraint; the
+-- store infers it by expression list in ON CONFLICT.
+CREATE UNIQUE INDEX repo_profiles_identity ON public.repo_profiles USING btree (org_id, source, lower(owner), lower(repo));
+
+
+--
+-- Name: idx_repo_profiles_org_owner_repo; Type: INDEX; Schema: public; Owner: -
+--
+
+-- Kept alongside the folded key: it serves the ordered org-wide list
+-- (WHERE org_id ORDER BY owner, repo), which the folded index cannot.
 CREATE INDEX idx_repo_profiles_org_owner_repo ON public.repo_profiles USING btree (org_id, owner, repo);
 
 

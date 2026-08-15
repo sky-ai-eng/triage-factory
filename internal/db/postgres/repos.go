@@ -80,13 +80,20 @@ func upsertRepoProfile(ctx context.Context, q queryer, orgID string, p domain.Re
 	// actually has an id (an empty one never clears a stored one) and source
 	// staying put as the create-time identity column it is — here it is part
 	// of the conflict target, so a conflicting row already agrees on it.
+	//
+	// The conflict target is the folded identity index, so an upsert spelling
+	// the repository differently than the stored row updates that row instead
+	// of creating a second one. Upsert creates as well as updates, which makes
+	// it a create path too; inferring the case-sensitive columns here would
+	// leave it as the one create path that could still duplicate. owner/repo
+	// are absent from the SET list, so the stored casing stays sticky.
 	_, err = q.ExecContext(ctx, `
 		INSERT INTO repo_profiles
 		  (org_id, source, owner, repo, external_id, description, has_readme, has_claude_md, has_agents_md,
 		   profile_text, clone_url, default_branch, profiled_at)
 		VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, $8, $9,
 		        NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13)
-		ON CONFLICT (org_id, source, owner, repo) DO UPDATE SET
+		ON CONFLICT (org_id, source, lower(owner), lower(repo)) DO UPDATE SET
 		  external_id    = COALESCE(EXCLUDED.external_id, repo_profiles.external_id),
 		  description    = EXCLUDED.description,
 		  has_readme     = EXCLUDED.has_readme,
@@ -115,9 +122,8 @@ func (s *repoStore) GetOrCreateSystem(ctx context.Context, orgID string, ref dom
 // getOrCreateRepoProfile is the store method's body, taking a queryer so it
 // composes inside a caller's transaction. Its create half is
 // insertRepoProfileRow, which the tracked-set reconcile in
-// team_github_repos.go calls directly — that reconcile runs under the caller's
-// app-pool tx and its own per-org advisory lock, so it needs the insert
-// without this function's separate lookup round-trip.
+// team_github_repos.go calls directly — that reconcile has already computed
+// which repos are new, so it skips the lookup rather than the insert.
 func getOrCreateRepoProfile(ctx context.Context, q queryer, orgID string, ref domain.RepoRef) (*domain.RepoProfile, error) {
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {
@@ -125,9 +131,8 @@ func getOrCreateRepoProfile(ctx context.Context, q queryer, orgID string, ref do
 	}
 	// One transaction around lookup → create → re-read, so the answer this
 	// returns is the row that exists at a single point in time rather than
-	// three separate ones. A caller that already has a tx keeps it (inTx
-	// passes a *sql.Tx through), which is also what puts the create's advisory
-	// lock in the caller's scope.
+	// three separate ones. A caller that already has a tx keeps it — inTx
+	// passes a *sql.Tx through.
 	var out *domain.RepoProfile
 	err = inTx(ctx, q, func(tx queryer) error {
 		existing, err := findRepoProfileByRef(ctx, tx, orgID, source, ref)
@@ -195,59 +200,33 @@ func findRepoProfileByRef(ctx context.Context, q queryer, orgID, source string, 
 // all create through it, so no create path can write a row without the
 // identity columns, and all three agree on what "already exists" means.
 //
-// # Why the lock, and why the guard is not enough on its own
+// "Already exists" means the repo_profiles_identity index: (org_id, source)
+// plus the case-FOLDED slug, because GitHub identifiers are case-insensitive
+// and one repository is one row however it is spelled. Enforcing that in the
+// index rather than in a guard is what makes concurrent creates safe without a
+// lock — a second writer conflicts on the index and blocks on the first while
+// it is in flight, then DO NOTHING turns the resolved conflict into the no-op
+// the create wants. A guarded INSERT over a case-sensitive key could not do
+// that: neither writer sees the other's uncommitted row, and their keys would
+// differ, so both would land.
 //
-// "Already exists" is case-INSENSITIVE, because GitHub identifiers are. The
-// unique index is not and cannot be — the natural key stores the casing the
-// repository is spelled with, and folding it in the index would refuse two
-// pre-existing rows that differ only in case rather than reconciling them.
-//
-// That gap is a live race, not a theoretical one. Two transactions creating
-// the same repository under different casing cannot see each other's uncommitted
-// rows, so both pass NOT EXISTS; their keys then differ, so ON CONFLICT catches
-// neither and both rows land — two rows for one GitHub repository, which is
-// exactly what this function exists to prevent. The ON CONFLICT only closes the
-// same-casing half of the race.
-//
-// So the create serializes on the repository's case-folded identity. The lock
-// is transaction-scoped, and inTx is what guarantees there is a transaction to
-// scope it to: a caller composing us into its own tx (the reconcile,
-// SetConfigured) holds it to their commit, and a bare call gets one of its own.
-// A blocked creator resumes after the winner commits, and — READ COMMITTED, so
-// its INSERT statement takes a fresh snapshot — then sees the winner's row and
-// no-ops.
-//
-// The key is hashtextextended over the folded identity, the same 64-bit
-// advisory space the tracked-set reconcile's per-org lock uses. A hash
-// collision between the two costs one spurious serialization, never
-// correctness. Lock order is always org-then-repository, so the reconcile
-// taking both cannot cycle.
+// DO NOTHING carries no conflict target on purpose. Every uniqueness
+// constraint this row can violate — the identity index, and the slug primary
+// key on the SQLite side — means the same thing, that the repository is
+// already here, and a targeted clause would raise on the one it did not name.
 func insertRepoProfileRow(ctx context.Context, q queryer, orgID string, ref domain.RepoRef) error {
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {
 		return err
 	}
-	return inTx(ctx, q, func(tx queryer) error {
-		if _, err := tx.ExecContext(ctx,
-			`SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':' || lower($3) || '/' || lower($4), 0))`,
-			orgID, source, ref.Owner, ref.Repo,
-		); err != nil {
-			return fmt.Errorf("lock repo identity[%s]: %w", ref.Slug(), err)
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO repo_profiles (org_id, source, owner, repo, external_id)
-			SELECT $1, $2, $3, $4, NULLIF($5, '')
-			WHERE NOT EXISTS (
-			    SELECT 1 FROM repo_profiles
-			    WHERE org_id = $1 AND source = $2
-			      AND lower(owner) = lower($3) AND lower(repo) = lower($4)
-			)
-			ON CONFLICT (org_id, source, owner, repo) DO NOTHING
-		`, orgID, source, ref.Owner, ref.Repo, ref.ExternalID); err != nil {
-			return fmt.Errorf("insert repo_profiles[%s]: %w", ref.Slug(), err)
-		}
-		return nil
-	})
+	if _, err := q.ExecContext(ctx, `
+		INSERT INTO repo_profiles (org_id, source, owner, repo, external_id)
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''))
+		ON CONFLICT DO NOTHING
+	`, orgID, source, ref.Owner, ref.Repo, ref.ExternalID); err != nil {
+		return fmt.Errorf("insert repo_profiles[%s]: %w", ref.Slug(), err)
+	}
+	return nil
 }
 
 func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {

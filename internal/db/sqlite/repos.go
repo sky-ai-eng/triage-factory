@@ -43,10 +43,18 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.RepoProfi
 	// column, not profiling metadata. external_id refreshes only when the
 	// writer actually has one — COALESCE over the NULLIF keeps an empty
 	// write from clearing an id already learned.
+	//
+	// The conflict target is the folded identity index, not the slug primary
+	// key, so an upsert spelling the repository differently than the stored row
+	// updates that row instead of creating a second one. Upsert creates as well
+	// as updates, which makes it a create path too; keying it on the
+	// case-sensitive id would leave it as the one create path that could still
+	// duplicate. id/owner/repo are absent from the SET list, so the stored
+	// casing stays sticky.
 	_, err = s.q.ExecContext(ctx, `
 		INSERT INTO repo_profiles (id, owner, repo, source, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, profiled_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-		ON CONFLICT(id) DO UPDATE SET
+		ON CONFLICT(org_id, source, LOWER(owner), LOWER(repo)) DO UPDATE SET
 			external_id    = COALESCE(excluded.external_id, repo_profiles.external_id),
 			description    = excluded.description,
 			has_readme     = excluded.has_readme,
@@ -82,6 +90,9 @@ func (s *repoStore) GetOrCreateSystem(ctx context.Context, orgID string, ref dom
 // insertRepoProfileRow, which the tracked-set reconcile in
 // team_github_repos.go calls directly — that reconcile has already computed
 // which repos are new, so it skips the lookup rather than the insert.
+//
+// The lookup before the insert is not what prevents a duplicate (the identity
+// index is); it is what returns the existing row without writing to it.
 func getOrCreateRepoProfile(ctx context.Context, q queryer, ref domain.RepoRef) (*domain.RepoProfile, error) {
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {
@@ -144,20 +155,17 @@ func findRepoProfileByRef(ctx context.Context, q queryer, source string, ref dom
 // all create through it, so no create path can write a row without the
 // identity columns, and all three agree on what "already exists" means.
 //
-// "Already exists" is case-INSENSITIVE, because GitHub identifiers are, while
-// the unique index is not: a repository already present under different casing
-// keeps its row (and its cached profile, base branch, clone state, ETag)
-// rather than gaining a second one. The ON CONFLICT behind the guard covers
-// the same-casing repeat.
+// "Already exists" means the repo_profiles_identity index: (org_id, source)
+// plus the case-FOLDED slug, because GitHub identifiers are case-insensitive
+// and one repository is one row however it is spelled. A repository already
+// present under different casing keeps its row — and its cached profile, base
+// branch, clone state, ETag — rather than gaining a second one, and the index
+// is what refuses rather than a guard any writer has to remember.
 //
-// A guard the index cannot enforce is a race wherever writers overlap, and the
-// Postgres impl takes a per-repository advisory lock for exactly that reason.
-// Here there is nothing to serialize. Local mode pins the pool to a single
-// connection (internal/db.Open), so this process's statements never overlap;
-// across processes SQLite's write lock makes the guarded INSERT atomic, and a
-// reader-turned-writer inside a transaction is failed with SQLITE_BUSY rather
-// than allowed to write against a stale read. Same asymmetry as the tracked-set
-// reconcile, whose per-org lock likewise has no analogue on this side.
+// DO NOTHING carries no conflict target on purpose. This row can violate two
+// uniqueness constraints — the identity index and the slug primary key — and
+// both mean the same thing, that the repository is already here. A targeted
+// clause would raise on whichever one it did not name.
 func insertRepoProfileRow(ctx context.Context, q queryer, ref domain.RepoRef) error {
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {
@@ -165,16 +173,9 @@ func insertRepoProfileRow(ctx context.Context, q queryer, ref domain.RepoRef) er
 	}
 	if _, err := q.ExecContext(ctx, `
 		INSERT INTO repo_profiles (id, owner, repo, source, external_id, updated_at)
-		SELECT ?, ?, ?, ?, ?, datetime('now')
-		WHERE NOT EXISTS (
-			SELECT 1 FROM repo_profiles
-			WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-		)
-		ON CONFLICT(id) DO NOTHING
-	`,
-		ref.Slug(), ref.Owner, ref.Repo, source, nullIfEmpty(ref.ExternalID),
-		source, ref.Owner, ref.Repo,
-	); err != nil {
+		VALUES (?, ?, ?, ?, ?, datetime('now'))
+		ON CONFLICT DO NOTHING
+	`, ref.Slug(), ref.Owner, ref.Repo, source, nullIfEmpty(ref.ExternalID)); err != nil {
 		return fmt.Errorf("insert repo_profiles[%s]: %w", ref.Slug(), err)
 	}
 	return nil

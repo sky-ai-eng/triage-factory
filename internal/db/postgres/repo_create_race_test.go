@@ -9,19 +9,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// The create guard is a case-INSENSITIVE NOT EXISTS sitting in front of a
-// case-SENSITIVE unique index, which is a race and not a theoretical one: two
-// transactions creating the same repository under different casing cannot see
-// each other's uncommitted rows, so both pass the guard, and their keys then
-// differ so ON CONFLICT catches neither. Both rows land, and TF holds two rows
-// for one GitHub repository — the state every reader downstream assumes cannot
-// exist.
+// Two transactions creating the same repository under different casing cannot
+// see each other's uncommitted rows. Against a case-SENSITIVE key that is a
+// race and not a theoretical one — both would insert, their keys would differ,
+// ON CONFLICT would catch neither, and TF would hold two rows for one GitHub
+// repository, the state every reader downstream assumes cannot exist.
 //
-// This drives that interleaving deterministically rather than hoping a
-// goroutine race reproduces it: tx1 creates "Acme/Api" and is held open while
-// tx2 tries "acme/api". With the per-repository advisory lock, tx2 blocks
-// until tx1 commits and then sees its row; without it, tx2 inserts immediately
-// and the row count is 2.
+// What prevents it is the folded identity index: the second writer conflicts
+// on it and blocks on the first while it is in flight, then DO NOTHING turns
+// the resolved conflict into a no-op. That is a property of the schema, so it
+// holds for any writer, including ones that never call this function.
+//
+// This drives the interleaving deterministically rather than hoping a goroutine
+// race reproduces it: tx1 creates "Acme/Api" and is held open while tx2 tries
+// "acme/api". Against a key that did not fold, tx2 would return immediately and
+// the row count would be 2.
 //
 // Package-internal so it can reach insertRepoProfileRow with transactions it
 // controls — the exported entry point opens (and closes) its own.
@@ -67,7 +69,7 @@ func TestInsertRepoProfileRow_CaseDifferingCreatorsResolveToOneRow(t *testing.T)
 	select {
 	case r := <-done:
 		t.Fatalf("tx2 completed (err=%v) while tx1 held the repository open; "+
-			"the create is not serializing on the case-folded identity", r.err)
+			"the identity key is not folding case, so both creators will insert", r.err)
 	case <-time.After(300 * time.Millisecond):
 	}
 

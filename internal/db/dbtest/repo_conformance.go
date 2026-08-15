@@ -629,6 +629,47 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		}
 	})
 
+	t.Run("Upsert_with_different_casing_updates_rather_than_duplicating", func(t *testing.T) {
+		// Upsert creates as well as updates, so it is a create path too — and
+		// the one that would still duplicate if its conflict target were the
+		// case-sensitive key rather than the folded identity. The stored
+		// casing wins, matching what the tracked-set reconcile does.
+		s, orgID := mk(t)
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "Acme/Api", Owner: "Acme", Repo: "Api",
+			ProfileText: "v1", DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("seed Upsert: %v", err)
+		}
+		if err := s.UpdateBaseBranch(ctx, orgID, "Acme/Api", "develop"); err != nil {
+			t.Fatalf("UpdateBaseBranch: %v", err)
+		}
+
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "acme/api", Owner: "acme", Repo: "api",
+			ProfileText: "v2", DefaultBranch: "main", ExternalID: "1296269",
+		}); err != nil {
+			t.Fatalf("differently-cased Upsert: %v", err)
+		}
+
+		if n, _ := s.CountConfigured(ctx, orgID); n != 1 {
+			t.Fatalf("rows = %d, want 1 — a differently-cased upsert must not mint a second repository", n)
+		}
+		got, _ := s.Get(ctx, orgID, "Acme/Api")
+		if got == nil {
+			t.Fatal("expected the original row to survive")
+		}
+		if got.ID != "Acme/Api" || got.Owner != "Acme" || got.Repo != "Api" {
+			t.Errorf("stored casing = %+v, want Acme/Api — casing is sticky", got)
+		}
+		if got.ProfileText != "v2" || got.ExternalID != "1296269" {
+			t.Errorf("the upsert did not land on the existing row: %+v", got)
+		}
+		if got.BaseBranch != "develop" {
+			t.Errorf("BaseBranch = %q, want develop — user config survives a re-profile", got.BaseBranch)
+		}
+	})
+
 	t.Run("Upsert_refuses_an_unknown_source", func(t *testing.T) {
 		s, orgID := mk(t)
 		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
