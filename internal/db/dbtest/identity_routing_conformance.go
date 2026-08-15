@@ -74,7 +74,7 @@ func RunIdentityRoutingConformance(t *testing.T, mk IdentityRoutingFactory) {
 	t.Run("UserIDsForGitHubLogin_ResolvesBoundUser", func(t *testing.T) {
 		stores, seed := mk(t)
 		u := seed.User(t)
-		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "pat"); err != nil {
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity: %v", err)
 		}
 		got, err := stores.Users.UserIDsForGitHubLoginSystem(ctx, host, "octocat")
@@ -92,7 +92,7 @@ func RunIdentityRoutingConformance(t *testing.T, mk IdentityRoutingFactory) {
 		u1 := seed.User(t)
 		u2 := seed.User(t)
 		for _, u := range []string{u1, u2} {
-			if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "shared-bot", "pat"); err != nil {
+			if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "shared-bot", "", "pat"); err != nil {
 				t.Fatalf("UpsertGitHubIdentity(%s): %v", u, err)
 			}
 		}
@@ -108,7 +108,7 @@ func RunIdentityRoutingConformance(t *testing.T, mk IdentityRoutingFactory) {
 		// Bind a different login so the table is non-empty — the absent
 		// row, not an empty table, is what must yield the empty slice.
 		u := seed.User(t)
-		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "somebody", "pat"); err != nil {
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "somebody", "", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity: %v", err)
 		}
 		got, err := stores.Users.UserIDsForGitHubLoginSystem(ctx, host, "nobody")
@@ -126,7 +126,7 @@ func RunIdentityRoutingConformance(t *testing.T, mk IdentityRoutingFactory) {
 		// sides run db.NormalizeGitHubHost).
 		stores, seed := mk(t)
 		u := seed.User(t)
-		if err := stores.Users.UpsertGitHubIdentity(ctx, u, "https://github.com", "octocat", "pat"); err != nil {
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, "https://github.com", "octocat", "", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity: %v", err)
 		}
 		got, err := stores.Users.UserIDsForGitHubLoginSystem(ctx, "https://github.com/", "octocat")
@@ -141,7 +141,7 @@ func RunIdentityRoutingConformance(t *testing.T, mk IdentityRoutingFactory) {
 		// different host is a different person and must not match.
 		stores, seed := mk(t)
 		u := seed.User(t)
-		if err := stores.Users.UpsertGitHubIdentity(ctx, u, "https://github.com", "octocat", "pat"); err != nil {
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, "https://github.com", "octocat", "", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity: %v", err)
 		}
 		got, err := stores.Users.UserIDsForGitHubLoginSystem(ctx, "https://ghe.example.com", "octocat")

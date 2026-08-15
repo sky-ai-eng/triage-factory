@@ -232,14 +232,14 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 	//    holds only DB writes (mirrors the HTTP handlers' validate-then-write).
 	//    We're here only when not yet provisioned (fresh or crash-recovery), so
 	//    these always run.
-	var githubIdentityLogin string
+	var githubIdentity auth.GitHubUser
 	switch {
 	case cfg.githubUserPAT != "":
-		login, verr := validateGitHubIdentityPAT(ctx, ghWeb, cfg.githubUserPAT)
+		ghUser, verr := validateGitHubIdentityPAT(ctx, ghWeb, cfg.githubUserPAT)
 		if verr != nil {
 			headlessLog.Warn("TRIAGE_FACTORY_GITHUB_USER_PAT failed validation; GitHub identity not bound (you'll be asked to Connect)", "host", ghWeb, "error", verr)
 		} else {
-			githubIdentityLogin = login
+			githubIdentity = ghUser
 		}
 	default:
 		// The GitHub identity gate is a hard redirect in local mode, so a
@@ -354,16 +354,16 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 		}
 
 		// GitHub identity (only if none bound for this user+host yet).
-		if githubIdentityLogin != "" {
+		if githubIdentity.Login != "" {
 			cur, gierr := tx.Users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, ghWeb)
 			if gierr != nil {
 				return gierr
 			}
 			if cur == "" {
-				if uerr := tx.Users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, ghWeb, githubIdentityLogin, "pat"); uerr != nil {
+				if uerr := tx.Users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, ghWeb, githubIdentity.Login, githubIdentity.UserID(), "pat"); uerr != nil {
 					return uerr
 				}
-				boundGitHubLogin = githubIdentityLogin
+				boundGitHubLogin = githubIdentity.Login
 			}
 		}
 

@@ -98,6 +98,13 @@ type GitHubAppsStore interface {
 	// preserved across upserts (a zero InstalledAt defaults to now()). In
 	// Postgres this writes on the admin pool — tf_app is denied all
 	// writes to this table by RLS.
+	//
+	// With BackfillInstallationsFromAPI this is one of exactly two writers of
+	// AccountID, and the only two: the id is mirrored from GitHub or it is
+	// not written at all. An empty AccountID leaves a stored id intact (the
+	// backfill is opportunistic — a NULL fills in on the next write that
+	// names the account, and is never re-emptied), while AccountLogin is
+	// overwritten unconditionally so a rename reaches the mirror.
 	UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) error
 
 	// MarkInstallationRemoved soft-deletes one installation by stamping

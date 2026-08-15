@@ -100,12 +100,15 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 // installationWebhook is the subset of the installation event payload the
 // lifecycle handler needs. The account block mirrors GitHub's verbatim
 // "User" / "Organization" type, which is exactly what the
-// org_github_app_installations CHECK constraint accepts.
+// org_github_app_installations CHECK constraint accepts, and carries both
+// halves of the account's identity: the numeric id the mirror resolves on and
+// the login it displays.
 type installationWebhook struct {
 	Action       string `json:"action"`
 	Installation struct {
 		ID      int64 `json:"id"`
 		Account struct {
+			ID    int64  `json:"id"`
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"account"`
@@ -130,12 +133,21 @@ func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request,
 	}
 	installationID := strconv.FormatInt(p.Installation.ID, 10)
 
+	// A payload that omits the account id (0) writes "" and so leaves any
+	// stored id alone — the upsert fills the column in opportunistically
+	// rather than treating a partial payload as an erasure.
+	var accountID string
+	if p.Installation.Account.ID != 0 {
+		accountID = strconv.FormatInt(p.Installation.Account.ID, 10)
+	}
+
 	switch p.Action {
 	case "created":
 		if err := s.githubApps.UpsertInstallation(r.Context(), domain.OrgGitHubAppInstallation{
 			InstallationID: installationID,
 			OrgID:          orgID,
 			AccountType:    p.Installation.Account.Type,
+			AccountID:      accountID,
 			AccountLogin:   p.Installation.Account.Login,
 			InstalledAt:    p.Installation.CreatedAt,
 		}); err != nil {

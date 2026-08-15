@@ -91,14 +91,15 @@ func getGitHubLogin(ctx context.Context, q queryer, userID, githubBaseURL string
 func (s *usersStore) UserIDsForGitHubLoginSystem(ctx context.Context, githubBaseURL, login string) ([]string, error) {
 	// Reverse of getGitHubLogin: (host, login) → user_id(s). Host is
 	// normalized the same way the writers store it so the key matches;
-	// login matches verbatim (the writers persist it as captured, no
-	// case-folding). Returns every matching row — two users may bind one
-	// login on a host (PK is per-user), and source/verified_at are out
-	// of scope.
+	// login matches on lower() because GitHub logins are case-insensitive
+	// while the writers persist them as captured (user_github_identities_
+	// login_lookup_idx serves it, mirroring user_identities' lower(email)).
+	// Returns every matching row — two users may bind one login on a host
+	// (PK is per-user), and source/verified_at are out of scope.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT user_id::text
 		FROM user_github_identities
-		WHERE github_base_url = $1 AND login = $2
+		WHERE github_base_url = $1 AND lower(login) = lower($2)
 		ORDER BY user_id ASC
 	`, db.NormalizeGitHubHost(githubBaseURL), login)
 	if err != nil {
@@ -140,19 +141,25 @@ func scanIDs(rows *sql.Rows, errContext string) ([]string, error) {
 	return out, rows.Err()
 }
 
-func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, source string) error {
+func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, githubUserID, source string) error {
 	// FK on user_id enforces the row-exists contract: a missing user
 	// surfaces as a foreign_key_violation, matching the old
 	// SetGitHubUsername "user not found" guard.
+	//
+	// github_user_id is COALESCEd, unlike login: a capture that learned no id
+	// leaves a known one alone rather than erasing it, so the column fills in
+	// opportunistically. A re-bind to a different account carries that
+	// account's id, so the COALESCE never pins a stale one.
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO user_github_identities
-			(user_id, github_base_url, login, source, verified_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, now(), now(), now())
+			(user_id, github_base_url, login, github_user_id, source, verified_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, now(), now(), now())
 		ON CONFLICT (user_id, github_base_url) DO UPDATE SET
-			login       = EXCLUDED.login,
-			source      = EXCLUDED.source,
-			verified_at = EXCLUDED.verified_at,
-			updated_at  = now(),
+			login          = EXCLUDED.login,
+			github_user_id = COALESCE(EXCLUDED.github_user_id, user_github_identities.github_user_id),
+			source         = EXCLUDED.source,
+			verified_at    = EXCLUDED.verified_at,
+			updated_at     = now(),
 			-- A rename / re-bind to a different login invalidates the prior
 			-- login's dashboard backfill: clear the marker so the new login's
 			-- history is re-seeded (TFAC-396). A no-op re-bind (same login)
@@ -160,7 +167,7 @@ func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBas
 			dashboard_backfilled_at = CASE
 				WHEN user_github_identities.login IS DISTINCT FROM EXCLUDED.login THEN NULL
 				ELSE user_github_identities.dashboard_backfilled_at END
-	`, userID, db.NormalizeGitHubHost(githubBaseURL), login, source)
+	`, userID, db.NormalizeGitHubHost(githubBaseURL), login, nullString(githubUserID), source)
 	if err != nil {
 		return fmt.Errorf("upsert user_github_identities: %w", err)
 	}

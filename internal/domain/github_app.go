@@ -54,6 +54,13 @@ type OrgGitHubAppInstallation struct {
 	InstallationID string
 	OrgID          string
 	AccountType    string
-	AccountLogin   string
-	InstalledAt    time.Time
+	// AccountID is GitHub's numeric id for the account the App is installed
+	// on, in its text form (the convention entities.source_id and
+	// InstallationID already follow). Unlike AccountLogin it survives a
+	// rename, so it — not the login — is what credential resolution matches
+	// on when both sides know it. "" means unknown: a row mirrored before
+	// this was captured, which the next reconcile or webhook fills in.
+	AccountID    string
+	AccountLogin string
+	InstalledAt  time.Time
 }

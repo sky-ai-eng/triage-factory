@@ -203,3 +203,31 @@ func TestGitHubWebhook_NoAppRegistered_404(t *testing.T) {
 		t.Fatalf("status = %d, want 404 (no registered app)", rec.Code)
 	}
 }
+
+// TestGitHubWebhook_InstallationCreated_CapturesAccountID pins that the
+// account's numeric id rides in from the delivery, since the webhook is one of
+// only two writers of it (the reconcile is the other) and is the one that sees
+// a brand-new installation first. The sibling test above covers the payload
+// that names no id: it stays NULL and the row resolves by login as before.
+func TestGitHubWebhook_InstallationCreated_CapturesAccountID(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+
+	body := []byte(`{"action":"created","installation":{"id":4242,"account":{"id":1234,"login":"acme","type":"Organization"},"created_at":"2026-01-01T00:00:00Z"}}`)
+	rec := postWebhook(s, "installation", sign(body), body)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	got := installations(t, s)
+	if len(got) != 1 {
+		t.Fatalf("installations = %+v, want one row", got)
+	}
+	if got[0].AccountID != "1234" {
+		t.Errorf("AccountID = %q, want %q", got[0].AccountID, "1234")
+	}
+	if got[0].AccountLogin != "acme" {
+		t.Errorf("AccountLogin = %q, want %q", got[0].AccountLogin, "acme")
+	}
+}

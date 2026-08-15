@@ -170,7 +170,7 @@ func listInstallations(ctx context.Context, q queryer, orgID string) ([]domain.O
 		return out, nil
 	}
 	rows, err := q.QueryContext(ctx, `
-		SELECT installation_id, org_id, account_type, account_login, installed_at
+		SELECT installation_id, org_id, account_type, account_id, account_login, installed_at
 		  FROM org_github_app_installations
 		 WHERE org_id = $1 AND removed_at IS NULL
 		 ORDER BY account_login
@@ -181,13 +181,17 @@ func listInstallations(ctx context.Context, q queryer, orgID string) ([]domain.O
 	defer rows.Close()
 
 	for rows.Next() {
-		var inst domain.OrgGitHubAppInstallation
+		var (
+			inst      domain.OrgGitHubAppInstallation
+			accountID sql.NullString
+		)
 		if err := rows.Scan(
 			&inst.InstallationID, &inst.OrgID, &inst.AccountType,
-			&inst.AccountLogin, &inst.InstalledAt,
+			&accountID, &inst.AccountLogin, &inst.InstalledAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan org_github_app_installations: %w", err)
 		}
+		inst.AccountID = accountID.String // NULL → "" (account id not yet captured)
 		out = append(out, inst)
 	}
 	return out, rows.Err()
@@ -200,6 +204,14 @@ func listInstallations(ctx context.Context, q queryer, orgID string) ([]domain.O
 // caller passes a zero time) and left untouched on conflict so the original
 // install time survives a re-observe; removed_at is cleared so a reinstall
 // revives the row.
+//
+// The two account fields update on opposite rules, which is the point of
+// having both. account_login is overwritten every time: it is what GitHub
+// currently calls the account, so a rename must reach the mirror or the UI
+// renders a name that no longer exists. account_id is COALESCEd, so a writer
+// that doesn't know it (an older payload) fills nothing in and erases
+// nothing — the backfill is opportunistic, and an id once learned is never
+// unlearned by a subsequent write that happens to omit it.
 func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) error {
 	var installedAt sql.NullTime
 	if !inst.InstalledAt.IsZero() {
@@ -207,13 +219,14 @@ func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.Or
 	}
 	_, err := s.admin.ExecContext(ctx, `
 		INSERT INTO org_github_app_installations
-			(installation_id, org_id, account_type, account_login, installed_at, removed_at)
-		VALUES ($1, $2, $3, $4, COALESCE($5, now()), NULL)
+			(installation_id, org_id, account_type, account_id, account_login, installed_at, removed_at)
+		VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), NULL)
 		ON CONFLICT (org_id, installation_id) DO UPDATE SET
 			account_type  = EXCLUDED.account_type,
 			account_login = EXCLUDED.account_login,
+			account_id    = COALESCE(EXCLUDED.account_id, org_github_app_installations.account_id),
 			removed_at    = NULL
-	`, inst.InstallationID, inst.OrgID, inst.AccountType, inst.AccountLogin, installedAt)
+	`, inst.InstallationID, inst.OrgID, inst.AccountType, nullString(inst.AccountID), inst.AccountLogin, installedAt)
 	if err != nil {
 		return fmt.Errorf("upsert org_github_app_installations: %w", err)
 	}

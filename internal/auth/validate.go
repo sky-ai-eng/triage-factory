@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,10 +53,28 @@ var ErrAnthropicKeyInvalid = errors.New("the Anthropic API key was rejected — 
 var ErrAnthropicUnreachable = errors.New("couldn't reach Anthropic — check your connection and try again")
 
 // GitHubUser is the subset of fields we extract from the GitHub user endpoint.
+//
+// ID is the account's numeric id. Both halves of the identity are captured
+// because they answer different questions: Login is what a human recognises
+// and what every GitHub-side lookup takes, while ID is the half that survives
+// a rename — so it is what an identity binding persists alongside the login.
 type GitHubUser struct {
+	ID        int64  `json:"id"`
 	Login     string `json:"login"`
 	AvatarURL string `json:"avatar_url"`
 	Name      string `json:"name"`
+}
+
+// UserID renders the numeric account id in the text form
+// user_github_identities.github_user_id stores (the convention every
+// GitHub-issued id in this schema follows), or "" when the host reported none.
+// A "" is a durable, supported state: the binding keeps working off the login,
+// and the id fills in on the next capture.
+func (u GitHubUser) UserID() string {
+	if u.ID == 0 {
+		return ""
+	}
+	return strconv.FormatInt(u.ID, 10)
 }
 
 // JiraUser is the subset of fields we extract from the Jira myself endpoint.

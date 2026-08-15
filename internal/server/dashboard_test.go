@@ -30,7 +30,7 @@ func TestDashboardPRs_AppModeNoPAT_ReturnsPRs(t *testing.T) {
 	// org_settings. No PAT is ever stored — that's the App-mode condition the
 	// gate used to mishandle.
 	host := dashboardTestHost(t, s, orgID, userID)
-	if err := s.users.UpsertGitHubIdentity(ctx, userID, host, "octocat", "connect_oauth"); err != nil {
+	if err := s.users.UpsertGitHubIdentity(ctx, userID, host, "octocat", "", "connect_oauth"); err != nil {
 		t.Fatalf("bind identity: %v", err)
 	}
 
@@ -75,7 +75,7 @@ func TestDashboardStats_AppModeNoPAT_ReturnsStats(t *testing.T) {
 	userID := runmode.LocalDefaultUserID
 
 	host := dashboardTestHost(t, s, orgID, userID)
-	if err := s.users.UpsertGitHubIdentity(ctx, userID, host, "octocat", "connect_oauth"); err != nil {
+	if err := s.users.UpsertGitHubIdentity(ctx, userID, host, "octocat", "", "connect_oauth"); err != nil {
 		t.Fatalf("bind identity: %v", err)
 	}
 

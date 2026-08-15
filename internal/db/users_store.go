@@ -45,7 +45,15 @@ type UsersStore interface {
 	// authenticated confirmation). Upserts on the (user_id,
 	// github_base_url) key. Returns an error when the user row does not
 	// exist — bootstrap paths own row creation.
-	UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, source string) error
+	//
+	// githubUserID is the account's numeric GitHub id in text form
+	// (auth.GitHubUser.UserID). login records what the account is currently
+	// called and githubUserID records which account it is; the second is the
+	// half a rename doesn't touch. Passing "" (a host that reported no id, or
+	// a caller that never had one) leaves any stored id intact rather than
+	// blanking it, so the value fills in opportunistically on the next
+	// capture.
+	UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, githubUserID, source string) error
 
 	// ClearGitHubIdentity deletes the user's GitHub identity row for a
 	// host (the disconnect path — GitHub URL/PAT cleared in Settings).
@@ -137,6 +145,13 @@ type UsersStore interface {
 	// the capture paths stored. Source / verified_at are out of scope:
 	// every matching row is returned regardless of how it was captured
 	// or whether it has been host-verified.
+	//
+	// login matches case-insensitively (lower(login), served by an index on
+	// both dialects), because GitHub logins are case-insensitive while the
+	// writers persist them as captured — the same treatment the sibling
+	// user_identities email lookup gives lower(email). A verbatim compare
+	// misses silently on capitalisation, which for a routing lookup reads as
+	// "this person has no teams" rather than as an error.
 	//
 	// Admin pool / claims-free: system/router callers only. Exposing
 	// this reverse lookup to a request handler would be a cross-user
