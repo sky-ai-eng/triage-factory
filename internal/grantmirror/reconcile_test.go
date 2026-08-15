@@ -302,7 +302,7 @@ func TestRunOrg_NoInstallationsIsANoOp(t *testing.T) {
 	}
 }
 
-func TestRunOrg_CarriesRepositoryIDsAndSkipsUnusableSlugs(t *testing.T) {
+func TestRunOrg_CarriesRepositoryIDs(t *testing.T) {
 	apps := &fakeApps{app: activeApp(), installs: []domain.OrgGitHubAppInstallation{live("1", "acme")}}
 	mirror := newFakeMirror()
 	var captured []domain.InstallationRepository
@@ -312,9 +312,7 @@ func TestRunOrg_CarriesRepositoryIDsAndSkipsUnusableSlugs(t *testing.T) {
 	grants := fakeGrants{byLogin: map[string]grantAnswer{
 		"acme": {complete: true, repos: []github.UserRepo{
 			repo("acme/api", 10),
-			repo("no-slash", 11), // not a repository slug
-			repo("a/b/c", 12),    // not a repository slug either
-			repo("acme/web", 0),  // GitHub sent no id
+			repo("acme/web", 0), // GitHub sent no id
 		}},
 	}}
 
@@ -322,7 +320,7 @@ func TestRunOrg_CarriesRepositoryIDsAndSkipsUnusableSlugs(t *testing.T) {
 		t.Fatalf("RunOrg: %v", err)
 	}
 	if len(captured) != 2 {
-		t.Fatalf("captured %d entries; want 2 (the two usable slugs)", len(captured))
+		t.Fatalf("captured %d entries; want 2", len(captured))
 	}
 	if captured[0].Owner != "acme" || captured[0].Repo != "api" || captured[0].ExternalID != "10" {
 		t.Errorf("first entry = %+v; want acme/api with external id 10", captured[0])
@@ -332,6 +330,37 @@ func TestRunOrg_CarriesRepositoryIDsAndSkipsUnusableSlugs(t *testing.T) {
 	}
 	if captured[0].Source != domain.RepoSourceGitHub {
 		t.Errorf("Source = %q; want %q", captured[0].Source, domain.RepoSourceGitHub)
+	}
+}
+
+func TestRunOrg_AnUnnameableEntryRefusesTheWholeAnswer(t *testing.T) {
+	// An entry TF cannot name is one it cannot store, and an answer missing an
+	// entry is not the whole grant — which is the mirror's entire contract.
+	// Writing the rest would persist a grant NARROWER than the real one,
+	// understating reach and possibly hiding the very finding the table exists
+	// for. Same posture as a truncated listing: keep the previous answer.
+	for _, unusable := range []string{"no-slash", "a/b/c", "/api", "acme/", ""} {
+		t.Run(unusable, func(t *testing.T) {
+			apps := &fakeApps{app: activeApp(), installs: []domain.OrgGitHubAppInstallation{live("1", "acme")}}
+			mirror := newFakeMirror()
+			mirror.rows["1"] = []string{"acme/api", "acme/web"}
+			grants := fakeGrants{byLogin: map[string]grantAnswer{
+				"acme": {complete: true, repos: []github.UserRepo{
+					repo("acme/api", 10),
+					repo(unusable, 11),
+				}},
+			}}
+
+			if err := newReconciler(apps, mirror, grants).RunOrg(context.Background(), testOrg); err == nil {
+				t.Fatal("RunOrg returned nil though an entry could not be named; a partial grant must be visible")
+			}
+			if mirror.replaces != 0 {
+				t.Errorf("mirror was written %d times from an answer with an unnameable entry; want 0", mirror.replaces)
+			}
+			if got := mirror.rows["1"]; len(got) != 2 {
+				t.Errorf("mirror = %v; want the previous answer intact", got)
+			}
+		})
 	}
 }
 

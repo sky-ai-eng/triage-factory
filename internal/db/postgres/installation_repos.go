@@ -79,9 +79,17 @@ func (s *installationReposStore) ReplaceForInstallationSystem(ctx context.Contex
 	})
 }
 
+// ClearForInstallationSystem fails closed on a malformed argument rather than
+// reporting success for a delete that matched nothing. It is a write path
+// called only when the grant is known to be gone, so "no rows matched" and "the
+// caller named the wrong installation" must not be the same answer — the second
+// would leave the mirror answering for a grant that no longer exists.
 func (s *installationReposStore) ClearForInstallationSystem(ctx context.Context, orgID, installationID string) error {
 	if !isValidUUID(orgID) {
-		return nil
+		return fmt.Errorf("clear installation repositories: invalid org id %q", orgID)
+	}
+	if installationID == "" {
+		return fmt.Errorf("clear installation repositories: empty installation id")
 	}
 	if _, err := s.admin.ExecContext(ctx, `
 		DELETE FROM installation_repositories

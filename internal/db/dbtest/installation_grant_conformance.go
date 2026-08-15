@@ -247,6 +247,34 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		equal(t, "mirror after one installation was removed", slugs(t, got), []string{"other/tool"})
 	})
 
+	t.Run("ClearingWithoutAnInstallationIsRefused", func(t *testing.T) {
+		// A write path called only when the grant is KNOWN to be gone. "No rows
+		// matched" and "the caller named no installation" must not be the same
+		// answer: reporting success for the second would leave every
+		// installation's mirror standing while the caller believes one was
+		// cleared.
+		b := mk(t)
+		install(t, b, "1", "acme", domain.RepositorySelectionAll)
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+			entry(b, "1", "acme", "api", "10"),
+		}); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem: %v", err)
+		}
+
+		if err := b.Mirror.ClearForInstallationSystem(ctx, b.OrgID, ""); err == nil {
+			t.Error("ClearForInstallationSystem accepted an empty installation id; want an error")
+		}
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "", nil); err == nil {
+			t.Error("ReplaceForInstallationSystem accepted an empty installation id; want an error")
+		}
+
+		got, err := b.Mirror.ListForOrgSystem(ctx, b.OrgID)
+		if err != nil {
+			t.Fatalf("ListForOrgSystem: %v", err)
+		}
+		equal(t, "mirror after two refused writes", slugs(t, got), []string{"acme/api"})
+	})
+
 	t.Run("MirrorsAreScopedToTheirInstallation", func(t *testing.T) {
 		// Two accounts, two grants. Reconciling one must not disturb the other:
 		// a per-installation replace that reached across would make a

@@ -36,6 +36,15 @@ import (
 // A grant deliberately contains repositories nobody tracks; a repository row
 // means TF works with the repository.
 //
+// # Who writes it
+//
+// Two system writers. The reconcile owns the CONTENT — it is the only thing
+// that decides which repositories an installation reaches — and
+// GitHubAppsStore.MarkInstallationRemoved owns the one write that is not about
+// content at all: it deletes an installation's entries in the same transaction
+// as the soft removal, because an uninstalled installation reaches nothing and
+// the two writes are one fact. Nothing else writes this table.
+//
 // # Pool split (Postgres)
 //
 // Admin pool for every method. The RLS policies mirror the installation rows
@@ -68,13 +77,18 @@ type InstallationReposStore interface {
 
 	// ClearForInstallationSystem drops one installation's mirror. This is the
 	// soft-removal path — an uninstalled installation grants nothing, and its
-	// row lives on only as history — and is called by MarkInstallationRemoved
-	// rather than by the reconcile, so a `deleted` webhook clears the grant at
-	// the moment it arrives instead of a poll interval later. A hard delete of
+	// row lives on only as history. MarkInstallationRemoved does the same delete
+	// inline (one transaction with the soft removal, so a `deleted` webhook
+	// clears the grant at the moment it arrives); this is the standalone door
+	// for a caller holding an installation it knows is gone. A hard delete of
 	// the installation row takes the mirror with it through the FK.
 	//
 	// Not to be confused with a failed reconcile: this is called when the grant
-	// is known to be gone, never when it could not be read.
+	// is known to be gone, never when it could not be read. Which is exactly why
+	// it validates its arguments and returns an error rather than treating a
+	// malformed org or an empty installation id as "nothing to clear" — a
+	// delete that silently matched no rows would report success for a grant
+	// that is still on the page.
 	ClearForInstallationSystem(ctx context.Context, orgID, installationID string) error
 
 	// ListForOrgSystem returns every mirrored grant entry across the org's LIVE

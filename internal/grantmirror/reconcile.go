@@ -166,7 +166,8 @@ func (r *Reconciler) RunOrg(ctx context.Context, orgID string) error {
 
 // reconcileInstallation refreshes one installation's grant, or leaves it
 // exactly as it was. There is no third outcome: every early return here is a
-// deliberate decision to keep the previous answer.
+// deliberate decision to keep the previous answer, and nothing writes a grant
+// it cannot vouch for as complete.
 func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, inst domain.OrgGitHubAppInstallation) error {
 	// A suspended installation refuses every token minted from it, so the grant
 	// cannot be read — but the grant still EXISTS, unchanged, and resumes intact
@@ -199,13 +200,13 @@ func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, in
 	for _, repo := range repos {
 		owner, name, ok := splitFullName(repo.FullName)
 		if !ok {
-			// A grant entry TF cannot name is one it cannot compare against the
-			// tracked set either. Dropping it silently would understate reach,
-			// so it is logged; failing the whole pass over one malformed entry
-			// would be worse, since the other entries are fine.
-			grantMirrorLog.WarnContext(ctx, "installation grant entry has an unusable full_name; skipping",
-				"org", orgID, "installation", inst.InstallationID, "full_name", repo.FullName)
-			continue
+			// A grant entry TF cannot name is one it cannot store, and an answer
+			// missing an entry is not the whole grant — which is the mirror's
+			// entire contract. Writing the rest would persist a grant narrower
+			// than the real one, understating reach and possibly hiding the very
+			// finding the table exists for. Same posture as a truncated listing:
+			// keep the previous answer, and say why.
+			return fmt.Errorf("grant entry %q is not a repository slug; refusing to write a partial grant", repo.FullName)
 		}
 		entries = append(entries, domain.InstallationRepository{
 			OrgID:          orgID,
