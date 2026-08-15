@@ -62,6 +62,48 @@ func TestCredentialClass_PATBind(t *testing.T) {
 	assertCredentialClass(t, s, domain.GitHubCredentialClassPAT, "a PAT bind")
 }
 
+// TestCredentialClass_PATBindRefusedForUnknownClass pins the fail-closed arm on
+// the one site where the missing-row inference would resolve to a WRITE.
+//
+// The bind's XOR gate asks "is there an org_github_apps row?" and reads no-row
+// as "nothing to conflict with". For an org in a credential system this build
+// can't name — one whose credential legitimately leaves no row — that inference
+// would hand it a PAT and record it as a PAT org, moving it between credential
+// systems on the strength of a question that was never the right one.
+//
+// Unreachable today: nothing writes a class outside the known set, which is
+// exactly what keeps an older build from meeting one. This is the backstop for
+// when that stops being true.
+func TestCredentialClass_PATBindRefusedForUnknownClass(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	stub := newGitHubAccessStub(t, ghAccessStub{login: "octocat"})
+	ctx := context.Background()
+
+	// A class from a newer peer. No App row — the shape that makes the XOR gate
+	// wave this through.
+	if err := s.orgs.SetGitHubCredentialClass(ctx, runmode.LocalDefaultOrgID, domain.GitHubCredentialClass("managed_app")); err != nil {
+		t.Fatalf("seed unknown class: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": stub.URL, "pat": "ghp_valid",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("bind pat under an unknown class = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Nothing was written — not the token, and not the class. A refusal that
+	// still moved the org would be the bug wearing a 409.
+	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "" {
+		t.Errorf("a refused bind stored a PAT: %q", v)
+	}
+	if got := orgCredentialClass(t, s); got != domain.GitHubCredentialClass("managed_app") {
+		t.Errorf("a refused bind rewrote the class to %q; want it untouched", got)
+	}
+}
+
 // TestCredentialClass_RegisterStaged writes byo_app at registration, including
 // while the App is STAGED behind a live PAT.
 //
