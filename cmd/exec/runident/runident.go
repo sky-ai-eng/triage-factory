@@ -74,7 +74,7 @@ type RunIdentity struct {
 	// pending_pr.run_id, conversation_worktrees.run_id, etc.
 	RunID string
 
-	// TeamID is the run's owning team (runs.team_id, NOT NULL), read
+	// TeamID is the run's owning team (conversations.team_id, NOT NULL), read
 	// straight off the run row GetSystem already loads — no task hop.
 	// Carried onto the local-mode RunInfo (TFAC-458) so the capture
 	// writers can stamp artifacts.team_id (NOT NULL per TFAC-455 F1).

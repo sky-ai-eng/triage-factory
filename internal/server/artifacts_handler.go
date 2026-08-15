@@ -663,7 +663,7 @@ func artifactPRNumber(art *domain.Artifact) int {
 //
 // No accept/dismiss distinction — the task closes on the last resolution
 // regardless of whether anything was accepted (epic decision #3). This is the
-// ONLY lifecycle effect of a resolve: it never flips runs.status or
+// ONLY lifecycle effect of a resolve: it never flips conversations.status or
 // resumes/terminates a blueprint.
 //
 // Governing signals: only a blueprint run is a task run, so only it can close a

@@ -12,15 +12,15 @@
 // honest answer.
 //
 // Cost is summed across every step of the run's blueprint, not just
-// the step that authored the content. The authoring run's own cost
-// reads runs.total_cost_usd when populated (the standard path;
-// CompleteConversation fills it in at run terminal), falling back to a
-// token-estimate from RunTokenTotals only while that column is nil —
-// the still-running standalone CLI case. The sibling steps' settled
-// costs are added on top via BlueprintSiblingCostUSDSystem. With the
-// queue-then-approve flow, review/PR submit run AFTER the agent has
-// terminated, so the authoring run's column is always populated and
-// the estimate fallback is rare.
+// the step that authored the content. The authoring run's own cost is
+// derived at read time as the SUM of the messages ledger's cost_usd
+// stamps (the standard path), falling back to a token-estimate from
+// TokenTotalsSystem only while nothing has settled — the still-running
+// standalone CLI case. The sibling steps' settled costs are added on
+// top via BlueprintSiblingCostUSDSystem. With the queue-then-approve
+// flow, review/PR submit run AFTER the agent has terminated, so the
+// authoring run's ledger has settled and the estimate fallback is
+// rare.
 package agentmeta
 
 import (
@@ -149,10 +149,10 @@ func elapsedFromRun(ctx context.Context, agentRuns db.ConversationStore, orgID, 
 }
 
 // ownDurationMs resolves a single run's own elapsed milliseconds. Prefers
-// the stored DurationMs (populated by CompleteConversation); falls back to
-// CompletedAt-StartedAt; final fallback is "now - StartedAt" for the
-// still-running standalone-CLI case. ok=false only when the run has no
-// duration and no StartedAt.
+// DurationMs (derived at read time from the claims' per-engagement
+// telemetry); falls back to CompletedAt-StartedAt; final fallback is
+// "now - StartedAt" for the still-running standalone-CLI case. ok=false
+// only when the run has no duration and no StartedAt.
 func ownDurationMs(run *domain.Conversation) (int, bool) {
 	if run.DurationMs != nil {
 		return *run.DurationMs, true

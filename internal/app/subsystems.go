@@ -195,7 +195,7 @@ func (a *App) buildExecution() error {
 	a.spawner.SetEventPublisher(a.bus)
 	// Replace the constructor's random per-boot uuid with the persistent
 	// instance-registry identity registerInstance minted above —
-	// runs.executor_id on claimed rows must equal the registry id, and
+	// claims.executor_id on claimed rows must equal the registry id, and
 	// RunInstanceHeartbeat's fenced renewal needs the matching boot_epoch.
 	a.spawner.SetExecutorID(a.identity.ID, a.bootEpoch)
 	// Dispatcher concurrency is a deployment decision: the default of 8 fits

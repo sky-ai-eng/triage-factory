@@ -58,9 +58,10 @@ func TestSpendStore_SQLite(t *testing.T) {
 		}
 
 		// A blueprint + trigger event_handler so an autonomous run can carry a
-		// non-NULL trigger_id (runs.trigger_id FK → event_handlers; the trigger's
-		// same-team FK → blueprints). event_type is a stable seeded catalog id.
-		// The view passes runs.trigger_id straight through (TFAC-478).
+		// non-NULL trigger_id (conversations.trigger_id FK → event_handlers;
+		// the trigger's same-team FK → blueprints). event_type is a stable
+		// seeded catalog id.
+		// The view passes conversations.trigger_id straight through (TFAC-478).
 		blueprintID := uuid.New().String()
 		if _, err := conn.Exec(
 			`INSERT INTO blueprints (id, name, org_id, team_id, creator_user_id) VALUES (?, 'spend-bp', ?, ?, ?)`,
@@ -111,12 +112,12 @@ func openSQLiteSpendConn(t *testing.T) *sql.DB {
 	return conn
 }
 
-// newSQLiteSpendSeeder owns the raw INSERT shape for each source. origin
-// is 'manual' so the runs_origin_requires_parents CHECK (which only constrains
-// origin='blueprint') is satisfied without a blueprint/task/prompt graph. Empty
-// CreatorUserID / ActorAgentID and a nil Cost serialize to SQL NULL. The two
-// agent arms plant one assistant ledger row each and return ITS id — the
-// view's source_id.
+// newSQLiteSpendSeeder owns the raw INSERT shape for each source. origin is
+// 'manual' so the conversations_origin_requires_parents CHECK (which only
+// constrains origin='blueprint') is satisfied without a
+// blueprint/task/prompt graph. Empty CreatorUserID / ActorAgentID and a nil
+// Cost serialize to SQL NULL. The two agent arms plant one assistant ledger
+// row each and return ITS id — the view's source_id.
 func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string) dbtest.SpendSeeder {
 	seedLedgerRow := func(t *testing.T, convID, model string, cost any, tok dbtest.SpendTokens, at time.Time) string {
 		t.Helper()

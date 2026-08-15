@@ -111,12 +111,13 @@ type Spawner struct {
 	agentRuns                               db.ConversationStore // run lifecycle + transcript
 	entities                                db.EntityStore       // entity reads for project lookup + resume context
 	artifacts                               db.ArtifactStore     // review + draft-PR artifact lookup on processCompletion park check
-	// stagedInjections is the durable, producer-agnostic "stage for next resume"
-	// agent-injection queue (TFAC-501). The generic staged-injection API (StageOrDeliverInjection
-	// / stagedInjectionsForResume) appends here when a target run has no warm process
-	// and flushes on the next resume. Admin-pool System methods only — both the
-	// producer (an eventbus subscriber) and the consumer (a resume goroutine) run
-	// without JWT claims. Nil-safe (tests passing a partial db.Stores{}).
+	// stagedInjections is the durable, producer-agnostic "stage for next
+	// resume" agent-injection queue (TFAC-501). The generic staged-injection
+	// API (StageOrDeliverInjection / stagedInjectionsForResume) appends here
+	// when a target run has no warm process and flushes on the next resume.
+	// Admin-pool System methods only — both the producer (an eventbus
+	// subscriber) and the consumer (a resume goroutine) run without JWT
+	// claims. Nil-safe (tests passing a partial db.Stores{}).
 	stagedInjections db.StagedInjectionStore
 	events           db.EventStore // admin-pool GetMetadataSystem for post-run prompt building
 	// taskMemory routes the post-completion UpsertAgentMemorySystem
@@ -339,7 +340,7 @@ type Spawner struct {
 	// never be a reason to fail to ASK it.
 	permissions db.PermissionStore
 	// executorID is this spawner instance's executor identity, stamped onto
-	// runs.executor_id at claim and resume. Empty at construction —
+	// claims.executor_id at claim and resume. Empty at construction —
 	// production wires the persistent instance-registry id via
 	// SetExecutorID once main resolves it, alongside bootEpoch (the pair
 	// the heartbeat loop's fenced renewal keys on), and the empty default

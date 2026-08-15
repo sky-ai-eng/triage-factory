@@ -977,7 +977,7 @@ func newSQLiteForArtifactTest(t *testing.T) *sql.DB {
 
 // seedArtifactRun inserts a minimal run the artifacts FK (conversation_id →
 // runs(id)) can point at. origin is set non-'blueprint' so the
-// runs_origin_requires_parents CHECK doesn't demand a parent chain; the
+// conversations_origin_requires_parents CHECK doesn't demand a parent chain; the
 // org/team/creator columns default to the local sentinels.
 func seedArtifactRun(t *testing.T, conn *sql.DB) string {
 	t.Helper()

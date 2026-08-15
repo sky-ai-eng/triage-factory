@@ -571,7 +571,7 @@ func TestMigrate_RunsTriggerIDBackfill(t *testing.T) {
 	// Minimal FK chain for two step runs: one under an event-fired
 	// blueprint_run (trigger frozen on the parent only — the bug shape), one
 	// under a manual blueprint_run. The sentinel user satisfies
-	// runs.creator_user_id's FK (pure-goose DBs carry no tenant rows); the
+	// conversations.creator_user_id's FK (pure-goose DBs carry no tenant rows); the
 	// event_type FKs reuse the catalog rows seeded above.
 	const userID = "00000000-0000-0000-0000-000000000100"
 	for _, stmt := range []string{

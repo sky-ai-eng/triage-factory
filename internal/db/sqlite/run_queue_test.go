@@ -411,18 +411,19 @@ func TestRunQueueStore_SQLite_SetCurrentStep(t *testing.T) {
 }
 
 // TestRunQueueStore_SQLite_EnqueueStampsActorAgent pins the audit gap fix:
-// EnqueueRun (the live run-creation path) persists runs.actor_agent_id, and the
-// ConversationStore.Get read projection JOINs agents to surface the bot's display
-// name as ActorAgentName for the "Ran as: {name}" UI. A run enqueued with no
-// actor reads back with both fields empty (the column's nullable contract).
+// EnqueueRun (the live run-creation path) persists
+// conversations.actor_agent_id, and the ConversationStore.Get read
+// projection JOINs agents to surface the bot's display name as
+// ActorAgentName for the "Ran as: {name}" UI. A run enqueued with no actor
+// reads back with both fields empty (the column's nullable contract).
 func TestRunQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
-	// One org agent backs runs.actor_agent_id (FK) and carries the display name
-	// the read JOIN denormalizes.
+	// One org agent backs conversations.actor_agent_id (FK) and carries the
+	// display name the read JOIN denormalizes.
 	agentID, err := stores.Agents.Create(ctx, org, domain.Agent{DisplayName: "Triage Bot"})
 	if err != nil {
 		t.Fatalf("Agents.Create: %v", err)

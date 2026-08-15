@@ -17,7 +17,7 @@ import "time"
 //
 // A turn that ends without one of these (prose / nothing) is not an outcome at
 // all — the run is left `open` (not concluded, not executing); see
-// internal/delegate. runs.outcome persists the parsed value; the blueprint
+// internal/delegate. conversations.outcome persists the parsed value; the blueprint
 // orchestrator's step advancement and the later queue work read it.
 type RunOutcome string
 
@@ -45,7 +45,7 @@ func (o RunOutcome) Valid() bool {
 // wire, and free text stays where it always was (messages /
 // result_summary).
 //
-// Persisted to runs.failure_kind (NULL === RunFailureUnclassified).
+// Persisted to conversations.failure_kind (NULL === RunFailureUnclassified).
 // Closed set — extend it here when a new failure genuinely needs
 // distinct rendering; an unrecognized value renders as a generic
 // failure, so additions are backward compatible.
@@ -255,13 +255,13 @@ type Conversation struct {
 	FailureKind   RunFailureKind
 	SessionID     string // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
 	MemoryMissing bool   // true if the pre-complete memory-file gate was exhausted without the agent writing a memory file
-	TriggerType   string // "manual" | "event" (matches runs.trigger_type / blueprint_runs.trigger_type vocabulary)
+	TriggerType   string // "manual" | "event" (matches conversations.trigger_type / blueprint_runs.trigger_type vocabulary)
 	TriggerID     string // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step run so the llm_spend view can attribute autonomous spend by rule (TFAC-478); empty/NULL for manual runs
 
 	// TriggeringEventID is the event instance that auto-fired this run.
 	// Set only on the event path; empty (→ SQL NULL) for manual
 	// runs and blueprint-step runs. Paired with TriggerID it forms the
-	// runs_event_trigger_fence partial unique index, which makes
+	// conversations_event_trigger_fence partial unique index, which makes
 	// event-triggered auto-delegation exactly-once under the at-least-once
 	// router queue: a replayed event whose first run already committed
 	// conflicts on the fence and is skipped. Forward-only provenance —
@@ -292,7 +292,7 @@ type Conversation struct {
 	// migration introduced for prompts / task_rules / etc.
 	CreatorUserID string
 
-	// TeamID is the run's owning team — runs.team_id, NOT NULL (the
+	// TeamID is the run's owning team — conversations.team_id, NOT NULL (the
 	// LocalDefaultTeamID sentinel in local mode, the task-derived team in
 	// multi mode; EnqueueRun / Create denormalize it from the parent task
 	// at insert, so it carries the team without a task hop at read time).

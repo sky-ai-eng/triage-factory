@@ -9,12 +9,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestDelegate_EventPath_StampsTriggerIDOnStepRun pins the write half of the
-// usage by-rule fix: an event-fired delegation denormalizes the firing
-// trigger onto the step-0 runs row (runs.trigger_id), and the JOIN-free
-// llm_spend view therefore categorizes that run 'autonomous' WITH a rule to
-// attribute it to. A NULL trigger_id here is exactly the "Automated cost with
-// an empty by-rule breakdown" bug on the usage page.
+// TestDelegate_EventPath_StampsTriggerIDOnStepRun pins the write half of
+// the usage by-rule fix: an event-fired delegation denormalizes the firing
+// trigger onto the step-0 conversations row (conversations.trigger_id), and
+// the JOIN-free llm_spend view therefore categorizes that run 'autonomous'
+// WITH a rule to attribute it to. A NULL trigger_id here is exactly the
+// "Automated cost with an empty by-rule breakdown" bug on the usage page.
 func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 	database := newDelegateTestDB(t)
 	org := runmode.LocalDefaultOrgID

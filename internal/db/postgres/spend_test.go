@@ -287,9 +287,9 @@ func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, age
 		`INSERT INTO projects (id, org_id, creator_user_id, team_id, name, visibility) VALUES ($1, $2, $3, NULL, 'spend-test-org', 'org')`,
 		nullTeamProjectID, orgID, userID)
 	// A blueprint + trigger event_handler so an autonomous run can carry a
-	// non-NULL trigger_id (runs.trigger_id FK → event_handlers; the trigger's
-	// same-team FK → blueprints). The view passes runs.trigger_id straight
-	// through (TFAC-478).
+	// non-NULL trigger_id (conversations.trigger_id FK → event_handlers;
+	// the trigger's same-team FK → blueprints). The view passes
+	// conversations.trigger_id straight through (TFAC-478).
 	blueprintID := uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB,
 		`INSERT INTO blueprints (id, org_id, team_id, creator_user_id, name) VALUES ($1, $2, $3, $4, 'spend-bp')`,
@@ -303,7 +303,7 @@ func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, age
 }
 
 // newPgSpendSeeder owns the raw INSERT shape for each source table on the admin
-// pool. origin='manual' satisfies runs_origin_requires_parents without a
+// pool. origin='manual' satisfies conversations_origin_requires_parents without a
 // blueprint graph; empty CreatorUserID/ActorAgentID and a nil Cost map to SQL
 // NULL (uuid columns reject empty strings; the in-flight run carries NULL cost).
 func newPgSpendSeeder(conn *sql.DB, orgID, teamProjectID, nullTeamProjectID string) dbtest.SpendSeeder {

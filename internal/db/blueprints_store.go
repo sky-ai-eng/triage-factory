@@ -156,7 +156,7 @@ func DedupPreserveOrder(ids []string) []string {
 //     owning the worktree shared across every step.
 //   - runs                — read-only here (per-step state lives on runs;
 //     RunsForBlueprint returns the slice of step rows linked to a blueprint_run).
-//     Step advancement reads each step run's terminal runs.outcome (see
+//     Step advancement reads each step run's terminal conversations.outcome (see
 //     delegate.decideBlueprintStep); there is no separate verdict channel.
 //
 // Audiences:

@@ -203,9 +203,10 @@ func (s *promptStore) UpdateImported(ctx context.Context, orgID string, id, name
 	return err
 }
 
-// Delete soft-deletes: it stamps deleted_at rather than removing the row, so
-// runs.prompt_id (RESTRICT) and blueprint_steps.step_prompt_id (RESTRICT) FKs
-// never fire and historical runs keep resolving the prompt via GetSystem.
+// Delete soft-deletes: it stamps deleted_at rather than removing the row,
+// so conversations.prompt_id (RESTRICT) and blueprint_steps.step_prompt_id
+// (RESTRICT) FKs never fire and historical runs keep resolving the prompt
+// via GetSystem.
 func (s *promptStore) Delete(ctx context.Context, orgID string, id string) error {
 	res, err := s.app.ExecContext(ctx, `UPDATE prompts SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
 	if err != nil {

@@ -292,8 +292,8 @@ func TestTaskMemoryStore_Postgres_BlueprintRunCrossOrgFKRejected(t *testing.T) {
 // for that entity. Two teams in ONE org both run on a single SHARED entity
 // (entities are org-wide); each team's run authors its own memory. A System
 // read scoped to team T1 must see only T1's memory — never T2's — and vice
-// versa, matching what the app-pool RLS path (conversation_memory_all → runs_select)
-// shows a member of that team.
+// versa, matching what the app-pool RLS path (conversation_memory_all
+// → conversations_select) shows a member of that team.
 func TestTaskMemoryStore_Postgres_SystemReadTeamScoped(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -435,14 +435,15 @@ func TestTaskMemoryStore_Postgres_BackfillProducesPrimaryJoinRows(t *testing.T) 
 }
 
 // TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped is the run-end
-// attach acceptance on Postgres, where the team-scoped read matters: a run's
-// memory, once attached to every entity it engaged (primary ∪ produced ∪
-// touched), is reachable through the join from all three roles — and that
-// reachability stays team-scoped. Two teams in ONE org each run a completion
-// that PRODUCES the SAME shared entity; a team-scoped System read of that
-// produced entity must surface only the reading team's memory, proving the
-// join-based read applies runs_select team visibility regardless of the join
-// role (not just the denormalized primary the SystemReadTeamScoped pin covers).
+// attach acceptance on Postgres, where the team-scoped read matters: a
+// run's memory, once attached to every entity it engaged (primary ∪
+// produced ∪ touched), is reachable through the join from all three roles —
+// and that reachability stays team-scoped. Two teams in ONE org each run a
+// completion that PRODUCES the SAME shared entity; a team-scoped System
+// read of that produced entity must surface only the reading team's memory,
+// proving the join-based read applies conversations_select team visibility
+// regardless of the join role (not just the denormalized primary the
+// SystemReadTeamScoped pin covers).
 func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -682,7 +683,8 @@ func seedPgRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, prom
 		t.Fatalf("seed task: %v", err)
 	}
 
-	// runs.blueprint_run_id is NOT NULL — mint a 1-step blueprint_run for the task.
+	// conversations.blueprint_run_id is NOT NULL — mint a 1-step blueprint_run
+	// for the task.
 	bpID := uuid.New().String()
 	if _, err := conn.Exec(`
 		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, source, name, created_at, updated_at)

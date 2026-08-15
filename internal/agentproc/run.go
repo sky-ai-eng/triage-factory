@@ -404,11 +404,11 @@ func (s *UsageSink) OnMessage(m *domain.Message) error {
 type Sink interface {
 	// OnSession fires once, the first time the stream emits a
 	// system/init event with a session_id. Implementations persist
-	// the id to whatever table owns "this conversation's resume key"
-	// (runs.session_id for delegate; projects.curator_session_id
-	// for the curator). Returning an error is logged but does not
-	// abort the run — the stream continues and the result still
-	// lands; callers can re-attempt session capture on resume.
+	// the id to conversations.sdk_session_id — one column for both
+	// surfaces, delegate and curator alike. Returning an error is
+	// logged but does not abort the run — the stream continues and
+	// the result still lands; callers can re-attempt session capture
+	// on resume.
 	OnSession(sessionID string) error
 
 	// OnMessage fires per fully-accumulated assistant or tool message.

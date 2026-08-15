@@ -74,10 +74,11 @@ type PromptStore interface {
 	UpdateImported(ctx context.Context, orgID string, id, name, body, allowedTools string) error
 
 	// Delete soft-deletes a prompt (stamps deleted_at). The row + its runs stay
-	// as the durable audit trail — runs.prompt_id is RESTRICT, so a hard DELETE
-	// on a prompt with run history would error, and auto-wrapping every new
-	// prompt as a 1-step blueprint (the step FK is also RESTRICT) makes
-	// hard-delete impossible. Request-facing reads (List/Get/GetBySystemSlug)
+	// as the durable audit trail — conversations.prompt_id is RESTRICT, so
+	// a hard DELETE on a prompt with run history would error, and
+	// auto-wrapping every new prompt as a 1-step blueprint (the step FK
+	// is also RESTRICT) makes hard-delete impossible. Request-facing
+	// reads (List/Get/GetBySystemSlug)
 	// filter deleted_at IS NULL; the ...System reads keep resolving it so
 	// in-flight runs + past-run timelines still render the name/body.
 	Delete(ctx context.Context, orgID string, id string) error
@@ -102,7 +103,7 @@ type PromptStore interface {
 
 	// Stats aggregates runs.* for this prompt — totals, success
 	// rate, cost, last-used, runs-per-day-for-30-days. The
-	// underlying queries hit the runs table; logically a Run-side
+	// underlying queries hit the conversations table; logically a Run-side
 	// concern but keyed on prompt_id, so it lives here so the
 	// prompts handler can depend on a single store. When RunStore
 	// lands (wave 3b) this stays put — the read still keys on

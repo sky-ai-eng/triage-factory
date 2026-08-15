@@ -283,7 +283,7 @@ type ResumeOutcome struct {
 // open run when the warm process is gone.
 //
 // Callers pass the sessionID captured during the initial run (read
-// from runs.session_id, populated on the runSink during the original
+// from conversations.sdk_session_id, populated on the runSink during the original
 // invocation), the cwd the original run used so the resumed
 // subprocess sees the same worktree, and the user message to append
 // to the conversation. The runID is reused so resumed messages append

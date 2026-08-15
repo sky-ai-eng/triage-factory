@@ -12,7 +12,7 @@ import (
 
 // seedBlueprintRunForRun mints a blueprint + blueprint_run pointed at the
 // given task so a `runs` row can reference blueprint_runs(id). The column is
-// nullable, but the runs_origin_requires_parents CHECK requires it (plus
+// nullable, but the conversations_origin_requires_parents CHECK requires it (plus
 // task_id/prompt_id) to be set when origin='blueprint' (the default). Returns
 // the blueprint_run id to drop into the run insert's blueprint_run_id column.
 //

@@ -1050,8 +1050,8 @@ func (s *Server) routes() {
 	s.api("GET /api/agent/conversations", ag.handleConversations)
 
 	// Projects. Pure CRUD over the projects table; the
-	// Curator runtime that populates curator_session_id and per-project
-	// entity classification land separately.
+	// Curator runtime that populates conversations.sdk_session_id and
+	// per-project entity classification land separately.
 	s.apiMutating("POST /api/projects", s.handleProjectCreate)
 	s.api("GET /api/projects", s.handleProjectList)
 	s.api("GET /api/projects/{id}", s.handleProjectGet)

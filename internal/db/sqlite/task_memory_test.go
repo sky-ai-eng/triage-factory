@@ -226,7 +226,7 @@ func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (runI
 	`, taskID, entityID, eventType, eventID); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	// runs.blueprint_run_id is NOT NULL — mint a blueprint + blueprint_run
+	// conversations.blueprint_run_id is NOT NULL — mint a blueprint + blueprint_run
 	// for this task so the run row satisfies the FK.
 	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
 	runID = uuid.New().String()

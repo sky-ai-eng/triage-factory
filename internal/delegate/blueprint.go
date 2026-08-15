@@ -20,7 +20,7 @@ import (
 )
 
 // blueprintStepOutcome is the orchestrator's decision after a completed
-// blueprint step, derived from the step's runs.outcome and its position.
+// blueprint step, derived from the step's conversations.outcome and its position.
 type blueprintStepOutcome int
 
 const (
@@ -42,7 +42,7 @@ const (
 //
 // abortReason is non-empty only for the missing-outcome-on-a-non-final-step
 // case ("no-outcome"); for an explicit abort it is empty and the caller
-// copies runs.outcome_reason into blueprint_runs.abort_reason.
+// copies conversations.outcome_reason into blueprint_runs.abort_reason.
 func decideBlueprintStep(outcome string, isFinal bool) (decision blueprintStepOutcome, abortReason string) {
 	switch domain.RunOutcome(outcome) {
 	case domain.RunOutcomeContinue:
@@ -575,12 +575,12 @@ func (s *Spawner) markBlueprintRunStatusAsUser(ctx context.Context, orgID, userI
 	return changed, err
 }
 
-// ResumeBlueprintAfterResume finalizes a blueprint after one of its step runs
-// was resumed (via a user follow-up) and reached a terminal state — once
-// processCompletion reports the step is no longer parked. It reads the resumed
-// step's terminal runs.outcome + position and routes through terminateBlueprint,
-// so a 1-step (or final-step) resume closes the task on finish and leaves it
-// open on abort.
+// ResumeBlueprintAfterResume finalizes a blueprint after one of its step
+// runs was resumed (via a user follow-up) and reached a terminal state —
+// once processCompletion reports the step is no longer parked. It reads the
+// resumed step's terminal conversations.outcome + position and routes
+// through terminateBlueprint, so a 1-step (or final-step) resume closes the
+// task on finish and leaves it open on abort.
 //
 // A non-final step that wants to advance mid-blueprint (continue) is the epic's
 // resume work and is not built here: the blueprint is terminated with a clear

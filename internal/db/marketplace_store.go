@@ -158,7 +158,7 @@ type MarketplaceStore interface {
 	// for every listing in orgID (TFAC-540) — teams_using (distinct
 	// installing teams whose copy still exists), total_runs, success_rate,
 	// and last_run_at, joined via marketplace_installs.root_object_id into
-	// runs.prompt_id (kind=prompt) or blueprint_runs.blueprint_id
+	// conversations.prompt_id (kind=prompt) or blueprint_runs.blueprint_id
 	// (kind=blueprint). total_runs/success_rate/last_run_at count only
 	// TERMINAL runs — a still-in-flight run hasn't resolved either way, so
 	// it must not count as evidence of usage or (worse) silently score as a

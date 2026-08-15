@@ -138,7 +138,7 @@ type BlueprintStep struct {
 //
 //   - StepIndex / Brief reconstruct the BlueprintStep (Step).
 //   - PromptID is kept (despite the frozen content) for the step's usage
-//     increment, the runs row's prompt_id, and skill-slug stability.
+//     increment, the conversations row's prompt_id, and skill-slug stability.
 //   - PromptName / PromptBody / Source / AllowedTools / Model reconstruct the
 //     *Prompt (Prompt). Source is load-bearing: MaterializeStepSkill writes an
 //     imported skill verbatim but synthesizes frontmatter for a user/system
@@ -183,7 +183,7 @@ func (p BlueprintPlanStep) Step(blueprintID string) BlueprintStep {
 // delegation — every blueprint, including a 1-step one, mints exactly one (a
 // single prompt is a 1-step blueprint; there is no separate single-prompt
 // path). Owns the shared worktree across all steps. Per-step state lives on the
-// runs table linked back via runs.blueprint_run_id (NOT NULL).
+// conversations table linked back via conversations.blueprint_run_id (NOT NULL).
 type BlueprintRun struct {
 	ID          string               `json:"id"`
 	BlueprintID string               `json:"blueprint_id"`
@@ -203,7 +203,7 @@ type BlueprintRun struct {
 	// (blueprint_runs.actor_agent_id). Resolved once at the
 	// delegation entry point — from the task's bot claim, or the org agent the
 	// router/handler already holds — and frozen here at mint. Every step run
-	// inherits it onto runs.actor_agent_id, so execution attribution is stable
+	// inherits it onto conversations.actor_agent_id, so execution attribution is stable
 	// across steps and survives a mid-blueprint user takeover (which clears the
 	// task claim but not who ran the bot's steps). Empty = NULL (no actor: minted
 	// before agent bootstrap, or the agent row was later deleted → SET NULL).

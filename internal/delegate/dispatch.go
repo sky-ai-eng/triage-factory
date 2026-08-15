@@ -1135,20 +1135,21 @@ func stepModelOrInherit(stepModel, inherited string) string {
 	return inherited
 }
 
-// enqueueBlueprintStep mints a queued runs row for step stepIndex of a
-// blueprint_run. Shared by Delegate (step 0) and the reactor (every advance).
-// actorAgentID is the executing bot, frozen on the blueprint_run at mint and
-// passed through here so every step inherits the same runs.actor_agent_id —
-// resolved once at the delegation entry point, never re-derived from the task
-// claim (which is empty at step 0 on the event path and cleared by a takeover).
-// triggerID is likewise the blueprint_run's frozen firing event_handler,
-// denormalized onto every step's runs.trigger_id (empty for manual → NULL):
-// the JOIN-free llm_spend view reads autonomous spend attribution off the runs
-// row alone (the usage by-rule breakdown, TFAC-478), so a step run without it
-// would show as autonomous cost attributable to no rule. TriggeringEventID is
-// deliberately NOT inherited — the replay fence relocated to blueprint_runs,
-// and stamping it per step would collide a multi-step chain on the leftover
-// runs_event_trigger_fence index.
+// enqueueBlueprintStep mints a queued conversations row for step stepIndex
+// of a blueprint_run. Shared by Delegate (step 0) and the reactor (every
+// advance). actorAgentID is the executing bot, frozen on the blueprint_run
+// at mint and passed through here so every step inherits the same
+// conversations.actor_agent_id — resolved once at the delegation entry
+// point, never re-derived from the task claim (which is empty at step 0 on
+// the event path and cleared by a takeover). triggerID is likewise the
+// blueprint_run's frozen firing event_handler, denormalized onto every
+// step's conversations.trigger_id (empty for manual → NULL): the JOIN-free
+// llm_spend view reads autonomous spend attribution off the conversations
+// row alone (the usage by-rule breakdown, TFAC-478), so a step run without
+// it would show as autonomous cost attributable to no rule.
+// TriggeringEventID is deliberately NOT inherited — the replay fence
+// relocated to blueprint_runs, and stamping it per step would collide a
+// multi-step chain on the leftover conversations_event_trigger_fence index.
 func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunID string, task domain.Task, step domain.BlueprintStep, model, triggerType, triggerID, creatorUserID, actorAgentID string) error {
 	stepIdx := step.StepIndex
 	runID := uuid.New().String()

@@ -69,7 +69,7 @@ const ProtocolVersion = 1
 // since the routing decision is collapsed into the Client methods
 // below).
 //
-// TeamID is the run's owning team (runs.team_id, NOT NULL). The capture
+// TeamID is the run's owning team (conversations.team_id, NOT NULL). The capture
 // writers (TFAC-459 Jira, TFAC-460 pre-push, GitHub-native rework) stamp
 // artifacts.team_id off it (NOT NULL per TFAC-455 F1), so it must be
 // populated on every construction path: the spawner reads it off the run

@@ -534,7 +534,7 @@ func (t TxStores) Extension(key string) any { return t.Ext[key] }
 // userID (no auth concept in local mode).
 //
 // userID is required and must reference a real users row in
-// Postgres — runs.creator_user_id has an FK to users(id). Callers
+// Postgres — conversations.creator_user_id has an FK to users(id). Callers
 // that don't have a real user (event-triggered run completion,
 // system services) should route to admin pool via the per-store
 // `...System` methods instead. Passing runmode.LocalDefaultUserID

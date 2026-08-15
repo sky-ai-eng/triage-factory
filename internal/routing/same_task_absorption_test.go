@@ -171,7 +171,7 @@ func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task 
 	if err != nil {
 		t.Fatalf("seed active run: %v", err)
 	}
-	// stubDelegateRun returns the blueprint_run id, not the runs.id the
+	// stubDelegateRun returns the blueprint_run id, not the conversations.id the
 	// injection seam targets (staged_agent_injections.run_id FKs to
 	// runs(id)) — resolve the real run row it minted (one run per
 	// blueprint_run in the stub, step_index 0).

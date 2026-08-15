@@ -40,7 +40,7 @@ import (
 type runConfig struct {
 	orgID     string  // tenant scope for every store call inside this run's goroutine — set once in Delegate from opts.OrgID, then read everywhere via cfg.orgID instead of being threaded positionally
 	claimID   string  // the engagement driving this run — the claims row ClaimNextRun minted, threaded through so teardown can stamp the run's measured sandbox cost by id (an active-claim lookup would race the release). Empty on paths with no claimed run in scope, which record no actuals.
-	teamID    string  // the run's owning team (runs.team_id, NOT NULL), stamped alongside orgID from the claimed run row; read at construction to populate agenthost.RunInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Also stamped on the run-bearing terminal literals (dispatchClaimedRun / handlePreAgentFailure); empty only on the CancelBlueprint / paused-cleanup paths that have a task but no claimed run in scope.
+	teamID    string  // the run's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed run row; read at construction to populate agenthost.RunInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Also stamped on the run-bearing terminal literals (dispatchClaimedRun / handlePreAgentFailure); empty only on the CancelBlueprint / paused-cleanup paths that have a task but no claimed run in scope.
 	scope     string  // what the agent is scoped to (repo, PR, issue)
 	toolsRef  string  // tool documentation to inject
 	wtPath    string  // initial cwd: GitHub PR worktree, or Jira run-root
@@ -143,7 +143,7 @@ type DelegateOpts struct {
 	// TriggerType is "manual" (user clicked Delegate) or "event"
 	// (router auto-fired from a matched event_handler). Drives the
 	// routing decision inside the goroutine: synthetic-claims for
-	// manual (so prompts_select RLS filters by user, runs_insert RLS
+	// manual (so prompts_select RLS filters by user, conversations_insert RLS
 	// sees creator_user_id), admin pool for event (router has no
 	// user identity to project). Defaults to "manual" if empty.
 	//
@@ -158,14 +158,14 @@ type DelegateOpts struct {
 	TriggerType string
 
 	// TriggerID is the event_handler ID for event-triggered runs,
-	// empty for manual. Recorded on the runs row for audit.
+	// empty for manual. Recorded on the conversations row for audit.
 	TriggerID string
 
 	// TriggeringEventID is the event instance that fired this run, for
 	// event-triggered delegations; empty for manual. Server-side
 	// provenance like TriggerID — the router threads it from the event
 	// being processed (immediate path) or the pending firing row (drain
-	// path). Paired with TriggerID it drives the runs_event_trigger_fence:
+	// path). Paired with TriggerID it drives the conversations_event_trigger_fence:
 	// the event-path insert is conflict-aware, so a replayed event whose
 	// first run already committed returns ErrAlreadyFired instead of
 	// spawning a duplicate. Required on the event path — CreateIfNotFiredSystem
@@ -188,7 +188,7 @@ type DelegateOpts struct {
 	// handlers hold the agent they claimed the task with; the drain path passes
 	// the task's already-stamped claim). Delegate freezes it onto
 	// blueprint_runs.actor_agent_id at mint, and every step run inherits it onto
-	// runs.actor_agent_id. Empty is tolerated (→ NULL on the row, the honest
+	// conversations.actor_agent_id. Empty is tolerated (→ NULL on the row, the honest
 	// "no actor" answer) but every production caller supplies it, so the run's
 	// execution attribution never depends on re-reading a task claim that may
 	// not be written yet at step 0.
@@ -366,7 +366,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		TriggerID:         triggerID,
 		TriggeringEventID: triggeringEventID,
 		// Freeze the executing bot at mint. Every step run inherits this onto
-		// runs.actor_agent_id, so execution attribution is resolved once here
+		// conversations.actor_agent_id, so execution attribution is resolved once here
 		// rather than re-derived from the task claim per step (which is empty at
 		// step 0 on the event path and cleared by a mid-blueprint takeover).
 		ActorAgentID: opts.ActorAgentID,
@@ -687,7 +687,7 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 // jira tool surfaces are exposed since the agent
 // will need both to implement and ship a PR.
 //
-// runs.worktree_path is set to the run-root. The resume path reads this
+// conversations.worktree_path is set to the run-root. The resume path reads this
 // field as the cwd to resume the session in (`claude --resume` keys
 // session storage by cwd-encoded ~/.claude/projects/<encoded>, and we
 // passed cwd=runRoot to the original agentproc.Run). Even though Jira

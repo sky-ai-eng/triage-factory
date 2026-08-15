@@ -49,7 +49,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 //
 // userID must be a real users row id. Passing
 // runmode.LocalDefaultUserID is rejected — that sentinel has no FK
-// target in the multi-mode users table, and runs.creator_user_id
+// target in the multi-mode users table, and conversations.creator_user_id
 // has an FK to users(id). Callers that lack a real user identity
 // (event-triggered runs by schema CHECK, system services) should
 // route through the admin pool via per-store `...System` methods

@@ -137,7 +137,7 @@ func newTestDB(t *testing.T) (db.Stores, *db.DB) {
 }
 
 // seedBlueprintRun mints a fresh blueprint + blueprint_run for taskID
-// and returns its id. runs.blueprint_run_id is NOT NULL, so every
+// and returns its id. conversations.blueprint_run_id is NOT NULL, so every
 // seeded run needs a parent blueprint_run.
 func seedBlueprintRun(t *testing.T, conn *sql.DB, taskID string) string {
 	t.Helper()

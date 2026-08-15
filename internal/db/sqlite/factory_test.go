@@ -34,7 +34,7 @@ func TestFactoryReadStore_SQLite(t *testing.T) {
 		if err := db.BootstrapSchemaForTest(conn); err != nil {
 			t.Fatalf("bootstrap schema: %v", err)
 		}
-		// runs.prompt_id FKs into prompts — seed a stable prompt row
+		// conversations.prompt_id FKs into prompts — seed a stable prompt row
 		// once so every Run() call resolves the FK without per-call
 		// setup.
 		if _, err := conn.Exec(

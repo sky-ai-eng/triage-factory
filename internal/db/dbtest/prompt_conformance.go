@@ -25,7 +25,7 @@ import (
 type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID string, seedRuns RunSeederForStats)
 
 // RunSeederForStats is a callback the harness invokes to populate
-// rows in the runs table for Stats assertions. statusByOffset maps
+// rows in the conversations table for Stats assertions. statusByOffset maps
 // row index → status string ("completed" / "failed" / "running"
 // etc.); the seeder generates one run per entry, with started_at
 // staggered across days so the per-day grouping has signal. Returns
@@ -236,7 +236,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 
 	t.Run("Delete_WithRunHistory_Succeeds", func(t *testing.T) {
 		// Regression: a user prompt with run history must be
-		// deletable without hitting the runs.prompt_id RESTRICT FK (a hard DELETE
+		// deletable without hitting the conversations.prompt_id RESTRICT FK (a hard DELETE
 		// would 500). Soft-delete sidesteps the FK and keeps the audit trail.
 		store, orgID, teamID, seedRuns := factory(t)
 		ctx := context.Background()

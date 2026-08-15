@@ -63,9 +63,9 @@ func seedMarketplaceStatsTask(t *testing.T, h *Harness, orgID, userID, teamID st
 	return taskID
 }
 
-// seedPromptRun records one runs row against promptID, started at
+// seedPromptRun records one conversations row against promptID, started at
 // startedAt, with the given terminal status ('completed' or 'failed').
-// runs.blueprint_run_id is NOT NULL, so this mints a throwaway
+// conversations.blueprint_run_id is NOT NULL, so this mints a throwaway
 // single-step blueprint_run to hang the run off, mirroring
 // seedPgRunsForStats.
 func seedPromptRun(t *testing.T, h *Harness, orgID, userID, teamID, taskID, promptID, status string, startedAt time.Time) {
@@ -212,7 +212,7 @@ func TestMarketplaceStats_PromptAggregation_TwoTeamsAndDeletedCopy(t *testing.T)
 
 // TestMarketplaceStats_BlueprintAggregation pins that the kind=blueprint
 // path aggregates through blueprint_runs.blueprint_id rather than
-// runs.prompt_id, and that it applies the same terminal-only filter (a
+// conversations.prompt_id, and that it applies the same terminal-only filter (a
 // still-running blueprint_run must not count).
 func TestMarketplaceStats_BlueprintAggregation(t *testing.T) {
 	h := Shared(t)

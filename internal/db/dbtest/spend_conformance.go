@@ -23,9 +23,9 @@ type SpendStoreFixture struct {
 	UserID  string
 	AgentID string
 	// TriggerID is a pre-seeded trigger event_handler (kind='trigger') in
-	// TeamID. The suite points an autonomous RunSpendFixture.TriggerID at it so
-	// runs.trigger_id has a valid FK target and the view's trigger_id column can
-	// be asserted (TFAC-478).
+	// TeamID. The suite points an autonomous RunSpendFixture.TriggerID at it
+	// so conversations.trigger_id has a valid FK target and the view's
+	// trigger_id column can be asserted (TFAC-478).
 	TriggerID string
 	Seeder    SpendSeeder
 }
@@ -50,7 +50,7 @@ type RunSpendFixture struct {
 	CreatorUserID string
 	TriggerType   string // "manual" | "event"
 	ActorAgentID  string
-	// TriggerID is the event_handler that fired this run (runs.trigger_id). ""
+	// TriggerID is the event_handler that fired this run (conversations.trigger_id). ""
 	// → NULL (a manual run carries none); set it to the fixture's seeded
 	// TriggerID for an autonomous run to exercise the view's trigger_id column.
 	TriggerID string

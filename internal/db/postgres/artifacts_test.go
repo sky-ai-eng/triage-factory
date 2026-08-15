@@ -1090,7 +1090,7 @@ func TestArtifactStore_Postgres_UpdateReviewDetailsIfPending(t *testing.T) {
 }
 
 // seedPgArtifactRun mints a minimal run the artifacts.conversation_id FK can point
-// at. origin is non-'blueprint' so runs_origin_requires_parents doesn't
+// at. origin is non-'blueprint' so conversations_origin_requires_parents doesn't
 // demand a parent chain; trigger_type='manual' needs a non-NULL creator.
 func seedPgArtifactRun(t *testing.T, h *pgtest.Harness, orgID, teamID, userID string) string {
 	t.Helper()

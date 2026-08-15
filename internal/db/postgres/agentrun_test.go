@@ -359,9 +359,9 @@ func TestConversationStore_Postgres_CrossOrgLeakage(t *testing.T) {
 // above wires both pools against AdminDB to prove the defense-in-depth
 // WHERE-clause filter is intact, this test runs the store through the
 // app pool under tf_app with real JWT claims so the actual
-// runs_select / runs_insert policies are exercised. Same-org reads
+// conversations_select / conversations_insert policies are exercised. Same-org reads
 // succeed; cross-org reads are silently filtered (USING); cross-org
-// Create raises 42501 from runs_insert WITH CHECK.
+// Create raises 42501 from conversations_insert WITH CHECK.
 func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

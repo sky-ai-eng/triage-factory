@@ -39,12 +39,13 @@ func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (
 	return stubDelegateRun(s.db, task, opts)
 }
 
-// stubDelegateRun mirrors the production Delegate path for the router tests: it
-// mints a blueprint_run (fenced on (triggering_event_id, trigger_id) for event
-// triggers — the relocated replay fence) and a linked run row (runs.blueprint_run_id
-// is NOT NULL). Returns the blueprint_run id, or delegate.ErrAlreadyFired when an
-// event replay trips the fence. No worktree/agent is stood up — only the DB rows
-// the router's ErrAlreadyFired + run-count assertions read.
+// stubDelegateRun mirrors the production Delegate path for the router
+// tests: it mints a blueprint_run (fenced on (triggering_event_id,
+// trigger_id) for event triggers — the relocated replay fence) and a linked
+// run row (conversations.blueprint_run_id is NOT NULL). Returns the
+// blueprint_run id, or delegate.ErrAlreadyFired when an event replay trips
+// the fence. No worktree/agent is stood up — only the DB rows the router's
+// ErrAlreadyFired + run-count assertions read.
 func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	store := sqlitestore.New(database)
 	// opts.ExplicitBlueprintID is a blueprint id; the run row's prompt_id FK

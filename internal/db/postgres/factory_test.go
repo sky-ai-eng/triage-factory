@@ -169,7 +169,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 		},
 		Run: func(t *testing.T, taskID, status string) string {
 			t.Helper()
-			// runs.blueprint_run_id is NOT NULL — mint a 1-step blueprint_run for
+			// conversations.blueprint_run_id is NOT NULL — mint a 1-step blueprint_run for
 			// the task first (the firing unit), then link the run to it.
 			bpID := uuid.New().String()
 			if _, err := conn.Exec(`

@@ -1,7 +1,7 @@
 // Cross-pod run control (TFAC-585): RunController's intended second
 // implementation. When the local process registry misses a control
 // request (interrupt/steer/cancel/permission), crossPodController resolves
-// the run's executor via runs.executor_id + instance-registry liveness,
+// the run's executor via claims.executor_id + instance-registry liveness,
 // inserts a row on the conversation_signals outbox, NOTIFYs tf_ctl, and waits (with
 // a bounded timeout) for the owning executor's apply loop to apply it
 // through its own local RunController and ack. See

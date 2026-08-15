@@ -197,7 +197,7 @@ type TaskStore interface {
 	// SetOwnerTeam updates a task's owning/attributed team_id without
 	// touching the claim columns. The router uses it to consolidate the
 	// owner to the acting team just before an auto-fired run is created,
-	// so the run — which inherits runs.team_id from tasks.team_id at
+	// so the run — which inherits conversations.team_id from tasks.team_id at
 	// insert — is attributed to the team that acted even when the
 	// creation-time owner team was skipped (e.g. it had auto-delegation
 	// disabled while a lower-priority team fires). The Postgres impl

@@ -286,11 +286,12 @@ func TestReactor_AdvanceInheritsActorAgent(t *testing.T) {
 }
 
 // TestReactor_AdvanceInheritsTriggerID pins the by-rule spend attribution
-// (TFAC-478): the next step the reactor enqueues inherits the blueprint_run's
-// frozen trigger_id onto runs.trigger_id, so an event-fired step lands in the
-// JOIN-free llm_spend view attributable to its firing rule. Without the
-// inheritance, every autonomous step run carried NULL there — autonomous cost
-// in the usage by-category split with an empty by-rule breakdown.
+// (TFAC-478): the next step the reactor enqueues inherits the
+// blueprint_run's frozen trigger_id onto conversations.trigger_id, so an
+// event-fired step lands in the JOIN-free llm_spend view attributable to
+// its firing rule. Without the inheritance, every autonomous step run
+// carried NULL there — autonomous cost in the usage by-category split with
+// an empty by-rule breakdown.
 func TestReactor_AdvanceInheritsTriggerID(t *testing.T) {
 	s, database, brID, _, run0 := reactorFixture(t, "trig-inherit", 2, "completed", "continue")
 	org := runmode.LocalDefaultOrgID

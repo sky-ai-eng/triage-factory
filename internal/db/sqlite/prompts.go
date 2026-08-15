@@ -199,9 +199,10 @@ func (s *promptStore) UpdateImported(ctx context.Context, orgID string, id, name
 	return err
 }
 
-// Delete soft-deletes: it stamps deleted_at rather than removing the row, so
-// runs.prompt_id (RESTRICT) and blueprint_steps.step_prompt_id (RESTRICT) FKs
-// never fire and historical runs keep resolving the prompt via GetSystem.
+// Delete soft-deletes: it stamps deleted_at rather than removing the row,
+// so conversations.prompt_id (RESTRICT) and blueprint_steps.step_prompt_id
+// (RESTRICT) FKs never fire and historical runs keep resolving the prompt
+// via GetSystem.
 func (s *promptStore) Delete(ctx context.Context, orgID string, id string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -262,7 +263,7 @@ func (s *promptStore) IncrementUsageSystem(ctx context.Context, orgID string, id
 
 // --- Stats ---------------------------------------------------------
 
-// Stats reads three separate views from the runs table. Kept as
+// Stats reads three separate views from the conversations table. Kept as
 // three statements rather than one CTE because the legacy free-
 // function shape was three statements and the conformance harness
 // covers both backends with identical assertions — a CTE optimization

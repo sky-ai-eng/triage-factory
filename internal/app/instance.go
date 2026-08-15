@@ -36,14 +36,14 @@ func (a *App) ensureIdentity() error {
 // The instances row's pubkey is always empty (TFAC-631): the orchestrator
 // holds no sealing key and never unseals a run's bundle. Each run's credential
 // sidecar mints its own per-run keypair and publishes its public half onto the
-// run's claim (runs.cred_pubkey) at bring-up, and the brain seals to that.
+// run's claim (claims.cred_pubkey) at bring-up, and the brain seals to that.
 func (a *App) registerInstance(ctx context.Context) error {
 	role := string(a.plan.role)
 
 	// The orchestrator publishes no sealing pubkey: it holds no private key and
 	// never unseals a run's bundle. Each run's credential sidecar mints its own
 	// per-run keypair and publishes the public half onto the claim
-	// (runs.cred_pubkey) at bring-up, and the brain seals to that — so the
+	// (claims.cred_pubkey) at bring-up, and the brain seals to that — so the
 	// instances row's pubkey is always empty now (TFAC-631).
 	epoch, err := a.stores.Instances.Register(ctx, a.identity.ID, role, a.cfg.Version, "")
 	if err != nil {

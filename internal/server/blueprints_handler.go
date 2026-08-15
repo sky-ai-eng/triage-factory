@@ -1085,8 +1085,8 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 
 // blueprintRunResponse bundles the blueprint run row with its per-step runs
 // so the run-detail UI can render the timeline in one fetch instead of N+1.
-// Each step run carries its terminal runs.outcome inline (Run.Outcome); there
-// is no separate verdict channel.
+// Each step run carries its terminal conversations.outcome inline
+// (Run.Outcome); there is no separate verdict channel.
 type blueprintRunResponse struct {
 	BlueprintRun *domain.BlueprintRun   `json:"blueprint_run"`
 	Steps        []blueprintRunStepView `json:"steps"`
