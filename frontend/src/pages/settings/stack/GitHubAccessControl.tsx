@@ -566,7 +566,7 @@ export default function GitHubAccessControl({
                   </>
                 ) : null}
                 . Switch to a GitHub App to poll under a bot identity of its own — one that
-                doesn&rsquo;t leave with the person who set it up — and to have GitHub itself scope
+                doesn't leave with the person who set it up — and to have GitHub itself scope
                 each team&rsquo;s access to the repositories that team tracks.
               </>
             ) : (
