@@ -374,6 +374,70 @@ func TestSendMessage_MissingRunNotSteerable(t *testing.T) {
 	}
 }
 
+// TestSendMessage_SteerRecordsAfterDelivery: the live-steer path writes the
+// transcript row the steer itself never does — one delivered user row,
+// attributed to the sender — and writes it only once the process has taken
+// the text. A live steer injects into the process without touching the queue,
+// so without this write the steered turn would be missing from the transcript
+// entirely.
+func TestSendMessage_SteerRecordsAfterDelivery(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-rec", "sess-rec", "/tmp/wt-rec")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	fc := &fakeController{}
+	s.controller = fc
+	s.registerProc(runmode.LocalDefaultOrgID, "r-rec", &agentproc.LiveRun{})
+
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-rec", runmode.LocalDefaultUserID, "hello"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if fc.steerCalls != 1 {
+		t.Fatalf("steer calls = %d, want 1", fc.steerCalls)
+	}
+
+	var role, userID, content string
+	var delivered bool
+	if err := database.QueryRow(`SELECT role, delivered, COALESCE(user_id, ''), content FROM messages WHERE conversation_id='r-rec'`).Scan(&role, &delivered, &userID, &content); err != nil {
+		t.Fatalf("read recorded message: %v", err)
+	}
+	if role != "user" || !delivered || userID != runmode.LocalDefaultUserID || content != "hello" {
+		t.Errorf("recorded message = {role:%q delivered:%v user:%q content:%q}, want one delivered user row attributed to the sender",
+			role, delivered, userID, content)
+	}
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id='r-rec'`).Scan(&n); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("messages recorded = %d, want exactly 1", n)
+	}
+}
+
+// TestSendMessage_RefusedSteerRecordsNothing: a running SDK run with no live
+// process anywhere — the orphaned window a restart leaves behind — refuses the
+// send with ErrNoLiveProcess and writes no transcript row. This is the window
+// where the message endpoint's old record-first ordering showed a user their
+// words in the transcript alongside the error toast for the same send.
+func TestSendMessage_RefusedSteerRecordsNothing(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-orphan", "sess-orphan", "/tmp/wt-orphan")
+	// Status stays `running` (seedRun's default) and no process is registered:
+	// the default inProcessController answers the steer with ErrNoLiveProcess.
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-orphan", runmode.LocalDefaultUserID, "hello?")
+	if !errors.Is(err, ErrNoLiveProcess) {
+		t.Errorf("err = %v, want ErrNoLiveProcess", err)
+	}
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id='r-orphan'`).Scan(&n); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("messages recorded = %d, want 0 — a refused steer must leave no row behind", n)
+	}
+}
+
 // TestInterrupt_LiveRoutesToController: Spawner.Interrupt drives the live
 // process through the control seam — asserted via a fake controller.
 func TestInterrupt_LiveRoutesToController(t *testing.T) {

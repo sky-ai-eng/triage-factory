@@ -540,13 +540,19 @@ func (ag *agentHandler) runVisible(ctx context.Context, orgID, userID, conversat
 	return exists, err
 }
 
-// handleMessage records a free-form user message on a run, broadcasts it
-// to watchers, then routes it: a live run is steered in place, an `open` run is
-// woken via resume. The run is read in the same tx that records the message, so
-// a run not visible to the caller's org reads as 404 (the authz gate before any
-// control op) and an existing run's message is recorded before routing — the
-// transcript stays optimistic (the user's words show immediately). A run that
-// can take no message (terminal / no live process) is 409.
+// handleMessage routes a free-form user message to a run: a live run is
+// steered in place, a parked run is woken via resume. The run is read under
+// the caller's org first, so a run not visible to this org is 404 — the authz
+// gate before any control op.
+//
+// Recording belongs to the delegate layer, and it happens only when the
+// message actually goes somewhere: a live steer records and broadcasts the
+// row after the process takes the text, a follow-up queues it as the
+// undelivered row a claim will drain. A run that can take no message
+// (terminal / no live process) is 409 with nothing recorded and nothing
+// broadcast — an optimistic write here used to leave a refused send painted
+// onto every watcher's transcript as a message the agent never received,
+// while the sender simultaneously saw an error toast.
 func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -572,53 +578,14 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read + record in one tx: the Get authorizes against the run under the
-	// caller's org (RLS), so a missing / cross-org run is a 404 before SendMessage
-	// reaches the registry; an existing run gets the user message persisted (with
-	// the row id carried back onto msg.ID for the broadcast's client dedup).
-	//
-	// SDK runs only. A native conversation's one input door is the messages
-	// table itself: SendMessage's native branch queues the row (pending) and
-	// broadcasts it, so an optimistic insert here would put the same words in
-	// front of the model twice — once as a bare user turn, once in the steer
-	// envelope. The SDK path keeps the optimistic row because its live steer
-	// injects into the process without writing one.
-	msg := &domain.Message{ConversationID: conversationID, Role: "user", Content: body.Text}
-	var runExists, nativeRun bool
-	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		run, e := tx.Conversations.Get(r.Context(), orgID, conversationID)
-		if e != nil {
-			return e
-		}
-		if run == nil {
-			return nil
-		}
-		runExists = true
-		nativeRun = run.Runtime == domain.ConversationRuntimeNative
-		if nativeRun {
-			return nil
-		}
-		id, e := tx.Conversations.InsertMessage(r.Context(), orgID, msg)
-		if e != nil {
-			return e
-		}
-		msg.ID = int(id)
-		return nil
-	}); err != nil {
+	visible, err := ag.runVisible(r.Context(), orgID, userID, conversationID)
+	if err != nil {
 		internalError(w, "agent", err)
 		return
 	}
-	if !runExists {
+	if !visible {
 		notFound(w, "run")
 		return
-	}
-	if !nativeRun {
-		ag.ws.Broadcast(websocket.Event{
-			Type:           "message",
-			OrgID:          orgID,
-			ConversationID: conversationID,
-			Data:           msg.ToDTO(),
-		})
 	}
 
 	if err := spawner.SendMessage(r.Context(), orgID, conversationID, userID, body.Text); err != nil {
