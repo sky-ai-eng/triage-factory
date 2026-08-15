@@ -189,12 +189,14 @@ type Server struct {
 	// never through the raw bus, or events lose the durable outbox.
 	ingestor *ingest.Ingestor
 
-	// onInstallationTokensInvalid, when set, fires when an installation's
-	// already-minted tokens stop being usable — a verified
-	// installation.deleted or installation.suspend webhook, and the
-	// App-credential change paths — so the credential resolver's
-	// per-installation token cache can drop the now-dead entry. Nil until
-	// the resolver wires it; callers skip it when nil.
+	// onInstallationTokensInvalid fires when an installation's already-minted
+	// tokens stop being usable — a verified installation.deleted or
+	// installation.suspend webhook, and the App-credential change paths — so
+	// the credential resolver's per-installation token cache can drop the
+	// now-dead entry. New wires it to ghTokenCache.Invalidate, so it is set on
+	// every Server; SetInstallationTokensInvalidHook replaces it (tests observe
+	// the firings that way), and callers still nil-guard because that setter
+	// accepts a nil.
 	onInstallationTokensInvalid func(orgID, installationID string)
 
 	// deployCfg holds deployment-identity config (publicURL, HMAC key,
@@ -1611,11 +1613,13 @@ func (s *Server) SetIngestor(i *ingest.Ingestor) {
 	s.ingestor = i
 }
 
-// SetInstallationTokensInvalidHook registers the callback fired when an
+// SetInstallationTokensInvalidHook REPLACES the callback fired when an
 // installation's minted tokens stop being usable — a verified
 // installation.deleted or installation.suspend webhook, and the App-credential
-// change paths (the resolver's token-cache invalidate). Optional — left nil
-// until the credential resolver wires it.
+// change paths. New already wires that callback to the resolver's own token
+// cache, so this is an override rather than the wiring: whatever it installs
+// takes over, and passing nil disables the invalidate entirely. Its caller
+// today is a test observing which installation a delivery fired for.
 func (s *Server) SetInstallationTokensInvalidHook(fn func(orgID, installationID string)) {
 	s.onInstallationTokensInvalid = fn
 }
