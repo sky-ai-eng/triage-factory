@@ -17,9 +17,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// stubDelegator records every Delegate call and creates a real run row
-// each time so MarkPendingFiringFired's FK to runs(id) is satisfied. Used
-// by the drain race test to count fire attempts under concurrency.
+// stubDelegator records every Delegate call and creates a real
+// blueprint_run row each time so MarkPendingFiringFired's FK to
+// blueprint_runs(id) is satisfied. Used by the drain race test to count
+// fire attempts under concurrency.
 type stubDelegator struct {
 	db    *sql.DB
 	calls int64

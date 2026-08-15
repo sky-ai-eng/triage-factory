@@ -56,11 +56,11 @@ type PendingFiringsSeeder struct {
 	// competing claim rather than a synthetic one.
 	ClaimTaskForUser func(t *testing.T, taskID string)
 
-	// RunForTask inserts a run against the taskID and returns the
-	// runID. Used by MarkFired tests to satisfy fired_run_id's FK to
-	// runs(id). Status / trigger_type aren't load-bearing here —
-	// the conformance suite only needs a real run row to point at;
-	// the per-task firing gate's runs-shaped half is owned by
+	// RunForTask inserts a blueprint_run against the taskID and returns
+	// its id. Used by MarkFired tests to satisfy fired_run_id's FK to
+	// blueprint_runs(id). Status / trigger_type aren't load-bearing here —
+	// the conformance suite only needs a real row to point at; the
+	// per-task firing gate's conversations-shaped half is owned by
 	// ConversationStore and tested there.
 	RunForTask func(t *testing.T, taskID string) string
 }

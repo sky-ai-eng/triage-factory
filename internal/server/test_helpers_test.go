@@ -121,9 +121,9 @@ var blueprintRunSeq int
 
 // seedBlueprintRunSQLite mints a blueprint + blueprint_run for the given
 // task on the local-default org/team and returns the blueprint_run id.
-// conversations.blueprint_run_id is NOT NULL, so every fixture that inserts a row
-// into runs must first create a blueprint_run for that task and point the
-// run at it. SQLite's blueprint_runs has no org_id/creator_user_id, but
+// conversations.blueprint_run_id is NOT NULL, so every fixture that inserts
+// a row into conversations must first create a blueprint_run for that task
+// and point the run at it. SQLite's blueprint_runs has no org_id/creator_user_id, but
 // worktree_path is NOT NULL.
 func seedBlueprintRunSQLite(t *testing.T, database *sql.DB, taskID string) string {
 	t.Helper()
