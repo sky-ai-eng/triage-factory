@@ -72,6 +72,99 @@ func TestRefreshWebhookHealth_FailurePreservesPriorState(t *testing.T) {
 	}
 }
 
+// TestWebhookHealthDTO_AppSwapDropsTheCachedAnswer pins that a cached answer
+// belongs to the registration it was probed for, not to the org.
+//
+// An org can tear its App down and register another — switch to a PAT and back,
+// or discard a staged App and import a different one — while its id never
+// changes. Serving the old App's state for the rest of the TTL would report a
+// health, a last-delivery time, and a repair button for something the workspace
+// no longer has.
+func TestWebhookHealthDTO_AppSwapDropsTheCachedAnswer(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	s.SetDeployConfig("https://tf.example.org", [32]byte{})
+	ctx := context.Background()
+
+	appA := &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "111", PEMRef: "pem-a"}
+	appB := &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "222", PEMRef: "pem-b"}
+
+	var probedFor []string
+	s.hookProbe = func(_ context.Context, _ string, app *domain.OrgGitHubApp, _ string) (githubapp.WebhookHealth, error) {
+		probedFor = append(probedFor, app.AppID)
+		return githubapp.WebhookHealth{
+			State: githubapp.WebhookStateHealthy, HookHost: "https://tf.example.org",
+			SecretConfigured: true, LastDeliveryStatusCode: 200,
+			LastDeliveryAt: time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC),
+		}, nil
+	}
+	s.refreshWebhookHealth(ctx, runmode.LocalDefaultOrgID, appA, testExpectedReceiver)
+	if dto := s.webhookHealthDTO(ctx, runmode.LocalDefaultOrgID, appA); dto == nil {
+		t.Fatal("App A: webhook_health=null after a successful probe")
+	}
+
+	// The org swaps to a different App. Nothing has probed it yet, so there is
+	// no answer to give — and A's answer is not it.
+	if dto := s.webhookHealthDTO(ctx, runmode.LocalDefaultOrgID, appB); dto != nil {
+		t.Errorf("App B: webhook_health=%+v before B was ever probed, want null", dto)
+	}
+	waitForWebhookProbeIdle(t, s, runmode.LocalDefaultOrgID)
+	if len(probedFor) != 2 || probedFor[1] != "222" {
+		t.Fatalf("probed for %v, want a probe of the new App B", probedFor)
+	}
+	if dto := s.webhookHealthDTO(ctx, runmode.LocalDefaultOrgID, appB); dto == nil {
+		t.Fatal("App B: webhook_health=null after its own probe landed")
+	}
+
+	// Re-importing the SAME App id is a new registration too — the stored
+	// webhook secret travels with the row, so the answer about the old one
+	// (rejecting, say, for the secret that was missing) must not carry over.
+	reimported := &domain.OrgGitHubApp{
+		OrgID: runmode.LocalDefaultOrgID, AppID: "222", PEMRef: "pem-b",
+		RegisteredAt: time.Date(2026, 8, 15, 13, 0, 0, 0, time.UTC),
+	}
+	if dto := s.webhookHealthDTO(ctx, runmode.LocalDefaultOrgID, reimported); dto != nil {
+		t.Errorf("re-imported App: webhook_health=%+v, want null until it is probed itself", dto)
+	}
+	waitForWebhookProbeIdle(t, s, runmode.LocalDefaultOrgID)
+}
+
+// TestRefreshWebhookHealth_LateProbeForAReplacedAppIsDropped closes the half an
+// invalidate-on-teardown call could not: a probe that was already in flight when
+// the registration changed. Writing its answer would stamp the OLD App's state
+// as freshly checked, and the entry would then look current for a full TTL.
+func TestRefreshWebhookHealth_LateProbeForAReplacedAppIsDropped(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	s.SetDeployConfig("https://tf.example.org", [32]byte{})
+	ctx := context.Background()
+
+	appA := &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "111", PEMRef: "pem-a"}
+	appB := &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "222", PEMRef: "pem-b"}
+
+	// B is the org's current App, probed and cached.
+	s.hookProbe = func(context.Context, string, *domain.OrgGitHubApp, string) (githubapp.WebhookHealth, error) {
+		return githubapp.WebhookHealth{State: githubapp.WebhookStateNoDeliveries}, nil
+	}
+	s.refreshWebhookHealth(ctx, runmode.LocalDefaultOrgID, appB, testExpectedReceiver)
+
+	// A's probe — started before the swap — finally answers.
+	s.hookProbe = func(context.Context, string, *domain.OrgGitHubApp, string) (githubapp.WebhookHealth, error) {
+		return githubapp.WebhookHealth{State: githubapp.WebhookStateRejected, LastDeliveryStatusCode: 401}, nil
+	}
+	s.refreshWebhookHealth(ctx, runmode.LocalDefaultOrgID, appA, testExpectedReceiver)
+
+	dto := s.webhookHealthDTO(ctx, runmode.LocalDefaultOrgID, appB)
+	if dto == nil {
+		t.Fatal("webhook_health=null, want App B's own answer")
+	}
+	if dto.State != string(githubapp.WebhookStateNoDeliveries) {
+		t.Errorf("state=%q, want %q — the replaced App's late probe overwrote it",
+			dto.State, githubapp.WebhookStateNoDeliveries)
+	}
+	waitForWebhookProbeIdle(t, s, runmode.LocalDefaultOrgID)
+}
+
 // TestWebhookHealthDTO_NothingToProbe pins the two cases that produce no probe
 // at all: an org with no App (nothing to ask about) and a deployment with no
 // public identity (no receiver URL to compare a hook against, so any answer
@@ -154,13 +247,19 @@ func TestGitHubAppStatus_ProbeFailureDoesNotFailTheRead(t *testing.T) {
 	s.SetDeployConfig("https://tf.example.org", [32]byte{})
 	seedLocalGitHubApp(t, s, "Iv1.probe", true)
 
-	// A prior answer, as a live deployment would have.
+	// Seed the prior answer against the registration the handler will actually
+	// load, not a stand-in: a cached answer is scoped to its App, so one probed
+	// for a different row is (correctly) not this org's answer at all.
+	registered, err := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
+	if err != nil || registered == nil {
+		t.Fatalf("read seeded app: %+v, %v", registered, err)
+	}
 	s.hookProbe = func(context.Context, string, *domain.OrgGitHubApp, string) (githubapp.WebhookHealth, error) {
 		return githubapp.WebhookHealth{
 			State: githubapp.WebhookStateNoDeliveries, HookHost: "https://tf.example.org", SecretConfigured: true,
 		}, nil
 	}
-	s.refreshWebhookHealth(context.Background(), runmode.LocalDefaultOrgID, testApp, testExpectedReceiver)
+	s.refreshWebhookHealth(context.Background(), runmode.LocalDefaultOrgID, registered, testExpectedReceiver)
 
 	// Every subsequent probe fails, and the entry is due, so the read kicks one.
 	probes := make(chan struct{}, 4)
@@ -190,7 +289,7 @@ func TestGitHubAppStatus_ProbeFailureDoesNotFailTheRead(t *testing.T) {
 		t.Fatal("the due status read never kicked a probe")
 	}
 	waitForWebhookProbeIdle(t, s, runmode.LocalDefaultOrgID)
-	after := s.webhookHealthDTO(context.Background(), runmode.LocalDefaultOrgID, testApp)
+	after := s.webhookHealthDTO(context.Background(), runmode.LocalDefaultOrgID, registered)
 	if after == nil || after.State != string(githubapp.WebhookStateNoDeliveries) {
 		t.Errorf("webhook_health=%+v after the failed background probe, want it unchanged", after)
 	}

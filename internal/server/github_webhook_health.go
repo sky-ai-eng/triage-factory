@@ -58,12 +58,42 @@ const (
 // health/have are kept separate from the schedule on purpose: a failed probe
 // moves nextProbe and nothing else, which is exactly how the last known answer
 // survives a GitHub outage.
+//
+// fingerprint is which REGISTRATION the answer describes, and it is the reason
+// this cache is safe across an App swap. The map is keyed by org, but the thing
+// probed is the org's App — tear one down and register another (switch to a PAT
+// and back, discard a staged App and import a different one) and the org id is
+// unchanged while every answer about the old App is now a statement about
+// something the workspace no longer has. Both the read and the write compare it,
+// which covers the two ways a stale answer could be served: a reader finding the
+// previous App's entry, and a probe that was already in flight when the
+// registration changed landing afterwards and being marked fresh for a full TTL.
 type webhookHealthEntry struct {
-	health    githubapp.WebhookHealth
-	have      bool
-	checkedAt time.Time
-	nextProbe time.Time
-	probing   bool
+	fingerprint string
+	health      githubapp.WebhookHealth
+	have        bool
+	checkedAt   time.Time
+	nextProbe   time.Time
+	probing     bool
+}
+
+// appFingerprint identifies one registration for the cache above: which App, and
+// which registration of it.
+//
+// RegisteredAt is what separates two registrations of the SAME App id, which is
+// not a hypothetical — discarding an App and importing it again with the webhook
+// secret that was missing the first time produces exactly that, and it is the
+// case where a stale "delivering, rejected" would be most misleading. The App id
+// alone cannot see it; the stored webhook secret changes with the row, not with
+// the App.
+//
+// Deliberately not a hash: this never leaves the process and only ever has to
+// compare equal to itself.
+func appFingerprint(app *domain.OrgGitHubApp) string {
+	if app == nil {
+		return ""
+	}
+	return app.AppID + "\x00" + app.RegisteredAt.UTC().Format(time.RFC3339Nano)
 }
 
 // githubAppWebhookHealth is the status DTO's webhook-health block. Null when
@@ -97,14 +127,20 @@ func (s *Server) webhookHealthDTO(ctx context.Context, orgID string, app *domain
 		return nil
 	}
 	expectedURL := s.webhookReceiverURL(orgID)
+	fingerprint := appFingerprint(app)
 
 	s.webhookHealthMu.Lock()
 	if s.webhookHealth == nil {
 		s.webhookHealth = make(map[string]*webhookHealthEntry)
 	}
 	e, ok := s.webhookHealth[orgID]
-	if !ok {
-		e = &webhookHealthEntry{}
+	if !ok || e.fingerprint != fingerprint {
+		// A different registration than the one the entry describes: start
+		// clean rather than answer for the App this org used to have. The
+		// reader gets nil — "not known yet" — and a probe for the current App
+		// starts now. Replacing the entry also orphans any probe still running
+		// for the old App; its write is dropped on the same comparison.
+		e = &webhookHealthEntry{fingerprint: fingerprint}
 		s.webhookHealth[orgID] = e
 	}
 	due := !e.probing && !time.Now().Before(e.nextProbe)
@@ -151,7 +187,16 @@ func (s *Server) webhookHealthDTO(ctx context.Context, orgID string, app *domain
 // A failure updates the schedule and NOTHING else. That is the invariant: the
 // probe is a diagnosis of the webhook, and a failure to reach GitHub is not a
 // diagnosis at all.
+//
+// A probe runs outside the lock, so the org's registration can change while one
+// is in flight. That answer describes the App the org had when the probe
+// started, so it is dropped rather than written — otherwise the swap would be
+// followed by the OLD App's state, stamped fresh, for a full TTL. This is why
+// the App lifecycle paths need no invalidate call of their own: the entry is
+// scoped to a registration, so a new one misses by construction instead of by
+// remembering.
 func (s *Server) refreshWebhookHealth(ctx context.Context, orgID string, app *domain.OrgGitHubApp, expectedURL string) {
+	fingerprint := appFingerprint(app)
 	health, err := s.probeWebhookHealth(ctx, orgID, app, expectedURL)
 	now := time.Now()
 
@@ -162,8 +207,14 @@ func (s *Server) refreshWebhookHealth(ctx context.Context, orgID string, app *do
 	}
 	e, ok := s.webhookHealth[orgID]
 	if !ok {
-		e = &webhookHealthEntry{}
+		e = &webhookHealthEntry{fingerprint: fingerprint}
 		s.webhookHealth[orgID] = e
+	} else if e.fingerprint != fingerprint {
+		// The registration changed while this probe was running. Its answer is
+		// about an App this org no longer has — and the entry now holding the
+		// org's slot belongs to the current one, including its own probing
+		// flag, so nothing here is ours to clear.
+		return
 	}
 	e.probing = false
 	if err != nil {
@@ -195,9 +246,17 @@ func (s *Server) probeWebhookHealth(ctx context.Context, orgID string, app *doma
 	return minter.ProbeWebhookHealth(ctx, expectedURL)
 }
 
-// invalidateWebhookHealth makes the org's next status read re-probe. Called
-// after the replay action, whose whole point is to change what the next probe
-// would see.
+// invalidateWebhookHealth makes the org's next status read re-probe, keeping the
+// current answer until one lands. Its caller is the replay action, whose whole
+// point is to change what the next probe would see.
+//
+// The App lifecycle paths (register, import, discard, switch-to-PAT) do NOT call
+// this, unlike their invalidateWebhookSecret neighbour, and the difference is
+// deliberate. That cache is keyed by org alone, so a rotation has to be pushed
+// at it; this one keys its entry to the registration (appFingerprint), so a
+// swapped App misses the cache without anyone remembering to say so — including
+// on the path an explicit invalidate would still get wrong, where a probe
+// already in flight lands after the swap.
 func (s *Server) invalidateWebhookHealth(orgID string) {
 	s.webhookHealthMu.Lock()
 	defer s.webhookHealthMu.Unlock()
