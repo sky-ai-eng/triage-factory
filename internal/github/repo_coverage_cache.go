@@ -47,6 +47,12 @@ const repoCoverageTTL = 5 * time.Minute
 // It self-heals on the same clock, and only ever in the permissive direction on
 // a probe TF made itself — never a token handed to the wrong account, since the
 // token comes from installationFor, not from here.
+//
+// One event evicts rather than waits: a repository rename. Both slugs go
+// stale at once and in opposite directions — the old one's entry answers for
+// a name that no longer resolves, and the new one may hold a NEGATIVE history
+// TF probed before the repository was called that — and unlike a grant edit,
+// TF is the process that just learned about it. See RepoCoverageInvalidator.
 type repoCoverageCache struct {
 	mu      sync.Mutex
 	expires map[string]time.Time
@@ -88,9 +94,36 @@ func (c *repoCoverageCache) markCovered(orgID, owner, repo string) {
 	c.expires[coverageKey(orgID, owner, repo)] = c.timeNow().Add(repoCoverageTTL)
 }
 
+// forget drops owner/repo's entry so the next call re-probes. A miss is a
+// no-op — the cache holds positives only, so "not there" is already the
+// answer forget produces.
+func (c *repoCoverageCache) forget(orgID, owner, repo string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.expires, coverageKey(orgID, owner, repo))
+}
+
 // coverageKey joins org + slug with a NUL so no pair can alias another by
 // concatenation; the slug is lowercased to match GitHub's case-insensitive
 // owner/repo handling.
 func coverageKey(orgID, owner, repo string) string {
 	return orgID + "\x00" + strings.ToLower(owner+"/"+repo)
+}
+
+// RepoCoverageInvalidator is the optional Resolver extension that drops a
+// cached repo-coverage decision. Same optional-extension shape as
+// ScopedResolver / RateLimitReader: a Resolver that doesn't implement it (a
+// test fake) has no cache to evict from, so the caller type-asserts and skips.
+//
+// The one caller is the rename handler. Coverage is keyed on the slug, and a
+// rename invalidates the entry for BOTH names at once: the old slug's positive
+// now vouches for a name that resolves to nothing, and the new slug must be
+// re-probed rather than inheriting whatever this process last decided about a
+// repository that happened to be called that.
+type RepoCoverageInvalidator interface {
+	InvalidateRepoCoverage(orgID, owner, repo string)
+}
+
+func (r *resolver) InvalidateRepoCoverage(orgID, owner, repo string) {
+	r.coverage.forget(orgID, owner, repo)
 }

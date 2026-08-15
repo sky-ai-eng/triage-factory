@@ -167,7 +167,14 @@ type RepoMeta struct {
 	// identity a rename or a transfer does not move, unlike owner/repo. It
 	// rides along on the response the default branch and clone URL already
 	// come from, so recording it costs no extra request.
-	ID            int64  `json:"id"`
+	ID int64 `json:"id"`
+	// FullName is what GitHub calls the repository RIGHT NOW, which is not
+	// necessarily what was asked for: a request for a renamed repository
+	// redirects to its current location, so a response whose full_name differs
+	// from the requested slug is a rename, observed on a request TF already
+	// makes. It is the only rename signal available under a PAT, where there
+	// is no installation grant listing to read one out of.
+	FullName      string `json:"full_name"`
 	DefaultBranch string `json:"default_branch"`
 	CloneURL      string `json:"clone_url"`
 	SSHURL        string `json:"ssh_url"`

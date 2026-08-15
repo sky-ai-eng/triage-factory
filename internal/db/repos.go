@@ -2,12 +2,34 @@ package db
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 //go:generate go run github.com/vektra/mockery/v2 --name=RepoStore --output=./mocks --case=underscore --with-expecter
+
+// Errors RenameSystem refuses a rewrite with. Both describe stored state a
+// rename cannot be applied over without losing a row, so both are terminal for
+// the attempt: the caller logs and moves on, and the next observation of the
+// same rename fails the same way until the conflicting row is gone.
+var (
+	// ErrRepoSlugOccupied means a different repository — one with a different
+	// provider id — already sits at the slug the rename would move onto.
+	// GitHub cannot serve two live repositories under one name, so the
+	// occupant is a repository TF still has a row for and GitHub no longer
+	// does. Moving onto it would collide with the identity index; deleting it
+	// is not this operation's call to make.
+	ErrRepoSlugOccupied = errors.New("target repository slug is already taken by another repository")
+
+	// ErrRepoIdentityAmbiguous means more than one repository row carries the
+	// provider id the rename keys on, so "the repository being renamed" does
+	// not name a single row. Nothing that ships can produce this — the id is
+	// written from provider payloads, one repository at a time — which is why
+	// it is refused rather than resolved by picking one.
+	ErrRepoIdentityAmbiguous = errors.New("more than one repository row carries this provider id")
+)
 
 // RepoStore owns the repo_profiles table — the user-configured GitHub
 // repos plus their AI-generated profile cache and clone-attempt state.
@@ -209,6 +231,51 @@ type RepoStore interface {
 	// is case-insensitive, like every other slug lookup here. A ref with an
 	// empty ExternalID is ignored rather than written: absent is not an id.
 	FillMissingExternalIDsSystem(ctx context.Context, orgID string, refs []domain.RepoRef) (int, error)
+
+	// ListIdentitiesSystem returns the provider identity — source, slug, and
+	// the provider's own id — of every repository row that carries an id.
+	// Rows without one are omitted rather than returned with an empty
+	// ExternalID: a repository TF has not learned an id for is not renamable
+	// in either direction, so it is not part of the comparison at all.
+	//
+	// The read half of rename detection. It is the small side of the join:
+	// TF holds tens of repositories per org where a grant listing may hold
+	// thousands, so the caller reads this once and matches the provider's
+	// enumeration against it in memory (domain.DetectRepoRenames) instead of
+	// asking the database once per observed repository.
+	ListIdentitiesSystem(ctx context.Context, orgID string) ([]domain.RepoRef, error)
+
+	// RenameSystem makes TF's stored slug for one repository match the slug
+	// the provider currently reports for it, rewriting every stored reference
+	// to the old slug in ONE transaction. observed carries the identity a
+	// rename does not move (Source + ExternalID) alongside the slug the
+	// provider now uses.
+	//
+	// Detection happens here, not in the caller: the method re-reads the
+	// repository row under a lock (SELECT … FOR UPDATE in Postgres; SQLite's
+	// single writer makes it moot) and decides for itself, so a candidate that
+	// went stale between a caller's read and this call is a no-op rather than
+	// a wrong write. Two concurrent detections of the same rename therefore
+	// cannot both rewrite: the loser re-reads the slug the winner already
+	// wrote and returns Renamed=false. Losing is terminal and needs no retry.
+	//
+	// Every no-op is a nil error, never a sentinel:
+	//
+	//   - observed carries no ExternalID — nothing to key on.
+	//   - no repository row carries that (source, id) — nothing to rename.
+	//   - the stored slug already matches, case-insensitively — the second run
+	//     of a rename that already applied, which is the steady state.
+	//
+	// Two states are refused instead, because writing through either would
+	// destroy a row rather than move one: ErrRepoSlugOccupied when a DIFFERENT
+	// repository already holds the target slug, and ErrRepoIdentityAmbiguous
+	// when more than one row claims the id. Both are terminal for the attempt.
+	//
+	// System (claims-free) variant only, and admin-pool in Postgres: the
+	// rewrite spans tables belonging to every team in the org (tracked sets,
+	// projects, entities, artifacts), which no request-scoped identity can
+	// see all of, and its callers are the poller and the profiler.
+	RenameSystem(ctx context.Context, orgID string, observed domain.RepoRef) (domain.RepoRenameOutcome, error)
 
 	GetPullsPollStateSystem(ctx context.Context, orgID, repoID string) (etag string, polledAt *time.Time, err error)
 

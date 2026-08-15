@@ -255,9 +255,10 @@ func NewResolver(secrets db.SecretStore, apps db.GitHubAppsStore, orgs db.OrgsSt
 // dropped method is a compile error rather than a silent runtime fall-through
 // to the unscoped path.
 var (
-	_ ScopedResolver     = (*resolver)(nil)
-	_ ScopedRepoResolver = (*resolver)(nil)
-	_ RateLimitReader    = (*resolver)(nil)
+	_ ScopedResolver          = (*resolver)(nil)
+	_ ScopedRepoResolver      = (*resolver)(nil)
+	_ RateLimitReader         = (*resolver)(nil)
+	_ RepoCoverageInvalidator = (*resolver)(nil)
 )
 
 // RateLimitFor implements RateLimitReader, reading this resolver's

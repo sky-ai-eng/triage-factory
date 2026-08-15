@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/reporename"
 	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -225,11 +226,26 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			continue
 		}
 
-		// All fetches succeeded (metaErr nil ⇒ meta non-nil). Both HTTPS and
-		// SSH clone forms come back from the same /repos/:owner/:repo
-		// response, so picking is a one-line branch. Empty SSHURL (legacy GHE
-		// deployments without ssh_url surfaced) falls back to HTTPS so we
-		// always have *some* URL on the row.
+		// All fetches succeeded (metaErr nil ⇒ meta non-nil), which makes this
+		// the point where the profiler knows what GitHub currently calls the
+		// repository: a request for a renamed one redirects, so the response's
+		// full_name answers a question the request never asked. Applying it
+		// here rather than after the upsert is what keeps the upsert landing
+		// on the moved row instead of minting a second one under the old name.
+		//
+		// This is the rename path a PAT org has. The poller's App-grant
+		// listing sees the same fact within a cycle, but only for App orgs;
+		// here it costs one field on a response already in hand, bounded by
+		// the profile TTL.
+		if moved, ok := p.applyRenameFromMeta(ctx, orgID, name, meta); ok {
+			name = moved
+			owner, repo, _ = strings.Cut(name, "/")
+		}
+
+		// Both HTTPS and SSH clone forms come back from the same
+		// /repos/:owner/:repo response, so picking is a one-line branch. Empty
+		// SSHURL (legacy GHE deployments without ssh_url surfaced) falls back
+		// to HTTPS so we always have *some* URL on the row.
 		defaultBranch := meta.DefaultBranch
 		cloneURL := meta.CloneURL
 		if preferSSH && meta.SSHURL != "" {
@@ -394,6 +410,33 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		repoprofileLog.Debug("profile run done", "profiled_with_ai", profiled, "without_docs", len(withoutDocs))
 	}
 	return touched, nil
+}
+
+// applyRenameFromMeta applies a rename this metadata response revealed and
+// reports the repository's current slug.
+//
+// tracked is the slug the request was made under; meta.FullName is what GitHub
+// answered with. Differing means the repository was renamed (or transferred —
+// same condition, since the id survives both). ok=false is the ordinary case:
+// the names agree, GitHub sent no id or name to compare, or the rename could
+// not be applied — and the caller then profiles under the name it already had,
+// which still resolves through GitHub's redirect.
+func (p *Profiler) applyRenameFromMeta(ctx context.Context, orgID, tracked string, meta *github.RepoMeta) (string, bool) {
+	id := meta.ExternalID()
+	if meta.FullName == "" || id == "" || domain.SameRepoSlug(meta.FullName, tracked) {
+		return "", false
+	}
+	owner, repo, ok := strings.Cut(meta.FullName, "/")
+	if !ok || owner == "" || repo == "" {
+		return "", false
+	}
+	applied := reporename.Apply(ctx, p.repos, p.resolver, repoprofileLog, orgID, []domain.RepoRef{{
+		Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
+	}})
+	if applied == 0 {
+		return "", false
+	}
+	return meta.FullName, true
 }
 
 // repoProfileInput is the per-repo JSON sent to the LLM.
