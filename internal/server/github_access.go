@@ -25,6 +25,34 @@ import (
 // registration created while a PAT is live is written active=false and the PAT
 // stays the live credential until a cutover flips the bit and deletes the PAT
 // in one transaction. See handleGitHubAppRegisterCallback for the staging side.
+//
+// All three transitions here serialize on githubAppRegRMWLockSalt keyed by org,
+// the same lock the PAT bind/unbind and the two registration paths take — one
+// credential slot per workspace means one transition at a time, deployment-wide.
+// They share one shape, so where the guards sit isn't something a reader has to
+// re-derive per handler: the pre-lock read is ADVISORY (it fails the common
+// rejection fast, before spending a GitHub round-trip on a transition that's
+// going to be refused anyway), the lock is taken AFTER that round-trip so a slow
+// or rate-limited GitHub never pins a pool connection for its duration, and the
+// re-read inside the critical section is the authoritative one. The re-read also
+// rebinds what the write uses, not just what it checks — a registration that
+// changed under us must not be described by the row this request first saw.
+//
+// The lock alone would not be enough. What makes the stale window reachable is
+// that everything learned before the round-trip can be invalidated by another
+// admin (or the same admin's second tab) committing a transition in it, and
+// GitHubAppsStore.SetActive is an unchecked UPDATE: a cutover that passed its
+// guards and then lost the registration flips zero rows, reports success, and
+// still deletes the PAT — leaving the org with no GitHub credential at all.
+
+// The refusals the transitions below state twice — once advisory, once
+// authoritative. Both evaluations of a guard owe the caller the same sentence;
+// which one they hit is only a matter of when they arrived.
+const (
+	msgAppAlreadyLive  = "the GitHub App is already the live credential"
+	msgAppNotInstalled = "install the App before switching"
+	msgAppIsLiveCred   = "this GitHub App is the live credential; use switch-to-pat to remove it"
+)
 
 // switchPATRequest carries a user-supplied org PAT for the switch-to-PAT and
 // pat-preflight paths. The preflight validates and discards it; the commit
@@ -133,13 +161,8 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx := r.Context()
 
-	// TODO(TFAC-817): this read-check-write is not serialized against the other
-	// credential transitions, and the checks below are separated from the write
-	// by a GitHub round-trip. A concurrent discard or switch-to-pat can delete
-	// the registration in that window; SetActive then silently updates zero rows
-	// while the PAT delete still fires, leaving the org with no credential at
-	// all. The other three transitions take githubAppRegRMWLockSalt and re-read
-	// inside the critical section — this one must too.
+	// Advisory: refuse the common cases before spending the backfill's round
+	// trip on them. The authoritative read is the one under the lock below.
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -150,9 +173,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if app.Active {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "the GitHub App is already the live credential",
-		})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": msgAppAlreadyLive})
 		return
 	}
 
@@ -173,9 +194,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if len(insts) == 0 {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "install the App before switching",
-		})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": msgAppNotInstalled})
 		return
 	}
 
@@ -183,6 +202,44 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 	base, err := s.ghResolver.BaseURLFor(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
+		return
+	}
+
+	// Serialize against every other credential transition for this org, taken
+	// after the backfill above. See the file header for the shape.
+	release, err := s.acquireKeyedLock(ctx, &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	defer release()
+
+	// The authoritative guards. Everything checked above raced the backfill, and
+	// this is the transition with the destructive write: the PAT delete below is
+	// unconditional, so committing against a registration that has since been
+	// discarded or torn down destroys the only credential the org has left.
+	// app is rebound, not just re-checked — the audit row names the App that is
+	// actually going live.
+	app, err = s.githubApps.GetForOrgSystem(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	if app == nil {
+		notFound(w, "github app")
+		return
+	}
+	if app.Active {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": msgAppAlreadyLive})
+		return
+	}
+	insts, err = s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	if len(insts) == 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": msgAppNotInstalled})
 		return
 	}
 
@@ -233,6 +290,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		internalError(w, "github-app", err)
 		return
 	}
+	release() // idempotent; the defer stays as the early-return safety net
 
 	githubAppLog.Info("cutover to app complete, pat deleted and app active", "org", orgID, "app_id", app.AppID)
 
@@ -274,25 +332,13 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// TODO(TFAC-817): unserialized read-check-write, and the PAT validation
-	// below puts a network round-trip between this check and the teardown it
-	// guards — take githubAppRegRMWLockSalt and re-read inside the critical
-	// section, as the PAT-bind handler does.
-	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
-	if err != nil {
+	// Advisory: refuse an org with nothing to switch off before spending the
+	// validation round-trip on it. The authoritative read is under the lock.
+	if app, err := s.githubApps.GetForOrgSystem(ctx, orgID); err != nil {
 		internalError(w, "github-app", err)
 		return
-	}
-	if app == nil {
+	} else if app == nil {
 		notFound(w, "github app")
-		return
-	}
-
-	// Capture the installations before teardown so their cached tokens can be
-	// invalidated after the commit.
-	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
-	if err != nil {
-		internalError(w, "github-app", err)
 		return
 	}
 
@@ -312,6 +358,39 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 			"error": "That token didn't validate against " + base + ". Double-check it and try again.",
 			"field": "pat",
 		})
+		return
+	}
+
+	// Serialize against every other credential transition for this org, taken
+	// after the validation above. See the file header for the shape.
+	release, err := s.acquireKeyedLock(ctx, &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	defer release()
+
+	// The authoritative read. It carries the refs teardownAppSecrets deletes, so
+	// a stale row here doesn't just mis-guard the teardown — it aims it: a
+	// registration discarded and replaced during the validation window would
+	// have its private key destroyed under the previous one's refs. Reading it
+	// inside the section is what makes the row the teardown describes the row
+	// the teardown removes.
+	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	if app == nil {
+		notFound(w, "github app")
+		return
+	}
+
+	// Capture the installations before teardown so their cached tokens can be
+	// invalidated after the commit.
+	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
 		return
 	}
 
@@ -361,6 +440,7 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		internalError(w, "github-app", err)
 		return
 	}
+	release() // idempotent; the defer stays as the early-return safety net
 
 	githubAppLog.Info("switched to pat, app torn down locally", "org", orgID, "app_id", app.AppID)
 
@@ -393,10 +473,33 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx := r.Context()
 
-	// TODO(TFAC-817): unserialized read-check-write — a concurrent cutover can
-	// activate the App after this 409 guard reads it as staged, so the teardown
-	// below can tear down a registration that has since become live. Take
-	// githubAppRegRMWLockSalt and re-read inside the critical section.
+	// Advisory, and here purely to keep the shape uniform with its two siblings:
+	// this handler makes no network call, so the pre-lock read buys nothing but
+	// a fast rejection that never waits on the lock.
+	if app, err := s.githubApps.GetForOrgSystem(ctx, orgID); err != nil {
+		internalError(w, "github-app", err)
+		return
+	} else if app == nil {
+		notFound(w, "github app")
+		return
+	} else if app.Active {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": msgAppIsLiveCred})
+		return
+	}
+
+	// Serialize against every other credential transition for this org. See the
+	// file header for the shape.
+	release, err := s.acquireKeyedLock(ctx, &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	defer release()
+
+	// The authoritative guards. The staged bit is what makes this handler safe
+	// at all — discarding is a teardown with no replacement credential, so the
+	// 409 is the only thing standing between an abandoned-switch exit and the
+	// removal of an App that a concurrent cutover has since made live.
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -407,9 +510,7 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if app.Active {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "this GitHub App is the live credential; use switch-to-pat to remove it",
-		})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": msgAppIsLiveCred})
 		return
 	}
 
@@ -446,6 +547,7 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 		internalError(w, "github-app", err)
 		return
 	}
+	release() // idempotent; the defer stays as the early-return safety net
 
 	githubAppLog.Info("discarded staged app", "org", orgID, "app_id", app.AppID)
 
