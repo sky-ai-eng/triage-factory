@@ -202,6 +202,41 @@ func TestInstallationFor_AmbiguityNamesTheCount(t *testing.T) {
 	}
 }
 
+// TestInstallationFor_ReadFailurePropagates pins the third answer, which is
+// neither of the other two. An unreadable installation mirror reported as
+// missing credentials sends a user to reconnect a GitHub that is fine, and
+// reported as ambiguous blames a caller that named its account correctly — so
+// the cause travels out intact, for whoever can actually act on it.
+func TestInstallationFor_ReadFailurePropagates(t *testing.T) {
+	errMirrorDown := errors.New("installation mirror unavailable")
+	gh := newGHTestServer(t)
+	r := NewResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+		&fakeApps{app: activeApp(), listErr: errMirrorDown},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	).(*resolver)
+
+	_, err := r.installationFor(context.Background(), "org-1", accountByLogin("acme"))
+	if !errors.Is(err, errMirrorDown) {
+		t.Fatalf("installationFor err = %v; want the read failure in the chain", err)
+	}
+	if errors.Is(err, ErrNoGitHubCredentials) || errors.Is(err, ErrAmbiguousInstallation) {
+		t.Errorf("installationFor err = %v; a backend failure is neither missing credentials nor ambiguous", err)
+	}
+
+	// And out through the public entry point, where the org also has a PAT the
+	// active App must not borrow: the outage surfaces rather than being papered
+	// over by a credential this org isn't using.
+	if _, err := r.ClientFor(context.Background(), "org-1", "acme"); !errors.Is(err, errMirrorDown) {
+		t.Errorf("ClientFor err = %v; want the read failure", err)
+	}
+	if gh.mintCalls != 0 {
+		t.Errorf("unreadable mirror should not mint; mintCalls=%d", gh.mintCalls)
+	}
+}
+
 // TestResolver_MultiInstallationMintsPerAccount walks the public entry point
 // for the shape this unblocks — one App, installed once per GitHub org — in
 // both directions at once: each account resolves ITS installation, and the
@@ -226,8 +261,8 @@ func TestResolver_MultiInstallationMintsPerAccount(t *testing.T) {
 			t.Fatalf("ClientFor(%s): %v", owner, err)
 		}
 	}
-	if want := []string{"456", "789"}; !slices.Equal(gh.mintedFor, want) {
-		t.Errorf("minted for installations %v; want %v (each account served by its own)", gh.mintedFor, want)
+	if got, want := gh.minted(), []string{"456", "789"}; !slices.Equal(got, want) {
+		t.Errorf("minted for installations %v; want %v (each account served by its own)", got, want)
 	}
 }
 

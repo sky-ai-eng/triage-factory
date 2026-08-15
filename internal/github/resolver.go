@@ -745,9 +745,14 @@ func (a accountRef) String() string {
 func (r *resolver) installationFor(ctx context.Context, orgID string, target accountRef) (domain.OrgGitHubAppInstallation, error) {
 	insts, err := r.apps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
-		ghResolverLog.Warn("list installations failed; skipping tier1",
-			"org", orgID, "error", err)
-		return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: list installations: %v", ErrNoGitHubCredentials, orgID, err)
+		// A read failure is not a missing credential, and saying so would be
+		// the same misreport the ambiguous case is: it sends a user to
+		// reconnect a GitHub that was never disconnected, when what happened
+		// was a backend blip that will be gone next call. Propagate it with the
+		// cause intact — the same posture githubBaseFor and the PAT tier take,
+		// and what HasAnyCredential already does with this very read.
+		ghResolverLog.Warn("list installations failed", "org", orgID, "error", err)
+		return domain.OrgGitHubAppInstallation{}, fmt.Errorf("list installations for org %s: %w", orgID, err)
 	}
 	if target.ID == "" && target.Login == "" {
 		if len(insts) == 1 {

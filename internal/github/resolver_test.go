@@ -10,7 +10,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,8 +40,9 @@ func (f *fakeSecrets) GetSystem(_ context.Context, _ string, key string) (string
 
 type fakeApps struct {
 	db.GitHubAppsStore
-	app   *domain.OrgGitHubApp
-	insts []domain.OrgGitHubAppInstallation
+	app     *domain.OrgGitHubApp
+	insts   []domain.OrgGitHubAppInstallation
+	listErr error // when set, the installation mirror is unreadable
 }
 
 func (f *fakeApps) GetForOrgSystem(_ context.Context, _ string) (*domain.OrgGitHubApp, error) {
@@ -47,6 +50,9 @@ func (f *fakeApps) GetForOrgSystem(_ context.Context, _ string) (*domain.OrgGitH
 }
 
 func (f *fakeApps) ListInstallationsForOrgSystem(_ context.Context, _ string) ([]domain.OrgGitHubAppInstallation, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return f.insts, nil
 }
 
@@ -84,11 +90,25 @@ func testPEM(t *testing.T) string {
 type ghTestServer struct {
 	srv          *httptest.Server
 	mintCalls    int32
-	mintedFor    []string // installation ids the mints were requested against, in order
 	lastProbe    string   // Authorization header seen on the /probe call
 	installRepos []string // full names the repo-access probe treats as granted
 	repoProbes   int32    // count of GET /repos/{owner}/{repo} coverage probes
 	repoProbe5xx bool     // when true, the coverage probe returns 500 (indeterminate)
+
+	// mintedFor records the installation ids mints were requested against, in
+	// order. It grows inside the handler goroutine, so unlike the scalars above
+	// it takes a lock on both sides — an append that reallocates while a test
+	// reads the slice header is a race whatever the ordering happens to be.
+	mu        sync.Mutex
+	mintedFor []string
+}
+
+// minted returns a copy of the installation ids minted so far, so an assertion
+// never holds a slice the handler can still append to.
+func (g *ghTestServer) minted() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.mintedFor)
 }
 
 func newGHTestServer(t *testing.T) *ghTestServer {
@@ -101,7 +121,9 @@ func newGHTestServer(t *testing.T) *ghTestServer {
 		// the minted token will act as, so recording it lets a test assert the
 		// resolver picked the installation it meant to.
 		id, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/api/v3/app/installations/"), "/")
+		g.mu.Lock()
 		g.mintedFor = append(g.mintedFor, id)
+		g.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token":      "ghs_minted",
