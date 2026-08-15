@@ -173,7 +173,7 @@ describe('GitHubAccessControl · PAT rotation', () => {
   })
 })
 
-// The webhook-health line on a live-App org (TFAC-815). What's pinned is the
+// The webhook-health line on a live-App org. What's pinned is the
 // property the ticket exists for: a registered App that receives no deliveries
 // is no longer indistinguishable from a working one — and the states that are
 // NORMAL (a local install's unconfigured hook, an unprobed App) never render as

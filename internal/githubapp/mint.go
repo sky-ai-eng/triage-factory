@@ -504,7 +504,9 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 			}
 			out = append(out, inst)
 		}
-		next = nextPageURL(linkHeader)
+		if next, err = m.nextPage(linkHeader); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -593,10 +595,54 @@ func (m *Minter) GetApp(ctx context.Context) (App, error) {
 	}, nil
 }
 
+// nextPage returns the rel="next" URL from a Link header, or "" when there is
+// no next page — after checking that it addresses the same origin as the
+// configured API base.
+//
+// The check is what makes following the header safe. Every request this package
+// paginates carries the App's signed JWT in an Authorization header, so a Link
+// pointing at another host would hand that credential to whoever answers, and
+// would make this process fetch a URL of the remote's choosing (the API base
+// may be an arbitrary GHES host, which can be misconfigured behind a proxy, or
+// simply wrong). The response body is attacker-shaped input; the request target
+// must not be. Go's client already strips Authorization across a redirect to a
+// different host, so this closes the half the stdlib does not see.
+//
+// Scheme and host must match; the path is not constrained, since a same-origin
+// path is neither a credential leak nor a reachability gain. A mismatch is an
+// error rather than a quiet stop: pagination that silently truncates would
+// report a partial listing as a complete one, and a Link header pointing off
+// the configured host is an anomaly worth surfacing either way.
+func (m *Minter) nextPage(link string) (string, error) {
+	next := nextPageURL(link)
+	if next == "" {
+		return "", nil
+	}
+	nu, err := url.Parse(next)
+	if err != nil {
+		return "", fmt.Errorf("githubapp: parse pagination link: %w", err)
+	}
+	// apiBase was parsed and validated in NewMinter, so this cannot fail for a
+	// live Minter; the error is kept rather than ignored so a future
+	// construction path can't quietly skip the comparison.
+	bu, err := url.Parse(m.apiBase)
+	if err != nil {
+		return "", fmt.Errorf("githubapp: parse API base: %w", err)
+	}
+	if !strings.EqualFold(nu.Scheme, bu.Scheme) || !strings.EqualFold(nu.Host, bu.Host) {
+		return "", fmt.Errorf("githubapp: pagination link points at %s://%s, not the configured API host %s://%s",
+			nu.Scheme, nu.Host, bu.Scheme, bu.Host)
+	}
+	return next, nil
+}
+
 // nextPageURL extracts the rel="next" URL from a GitHub Link header, or ""
 // when there's no next page. The header looks like:
 //
 //	<https://api.github.com/app/installations?page=2>; rel="next", <...>; rel="last"
+//
+// Callers reach it through Minter.nextPage, which additionally pins the URL to
+// the configured API origin — this half only parses.
 func nextPageURL(link string) string {
 	for _, part := range strings.Split(link, ",") {
 		segs := strings.Split(strings.TrimSpace(part), ";")

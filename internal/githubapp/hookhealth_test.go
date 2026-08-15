@@ -381,6 +381,44 @@ func TestListHookDeliveries_QueryAndPaging(t *testing.T) {
 	}
 }
 
+// TestListHookDeliveries_RefusesOffOriginPagination is the deliveries half of
+// the same rule: the cursor comes from a Link header the remote host writes,
+// and the request that follows it carries the App JWT. A host that names
+// another origin — misconfigured, proxied, or hostile — does not get that
+// credential, and does not get to choose what this process fetches.
+func TestListHookDeliveries_RefusesOffOriginPagination(t *testing.T) {
+	key := newTestKey(t)
+	var reached bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer other.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", `<`+other.URL+`/app/hook/deliveries?cursor=v1_2>; rel="next"`)
+		_, _ = w.Write([]byte(`[{"id":1,"guid":"a","delivered_at":"2026-08-15T00:00:00Z","redelivery":false,
+			"duration":0.1,"status":"Unauthorized","status_code":401,"event":"installation","action":"created",
+			"installation_id":7,"repository_id":null}]`))
+	}))
+	defer srv.Close()
+
+	m, err := githubapp.NewMinter(githubapp.Config{
+		PrivateKey: key, AppID: 424242, APIBase: srv.URL, HTTPClient: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewMinter: %v", err)
+	}
+
+	got, err := m.ListHookDeliveries(context.Background(), githubapp.HookDeliveryQuery{MaxPages: 3})
+	if err == nil {
+		t.Fatalf("ListHookDeliveries = %+v, nil err; want a refusal on the off-origin Link", got)
+	}
+	if reached {
+		t.Error("the other host was fetched; the App JWT must never leave the configured API host")
+	}
+}
+
 // TestListHookDeliveries_StopsAtMaxPages keeps an App with a long delivery
 // history from turning one repair click into unbounded paging.
 func TestListHookDeliveries_StopsAtMaxPages(t *testing.T) {

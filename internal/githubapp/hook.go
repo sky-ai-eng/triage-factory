@@ -199,7 +199,12 @@ func (m *Minter) ListHookDeliveries(ctx context.Context, q HookDeliveryQuery) ([
 				InstallationID: it.InstallationID,
 			})
 		}
-		next = nextPageURL(link)
+		// Pinned to the configured API origin before it is fetched — the next
+		// request carries the App JWT, and the host that produced this header
+		// does not get to choose where that goes. See Minter.nextPage.
+		if next, err = m.nextPage(link); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }

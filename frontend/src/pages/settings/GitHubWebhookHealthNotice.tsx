@@ -122,12 +122,17 @@ export default function GitHubWebhookHealthNotice({
     setBusy(true)
     try {
       const res = await replayGitHubWebhookDeliveries(orgId)
+      // The request is finished by the time this runs, so the copy is about
+      // what GitHub accepted — not about work still happening here. GitHub
+      // performs the redelivery itself, which is why it's "queued" rather than
+      // "replayed": the events arrive at the receiver on GitHub's schedule.
       if (res.candidates === 0) {
         toast.success('No missed installation events to replay')
+      } else if (res.replayed === 0) {
+        toast.error(`GitHub refused all ${res.candidates} redelivery requests`)
       } else {
-        toast.success(
-          `Replaying ${res.replayed} missed installation event${res.replayed === 1 ? '' : 's'}`,
-        )
+        const queued = `Queued ${res.replayed} missed installation event${res.replayed === 1 ? '' : 's'} for redelivery`
+        toast.success(res.failed > 0 ? `${queued} — ${res.failed} refused by GitHub` : queued)
       }
     } catch (e) {
       toast.error((e as Error).message)
