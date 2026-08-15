@@ -24,11 +24,16 @@ import (
 // string as repoID — that's what callers pass and what
 // domain.RepoProfile.ID returns. SQLite stores that string directly
 // in the id column. Postgres uses a synthetic uuid id internally
-// plus a UNIQUE(org_id, owner, repo) natural key; the Postgres impl
-// splits the passed-in "owner/repo" and queries by (org_id, owner,
-// repo) so callers never see the synthetic uuid. The synthetic id
-// exists because the PG style is "every table has a uuid PK" — not
-// because callers need it.
+// plus a UNIQUE(org_id, source, owner, repo) natural key; the
+// Postgres impl splits the passed-in "owner/repo" and queries by
+// (org_id, owner, repo) so callers never see the synthetic uuid. The
+// synthetic id exists because the PG style is "every table has a uuid
+// PK" — not because callers need it.
+//
+// source is absent from the slug-keyed methods deliberately: they
+// match a repo without naming one, which is unambiguous while GitHub
+// is the only provider that issues repositories. The methods that DO
+// name one take a domain.RepoRef.
 type RepoStore interface {
 	// Upsert inserts or updates a repo profile. On conflict it
 	// refreshes profiling metadata (description, has_readme,
@@ -36,6 +41,13 @@ type RepoStore interface {
 	// default_branch, profiled_at) but PRESERVES user-configured
 	// base_branch and clone-status fields — those are mutated by
 	// dedicated methods and shouldn't be clobbered by a re-profile.
+	//
+	// p.Source normalizes through domain.NormalizeRepoSource (empty means
+	// GitHub) and is a create-time identity column: a conflicting write
+	// leaves it alone. p.ExternalID refreshes the stored id when non-empty
+	// and leaves it alone when empty — the profiler reads the id off the
+	// same /repos/{owner}/{repo} response it takes default_branch and
+	// clone_url from, and a caller with no id has learned nothing to write.
 	Upsert(ctx context.Context, orgID string, p domain.RepoProfile) error
 
 	// List returns every configured repo, including those without
@@ -106,6 +118,43 @@ type RepoStore interface {
 	// if not configured.
 	Get(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error)
 
+	// GetOrCreateSystem returns the row for one repository, minting a bare
+	// one if it does not exist yet. It is the single primitive that brings
+	// a repository into the table: the tracked-set reconcile
+	// (TeamGitHubReposStore.ReplaceForTeam) and SetConfigured create their
+	// rows through the same INSERT, so a repository row can never exist
+	// without the identity columns the create sets.
+	//
+	// Get-or-create, not upsert. An existing row is returned as it stands —
+	// same id, same profile text, same base branch, same clone and poll
+	// state — with exactly one exception: external_id takes ref's value
+	// when ref carries one. That is the same rule Upsert applies, and it is
+	// one rule rather than two: a non-empty id the caller just read off a
+	// provider payload is what that provider currently says the slug
+	// resolves to, and an empty one means the caller learned nothing, so it
+	// never clears a stored id.
+	//
+	// The lookup is case-INSENSITIVE on owner/repo (GitHub identifiers are),
+	// matching the reconcile: a caller spelling a tracked repo differently
+	// gets the existing row rather than minting a second one for the same
+	// repository. Stored casing is therefore sticky. ref.Source normalizes
+	// through domain.NormalizeRepoSource — empty means GitHub, an unknown
+	// value is an error rather than a row.
+	//
+	// System (claims-free) variant only: the callers that learn about a
+	// repository are background jobs. Control-plane ones — the executor's
+	// Postgres role holds SELECT and UPDATE on repo_profiles, not INSERT, so
+	// a repository is brought into the table by the side that polls and
+	// tracks, never by a running agent's pod.
+	//
+	// Concurrent creators of the same repository resolve to one row, whatever
+	// casing each of them spelled it with. That is enforced by the create
+	// itself and not by anything the caller has to hold — the unique index is
+	// case-sensitive and so cannot see the case-differing race, which is
+	// precisely why the impls serialize on the case-folded identity instead of
+	// leaning on it.
+	GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.RepoProfile, error)
+
 	// UpdateCloneStatus records the outcome of an EnsureBareClone
 	// attempt for the given repo. status is "ok" | "failed" |
 	// "pending"; errMsg and errKind are stored as TEXT (empty
@@ -143,6 +192,24 @@ type RepoStore interface {
 	// — the poller goroutine has no JWT claims, same convention as
 	// ListConfiguredNamesSystem. No-ops to ("", nil, nil) when the repo
 	// isn't in repo_profiles.
+	// FillMissingExternalIDsSystem records the provider's repository id for
+	// tracked repos that do not have one yet, and returns how many rows it
+	// filled. Refs whose repository has no row, or whose row already carries
+	// an id, are skipped — this only ever turns a NULL into a value.
+	//
+	// It exists because an id nobody records is an id nobody has: rename
+	// detection keys on (source, external_id) and treats a NULL as "not
+	// renamable", so a repository stays undetectable for as long as its id is
+	// missing. Filling it only when a repository is profiled leaves that
+	// window open for the length of the profile TTL.
+	//
+	// The caller is the poller, which already enumerates each installation's
+	// repo grant every cycle to compute the tracked∩granted intersection —
+	// that response carries the ids, so this costs no GitHub request. Matching
+	// is case-insensitive, like every other slug lookup here. A ref with an
+	// empty ExternalID is ignored rather than written: absent is not an id.
+	FillMissingExternalIDsSystem(ctx context.Context, orgID string, refs []domain.RepoRef) (int, error)
+
 	GetPullsPollStateSystem(ctx context.Context, orgID, repoID string) (etag string, polledAt *time.Time, err error)
 
 	// SetPullsPollStateSystem records the conditional-request state after

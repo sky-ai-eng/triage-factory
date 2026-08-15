@@ -226,18 +226,19 @@ func reconcileRepoProfilesFromUnion(ctx context.Context, tx queryer, union []dom
 			}
 		}
 	}
-	// Insert a skeleton only for genuinely-new repos (not already present
+	// Create a row only for genuinely-new repos (not already present
 	// case-insensitively); existing rows keep their casing + cached columns.
+	// This is the tracking half of the get-or-create invariant — a repository
+	// gets its row here, when it is first tracked, not when profiling first
+	// succeeds — and it goes through the same insert the store method does so
+	// the identity columns cannot differ by which path created the row. The
+	// tracked set is GitHub's by construction, so source is the default.
 	for _, r := range desired {
 		if existingLower[strings.ToLower(r.Slug())] {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO repo_profiles (id, owner, repo, updated_at)
-			VALUES (?, ?, ?, datetime('now'))
-			ON CONFLICT(id) DO NOTHING
-		`, r.Slug(), r.Owner, r.Repo); err != nil {
-			return fmt.Errorf("insert repo_profiles skeleton[%s]: %w", r.Slug(), err)
+		if err := insertRepoProfileRow(ctx, tx, domain.RepoRef{Owner: r.Owner, Repo: r.Repo}); err != nil {
+			return err
 		}
 	}
 	return nil

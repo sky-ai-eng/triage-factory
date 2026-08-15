@@ -225,18 +225,16 @@ func reconcileRepoProfilesFromUnion(ctx context.Context, q queryer, orgID string
 	`, orgID, lowOwners, lowNames); err != nil {
 		return fmt.Errorf("gc repo_profiles: %w", err)
 	}
-	// Insert a skeleton only for repos not already present case-insensitively;
-	// existing rows keep their casing + cached columns (sticky casing).
+	// Create a row only for repos not already present case-insensitively;
+	// existing rows keep their casing + cached columns (sticky casing). This
+	// is the tracking half of the get-or-create invariant — a repository gets
+	// its row here, when it is first tracked, not when profiling first
+	// succeeds — and it goes through the same insert the store method does so
+	// the identity columns cannot differ by which path created the row. The
+	// tracked set is GitHub's by construction, so source is the default.
 	for _, r := range desired {
-		if _, err := q.ExecContext(ctx, `
-			INSERT INTO repo_profiles (org_id, owner, repo)
-			SELECT $1, $2, $3
-			WHERE NOT EXISTS (
-			    SELECT 1 FROM repo_profiles
-			    WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)
-			)
-		`, orgID, r.Owner, r.Repo); err != nil {
-			return fmt.Errorf("insert repo_profiles skeleton[%s]: %w", r.Slug(), err)
+		if err := insertRepoProfileRow(ctx, q, orgID, domain.RepoRef{Owner: r.Owner, Repo: r.Repo}); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -34,6 +34,9 @@ type RepoStoreFactory func(t *testing.T) (store db.RepoStore, orgID string)
 //   - CountConfigured returns the row count.
 //   - UpdateBaseBranch + UpdateCloneStatus mutate only the targeted
 //     fields.
+//   - GetOrCreateSystem mints a row for an untracked repository, is
+//     idempotent, never duplicates or rewrites an existing (profiled)
+//     one, matches case-insensitively, and records an external id.
 func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -242,6 +245,80 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		}
 	})
 
+	t.Run("SetConfigured_resubmission_under_different_casing_keeps_the_row", func(t *testing.T) {
+		// SetConfigured is a full-set replace: anything not in the submitted
+		// list is deleted. Deciding membership case-SENSITIVELY makes a
+		// resubmission under different casing look like "this repo was
+		// dropped and a different one added" — the row is deleted and a bare
+		// one created in its place, so an AI profile, a user's base branch,
+		// the clone outcome and the poller's ETag all disappear because
+		// someone capitalized the slug differently. GitHub identifiers are
+		// case-insensitive; the two spellings were never two repositories.
+		s, orgID := mk(t)
+		profiled := time.Now().UTC().Truncate(time.Second)
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "Acme/Api", Owner: "Acme", Repo: "Api",
+			Description: "Api service", ProfileText: "accumulated profile",
+			CloneURL: "git@github.com:Acme/Api.git", DefaultBranch: "main",
+			ExternalID: "1296269", ProfiledAt: &profiled,
+			HasReadme: true, HasClaudeMd: true,
+		}); err != nil {
+			t.Fatalf("seed profiled row: %v", err)
+		}
+		if err := s.UpdateBaseBranch(ctx, orgID, "Acme/Api", "develop"); err != nil {
+			t.Fatalf("UpdateBaseBranch: %v", err)
+		}
+		if err := s.UpdateCloneStatus(ctx, orgID, "Acme", "Api", "ok", "", ""); err != nil {
+			t.Fatalf("UpdateCloneStatus: %v", err)
+		}
+		etagAt := profiled.Add(time.Hour)
+		if err := s.SetPullsPollStateSystem(ctx, orgID, "Acme/Api", `"etag-v1"`, etagAt); err != nil {
+			t.Fatalf("SetPullsPollStateSystem: %v", err)
+		}
+
+		// The same repository, resubmitted lowercased, alongside a genuinely
+		// new one — so this exercises the replace path rather than a no-op.
+		if err := s.SetConfigured(ctx, orgID, []string{"acme/api", "octo/new"}); err != nil {
+			t.Fatalf("SetConfigured: %v", err)
+		}
+
+		if n, _ := s.CountConfigured(ctx, orgID); n != 2 {
+			t.Fatalf("rows = %d, want 2 — a casing difference is not a drop plus an add", n)
+		}
+		got, err := s.Get(ctx, orgID, "acme/api")
+		if err != nil || got == nil {
+			t.Fatalf("Get after resubmission: got=%v err=%v", got, err)
+		}
+		if got.ID != "Acme/Api" {
+			t.Errorf("id = %q, want Acme/Api — stored casing is sticky", got.ID)
+		}
+		if got.ProfileText != "accumulated profile" || got.Description != "Api service" {
+			t.Errorf("profile lost by the resubmission: %+v", got)
+		}
+		if !got.HasReadme || !got.HasClaudeMd {
+			t.Errorf("doc flags lost by the resubmission: readme=%v claude=%v", got.HasReadme, got.HasClaudeMd)
+		}
+		if got.BaseBranch != "develop" {
+			t.Errorf("BaseBranch = %q, want develop — a user setting must survive a re-save", got.BaseBranch)
+		}
+		if got.CloneURL != "git@github.com:Acme/Api.git" || got.CloneStatus != "ok" {
+			t.Errorf("clone state lost by the resubmission: %+v", got)
+		}
+		if got.ExternalID != "1296269" {
+			t.Errorf("ExternalID = %q, want it kept — identity does not survive a delete+create", got.ExternalID)
+		}
+		if got.ProfiledAt == nil {
+			t.Error("ProfiledAt is nil — the repo would re-profile from scratch, ignoring the TTL")
+		}
+		etag, polledAt, err := s.GetPullsPollStateSystem(ctx, orgID, "Acme/Api")
+		if err != nil {
+			t.Fatalf("GetPullsPollStateSystem: %v", err)
+		}
+		if etag != `"etag-v1"` || polledAt == nil {
+			t.Errorf("poll state = (%q, %v), want it kept — losing it re-lists every open PR", etag, polledAt)
+		}
+	})
+
 	t.Run("SetConfigured_skips_malformed_entries", func(t *testing.T) {
 		// "no-slash" and "trailing/" produce empty halves which the
 		// impl silently skips. The valid entry alongside still lands.
@@ -361,6 +438,414 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		s, orgID := mk(t)
 		if err := s.UpdateCloneStatus(ctx, orgID, "ghost", "repo", "ok", "", ""); err != nil {
 			t.Errorf("UpdateCloneStatus on absent repo should be a no-op, got %v", err)
+		}
+	})
+
+	t.Run("slug_keyed_methods_all_match_case_insensitively", func(t *testing.T) {
+		// GitHub identifiers are case-insensitive, so every method that takes
+		// a caller-supplied slug has to resolve the same repository — one
+		// method disagreeing is a silent miss, not an error, and reads as
+		// "that repo isn't configured".
+		//
+		// The live path is an agent's `tfac exec workspace add owner/repo`,
+		// whose argv goes straight to Get; a stale-casing miss there is
+		// reported to the agent as not-configured, immediately before a
+		// team-tracking gate that WOULD have matched. The rest are pinned
+		// alongside it so the family cannot drift apart again.
+		s, orgID := mk(t)
+		if err := s.SetConfigured(ctx, orgID, []string{"Acme/Api"}); err != nil {
+			t.Fatalf("SetConfigured: %v", err)
+		}
+
+		got, err := s.Get(ctx, orgID, "acme/api")
+		if err != nil || got == nil {
+			t.Fatalf("Get with different casing: got=%v err=%v", got, err)
+		}
+		if got.ID != "Acme/Api" {
+			t.Errorf("Get returned id %q, want the stored casing Acme/Api", got.ID)
+		}
+		if sys, err := s.GetSystem(ctx, orgID, "ACME/API"); err != nil || sys == nil {
+			t.Errorf("GetSystem with different casing: got=%v err=%v", sys, err)
+		}
+
+		if err := s.UpdateCloneStatus(ctx, orgID, "acme", "api", "failed", "boom", "ssh"); err != nil {
+			t.Fatalf("UpdateCloneStatus: %v", err)
+		}
+		got, _ = s.Get(ctx, orgID, "Acme/Api")
+		if got == nil || got.CloneStatus != "failed" || got.CloneErrorKind != "ssh" {
+			t.Errorf("clone status after a differently-cased update = %+v, want failed/ssh", got)
+		}
+
+		now := time.Now().UTC().Truncate(time.Second)
+		if err := s.SetPullsPollStateSystem(ctx, orgID, "ACME/api", `"etag-v1"`, now); err != nil {
+			t.Fatalf("SetPullsPollStateSystem: %v", err)
+		}
+		etag, polledAt, err := s.GetPullsPollStateSystem(ctx, orgID, "acme/API")
+		if err != nil {
+			t.Fatalf("GetPullsPollStateSystem: %v", err)
+		}
+		if etag != `"etag-v1"` || polledAt == nil {
+			t.Errorf("poll state through differently-cased slugs = (%q, %v), want the stored pair", etag, polledAt)
+		}
+	})
+
+	t.Run("GetOrCreate_creates_then_is_idempotent", func(t *testing.T) {
+		// The core of the primitive: the first call mints the row, every
+		// call after it hands back the same one. "Same" is checked by
+		// identity (the store surfaces "owner/repo" as the id on both
+		// backends) AND by row count, because the failure this guards is a
+		// second row for the same repository, which a per-call Get would
+		// happily read past.
+		s, orgID := mk(t)
+		ref := domain.RepoRef{Owner: "octo", Repo: "widget"}
+
+		first, err := s.GetOrCreateSystem(ctx, orgID, ref)
+		if err != nil || first == nil {
+			t.Fatalf("GetOrCreateSystem (create): got=%v err=%v", first, err)
+		}
+		if first.ID != "octo/widget" || first.Owner != "octo" || first.Repo != "widget" {
+			t.Errorf("created row identity = %+v, want octo/widget", first)
+		}
+		if first.Source != domain.RepoSourceGitHub {
+			t.Errorf("created row source = %q, want %q — an unset source means GitHub", first.Source, domain.RepoSourceGitHub)
+		}
+		if first.ExternalID != "" {
+			t.Errorf("created row external id = %q, want empty — nothing fetched one", first.ExternalID)
+		}
+		if first.ProfileText != "" || first.ProfiledAt != nil {
+			t.Errorf("created row should be bare, got %+v", first)
+		}
+
+		for i := 0; i < 3; i++ {
+			again, err := s.GetOrCreateSystem(ctx, orgID, ref)
+			if err != nil || again == nil {
+				t.Fatalf("GetOrCreateSystem (repeat %d): got=%v err=%v", i, again, err)
+			}
+			if again.ID != first.ID {
+				t.Errorf("repeat %d returned id %q, want %q", i, again.ID, first.ID)
+			}
+		}
+		if n, err := s.CountConfigured(ctx, orgID); err != nil {
+			t.Fatalf("CountConfigured: %v", err)
+		} else if n != 1 {
+			t.Errorf("rows after 4 get-or-creates = %d, want 1", n)
+		}
+	})
+
+	t.Run("GetOrCreate_does_not_duplicate_or_rewrite_a_profiled_repo", func(t *testing.T) {
+		// The negative space. A repository that has been profiled, given a
+		// base branch, and cloned must come back from get-or-create exactly
+		// as it stands — one row, same id, every cached column intact.
+		s, orgID := mk(t)
+		profiled := time.Now().UTC().Truncate(time.Second)
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "octo/widget", Owner: "octo", Repo: "widget",
+			Description: "Widget service", ProfileText: "Service profile body",
+			CloneURL: "git@github.com:octo/widget.git", DefaultBranch: "main",
+			ProfiledAt: &profiled,
+		}); err != nil {
+			t.Fatalf("seed profiled row: %v", err)
+		}
+		if err := s.UpdateBaseBranch(ctx, orgID, "octo/widget", "develop"); err != nil {
+			t.Fatalf("UpdateBaseBranch: %v", err)
+		}
+		if err := s.UpdateCloneStatus(ctx, orgID, "octo", "widget", "ok", "", ""); err != nil {
+			t.Fatalf("UpdateCloneStatus: %v", err)
+		}
+
+		got, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "widget"})
+		if err != nil || got == nil {
+			t.Fatalf("GetOrCreateSystem: got=%v err=%v", got, err)
+		}
+		if got.ID != "octo/widget" {
+			t.Errorf("id = %q, want octo/widget — get-or-create must not re-key an existing row", got.ID)
+		}
+		if got.ProfileText != "Service profile body" || got.Description != "Widget service" {
+			t.Errorf("profile clobbered: %+v", got)
+		}
+		if got.BaseBranch != "develop" {
+			t.Errorf("BaseBranch = %q, want develop", got.BaseBranch)
+		}
+		if got.CloneStatus != "ok" {
+			t.Errorf("CloneStatus = %q, want ok", got.CloneStatus)
+		}
+		if got.ProfiledAt == nil {
+			t.Error("ProfiledAt is nil — a get-or-create must not un-profile a repo")
+		}
+		if n, _ := s.CountConfigured(ctx, orgID); n != 1 {
+			t.Errorf("rows = %d, want 1 — the profiled repo must not be duplicated", n)
+		}
+	})
+
+	t.Run("GetOrCreate_matches_case_insensitively", func(t *testing.T) {
+		// GitHub identifiers are case-insensitive and the unique index is
+		// not, so a caller spelling a tracked repo differently must find the
+		// existing row rather than mint a second one for the same repository.
+		// Stored casing is sticky, exactly as the tracked-set reconcile
+		// leaves it.
+		s, orgID := mk(t)
+		if err := s.SetConfigured(ctx, orgID, []string{"Acme/Api"}); err != nil {
+			t.Fatalf("SetConfigured: %v", err)
+		}
+		got, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "API"})
+		if err != nil || got == nil {
+			t.Fatalf("GetOrCreateSystem (mismatched case): got=%v err=%v", got, err)
+		}
+		if got.ID != "Acme/Api" {
+			t.Errorf("id = %q, want Acme/Api — stored casing is sticky", got.ID)
+		}
+		if n, _ := s.CountConfigured(ctx, orgID); n != 1 {
+			t.Errorf("rows = %d, want 1 — a casing difference is not a second repository", n)
+		}
+	})
+
+	t.Run("GetOrCreate_records_the_external_id", func(t *testing.T) {
+		// A create carries the id straight onto the new row; a later call
+		// that learned one fills a row that has none. An empty id never
+		// clears a stored one — a caller without an id has learned nothing.
+		s, orgID := mk(t)
+
+		withID, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
+			Owner: "octo", Repo: "created-with-id", ExternalID: "1296269",
+		})
+		if err != nil || withID == nil {
+			t.Fatalf("GetOrCreateSystem (create with id): got=%v err=%v", withID, err)
+		}
+		if withID.ExternalID != "1296269" {
+			t.Errorf("created external id = %q, want 1296269", withID.ExternalID)
+		}
+
+		if _, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "backfilled"}); err != nil {
+			t.Fatalf("GetOrCreateSystem (create bare): %v", err)
+		}
+		filled, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
+			Owner: "octo", Repo: "backfilled", ExternalID: "555",
+		})
+		if err != nil || filled == nil {
+			t.Fatalf("GetOrCreateSystem (fill id): got=%v err=%v", filled, err)
+		}
+		if filled.ExternalID != "555" {
+			t.Errorf("filled external id = %q, want 555", filled.ExternalID)
+		}
+		// Round-trips through a plain read, not just the return value.
+		if got, _ := s.Get(ctx, orgID, "octo/backfilled"); got == nil || got.ExternalID != "555" {
+			t.Errorf("Get after fill = %+v, want external id 555", got)
+		}
+
+		kept, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "backfilled"})
+		if err != nil || kept == nil {
+			t.Fatalf("GetOrCreateSystem (no id): got=%v err=%v", kept, err)
+		}
+		if kept.ExternalID != "555" {
+			t.Errorf("external id after an id-less call = %q, want 555 — an empty id clears nothing", kept.ExternalID)
+		}
+	})
+
+	t.Run("FillMissingExternalIDs_only_ever_turns_NULL_into_a_value", func(t *testing.T) {
+		// The poller's half of repository identity: it already enumerates each
+		// installation's grant every cycle, and that response carries the ids.
+		// This is the write, and its whole contract is that it is safe to run
+		// on every cycle — it fills what is missing, touches nothing else, and
+		// reports how much it filled so the steady state is visibly zero.
+		s, orgID := mk(t)
+		if err := s.SetConfigured(ctx, orgID, []string{"Acme/Api", "octo/known", "octo/bare"}); err != nil {
+			t.Fatalf("SetConfigured: %v", err)
+		}
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "octo/known", Owner: "octo", Repo: "known",
+			ExternalID: "111", DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("seed known id: %v", err)
+		}
+
+		filled, err := s.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
+			// Different casing than stored — the grant's spelling is GitHub's,
+			// not necessarily the one tracked.
+			{Owner: "acme", Repo: "api", ExternalID: "1296269"},
+			// Already has one; a fill must never move it.
+			{Owner: "octo", Repo: "known", ExternalID: "999"},
+			// No id to record; not a write.
+			{Owner: "octo", Repo: "bare"},
+			// Not a configured repo; nothing to fill, and nothing created.
+			{Owner: "ghost", Repo: "repo", ExternalID: "42"},
+		})
+		if err != nil {
+			t.Fatalf("FillMissingExternalIDsSystem: %v", err)
+		}
+		if filled != 1 {
+			t.Errorf("filled = %d, want 1 — only the NULL one is a write", filled)
+		}
+
+		got, _ := s.Get(ctx, orgID, "Acme/Api")
+		if got == nil || got.ExternalID != "1296269" {
+			t.Errorf("case-differing fill = %+v, want external id 1296269", got)
+		}
+		if got != nil && got.ID != "Acme/Api" {
+			t.Errorf("fill moved the stored casing to %q; it must only write external_id", got.ID)
+		}
+		known, _ := s.Get(ctx, orgID, "octo/known")
+		if known == nil || known.ExternalID != "111" {
+			t.Errorf("known id = %+v, want 111 kept — a fill never overwrites", known)
+		}
+		bare, _ := s.Get(ctx, orgID, "octo/bare")
+		if bare == nil || bare.ExternalID != "" {
+			t.Errorf("id-less ref wrote %+v, want the row left alone", bare)
+		}
+		if ghost, _ := s.Get(ctx, orgID, "ghost/repo"); ghost != nil {
+			t.Errorf("fill created a row for an untracked repo: %+v — it writes, never creates", ghost)
+		}
+		if n, _ := s.CountConfigured(ctx, orgID); n != 3 {
+			t.Errorf("rows = %d, want 3 — a fill adds none", n)
+		}
+
+		// Steady state: running it again fills nothing.
+		filled, err = s.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
+			{Owner: "Acme", Repo: "Api", ExternalID: "1296269"},
+		})
+		if err != nil {
+			t.Fatalf("re-run: %v", err)
+		}
+		if filled != 0 {
+			t.Errorf("second run filled %d, want 0 — every cycle after the first is a no-op", filled)
+		}
+
+		if n, err := s.FillMissingExternalIDsSystem(ctx, orgID, nil); err != nil || n != 0 {
+			t.Errorf("empty batch = (%d, %v), want (0, nil)", n, err)
+		}
+	})
+
+	t.Run("GetOrCreate_refuses_an_unknown_source", func(t *testing.T) {
+		// source is app-validated rather than CHECK-constrained, so this
+		// function IS the validation. A typo must not reach the row and key
+		// a repository under a provider nothing resolves.
+		s, orgID := mk(t)
+		if _, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
+			Source: "gitlob", Owner: "octo", Repo: "widget",
+		}); err == nil {
+			t.Error("GetOrCreateSystem accepted an unknown source; want an error")
+		}
+		if n, _ := s.CountConfigured(ctx, orgID); n != 0 {
+			t.Errorf("rows = %d, want 0 — a refused source must not write", n)
+		}
+	})
+
+	t.Run("Upsert_round_trips_identity_and_refreshes_the_external_id", func(t *testing.T) {
+		// The profiler's write path: it learns the id from the same
+		// /repos/{owner}/{repo} response it takes the clone URL from, so a
+		// re-profile carrying an id refreshes it while one carrying none
+		// leaves the stored id alone.
+		s, orgID := mk(t)
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "octo/widget", Owner: "octo", Repo: "widget",
+			Source: domain.RepoSourceGitHub, ExternalID: "1296269",
+			ProfileText: "v1", DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		got, _ := s.Get(ctx, orgID, "octo/widget")
+		if got == nil || got.Source != domain.RepoSourceGitHub || got.ExternalID != "1296269" {
+			t.Fatalf("identity did not round-trip: %+v", got)
+		}
+
+		// A re-profile that carries no id keeps the one on the row.
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "octo/widget", Owner: "octo", Repo: "widget",
+			ProfileText: "v2", DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("re-Upsert without id: %v", err)
+		}
+		got, _ = s.Get(ctx, orgID, "octo/widget")
+		if got == nil || got.ExternalID != "1296269" {
+			t.Errorf("external id after an id-less re-profile = %+v, want 1296269 preserved", got)
+		}
+		if got.ProfileText != "v2" {
+			t.Errorf("profile text = %q, want v2 — the re-profile still lands", got.ProfileText)
+		}
+
+		// One that carries a different id takes it: GitHub is authoritative
+		// for what the slug resolves to now.
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "octo/widget", Owner: "octo", Repo: "widget",
+			ExternalID: "77", ProfileText: "v3", DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("re-Upsert with a new id: %v", err)
+		}
+		got, _ = s.Get(ctx, orgID, "octo/widget")
+		if got == nil || got.ExternalID != "77" {
+			t.Errorf("external id after a re-profile that carried one = %+v, want 77", got)
+		}
+	})
+
+	t.Run("Upsert_with_different_casing_updates_rather_than_duplicating", func(t *testing.T) {
+		// Upsert creates as well as updates, so it is a create path too — and
+		// the one that would still duplicate if its conflict target were the
+		// case-sensitive key rather than the folded identity. The stored
+		// casing wins, matching what the tracked-set reconcile does.
+		s, orgID := mk(t)
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "Acme/Api", Owner: "Acme", Repo: "Api",
+			ProfileText: "v1", DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("seed Upsert: %v", err)
+		}
+		if err := s.UpdateBaseBranch(ctx, orgID, "Acme/Api", "develop"); err != nil {
+			t.Fatalf("UpdateBaseBranch: %v", err)
+		}
+
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "acme/api", Owner: "acme", Repo: "api",
+			ProfileText: "v2", DefaultBranch: "main", ExternalID: "1296269",
+		}); err != nil {
+			t.Fatalf("differently-cased Upsert: %v", err)
+		}
+
+		if n, _ := s.CountConfigured(ctx, orgID); n != 1 {
+			t.Fatalf("rows = %d, want 1 — a differently-cased upsert must not mint a second repository", n)
+		}
+		got, _ := s.Get(ctx, orgID, "Acme/Api")
+		if got == nil {
+			t.Fatal("expected the original row to survive")
+		}
+		if got.ID != "Acme/Api" || got.Owner != "Acme" || got.Repo != "Api" {
+			t.Errorf("stored casing = %+v, want Acme/Api — casing is sticky", got)
+		}
+		if got.ProfileText != "v2" || got.ExternalID != "1296269" {
+			t.Errorf("the upsert did not land on the existing row: %+v", got)
+		}
+		if got.BaseBranch != "develop" {
+			t.Errorf("BaseBranch = %q, want develop — user config survives a re-profile", got.BaseBranch)
+		}
+	})
+
+	t.Run("Upsert_refuses_an_unknown_source", func(t *testing.T) {
+		s, orgID := mk(t)
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "octo/widget", Owner: "octo", Repo: "widget", Source: "gitlob",
+		}); err == nil {
+			t.Error("Upsert accepted an unknown source; want an error")
+		}
+		if n, _ := s.CountConfigured(ctx, orgID); n != 0 {
+			t.Errorf("rows = %d, want 0 — a refused source must not write", n)
+		}
+	})
+
+	t.Run("SetConfigured_creates_rows_with_the_identity_columns", func(t *testing.T) {
+		// The tracked-set create path and the get-or-create create path are
+		// the same INSERT, so a row minted by tracking is indistinguishable
+		// from one minted by get-or-create.
+		s, orgID := mk(t)
+		if err := s.SetConfigured(ctx, orgID, []string{"octo/widget"}); err != nil {
+			t.Fatalf("SetConfigured: %v", err)
+		}
+		got, err := s.Get(ctx, orgID, "octo/widget")
+		if err != nil || got == nil {
+			t.Fatalf("Get: got=%v err=%v", got, err)
+		}
+		if got.Source != domain.RepoSourceGitHub {
+			t.Errorf("tracked row source = %q, want %q", got.Source, domain.RepoSourceGitHub)
+		}
+		if got.ExternalID != "" {
+			t.Errorf("tracked row external id = %q, want empty — tracking learns no id", got.ExternalID)
 		}
 	})
 

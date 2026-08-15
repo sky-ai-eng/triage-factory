@@ -1143,11 +1143,30 @@ CREATE TABLE public.prompts (
 -- Name: repo_profiles; Type: TABLE; Schema: public; Owner: -
 --
 
+-- Every repository reference elsewhere in this schema is case-normalized
+-- (owner, repo) text — team_github_repos' PK, conversation_worktrees.repo_id,
+-- entities.source_id, teams.pinned_repos. A rename or a transfer moves all of
+-- them at once and TF cannot even detect that it happened: under polling, a
+-- renamed repository is indistinguishable from a 404 plus a brand-new one.
+-- source + external_id are the half of a repository's identity a rename does
+-- not move.
+--
+-- source is app-validated, not CHECK-constrained — the convention this
+-- baseline states for the other source columns (prompts.source above), so a
+-- second provider costs a value rather than a schema change. external_id is
+-- deliberately not named github_repo_id for the same reason:
+-- (source, external_id) is the shape entities (source, source_id) already
+-- uses. It is nullable and NULL is a supported state rather than a gap to
+-- backfill — a row without an id behaves exactly as it does today,
+-- everywhere — and it fills in from GitHub payloads TF already fetches, never
+-- from a fetch added to obtain it.
 CREATE TABLE public.repo_profiles (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     owner text NOT NULL,
     repo text NOT NULL,
+    source text DEFAULT 'github'::text NOT NULL,
+    external_id text,
     description text,
     has_readme boolean DEFAULT false NOT NULL,
     has_claude_md boolean DEFAULT false NOT NULL,
@@ -2143,14 +2162,6 @@ ALTER TABLE ONLY public.prompts
 
 
 --
--- Name: repo_profiles repo_profiles_org_id_owner_repo_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.repo_profiles
-    ADD CONSTRAINT repo_profiles_org_id_owner_repo_key UNIQUE (org_id, owner, repo);
-
-
---
 -- Name: repo_profiles repo_profiles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2508,6 +2519,28 @@ CREATE INDEX idx_pending_firings_entity_pending ON public.pending_firings USING 
 -- Name: idx_repo_profiles_org_owner_repo; Type: INDEX; Schema: public; Owner: -
 --
 
+-- The repository natural key. It includes source because two providers may
+-- issue the same owner/repo spelling and those are different repositories, and
+-- it folds case because GitHub identifiers are case-insensitive, so "one
+-- repository" has always meant one row per folded slug. A key that did not fold
+-- would leave that invariant to the writers, and a writer is exactly what
+-- fails: an INSERT guarded by a case-insensitive NOT EXISTS over a
+-- case-sensitive index admits two rows whenever two transactions race, because
+-- neither sees the other's uncommitted row and their keys then differ. Here the
+-- second writer conflicts instead — blocking on the first while it is in
+-- flight — so the create path needs no lock of its own.
+--
+-- An expression key has to be an index rather than a UNIQUE constraint; the
+-- store infers it by expression list in ON CONFLICT.
+CREATE UNIQUE INDEX repo_profiles_identity ON public.repo_profiles USING btree (org_id, source, lower(owner), lower(repo));
+
+
+--
+-- Name: idx_repo_profiles_org_owner_repo; Type: INDEX; Schema: public; Owner: -
+--
+
+-- Kept alongside the folded key: it serves the ordered org-wide list
+-- (WHERE org_id ORDER BY owner, repo), which the folded index cannot.
 CREATE INDEX idx_repo_profiles_org_owner_repo ON public.repo_profiles USING btree (org_id, owner, repo);
 
 

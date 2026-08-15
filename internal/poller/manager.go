@@ -575,6 +575,14 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		if len(scoped) == 0 {
 			continue
 		}
+		// The grant response carries GitHub's repository id for every repo in
+		// it, so this is where a tracked repo's id is cheapest to learn: no
+		// request of its own, and it covers the whole tracked set rather than
+		// whatever the profiler reaches before its TTL. Only NULLs are filled,
+		// so it is a no-op on every cycle after the first. Best-effort — an
+		// id TF fails to record is one it records next cycle, and never a
+		// reason to skip the poll the caller actually came for.
+		m.recordRepoIDs(ctx, orgID, scoped, grant)
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
 		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, "", scoped, resolver)
@@ -835,6 +843,55 @@ func (m *Manager) orgHasRegisteredApp(ctx context.Context, orgID string) bool {
 // installation's grant, marking each in covered so the caller can report
 // configured repos that no installation grants. Matching is case-insensitive
 // on the "owner/repo" slug (GitHub logins are case-insensitive).
+// recordRepoIDs writes GitHub's repository id onto the tracked repos in
+// scoped, taking the ids from the grant listing this cycle already fetched.
+//
+// It is the poller's half of repository identity: a slug is what a repository
+// is called and the id is what it is, and rename detection can only key on the
+// half that a rename does not move. Filling ids only when a repository is
+// profiled would leave every repo undetectable for the length of the profile
+// TTL; filling them here closes that to one poll cycle at no request cost.
+//
+// Scoped to the intersection rather than the whole grant on purpose: a repo
+// nobody tracks has no row, so writing it would either no-op or (worse) invite
+// a create path in the poller.
+func (m *Manager) recordRepoIDs(ctx context.Context, orgID string, scoped []string, grant []ghclient.UserRepo) {
+	if m.repos == nil {
+		return
+	}
+	byName := make(map[string]string, len(grant))
+	for _, g := range grant {
+		if id := g.ExternalID(); id != "" {
+			byName[strings.ToLower(g.FullName)] = id
+		}
+	}
+	refs := make([]domain.RepoRef, 0, len(scoped))
+	for _, slug := range scoped {
+		id := byName[strings.ToLower(slug)]
+		if id == "" {
+			continue
+		}
+		owner, repo, ok := strings.Cut(slug, "/")
+		if !ok {
+			continue
+		}
+		refs = append(refs, domain.RepoRef{
+			Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
+		})
+	}
+	if len(refs) == 0 {
+		return
+	}
+	filled, err := m.repos.FillMissingExternalIDsSystem(ctx, orgID, refs)
+	if err != nil {
+		githubLog.WarnContext(ctx, "record repository ids failed", "org", orgID, "error", err)
+		return
+	}
+	if filled > 0 {
+		githubLog.InfoContext(ctx, "recorded repository ids", "org", orgID, "filled", filled)
+	}
+}
+
 func intersectConfigured(configured []string, grant []ghclient.UserRepo, covered map[string]bool) []string {
 	granted := make(map[string]bool, len(grant))
 	for _, g := range grant {

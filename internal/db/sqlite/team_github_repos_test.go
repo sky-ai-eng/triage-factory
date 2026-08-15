@@ -286,3 +286,46 @@ func equalSlugs(a, b []string) bool {
 	}
 	return true
 }
+
+// Tracking is what brings a repository into repo_profiles — not profiling —
+// so the row the reconcile mints has to be a complete identity row from the
+// moment it exists. The store's own get-or-create and this path share one
+// INSERT precisely so a row cannot differ by which of them created it.
+func TestTeamGitHubRepos_SQLite_TrackedRowCarriesIdentity(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}}); err != nil {
+		t.Fatalf("ReplaceForTeam: %v", err)
+	}
+
+	got, err := stores.Repos.Get(ctx, runmode.LocalDefaultOrgID, "acme/api")
+	if err != nil || got == nil {
+		t.Fatalf("Get after tracking: got=%v err=%v — tracking must create the row immediately", got, err)
+	}
+	if got.Source != domain.RepoSourceGitHub {
+		t.Errorf("source = %q, want %q", got.Source, domain.RepoSourceGitHub)
+	}
+	if got.ExternalID != "" {
+		t.Errorf("external id = %q, want empty — tracking learns no id, and none is invented", got.ExternalID)
+	}
+	if got.ProfiledAt != nil {
+		t.Error("the freshly tracked row is already profiled; it should be bare until the profiler runs")
+	}
+
+	// Get-or-create over the row tracking just made is a read: same row, no
+	// second one.
+	again, err := stores.Repos.GetOrCreateSystem(ctx, runmode.LocalDefaultOrgID,
+		domain.RepoRef{Owner: "acme", Repo: "api"})
+	if err != nil || again == nil {
+		t.Fatalf("GetOrCreateSystem: got=%v err=%v", again, err)
+	}
+	if again.ID != got.ID {
+		t.Errorf("get-or-create returned id %q, want the tracked row's %q", again.ID, got.ID)
+	}
+	if n, _ := stores.Repos.CountConfigured(ctx, runmode.LocalDefaultOrgID); n != 1 {
+		t.Errorf("repo_profiles rows = %d, want 1", n)
+	}
+}
