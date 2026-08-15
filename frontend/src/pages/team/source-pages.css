@@ -1,0 +1,464 @@
+/* An event source's own page.
+   Three of them — GitHub, Jira, Slack — sharing one header band and splitting
+   below it. GitHub and Slack put prose, figures and a fortnight's chart in a
+   narrow left column against a wide table; Jira has no chart, because its
+   status board already lands column by column and owns that space.
+
+   Measurements are the prototype's. Nothing scrolls: the view fits the height
+   it is given and the table fits its rows to what is left. */
+
+.sp {
+  /* Same gutter cancellation as the overview: the page owns 26/32 rather than
+     the 4/8 the shell body lends every page not yet rebuilt. Comes off with
+     that rule. */
+  margin: -2rem;
+  padding: 26px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  min-height: max(700px, 100%);
+  background: var(--color-ground);
+}
+
+/* ── The band ──────────────────────────────────────────────────────── */
+
+.sp-head {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: 40px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--color-line-1);
+}
+
+.sp-id {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-right: auto;
+}
+
+/* The whole title is the way back — the chevron, the mark and the word. A
+   source page hangs off the sources panel, so up is where it came from. */
+.sp-back {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sp-back-chev {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-left: 1.6px solid var(--color-warm);
+  border-bottom: 1.6px solid var(--color-warm);
+  transform: rotate(45deg);
+}
+
+/* GitHub's mark is brand black and draws in currentColor, so it needs a color
+   to take. The other two wear their own. */
+.sp-mark {
+  flex: none;
+  display: flex;
+  color: var(--color-ink-1);
+}
+
+.sp-title {
+  font-size: 24px;
+  line-height: 1.05;
+  font-weight: var(--font-weight-semi);
+  color: var(--color-ink-1);
+}
+
+.sp-sub {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--color-ink-3);
+}
+
+.sp-figs {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: 32px;
+}
+
+.sp-fig {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  align-items: flex-end;
+}
+
+.sp-fig-v {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-medium);
+  font-size: 24px;
+  line-height: 1;
+  color: var(--color-ink-1);
+}
+
+.sp-fig-v[data-tone='faint'] {
+  color: var(--color-ink-4);
+}
+
+.sp-fig-l {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.3;
+  color: var(--color-ink-3);
+}
+
+.sp-div {
+  flex: none;
+  width: 1px;
+  height: 32px;
+  background: var(--color-line-1);
+}
+
+/* ── The split ─────────────────────────────────────────────────────── */
+
+.sp-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sp-cols {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 2fr 3fr;
+  gap: 0 64px;
+}
+
+/* Jira's two halves are one argument and one list, and they weigh the same. */
+.sp-cols[data-split='even'] {
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+}
+
+.sp-left {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 20px;
+  min-width: 0;
+  /* Clears the selection bar's own lane, so a floating verb never lands over
+     the last figure. */
+  padding-bottom: 54px;
+}
+
+.sp-prose {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--color-ink-2);
+  max-width: 52ch;
+  text-wrap: pretty;
+}
+
+/* Slack's column carries one fewer instrument, so its prose runs a half-step
+   larger and sits higher against the band. */
+.sp-prose[data-source='slack'] {
+  margin-top: -38px;
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.sp-grow {
+  flex: 1;
+}
+
+/* ── The figures ───────────────────────────────────────────────────── */
+
+.sp-figrows {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.sp-figrow {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 9px 0;
+  /* The row owns the ink; the odometer inside it inherits, so one attribute
+     colors a figure and its unit together. */
+  color: var(--color-ink-1);
+}
+
+.sp-figrows[data-tight] .sp-figrow {
+  padding: 6px 0;
+}
+
+.sp-figrow + .sp-figrow {
+  border-top: 1px solid var(--color-line-1);
+}
+
+.sp-figrow[data-tone='warm'] {
+  color: var(--color-warm);
+}
+.sp-figrow[data-tone='alarm'] {
+  color: var(--color-alarm);
+}
+.sp-figrow[data-tone='faint'] {
+  color: var(--color-ink-4);
+}
+
+/* The live figure's slot. Fixed, so a count going from 9 to 10 does not move
+   the label beside it. */
+.sp-figrow-v {
+  flex: none;
+  width: 62px;
+  display: flex;
+  align-items: center;
+}
+
+.sp-figrow-l {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-ink-3);
+}
+
+/* A label arriving after the figure it belongs to. */
+.sp-fade {
+  opacity: 0;
+  animation: tf-sp-fade 0.5s linear var(--at, 0s) both;
+}
+
+@keyframes tf-sp-fade {
+  to {
+    opacity: 1;
+  }
+}
+
+/* Slack's footnote about the star. */
+.sp-note {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--color-ink-4);
+  max-width: 64ch;
+  text-wrap: pretty;
+}
+
+/* The chart is a ui component with its own stylesheet — see
+   src/ui/sourcechart/. The page owns only where it sits. */
+.sp-left > .sc {
+  margin-top: 14px;
+}
+
+/* ── The table side ────────────────────────────────────────────────── */
+
+.sp-right {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Positioned, because the selection bar pins to the TABLE's region rather than
+   the page's — so it lands under the rows instead of over the left column. */
+.sp-tablewrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sp-right > .sp-tablewrap {
+  padding-top: 26px;
+}
+
+/* ── Jira ──────────────────────────────────────────────────────────── */
+
+.sp-jira-left {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+  min-height: 0;
+  padding-right: 44px;
+}
+
+.sp-jira-left .sp-prose {
+  flex: none;
+}
+
+.sp-subhead {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sp-subhead-t {
+  font-size: 15px;
+  line-height: 1.25;
+  font-weight: var(--font-weight-semi);
+  color: var(--color-ink-1);
+}
+
+.sp-subhead-p {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--color-ink-3);
+  text-wrap: pretty;
+}
+
+.sp-board {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 54px;
+}
+
+.sp-jira-right {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  min-height: 0;
+  padding-left: 44px;
+  border-left: 1px solid var(--color-line-1);
+}
+
+.sp-jira-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* ── The filter ────────────────────────────────────────────────────── */
+
+.sp-filter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: var(--color-sunk);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-line-2) 40%, var(--color-line-1));
+  min-width: 132px;
+}
+
+.sp-filter svg {
+  flex: none;
+}
+
+.sp-filter input {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  background: none;
+  border: 0;
+  outline: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: var(--color-ink-1);
+}
+
+.sp-filter input::placeholder {
+  color: var(--color-ink-4);
+}
+
+/* ── Cells the source tables draw ──────────────────────────────────── */
+
+/* A repository's runs: a hatched track filled to the value, with the number at
+   the right, so the column reads as a ranking and as a measurement at once. */
+.sp-runs {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sp-runs-track {
+  width: 132px;
+  height: 5px;
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--color-line-2) 27%, var(--color-line-1)) 0 1px,
+    transparent 1px 4px
+  );
+}
+
+.sp-runs-track > span {
+  display: block;
+  height: 5px;
+}
+
+.sp-runs-v {
+  width: 26px;
+  text-align: right;
+  color: var(--color-ink-2);
+}
+
+.sp-runs-v[data-none] {
+  color: color-mix(in srgb, var(--color-ink-4) 29%, var(--color-line-2));
+}
+
+/* The primary mark. Its ink is the whole reading: ours, somebody else's, or
+   nobody's — and the last of those is the one worth finding. */
+.sp-star {
+  display: flex;
+}
+
+.sp-star svg {
+  fill: currentColor;
+}
+
+.sp-star[data-tone='ours'] {
+  color: var(--color-warm);
+}
+
+.sp-star[data-tone='theirs'] {
+  color: color-mix(in srgb, var(--color-ink-4) 29%, var(--color-line-2));
+}
+
+/* Hollow, and in alarm ink: a watched channel with no primary team is the one
+   state on this page that needs somebody. */
+.sp-star[data-tone='none'] {
+  color: var(--color-alarm);
+}
+
+.sp-star[data-tone='none'] svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+
+.sp-error {
+  margin: 0;
+  font-size: var(--text-secondary);
+  line-height: var(--leading-prose);
+  color: var(--color-alarm);
+}
+
+/* ── Reduced motion ────────────────────────────────────────────────────
+   The blanket in tokens/motion.css removes the animation, and a label that
+   fills `both` from opacity 0 is then never shown at all. The end state is
+   the information, so the page states it. (The odometer and the chart each
+   answer for their own build.) */
+
+.sp[data-still] .sp-fade {
+  opacity: 1;
+  animation: none;
+}

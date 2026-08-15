@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 import Table from '../../ui/table/Table'
 import type { TableCandidate, TableRow } from '../../ui/table/Table'
 import SourceCard from '../../ui/sourcecard/SourceCard'
+import GitHubSource from './GitHubSource'
+import JiraSource from './JiraSource'
+import SlackSource from './SlackSource'
+import type { SourceKind } from './SourceFrame'
 import { usePageHeader } from '../../contexts/ChromeContext'
 import { useActiveOrgId } from '../../contexts/OrgContext'
 import { useOrgHref } from '../../hooks/useOrgHref'
@@ -13,7 +17,13 @@ import type { MemberRosterAdapter, RosterMember } from '../../hooks/useMemberRos
 import { apiFetch, apiJSON } from '../../lib/apiClient'
 import './team-settings.css'
 
-// Team settings — the overview.
+// Team settings — the overview, and the three source pages behind it.
+//
+// ONE ROUTE, FOUR VIEWS. A source page is a drill-in, not a destination: the
+// rail's Team row stays lit, the crumbs grow a level, and `?source=` is what
+// makes the drill-in survive a reload and a shared link. Leaving one goes back
+// to the sources panel — up one level, which is where the cards live — rather
+// than to the roster.
 //
 // The page is a header group and one REGION. The header group is the team's
 // title block and a two-panel band; the region below it holds one of three
@@ -37,6 +47,17 @@ import './team-settings.css'
 // member count and the roster are real, and so is adding and removing people.
 
 type Region = 'roster' | 'sources' | 'models'
+
+const SOURCES_BY_KEY: Record<string, SourceKind> = {
+  github: 'github',
+  jira: 'jira',
+  slack: 'slack',
+}
+const SOURCE_NAMES: Record<SourceKind, string> = {
+  github: 'GitHub',
+  jira: 'Jira',
+  slack: 'Slack',
+}
 
 type MemberApiRow = {
   user_id: string
@@ -107,6 +128,26 @@ export default function TeamSettings() {
   const orgId = useActiveOrgId()
   const [region, setRegion] = useState<Region>('roster')
   const [filter, setFilter] = useState('')
+  const [params, setParams] = useSearchParams()
+  const source = SOURCES_BY_KEY[params.get('source') ?? ''] ?? null
+
+  const openSource = useCallback(
+    (key: SourceKind) => {
+      const next = new URLSearchParams(params)
+      next.set('source', key)
+      setParams(next)
+    },
+    [params, setParams],
+  )
+  // Back to the sources panel, not to the roster: a source page's title
+  // chevron goes up one level, and the panel's own back goes home, so two
+  // presses land where you started.
+  const closeSource = useCallback(() => {
+    const next = new URLSearchParams(params)
+    next.delete('source')
+    setRegion('sources')
+    setParams(next)
+  }, [params, setParams])
 
   const { teams, lastActingTeamId, loaded } = useTeams()
   const team = loaded ? (teams.find((t) => t.id === lastActingTeamId) ?? teams[0] ?? null) : null
@@ -203,9 +244,21 @@ export default function TeamSettings() {
     }))
   }, [orgPeople, members])
 
+  // The band states the team, and a source hangs off it: the name is the crumb
+  // you return by, so it stays visible everywhere in the team rather than only
+  // on its first screen.
   const header = useMemo(
-    () => ({ crumbs: [{ name: 'Team' }], title: team?.name ?? 'Team' }),
-    [team?.name],
+    () =>
+      source
+        ? {
+            crumbs: [
+              { name: 'Team', onClick: closeSource },
+              { name: team?.name ?? 'Team', onClick: closeSource },
+            ],
+            title: SOURCE_NAMES[source],
+          }
+        : { crumbs: [{ name: 'Team' }], title: team?.name ?? 'Team' },
+    [team?.name, source, closeSource],
   )
   usePageHeader(header)
 
@@ -228,6 +281,13 @@ export default function TeamSettings() {
 
   if (!team) {
     return <p className="ts-empty">{loaded ? 'No team resolved for this org.' : 'Loading…'}</p>
+  }
+
+  if (source) {
+    const body = { teamId, teamName: team.name, isAdmin, onBack: closeSource }
+    if (source === 'github') return <GitHubSource {...body} />
+    if (source === 'jira') return <JiraSource {...body} />
+    return <SlackSource {...body} />
   }
 
   return (
@@ -518,7 +578,7 @@ export default function TeamSettings() {
                     ['events · 7d', '—'],
                     ['became tasks', '—'],
                   ]}
-                  onClick={() => navigate(orgHref('/repos'))}
+                  onClick={() => openSource('github')}
                 />
                 <SourceCard
                   name="Jira"
@@ -529,7 +589,7 @@ export default function TeamSettings() {
                     ['events · 7d', '—'],
                     ['became tasks', '—'],
                   ]}
-                  onClick={() => navigate(orgHref('/projects'))}
+                  onClick={() => openSource('jira')}
                 />
                 <SourceCard
                   name="Slack"
@@ -537,7 +597,7 @@ export default function TeamSettings() {
                   state="configured"
                   scope="channels this team watches"
                   stats={[['mentions · 7d', '—']]}
-                  onClick={() => navigate(orgHref('/settings'))}
+                  onClick={() => openSource('slack')}
                 />
                 <SourceCard
                   name="Schedule"
