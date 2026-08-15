@@ -10,7 +10,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,8 +40,9 @@ func (f *fakeSecrets) GetSystem(_ context.Context, _ string, key string) (string
 
 type fakeApps struct {
 	db.GitHubAppsStore
-	app   *domain.OrgGitHubApp
-	insts []domain.OrgGitHubAppInstallation
+	app     *domain.OrgGitHubApp
+	insts   []domain.OrgGitHubAppInstallation
+	listErr error // when set, the installation mirror is unreadable
 }
 
 func (f *fakeApps) GetForOrgSystem(_ context.Context, _ string) (*domain.OrgGitHubApp, error) {
@@ -47,6 +50,9 @@ func (f *fakeApps) GetForOrgSystem(_ context.Context, _ string) (*domain.OrgGitH
 }
 
 func (f *fakeApps) ListInstallationsForOrgSystem(_ context.Context, _ string) ([]domain.OrgGitHubAppInstallation, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return f.insts, nil
 }
 
@@ -88,14 +94,36 @@ type ghTestServer struct {
 	installRepos []string // full names the repo-access probe treats as granted
 	repoProbes   int32    // count of GET /repos/{owner}/{repo} coverage probes
 	repoProbe5xx bool     // when true, the coverage probe returns 500 (indeterminate)
+
+	// mintedFor records the installation ids mints were requested against, in
+	// order. It grows inside the handler goroutine, so unlike the scalars above
+	// it takes a lock on both sides — an append that reallocates while a test
+	// reads the slice header is a race whatever the ordering happens to be.
+	mu        sync.Mutex
+	mintedFor []string
+}
+
+// minted returns a copy of the installation ids minted so far, so an assertion
+// never holds a slice the handler can still append to.
+func (g *ghTestServer) minted() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.mintedFor)
 }
 
 func newGHTestServer(t *testing.T) *ghTestServer {
 	t.Helper()
 	g := &ghTestServer{}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v3/app/installations/", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v3/app/installations/", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&g.mintCalls, 1)
+		// POST /app/installations/{id}/access_tokens — the id is which account
+		// the minted token will act as, so recording it lets a test assert the
+		// resolver picked the installation it meant to.
+		id, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/api/v3/app/installations/"), "/")
+		g.mu.Lock()
+		g.mintedFor = append(g.mintedFor, id)
+		g.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token":      "ghs_minted",
@@ -593,7 +621,9 @@ func TestResolver_Tier1_EmptyTargetSingleInstall(t *testing.T) {
 }
 
 // An ambiguous empty target with multiple installs can't pick an installation.
-// App XOR PAT — an active-App org errors rather than borrowing the (stale) PAT.
+// App XOR PAT — an active-App org errors rather than borrowing the (stale) PAT
+// — and the error says ambiguous rather than no-credentials, since a workspace
+// told its GitHub is disconnected re-authorizes a connection that was fine.
 func TestResolver_EmptyTargetMultiInstall_Errors(t *testing.T) {
 	gh := newGHTestServer(t)
 	r := NewResolver(
@@ -603,8 +633,12 @@ func TestResolver_EmptyTargetMultiInstall_Errors(t *testing.T) {
 		&fakeAgents{},
 		nil,
 	)
-	if _, err := r.ClientFor(context.Background(), "org-1", ""); !errors.Is(err, ErrNoGitHubCredentials) {
-		t.Fatalf("ClientFor err = %v, want ErrNoGitHubCredentials (ambiguous target, active App, no PAT fallback)", err)
+	_, err := r.ClientFor(context.Background(), "org-1", "")
+	if !errors.Is(err, ErrAmbiguousInstallation) {
+		t.Fatalf("ClientFor err = %v, want ErrAmbiguousInstallation (empty target, two installations)", err)
+	}
+	if errors.Is(err, ErrNoGitHubCredentials) {
+		t.Errorf("ClientFor err = %v; ambiguity must not read as missing credentials", err)
 	}
 	if gh.mintCalls != 0 {
 		t.Errorf("ambiguous empty target should not mint; mintCalls=%d", gh.mintCalls)

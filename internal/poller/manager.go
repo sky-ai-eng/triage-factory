@@ -719,6 +719,12 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	// there is no caller (tests), which needs no guard.
 	span := trace.SpanFromContext(ctx)
 
+	// No target account, and none to give: the credential this path resolves is
+	// the org PAT, which is account-agnostic, and the cycle it feeds polls the
+	// whole configured set across every tracked owner. Should the org's App turn
+	// active between the caller's gate and this call, resolution answers as the
+	// App does — its one installation, or an ambiguity error past that, never a
+	// guessed account.
 	client, err := m.resolver.ClientFor(ctx, orgID, "")
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
