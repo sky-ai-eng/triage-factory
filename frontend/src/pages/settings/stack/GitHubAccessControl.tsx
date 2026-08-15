@@ -38,6 +38,7 @@ import { GitHubAccountTypeStep, GitHubAppSourcePicker, GitHubAppStep } from '../
 import GitHubAppImportForm from '../GitHubAppImportForm'
 import { appImportedPatch } from '../../setup/githubAppImported'
 import { GitHubAppInstallView } from '../GitHubAppInstallView'
+import GitHubWebhookHealthNotice from '../GitHubWebhookHealthNotice'
 import { useGitHubAppInstall } from '../../../hooks/useGitHubAppInstall'
 import {
   cutoverPreflight,
@@ -528,6 +529,17 @@ export default function GitHubAccessControl({
             installation
             {installCount === 1 ? '' : 's'}.
           </p>
+          {/* Whether GitHub is actually delivering this App's webhooks here.
+              Renders nothing until the backend's probe has an answer — the
+              installation mirror is what a hookless App silently costs, and
+              this is the only place that says so. */}
+          {orgId && (
+            <GitHubWebhookHealthNotice
+              orgId={orgId}
+              health={installStatus?.webhook_health ?? null}
+              isLocal={ctx.isLocal}
+            />
+          )}
           <button
             type="button"
             onClick={() => setPhase({ kind: 'to-pat-token' })}

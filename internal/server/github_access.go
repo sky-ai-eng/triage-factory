@@ -11,7 +11,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
@@ -675,21 +674,9 @@ func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.
 // are isolated (logged + skipped) so one bad mint doesn't blank the preview; a
 // PEM/parse error that dooms every installation propagates.
 func (s *Server) appInstallationReposUnion(ctx context.Context, orgID, base string, app *domain.OrgGitHubApp, insts []domain.OrgGitHubAppInstallation) ([]ghclient.UserRepo, error) {
-	pem, err := s.secrets.GetSystem(ctx, orgID, app.PEMRef)
+	minter, err := s.appMinterAt(ctx, orgID, base, app)
 	if err != nil {
-		return nil, fmt.Errorf("read app pem: %w", err)
-	}
-	key, err := githubapp.ParsePrivateKey([]byte(pem))
-	if err != nil {
-		return nil, fmt.Errorf("parse app pem: %w", err)
-	}
-	appID, err := strconv.ParseInt(app.AppID, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("parse app id %q: %w", app.AppID, err)
-	}
-	minter, err := githubapp.NewMinter(githubapp.Config{PrivateKey: key, AppID: appID, APIBase: ghclient.APIBase(base)})
-	if err != nil {
-		return nil, fmt.Errorf("init app token minter: %w", err)
+		return nil, err
 	}
 
 	byName := make(map[string]ghclient.UserRepo)

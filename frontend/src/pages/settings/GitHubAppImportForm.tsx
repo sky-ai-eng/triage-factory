@@ -254,12 +254,21 @@ export default function GitHubAppImportForm({
         )}
       </div>
 
-      {/* Webhook secret — multi mode only (local is hookless). */}
+      {/* Webhook secret — multi mode only (local is hookless).
+
+          The copy names the CONSEQUENCE, not the field. Skipping this is
+          accepted silently and then rejects every delivery GitHub sends, which
+          leaves installation tracking to the periodic sync — the field being
+          "(optional)" is true of the form and misleading about the workspace.
+          The Settings panel's webhook-health line is where that shows up
+          afterwards; this is where it can still be avoided. */}
       {!isLocal && (
         <label className="block space-y-2">
           <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
             Webhook secret{' '}
-            <span className="font-normal normal-case text-text-tertiary">(optional)</span>
+            <span className="font-normal normal-case text-text-tertiary">
+              (needed for live installation tracking)
+            </span>
           </span>
           <input
             type="password"
@@ -270,8 +279,10 @@ export default function GitHubAppImportForm({
             className={glassInputClass}
           />
           <span className="block text-[11px] leading-relaxed text-text-tertiary">
-            Lets Triage Factory verify incoming webhook deliveries. Leave blank if the App has no
-            webhook secret.
+            Paste the secret set on the App&rsquo;s webhook so Triage Factory can verify deliveries
+            are genuine. Without it every delivery is rejected: installs, uninstalls and suspensions
+            reach this workspace only on the next periodic sync. Leave blank only if the App has no
+            webhook secret — you can add one on GitHub and import again.
           </span>
         </label>
       )}

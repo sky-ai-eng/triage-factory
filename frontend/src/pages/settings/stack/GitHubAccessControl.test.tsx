@@ -6,22 +6,36 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 
-const ghMocks = vi.hoisted(() => ({ patPreflight: vi.fn() }))
+const ghMocks = vi.hoisted(() => ({
+  patPreflight: vi.fn(),
+  replayGitHubWebhookDeliveries: vi.fn(),
+}))
 vi.mock('../../../lib/githubApp', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../lib/githubApp')>()
-  return { ...actual, patPreflight: ghMocks.patPreflight }
+  return {
+    ...actual,
+    patPreflight: ghMocks.patPreflight,
+    replayGitHubWebhookDeliveries: ghMocks.replayGitHubWebhookDeliveries,
+  }
 })
 
 const credMocks = vi.hoisted(() => ({ connectGitHubPAT: vi.fn() }))
 vi.mock('../orgCredentials', () => ({ connectGitHubPAT: credMocks.connectGitHubPAT }))
 
-// The App-status display fetch the component mounts; irrelevant to a PAT org and
-// jsdom has no server to answer it.
+// The App-status display fetch the component mounts; jsdom has no server to
+// answer it, so the status is supplied directly. null (the PAT org's view) is
+// the default; the webhook-health cases below set one.
+const installMocks = vi.hoisted(() => ({ status: null as GitHubAppStatus | null }))
 vi.mock('../../../hooks/useGitHubAppInstall', () => ({
-  useGitHubAppInstall: () => ({ status: null, setStatus: () => {}, installUrl: '' }),
+  useGitHubAppInstall: () => ({
+    status: installMocks.status,
+    setStatus: () => {},
+    installUrl: '',
+  }),
 }))
 
 import GitHubAccessControl from './GitHubAccessControl'
+import type { GitHubAppStatus, GitHubAppWebhookHealth } from '../../../lib/githubApp'
 import { initialWizardState } from '../../setup/steps'
 import type { StepContext, WizardState } from '../../setup/types'
 
@@ -50,7 +64,9 @@ function renderControl(over: Partial<WizardState> = {}) {
 
 beforeEach(() => {
   ghMocks.patPreflight.mockReset()
+  ghMocks.replayGitHubWebhookDeliveries.mockReset()
   credMocks.connectGitHubPAT.mockReset()
+  installMocks.status = null
 })
 
 describe('GitHubAccessControl · PAT rotation', () => {
@@ -154,5 +170,94 @@ describe('GitHubAccessControl · PAT rotation', () => {
     expect(await screen.findByText('GitHub: bad credentials')).toBeInTheDocument()
     expect(patch).not.toHaveBeenCalled()
     expect(reload).not.toHaveBeenCalled()
+  })
+})
+
+// The webhook-health line on a live-App org (TFAC-815). What's pinned is the
+// property the ticket exists for: a registered App that receives no deliveries
+// is no longer indistinguishable from a working one — and the states that are
+// NORMAL (a local install's unconfigured hook, an unprobed App) never render as
+// a fault.
+describe('GitHubAccessControl · App webhook health', () => {
+  const liveApp = {
+    githubAppRegistered: true,
+    githubAppStaged: false,
+    githubAppSlug: 'acme-bot',
+    hasGitHubPat: false,
+    githubPatLogin: '',
+  }
+
+  function withHealth(health: GitHubAppWebhookHealth | null) {
+    installMocks.status = {
+      app: null,
+      installations: [],
+      using_hosted_default: false,
+      connect_callback_url: '',
+      webhook_health: health,
+    } satisfies GitHubAppStatus
+  }
+
+  const rejected: GitHubAppWebhookHealth = {
+    state: 'delivering_rejected',
+    hook_host: 'https://tf.example.org',
+    secret_configured: true,
+    last_delivery_at: '2026-08-15T12:00:00Z',
+    last_delivery_status_code: 401,
+    checked_at: '2026-08-15T12:01:00Z',
+  }
+
+  it('says GitHub is delivering and TF is refusing, and offers the replay', async () => {
+    ghMocks.replayGitHubWebhookDeliveries.mockResolvedValue({
+      candidates: 3,
+      replayed: 3,
+      failed: 0,
+    })
+    withHealth(rejected)
+    renderControl(liveApp)
+
+    expect(screen.getByText(/Triage Factory is rejecting them/i)).toBeInTheDocument()
+    expect(screen.getByText(/webhook secret is missing here/i)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /Replay missed installation events/i }))
+    await waitFor(() => {
+      expect(ghMocks.replayGitHubWebhookDeliveries).toHaveBeenCalledWith('org-1')
+    })
+  })
+
+  it('names the other host when the App delivers somewhere else', () => {
+    withHealth({
+      ...rejected,
+      state: 'pointing_elsewhere',
+      hook_host: 'https://staging.example.com',
+    })
+    renderControl(liveApp)
+
+    expect(screen.getByText(/staging\.example\.com/)).toBeInTheDocument()
+    // Nothing to replay: the deliveries never came here to be refused.
+    expect(
+      screen.queryByRole('button', { name: /Replay missed installation events/i }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('reports an unconfigured hook in local mode as normal, not as a fault', () => {
+    withHealth({
+      state: 'not_configured',
+      hook_host: '',
+      secret_configured: false,
+      last_delivery_at: '',
+      last_delivery_status_code: 0,
+      checked_at: '2026-08-15T12:01:00Z',
+    })
+    renderControl(liveApp) // renderControl runs with isLocal: true
+
+    expect(screen.getByText(/Webhooks aren’t configured for this App/i)).toBeInTheDocument()
+    expect(screen.getByText(/Normal for a local install/i)).toBeInTheDocument()
+  })
+
+  it('says nothing at all before the probe has an answer', () => {
+    withHealth(null)
+    renderControl(liveApp)
+
+    expect(screen.queryByText(/Webhooks/i)).not.toBeInTheDocument()
   })
 })
