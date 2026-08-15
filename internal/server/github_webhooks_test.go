@@ -10,12 +10,14 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -136,7 +138,7 @@ func TestGitHubWebhook_InstallationDeleted_FiresHook(t *testing.T) {
 		firedOrg string
 		firedID  string
 	)
-	s.SetInstallationRemovedHook(func(orgID, installationID string) {
+	s.SetInstallationTokensInvalidHook(func(orgID, installationID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		firedOrg, firedID = orgID, installationID
@@ -201,6 +203,181 @@ func TestGitHubWebhook_NoAppRegistered_404(t *testing.T) {
 	rec := postWebhook(s, "installation", sign(body), body)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (no registered app)", rec.Code)
+	}
+}
+
+// onlyInstallation returns the org's single live installation, failing on any
+// other count.
+func onlyInstallation(t *testing.T, s *Server) domain.OrgGitHubAppInstallation {
+	t.Helper()
+	got := installations(t, s)
+	if len(got) != 1 {
+		t.Fatalf("installations = %+v, want exactly one live row", got)
+	}
+	return got[0]
+}
+
+// TestGitHubWebhook_InstallationSuspend records the suspension on the mirrored
+// row without removing it. The negative half matters as much as the positive:
+// a suspension is not an uninstall, so the row stays live and the account
+// fields are untouched — what changed is that GitHub will now refuse every
+// token minted from this installation.
+func TestGitHubWebhook_InstallationSuspend(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+	seedInstallation(t, s, 4242, "acme")
+
+	body := []byte(`{"action":"suspend","installation":{"id":4242,"account":{"login":"acme","type":"Organization"},` +
+		`"suspended_at":"2026-08-15T12:00:00Z","suspended_by":{"login":"octocat"}}}`)
+	rec := postWebhook(s, "installation", sign(body), body)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	got := onlyInstallation(t, s)
+	if !got.Suspended() {
+		t.Error("Suspended() = false after a suspend delivery; want true")
+	}
+	if want := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC); !got.SuspendedAt.Equal(want) {
+		t.Errorf("SuspendedAt = %s, want the payload's %s", got.SuspendedAt, want)
+	}
+	if got.SuspendedBy != "octocat" {
+		t.Errorf("SuspendedBy = %q, want %q", got.SuspendedBy, "octocat")
+	}
+	if got.AccountLogin != "acme" {
+		t.Errorf("AccountLogin = %q, want the untouched %q", got.AccountLogin, "acme")
+	}
+}
+
+// TestGitHubWebhook_InstallationSuspend_InvalidatesCachedToken is the invariant
+// the ticket exists for: an installation token minted before the suspension is
+// dead the moment it lands, and the cache would otherwise keep serving it for
+// up to an hour — presenting a suspension as generic 403s on a row that still
+// reads as connected. Asserted through the real wiring (New's hook over the
+// resolver's own cache), not a stand-in.
+func TestGitHubWebhook_InstallationSuspend_InvalidatesCachedToken(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+	seedInstallation(t, s, 4242, "acme")
+
+	// Prime the cache the way a resolution would: a token good for another
+	// hour, which is exactly what makes the stale-token window an hour long.
+	s.ghTokenCache.Set(runmode.LocalDefaultOrgID, "4242", githubapp.Token{
+		Value:     "ghs_minted_before_the_suspension",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if _, ok := s.ghTokenCache.Get(runmode.LocalDefaultOrgID, "4242"); !ok {
+		t.Fatal("primed token not in the cache; the test asserts nothing")
+	}
+
+	body := []byte(`{"action":"suspend","installation":{"id":4242,"account":{"login":"acme","type":"Organization"},` +
+		`"suspended_at":"2026-08-15T12:00:00Z","suspended_by":{"login":"octocat"}}}`)
+	if rec := postWebhook(s, "installation", sign(body), body); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+
+	if tok, ok := s.ghTokenCache.Get(runmode.LocalDefaultOrgID, "4242"); ok {
+		t.Errorf("cache still serves %q after a suspend; want a miss", tok.Value)
+	}
+	// Only this installation's token dies with it — another account's
+	// installation under the same App keeps minting.
+	s.ghTokenCache.Set(runmode.LocalDefaultOrgID, "9999", githubapp.Token{Value: "ghs_other", ExpiresAt: time.Now().Add(time.Hour)})
+	if rec := postWebhook(s, "installation", sign(body), body); rec.Code != http.StatusNoContent {
+		t.Fatalf("second suspend status = %d, want 204", rec.Code)
+	}
+	if _, ok := s.ghTokenCache.Get(runmode.LocalDefaultOrgID, "9999"); !ok {
+		t.Error("a suspend dropped another installation's cached token; want it untouched")
+	}
+}
+
+// TestGitHubWebhook_InstallationSuspend_NoSuspendedAt falls back to the receipt
+// time. A delivery that names no timestamp still describes an installation
+// that is suspended right now, and a zero timestamp IS "not suspended" in the
+// mirror — so recording nothing would silently drop the state.
+func TestGitHubWebhook_InstallationSuspend_NoSuspendedAt(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+	seedInstallation(t, s, 4242, "acme")
+
+	body := []byte(`{"action":"suspend","installation":{"id":4242,"account":{"login":"acme","type":"Organization"}}}`)
+	if rec := postWebhook(s, "installation", sign(body), body); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := onlyInstallation(t, s); !got.Suspended() {
+		t.Error("Suspended() = false for a suspend that named no timestamp; want true")
+	}
+}
+
+// TestGitHubWebhook_InstallationUnsuspend restores exactly the prior state:
+// both columns cleared, nothing else on the row disturbed.
+func TestGitHubWebhook_InstallationUnsuspend(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+	seedInstallation(t, s, 4242, "acme")
+
+	suspend := []byte(`{"action":"suspend","installation":{"id":4242,"account":{"login":"acme","type":"Organization"},` +
+		`"suspended_at":"2026-08-15T12:00:00Z","suspended_by":{"login":"octocat"}}}`)
+	if rec := postWebhook(s, "installation", sign(suspend), suspend); rec.Code != http.StatusNoContent {
+		t.Fatalf("suspend status = %d, want 204", rec.Code)
+	}
+
+	unsuspend := []byte(`{"action":"unsuspend","installation":{"id":4242,"account":{"login":"acme","type":"Organization"}}}`)
+	if rec := postWebhook(s, "installation", sign(unsuspend), unsuspend); rec.Code != http.StatusNoContent {
+		t.Fatalf("unsuspend status = %d, want 204", rec.Code)
+	}
+
+	got := onlyInstallation(t, s)
+	if got.Suspended() {
+		t.Errorf("Suspended() = true after an unsuspend (SuspendedAt=%s); want false", got.SuspendedAt)
+	}
+	if got.SuspendedBy != "" {
+		t.Errorf("SuspendedBy = %q after an unsuspend; want \"\" (no residue)", got.SuspendedBy)
+	}
+	if got.AccountLogin != "acme" {
+		t.Errorf("AccountLogin = %q, want the untouched %q", got.AccountLogin, "acme")
+	}
+}
+
+// TestGitHubWebhook_ReinstallAfterSuspendedDelete is the lifecycle arrow with
+// the sharp edge: an installation is suspended, then deleted, then the account
+// re-installs the App. The revived row must not inherit the suspension of the
+// installation it replaced — otherwise a user who re-installed to fix things
+// gets a workspace that reads as suspended and no gesture that clears it.
+func TestGitHubWebhook_ReinstallAfterSuspendedDelete(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+	seedInstallation(t, s, 4242, "acme")
+
+	for _, delivery := range []string{
+		`{"action":"suspend","installation":{"id":4242,"account":{"login":"acme","type":"Organization"},` +
+			`"suspended_at":"2026-08-15T12:00:00Z","suspended_by":{"login":"octocat"}}}`,
+		`{"action":"deleted","installation":{"id":4242,"account":{"login":"acme","type":"Organization"}}}`,
+	} {
+		body := []byte(delivery)
+		if rec := postWebhook(s, "installation", sign(body), body); rec.Code != http.StatusNoContent {
+			t.Fatalf("delivery %s: status = %d, want 204", delivery[:32], rec.Code)
+		}
+	}
+	if got := installations(t, s); len(got) != 0 {
+		t.Fatalf("after the delete got %d live installations, want 0", len(got))
+	}
+
+	created := []byte(`{"action":"created","installation":{"id":4242,"account":{"login":"acme","type":"Organization"},"created_at":"2026-08-16T00:00:00Z"}}`)
+	if rec := postWebhook(s, "installation", sign(created), created); rec.Code != http.StatusNoContent {
+		t.Fatalf("created status = %d, want 204", rec.Code)
+	}
+
+	got := onlyInstallation(t, s)
+	if got.Suspended() {
+		t.Errorf("the re-installed installation reads as suspended (SuspendedAt=%s); want the suspension cleared with removed_at", got.SuspendedAt)
+	}
+	if got.SuspendedBy != "" {
+		t.Errorf("SuspendedBy = %q after a re-install; want \"\"", got.SuspendedBy)
 	}
 }
 

@@ -117,6 +117,12 @@ type Server struct {
 	// repo picker's PAT fallback and GitHub-teams discovery.) Built in New from
 	// the stores, so it's never nil — handlers don't need a guard.
 	ghResolver ghclient.Resolver
+	// ghTokenCache is the per-installation App-token cache backing ghResolver.
+	// Retained on the Server (not just handed to the resolver) so the paths
+	// that learn a token has died — installation.deleted, installation.suspend,
+	// an App cutover or teardown — can Invalidate it, the same reason
+	// jiraTokenCache is held here. Built in New, never nil.
+	ghTokenCache ghclient.TokenCache
 	// jiraResolver routes Jira writes by provenance: ForSystem for
 	// the org/bot service cred, ForUser for the acting user's own stored
 	// credential. User-initiated board claim / undo / requeue resolve via
@@ -183,11 +189,15 @@ type Server struct {
 	// never through the raw bus, or events lose the durable outbox.
 	ingestor *ingest.Ingestor
 
-	// onInstallationRemoved, when set, fires on a verified
-	// installation.deleted webhook so the credential resolver's
-	// per-installation token cache can drop the now-dead entry. Nil
-	// until the resolver wires it; the receiver skips the call when nil.
-	onInstallationRemoved func(orgID, installationID string)
+	// onInstallationTokensInvalid fires when an installation's already-minted
+	// tokens stop being usable — a verified installation.deleted or
+	// installation.suspend webhook, and the App-credential change paths — so
+	// the credential resolver's per-installation token cache can drop the
+	// now-dead entry. New wires it to ghTokenCache.Invalidate, so it is set on
+	// every Server; SetInstallationTokensInvalidHook replaces it (tests observe
+	// the firings that way), and callers still nil-guard because that setter
+	// accepts a nil.
+	onInstallationTokensInvalid func(orgID, installationID string)
 
 	// deployCfg holds deployment-identity config (publicURL, HMAC key,
 	// secureCookies) populated in both local and multi mode.
@@ -556,10 +566,11 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// GitHub credential resolver + its installation-token cache, built from
 	// the same stores. Constructed here (not injected) so a Server is always
 	// usable without external wiring — tests that call New directly get a
-	// working resolver too. A verified installation.deleted webhook drops
-	// the dead token from the cache via onInstallationRemoved.
-	ghTokenCache := ghclient.NewMemoryTokenCache()
-	s.ghResolver = ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, ghTokenCache)
+	// working resolver too. A verified installation.deleted or
+	// installation.suspend webhook drops the dead token from the cache via
+	// onInstallationTokensInvalid.
+	s.ghTokenCache = ghclient.NewMemoryTokenCache()
+	s.ghResolver = ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, s.ghTokenCache)
 	// Atlassian OAuth app resolver (TFAC-337): per-org override → deployment
 	// first-party (hosted) / local-supplied (local). The first-party app is
 	// read from the deployment env, and only in hosted mode — local has no
@@ -578,8 +589,8 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// Constructed here like ghResolver so a Server is always usable without
 	// external wiring.
 	s.jiraResolver = jira.NewResolverWithOAuth(stores.Secrets, stores.Orgs, s.jiraTokenCache)
-	s.onInstallationRemoved = func(orgID, installationID string) {
-		ghTokenCache.Invalidate(orgID, installationID)
+	s.onInstallationTokensInvalid = func(orgID, installationID string) {
+		s.ghTokenCache.Invalidate(orgID, installationID)
 	}
 	s.routes()
 	return s
@@ -1602,11 +1613,15 @@ func (s *Server) SetIngestor(i *ingest.Ingestor) {
 	s.ingestor = i
 }
 
-// SetInstallationRemovedHook registers a callback fired on a verified
-// installation.deleted webhook (the resolver's token-cache invalidate).
-// Optional — left nil until the credential resolver wires it.
-func (s *Server) SetInstallationRemovedHook(fn func(orgID, installationID string)) {
-	s.onInstallationRemoved = fn
+// SetInstallationTokensInvalidHook REPLACES the callback fired when an
+// installation's minted tokens stop being usable — a verified
+// installation.deleted or installation.suspend webhook, and the App-credential
+// change paths. New already wires that callback to the resolver's own token
+// cache, so this is an override rather than the wiring: whatever it installs
+// takes over, and passing nil disables the invalidate entirely. Its caller
+// today is a test observing which installation a delivery fired for.
+func (s *Server) SetInstallationTokensInvalidHook(fn func(orgID, installationID string)) {
+	s.onInstallationTokensInvalid = fn
 }
 
 // MarkJiraRestarted records the moment orgID's Jira poller was restarted.

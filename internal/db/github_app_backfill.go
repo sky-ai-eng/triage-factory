@@ -100,6 +100,14 @@ func DiscoverAppInstallations(ctx context.Context, secrets SecretStore, orgID, a
 			AccountID:      accountID,
 			AccountLogin:   in.AccountLogin,
 			InstalledAt:    in.CreatedAt,
+			// Suspension rides in from the listing, so the reconcile converges a
+			// suspend (or unsuspend) whose webhook this deployment never saw —
+			// GitHub does not re-deliver one, and local mode has no delivery path
+			// at all. A GitHub that reports no suspension is asserting there is
+			// none, which is why the upsert writes these verbatim instead of
+			// preserving what the row already had.
+			SuspendedAt: in.SuspendedAt,
+			SuspendedBy: in.SuspendedBy,
 		})
 	}
 	return out, nil

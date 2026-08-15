@@ -102,13 +102,17 @@ type Token struct {
 // created_at (zero if GitHub omitted it). AccountID is the account's numeric
 // id — the half of the account's identity that a rename does not change, so it
 // is what the installation mirror keys credential resolution on; 0 when GitHub
-// omitted it.
+// omitted it. SuspendedAt is the installation's suspended_at (zero when the
+// account owner has not suspended it) and SuspendedBy the login that did,
+// carried so the reconcile can converge suspension that no webhook delivered.
 type Installation struct {
 	ID           int64
 	AccountID    int64
 	AccountLogin string
 	AccountType  string
 	CreatedAt    time.Time
+	SuspendedAt  time.Time
+	SuspendedBy  string
 }
 
 // Minter signs JWTs with a GitHub App's RSA private key and exchanges
@@ -420,8 +424,16 @@ func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64
 // installationListItem is the subset of an /app/installations array entry
 // we keep. GitHub returns far more (permissions, events, repository_selection);
 // installation mirroring only needs the id, the account it's installed on,
-// and when it was created. Both halves of the account's identity are kept —
-// the numeric id (stable) and the login (renameable, and what the UI renders).
+// when it was created, and whether the account owner has suspended it. Both
+// halves of the account's identity are kept — the numeric id (stable) and the
+// login (renameable, and what the UI renders).
+//
+// suspended_at / suspended_by are the reconcile's half of suspension, and the
+// reason it is not webhook-only: GitHub does not re-deliver a missed
+// installation.suspend, and local mode receives no deliveries at all. Both are
+// nullable on the wire; encoding/json leaves a null as the zero value, so an
+// unsuspended installation reads back as a zero time and an empty login
+// without any pointer indirection.
 type installationListItem struct {
 	ID      int64 `json:"id"`
 	Account struct {
@@ -429,7 +441,11 @@ type installationListItem struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	} `json:"account"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt   time.Time `json:"created_at"`
+	SuspendedAt time.Time `json:"suspended_at"`
+	SuspendedBy struct {
+		Login string `json:"login"`
+	} `json:"suspended_by"`
 }
 
 // ListInstallations enumerates every installation of the App via
@@ -475,13 +491,18 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 			return nil, fmt.Errorf("githubapp: parse installations response: %w", err)
 		}
 		for _, it := range page {
-			out = append(out, Installation{
+			inst := Installation{
 				ID:           it.ID,
 				AccountID:    it.Account.ID,
 				AccountLogin: it.Account.Login,
 				AccountType:  it.Account.Type,
 				CreatedAt:    it.CreatedAt.UTC(),
-			})
+				SuspendedBy:  it.SuspendedBy.Login,
+			}
+			if !it.SuspendedAt.IsZero() {
+				inst.SuspendedAt = it.SuspendedAt.UTC()
+			}
+			out = append(out, inst)
 		}
 		next = nextPageURL(linkHeader)
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -124,7 +125,8 @@ func (s *gitHubAppsStore) DeleteForOrg(ctx context.Context, orgID string) error 
 
 func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT installation_id, org_id, account_type, account_id, account_login, installed_at
+		SELECT installation_id, org_id, account_type, account_id, account_login,
+		       installed_at, suspended_at, suspended_by
 		  FROM org_github_app_installations
 		 WHERE org_id = ? AND removed_at IS NULL
 		 ORDER BY account_login
@@ -137,16 +139,21 @@ func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID str
 	out := make([]domain.OrgGitHubAppInstallation, 0)
 	for rows.Next() {
 		var (
-			inst      domain.OrgGitHubAppInstallation
-			accountID sql.NullString
+			inst        domain.OrgGitHubAppInstallation
+			accountID   sql.NullString
+			suspendedAt sql.NullTime
+			suspendedBy sql.NullString
 		)
 		if err := rows.Scan(
 			&inst.InstallationID, &inst.OrgID, &inst.AccountType,
 			&accountID, &inst.AccountLogin, &inst.InstalledAt,
+			&suspendedAt, &suspendedBy,
 		); err != nil {
 			return nil, fmt.Errorf("scan org_github_app_installations: %w", err)
 		}
 		inst.AccountID = accountID.String // NULL → "" (account id not yet captured)
+		inst.SuspendedAt = suspendedAt.Time
+		inst.SuspendedBy = suspendedBy.String
 		out = append(out, inst)
 	}
 	return out, rows.Err()
@@ -164,7 +171,10 @@ func (s *gitHubAppsStore) ListInstallationsForOrgSystem(ctx context.Context, org
 // zero InstalledAt) and preserved on conflict; removed_at is cleared so a
 // reinstall revives the row. account_login is overwritten (a rename must
 // reach the mirror) while account_id is only ever filled in, never blanked —
-// see the Postgres impl for why.
+// see the Postgres impl for why. The suspension columns follow the login's
+// rule, not the id's: both callers see GitHub's whole answer, so they land
+// verbatim, and a re-install clears an inherited suspension in the same
+// statement it clears removed_at.
 func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) error {
 	var installedAt sql.NullTime
 	if !inst.InstalledAt.IsZero() {
@@ -172,18 +182,51 @@ func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.Or
 	}
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO org_github_app_installations
-			(installation_id, org_id, account_type, account_id, account_login, installed_at, removed_at)
-		VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), NULL)
+			(installation_id, org_id, account_type, account_id, account_login, installed_at,
+			 removed_at, suspended_at, suspended_by)
+		VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), NULL, ?, ?)
 		ON CONFLICT(org_id, installation_id) DO UPDATE SET
 			account_type  = excluded.account_type,
 			account_login = excluded.account_login,
 			account_id    = COALESCE(excluded.account_id, org_github_app_installations.account_id),
-			removed_at    = NULL
-	`, inst.InstallationID, inst.OrgID, inst.AccountType, nullStringValue(inst.AccountID), inst.AccountLogin, installedAt)
+			removed_at    = NULL,
+			suspended_at  = excluded.suspended_at,
+			suspended_by  = excluded.suspended_by
+	`, inst.InstallationID, inst.OrgID, inst.AccountType, nullStringValue(inst.AccountID), inst.AccountLogin, installedAt,
+		nullTimeValue(inst.SuspendedAt), nullStringValue(inst.SuspendedBy))
 	if err != nil {
 		return fmt.Errorf("upsert org_github_app_installations: %w", err)
 	}
 	return nil
+}
+
+// SetInstallationSuspension stamps or clears the suspension columns. Zero
+// suspendedAt clears both (an unsuspend leaves no residue); a non-zero one
+// writes both, with an unnamed suspender landing as NULL rather than "".
+func (s *gitHubAppsStore) SetInstallationSuspension(ctx context.Context, orgID, installationID string, suspendedAt time.Time, suspendedBy string) error {
+	by := nullStringValue(suspendedBy)
+	if suspendedAt.IsZero() {
+		by = nil // no suspender to record on a cleared row
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE org_github_app_installations
+		   SET suspended_at = ?, suspended_by = ?
+		 WHERE org_id = ? AND installation_id = ?
+	`, nullTimeValue(suspendedAt), by, orgID, installationID)
+	if err != nil {
+		return fmt.Errorf("set org_github_app_installations suspension: %w", err)
+	}
+	return nil
+}
+
+// nullTimeValue maps a zero time to a SQL NULL so an absent timestamp is
+// stored as absent rather than as the zero instant, which reads back as a real
+// (and very old) time.
+func nullTimeValue(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t
 }
 
 func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, orgID, installationID string) error {

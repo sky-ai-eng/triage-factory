@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -97,6 +98,34 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 			}
 		})
 	}
+
+	// The status payload also carries each installation's suspension, so the
+	// panel can distinguish an installation whose tokens GitHub refuses from a
+	// working one. Nothing in the UI reads these yet — the surface is
+	// deliberately inert beyond the DTO — but a field the front end cannot see
+	// is a field it cannot adopt.
+	t.Run("installation suspension", func(t *testing.T) {
+		suspendedAt := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+		resp := newGitHubAppStatusResponse(nil, []domain.OrgGitHubAppInstallation{
+			{InstallationID: "456", AccountType: "Organization", AccountLogin: "acme"},
+			{InstallationID: "789", AccountType: "Organization", AccountLogin: "beta", SuspendedAt: suspendedAt, SuspendedBy: "octocat"},
+		}, "", "")
+		if len(resp.Installations) != 2 {
+			t.Fatalf("installations=%d, want 2", len(resp.Installations))
+		}
+		// A live installation reports "" rather than the zero instant
+		// formatted, which would read as suspended since year one.
+		if got := resp.Installations[0]; got.SuspendedAt != "" || got.SuspendedBy != "" {
+			t.Errorf("live installation: suspended_at=%q suspended_by=%q, want both empty", got.SuspendedAt, got.SuspendedBy)
+		}
+		got := resp.Installations[1]
+		if want := suspendedAt.Format(time.RFC3339); got.SuspendedAt != want {
+			t.Errorf("suspended_at=%q, want %q", got.SuspendedAt, want)
+		}
+		if got.SuspendedBy != "octocat" {
+			t.Errorf("suspended_by=%q, want %q", got.SuspendedBy, "octocat")
+		}
+	})
 }
 
 // TestGitHubAppStatus_BadOrgID rejects a non-UUID path segment with 404.

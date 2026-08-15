@@ -63,4 +63,20 @@ type OrgGitHubAppInstallation struct {
 	AccountID    string
 	AccountLogin string
 	InstalledAt  time.Time
+	// SuspendedAt is when the account owner suspended this installation, zero
+	// when it is not suspended. A suspension is not an uninstall: the grant
+	// survives, the row stays active (removed_at is untouched), and the
+	// installation resumes on unsuspend — but every token minted from it is
+	// refused while it lasts, so a suspended installation must be
+	// distinguishable from a working one wherever the mirror is read.
+	SuspendedAt time.Time
+	// SuspendedBy is the GitHub login that suspended the installation, from the
+	// payload's suspended_by user object. Display provenance only — nothing
+	// resolves on it — and "" when the source named no one.
+	SuspendedBy string
 }
+
+// Suspended reports whether the installation is currently suspended. The
+// timestamp is the state (there is no separate flag to fall out of step with
+// it), so every reader asks this rather than re-deriving the zero check.
+func (i OrgGitHubAppInstallation) Suspended() bool { return !i.SuspendedAt.IsZero() }
