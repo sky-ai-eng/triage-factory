@@ -134,10 +134,10 @@ export default function GitHubAppPanel({
       )}
       <p className="text-[11px] text-text-tertiary mb-4 leading-relaxed">
         A GitHub App connects Triage Factory to your organization under a bot identity of its own —
-        one that doesn&rsquo;t leave with the person who set it up — and lets GitHub itself hold
+        one that doesn't leave with the person who set it up — and lets GitHub itself hold
         each team to its own repositories: a team&rsquo;s token is issued for the repositories that
-        team tracks, and it can&rsquo;t reach past them. A Personal Access Token is the simpler
-        alternative — you don&rsquo;t need both.
+        team tracks, and it can't reach past them. A Personal Access Token is the simpler
+        alternative — you don't need both.
       </p>
 
       {ghAppState.kind === 'loading' && (
