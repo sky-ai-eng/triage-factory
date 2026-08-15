@@ -1,0 +1,192 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
+
+// The team overview's two wired verbs: the band as navigation, and the archive.
+//
+// Both are here because both were once drawn but not connected — a source row
+// that looked like a way in and was not, and an Archive button that went to
+// another page instead of archiving. What a control LOOKS like it does is not
+// checkable in a screenshot; what it calls is.
+
+const api = vi.hoisted(() => ({ apiJSON: vi.fn(), apiFetch: vi.fn() }))
+vi.mock('../../lib/apiClient', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/apiClient')>()
+  return { ...actual, apiJSON: api.apiJSON, apiFetch: api.apiFetch }
+})
+
+const life = vi.hoisted(() => ({ fetchArchivePreview: vi.fn(), archiveTeam: vi.fn() }))
+vi.mock('../../lib/teamLifecycle', () => life)
+
+const toasts = vi.hoisted(() => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() },
+}))
+vi.mock('../../components/Toast/toastStore', () => toasts)
+
+// The two roles this page splits on, mutable per test: team admin gates the
+// roster's verbs, org admin gates the archive.
+const roles = vi.hoisted(() => ({ team: 'admin', org: true }))
+vi.mock('../../hooks/useOrgRole', () => ({
+  useOrgRole: () => ({ role: roles.org ? 'admin' : 'member', isAdmin: roles.org, loading: false }),
+}))
+vi.mock('../../hooks/useTeamRole', () => ({
+  useTeamRole: () => ({ roleForTeam: () => roles.team, loading: false }),
+}))
+
+const teamsRefresh = vi.hoisted(() => vi.fn())
+vi.mock('../../hooks/useTeams', () => ({
+  useTeams: () => ({
+    teams: [{ id: 't1', name: 'platform', slug: 'platform' }],
+    lastActingTeamId: 't1',
+    multi: false,
+    loading: false,
+    loaded: true,
+    error: null,
+    refresh: teamsRefresh,
+    createTeam: vi.fn(),
+  }),
+}))
+vi.mock('../../contexts/OrgContext', () => ({ useActiveOrgId: () => 'org-1' }))
+vi.mock('../../hooks/useOrgHref', () => ({ useOrgHref: () => (p: string) => p }))
+
+import TeamSettings from './TeamSettings'
+
+const MEMBERS = {
+  members: [
+    {
+      user_id: 'u1',
+      display_name: 'robin',
+      github_username: 'robin',
+      jira_account_id: null,
+      role: 'admin',
+      is_current_user: true,
+    },
+    {
+      user_id: 'u2',
+      display_name: 'dana',
+      github_username: 'dana',
+      jira_account_id: null,
+      role: 'member',
+      is_current_user: false,
+    },
+  ],
+}
+
+beforeEach(() => {
+  roles.team = 'admin'
+  roles.org = true
+  api.apiJSON.mockImplementation((path: string) => {
+    if (path.endsWith('/members')) return Promise.resolve(MEMBERS)
+    if (path.endsWith('/repos')) return Promise.resolve({ repos: ['sky/planner', 'sky/runner'] })
+    return Promise.reject(new Error('no route: ' + path))
+  })
+  api.apiFetch.mockResolvedValue({ ok: true })
+  life.fetchArchivePreview.mockResolvedValue({
+    team_id: 't1',
+    name: 'platform',
+    archived: false,
+    active_runs: 3,
+    active_curator_sessions: 1,
+  })
+  life.archiveTeam.mockResolvedValue({ cancelled_runs: 3, cancelled_curator_sessions: 1 })
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })),
+  )
+})
+
+afterEach(() => {
+  vi.clearAllMocks()
+  vi.unstubAllGlobals()
+})
+
+function renderPage() {
+  return render(
+    <MemoryRouter>
+      <TeamSettings />
+    </MemoryRouter>,
+  )
+}
+
+/** The band's own EVENT SOURCES head — the opened panel names itself the same. */
+const bandHead = () => document.querySelector<HTMLElement>('.ts-panel-right .ts-panel-t')
+
+describe('the band', () => {
+  it('takes a named source to its own page', async () => {
+    renderPage()
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+
+    fireEvent.click(screen.getByText('GitHub'))
+
+    // Not the panel that lists the sources — the source itself.
+    await waitFor(() => expect(document.querySelector('.sp[data-source="github"]')).not.toBeNull())
+    expect(screen.getByText('event source · platform')).toBeInTheDocument()
+  })
+
+  it('opens the panel from the cell around the rows, not only from its head', async () => {
+    renderPage()
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+
+    fireEvent.click(screen.getByText('last 7 days · repositories, projects, channels'))
+    expect(screen.getByText('Pick a source to configure')).toBeInTheDocument()
+
+    // And the head hands it back, rather than toggling twice through the cell
+    // behind it and landing where it started.
+    fireEvent.click(bandHead()!)
+    expect(screen.queryByText('Pick a source to configure')).not.toBeInTheDocument()
+  })
+})
+
+describe('archiving the team', () => {
+  it('states what it will stop, then stops it', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByText('Archive this team')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Archive' }))
+
+    // Every consequence is read, not assumed: the repositories from the team's
+    // tracked set, the members from the roster, the live work from the preview.
+    await waitFor(() => expect(screen.getByText('Archive platform?')).toBeInTheDocument())
+    expect(screen.getByText('2 repositories stop being watched')).toBeInTheDocument()
+    expect(screen.getByText('2 members lose access')).toBeInTheDocument()
+    expect(screen.getByText('3 delegations and 1 curator session stop now')).toBeInTheDocument()
+    expect(screen.getByText('Run history and cost records are kept')).toBeInTheDocument()
+
+    const confirm = screen.getAllByRole('button', { name: 'Archive' })
+    fireEvent.click(confirm[confirm.length - 1])
+
+    await waitFor(() => expect(life.archiveTeam).toHaveBeenCalledWith('t1'))
+    // The team is gone from /api/teams, so the page has to be told to look again.
+    await waitFor(() => expect(teamsRefresh).toHaveBeenCalled())
+    expect(toasts.toast.success).toHaveBeenCalled()
+  })
+
+  it('withdraws the question when it cannot say what would be lost', async () => {
+    life.fetchArchivePreview.mockRejectedValue(new Error('nope'))
+    renderPage()
+    await waitFor(() => expect(screen.getByText('Archive this team')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Archive' }))
+
+    // A destructive confirm that cannot state its consequences is not one.
+    await waitFor(() => expect(toasts.toast.error).toHaveBeenCalled())
+    expect(screen.queryByText('Archive platform?')).not.toBeInTheDocument()
+    expect(life.archiveTeam).not.toHaveBeenCalled()
+  })
+
+  it('is absent for a team admin who is not an org admin', async () => {
+    roles.org = false
+    renderPage()
+    // Named twice on the row — once as the person, once as the account.
+    await waitFor(() => expect(screen.getAllByText('robin').length).toBeGreaterThan(0))
+
+    // Absent, not disabled: the endpoint is the org's, and 404s for them.
+    expect(screen.queryByText('Archive this team')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Archive' })).not.toBeInTheDocument()
+  })
+})

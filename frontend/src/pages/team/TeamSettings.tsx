@@ -3,6 +3,8 @@ import { useNavigate, useSearchParams } from 'react-router'
 import Table from '../../ui/table/Table'
 import type { TableCandidate, TableRow } from '../../ui/table/Table'
 import SourceCard from '../../ui/sourcecard/SourceCard'
+import Dialog from '../../ui/dialog/Dialog'
+import type { DialogConsequence } from '../../ui/dialog/Dialog'
 import GitHubSource from './GitHubSource'
 import JiraSource from './JiraSource'
 import SlackSource from './SlackSource'
@@ -10,10 +12,14 @@ import type { SourceKind } from './SourceFrame'
 import { usePageHeader } from '../../contexts/ChromeContext'
 import { useActiveOrgId } from '../../contexts/OrgContext'
 import { useOrgHref } from '../../hooks/useOrgHref'
+import { useOrgRole } from '../../hooks/useOrgRole'
 import { useTeams } from '../../hooks/useTeams'
 import { useTeamRole } from '../../hooks/useTeamRole'
 import { useMemberRoster, displayNameFor } from '../../hooks/useMemberRoster'
 import type { MemberRosterAdapter, RosterMember } from '../../hooks/useMemberRoster'
+import { archiveTeam, fetchArchivePreview } from '../../lib/teamLifecycle'
+import type { ArchivePreview } from '../../lib/teamLifecycle'
+import { toast } from '../../components/Toast/toastStore'
 import { apiFetch, apiJSON } from '../../lib/apiClient'
 import './team-settings.css'
 
@@ -82,7 +88,8 @@ const MODELS = [
   { name: 'Claude Haiku 4.5', tag: '', price: '$4 / M' },
 ]
 
-const SOURCES = ['GitHub', 'Jira', 'Slack']
+/** The three live sources, in the order the band and the card grid list them. */
+const SOURCES: SourceKind[] = ['github', 'jira', 'slack']
 
 /** A headline figure. `null` reads as a dash — the question has not been answered. */
 function Figure({
@@ -114,9 +121,9 @@ function Figure({
 }
 
 /** A hatched track with a fill. No data means no fill — the track keeps the row's height. */
-function Meter({ frac }: { frac: number | null }) {
+function Meter({ frac, thin }: { frac: number | null; thin?: boolean }) {
   return (
-    <span className="ts-meter">
+    <span className="ts-meter" data-thin={thin ? '' : undefined}>
       {frac == null ? null : <span className="ts-meter-fill" style={{ width: frac * 100 + '%' }} />}
     </span>
   )
@@ -149,11 +156,15 @@ export default function TeamSettings() {
     setParams(next)
   }, [params, setParams])
 
-  const { teams, lastActingTeamId, loaded } = useTeams()
+  const { teams, lastActingTeamId, loaded, refresh: refreshTeams } = useTeams()
   const team = loaded ? (teams.find((t) => t.id === lastActingTeamId) ?? teams[0] ?? null) : null
   const teamId = team?.id ?? ''
   const { roleForTeam } = useTeamRole()
   const isAdmin = roleForTeam(teamId) === 'admin'
+  // Archiving is the org's verb, not the team's: the endpoint is org-admin only
+  // and 404s for everyone else, so a team admin is shown no card rather than a
+  // card whose one button cannot work.
+  const { isAdmin: isOrgAdmin } = useOrgRole()
 
   // The three writes this page makes, defined once. `keepalive` keeps the
   // request alive past the document on the unload path; sendBeacon is not an
@@ -213,6 +224,85 @@ export default function TeamSettings() {
   )
 
   const { members, loading, error } = useMemberRoster(adapter)
+
+  // ── Archive ────────────────────────────────────────────────────────────
+  // Three states rather than a boolean, because the confirm cannot be offered
+  // until the page knows what pressing it would stop, and must not be offered
+  // twice while that is being done.
+  const [archive, setArchive] = useState<'closed' | 'asking' | 'sending'>('closed')
+  const [preview, setPreview] = useState<ArchivePreview | null>(null)
+  const [watched, setWatched] = useState<number | null>(null)
+
+  const openArchive = useCallback(() => {
+    setPreview(null)
+    setWatched(null)
+    setArchive('asking')
+    void fetchArchivePreview(teamId)
+      .then(setPreview)
+      .catch((e) => {
+        // A confirm that cannot state its consequences is not a confirm. If the
+        // count could not be read the question is withdrawn rather than asked
+        // with the answer left blank.
+        setArchive('closed')
+        toast.error(e instanceof Error ? e.message : 'Could not check this team for live work.')
+      })
+    // The first consequence the design states, and the one number this page
+    // does not already hold. Best-effort: an unread count is a line the dialog
+    // leaves out, never a zero.
+    void apiJSON<{ repos: string[] }>(`/api/settings/team/${encodeURIComponent(teamId)}/repos`)
+      .then((d) => setWatched((d.repos ?? []).length))
+      .catch(() => setWatched(null))
+  }, [teamId])
+
+  const confirmArchive = useCallback(() => {
+    // The button says "Checking…" until the preview lands; pressing it then is
+    // pressing a label, not a verb.
+    if (!preview || archive === 'sending') return
+    setArchive('sending')
+    void archiveTeam(teamId)
+      .then((res) => {
+        setArchive('closed')
+        const runs = res.cancelled_runs
+        const sessions = res.cancelled_curator_sessions
+        toast.success(
+          `Team archived — stopped ${runs} ${runs === 1 ? 'delegation' : 'delegations'} and ` +
+            `${sessions} curator ${sessions === 1 ? 'session' : 'sessions'}.`,
+        )
+        // The team is gone from /api/teams, which drives this page to whichever
+        // team is left — or to its own empty state.
+        void refreshTeams()
+      })
+      .catch((e) => {
+        setArchive('closed')
+        toast.error(e instanceof Error ? e.message : 'Could not archive the team.')
+      })
+  }, [teamId, preview, archive, refreshTeams])
+
+  // What will actually happen, one line each, and what stays alongside what
+  // goes. Every number is read rather than assumed; a line nothing answered is
+  // absent instead of guessed.
+  const consequences = useMemo<DialogConsequence[]>(() => {
+    const out: DialogConsequence[] = []
+    if (watched !== null)
+      out.push({
+        text: `${watched} ${watched === 1 ? 'repository stops' : 'repositories stop'} being watched`,
+        tone: 'loss',
+      })
+    out.push({
+      text: `${members.length} ${members.length === 1 ? 'member loses' : 'members lose'} access`,
+      tone: 'loss',
+    })
+    if (preview)
+      out.push({
+        text:
+          `${preview.active_runs} ${preview.active_runs === 1 ? 'delegation' : 'delegations'} and ` +
+          `${preview.active_curator_sessions} curator ` +
+          `${preview.active_curator_sessions === 1 ? 'session' : 'sessions'} stop now`,
+        tone: 'loss',
+      })
+    out.push({ text: 'Run history and cost records are kept', tone: 'keep' })
+    return out
+  }, [watched, members.length, preview])
 
   // The org's people, so `+ add teammate` has candidates. Anyone already on the
   // team is listed and disabled rather than hidden — a name missing from a
@@ -317,63 +407,90 @@ export default function TeamSettings() {
           </div>
         </div>
 
-        {/* The band. Two controls, not two headings: each opens its own panel
-            in the region below rather than adding a section to the page. */}
+        {/* The band. Two cells, not two headings: each opens its own panel in
+            the region below rather than adding a section to the page. The cell
+            is the mouse's target and its head is the control — the cell cannot
+            be a button itself, because the sources inside it are, and a control
+            inside a control is neither. */}
         <div className="ts-band">
-          <button
-            type="button"
+          <div
             className="ts-panel"
-            aria-expanded={region === 'models'}
             onClick={() => setRegion((r) => (r === 'models' ? 'roster' : 'models'))}
           >
-            <span className="ts-panel-head">
+            <button
+              type="button"
+              className="ts-panel-head"
+              aria-expanded={region === 'models'}
+              onClick={(e) => {
+                // The cell behind it toggles too, and two toggles are none.
+                e.stopPropagation()
+                setRegion((r) => (r === 'models' ? 'roster' : 'models'))
+              }}
+            >
               <span className="ts-panel-t">CONFIGURED MODELS</span>
               <span className="ts-lead" />
               <span className="ts-panel-n">{MODELS.length} models</span>
               <i className="ts-chev" aria-hidden="true" />
-            </span>
-            <span className="ts-rows">
+            </button>
+            <div className="ts-rows">
               {MODELS.map((m) => (
-                <span className="ts-row" key={m.name}>
-                  <span className="ts-row-line">
+                <div className="ts-row" key={m.name}>
+                  <div className="ts-row-line">
                     <span className="ts-row-n">{m.name}</span>
                     {m.tag ? <span className="ts-row-tag">{m.tag}</span> : null}
                     <span className="ts-lead-flex" />
                     <span className="ts-row-v">{m.price}</span>
-                  </span>
+                  </div>
                   {/* No share-of-runs aggregation, so the track holds its
                       height and draws no fill rather than inventing one. */}
                   <Meter frac={null} />
-                </span>
+                </div>
               ))}
-            </span>
-          </button>
+            </div>
+          </div>
 
-          <button
-            type="button"
+          <div
             className="ts-panel ts-panel-right"
-            aria-expanded={region === 'sources'}
             onClick={() => setRegion((r) => (r === 'sources' ? 'roster' : 'sources'))}
           >
-            <span className="ts-panel-head">
+            <button
+              type="button"
+              className="ts-panel-head"
+              aria-expanded={region === 'sources'}
+              onClick={(e) => {
+                e.stopPropagation()
+                setRegion((r) => (r === 'sources' ? 'roster' : 'sources'))
+              }}
+            >
               <span className="ts-panel-t">EVENT SOURCES</span>
               <span className="ts-lead" />
               <span className="ts-panel-n">— events</span>
               <i className="ts-chev" aria-hidden="true" />
-            </span>
-            <span className="ts-flow">
-              <span className="ts-flow-list">
+            </button>
+            <div className="ts-flow">
+              <div className="ts-flow-list">
+                {/* Naming a source is how you get to it: the band works as
+                    navigation between the three, not only as a way into the
+                    panel that lists them. */}
                 {SOURCES.map((s) => (
-                  <span className="ts-row" key={s}>
-                    <span className="ts-row-line">
-                      <span className="ts-row-n">{s}</span>
+                  <button
+                    type="button"
+                    className="ts-flow-row"
+                    key={s}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      openSource(s)
+                    }}
+                  >
+                    <span className="ts-flow-row-line">
+                      <span className="ts-flow-row-n">{SOURCE_NAMES[s]}</span>
                       <span className="ts-lead-flex" />
-                      <span className="ts-row-v">—</span>
+                      <span className="ts-flow-row-v">—</span>
                     </span>
-                    <Meter frac={null} />
-                  </span>
+                    <Meter frac={null} thin />
+                  </button>
                 ))}
-              </span>
+              </div>
               {/* Three sources converging on one stream. Structural rather than
                   plotted — there is no series behind it yet. */}
               <svg
@@ -386,21 +503,21 @@ export default function TeamSettings() {
                 <path d="M8,59 L136,59" opacity="0.6" />
                 <path d="M8,104 C68,104 78,59 136,59" opacity="0.42" />
               </svg>
-              <span className="ts-flow-stats">
-                <span className="ts-stat">
+              <div className="ts-flow-stats">
+                <div className="ts-stat">
                   <span className="ts-stat-v">—</span>
                   <span className="ts-stat-l">events</span>
-                </span>
-                <span className="ts-stat">
+                </div>
+                <div className="ts-stat">
                   <span className="ts-stat-v" data-tone="warm">
                     —
                   </span>
                   <span className="ts-stat-l">became tasks</span>
-                </span>
-              </span>
-            </span>
+                </div>
+              </div>
+            </div>
             <span className="ts-panel-foot">last 7 days · repositories, projects, channels</span>
-          </button>
+          </div>
         </div>
       </div>
 
@@ -503,12 +620,11 @@ export default function TeamSettings() {
               )}
             </div>
 
-            {/* Team admins only. A member's page ends at the pager — the card
-                is not rendered rather than rendered disabled, since a verb you
-                may never use is not information. Archiving is also an org
-                admin's to do from Organization, which is where a member is
-                pointed if they ask. */}
-            {isAdmin ? (
+            {/* Org admins only. Everyone else's page ends at the pager — the
+                card is not rendered rather than rendered disabled, since a verb
+                you may never use is not information, and this one is the org's
+                rather than the team's. */}
+            {isOrgAdmin ? (
               <div className="ts-danger">
                 <div className="ts-danger-h">DANGER</div>
                 <div className="ts-danger-b">
@@ -520,11 +636,7 @@ export default function TeamSettings() {
                       is kept; an org admin can restore it.
                     </span>
                   </div>
-                  <button
-                    type="button"
-                    className="ts-danger-btn"
-                    onClick={() => navigate(orgHref('/settings'))}
-                  >
+                  <button type="button" className="ts-danger-btn" onClick={openArchive}>
                     Archive
                   </button>
                 </div>
@@ -639,6 +751,23 @@ export default function TeamSettings() {
           </div>
         ) : null}
       </div>
+
+      {/* The one question this page cannot answer for you. It states what will
+          happen rather than asking whether you are sure, and the counts in it
+          are read from the server the moment it opens — an archive stops live
+          work, and how much is the whole reason to interrupt someone. */}
+      <Dialog
+        open={archive !== 'closed'}
+        kind="destructive"
+        build="flash"
+        title={`Archive ${team.name}?`}
+        body="The team stops working. Nothing it produced is deleted."
+        consequences={consequences}
+        note="An org admin can restore an archived team."
+        confirmLabel={archive === 'sending' ? 'Archiving…' : preview ? 'Archive' : 'Checking…'}
+        onConfirm={confirmArchive}
+        onCancel={() => setArchive('closed')}
+      />
     </div>
   )
 }

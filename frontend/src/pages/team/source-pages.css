@@ -284,6 +284,31 @@
   padding-top: 26px;
 }
 
+/* The table fills the column it was given, and its block sits in the middle of
+   what it does not use. The prototype's tables are long enough to reach the
+   bottom, so this only shows with a short set — and a team watching three
+   repositories should read as a table sitting in its column rather than one
+   hanging off the top of it.
+
+   `.tb` itself still STRETCHES. The auto page size measures down from the
+   table's own top edge, so a box that moved as the table shrank would feed its
+   own measurement; centring the content inside a full-height box leaves that
+   reading exactly where it was. `safe` so a table that overruns by a row's
+   remainder clips at the bottom rather than losing its header off the top. */
+.sp-tablewrap > .tb {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: safe center;
+}
+
+/* Nothing in the stack gives up height to the centring — a flex column would
+   otherwise shrink the rows to fit rather than page them. */
+.sp-tablewrap > .tb > * {
+  flex: none;
+}
+
 /* ── Jira ──────────────────────────────────────────────────────────── */
 
 .sp-jira-left {
