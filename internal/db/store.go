@@ -250,6 +250,14 @@ type Stores struct {
 	// org_github_apps for the same manifest-flow path.
 	GitHubApps GitHubAppsStore
 
+	// GitHubDeliveries owns github_webhook_deliveries — the dedup record of
+	// GitHub App webhook deliveries the receiver has already applied, so an
+	// operator-triggered redelivery doesn't re-run the installation upsert or
+	// re-publish to the bus. Admin-pool-only in Postgres: the receiver is
+	// pre-auth and has no claims for a policy to gate on. Not in TxStores —
+	// the gate runs before any of the work a delivery does, never inside it.
+	GitHubDeliveries GitHubDeliveryStore
+
 	// JiraApps owns the org_jira_apps table — per-org Atlassian OAuth (3LO)
 	// app registrations (the BYO-app override / local-supplied app). App pool
 	// in Postgres (RLS gates reads by org membership, writes by org admin);

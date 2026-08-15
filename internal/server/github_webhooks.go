@@ -38,6 +38,9 @@ const maxWebhookBody = 25 << 20
 // the bus for downstream content processing and acked with 204. Validation
 // failures return 4xx so GitHub doesn't retry a structurally-bad delivery
 // indefinitely.
+//
+// A verified delivery is deduped on its X-GitHub-Delivery GUID before any of
+// that runs — see the gate below.
 func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	orgID := r.PathValue("org_id")
 	if _, err := uuid.Parse(orgID); err != nil {
@@ -120,13 +123,68 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Signature verified past this point.
-	if eventName == "installation" {
-		s.handleInstallationEvent(w, r, orgID, body)
+
+	// Dedup gates ahead of every side effect — the mirror write and the bus
+	// publish alike. GitHub never auto-retries a failed delivery, but it
+	// redelivers on demand (the Redeliver button; POST
+	// /app/hook/deliveries/{delivery_id}/attempts), which is the recovery an
+	// operator reaches for after an outage — so a second copy of a delivery is
+	// ordinary traffic, and without this it re-runs the upsert and re-publishes.
+	deliveryID := r.Header.Get("X-GitHub-Delivery")
+	if deliveryID == "" {
+		// Every genuine delivery carries a GUID. Without one there is nothing
+		// to dedup on, so applying it would quietly void the exactly-once
+		// promise for that delivery — refused as structurally bad, like a
+		// delivery naming no event.
+		badRequest(w, "missing X-GitHub-Delivery header")
+		return
+	}
+	fresh, err := s.githubDeliveries.MarkDeliveredSystem(r.Context(), deliveryInstallationID(body), deliveryID)
+	if err != nil {
+		internalError(w, "github-webhook", err)
+		return
+	}
+	if !fresh {
+		// Losing is terminal for this request and carries no retry: GitHub was
+		// already told the first copy succeeded, and reporting failure on the
+		// duplicate would provoke exactly the redelivery this dedup exists to
+		// absorb. Debug, not warn — an operator replaying a delivery is
+		// ordinary, not a fault.
+		githubAppLog.Debug("dropping duplicate github webhook delivery",
+			"org", orgID, "event", eventName, "delivery", deliveryID)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
-	s.publishWebhookEvent(orgID, eventName, r.Header.Get("X-GitHub-Delivery"))
+	if eventName == "installation" {
+		s.handleInstallationEvent(w, r, orgID, deliveryID, body)
+		return
+	}
+
+	s.publishWebhookEvent(orgID, eventName, deliveryID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// deliveryInstallationID reads the installation id out of a delivery body for
+// the dedup key. Every App-scoped event carries the installation object
+// whatever its event name, so this one parse serves the lifecycle events and
+// the content events alike.
+//
+// Returns "" — keying the delivery on its GUID alone — for a delivery that
+// names no installation (github_app_authorization, for one) and for a body
+// this can't parse. A malformed body is not this function's to report: the
+// installation handler already refuses one with a 400, and it is the only
+// caller that needs the payload to be well-formed.
+func deliveryInstallationID(body []byte) string {
+	var envelope struct {
+		Installation struct {
+			ID int64 `json:"id"`
+		} `json:"installation"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Installation.ID == 0 {
+		return ""
+	}
+	return strconv.FormatInt(envelope.Installation.ID, 10)
 }
 
 // installationWebhook is the subset of the installation event payload the
@@ -161,7 +219,7 @@ type installationWebhook struct {
 // from the installation dead while the cache would keep serving one until its
 // natural expiry. Any other action (new_permissions_accepted, …) is published
 // to the bus and acked — the mirror doesn't track those states.
-func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request, orgID string, body []byte) {
+func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request, orgID, deliveryID string, body []byte) {
 	var p installationWebhook
 	if err := json.Unmarshal(body, &p); err != nil {
 		badRequest(w, "malformed installation payload")
@@ -232,7 +290,7 @@ func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	default:
-		s.publishWebhookEvent(orgID, "installation", r.Header.Get("X-GitHub-Delivery"))
+		s.publishWebhookEvent(orgID, "installation", deliveryID)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

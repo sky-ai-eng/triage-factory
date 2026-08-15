@@ -6033,6 +6033,60 @@ GRANT ALL ON TABLE public.org_github_app_installations TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_github_app_installations TO tf_app;
 
 
+-- GitHub webhook delivery dedup: github_webhook_deliveries. The receiver read
+-- X-GitHub-Delivery only to decorate the published event's metadata — never
+-- persisted, never checked — so a redelivered copy re-ran the installation
+-- upsert and re-published to the bus. GitHub does not auto-retry a failed
+-- delivery, but it does redeliver on demand (the Redeliver button; POST
+-- /app/hook/deliveries/{delivery_id}/attempts, 30-day window), which is exactly
+-- the recovery path an operator reaches for after an outage. A redelivery is
+-- ordinary traffic, not an anomaly.
+--
+-- Keyed (installation_id, delivery_id), NOT (org_id, delivery_id). The
+-- org-keyed form cannot be written before the tenant is known, and "before the
+-- tenant is known" is precisely the shape a shared-App receiver has — one
+-- static URL, one deployment secret, routing installation.id -> org_id and
+-- dropping an unmapped delivery before any side effect. The installation-keyed
+-- form costs nothing today and does not have to be re-keyed later. A delivery
+-- carrying no installation object (github_app_authorization, for one) keys on
+-- the delivery id alone and stores '' in this column: the empty string rather
+-- than NULL, because a NULL in a primary key defeats the uniqueness the table
+-- exists for.
+--
+-- Retention is 72h, pruned opportunistically on every insert — long past the
+-- burst of redeliveries that follows an outage, and deliberately short of
+-- GitHub's 30-day redelivery window. A copy redelivered a week later re-applies;
+-- that is an operator deliberately replaying one delivery, not the automatic
+-- retry this table absorbs.
+--
+-- Admin-pool-only / system table, same posture as slack_event_deliveries /
+-- poll_readiness: RLS enabled with NO policy (deny-by-default to non-BYPASSRLS
+-- roles) + REVOKE ALL from PUBLIC and the app roles. The receiver is pre-auth —
+-- it holds a trusted org_id from the URL path and no request claims for a
+-- policy to gate on — and there is no app-pool caller.
+CREATE TABLE public.github_webhook_deliveries (
+    installation_id text NOT NULL,
+    delivery_id     text NOT NULL,
+    received_at     timestamp with time zone NOT NULL DEFAULT now()
+);
+
+ALTER TABLE ONLY public.github_webhook_deliveries
+    ADD CONSTRAINT github_webhook_deliveries_pkey PRIMARY KEY (installation_id, delivery_id);
+
+-- The prune is the only query that doesn't go through the primary key. Unlike
+-- the Slack dedup table, this one sees every push / check_run / comment across
+-- every tracked repo, so a sequential scan per delivery is not a safe assumption
+-- to ship; with this index the usual "nothing to prune" case is a range probe
+-- that matches nothing.
+CREATE INDEX github_webhook_deliveries_received_at_idx
+    ON public.github_webhook_deliveries (received_at);
+
+ALTER TABLE public.github_webhook_deliveries ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.github_webhook_deliveries FROM PUBLIC;
+REVOKE ALL ON public.github_webhook_deliveries FROM anon, authenticated, service_role;
+
+
 --
 -- Durable router event queue. The in-memory bus drops events
 -- for slow subscribers under burst; the router — which persists event

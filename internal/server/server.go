@@ -33,26 +33,27 @@ import (
 
 // Server is the main HTTP server for Triage Factory.
 type Server struct {
-	db           *sql.DB
-	prompts      db.PromptStore
-	swipes       db.SwipeStore
-	agents       db.AgentStore           // resolves the org's agent for claim stamps
-	teamAgents   db.TeamAgentStore       // re-checks team_agents.enabled on swipe-delegate / factory-delegate
-	users        db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities
-	blueprints   db.BlueprintStore       // used by event-handler + project test fixtures
-	tasks        db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
-	agentRuns    db.ConversationStore    // agent run lifecycle + transcript
-	repos        db.RepoStore            // repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
-	projects     db.ProjectStore         // projects CRUD for projects/curator/backfill/project_entities handlers
-	curatorStore db.CuratorStore         // curator view of conversations/messages/claims — handler-side System writes (cancel release, pending-context producer) go through here; claims-bound reads ride tx.Curator
-	events       db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
-	taskMemory   db.TaskMemoryStore      // conversation_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
-	secrets      db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
-	teams        db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, projects, prompts)
-	orgs         db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
-	jiraRules    db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
-	githubApps   db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
-	authEvents   db.AuthEventStore       // TFAC-76: SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
+	db               *sql.DB
+	prompts          db.PromptStore
+	swipes           db.SwipeStore
+	agents           db.AgentStore           // resolves the org's agent for claim stamps
+	teamAgents       db.TeamAgentStore       // re-checks team_agents.enabled on swipe-delegate / factory-delegate
+	users            db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities
+	blueprints       db.BlueprintStore       // used by event-handler + project test fixtures
+	tasks            db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
+	agentRuns        db.ConversationStore    // agent run lifecycle + transcript
+	repos            db.RepoStore            // repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
+	projects         db.ProjectStore         // projects CRUD for projects/curator/backfill/project_entities handlers
+	curatorStore     db.CuratorStore         // curator view of conversations/messages/claims — handler-side System writes (cancel release, pending-context producer) go through here; claims-bound reads ride tx.Curator
+	events           db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
+	taskMemory       db.TaskMemoryStore      // conversation_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
+	secrets          db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
+	teams            db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, projects, prompts)
+	orgs             db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
+	jiraRules        db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
+	githubApps       db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
+	githubDeliveries db.GitHubDeliveryStore  // applied webhook deliveries, so a redelivery is dropped before the mirror write and the bus publish
+	authEvents       db.AuthEventStore       // TFAC-76: SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
 	// tx runs handler-cleanup write batches under the request user's
 	// claims even when the cleanup needs to outlive the request
 	// context. Each cleanup wraps in `s.tx.WithTx(cleanupCtx, orgID,
@@ -530,33 +531,34 @@ func (s *Server) agentEnabledForTeam(ctx context.Context, orgID, userID, teamID 
 // ported to a store yet.
 func New(database *sql.DB, stores db.Stores) *Server {
 	s := &Server{
-		db:           database,
-		prompts:      stores.Prompts,
-		swipes:       stores.Swipes,
-		agents:       stores.Agents,
-		teamAgents:   stores.TeamAgents,
-		users:        stores.Users,
-		blueprints:   stores.Blueprints,
-		tasks:        stores.Tasks,
-		agentRuns:    stores.Conversations,
-		repos:        stores.Repos,
-		projects:     stores.Projects,
-		events:       stores.Events,
-		taskMemory:   stores.TaskMemory,
-		secrets:      stores.Secrets,
-		curatorStore: stores.Curator,
-		teams:        stores.Teams,
-		orgs:         stores.Orgs,
-		jiraRules:    stores.JiraStatusRules,
-		githubApps:   stores.GitHubApps,
-		jiraApps:     stores.JiraApps,
-		authEvents:   stores.AuthEvents,
-		tx:           stores.Tx,
-		az:           authz.New(database, stores.Tx),
-		fleetQueue:   stores.RunQueue,
-		allStores:    stores,
-		mux:          http.NewServeMux(),
-		ws:           websocket.NewHub(),
+		db:               database,
+		prompts:          stores.Prompts,
+		swipes:           stores.Swipes,
+		agents:           stores.Agents,
+		teamAgents:       stores.TeamAgents,
+		users:            stores.Users,
+		blueprints:       stores.Blueprints,
+		tasks:            stores.Tasks,
+		agentRuns:        stores.Conversations,
+		repos:            stores.Repos,
+		projects:         stores.Projects,
+		events:           stores.Events,
+		taskMemory:       stores.TaskMemory,
+		secrets:          stores.Secrets,
+		curatorStore:     stores.Curator,
+		teams:            stores.Teams,
+		orgs:             stores.Orgs,
+		jiraRules:        stores.JiraStatusRules,
+		githubApps:       stores.GitHubApps,
+		githubDeliveries: stores.GitHubDeliveries,
+		jiraApps:         stores.JiraApps,
+		authEvents:       stores.AuthEvents,
+		tx:               stores.Tx,
+		az:               authz.New(database, stores.Tx),
+		fleetQueue:       stores.RunQueue,
+		allStores:        stores,
+		mux:              http.NewServeMux(),
+		ws:               websocket.NewHub(),
 	}
 	// Per-IP rate limiters for the pre-auth allowlist and the signed-webhook
 	// tier. Built here (not injected) so a Server is always usable without
