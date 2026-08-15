@@ -1,19 +1,16 @@
 // Package reporename applies repository renames TF has observed.
 //
-// A rename is only detectable because a repository has two halves of identity:
+// A rename is detectable only because a repository has two halves of identity:
 // the slug it is called by, which moves, and the id its provider issued, which
-// does not. Without the id a rename is data loss nobody notices — under
-// polling a renamed repository is a 404 plus a brand-new one — so everything
-// here keys on the id and treats a repository TF has no id for as not
-// renamable, in either direction.
+// does not. Everything here keys on the id, so a repository TF has no id for is
+// never renamable in either direction.
 //
 // The package is the seam between "TF just enumerated some repositories" and
-// "the store rewrites every reference in one transaction". It exists because
-// two unrelated callers observe the same fact from different requests: the
-// poller sees it in an installation's repo grant (App credentials, every
-// cycle, no request of its own), and the profiler sees it in the
-// /repos/{owner}/{repo} response GitHub redirects to the new name (either
-// credential class, once per profile TTL). Both hand what they saw to Apply.
+// "the store rewrites every reference in one transaction", and it exists
+// because two unrelated callers observe the same fact from different requests:
+// the poller reads it out of an installation's repo grant, the profiler out of
+// the /repos/{owner}/{repo} response GitHub redirects to the new name (the only
+// path a PAT org has). Both hand what they saw to Apply.
 package reporename
 
 import (
@@ -29,16 +26,12 @@ import (
 // Apply reconciles the slugs of the repositories in observed against what the
 // provider currently calls them, and returns how many it moved.
 //
-// Observing more repositories than TF tracks is expected and cheap: a
-// repository with no row matches nothing. The read of TF's own identities is
-// the small side of the comparison (tens of rows per org against a grant that
-// may hold thousands), so this is one query plus one transaction per actual
-// rename — and in the steady state, which is every cycle after the first,
-// zero transactions.
+// Observing more repositories than TF tracks is expected and cheap: one query
+// plus one transaction per actual rename, and in the steady state — every cycle
+// after the first — zero transactions.
 //
-// Best-effort by construction. A rename TF fails to apply is one it re-detects
-// on the next observation, and no caller's real work — a poll cycle, a
-// profiling pass — is worth failing over it.
+// Best-effort by construction: a rename TF fails to apply is one it re-detects
+// on the next observation, and no caller's real work is worth failing over it.
 func Apply(ctx context.Context, repos db.RepoStore, resolver ghclient.Resolver, log *slog.Logger, orgID string, observed []domain.RepoRef) int {
 	if repos == nil || len(observed) == 0 {
 		return 0
@@ -58,18 +51,15 @@ func Apply(ctx context.Context, repos db.RepoStore, resolver ghclient.Resolver, 
 		out, err := repos.RenameSystem(ctx, orgID, ref)
 		switch {
 		case errors.Is(err, db.ErrRepoSlugOccupied), errors.Is(err, db.ErrRepoIdentityAmbiguous):
-			// Terminal: stored state a rewrite cannot be applied over — another
-			// repository row, or a durable entity/artifact still answering to
-			// the target name. Retrying changes nothing, so this reports and
-			// moves on rather than counting as a failure of the caller's work.
+			// Terminal: stored state a rewrite cannot be applied over —
+			// another repository row, or a durable entity/artifact still
+			// answering to the target name. Retrying changes nothing.
 			//
 			// Error, not Warn, and it recurs on every detection until a human
-			// retires whatever holds the name. That repetition is the point:
-			// the condition is permanent, and a rename this product cannot
-			// apply is exactly the thing an operator has to be told about.
-			// The alternative — suppressing repeats — needs durable state to
-			// survive a restart, which is not worth carrying for a condition
-			// that should never occur.
+			// retires whatever holds the name. The repetition is the point: a
+			// rename this product cannot apply is exactly what an operator has
+			// to be told about, and suppressing repeats would need durable
+			// state to survive a restart.
 			log.ErrorContext(ctx, "repository rename refused",
 				"org", orgID, "repo", ref.Slug(), "external_id", ref.ExternalID, "error", err)
 			continue

@@ -12,55 +12,31 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// This file holds the slug rewrite a repository rename performs, split into
-// the three groups the schema actually has. The split is not decoration: the
-// middle group is exactly the set of columns that become foreign keys on the
-// repository row when repositories are referenced by id, and a rename then
-// stops moving them at all. Keeping it as one function means that day is a
+// The slug rewrite a repository rename performs, split into the three groups
+// the schema has. The split is the design: the middle group is what becomes a
+// foreign key once repositories are referenced by row id, so that day is a
 // deletion rather than a re-derivation of which statements were which.
 //
-//	renameRepositoryRow   — the repository's own row. The rename itself.
-//	rewriteRepoSlugRefs   — columns holding the bare slug and nothing else.
-//	rewriteSlugDerivedKeys — text keys with a slug embedded in them. These
-//	                         stay text under any FK conversion, so this group
-//	                         survives.
+//	renameRepositoryRow    — the repository's own row. The rename itself.
+//	rewriteRepoSlugRefs    — columns holding the bare slug and nothing else.
+//	rewriteSlugDerivedKeys — text keys with a slug embedded in them. They stay
+//	                         text under any FK conversion, so this group lives on.
 //
-// Membership was decided by grepping the schema for the shape rather than by
-// working from a list, and the search found one table no list named:
-// placement_overrides, whose (key_kind, key_value) pair holds "owner/repo"
-// when key_kind is 'repo'. Its key column is polymorphic — the same column
-// holds a project id for a curator key — so it can never become a foreign key
-// and belongs with the surviving group.
+// What moves: a slug TF minted, naming something that lives inside the
+// database. What stays: a value observed from the provider (entities.url,
+// artifacts.url — GitHub redirects those), history (events.payload_json;
+// external_actions.target and detail_json record an act under the name in
+// force at the time), or a name for something outside the database that did
+// not itself move (a worktree's path, as against its repo_id).
 //
-// Two columns hold the old slug and are NOT rewritten, because they are links
-// rather than identity, and GitHub redirects a renamed repository's URLs.
-// artifacts.url self-heals: its upsert refreshes the column, and moving
-// dedup_key onto the new slug is what lets the next writer find that row to
-// refresh. entities.url does not — nothing writes it after the row is created.
+// Membership came from grepping the migrated schema for the shape rather than
+// from a list, which is how placement_overrides got here — its (key_kind,
+// key_value) pair holds "owner/repo" when key_kind is 'repo'. That column is
+// polymorphic, so it can never become an FK and stays with the last group.
 //
-// TODO(TFAC-831): entities.url keeps the old slug for the life of the row. The
-// redirect covers it until the freed name is claimed by a different
-// repository, at which point the stored link resolves to a stranger's PR.
-//
-// events.payload_json is untouched by intent rather than by omission: it is an
-// append-only record of what happened at a point in time, and at that point in
-// time the repository was called what it says it was. Nothing renders it and
-// nothing resolves it.
-//
-// The external_actions ledger is frozen here too, but only its record half
-// earns that reasoning: target names the subject at the moment of the act, and
-// detail_json is a verbatim capture of the request as sent. Rewriting either
-// would make the log assert TF acted on a name that did not exist yet.
-//
-// TODO(TFAC-831): external_actions.url is a pointer rather than a record — the
-// action feed renders it as a link — and no ledger row is ever updated, so a
-// rename strands it. Once the freed name is re-claimed, an audit row links to
-// an object TF never touched.
-//
-// TODO(TFAC-830): nothing reclaims the directory the old slug named. The paths
-// stay slug-derived on purpose (a human reads them while debugging a sandbox)
-// and the new one is re-derived on next use, but the old tree is only ever
-// evicted in multi mode — the local reaper is unbounded by construction.
+// TODO(TFAC-831): entities.url and external_actions.url keep the old slug, so
+// a re-claimed name leaves them linking to a stranger's object.
+// TODO(TFAC-830): the directory the old slug named is never reclaimed.
 //
 // Everything here runs on the ADMIN pool. The rewrite spans tables owned by
 // every team in the org — tracked sets, projects, entities, artifacts — and no

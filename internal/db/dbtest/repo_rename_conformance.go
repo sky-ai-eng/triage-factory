@@ -359,19 +359,18 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 	})
 
-	t.Run("Rename_refuses_when_a_durable_record_already_answers_to_the_target", func(t *testing.T) {
+	t.Run("Rename_refuses_when_a_durable_entity_already_answers_to_the_target", func(t *testing.T) {
 		// The reference tables absorb an orphan; entities and artifacts must
 		// NOT. An entity carries tasks, conversations and memory, and an
 		// artifact is the audit record of a real external object — deleting
-		// either to make room for a rename destroys exactly what forward-only
-		// tracking promises to keep.
+		// either to make room for a rename destroys what forward-only tracking
+		// promises to keep.
 		//
-		// And this is ordinary product state, not corruption: untracking a
+		// This is ordinary product state, not corruption: untracking a
 		// repository drops its repo_profiles row and deliberately keeps its
 		// entities, so the repository-row guard cannot see that the name is
-		// still spoken for. The rename has to refuse — as a documented
-		// terminal state, so the caller logs it once instead of retrying a
-		// permanent condition on every poll cycle.
+		// still spoken for. Refusing is the answer, classified so the caller
+		// treats it as terminal rather than retrying it every poll cycle.
 		s, orgID, seed := mk(t)
 		_ = seed
 
@@ -423,6 +422,71 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		kept, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "octo/api#18")
 		if kept == nil || kept.ID != orphan.ID {
 			t.Errorf("the orphaned entity = %+v, want it untouched — a rename never destroys durable work", kept)
+		}
+	})
+
+	t.Run("Rename_refuses_when_a_durable_artifact_already_answers_to_the_target", func(t *testing.T) {
+		// The artifact half of the case above. It is a separate statement
+		// rather than the same one: the collision lands on a different unique
+		// index (artifacts.dedup_key, not entities.source_id) in a different
+		// function, and the entity case cannot reach it — that rewrite fails
+		// first. Seeded with no entities at all so the refusal is provably the
+		// artifact index talking.
+		s, orgID, seed := mk(t)
+
+		if err := s.Repos.SetConfigured(ctx, orgID, []string{"octo/api"}); err != nil {
+			t.Fatalf("track the first repository: %v", err)
+		}
+		if _, err := s.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
+			Owner: "octo", Repo: "api", ExternalID: "1",
+		}); err != nil {
+			t.Fatalf("seed the first repository's identity: %v", err)
+		}
+		orphan, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+			Target: domain.PullRequestTarget("octo/api", 18), ExternalID: "18",
+			State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey("octo/api", 18),
+		})
+		if err != nil {
+			t.Fatalf("seed the orphaned artifact: %v", err)
+		}
+		if err := s.Repos.SetConfigured(ctx, orgID, []string{"octo/legacy"}); err != nil {
+			t.Fatalf("untrack it: %v", err)
+		}
+
+		// The live repository whose PR of the same number would collide.
+		if _, err := s.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRef{
+			Owner: "octo", Repo: "legacy", ExternalID: "2",
+		}); err != nil {
+			t.Fatalf("seed the renaming repository: %v", err)
+		}
+		live, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+			Target: domain.PullRequestTarget("octo/legacy", 18), ExternalID: "18",
+			State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey("octo/legacy", 18),
+		})
+		if err != nil {
+			t.Fatalf("seed the live artifact: %v", err)
+		}
+
+		_, err = s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Owner: "octo", Repo: "api", ExternalID: "2",
+		})
+		if !errors.Is(err, db.ErrRepoSlugOccupied) {
+			t.Fatalf("err = %v, want ErrRepoSlugOccupied — a raw constraint violation reads as retryable", err)
+		}
+
+		// All tables or none.
+		if got, _ := s.Repos.Get(ctx, orgID, "octo/legacy"); got == nil {
+			t.Error("the repository row moved despite the refusal")
+		}
+		if got, _ := s.Artifacts.Get(ctx, orgID, live.ID); got == nil ||
+			got.DedupKey != domain.PullRequestDedupKey("octo/legacy", 18) {
+			t.Errorf("the live artifact = %+v, want its dedup key unmoved", got)
+		}
+		if got, _ := s.Artifacts.Get(ctx, orgID, orphan.ID); got == nil ||
+			got.DedupKey != domain.PullRequestDedupKey("octo/api", 18) {
+			t.Errorf("the orphaned artifact = %+v, want it untouched — a rename never destroys an audit record", got)
 		}
 	})
 
