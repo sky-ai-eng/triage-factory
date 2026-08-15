@@ -40,7 +40,9 @@ const maxWebhookBody = 25 << 20
 // indefinitely.
 //
 // A verified delivery is deduped on its X-GitHub-Delivery GUID before any of
-// that runs — see the gate below.
+// that runs — see the gate below. Structural validation stays ahead of the
+// gate, so a delivery that is bad on its face answers 4xx on every attempt
+// rather than 4xx once and then 204 as a "duplicate".
 func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	orgID := r.PathValue("org_id")
 	if _, err := uuid.Parse(orgID); err != nil {
@@ -139,6 +141,21 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "missing X-GitHub-Delivery header")
 		return
 	}
+	// Structural validation of the payload runs BEFORE the gate, so a delivery
+	// that is bad on its face keeps its 4xx on every attempt. Recording it
+	// first would answer the operator's redelivery with a 204 — the receiver
+	// reporting success for a payload it never applied and never could. What
+	// this leaves behind the gate is only work that can fail on TF's state
+	// rather than on the delivery, and every one of those answers 5xx.
+	var install *installationWebhook
+	if eventName == "installation" {
+		var perr error
+		if install, perr = parseInstallationWebhook(body); perr != nil {
+			badRequest(w, perr.Error())
+			return
+		}
+	}
+
 	fresh, err := s.githubDeliveries.MarkDeliveredSystem(r.Context(), deliveryInstallationID(body), deliveryID)
 	if err != nil {
 		internalError(w, "github-webhook", err)
@@ -156,8 +173,8 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if eventName == "installation" {
-		s.handleInstallationEvent(w, r, orgID, deliveryID, body)
+	if install != nil {
+		s.applyInstallationEvent(w, r, orgID, deliveryID, *install)
 		return
 	}
 
@@ -172,9 +189,9 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 //
 // Returns "" — keying the delivery on its GUID alone — for a delivery that
 // names no installation (github_app_authorization, for one) and for a body
-// this can't parse. A malformed body is not this function's to report: the
-// installation handler already refuses one with a 400, and it is the only
-// caller that needs the payload to be well-formed.
+// this can't parse. A malformed body is not this function's to report: an
+// installation delivery is already refused ahead of the gate, and no other
+// event requires a parseable payload to be recorded and published.
 func deliveryInstallationID(body []byte) string {
 	var envelope struct {
 		Installation struct {
@@ -212,23 +229,34 @@ type installationWebhook struct {
 	} `json:"installation"`
 }
 
-// handleInstallationEvent applies a verified installation event to the
-// mirror. created upserts, deleted soft-removes, suspend / unsuspend stamp
-// and clear the suspension columns; deleted and suspend additionally fire the
-// token-cache invalidate hook, because both leave every token already minted
-// from the installation dead while the cache would keep serving one until its
-// natural expiry. Any other action (new_permissions_accepted, …) is published
-// to the bus and acked — the mirror doesn't track those states.
-func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request, orgID, deliveryID string, body []byte) {
+// parseInstallationWebhook decodes and structurally validates an installation
+// delivery. Both failures it reports are properties of the payload itself —
+// nothing about TF's state can change either answer — so they are identical on
+// every attempt, which is what makes this safe to run ahead of the dedup gate
+// and unsafe to run behind it.
+func parseInstallationWebhook(body []byte) (*installationWebhook, error) {
 	var p installationWebhook
 	if err := json.Unmarshal(body, &p); err != nil {
-		badRequest(w, "malformed installation payload")
-		return
+		return nil, errors.New("malformed installation payload")
 	}
 	if p.Installation.ID == 0 {
-		badRequest(w, "installation payload missing installation id")
-		return
+		return nil, errors.New("installation payload missing installation id")
 	}
+	return &p, nil
+}
+
+// applyInstallationEvent applies a verified, parsed, deduped installation event
+// to the mirror. created upserts, deleted soft-removes, suspend / unsuspend
+// stamp and clear the suspension columns; deleted and suspend additionally fire
+// the token-cache invalidate hook, because both leave every token already
+// minted from the installation dead while the cache would keep serving one
+// until its natural expiry. Any other action (new_permissions_accepted, …) is
+// published to the bus and acked — the mirror doesn't track those states.
+//
+// Every failure here is a store failure, answered 5xx: the payload was
+// validated before the delivery was recorded, so nothing in this function can
+// discover that the delivery was bad.
+func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, orgID, deliveryID string, p installationWebhook) {
 	installationID := strconv.FormatInt(p.Installation.ID, 10)
 
 	// A payload that omits the account id (0) writes "" and so leaves any

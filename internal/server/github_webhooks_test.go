@@ -540,6 +540,39 @@ func TestGitHubWebhook_BadSignatureDoesNotClaimDeliveryID(t *testing.T) {
 	}
 }
 
+// TestGitHubWebhook_MalformedPayload_StaysBadRequestOnRedelivery pins the
+// ordering between structural validation and the dedup gate. A delivery that
+// is bad on its face must answer 4xx every time it is sent — if recording it
+// came first, the operator's redelivery would be answered 204 as a
+// "duplicate", which is the receiver reporting success for a payload it never
+// applied and never could.
+func TestGitHubWebhook_MalformedPayload_StaysBadRequestOnRedelivery(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+
+	for _, tc := range []struct {
+		name     string
+		delivery string
+		body     []byte
+	}{
+		{"unparseable", "gh-delivery-garbage", []byte(`{"action":"created","installation":`)},
+		{"no installation id", "gh-delivery-no-id", []byte(`{"action":"created","installation":{"account":{"login":"acme","type":"Organization"}}}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for attempt := 1; attempt <= 2; attempt++ {
+				rec := postWebhookDelivery(s, "installation", sign(tc.body), tc.body, tc.delivery)
+				if rec.Code != http.StatusBadRequest {
+					t.Fatalf("attempt %d: status = %d, want 400 — a structurally-bad delivery does not become a duplicate", attempt, rec.Code)
+				}
+			}
+			if got := installations(t, s); len(got) != 0 {
+				t.Errorf("a rejected delivery wrote %d installations, want 0", len(got))
+			}
+		})
+	}
+}
+
 // TestGitHubWebhook_MissingDeliveryID refuses a verified delivery that carries
 // no GUID. There is nothing to dedup it on, so applying it would quietly void
 // the exactly-once promise for that delivery; 4xx keeps it from looking
