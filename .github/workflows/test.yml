@@ -97,6 +97,13 @@ jobs:
       # stage the same release the sandbox image bakes. Version and checksum are
       # read out of the Dockerfile, which internal/ghpin's drift test holds
       # equal to the Go pin local mode fetches from.
+      #
+      # This step is also what makes a pin bump a test-mediated event: the
+      # conformance gate drives every write command the pinned gh has and
+      # asserts each still lands the audit row or the refusal the shared
+      # classification table names, and it checks the staged binary reports the
+      # pinned version, so a bump cannot land while the gate silently runs
+      # against the old release.
       - name: Stage pinned gh binary
         if: steps.docs.outputs.only != 'true'
         run: |
