@@ -104,6 +104,11 @@ func New(conn *sql.DB) db.Stores {
 		// claim writes and sweeps, which collapse onto the one connection.
 		Curator:    newCuratorStore(conn),
 		GitHubApps: newGitHubAppsStore(conn, secrets),
+		// InstallationRepos: the App-installation grant mirror. Admin-pool-only
+		// in Postgres; one connection here. Wired in local mode too — the
+		// reconcile that maintains it is by-pull in both modes, which is the
+		// only shape that works where no webhook ever arrives.
+		InstallationRepos: newInstallationReposStore(conn),
 		// GitHubDeliveries is admin-pool-only in Postgres; SQLite collapses to
 		// the one connection. Wired in local mode too — a local install GitHub
 		// can reach runs the same pre-auth receiver.

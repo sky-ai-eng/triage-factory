@@ -116,6 +116,11 @@ func DiscoverAppInstallations(ctx context.Context, secrets SecretStore, orgID, a
 			// preserving what the row already had.
 			SuspendedAt: in.SuspendedAt,
 			SuspendedBy: in.SuspendedBy,
+			// The listing is the only source that reports the grant's width on
+			// every pass. A narrowing fires installation_repositories, which
+			// GitHub never re-delivers and local mode never receives, so
+			// "selected" learned here is how the mirror converges at all.
+			RepositorySelection: in.RepositorySelection,
 		})
 	}
 	return out, nil

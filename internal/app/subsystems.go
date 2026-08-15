@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -561,6 +562,16 @@ func (a *App) buildRouting() {
 	// TFAC-573: GET /readyz's poller-alive hard check + per-org poll-
 	// staleness soft signal read through this method.
 	a.srv.SetPollerManager(a.pollerMgr.Health)
+	// The App-installation grant mirror, refreshed by pull at the head of every
+	// GitHub cycle. Deliberately NOT a system:poll: subscriber like the scorer /
+	// profiler / classifier / reconciler: those all hang off a poll COMPLETION,
+	// and a cycle that finds no installations never emits one — so a subscriber
+	// would go silent for precisely the org whose mirror needs correcting. Its
+	// leader gating is the poller's own, which is the same brain lease every
+	// other timer-driven pass sits behind.
+	a.pollerMgr.ReconcileGrant = grantmirror.NewReconciler(
+		a.stores.GitHubApps, a.stores.InstallationRepos, a.ghResolver,
+	).RunOrg
 	a.pollerMgr.OnError = func(source, orgID string, err error) {
 		// Throttle key includes orgID so a chronic failure on one tenant
 		// doesn't suppress a fresh failure on another. Process-level errors

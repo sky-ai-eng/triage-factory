@@ -105,14 +105,18 @@ type Token struct {
 // omitted it. SuspendedAt is the installation's suspended_at (zero when the
 // account owner has not suspended it) and SuspendedBy the login that did,
 // carried so the reconcile can converge suspension that no webhook delivered.
+// RepositorySelection is GitHub's "all" / "selected" — whether the grant covers
+// every repository on the account or an enumerated set — which is what says
+// whether the grant can drift from the tracked set at all.
 type Installation struct {
-	ID           int64
-	AccountID    int64
-	AccountLogin string
-	AccountType  string
-	CreatedAt    time.Time
-	SuspendedAt  time.Time
-	SuspendedBy  string
+	ID                  int64
+	AccountID           int64
+	AccountLogin        string
+	AccountType         string
+	CreatedAt           time.Time
+	SuspendedAt         time.Time
+	SuspendedBy         string
+	RepositorySelection string
 }
 
 // Minter signs JWTs with a GitHub App's RSA private key and exchanges
@@ -422,11 +426,11 @@ func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64
 }
 
 // installationListItem is the subset of an /app/installations array entry
-// we keep. GitHub returns far more (permissions, events, repository_selection);
-// installation mirroring only needs the id, the account it's installed on,
-// when it was created, and whether the account owner has suspended it. Both
-// halves of the account's identity are kept — the numeric id (stable) and the
-// login (renameable, and what the UI renders).
+// we keep. GitHub returns far more (permissions, events, single_file_name);
+// installation mirroring only needs the id, the account it's installed on, when
+// it was created, whether the account owner has suspended it, and how wide the
+// grant is. Both halves of the account's identity are kept — the numeric id
+// (stable) and the login (renameable, and what the UI renders).
 //
 // suspended_at / suspended_by are the reconcile's half of suspension, and the
 // reason it is not webhook-only: GitHub does not re-deliver a missed
@@ -446,6 +450,11 @@ type installationListItem struct {
 	SuspendedBy struct {
 		Login string `json:"login"`
 	} `json:"suspended_by"`
+	// repository_selection is the other half of what the reconcile cannot learn
+	// from a webhook it never received: an installation narrowed from "all" to a
+	// selection fires installation_repositories, which GitHub does not re-deliver
+	// and local mode never receives at all.
+	RepositorySelection string `json:"repository_selection"`
 }
 
 // ListInstallations enumerates every installation of the App via
@@ -492,12 +501,13 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 		}
 		for _, it := range page {
 			inst := Installation{
-				ID:           it.ID,
-				AccountID:    it.Account.ID,
-				AccountLogin: it.Account.Login,
-				AccountType:  it.Account.Type,
-				CreatedAt:    it.CreatedAt.UTC(),
-				SuspendedBy:  it.SuspendedBy.Login,
+				ID:                  it.ID,
+				AccountID:           it.Account.ID,
+				AccountLogin:        it.Account.Login,
+				AccountType:         it.Account.Type,
+				CreatedAt:           it.CreatedAt.UTC(),
+				SuspendedBy:         it.SuspendedBy.Login,
+				RepositorySelection: it.RepositorySelection,
 			}
 			if !it.SuspendedAt.IsZero() {
 				inst.SuspendedAt = it.SuspendedAt.UTC()

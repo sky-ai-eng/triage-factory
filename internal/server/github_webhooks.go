@@ -226,6 +226,12 @@ type installationWebhook struct {
 		SuspendedBy struct {
 			Login string `json:"login"`
 		} `json:"suspended_by"`
+		// repository_selection: "all" or "selected". The latency optimization on
+		// top of the reconcile — a fresh install's grant width lands the moment
+		// the delivery does instead of at the next poll. The reconcile is what
+		// makes it CORRECT, since GitHub never re-sends a delivery it failed to
+		// deliver and local mode receives none at all.
+		RepositorySelection string `json:"repository_selection"`
 	} `json:"installation"`
 }
 
@@ -298,6 +304,11 @@ func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, 
 			AccountLogin:   p.Installation.Account.Login,
 			GitHubHost:     host,
 			InstalledAt:    p.Installation.CreatedAt,
+			// A payload that omits repository_selection writes "" and so leaves
+			// any stored width alone, the same fill-in-only rule the account id
+			// takes: a writer that didn't look must not erase what a reconcile
+			// established.
+			RepositorySelection: p.Installation.RepositorySelection,
 		}); err != nil {
 			internalError(w, "github-webhook", err)
 			return
