@@ -1,0 +1,593 @@
+/* StatusRules — the Jira board.
+   Structure, color and every state are here. The component branches on content
+   only: which column the pointer is over, which chip is staged, whether a
+   column scrolls and whether a name is clipped all arrive as data attributes.
+
+   Two things stay inline, because both are measured at runtime and neither can
+   be expressed as a selector: the build delay for each column and chip (--at),
+   and the peek label's fixed position. */
+
+.sr {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+}
+
+.sr-spacer {
+  flex: 1;
+}
+
+/* ---- the project picker ------------------------------------------------- */
+
+.sr-projects {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.sr-search-wrap {
+  position: relative;
+}
+
+.sr-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 9px;
+  border-radius: 4px;
+  background: var(--color-sunk);
+  box-shadow: var(--shadow-edge);
+}
+
+.sr-search-icon {
+  stroke: var(--color-ink-4);
+}
+
+.sr-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  padding: 0;
+  background: transparent;
+  font: var(--font-weight-regular) var(--text-label) / 1.4 var(--font-mono);
+  color: var(--color-ink-1);
+}
+
+.sr-clear {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: var(--font-weight-regular) var(--text-reported) / 1 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+/* A floating surface: real border, real shadow, and both drawn from tokens so
+   they relight. The shadow was a literal rgba(42,38,34,.6), which on the dark
+   ground was a black bloom under a light card. */
+.sr-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  padding: 5px;
+  border-radius: 5px;
+  background: var(--color-raised);
+  border: 1px solid color-mix(in srgb, var(--color-ink-1) 10%, transparent);
+  box-shadow: 0 16px 40px -18px color-mix(in srgb, var(--color-ink-1) 60%, transparent);
+}
+
+.sr-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.sr-opt:hover,
+.sr-opt:focus-visible {
+  background: var(--color-tint-2);
+}
+
+.sr-opt-key {
+  flex: none;
+  width: 54px;
+  font: var(--font-weight-regular) var(--text-label) / 1.4 var(--font-mono);
+  color: var(--color-ink-1);
+}
+
+.sr-opt-name {
+  flex: 1;
+  min-width: 0;
+  font: var(--font-weight-regular) var(--text-label) / 1.4 var(--font-mono);
+  color: var(--color-ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sr-opt-count {
+  font: var(--font-weight-regular) 9.5px / 1.4 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+.sr-unlisted {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 5px 4px;
+  cursor: pointer;
+  font: var(--font-weight-regular) var(--text-label) / 1.4 var(--font-mono);
+  color: var(--color-ink-2);
+}
+
+.sr-unlisted[data-after] {
+  margin-top: 4px;
+  border-top: 1px dotted var(--color-line-2);
+}
+
+.sr-unlisted-key {
+  color: var(--color-ink-1);
+}
+
+.sr-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.sr-pchip {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--color-raised);
+  box-shadow: var(--shadow-edge-strong);
+  font: var(--font-weight-regular) var(--text-label) / 1.35 var(--font-mono);
+  color: var(--color-ink-1);
+}
+
+.sr-pchip-count {
+  color: var(--color-ink-4);
+}
+
+.sr-more {
+  appearance: none;
+  margin: 0;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  box-shadow: var(--shadow-edge);
+  font: var(--font-weight-regular) var(--text-label) / 1.35 var(--font-mono);
+  color: var(--color-ink-3);
+}
+
+.sr-nowatch {
+  font: var(--font-weight-regular) var(--text-label) / 1.4 var(--font-mono);
+  color: var(--color-alarm);
+}
+
+.sr-head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--color-line-1);
+}
+
+.sr-head-label {
+  font: var(--font-weight-regular) 8px / 1 var(--font-mono);
+  letter-spacing: 0.14em;
+  color: var(--color-ink-4);
+}
+
+.sr-head-count {
+  font: var(--font-weight-regular) 9.5px / 1 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+/* ---- the board --------------------------------------------------------- */
+
+.sr-board {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-auto-rows: 100%;
+  gap: 10px;
+  padding: 2px 0;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* With nothing mapped the board gives its height to the tray, which is where
+   every chip is. */
+.sr-board[data-board-empty] {
+  flex: 0 0 auto;
+}
+
+.sr-col {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  /* Grid items default to min-height:auto, so without this the column refuses
+     to shrink to its track and spills over the tray instead of letting its
+     scroller take over. */
+  min-height: 0;
+  overflow: hidden;
+  padding: 5px;
+  margin: -5px;
+  border-radius: 5px;
+  background: transparent;
+  cursor: default;
+  transition:
+    background var(--dur-hover) linear,
+    box-shadow var(--dur-hover) linear;
+}
+
+/* Something is staged, so every column is a place it could go. */
+.sr-col[data-staged] {
+  background: var(--color-tint-2);
+  cursor: pointer;
+}
+
+/* The pointer is over this one. */
+.sr-col[data-over] {
+  background: var(--color-tint-3);
+  box-shadow: inset 0 0 0 1px var(--color-ink-4);
+}
+
+.sr-col[data-building] {
+  animation: sr-col var(--dur-content) var(--ease-default) var(--at) both;
+}
+
+.sr-col:focus-visible {
+  outline: 1.5px solid var(--color-focus);
+  outline-offset: 0;
+}
+
+.sr-col-label {
+  flex: none;
+  font: var(--font-weight-regular) 8.5px / 1 var(--font-mono);
+  letter-spacing: 0.1em;
+  color: var(--color-ink-4);
+  white-space: nowrap;
+}
+
+.sr-scroll {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* A column that scrolls says so by fading its last chip out — a mask, not a
+   gradient overlay, so it holds on whatever ground the panel gives it. */
+.sr-scroll[data-more] {
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
+}
+
+.sr-chip {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  cursor: grab;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--color-line-1);
+  transform-origin: left center;
+}
+
+/* ★ — the status TF writes back. Filled, and its frame comes off: the fill is
+   what marks it, and a fill plus a ring is two marks for one fact. */
+.sr-chip[data-canonical] {
+  background: var(--color-tint-3);
+  box-shadow: inset 0 0 0 1px transparent;
+}
+
+.sr-chip[data-building] {
+  animation: sr-chip 0.2s var(--ease-default) var(--at) both;
+}
+
+.sr-chip:focus-visible,
+.sr-tchip:focus-visible {
+  outline: 1.5px solid var(--color-focus);
+  outline-offset: 1px;
+}
+
+.sr-star {
+  font: var(--font-weight-regular) 9px / 1 var(--font-mono);
+  color: var(--color-warm);
+  transform: translateY(-0.5px);
+}
+
+.sr-name {
+  font: var(--font-weight-regular) 10.5px / 1.35 var(--font-mono);
+  color: var(--color-ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+}
+
+.sr-chip[data-canonical] .sr-name {
+  color: var(--color-ink-1);
+}
+
+/* A name too long for its column fades at the edge rather than ending in an
+   ellipsis — the column is narrow, and three dots spend four characters saying
+   what the fade says with none. The component measures and sets the attribute. */
+.sr-name[data-clipped] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 15px), transparent);
+}
+
+/* An empty column still shows where a chip would land. */
+.sr-slot {
+  flex: none;
+  height: 24px;
+  border-radius: 4px;
+  border: 1px dashed var(--color-line-2);
+}
+
+.sr-col[data-staged] .sr-slot {
+  border-color: var(--color-ink-4);
+}
+
+/* ---- the tray ---------------------------------------------------------- */
+
+.sr-tray {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-height: 0;
+  padding: 9px;
+  justify-content: center;
+  border-radius: 5px;
+  background: var(--color-sunk);
+  /* The tray's edge is structure, not a frame: a literal light hairline here
+     reads as a bright ring once the ground goes dark. */
+  box-shadow: var(--shadow-edge);
+}
+
+/* Everything is mapped: keep a shallow band so a chip dragged out of a column
+   still has somewhere to land, and drop the filter and the chip area. */
+.sr-tray[data-empty] {
+  gap: 0;
+  min-height: 30px;
+  padding: 0 9px;
+}
+
+.sr-tray[data-board-empty] {
+  flex: 1 1 auto;
+}
+
+.sr-tray-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sr-tray-label {
+  font: var(--font-weight-regular) 8.5px / 1 var(--font-mono);
+  letter-spacing: 0.1em;
+  color: var(--color-ink-4);
+}
+
+.sr-tray-note {
+  font: var(--font-weight-regular) 9.5px / 1.4 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+.sr-filter {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--color-raised);
+  box-shadow: var(--shadow-edge-strong);
+}
+
+.sr-filter svg {
+  stroke: var(--color-ink-4);
+}
+
+.sr-filter input {
+  width: 62px;
+  border: 0;
+  outline: 0;
+  padding: 0;
+  background: transparent;
+  font: var(--font-weight-regular) 9.5px / 1.4 var(--font-mono);
+  color: var(--color-ink-2);
+}
+
+.sr-pool {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-content: flex-start;
+  min-height: 0;
+  /* Three rows, then it scrolls. */
+  max-height: 66px;
+  overflow-y: auto;
+}
+
+.sr-tray[data-board-empty] .sr-pool {
+  max-height: none;
+  flex: 1;
+}
+
+.sr-tchip {
+  padding: 3px 7px;
+  border-radius: 4px;
+  cursor: grab;
+  font: var(--font-weight-regular) var(--text-label) / 1.35 var(--font-mono);
+  color: var(--color-ink-2);
+  background: var(--color-raised);
+  box-shadow: var(--shadow-edge-strong);
+  white-space: nowrap;
+}
+
+/* Staged: picked up without a pointer, waiting for a column. */
+.sr-tchip[data-staged] {
+  color: var(--color-ink-1);
+  box-shadow: inset 0 0 0 1px var(--color-warm);
+}
+
+.sr-nohit {
+  font: var(--font-weight-regular) var(--text-label) / 1.4 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+.sr-foot {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-top: 8px;
+  border-top: 1px dotted var(--color-line-2);
+}
+
+.sr-count {
+  font: var(--font-weight-regular) 9.5px / 1.4 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+.sr-hint {
+  font: var(--font-weight-regular) 9.5px / 1.4 var(--font-mono);
+  color: var(--color-warm);
+}
+
+.sr-suggest {
+  appearance: none;
+  margin: 0;
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--color-raised);
+  box-shadow: var(--shadow-edge-strong);
+  font: var(--font-weight-regular) var(--text-label) / 1.3 var(--font-mono);
+  color: var(--color-ink-1);
+}
+
+/* ---- read-only --------------------------------------------------------- */
+
+/* Not interactive means not interactive-looking either: a grab cursor over a
+   chip that cannot be picked up is the board telling the reader something that
+   is not true. The tab stops go with it — the component drops role and
+   tabIndex, so there is nothing here to disable. */
+.sr[data-readonly] .sr-chip,
+.sr[data-readonly] .sr-tchip {
+  cursor: default;
+}
+
+/* ---- the peek label ---------------------------------------------------- */
+
+.sr-peek {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: var(--color-raised);
+  border: 1px solid color-mix(in srgb, var(--color-ink-1) 10%, transparent);
+  box-shadow: 0 10px 26px -14px color-mix(in srgb, var(--color-ink-1) 55%, transparent);
+  font: var(--font-weight-regular) 10.5px / 1.35 var(--font-mono);
+  color: var(--color-ink-1);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.sr-note {
+  margin: 0;
+  font: var(--font-weight-regular) 10.5px / 1.5 var(--font-mono);
+  color: var(--color-ink-3);
+}
+
+/* ---- the drag ghost ---------------------------------------------------- */
+
+/* The 1×1 stand-in handed to setDragImage: an empty element, not an Image, so
+   there is no chance of the browser's broken-image glyph flying in from the
+   corner before a data URI decodes. */
+.sr-shim {
+  position: fixed;
+  top: -20px;
+  left: -20px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+/* Our own drag image. It is a clone of the chip, so it keeps .sr-chip/.sr-tchip
+   and this class only overrides what a floating copy needs — which is why these
+   rules come last. It hangs off <body>, outside any scope the board sits in, so
+   every value here resolves against :root and the reader's own lighting. */
+.sr-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  margin: 0;
+  z-index: 60;
+  pointer-events: none;
+  box-sizing: border-box;
+  animation: none;
+  opacity: 1;
+  cursor: grabbing;
+  border-radius: 4px;
+  background: var(--color-raised);
+  box-shadow:
+    inset 0 0 0 1px var(--color-line-2),
+    0 5px 14px color-mix(in srgb, var(--color-ink-1) 18%, transparent);
+}
+
+/* ---- build ------------------------------------------------------------- */
+
+/* The four columns ARE a sequence, so they draw left to right — frame first,
+   then the chips land inside each one. */
+@keyframes sr-col {
+  0% {
+    opacity: 0;
+    box-shadow: inset 0 0 0 1px var(--color-line-2);
+  }
+  32% {
+    opacity: 1;
+    box-shadow: inset 0 0 0 1px var(--color-ink-3);
+  }
+  100% {
+    opacity: 1;
+    box-shadow: inset 0 0 0 1px transparent;
+  }
+}
+
+@keyframes sr-chip {
+  from {
+    opacity: 0;
+    transform: scaleX(0.72);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

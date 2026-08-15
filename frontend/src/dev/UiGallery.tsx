@@ -21,7 +21,10 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import AcquireCard from './AcquireCard'
+import PrimitivesCard from './PrimitivesCard'
+import SelectionBarCard from './SelectionBarCard'
 import ShellCard from './ShellCard'
+import TableCard from './TableCard'
 import './gallery.css'
 
 type Section = 'color' | 'type' | 'elevation' | 'space' | 'components'
@@ -307,6 +310,9 @@ export default function UiGallery() {
               component&rsquo;s <code>.md</code> before changing it.
             </p>
             <AcquireCard />
+            <PrimitivesCard />
+            <SelectionBarCard />
+            <TableCard />
             <ShellCard />
           </>
         )}

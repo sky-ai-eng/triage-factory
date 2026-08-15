@@ -20,7 +20,7 @@ import PRDashboard from './pages/PRDashboard'
 import Settings from './pages/Settings'
 import Prompts from './pages/Prompts'
 import OrgPage from './pages/OrgPage'
-import TeamPage from './pages/TeamPage'
+import TeamSettings from './pages/team/TeamSettings'
 import Marketplace from './pages/Marketplace'
 import Repos from './pages/Repos'
 import Factory from './pages/Factory'
@@ -247,11 +247,12 @@ function MultiRoutes() {
             <Route path="board" element={<Board />} />
             <Route path="runs/:runID" element={<RunDetail />} />
             <Route path="prs" element={<PRDashboard />} />
-            {/* Prompts is the /team Prompts tab in multi mode (TFAC-445). The
-                top-level Prompts nav deep-links straight there; this redirect
-                keeps the standalone /prompts path (and old bookmarks) pointing
-                at the canonical surface. `..` pops to /orgs/:org_id. */}
-            <Route path="prompts" element={<Navigate to="../team?tab=prompts" replace />} />
+            {/* Prompts is its own destination. It used to redirect into a tab
+                on /team, which is where the editor lived before the rail gave
+                Prompts a row of its own with Library, Marketplace and Bindings
+                under it. The page is mode-agnostic — it resolves its team from
+                useActiveTeam like every other surface. */}
+            <Route path="prompts" element={<Prompts />} />
             <Route path="repos" element={<Repos />} />
             <Route path="projects" element={<Projects />} />
             <Route path="projects/:id" element={<ProjectDetail />} />
@@ -264,7 +265,7 @@ function MultiRoutes() {
             {/* Team page shell (TFAC-445) — [Members · Settings · Prompts]
                 tabs + a shared team-switcher, plus the zero-team safe landing.
                 Multi-mode only. */}
-            <Route path="team" element={<TeamPage />} />
+            <Route path="team" element={<TeamSettings />} />
             {/* Within-org prompt marketplace browse page (TFAC-537). Multi-mode
                 only — nothing in LocalRoutes; absence from that table is the
                 mode gate, mirroring org/team above. */}

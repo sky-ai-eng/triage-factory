@@ -1,0 +1,337 @@
+/* Dialog — see Dialog.md. Tokens only; no colors are authored here. */
+
+.dlg-back {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* The page stays legible behind it: this is a question about what you are
+     looking at, so hiding it would be the wrong kind of modal. */
+  background: color-mix(in srgb, var(--color-sunk) 62%, transparent);
+  backdrop-filter: blur(2px) saturate(0.7);
+  -webkit-backdrop-filter: blur(2px) saturate(0.7);
+  animation: dlg-fade 0.12s linear;
+}
+
+.dlg {
+  position: relative;
+  box-sizing: border-box;
+  padding: 18px 20px 16px;
+  background: var(--color-raised);
+  /* A dialog is the definition of floating, so it takes the float pair from
+     tokens/elevation.css — real border, --shadow-float, radius 10px — not an
+     in-flow inset hairline. */
+  border: var(--edge-float);
+  border-radius: 10px;
+  box-shadow: var(--shadow-float);
+  animation: dlg-in 0.14s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Beat 2 — the flash. Hard on, hard off: the frame is claimed, and nothing
+   about that is a transition. */
+.dlg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  background: var(--color-ink-1);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.04s linear;
+}
+.dlg[data-phase='flash']::before {
+  opacity: 1;
+}
+
+/* Beat 3 — the wireframe cross, corner to corner, the mark a wireframe puts in
+   a box whose contents are not there yet. */
+.dlg::after {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border-radius: 10px;
+  pointer-events: none;
+  background-image:
+    linear-gradient(
+      to bottom right,
+      transparent calc(50% - 0.5px),
+      var(--color-line-2) calc(50% - 0.5px),
+      var(--color-line-2) calc(50% + 0.5px),
+      transparent calc(50% + 0.5px)
+    ),
+    linear-gradient(
+      to bottom left,
+      transparent calc(50% - 0.5px),
+      var(--color-line-2) calc(50% - 0.5px),
+      var(--color-line-2) calc(50% + 0.5px),
+      transparent calc(50% + 0.5px)
+    );
+  opacity: 0;
+  transition: opacity 0.1s linear;
+}
+.dlg[data-phase='measure']::after {
+  opacity: 1;
+}
+
+/* Beat 3b — MEASURE. A caliper draws across the empty frame while the cross is
+   up: the same claim the reference makes, that the space has been sized before
+   anything is put in it. It costs no time — it shares the cross's window. The
+   ticks are revealed by a clip rather than a scale, because a scaled tick is a
+   distorted tick. */
+.dlg-cal {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 62%;
+  aspect-ratio: 200 / 96;
+  height: auto;
+  transform: translate(-50%, -50%);
+  overflow: visible;
+  fill: none;
+  stroke: color-mix(in srgb, var(--color-ink-4) 66%, transparent);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s linear;
+}
+.dlg-cal ellipse {
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;
+}
+/* The rings draw when the measure phase arrives, outer first. A new matching
+   rule starts the animation, so the sequence cannot inherit a part-elapsed
+   clock the way a mounted-on-load keyframe track could. */
+.dlg[data-phase='measure'] .dlg-cal {
+  opacity: 1;
+}
+.dlg[data-phase='measure'] .dlg-cal ellipse {
+  animation: dlg-ring 0.21s linear both;
+}
+.dlg[data-phase='measure'] .dlg-cal ellipse.inner {
+  animation-delay: 0.07s;
+}
+
+/* build="none": no beats at all. The panel still settles in 0.14s — a surface
+   that appears with no movement whatsoever reads as a rendering glitch — but the
+   contents are simply there, with no stagger to sit through. */
+.dlg.instant .dlg-cal {
+  display: none;
+}
+.dlg.instant .dlg-rule {
+  animation-duration: 0.18s;
+}
+.dlg.instant > *:not(.dlg-rule):not(.dlg-cal) {
+  transition-duration: 0.13s;
+}
+.dlg.instant .dlg-list li {
+  transition-duration: 0.12s;
+}
+.dlg.instant.built > *:nth-child(3) {
+  transition-delay: 0.025s;
+}
+.dlg.instant.built > *:nth-child(4) {
+  transition-delay: 0.05s;
+}
+.dlg.instant.built > *:nth-child(5) {
+  transition-delay: 0.175s;
+}
+.dlg.instant.built > *:nth-child(6) {
+  transition-delay: 0.1s;
+}
+.dlg.instant.built .dlg-list li:nth-child(1) {
+  transition-delay: 0.05s;
+}
+.dlg.instant.built .dlg-list li:nth-child(2) {
+  transition-delay: 0.075s;
+}
+.dlg.instant.built .dlg-list li:nth-child(3) {
+  transition-delay: 0.1s;
+}
+.dlg.instant.built .dlg-list li:nth-child(4) {
+  transition-delay: 0.125s;
+}
+.dlg.instant.built .dlg-list li:nth-child(5) {
+  transition-delay: 0.15s;
+}
+
+/* Beat 5 — the contents resolve, in reading order. Transitions rather than
+   delayed animations: a transition cannot get stuck in a fill state. */
+.dlg > *:not(.dlg-rule):not(.dlg-cal) {
+  transition:
+    opacity 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.dlg:not(.built) > *:not(.dlg-rule):not(.dlg-cal) {
+  opacity: 0;
+  transform: translateY(1px);
+}
+.dlg.built > *:nth-child(3) {
+  transition-delay: 0.05s;
+}
+.dlg.built > *:nth-child(4) {
+  transition-delay: 0.1s;
+}
+.dlg.built > *:nth-child(5) {
+  transition-delay: 0.35s;
+}
+.dlg.built > *:nth-child(6) {
+  transition-delay: 0.2s;
+}
+.dlg-list li {
+  transition: opacity 0.24s linear;
+}
+.dlg:not(.built) .dlg-list li {
+  opacity: 0;
+}
+.dlg.built .dlg-list li:nth-child(1) {
+  transition-delay: 0.1s;
+}
+.dlg.built .dlg-list li:nth-child(2) {
+  transition-delay: 0.15s;
+}
+.dlg.built .dlg-list li:nth-child(3) {
+  transition-delay: 0.2s;
+}
+.dlg.built .dlg-list li:nth-child(4) {
+  transition-delay: 0.25s;
+}
+.dlg.built .dlg-list li:nth-child(5) {
+  transition-delay: 0.3s;
+}
+
+.dlg-head {
+  font: 500 14.5px/1.35 var(--font-sans);
+  color: var(--color-ink-1);
+  margin: 0 0 8px;
+}
+
+.dlg-body {
+  margin: 0 0 12px;
+  font: 400 11.5px/1.65 var(--font-mono);
+  color: var(--color-ink-3);
+}
+
+.dlg-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dlg-list li {
+  position: relative;
+  padding-left: 14px;
+  font: 400 11.5px/1.6 var(--font-mono);
+  color: var(--color-ink-2);
+}
+/* A dash for what survives, a cross for what does not: the shape carries the
+   distinction so it survives a grayscale print. */
+.dlg-list li::before {
+  content: '–';
+  position: absolute;
+  left: 0;
+  color: var(--color-ink-4);
+}
+.dlg-list li.loss {
+  color: var(--color-ink-1);
+}
+.dlg-list li.loss::before {
+  content: '×';
+  color: var(--color-alarm);
+}
+
+.dlg-note {
+  margin: 0 0 14px;
+  font: 400 10.5px/1.55 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+.dlg-acts {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dlg-btn {
+  font: 400 11.5px/1 var(--font-sans);
+  color: var(--color-ink-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+.dlg-btn:hover {
+  background: var(--color-tint-2);
+  color: var(--color-ink-1);
+}
+.dlg-btn.go {
+  color: var(--color-ground);
+  background: var(--color-warm);
+}
+.dlg-btn.go:hover {
+  background: var(--color-warm);
+  opacity: 0.88;
+  color: var(--color-ground);
+}
+.dlg.bad .dlg-btn.go {
+  color: var(--color-alarm);
+  background: transparent;
+  border-color: var(--color-alarm-1);
+}
+.dlg.bad .dlg-btn.go:hover {
+  background: var(--color-alarm-1);
+  opacity: 1;
+  color: var(--color-alarm);
+}
+.dlg-btn:focus-visible {
+  outline: 1.5px solid var(--color-ink-3);
+  outline-offset: 2px;
+}
+/* The panel takes focus so the keyboard lands inside the dialog, but it is not a
+   control and must not look like one. */
+.dlg:focus {
+  outline: none;
+}
+.dlg:focus-visible {
+  outline: none;
+}
+
+@keyframes dlg-fade {
+  from {
+    opacity: 0;
+  }
+}
+/* Stated as hard stops rather than eased ranges: an eased flash reads as a glow,
+   and a glow is ambience. */
+/* build="quiet": the frame is still claimed and the contents still resolve, but
+   nothing goes bright. The wireframe carries the whole "this is new" claim, and
+   it starts sooner because there is no flash to wait for. */
+
+/* Empty until 0.13s, cross until 0.30s, empty until the fill at 0.42s. */
+/* Off by 48% of 0.72s = 0.35s, and the first line does not land until 0.46s —
+   that gap IS the beat. */
+@keyframes dlg-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.995);
+  }
+}
+@keyframes dlg-draw {
+  from {
+    transform: scaleX(0);
+  }
+}
+@keyframes dlg-ring {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}

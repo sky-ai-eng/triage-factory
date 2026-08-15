@@ -1,0 +1,261 @@
+/* Hold — see Hold.md. Tokens only. */
+
+.hld {
+  position: relative;
+  overflow: hidden;
+  box-sizing: border-box;
+  min-width: 96px;
+  padding: 6px 11px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--color-warm);
+  box-shadow: inset 0 0 0 1px var(--color-warm-3);
+  color: var(--color-ground);
+  transition:
+    background-color 0.12s linear,
+    color 0.12s linear;
+  font: 400 11px/1 var(--font-sans);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  text-align: center;
+  --hatch-ink: color-mix(in srgb, var(--color-warm) 46%, transparent);
+  --wave-ink: color-mix(in srgb, var(--color-warm) 30%, transparent);
+  --front-ink: var(--color-warm);
+}
+.hld:hover,
+.hld.on,
+.hld.done {
+  background-color: transparent;
+  color: var(--color-ink-1);
+}
+.hld[data-tone='alarm'] {
+  background: color-mix(in srgb, var(--color-alarm) 82%, transparent);
+  box-shadow: inset 0 0 0 1px var(--color-alarm-1);
+  color: var(--color-ground);
+  --hatch-ink: color-mix(in srgb, var(--color-alarm) 88%, transparent);
+  --wave-ink: color-mix(in srgb, var(--color-alarm) 26%, transparent);
+  --front-ink: var(--color-alarm);
+}
+.hld:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* Surface mode with triggers renders a div, so :disabled cannot apply. */
+.hld[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: default;
+}
+.hld:focus-visible {
+  outline: 1.5px solid var(--color-ink-3);
+  outline-offset: 2px;
+}
+
+/* HOVER — the fill drains, then the cross BLINKS. Both lines arrive at once,
+   hold for 0.4s, and go. Not a wipe and not persistent: a drawn line reads as
+   construction and a permanent one reads as state, while a blink reads as a
+   reading being taken — the frame was checked, and it is empty. */
+.hld-x1,
+.hld-x2 {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+}
+.hld-x1 {
+  background-image: linear-gradient(
+    to bottom right,
+    transparent calc(50% - 0.5px),
+    var(--hatch-ink) calc(50% - 0.5px),
+    var(--hatch-ink) calc(50% + 0.5px),
+    transparent calc(50% + 0.5px)
+  );
+}
+.hld-x2 {
+  background-image: linear-gradient(
+    to bottom left,
+    transparent calc(50% - 0.5px),
+    var(--hatch-ink) calc(50% - 0.5px),
+    var(--hatch-ink) calc(50% + 0.5px),
+    transparent calc(50% + 0.5px)
+  );
+}
+.hld:hover .hld-x1,
+.hld:hover .hld-x2,
+.hld.on .hld-x1,
+.hld.on .hld-x2,
+.hld.done .hld-x1,
+.hld.done .hld-x2 {
+  animation: hld-blink 0.22s linear both;
+}
+
+/* PRESS — rings expanding from the press point. The radius is a state value, so
+   it advances in stops and never interpolates between them. */
+.hld-wave,
+.hld-front {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.hld-wave {
+  background-color: var(--wave-ink);
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(0, 0, 0, 0.22) 0 1px,
+    transparent 1px 5px
+  );
+  clip-path: circle(var(--r, 0px) at var(--hx, 50%) var(--hy, 50%));
+}
+/* The frontier: one bright ring at the leading edge, the brightest thing in the
+   control. Drawn as a hard-stop radial so it is exactly 1.5px wherever it is. */
+.hld-front {
+  background: radial-gradient(
+    circle at var(--hx, 50%) var(--hy, 50%),
+    transparent 0 calc(var(--r, 0px) - 1.5px),
+    var(--front-ink) calc(var(--r, 0px) - 1.5px) var(--r, 0px),
+    transparent var(--r, 0px)
+  );
+}
+
+.hld-face {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+.hld-lbl {
+  position: relative;
+}
+.hld-count {
+  font: 400 9.5px/1 var(--font-mono);
+  color: color-mix(in srgb, var(--color-ink-1) 74%, transparent);
+  letter-spacing: 0.04em;
+}
+.hld[data-tone='alarm'] .hld-count {
+  color: color-mix(in srgb, var(--color-ink-1) 74%, transparent);
+}
+.hld[data-tone='alarm']:hover,
+.hld[data-tone='alarm'].on,
+.hld[data-tone='alarm'].done {
+  background-color: transparent;
+  color: var(--color-ink-1);
+}
+
+/* LANDING — the frame flashes twice, hard on and hard off. The same statement
+   Acquire makes when a value arrives: this is the moment it became true. */
+.hld.done .hld-wave,
+.hld.done .hld-front {
+  display: none;
+}
+
+.hld.done::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--color-ink-1);
+  animation: hld-land 0.22s linear both;
+  pointer-events: none;
+}
+.hld.done .hld-lbl {
+  color: var(--color-ground);
+  position: relative;
+  z-index: 1;
+}
+
+/* Hard stops: 0.11s empty, 0.09s lit, then gone. An eased blink is a glow, and a
+   glow is ambience. */
+@keyframes hld-blink {
+  0%,
+  49.9% {
+    opacity: 0;
+  }
+  50%,
+  89.9% {
+    opacity: 1;
+  }
+  90%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes hld-land {
+  0%,
+  34% {
+    opacity: 0.9;
+  }
+  35%,
+  52% {
+    opacity: 0;
+  }
+  53%,
+  72% {
+    opacity: 0.75;
+  }
+  73%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* SURFACE — the control wraps existing content instead of drawing a button. It
+   contributes no chrome of its own: the container it wraps keeps its own
+   background, padding and radius, and Hold only adds the measurement.
+
+   Hover must NOT drain or blink here. In button mode the drain says "this is a
+   thing you fill"; on a bar carrying several verbs it would fire whenever the
+   pointer crossed the bar at all, which is noise. The cross and the rings
+   appear only once a press has actually begun. */
+.hld[data-variant='surface'] {
+  min-width: 0;
+  padding: 0;
+  border-radius: var(--hld-radius, inherit);
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: default;
+  transition: none;
+  /* Fill the container it was given and lay its children out along it, so the
+     wrapper keeps the chrome (background, padding, radius) and Hold only
+     contributes the measurement. gap is inherited rather than fixed: the
+     container decides its own rhythm. */
+  display: flex;
+  align-items: center;
+  gap: var(--hld-gap, 12px);
+  padding: var(--hld-pad, 0);
+  width: 100%;
+  height: 100%;
+  /* A surface wraps real content, and that content may need to escape the
+     control's box — a picker drawing itself upward out of a selection bar, for
+     one. The corner clip the rings need moves onto the ring layers themselves
+     rather than being paid for by everything inside. */
+  overflow: visible;
+}
+.hld[data-variant='surface'] .hld-wave,
+.hld[data-variant='surface'] .hld-front,
+.hld[data-variant='surface']::after {
+  border-radius: var(--hld-radius, inherit);
+  overflow: hidden;
+}
+.hld[data-variant='surface']:hover {
+  background-color: transparent;
+  color: inherit;
+}
+/* No cross in surface mode. The wireframe beat says "this region is reserved and
+   empty", which is true of a button about to be filled and false of a bar that
+   is already full of labels. Only the rings run. */
+.hld[data-variant='surface'] .hld-x1,
+.hld[data-variant='surface'] .hld-x2 {
+  display: none;
+}
+.hld[data-variant='surface'] .hld-face {
+  display: contents;
+}
+/* The landing flash covers the surface but must not invert its text — the bar
+   has several labels and only one of them is the commit. */
+.hld[data-variant='surface'].done .hld-lbl {
+  color: inherit;
+}

@@ -1,0 +1,195 @@
+/* SourceCard.
+   Three states, one card. The surface says what you can do with it:
+   configured is raised and takes a click, unavailable is the same card sunk
+   into the ground, soon is an outline only.
+
+   Everything here is a selector on [data-state] — the component branches on
+   nothing but content. Hover in particular is a :hover rule, not React state:
+   a grid of five cards used to track five hovers, and a card whose ring stayed
+   lit after the pointer left was the recurring defect. */
+
+.tf-src {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /* Fills whatever box it is mounted in, so a row of cards shares one bottom
+     edge and the inert states can bottom-align their note. */
+  height: 100%;
+  box-sizing: border-box;
+  padding: 18px 20px 15px;
+  border-radius: 6px;
+  border: 1px solid var(--color-line-2);
+  background: var(--color-raised);
+  cursor: default;
+  transition: box-shadow 0.12s linear;
+}
+
+.tf-src[data-state='unavailable'] {
+  background: var(--color-sunk);
+}
+
+.tf-src[data-state='soon'] {
+  background: transparent;
+  border-style: dashed;
+}
+
+.tf-src[data-clickable] {
+  cursor: pointer;
+}
+
+/* The border stays put on hover; the warm ring is the response. A border that
+   changes color has to pick a light value, and this card lives on both the
+   app's warm paper and the system's dark ground. */
+.tf-src[data-clickable]:hover {
+  box-shadow:
+    0 1px 0 var(--color-tint-2),
+    0 0 0 1px var(--color-warm-4);
+}
+
+.tf-src[data-clickable]:focus-visible {
+  outline: 1.5px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.tf-src__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+}
+
+.tf-src__mark {
+  flex: none;
+  display: flex;
+  /* The default for the marks drawn in currentColor — Linear and Schedule,
+     neither of which is a connection yet. */
+  color: var(--color-ink-4);
+}
+
+/* GitHub's mark is brand black. In primary ink it survives either ground, which
+   is the only honest way to keep a black logo. */
+.tf-src__mark[data-mark='github'] {
+  color: var(--color-ink-1);
+}
+
+/* Grayscale rather than a second set of marks: one asset, two readings, and the
+   desaturated one still reads as the brand. */
+.tf-src:not([data-state='configured']) .tf-src__mark {
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+
+.tf-src__id {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+/* A name in full ink is a name you can act on. Both inert states step back to
+   secondary ink, and the mark steps back with them. */
+.tf-src__name {
+  font: var(--font-weight-medium) 14px / 1.2 var(--font-sans);
+  color: var(--color-ink-1);
+}
+
+.tf-src:not([data-state='configured']) .tf-src__name {
+  color: var(--color-ink-2);
+}
+
+.tf-src__scope {
+  font: var(--font-weight-regular) 10.5px / 1.4 var(--font-mono);
+  color: var(--color-ink-3);
+}
+
+.tf-src:not([data-state='configured']) .tf-src__scope {
+  color: var(--color-ink-4);
+}
+
+.tf-src__stats {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 15px;
+  margin-top: 15px;
+  border-top: 1px solid var(--color-line-1);
+}
+
+.tf-src__stat {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.tf-src__stat-label {
+  font: var(--font-weight-regular) var(--text-label) / 1.5 var(--font-mono);
+  color: var(--color-ink-3);
+}
+
+.tf-src__leader {
+  flex: 1;
+  border-bottom: 1px dotted var(--color-line-1);
+  transform: translateY(-3px);
+}
+
+.tf-src__stat-value {
+  font: var(--font-weight-regular) var(--text-label) / 1.5 var(--font-mono);
+  color: var(--color-ink-1);
+}
+
+.tf-src__stat-value[data-tone='warm'] {
+  color: var(--color-warm);
+}
+
+.tf-src__stat-value[data-tone='alarm'] {
+  color: var(--color-alarm);
+}
+
+.tf-src__foot {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 9px;
+  justify-content: flex-end;
+  padding-top: 15px;
+  margin-top: 15px;
+  border-top: 1px solid var(--color-line-1);
+}
+
+.tf-src[data-state='soon'] .tf-src__foot {
+  border-top-style: dashed;
+}
+
+.tf-src__note {
+  font: var(--font-weight-regular) var(--text-reported) / 1.55 var(--font-sans);
+  color: var(--color-ink-4);
+  text-wrap: pretty;
+}
+
+.tf-src[data-state='unavailable'] .tf-src__note {
+  color: var(--color-ink-3);
+}
+
+.tf-src__ask {
+  appearance: none;
+  margin: 0;
+  padding: 0 0 1px;
+  border: 0;
+  border-bottom: 1px solid var(--color-warm-3);
+  border-radius: 0;
+  background: none;
+  font: var(--font-weight-regular) 10.5px / 1 var(--font-mono);
+  color: var(--color-warm);
+}
+
+.tf-src__ask:hover {
+  border-bottom-color: var(--color-warm);
+}
+
+.tf-src__asked {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: var(--font-weight-regular) 10.5px / 1.3 var(--font-mono);
+  color: var(--color-ink-4);
+}

@@ -1,0 +1,121 @@
+/* Team settings. The page owns its own padding and rhythm — the shell owns the
+   frame and nothing else. */
+
+.ts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-10);
+  max-width: 1080px;
+}
+
+/* The header band: the team's headline figures, carried on every view. */
+.ts-band {
+  display: flex;
+  gap: var(--space-11);
+  padding-bottom: var(--space-8);
+  border-bottom: 1px solid var(--color-line-1);
+}
+
+.ts-fig {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Mono and tabular: the figure came from the system, so it aligns with every
+   other figure in the product. */
+.ts-fig-v {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 24px;
+  line-height: var(--leading-tight);
+  color: var(--color-ink-1);
+}
+
+.ts-fig-l {
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--color-ink-4);
+}
+
+.ts-sec {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.ts-h {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  font-weight: var(--font-weight-regular);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--color-ink-4);
+}
+
+.ts-note {
+  margin: 0;
+  font-size: var(--text-secondary);
+  line-height: var(--leading-prose);
+  color: var(--color-ink-3);
+  max-width: var(--container-measure);
+}
+
+.ts-error {
+  margin: 0;
+  font-size: var(--text-secondary);
+  color: var(--color-alarm);
+}
+
+.ts-empty {
+  font-size: var(--text-body);
+  color: var(--color-ink-3);
+}
+
+/* Five cards, wrapping. Each states its own state through its surface. */
+.ts-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+}
+
+/* In-flow, so an inset hairline and no cast. The frame is warm rather than
+   alarm: the card is not itself dangerous, the verb inside it is. */
+.ts-danger {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-9);
+  padding: var(--space-8);
+  border-radius: var(--radius-inflow);
+  box-shadow: var(--shadow-edge-alarm);
+  max-width: var(--container-measure);
+}
+
+.ts-danger-h {
+  font-size: var(--text-card-title);
+  letter-spacing: var(--tracking-card-title);
+  color: var(--color-ink-1);
+  margin-bottom: var(--space-3);
+}
+
+.ts-danger-btn {
+  flex: none;
+  appearance: none;
+  background: none;
+  border: 0;
+  font: inherit;
+  font-size: var(--text-ui);
+  color: var(--color-alarm);
+  padding: var(--space-3) var(--space-5);
+  border-radius: var(--radius-nested);
+  box-shadow: inset 0 0 0 1px var(--color-alarm-1);
+  transition: box-shadow var(--dur-hover) var(--ease-default);
+}
+
+.ts-danger-btn:hover {
+  box-shadow: inset 0 0 0 1px var(--color-alarm);
+}

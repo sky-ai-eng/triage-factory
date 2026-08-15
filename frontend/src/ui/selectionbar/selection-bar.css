@@ -1,0 +1,361 @@
+/* SelectionBar — see SelectionBar.md. Tokens with light fallbacks, so it
+   is also correct on a page that draws its own canvas. */
+
+.selbar-mount {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 14px;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* Nothing in a bar of verbs is text you want to select: a drag that starts on
+   "Hold to remove" would otherwise highlight the label instead of pressing it,
+   and a double-click anywhere selects the whole row of words. */
+.selbar {
+  position: relative;
+  pointer-events: auto;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-warm, #a85a3a) 8%, var(--color-raised, #fffdfb));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--color-warm, #a85a3a) 26%, transparent),
+    0 6px 20px rgba(42, 38, 34, 0.13);
+  user-select: none;
+  -webkit-user-select: none;
+  --hld-pad: 8px 10px 8px 14px;
+  --hld-gap: 16px;
+  --hld-radius: 8px;
+}
+.selbar,
+.selbar * {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Without a danger action there is no Hold to lay the row out, so the bar does
+   it itself with the same padding and rhythm. */
+.selbar-row {
+  display: flex;
+  align-items: center;
+  gap: var(--hld-gap);
+  padding: var(--hld-pad);
+}
+
+.selbar-count {
+  position: relative;
+  flex: none;
+  font: 400 10.5px/1 var(--font-mono, 'DM Mono', monospace);
+  color: var(--color-warm, #a85a3a);
+}
+.selbar-sep {
+  position: relative;
+  flex: none;
+  width: 1px;
+  height: 14px;
+  background: color-mix(in srgb, var(--color-ink-4, #9a938c) 34%, transparent);
+}
+.selbar-act {
+  position: relative;
+  flex: none;
+  padding: 9px 7px;
+  margin: -9px -7px;
+  font: 400 10.5px/1 var(--font-mono, 'DM Mono', monospace);
+  color: var(--color-ink-1, #1a1a1a);
+  cursor: pointer;
+  transition: color 0.12s linear;
+}
+.selbar-act:hover {
+  color: var(--color-warm, #a85a3a);
+}
+/* Each verb is a tab stop, so it has to say when it holds focus — the hold
+   gesture is keyboard-driven from here. */
+.selbar-act:focus-visible {
+  outline: none;
+  color: var(--color-warm, #a85a3a);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warm, #a85a3a) 45%, transparent);
+}
+.selbar-act[data-tone='alarm']:focus-visible {
+  color: var(--color-alarm, #a84545);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-alarm, #a84545) 45%, transparent);
+}
+.selbar-act[data-tone='alarm'] {
+  color: var(--color-alarm, #a84545);
+}
+/* The destructive verb gets a little more air than the rhythm gives, so it is
+   not read as the next item in a list of equals. */
+.selbar-act[data-selbar-danger] {
+  margin-left: -3px;
+}
+/* The trailing rule belongs to the dismiss, not to the verbs: it rides closer
+   to the × so the pair reads as one thing set apart from the actions. */
+.selbar-sep-tail {
+  margin-left: 8px;
+  margin-right: -8px;
+}
+.selbar-act[data-tone='alarm']:hover {
+  color: var(--color-alarm, #a84545);
+}
+.selbar-dismiss {
+  position: relative;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  margin: -6px -6px -6px -6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  padding: 0;
+  background: none;
+  border-radius: 5px;
+  font: 400 11px/1 var(--font-mono, 'DM Mono', monospace);
+  color: var(--color-ink-4, #9a938c);
+  cursor: pointer;
+  transition: color 0.12s linear;
+}
+.selbar-dismiss:hover {
+  color: var(--color-ink-2, #4a4541);
+}
+
+/* THE PICKER — it draws itself rather than appearing. No fill, no rectangle and
+   no shadow: separation is a soft-edged blur field with no border to read as a
+   panel, so the bar underneath stays half-legible instead of being covered. */
+.selbar-picker {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: none;
+  padding: 9px 7px;
+  margin: -9px -7px;
+  font: 400 10.5px/1 var(--font-mono, 'DM Mono', monospace);
+  color: var(--color-ink-1, #1a1a1a);
+  cursor: pointer;
+  transition: color 0.12s linear;
+}
+.selbar-picker:hover {
+  color: var(--color-warm, #a85a3a);
+}
+/* The sizer reserves the closed label's width and is never seen; the face is
+   painted over it. Both states therefore measure identically and the bar does
+   not resize when the picker opens. */
+.selbar-sizer {
+  visibility: hidden;
+  pointer-events: none;
+}
+.selbar-face {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+.selbar-face .selbar-held {
+  flex: 1;
+  text-align: center;
+}
+
+.selbar-picker .selbar-held {
+  padding-left: 8px;
+  color: var(--color-ink-4, #9a938c);
+}
+
+/* Absolute, so it adds no width: the terminus is painted into the slot the face
+   reserves for it rather than being laid out beside the sizer. */
+.selbar-term {
+  position: relative;
+  flex: none;
+  width: 9px;
+  height: 9px;
+}
+.selbar-x {
+  position: absolute;
+  inset: 0;
+  opacity: 0.9;
+  animation: selbar-term 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.selbar-x i {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  background: var(--color-warm, #a85a3a);
+}
+.selbar-x i:first-child {
+  transform: translateX(-50%) rotate(45deg);
+}
+.selbar-x i:last-child {
+  transform: translateX(-50%) rotate(-45deg);
+}
+
+.selbar-stem {
+  position: absolute;
+  left: 50%;
+  bottom: 50%;
+  width: 1px;
+  background: color-mix(in srgb, var(--color-warm, #a85a3a) 55%, transparent);
+  transform: translateX(-50%);
+  transform-origin: bottom;
+}
+
+/* Geometry is written by the component from the measured option block; only
+   the effect lives here. Starts collapsed so a first paint before measurement
+   cannot flash a blurred rectangle. */
+.selbar-haze {
+  position: absolute;
+  left: 0;
+  bottom: 32px;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  backdrop-filter: blur(9px) saturate(0.6);
+  -webkit-backdrop-filter: blur(9px) saturate(0.6);
+  animation: selbar-haze 0.26s linear both;
+}
+
+.selbar-opts {
+  position: absolute;
+  left: 50%;
+  bottom: 32px;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  align-items: flex-start;
+}
+.selbar-opt {
+  position: relative;
+  padding-left: 24px;
+  border: 0;
+  background: none;
+  text-align: left;
+  font: 400 11.5px/1.5 var(--font-sans, Archivo, system-ui, sans-serif);
+  color: var(--color-ink-1, #1a1a1a);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.12s linear;
+  animation: selbar-lab 0.24s cubic-bezier(0.22, 1, 0.36, 1) var(--d, 0s) both;
+}
+/* Hover is a colour change, never a fill: a tinted row would be the rectangle
+   this whole treatment exists to avoid. */
+.selbar-opt:hover {
+  color: var(--color-warm, #a85a3a);
+}
+.selbar-opt.on {
+  color: var(--color-warm, #a85a3a);
+}
+.selbar-opt.off {
+  color: var(--color-ink-3, #6b6560);
+  cursor: default;
+}
+.selbar-opt.off:hover {
+  color: var(--color-ink-3, #6b6560);
+}
+.selbar-opt i {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 1px;
+  background: color-mix(in srgb, var(--color-warm, #a85a3a) 40%, transparent);
+  animation: selbar-tick 0.22s cubic-bezier(0.22, 1, 0.36, 1) var(--d, 0s) both;
+}
+.selbar-opt.off i {
+  background: color-mix(in srgb, var(--color-warm, #a85a3a) 22%, transparent);
+}
+.selbar-opt em {
+  font-style: normal;
+  color: currentColor;
+  opacity: 0.55;
+}
+.selbar-opt.off em {
+  opacity: 0.72;
+}
+
+/* UNDO — the change has already landed; this is the window to reverse it. */
+.selbar-undo {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 10px 8px 14px;
+}
+/* Dial then verb, set as one thing. */
+.selbar-undo-act {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.selbar-undo-msg {
+  font: 400 10.5px/1 var(--font-mono, 'DM Mono', monospace);
+  color: var(--color-ink-1, #1a1a1a);
+}
+@keyframes selbar-term {
+  from {
+    transform: scale(0.25);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+}
+@keyframes selbar-haze {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes selbar-lab {
+  from {
+    opacity: 0;
+    transform: translateX(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes selbar-tick {
+  from {
+    width: 0;
+  }
+  to {
+    width: 11px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .selbar-term,
+  .selbar-haze,
+  .selbar-opt,
+  .selbar-opt i {
+    animation-duration: 0.01s;
+  }
+}
+
+/* The undo verb is a real <button> now — it was a clickable span, which meant
+   the one control offered during the undo window could not be reached by
+   keyboard. It inherits .selbar-act's type and color, so it only needs the
+   element defaults taken off. */
+button.selbar-act {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+}
+
+/* The picker is a tab stop (role="button", aria-haspopup), so it says when it
+   holds focus the same way a verb does. */
+.selbar-picker:focus-visible {
+  outline: none;
+  color: var(--color-warm);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warm) 45%, transparent);
+}

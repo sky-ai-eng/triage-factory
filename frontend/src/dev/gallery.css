@@ -360,3 +360,65 @@
   border-radius: var(--radius-nested);
   box-shadow: var(--shadow-edge);
 }
+
+/* A stand-in for the surface a floating component sits over. Positioned,
+   because barPosition="absolute" resolves against the nearest positioned
+   ancestor — the same requirement a real table has. */
+.gal-barmount {
+  position: relative;
+  min-height: 190px;
+  border-radius: var(--radius-inflow);
+  box-shadow: var(--shadow-edge);
+  background: var(--color-tint-1);
+  padding: var(--space-6);
+  margin-bottom: var(--space-7);
+}
+
+.gal-barmount > .gal-spec-tag {
+  display: block;
+}
+
+/* The table measures its auto page size against the tightest clipping or
+   scrolling ancestor, so the mount states a height rather than growing with
+   its content — a box that clips and still grows feeds the table's own height
+   back in. */
+.gal-tablemount {
+  position: relative;
+  margin-bottom: var(--space-7);
+}
+
+/* A stand-in for the surface a floating component sits over. Positioned,
+   because barPosition="absolute" resolves against the nearest positioned
+   ancestor — the same requirement a real table has. */
+.gal-barmount {
+  position: relative;
+  min-height: 190px;
+  border-radius: var(--radius-inflow);
+  box-shadow: var(--shadow-edge);
+  background: var(--color-tint-1);
+  padding: var(--space-6);
+  margin-bottom: var(--space-7);
+}
+
+.gal-barmount > .gal-spec-tag {
+  display: block;
+}
+
+/* The table measures its auto page size against the tightest clipping or
+   scrolling ancestor, so a mount that both clips and grows would feed the
+   table's own height back in. This one only positions. */
+.gal-tablemount {
+  position: relative;
+  margin-bottom: var(--space-7);
+}
+
+.gal-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  margin-bottom: var(--space-7);
+}
+
+.gal-boardmount {
+  margin-bottom: var(--space-7);
+}

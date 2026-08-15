@@ -1,0 +1,852 @@
+/* Table.
+   Structure, color and state are all here. The component computes only what has
+   to be measured and hands it over as custom properties:
+
+     --tb-grid     the column tracks, from the sizing pass
+     --tb-d        each row's build delay
+     --tb-run      how far the build beam travels
+     --tb-row-bg   the caller's tint for the one row that is the one
+
+   Everything else is a selector. Hover in particular: rows used to set
+   e.currentTarget.style.background on mouseenter and put it back on mouseleave,
+   which is why a row could keep its wash after the pointer had moved on — the
+   defect that came back three times. A :hover rule cannot get stuck. */
+
+.tb {
+  --tb-gap: 10px;
+}
+
+/* ---- the title row ------------------------------------------------------ */
+
+.tb-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* One height whether or not the row carries controls, so two tables stacked
+     in the same region start their columns on the same line. */
+  min-height: 32px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--color-line-1);
+}
+
+.tb-spacer {
+  flex: 1;
+}
+
+.tb-title-label {
+  font: var(--font-weight-regular) 9px / 1 var(--font-mono);
+  letter-spacing: 0.16em;
+  color: var(--color-ink-4);
+}
+
+.tb-title-label[data-selected],
+.tb-selcount {
+  font: var(--font-weight-regular) 9px / 1 var(--font-mono);
+  letter-spacing: 0.16em;
+  color: var(--color-warm);
+}
+
+.tb-divider {
+  width: 1px;
+  height: 10px;
+  background: var(--color-line-2);
+}
+
+.tb-verb,
+.tb-clear,
+.tb-add {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: var(--font-weight-regular) var(--text-label) / 1 var(--font-mono);
+}
+
+.tb-verb {
+  color: var(--color-ink-3);
+}
+.tb-verb:hover {
+  color: var(--color-ink-1);
+}
+.tb-verb[data-tone='bad'],
+.tb-verb[data-tone='bad']:hover {
+  color: var(--color-alarm);
+}
+
+.tb-clear {
+  color: var(--color-ink-4);
+}
+.tb-clear:hover {
+  color: var(--color-ink-2);
+}
+
+.tb-headaction {
+  font: var(--font-weight-regular) var(--text-label) / 1 var(--font-mono);
+  color: var(--color-warm);
+  cursor: pointer;
+}
+
+.tb-add {
+  color: var(--color-warm);
+  white-space: nowrap;
+  border-radius: 4px;
+}
+
+.tb-add[data-draftable] {
+  padding: 4px 9px;
+}
+
+/* Open, the control is a pressed thing: the draft row below is its state, and
+   this is where it came from. */
+.tb-add[data-open] {
+  background: var(--color-warm-1);
+  box-shadow: inset 0 0 0 1px var(--color-warm-3);
+}
+
+/* ---- the column header -------------------------------------------------- */
+
+.tb-head {
+  display: grid;
+  grid-template-columns: var(--tb-grid);
+  align-items: center;
+  column-gap: var(--tb-gap);
+  padding: 8px 12px 6px;
+  /* The checkbox column is taller than a caps label, so a selectable table's
+     header would otherwise sit 4px below an unselectable one. */
+  min-height: 28px;
+  margin: 0;
+  border-bottom: 1px solid var(--color-line-1);
+}
+
+.tb-col {
+  font: var(--font-weight-regular) 8.5px / 1 var(--font-mono);
+  letter-spacing: 0.16em;
+  color: var(--color-ink-4);
+  cursor: default;
+  justify-self: stretch;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  /* The whole cell is the target, not just its glyphs: a click in the padding
+     above or below the label reads as a miss otherwise. */
+  align-self: stretch;
+  padding: 4px 0;
+  margin: -4px 0;
+  /* A sort caret must not be able to wrap its own label: the header is one line
+     whether or not it is the active sort. */
+  white-space: nowrap;
+}
+
+.tb-col[data-sortable] {
+  cursor: pointer;
+}
+.tb-col[data-active] {
+  color: var(--color-ink-2);
+}
+.tb-col[data-align='end'] {
+  justify-content: flex-end;
+}
+.tb-col[data-align='center'] {
+  justify-content: center;
+}
+
+.tb-col:focus-visible {
+  outline: 1.5px solid var(--color-focus);
+  outline-offset: 1px;
+}
+
+.tb-caret {
+  width: 4px;
+  height: 4px;
+  border-right: 1.2px solid var(--color-warm);
+  border-bottom: 1.2px solid var(--color-warm);
+}
+
+/* Descending (highest first) points down; ascending points up. */
+.tb-caret[data-dir='up'] {
+  transform: rotate(-135deg);
+}
+.tb-caret[data-dir='down'] {
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+.tb-empty {
+  padding: 10px 8px 10px 12px;
+  font: var(--font-weight-regular) var(--text-reported) / 1.5 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+/* ---- rows -------------------------------------------------------------- */
+
+.tb-body {
+  position: relative;
+}
+
+.tb-row {
+  display: grid;
+  grid-template-columns: var(--tb-grid);
+  align-items: center;
+  column-gap: var(--tb-gap);
+  height: 35px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  position: relative;
+  margin: 0;
+  border-radius: 4px;
+  cursor: default;
+  background: var(--tb-row-bg, transparent);
+}
+
+.tb-row[data-selectable] {
+  cursor: pointer;
+}
+
+/* Hover belongs to the pointer. Selection outranks it, and the caller's own row
+   tint sits underneath both. */
+.tb-row[data-selectable]:hover:not([data-on]) {
+  background: var(--color-tint-2);
+}
+.tb-row[data-on] {
+  background: var(--color-tint-3);
+}
+
+.tb-cell {
+  font: var(--font-weight-regular) var(--text-reported) / 1.5 var(--font-mono);
+  color: var(--color-ink-4);
+  /* Stretch even when right-aligned: an end-justified grid item sizes to its
+     content and overflows the track, sliding under the column to its left
+     instead of clipping. */
+  justify-self: stretch;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.tb-cell[data-sans] {
+  font: var(--font-weight-regular) var(--text-card-title) / 1.5 var(--font-sans);
+}
+
+.tb-cell[data-align='end'] {
+  text-align: right;
+}
+.tb-cell[data-align='center'] {
+  text-align: center;
+}
+
+.tb-cell-node {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  justify-self: stretch;
+  min-width: 0;
+  overflow: hidden;
+  /* The cell is a query container, so a cell that wants to say the same thing
+     more briefly when it is narrow can do it in its own CSS — the table does
+     not need to know. */
+  container-type: inline-size;
+}
+
+.tb-cell-node[data-align='end'] {
+  justify-content: flex-end;
+}
+.tb-cell-node[data-align='center'] {
+  justify-content: center;
+}
+
+.tb-tip {
+  position: absolute;
+  bottom: 100%;
+  margin-bottom: -4px;
+  z-index: 60;
+  pointer-events: none;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: var(--color-ink-1);
+  color: var(--color-ground);
+  font: var(--font-weight-regular) 10.5px / 1.5 var(--font-mono);
+  white-space: nowrap;
+}
+
+.tb-fill {
+  flex: none;
+}
+
+/* ---- cell types -------------------------------------------------------- */
+
+.tb-identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tb-avatar {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+}
+
+.tb-identity-name {
+  font: var(--font-weight-regular) var(--text-card-title) / 1.5 var(--font-sans);
+  color: var(--color-ink-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tb-spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 14px;
+  width: 100%;
+}
+
+.tb-spark i {
+  flex: 1;
+  background: var(--color-warm);
+  border-radius: 1px;
+}
+
+.tb-mark {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.tb-mark[data-align='end'] {
+  justify-content: flex-end;
+}
+.tb-mark svg {
+  display: block;
+  fill: var(--color-line-2);
+}
+.tb-mark[data-set] svg {
+  fill: var(--color-warm);
+}
+
+/* A locked toggle is ON and cannot be switched off — that is not the same as
+   unavailable, so it keeps full contrast and only loses the cursor and the
+   press. Dimming it would say the value is in doubt. */
+.tb-toggle {
+  display: flex;
+  cursor: pointer;
+}
+
+.tb-toggle[data-locked] {
+  cursor: default;
+}
+
+.tb-toggle[data-locked] > * {
+  pointer-events: none;
+}
+
+.tb-share {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.tb-share-track {
+  flex: 1;
+  display: flex;
+  height: 4px;
+  background: repeating-linear-gradient(-45deg, var(--color-line-2) 0 1px, transparent 1px 4px);
+}
+
+.tb-share-track i {
+  height: 4px;
+  background: var(--color-warm);
+}
+
+.tb-share-value {
+  flex: none;
+  text-align: right;
+  font: var(--font-weight-regular) var(--text-label) / 1.5 var(--font-mono);
+  color: var(--color-ink-2);
+}
+
+/* ---- the draft page ---------------------------------------------------- */
+
+.tb-draft {
+  position: relative;
+  z-index: 3;
+}
+
+.tb-draft-row {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: var(--tb-grid);
+  align-items: center;
+  column-gap: var(--tb-gap);
+  /* Taller than a data row: it is being written, not read. */
+  height: 42px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  background: var(--color-warm-1);
+}
+
+.tb-draft-edge {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--color-warm);
+}
+
+/* One pass across the row when it opens: the flash says where the page changed,
+   so the row itself needs no outline to be found. */
+.tb-draft-sweep {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 38%;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--color-warm-3), transparent);
+  animation: tb-sweep 0.5s ease-out 1 both;
+}
+
+.tb-draft-underline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--color-warm-3);
+}
+
+.tb-draft-input {
+  justify-self: stretch;
+  min-width: 0;
+  appearance: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  /* No indent, even in an identity column: the draft page shows no roster rows
+     to line up with, and the header above it is the only reference the reader
+     has. Reserving space for an avatar that is not drawn just looks like a lost
+     tab stop. */
+  padding: 0;
+  font: var(--font-weight-regular) var(--text-reported) / 1.5 var(--font-mono);
+  color: var(--color-ink-1);
+  caret-color: var(--color-warm);
+}
+
+.tb-draft-input[data-sans] {
+  font: var(--font-weight-regular) var(--text-card-title) / 1.5 var(--font-sans);
+}
+
+.tb-field {
+  justify-self: stretch;
+  min-width: 0;
+  position: relative;
+  display: flex;
+}
+
+.tb-field-btn {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tb-field-val {
+  font: var(--font-weight-regular) var(--text-label) / 1.4 var(--font-mono);
+  color: var(--color-ink-2);
+}
+
+.tb-field-caret {
+  width: 4.5px;
+  height: 4.5px;
+  border-right: 1.2px solid var(--color-ink-3);
+  border-bottom: 1.2px solid var(--color-ink-3);
+  transform: rotate(45deg) translateY(-1px);
+}
+
+.tb-menu {
+  position: absolute;
+  top: 26px;
+  left: -8px;
+  min-width: 96px;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-raised);
+  border: 1px solid var(--color-line-2);
+  border-radius: 4px;
+  box-shadow: 0 10px 26px -16px color-mix(in srgb, var(--color-ink-1) 45%, transparent);
+  overflow: hidden;
+  z-index: 4;
+}
+
+.tb-menu-opt {
+  appearance: none;
+  margin: 0;
+  border: 0;
+  padding: 6px 10px;
+  text-align: left;
+  background: transparent;
+  font: var(--font-weight-regular) var(--text-label) / 1.4 var(--font-mono);
+  color: var(--color-ink-2);
+}
+
+.tb-menu-opt[data-on] {
+  color: var(--color-warm);
+  background: var(--color-warm-1);
+}
+
+.tb-menu-opt:hover {
+  background: var(--color-tint-2);
+}
+
+.tb-blank {
+  justify-self: stretch;
+  text-align: left;
+  font: var(--font-weight-regular) var(--text-reported) / 1.5 var(--font-mono);
+  color: var(--color-line-2);
+}
+
+.tb-blank[data-align='end'] {
+  text-align: right;
+}
+
+.tb-previews {
+  display: flex;
+  flex-direction: column;
+}
+
+.tb-preview {
+  display: grid;
+  grid-template-columns: var(--tb-grid);
+  align-items: center;
+  column-gap: var(--tb-gap);
+  height: 35px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  background: transparent;
+}
+
+.tb-preview[data-lead] {
+  background: var(--color-tint-2);
+}
+
+.tb-preview[data-disabled] {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.tb-preview-id {
+  justify-self: stretch;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  /* Same left edge as the draft row and the header. */
+  padding-left: 0;
+  overflow: hidden;
+}
+
+.tb-preview-name {
+  font: var(--font-weight-regular) var(--text-card-title) / 1.5 var(--font-sans);
+  color: var(--color-ink-2);
+  white-space: nowrap;
+}
+
+.tb-preview[data-disabled] .tb-preview-name {
+  color: var(--color-ink-4);
+}
+
+.tb-preview-note {
+  font: var(--font-weight-regular) 9.5px / 1.5 var(--font-mono);
+  color: var(--color-ink-4);
+  white-space: nowrap;
+}
+
+.tb-preview-cell {
+  justify-self: stretch;
+  text-align: left;
+  font: var(--font-weight-regular) var(--text-label) / 1.5 var(--font-mono);
+  color: var(--color-line-2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.tb-preview-cell[data-set] {
+  color: var(--color-ink-4);
+}
+.tb-preview-cell[data-align='end'] {
+  text-align: right;
+}
+
+.tb-hint {
+  padding: 6px 12px 8px;
+  font: var(--font-weight-regular) 9.5px / 1.5 var(--font-mono);
+  color: var(--color-ink-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- the staging strip ------------------------------------------------- */
+
+/* Staged people are pills, not rows, and the strip scrolls sideways without
+   bound so clearing the search cannot take the staged set with it. */
+.tb-staged {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 2px;
+  padding: 5px 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  border-top: 1px solid var(--color-line-1);
+  scrollbar-width: thin;
+}
+
+.tb-pill {
+  appearance: none;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 3px 7px 3px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-warm) 6%, transparent);
+  box-shadow: inset 0 0 0 1px var(--color-warm-3);
+  font: var(--font-weight-regular) var(--text-label) / 1.5 var(--font-mono);
+  color: var(--color-ink-1);
+}
+
+.tb-pill-val {
+  color: var(--color-ink-3);
+}
+.tb-pill-x {
+  color: var(--color-warm);
+}
+
+/* ---- the pager -------------------------------------------------------- */
+
+.tb-pager {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-top: 11px;
+  border-top: 1px solid var(--color-line-2);
+}
+
+.tb-pager-footer {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.tb-pager-count {
+  font: var(--font-weight-regular) 10.5px / 1.5 var(--font-mono);
+  color: var(--color-ink-4);
+}
+
+.tb-pages {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.tb-page {
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: var(--font-weight-regular) var(--text-label) / 1 var(--font-mono);
+  background: transparent;
+  color: var(--color-line-2);
+  box-shadow: inset 0 0 0 1px var(--color-line-1);
+  cursor: default;
+}
+
+.tb-page[data-live] {
+  color: var(--color-ink-2);
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+  cursor: pointer;
+}
+
+.tb-page[data-on] {
+  color: var(--color-ground);
+  background: var(--color-ink-1);
+  box-shadow: none;
+}
+
+/* The draft page sits apart from the numbers it is not one of. */
+.tb-page[data-draft] {
+  margin-right: 7px;
+  color: var(--color-warm);
+  box-shadow: inset 0 0 0 1px var(--color-warm-3);
+  cursor: pointer;
+}
+
+.tb-page[data-draft][data-on] {
+  color: var(--color-ground);
+  background: var(--color-warm);
+  box-shadow: none;
+}
+
+/* ---- the selection bar's slot ----------------------------------------- */
+
+.tb-bar-slot {
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  padding-top: 16px;
+}
+
+.tb-bar-float {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  justify-content: center;
+  padding: 0 0 8px;
+  pointer-events: none;
+  z-index: 180;
+}
+
+.tb-bar-float[data-pos='fixed'] {
+  position: fixed;
+}
+.tb-bar-float[data-pos='absolute'] {
+  position: absolute;
+}
+.tb-bar-inner {
+  pointer-events: auto;
+}
+
+/* ---- build ----------------------------------------------------------- */
+
+/* The table arriving as a scan rather than a fade, and the same event the models
+   table runs: a row is a reserved frame that fills, hatched while pending and
+   resolved once the beam has passed it. Delay per row comes from --tb-d so the
+   order is the render's, not an nth-child guess. */
+@keyframes tb-fill {
+  0% {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  30% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes tb-hatch {
+  0% {
+    opacity: 1;
+  }
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes tb-beam {
+  0% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  12% {
+    opacity: 0.9;
+  }
+  78% {
+    opacity: 0.55;
+  }
+  100% {
+    transform: translateY(var(--tb-run, 280px));
+    opacity: 0;
+  }
+}
+
+@keyframes tb-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes tb-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+[data-tbuild] [data-trow] {
+  animation: tb-fill var(--dur-content) var(--ease-default) both;
+  animation-delay: var(--tb-d, 0.2s);
+}
+
+[data-tbuild] [data-trow]::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 4px;
+  pointer-events: none;
+  background: repeating-linear-gradient(45deg, var(--color-line-2) 0 1px, transparent 1px 6px);
+  animation: tb-hatch var(--dur-content) linear both;
+  animation-delay: inherit;
+}
+
+.tb-beam {
+  position: absolute;
+  left: -6px;
+  right: -6px;
+  top: 0;
+  height: 1px;
+  background: var(--color-warm);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  animation: tb-beam 0.46s cubic-bezier(0.33, 0, 0.2, 1) 0.17s both;
+}

@@ -155,7 +155,7 @@ export default function Shell() {
     // The provider wraps the shell rather than sitting inside it, so a page can
     // ask for the whole screen and have the answer reach the chrome above it.
     <ChromeProvider>
-      {(immersive) => (
+      {({ immersive, header }) => (
         <UiShell
           immersive={immersive}
           mode={isMulti ? 'multi' : 'local'}
@@ -171,11 +171,14 @@ export default function Shell() {
           teams={teamNames}
           route={route}
           onRoute={onRoute}
-          // The header band is the shell's; what fills it is the page's. Until
-          // pages supply their own crumbs and title, the rail's name for where you
-          // are is the honest answer — better than an empty band, and replaced page
-          // by page as each one is rebuilt.
-          title={TITLES[route] ?? ''}
+          // The header band is the shell's; what fills it is the page's. A page
+          // that has something better to say sends it over ChromeContext; until
+          // one does, the rail's name for where you are is the honest answer.
+          crumbs={header?.crumbs}
+          title={header?.title ?? TITLES[route] ?? ''}
+          subtitle={header?.subtitle}
+          actions={header?.actions}
+          onTitleSave={header?.onTitleSave}
           needs={null}
           running={null}
           queued={null}
