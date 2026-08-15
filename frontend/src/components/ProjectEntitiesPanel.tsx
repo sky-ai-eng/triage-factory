@@ -1,6 +1,6 @@
 import { useEffect, useCallback, useState } from 'react'
 import { ChevronDown, ExternalLink } from 'lucide-react'
-import { readError } from '../lib/api'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { toast } from './Toast/toastStore'
 import { useWebSocket } from '../hooks/useWebSocket'
 
@@ -39,22 +39,15 @@ export default function ProjectEntitiesPanel({ projectId }: Props) {
     let cancelled = false
     ;(async () => {
       try {
-        const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/entities`)
-        if (cancelled) return
-        if (!res.ok) {
-          const msg = await readError(res, 'Failed to load entities')
-          if (cancelled) return
-          setLoadError(msg)
-          toast.error(msg)
-          return
-        }
-        const data = (await res.json()) as { entities: ProjectEntity[] }
+        const data = await apiJSON<{ entities: ProjectEntity[] }>(
+          `/api/projects/${encodeURIComponent(projectId)}/entities`,
+        )
         if (cancelled) return
         setEntities(data.entities ?? [])
         setLoadError('')
       } catch (err) {
         if (cancelled) return
-        const msg = `Failed to load entities: ${(err as Error).message}`
+        const msg = httpErrorMessage(err, "Could not load the project's entities.")
         setLoadError(msg)
         toast.error(msg)
       }

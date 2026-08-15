@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ActivityAction } from '../types'
-import { readError } from '../lib/api'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { ActionRow } from './ActionRow'
 
 // ActionList — every external write one run performed, newest first. The
@@ -40,28 +40,32 @@ export default function ActionList({ runId, refreshKey }: Props) {
   const load = useCallback(async () => {
     const gen = ++generation.current
     try {
-      const res = await fetch(`/api/agent/conversations/${runId}/actions`)
-      if (!res.ok) throw new Error(await readError(res, "Couldn't load actions"))
-      const data = (await res.json()) as ActivityAction[]
+      const data = await apiJSON<ActivityAction[]>(`/api/agent/conversations/${runId}/actions`)
       if (generation.current === gen) {
         setActions(data ?? [])
         setError(null)
       }
     } catch (err) {
       if (generation.current === gen) {
-        setError(err instanceof Error ? err.message : String(err))
+        setError(httpErrorMessage(err, "Couldn't load this run's actions."))
       }
     }
   }, [runId])
 
+  // A run change resets to the loading state. The reset is the point — it must
+  // land before the new run's rows do, so it is synchronous by design.
   useEffect(() => {
     generation.current++
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setActions(null)
     setError(null)
   }, [runId])
 
   useEffect(() => {
     if (!runId) return
+    // Fetch-on-runId-change: load owns its own setState calls; the effect just
+    // kicks it. Same safe pattern AuthContext uses.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load()
   }, [runId, refreshKey, load])
 

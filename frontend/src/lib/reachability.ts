@@ -6,6 +6,8 @@
 // is a 400. See internal/server/reachability_handlers.go +
 // internal/reachability/reachability.go.
 
+import { apiJSON, HttpError } from './apiClient'
+
 // ReachabilityResult mirrors the backend reachability.Result. `reachable` is
 // the verdict; `reason` is a short classified cause ("dns", "timeout", "tls",
 // "connection refused", …) present only when unreachable; `status` is the HTTP
@@ -44,28 +46,24 @@ export function reachabilityMessage(result: ReachabilityResult): string {
 // "fix your URL" case shares the unreachable shape; a failure reaching our OWN
 // server becomes reason "network".
 async function probe(path: string, url: string): Promise<ReachabilityResult> {
-  let res: Response
   try {
-    res = await fetch(path, {
+    return await apiJSON<ReachabilityResult>(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url: url.trim() }),
     })
-  } catch {
+  } catch (e) {
+    if (e instanceof HttpError) {
+      if (e.status === 400) return { reachable: false, reason: 'invalid_url' }
+      // A 2xx that didn't parse is apiJSON's non-JSON guard: our server reached
+      // us but sent a garbled body. Same `network` reason — the message must
+      // not claim the *host* was unreachable — but no `status`, since nothing
+      // failed with one.
+      if (e.status < 400) return { reachable: false, reason: 'network' }
+      return { reachable: false, reason: 'network', status: e.status }
+    }
     return { reachable: false, reason: 'network' }
   }
-  if (res.status === 400) {
-    return { reachable: false, reason: 'invalid_url' }
-  }
-  if (!res.ok) {
-    return { reachable: false, reason: 'network', status: res.status }
-  }
-  // A parse failure on a 200 means the server reached us but sent a garbled
-  // body — tag it `network` so the message doesn't claim the *host* was
-  // unreachable (the default-case copy), which would be misleading.
-  return (await res
-    .json()
-    .catch(() => ({ reachable: false, reason: 'network' }))) as ReachabilityResult
 }
 
 // hostOf renders the host (no scheme) for a confirmed-URL summary, falling

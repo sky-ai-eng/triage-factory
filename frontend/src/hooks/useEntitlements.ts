@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react'
+import { apiJSON } from '../lib/apiClient'
 
 // Shared store for GET /api/entitlements — the gated EE features licensed in
 // this deployment (for the viewer's active org in multi mode). Mirrors the
@@ -43,10 +44,8 @@ function setState(next: State) {
 function load(): Promise<void> {
   if (inFlight) return inFlight
   const gen = generation
-  inFlight = fetch('/api/entitlements')
-    .then(async (r) => {
-      if (!r.ok) throw new Error(`entitlements probe failed (${r.status})`)
-      const data = (await r.json()) as { features?: string[] }
+  inFlight = apiJSON<{ features?: string[] }>('/api/entitlements')
+    .then((data) => {
       if (gen !== generation) return // superseded — a newer invalidation won
       setState({ features: new Set(data.features ?? []), loaded: true })
     })

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ActivityAction, ActivityArtifact, ArtifactKind } from '../types'
-import { readError } from '../lib/api'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { ArtifactRow } from './ArtifactRow'
 import { ActionRow } from './ActionRow'
 import {
@@ -166,14 +166,12 @@ export default function ActivityFeed({
     setError(null)
     ;(async () => {
       try {
-        const res = await fetch(pageURL)
-        if (!res.ok) throw new Error(await readError(res, "Couldn't load activity"))
-        const data = ((await res.json()) as FeedRow[] | null) ?? []
+        const data = (await apiJSON<FeedRow[] | null>(pageURL)) ?? []
         if (!cancelled) {
           setLoaded({ mode, url: pageURL, rows: data, hasMore: data.length === PAGE_SIZE })
         }
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err))
+        if (!cancelled) setError(httpErrorMessage(err, "Couldn't load activity."))
       }
     })()
     return () => {
@@ -196,9 +194,9 @@ export default function ActivityFeed({
       // Offset is the count actually fetched from the server (loaded.rows
       // accumulates server pages; the in-memory filters only narrow the render),
       // so paging stays aligned with the server's newest-first cursor.
-      const res = await fetch(buildUrl(baseUrl, mode, filters, loaded.rows.length))
-      if (!res.ok) throw new Error(await readError(res, "Couldn't load activity"))
-      const data = ((await res.json()) as FeedRow[] | null) ?? []
+      const data =
+        (await apiJSON<FeedRow[] | null>(buildUrl(baseUrl, mode, filters, loaded.rows.length))) ??
+        []
       // Drop the page if the lens/filters moved while it was in flight — appending
       // it would splice another request's rows into the current view.
       setLoaded((prev) =>
@@ -207,7 +205,7 @@ export default function ActivityFeed({
           : prev,
       )
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(httpErrorMessage(err, "Couldn't load activity."))
     } finally {
       setLoadingMore(false)
     }

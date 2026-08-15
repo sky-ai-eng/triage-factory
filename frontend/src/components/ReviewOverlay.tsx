@@ -6,6 +6,7 @@ import DiffFile from './DiffFile'
 import type { FileComment } from './DiffFile'
 import ReviewSummary from './ReviewSummary'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 // ReviewArtifact mirrors internal/server/reviews_artifact_handler.go's
 // reviewArtifactJSON. review_body / review_event are the STAGED values (applied
@@ -109,15 +110,10 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     ;(async () => {
       let data: ReviewArtifact
       try {
-        const res = await fetch(`/api/artifacts/${artifactId}`)
-        if (!res.ok) {
-          const e = await res.json().catch(() => ({}))
-          throw new Error(e.error || `Failed to load review (${res.status})`)
-        }
-        data = await res.json()
+        data = await apiJSON<ReviewArtifact>(`/api/artifacts/${artifactId}`)
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err))
+          setError(httpErrorMessage(err, 'Could not load the review.'))
           setLoading(false)
         }
         return
@@ -126,17 +122,15 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
       setReview(data)
 
       try {
-        const diffRes = await fetch(`/api/artifacts/${artifactId}/diff`)
-        if (!diffRes.ok) {
-          const e = await diffRes.json().catch(() => ({}))
-          throw new Error(e.error || `Failed to load diff (${diffRes.status})`)
-        }
+        // The diff endpoint answers with the patch text, not JSON, and the
+        // truncation flag rides on a header — so this reads the Response.
+        const diffRes = await apiFetch(`/api/artifacts/${artifactId}/diff`)
         const diffText = await diffRes.text()
         if (cancelled) return
         setFiles(parseDiff(diffText))
         setTruncationNote(diffRes.headers.get('X-Diff-Truncated'))
       } catch (err) {
-        if (!cancelled) setDiffError(err instanceof Error ? err.message : String(err))
+        if (!cancelled) setDiffError(httpErrorMessage(err, 'Could not load the diff.'))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -152,14 +146,16 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   // mode, and update local state only on success.
   const handleUpdateComment = useCallback(
     async (commentId: string, body: string) => {
-      const res = await fetch(`/api/artifacts/${artifactId}/comments/${commentId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ body }),
-      })
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
-        throw new Error(e.error || `Save failed (${res.status})`)
+      try {
+        await apiFetch(`/api/artifacts/${artifactId}/comments/${commentId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ body }),
+        })
+      } catch (err) {
+        // Rethrown as a clean message: ReviewComment renders it and stays in
+        // edit mode, so an HttpError's raw body must not reach it.
+        throw new Error(httpErrorMessage(err, 'Could not save the comment.'))
       }
       setReview((prev) =>
         prev
@@ -175,12 +171,10 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
 
   const handleDeleteComment = useCallback(
     async (commentId: string) => {
-      const res = await fetch(`/api/artifacts/${artifactId}/comments/${commentId}`, {
-        method: 'DELETE',
-      })
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
-        throw new Error(e.error || `Delete failed (${res.status})`)
+      try {
+        await apiFetch(`/api/artifacts/${artifactId}/comments/${commentId}`, { method: 'DELETE' })
+      } catch (err) {
+        throw new Error(httpErrorMessage(err, 'Could not delete the comment.'))
       }
       setReview((prev) =>
         prev ? { ...prev, comments: prev.comments.filter((c) => c.id !== commentId) } : prev,
@@ -193,14 +187,14 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   // at approval). lastSavePromise lets the submit handler await the last edit.
   const patchReview = useCallback(
     async (patch: object) => {
-      const res = await fetch(`/api/artifacts/${artifactId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      })
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
-        throw new Error(e.error || `Save failed (${res.status})`)
+      try {
+        await apiFetch(`/api/artifacts/${artifactId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        })
+      } catch (err) {
+        throw new Error(httpErrorMessage(err, 'Could not save the review.'))
       }
     },
     [artifactId],
@@ -244,17 +238,13 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
       if (inFlightSaves.current.size > 0) {
         await Promise.allSettled([...inFlightSaves.current])
       }
-      const res = await fetch(`/api/artifacts/${artifactId}/approve`, {
+      await apiFetch(`/api/artifacts/${artifactId}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
-        throw new Error(e.error || 'Submit failed')
-      }
       onClose()
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : String(err))
+      setSubmitError(httpErrorMessage(err, 'Could not submit the review.'))
     } finally {
       setSubmitting(false)
     }
@@ -268,17 +258,13 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     setRefreshing(true)
     setRefreshError(null)
     try {
-      const res = await fetch(`/api/artifacts/${artifactId}/review/refresh`, {
+      await apiFetch(`/api/artifacts/${artifactId}/review/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
-        throw new Error(e.error || `Refresh failed (${res.status})`)
-      }
       setReloadKey((k) => k + 1)
     } catch (err) {
-      setRefreshError(err instanceof Error ? err.message : String(err))
+      setRefreshError(httpErrorMessage(err, 'Could not refresh the review.'))
       // Re-throw so ReviewSummary keeps the confirm panel open — that panel is the
       // only place refreshError renders, so closing it would hide the message.
       throw err

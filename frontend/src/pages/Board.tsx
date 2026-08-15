@@ -33,7 +33,7 @@ import PendingPROverlay from '../components/PendingPROverlay'
 import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import AssigneePicker from '../components/board/AssigneePicker'
 import { toast } from '../components/Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import BoardColumn, { CollapsedColumn } from '../components/board/BoardColumn'
 import {
   applyColumnFilter,
@@ -323,11 +323,9 @@ export default function Board() {
   const fetchChainStepRuns = useCallback(
     async (chainRunID: string): Promise<Conversation[] | null> => {
       try {
-        const res = await fetch(`/api/blueprint-runs/${chainRunID}`)
-        if (!res.ok) return null
-        const data: {
+        const data = await apiJSON<{
           steps?: Array<{ step: { step_index: number }; run?: Conversation | null }>
-        } = await res.json()
+        }>(`/api/blueprint-runs/${chainRunID}`)
         const total = data.steps?.length ?? 0
         if (total === 0) return null
         return Array.from({ length: total }, (_, i) => {
@@ -371,9 +369,11 @@ export default function Board() {
   useEffect(() => {
     void (async () => {
       try {
+        // Either read failing leaves the picker degraded but the board
+        // working, so both fall to null rather than rejecting the pair.
         const [meRes, rosterRes] = await Promise.all([
-          fetch('/api/me').then((r) => (r.ok ? r.json() : null)),
-          fetch('/api/team/members').then((r) => (r.ok ? r.json() : null)),
+          apiJSON<unknown>('/api/me').catch(() => null),
+          apiJSON<unknown>('/api/team/members').catch(() => null),
         ])
         // /api/me returns the caller's identity as `id`, not `user_id`
         // (see auth_handlers.go:514). The picker uses currentUserID to
@@ -411,15 +411,18 @@ export default function Board() {
         for (const id of tf) p.append('team_id', id)
         return `/api/tasks?${p.toString()}`
       }
+      // A column that fails paints empty rather than taking the other four
+      // down with it — the board is five independent reads, not one.
+      const column = (url: string) => apiJSON<Task[]>(url).catch(() => [] as Task[])
       const [queuedRes, claimedRes, inProgressRes, inReviewRes, doneRes] = await Promise.all([
-        fetch(queueURL).then((r) => (r.ok ? r.json() : [])),
+        column(queueURL),
         // "claimed" stays a derived pseudo-status (status=queued + a
         // claim col set) — the backend's ByStatus(claimed) branch
         // already handles this for back-compat.
-        fetch(tasksURL('claimed')).then((r) => (r.ok ? r.json() : [])),
-        fetch(tasksURL('in_progress')).then((r) => (r.ok ? r.json() : [])),
-        fetch(tasksURL('in_review')).then((r) => (r.ok ? r.json() : [])),
-        fetch(tasksURL('done')).then((r) => (r.ok ? r.json() : [])),
+        column(tasksURL('claimed')),
+        column(tasksURL('in_progress')),
+        column(tasksURL('in_review')),
+        column(tasksURL('done')),
       ])
       setQueued(queuedRes)
       setClaimed(claimedRes)
@@ -443,12 +446,10 @@ export default function Board() {
       const aggParams = new URLSearchParams()
       aggParams.set('task_ids', withRuns.map((t) => t.id).join(','))
       aggParams.set('include', 'messages')
-      const aggRes = await fetch(`/api/agent/conversations?${aggParams.toString()}`)
-      if (!aggRes.ok) return
-      const agg = (await aggRes.json()) as {
+      const agg = await apiJSON<{
         runs?: Record<string, Conversation[]>
         messages?: Record<string, Message[]>
-      }
+      }>(`/api/agent/conversations?${aggParams.toString()}`)
       const runsByTask = agg.runs ?? {}
       const messagesByRun = agg.messages ?? {}
 
@@ -602,10 +603,8 @@ export default function Board() {
             }
             return updated
           })
-          fetch(`/api/agent/conversations/${conversationID}`)
-            .then((r) => (r.ok ? r.json() : null))
-            .then((fullRun: Conversation | null) => {
-              if (!fullRun) return
+          apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
+            .then((fullRun) => {
               setAgentRuns((p) => {
                 const existing = p[fullRun.TaskID]
                 if (
@@ -654,10 +653,8 @@ export default function Board() {
                 scheduleFetchTasks()
               }
             } else {
-              fetch(`/api/agent/conversations/${conversationID}`)
-                .then((r) => (r.ok ? r.json() : null))
-                .then((fullRun: Conversation | null) => {
-                  if (!fullRun) return
+              apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
+                .then((fullRun) => {
                   setAgentRuns((p) => ({ ...p, [fullRun.TaskID]: fullRun }))
                   if (fullRun.blueprint_run_id) {
                     seedChainStepRuns(fullRun.TaskID, fullRun.blueprint_run_id)
@@ -671,10 +668,8 @@ export default function Board() {
           // on GitHub. The run's own status is unchanged — only its
           // artifact-derived surface (pending kind / approval card) — so refetch
           // the run, with NO optimistic Status write (unlike conversation_update).
-          fetch(`/api/agent/conversations/${event.conversation_id}`)
-            .then((r) => (r.ok ? r.json() : null))
-            .then((fullRun: Conversation | null) => {
-              if (!fullRun) return
+          apiJSON<Conversation>(`/api/agent/conversations/${event.conversation_id}`)
+            .then((fullRun) => {
               setAgentRuns((p) => {
                 const existing = p[fullRun.TaskID]
                 if (
@@ -854,20 +849,16 @@ export default function Board() {
   const fireComplete = useCallback(
     async (taskId: string) => {
       try {
-        const res = await fetch(`/api/tasks/${taskId}/swipe`, {
+        // A failure (e.g. a teardown that partially failed) must surface — a
+        // silent fetchTasks would repaint as if the move succeeded.
+        await apiFetch(`/api/tasks/${taskId}/swipe`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'complete', hesitation_ms: 0 }),
         })
-        if (!res.ok) {
-          // A non-2xx (e.g. a teardown that partially failed) must surface — a
-          // silent fetchTasks would repaint as if the move succeeded.
-          toast.error(await readError(res, 'Failed to mark done'))
-          return
-        }
         fetchTasks()
-      } catch {
-        toast.error('Move failed — please try again')
+      } catch (err) {
+        toast.error(httpErrorMessage(err, 'Could not mark the task done.'))
       }
     },
     [fetchTasks],
@@ -876,14 +867,10 @@ export default function Board() {
   const fireRequeue = useCallback(
     async (taskId: string) => {
       try {
-        const res = await fetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to return to queue'))
-          return
-        }
+        await apiFetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
         fetchTasks()
-      } catch {
-        toast.error('Return to queue failed — please try again')
+      } catch (err) {
+        toast.error(httpErrorMessage(err, 'Could not return the task to the queue.'))
       }
     },
     [fetchTasks],
@@ -1050,7 +1037,7 @@ export default function Board() {
       // advances). Queue → Done is dismiss.
       if (sourceCol === 'queued') {
         if (targetCol === 'done') {
-          await fetch(`/api/tasks/${taskId}/swipe`, {
+          await apiFetch(`/api/tasks/${taskId}/swipe`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action: 'dismiss', hesitation_ms: 0 }),
@@ -1059,13 +1046,13 @@ export default function Board() {
           return
         }
         // Claim first, then advance if needed.
-        await fetch(`/api/tasks/${taskId}/swipe`, {
+        await apiFetch(`/api/tasks/${taskId}/swipe`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
         })
         if (targetCol === 'in_progress' || targetCol === 'in_review') {
-          await fetch(`/api/tasks/${taskId}/advance`, {
+          await apiFetch(`/api/tasks/${taskId}/advance`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ to: targetCol }),
@@ -1107,7 +1094,7 @@ export default function Board() {
         return
       }
       if (targetCol === 'in_progress' || targetCol === 'in_review') {
-        await fetch(`/api/tasks/${taskId}/advance`, {
+        await apiFetch(`/api/tasks/${taskId}/advance`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ to: targetCol }),
@@ -1115,11 +1102,11 @@ export default function Board() {
         fetchTasks()
         return
       }
-    } catch {
-      // A network blip on the swipe/advance/requeue mutation would otherwise
-      // leave the board silently in the wrong state; surface it and let the
-      // next fetchTasks reconcile.
-      toast.error('Move failed — please try again')
+    } catch (err) {
+      // A failed swipe/advance/requeue mutation would otherwise leave the board
+      // silently in the wrong state; surface it and let the next fetchTasks
+      // reconcile.
+      toast.error(httpErrorMessage(err, 'Could not move the task — please try again.'))
     }
   }
 
@@ -1135,11 +1122,15 @@ export default function Board() {
   // claim mutations in the board; drag is for column moves.
   const handlePickerClaim = useCallback(
     async (task: Task) => {
-      await fetch(`/api/tasks/${task.id}/swipe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
-      })
+      try {
+        await apiFetch(`/api/tasks/${task.id}/swipe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
+        })
+      } catch (err) {
+        toast.error(httpErrorMessage(err, 'Could not claim the task.'))
+      }
       fetchTasks()
     },
     [fetchTasks],
@@ -1173,17 +1164,18 @@ export default function Board() {
 
   const handlePickerReassign = useCallback(
     async (task: Task, targetUserID: string) => {
-      const res = await fetch(`/api/tasks/${task.id}/swipe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'reassign',
-          hesitation_ms: 0,
-          target_user_id: targetUserID,
-        }),
-      })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Reassign failed'))
+      try {
+        await apiFetch(`/api/tasks/${task.id}/swipe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'reassign',
+            hesitation_ms: 0,
+            target_user_id: targetUserID,
+          }),
+        })
+      } catch (err) {
+        toast.error(httpErrorMessage(err, 'Could not reassign the task.'))
       }
       fetchTasks()
     },
@@ -1196,47 +1188,54 @@ export default function Board() {
       const task = pendingDelegateTask.current
       if (!task) return
       pendingDelegateTask.current = null
-      const res = await fetch(`/api/tasks/${task.id}/swipe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'delegate', hesitation_ms: 0, blueprint_id: promptId }),
-      })
-      if (res.ok) {
-        try {
-          const body = (await res.json()) as { conversation_id?: string; delegate_error?: string }
-          const runID = body.conversation_id
-          if (runID) {
-            setAgentRuns((prev) => ({
-              ...prev,
-              // Optimistic row for the conversation the delegate call just
-              // minted, standing in until the first WS status lands. `queued`
-              // is what the backend's display ladder reports for a fresh
-              // mint — nobody has claimed it yet — so the card shows its
-              // queue wait instead of pretending an agent is already working.
-              [task.id]: {
-                ID: runID,
-                TaskID: task.id,
-                Status: 'queued',
-                Model: '',
-                StartedAt: new Date().toISOString(),
-                ResultSummary: '',
-              },
-            }))
-            setDelegateFailures((prev) => {
-              if (!(task.id in prev)) return prev
-              const next = { ...prev }
-              delete next[task.id]
-              return next
-            })
-          } else if (body.delegate_error) {
-            setDelegateFailures((prev) => ({
-              ...prev,
-              [task.id]: body.delegate_error || 'spawn failed',
-            }))
-          }
-        } catch {
-          // Body wasn't JSON — fetchTasks below still recovers.
+      try {
+        const body = await apiJSON<{ conversation_id?: string; delegate_error?: string }>(
+          `/api/tasks/${task.id}/swipe`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'delegate',
+              hesitation_ms: 0,
+              blueprint_id: promptId,
+            }),
+          },
+        )
+        const runID = body.conversation_id
+        if (runID) {
+          setAgentRuns((prev) => ({
+            ...prev,
+            // Optimistic row for the conversation the delegate call just
+            // minted, standing in until the first WS status lands. `queued`
+            // is what the backend's display ladder reports for a fresh
+            // mint — nobody has claimed it yet — so the card shows its
+            // queue wait instead of pretending an agent is already working.
+            [task.id]: {
+              ID: runID,
+              TaskID: task.id,
+              Status: 'queued',
+              Model: '',
+              StartedAt: new Date().toISOString(),
+              ResultSummary: '',
+            },
+          }))
+          setDelegateFailures((prev) => {
+            if (!(task.id in prev)) return prev
+            const next = { ...prev }
+            delete next[task.id]
+            return next
+          })
+        } else if (body.delegate_error) {
+          setDelegateFailures((prev) => ({
+            ...prev,
+            [task.id]: body.delegate_error || 'spawn failed',
+          }))
         }
+      } catch (err) {
+        // A failed delegate — or a body that wasn't JSON — is not silent: the
+        // card would otherwise sit unchanged with no explanation. fetchTasks
+        // below still reconciles whatever did land.
+        toast.error(httpErrorMessage(err, 'Could not delegate the task.'))
       }
       fetchTasks()
     },

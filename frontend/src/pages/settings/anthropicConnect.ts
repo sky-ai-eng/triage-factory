@@ -16,6 +16,8 @@
 // the same two choices without drift — the Claude analog of
 // JIRA_DEPLOYMENT_OPTIONS. Lives here (a non-component module) rather than in
 // ClaudeStep.tsx so the component file only exports components.
+import { apiFetch, httpErrorMessage } from '../../lib/apiClient'
+
 export const CLAUDE_SOURCE_OPTIONS: { kind: 'system' | 'byok'; title: string; detail: string }[] = [
   {
     kind: 'system',
@@ -33,17 +35,13 @@ export async function connectAnthropic(
   apiKey: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    const res = await fetch('/api/anthropic/connect', {
+    await apiFetch('/api/anthropic/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ api_key: apiKey }),
     })
-    const resBody = await res.json().catch(() => ({}))
-    if (!res.ok) {
-      return { ok: false, error: resBody.error || 'Could not validate the API key' }
-    }
     return { ok: true }
-  } catch {
-    return { ok: false, error: 'Could not connect to server' }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not validate the API key.') }
   }
 }

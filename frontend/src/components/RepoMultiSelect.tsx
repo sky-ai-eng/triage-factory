@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { Link } from 'react-router'
 import { Check, X } from 'lucide-react'
-import { readError } from '../lib/api'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { toast } from './Toast/toastStore'
 
@@ -53,20 +53,12 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
     async (signal: AbortSignal) => {
       try {
         setError(null)
-        const res = await fetch(teamReposPath, { signal })
-        if (signal.aborted) return
-        if (!res.ok) {
-          const msg = await readError(res, 'Failed to load repos')
-          setError(msg)
-          toast.error(msg)
-          return
-        }
-        const data: { repos?: string[] } = await res.json()
+        const data = await apiJSON<{ repos?: string[] }>(teamReposPath, { signal })
         if (signal.aborted) return
         setAvailable(data.repos ?? [])
       } catch (err) {
         if (signal.aborted) return
-        const msg = `Failed to load repos: ${err instanceof Error ? err.message : String(err)}`
+        const msg = httpErrorMessage(err, 'Could not load the tracked repos.')
         setError(msg)
         toast.error(msg)
       } finally {

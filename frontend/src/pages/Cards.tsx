@@ -14,6 +14,7 @@ import RequestedReviewerBadge from '../components/RequestedReviewerBadge'
 import PromptPicker from '../components/PromptPicker'
 import TaskRulesPanel from '../components/TaskRulesPanel'
 import TeamScopeSelect from '../components/TeamScopeSelect'
+import { apiFetch, apiJSON } from '../lib/apiClient'
 
 type SwipeAction = 'claim' | 'dismiss' | 'snooze' | 'delegate'
 type LoadState = 'loading' | 'empty' | 'ready'
@@ -42,9 +43,8 @@ export default function Cards() {
 
   const fetchQueue = useCallback(async (preserveCurrent = false) => {
     const q = teamFilterQuery(teamFilterRef.current)
-    const res = await fetch('/api/queue' + (q ? `?${q}` : ''))
-    if (res.ok) {
-      const data: Task[] = await res.json()
+    try {
+      const data = await apiJSON<Task[]>('/api/queue' + (q ? `?${q}` : ''))
       setTasks((prev) => {
         if (preserveCurrent && prev.length > 0) {
           // Keep the current top card in place, merge updated queue behind it
@@ -58,6 +58,10 @@ export default function Cards() {
       if (!preserveCurrent) setCardStart(Date.now())
       hasFetched.current = true
       setLoadState(data.length === 0 ? 'empty' : 'ready')
+    } catch {
+      // Leave the deck as it is: the next fetchQueue (a swipe, an undo, a WS
+      // nudge) reconciles, and blanking the cards on one failed poll would be
+      // worse than showing a slightly stale queue.
     }
   }, [])
 
@@ -108,24 +112,23 @@ export default function Cards() {
     const hesitationMs = Date.now() - cardStart
 
     try {
-      const res =
-        action === 'snooze'
-          ? await fetch(`/api/tasks/${task.id}/snooze`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ until: '2h', hesitation_ms: hesitationMs }),
-            })
-          : await fetch(`/api/tasks/${task.id}/swipe`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                action,
-                hesitation_ms: hesitationMs,
-                ...(promptId && { blueprint_id: promptId }),
-              }),
-            })
-
-      if (!res.ok) return
+      if (action === 'snooze') {
+        await apiFetch(`/api/tasks/${task.id}/snooze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ until: '2h', hesitation_ms: hesitationMs }),
+        })
+      } else {
+        await apiFetch(`/api/tasks/${task.id}/swipe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action,
+            hesitation_ms: hesitationMs,
+            ...(promptId && { blueprint_id: promptId }),
+          }),
+        })
+      }
     } catch {
       return
     }
@@ -144,8 +147,7 @@ export default function Cards() {
   const undo = async () => {
     if (!undoTask) return
     try {
-      const res = await fetch(`/api/tasks/${undoTask.id}/undo`, { method: 'POST' })
-      if (!res.ok) return
+      await apiFetch(`/api/tasks/${undoTask.id}/undo`, { method: 'POST' })
     } catch {
       return
     }

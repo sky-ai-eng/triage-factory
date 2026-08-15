@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { apiFetch, apiJSON, httpErrorMessage, readJSON } from '../lib/apiClient'
 import type { DeploymentConfig, MeResponse, TeamMember, TeamMembersResponse } from '../types'
 
 /** In-flight Promise dedup for /api/config. The endpoint is read once at
@@ -8,14 +9,9 @@ let configInFlight: Promise<DeploymentConfig> | null = null
 
 function loadConfig(): Promise<DeploymentConfig> {
   if (configInFlight) return configInFlight
-  configInFlight = fetch('/api/config')
-    .then((r) => {
-      if (!r.ok) throw new Error(`/api/config: ${r.status}`)
-      return r.json() as Promise<DeploymentConfig>
-    })
-    .finally(() => {
-      configInFlight = null
-    })
+  configInFlight = apiJSON<DeploymentConfig>('/api/config').finally(() => {
+    configInFlight = null
+  })
   return configInFlight
 }
 
@@ -42,7 +38,7 @@ export function useDeploymentConfig(): {
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err))
+          setError(httpErrorMessage(err, 'Could not load the deployment configuration.'))
           setLoading(false)
         }
       })
@@ -64,12 +60,13 @@ let meInFlight: Promise<MeResponse | null> | null = null
 
 function loadMe(): Promise<MeResponse | null> {
   if (meInFlight) return meInFlight
-  meInFlight = fetch('/api/me')
-    .then((r) => {
-      if (r.status === 401) return null
-      if (!r.ok) throw new Error(`/api/me: ${r.status}`)
-      return r.json() as Promise<MeResponse>
-    })
+  // `allow: [401]` is doing two things: a signed-out session resolves here
+  // instead of throwing, and — the load-bearing half — it keeps this read out
+  // of the global re-auth funnel. "Not signed in" is the answer this hook
+  // exists to return, so firing the handler would turn every render of a
+  // logged-out surface into a redirect.
+  meInFlight = apiFetch('/api/me', { allow: [401] })
+    .then((r) => (r.status === 401 ? null : readJSON<MeResponse>(r, '/api/me')))
     .finally(() => {
       meInFlight = null
     })
@@ -106,7 +103,7 @@ export function useMe(): {
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err))
+          setError(httpErrorMessage(err, 'Could not load your account.'))
           setLoading(false)
         }
       })
@@ -134,11 +131,7 @@ export function useTeamMembers(): {
 
   useEffect(() => {
     let cancelled = false
-    fetch('/api/team/members')
-      .then((r) => {
-        if (!r.ok) throw new Error(`/api/team/members: ${r.status}`)
-        return r.json() as Promise<TeamMembersResponse>
-      })
+    apiJSON<TeamMembersResponse>('/api/team/members')
       .then((data) => {
         if (!cancelled) {
           setMembers(data.members || [])
@@ -147,7 +140,7 @@ export function useTeamMembers(): {
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err))
+          setError(httpErrorMessage(err, 'Could not load the team roster.'))
           setLoading(false)
         }
       })

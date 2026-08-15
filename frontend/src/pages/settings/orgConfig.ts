@@ -5,7 +5,7 @@
 // shape via the existing endpoints, so there is no parallel persistence path
 // to drift.
 
-import { readError } from '../../lib/api'
+import { apiJSON, httpErrorMessage } from '../../lib/apiClient'
 
 export type CloneProtocol = 'ssh' | 'https'
 
@@ -198,8 +198,9 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
 }
 
 export async function fetchOrgSettings(): Promise<OrgSettingsData | null> {
-  const res = await fetch('/api/settings/org')
-  return res.ok ? ((await res.json()) as OrgSettingsData) : null
+  // Null on any failure: every caller renders a "couldn't load settings" state
+  // rather than a message, so there is nothing to carry out of the error.
+  return apiJSON<OrgSettingsData>('/api/settings/org').catch(() => null)
 }
 
 // dailyCapError is the frontend input-layer validation for the daily spend cap.
@@ -298,23 +299,23 @@ function dailyCapToWire(raw: string): number | undefined {
 export async function saveOrgConfig(
   form: OrgConfigForm,
 ): Promise<{ ok: true; warning?: string } | { ok: false; error: string }> {
-  const res = await fetch('/api/settings/org', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      github_base_url: form.github_url,
-      github_poll_interval: form.github_poll_interval,
-      github_clone_protocol: form.github_clone_protocol,
-      jira_base_url: form.jira_url,
-      jira_poll_interval: form.jira_poll_interval,
-      max_llm_model_tier: form.max_llm_model_tier,
-      max_daily_cost_usd: dailyCapToWire(form.max_daily_cost_usd),
-      max_concurrent_runs: concurrentRunsToWire(form.max_concurrent_runs),
-    }),
-  })
-  if (!res.ok) {
-    return { ok: false, error: await readError(res, 'Failed to save settings') }
+  try {
+    const body = await apiJSON<{ warning?: string } | null>('/api/settings/org', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        github_base_url: form.github_url,
+        github_poll_interval: form.github_poll_interval,
+        github_clone_protocol: form.github_clone_protocol,
+        jira_base_url: form.jira_url,
+        jira_poll_interval: form.jira_poll_interval,
+        max_llm_model_tier: form.max_llm_model_tier,
+        max_daily_cost_usd: dailyCapToWire(form.max_daily_cost_usd),
+        max_concurrent_runs: concurrentRunsToWire(form.max_concurrent_runs),
+      }),
+    })
+    return { ok: true, warning: body?.warning }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the settings.') }
   }
-  const body = (await res.json().catch(() => null)) as { warning?: string } | null
-  return { ok: true, warning: body?.warning }
 }

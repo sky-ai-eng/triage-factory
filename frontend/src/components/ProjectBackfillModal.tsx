@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ExternalLink } from 'lucide-react'
 import { toast } from './Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
 interface BackfillCandidate {
@@ -66,20 +66,14 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
     let cancelled = false
     ;(async () => {
       try {
-        const res = await fetch(
+        const data = await apiJSON<{ candidates: BackfillCandidate[] }>(
           `/api/projects/${encodeURIComponent(projectId)}/backfill-candidates`,
         )
-        if (!res.ok) {
-          const msg = await readError(res, 'Failed to load candidates')
-          if (!cancelled) setLoadError(msg)
-          return
-        }
-        const data = (await res.json()) as { candidates: BackfillCandidate[] }
         if (cancelled) return
         const list = data.candidates ?? []
         setCandidates(list)
       } catch (err) {
-        if (!cancelled) setLoadError(`Failed to load candidates: ${(err as Error).message}`)
+        if (!cancelled) setLoadError(httpErrorMessage(err, 'Could not load the candidates.'))
       }
     })()
     return () => {
@@ -129,16 +123,14 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
     setSaving(true)
     setFailures({})
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/backfill`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entity_ids: Array.from(selected) }),
-      })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to assign entities'))
-        return
-      }
-      const data = (await res.json()) as { applied: number; failed: BackfillFailure[] }
+      const data = await apiJSON<{ applied: number; failed: BackfillFailure[] }>(
+        `/api/projects/${encodeURIComponent(projectId)}/backfill`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entity_ids: Array.from(selected) }),
+        },
+      )
       const failed = data.failed ?? []
       if (failed.length === 0) {
         if (data.applied > 0) {

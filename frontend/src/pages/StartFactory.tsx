@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router'
 import { useAuthStatus } from '../hooks/useAuthStatus'
+import { apiFetch, httpErrorMessage } from '../lib/apiClient'
 
 /**
  * StartFactory is the local-mode first-run landing — the local analog of
@@ -37,17 +38,12 @@ export default function StartFactory() {
       // No body: the endpoint provisions the fixed LocalDefault sentinel and
       // is idempotent, so a double-click or a reload-then-retry can't create
       // a second tenant or re-seed over user changes.
-      const res = await fetch('/api/setup/start', { method: 'POST' })
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        setError(data.error || 'Failed to start Triage Factory')
-        return
-      }
+      await apiFetch('/api/setup/start', { method: 'POST' })
       // Provisioned. Route into the setup wizard; its LocalAuthGate re-reads
       // status and now admits us (configured=true).
       navigate('/setup', { replace: true })
-    } catch {
-      setError('Could not connect to server')
+    } catch (err) {
+      setError(httpErrorMessage(err, 'Could not start Triage Factory.'))
     } finally {
       setStarting(false)
     }

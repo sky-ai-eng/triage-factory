@@ -3,6 +3,7 @@ import { render, screen, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import RunStation, { type StationActions } from './RunStation'
 import type { Conversation } from '../../types'
+import { jsonBody } from '../../test/apiResponse'
 
 // The dock is the surface this suite is about: whether the composer input is
 // offered (and what stands in its place when it isn't), and how the approval
@@ -114,31 +115,30 @@ describe('RunStation dock approval affordance', () => {
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: () =>
-          Promise.resolve([
-            {
-              id: 'pr1',
-              kind: 'pull_request',
-              provider: 'github',
-              state: 'draft',
-              target: 'org/repo#18',
-              external_id: '18',
-              url: 'https://gh/pr',
-              details: null,
-              created_at: '2026-07-30T00:00:00Z',
-            },
-            {
-              id: 'rv1',
-              kind: 'review',
-              provider: 'github',
-              state: 'pending',
-              target: 'org/repo#19',
-              external_id: '19',
-              url: 'https://gh/rv',
-              details: null,
-              created_at: '2026-07-30T00:00:00Z',
-            },
-          ]),
+        ...jsonBody([
+          {
+            id: 'pr1',
+            kind: 'pull_request',
+            provider: 'github',
+            state: 'draft',
+            target: 'org/repo#18',
+            external_id: '18',
+            url: 'https://gh/pr',
+            details: null,
+            created_at: '2026-07-30T00:00:00Z',
+          },
+          {
+            id: 'rv1',
+            kind: 'review',
+            provider: 'github',
+            state: 'pending',
+            target: 'org/repo#19',
+            external_id: '19',
+            url: 'https://gh/rv',
+            details: null,
+            created_at: '2026-07-30T00:00:00Z',
+          },
+        ]),
       }),
     )
     const onOpenArtifact = vi.fn()

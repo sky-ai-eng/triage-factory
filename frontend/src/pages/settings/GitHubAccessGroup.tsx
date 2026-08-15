@@ -9,6 +9,7 @@ import {
 } from './primitives'
 import GitHubAppPanel from './GitHubAppPanel'
 import type { CloneProtocol } from './orgConfig'
+import { apiJSON, httpErrorMessage } from '../../lib/apiClient'
 
 interface GitHubAccessValue {
   github_url: string
@@ -76,19 +77,16 @@ export default function GitHubAccessGroup({
   const testSSH = async () => {
     setSshTestState({ kind: 'running' })
     try {
-      const res = await fetch('/api/github/preflight-ssh', { method: 'POST' })
-      if (!res.ok) {
-        setSshTestState({ kind: 'fail', stderr: `Server returned ${res.status}` })
-        return
-      }
-      const data = (await res.json()) as { ok: boolean; stderr?: string }
+      const data = await apiJSON<{ ok: boolean; stderr?: string }>('/api/github/preflight-ssh', {
+        method: 'POST',
+      })
       if (data.ok) {
         setSshTestState({ kind: 'ok' })
       } else {
         setSshTestState({ kind: 'fail', stderr: data.stderr || 'Preflight failed.' })
       }
     } catch (err) {
-      setSshTestState({ kind: 'fail', stderr: (err as Error).message })
+      setSshTestState({ kind: 'fail', stderr: httpErrorMessage(err, 'Preflight failed.') })
     }
   }
 

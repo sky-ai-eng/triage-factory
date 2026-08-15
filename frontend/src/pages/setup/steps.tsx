@@ -168,14 +168,12 @@ async function fetchIntegrationsState(): Promise<{
 }> {
   const empty = { githubReady: false, jiraConnected: false, jiraDeployment: null }
   try {
-    const res = await fetch('/api/integrations/status')
-    if (!res.ok) return empty
-    const data = (await res.json()) as {
+    const data = await apiJSON<{
       github_ready?: boolean
       jira?: boolean
       jira_url?: string
       jira_deployment?: string
-    }
+    }>('/api/integrations/status')
     return {
       githubReady: !!data.github_ready,
       jiraConnected: !!data.jira && !!data.jira_url,
@@ -1317,7 +1315,9 @@ export async function loadUserIdentity(ctx: LoadContext): Promise<Partial<Wizard
   // Through apiClient so a stale-session 401 is routed to AuthContext; a hard
   // failure (HttpError / network) throws, and the host shows a retry rather
   // than wrongly prompting a connected user to reconnect.
-  const data = await apiJSON<GitHubIdentityStatus>('/github/identity', { org: ctx.orgId })
+  const data = await apiJSON<GitHubIdentityStatus>(
+    `/api/orgs/${encodeURIComponent(ctx.orgId)}/github/identity`,
+  )
   return {
     userIdentityConnected: data.connected,
     userIdentityLogin: data.login ?? '',
@@ -1380,7 +1380,9 @@ export async function loadJiraUserAccess(ctx: LoadContext): Promise<Partial<Wiza
   if (!ctx.orgId) throw new Error('No organization context for the Jira access check.')
   // Through apiClient so a stale-session 401 is routed to AuthContext; a hard
   // failure (HttpError / network) throws.
-  const data = await apiJSON<JiraIdentityStatus>('/jira/identity', { org: ctx.orgId })
+  const data = await apiJSON<JiraIdentityStatus>(
+    `/api/orgs/${encodeURIComponent(ctx.orgId)}/jira/identity`,
+  )
   return {
     jiraUserConnected: data.connected,
     jiraUserAccount: data.account ?? '',

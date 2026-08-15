@@ -5,6 +5,7 @@ import { TelemetryRail } from '../components/runstation/StationInstruments'
 import { stationState } from '../components/runstation/stationStyle'
 import { canResumeRun, resumeBlockedCopy } from '../lib/runStatus'
 import type { Conversation, Message, WSEvent } from '../types'
+import { jsonBody } from '../test/apiResponse'
 
 // The hook's live updates arrive through the singleton websocket. Mocking the
 // module hands the test the handler the hook registered, so events can be
@@ -74,7 +75,7 @@ function mockFetch(transcript?: Promise<Message[]>) {
     const [path, query] = url.split('?')
     const sinceID = query ? Number(new URLSearchParams(query).get('since_id')) : null
     if (sinceID !== null && failSinceReads) {
-      return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve(null) })
+      return Promise.resolve({ ok: false, status: 500, ...jsonBody(null) })
     }
     const body: unknown = path.endsWith('/artifacts/refresh')
       ? { updated: 0 }
@@ -88,7 +89,7 @@ function mockFetch(transcript?: Promise<Message[]>) {
         : path.endsWith('/artifacts') || path.endsWith('/actions')
           ? []
           : serverRun
-    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) })
+    return Promise.resolve({ ok: true, status: 200, ...jsonBody(body) })
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -596,11 +597,13 @@ describe('useRunDetail resumability', () => {
       if (path !== `/api/agent/conversations/${RUN_ID}`) {
         // Everything else this mount pulls — transcript, artifacts, pending
         // permissions — is empty here; the run row is the whole subject.
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) })
+        return Promise.resolve({ ok: true, status: 200, ...jsonBody([]) })
       }
       runReads++
+      // The run row goes through apiJSON now, so the stub has to answer text()
+      // as well — jsonBody awaits the promise, which is what parks the refetch.
       const body = runReads === 1 ? Promise.resolve(serverRun) : parkedRefetch.promise
-      return Promise.resolve({ ok: true, status: 200, json: () => body })
+      return Promise.resolve({ ok: true, status: 200, ...jsonBody(body) })
     })
     vi.stubGlobal('fetch', fetchMock)
     return fetchMock

@@ -4,7 +4,13 @@
 // against; the card also shows the callback URL the app owner must register.
 // The endpoints are org-scoped under /api/orgs/{org_id}/jira/app.
 
-import { readError } from './api'
+import { apiJSON, HttpError, httpErrorMessage } from './apiClient'
+
+// asError mirrors githubApp's: the card renders `err.message` directly, so a
+// raw HttpError (whose message embeds the response body) must not escape here.
+function asError(e: unknown, fallback: string): Error {
+  return new Error(httpErrorMessage(e, fallback))
+}
 
 // The per-org Atlassian OAuth app override summary. Only the public half
 // (client_id) is surfaced; the client_secret never leaves the secret store.
@@ -31,9 +37,11 @@ export interface JiraAppStatus {
 }
 
 export async function getJiraAppStatus(orgId: string): Promise<JiraAppStatus> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/jira/app`)
-  if (!res.ok) throw new Error(await readError(res, 'Failed to load Atlassian app status'))
-  return (await res.json()) as JiraAppStatus
+  try {
+    return await apiJSON<JiraAppStatus>(`/api/orgs/${encodeURIComponent(orgId)}/jira/app`)
+  } catch (e) {
+    throw asError(e, 'Could not load the Atlassian app status.')
+  }
 }
 
 // JiraAppImportInput is the import request body — a bring-your-own Atlassian
@@ -59,23 +67,27 @@ export async function importJiraApp(
   orgId: string,
   input: JiraAppImportInput,
 ): Promise<JiraAppImportOutcome> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/jira/app`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-  })
-  if (res.ok) {
-    return { ok: true, result: (await res.json()) as JiraAppStatus }
-  }
+  const fallback = 'Could not save the Atlassian app.'
   try {
-    const body = (await res.json()) as { error?: string; field?: string }
-    return {
-      ok: false,
-      error: body.error || 'Failed to save the Atlassian app.',
-      field: body.field,
+    const result = await apiJSON<JiraAppStatus>(`/api/orgs/${encodeURIComponent(orgId)}/jira/app`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return { ok: true, result }
+  } catch (e) {
+    // `field` is what routes a rejection to the right input, so the failure
+    // body is read whole rather than through httpErrorMessage's `error`-only
+    // view.
+    if (e instanceof HttpError) {
+      try {
+        const body = JSON.parse(e.body) as { error?: string; field?: string }
+        return { ok: false, error: body.error || fallback, field: body.field }
+      } catch {
+        // Body wasn't JSON — fall through.
+      }
     }
-  } catch {
-    return { ok: false, error: 'Failed to save the Atlassian app.' }
+    return { ok: false, error: httpErrorMessage(e, fallback) }
   }
 }
 
@@ -85,7 +97,11 @@ export async function importJiraApp(
 //
 // DELETE /api/orgs/{org_id}/jira/app
 export async function deleteJiraApp(orgId: string): Promise<JiraAppStatus> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/jira/app`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(await readError(res, 'Failed to remove the Atlassian app'))
-  return (await res.json()) as JiraAppStatus
+  try {
+    return await apiJSON<JiraAppStatus>(`/api/orgs/${encodeURIComponent(orgId)}/jira/app`, {
+      method: 'DELETE',
+    })
+  } catch (e) {
+    throw asError(e, 'Could not remove the Atlassian app.')
+  }
 }

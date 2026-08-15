@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router'
 import { Plus, Trash2, Upload } from 'lucide-react'
 import { useOrgHref } from '../hooks/useOrgHref'
 import type { Project, ProjectImportError, ProjectImportResult } from '../types'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import ProjectCreateModal from '../components/ProjectCreateModal'
@@ -44,17 +44,10 @@ export default function Projects() {
   const refresh = useCallback(async () => {
     try {
       setLoadError(null)
-      const res = await fetch('/api/projects')
-      if (!res.ok) {
-        const msg = await readError(res, 'Failed to load projects')
-        setLoadError(msg)
-        toast.error(msg)
-        return
-      }
-      const data: Project[] = await res.json()
+      const data = await apiJSON<Project[]>('/api/projects')
       setProjects(data)
     } catch (err) {
-      const msg = `Failed to load projects: ${err instanceof Error ? err.message : String(err)}`
+      const msg = httpErrorMessage(err, 'Could not load your projects.')
       setLoadError(msg)
       toast.error(msg)
     } finally {
@@ -154,13 +147,9 @@ export default function Projects() {
   const handleDelete = useCallback(async (project: Project) => {
     if (!confirm(`Delete project "${project.name}"? This can't be undone.`)) return
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}`, {
+      const res = await apiFetch(`/api/projects/${encodeURIComponent(project.id)}`, {
         method: 'DELETE',
       })
-      if (!res.ok && res.status !== 204) {
-        toast.error(await readError(res, 'Failed to delete project'))
-        return
-      }
       const cleanupWarning = res.headers.get('X-Cleanup-Warning')
       if (cleanupWarning) {
         toast.warning(cleanupWarning)
@@ -169,7 +158,7 @@ export default function Projects() {
       }
       setProjects((prev) => prev.filter((p) => p.id !== project.id))
     } catch (err) {
-      toast.error(`Failed to delete project: ${err instanceof Error ? err.message : String(err)}`)
+      toast.error(httpErrorMessage(err, 'Could not delete the project.'))
     }
   }, [])
 
@@ -377,22 +366,10 @@ function ProjectImportModal({
     try {
       const form = new FormData()
       form.append('bundle', file)
-      const res = await fetch('/api/projects/import', { method: 'POST', body: form })
-      if (!res.ok) {
-        let parsed: ProjectImportError | null = null
-        try {
-          parsed = (await res.clone().json()) as ProjectImportError
-        } catch {
-          parsed = null
-        }
-        if (parsed) {
-          setError(parsed)
-        } else {
-          setError({ error: 'import_failed', message: await readError(res, 'Import failed') })
-        }
-        return
-      }
-      const result = (await res.json()) as ProjectImportResult
+      const result = await apiJSON<ProjectImportResult>('/api/projects/import', {
+        method: 'POST',
+        body: form,
+      })
       for (const warning of result.warnings || []) {
         toast.warning(
           warning.repo
@@ -403,10 +380,13 @@ function ProjectImportModal({
       toast.success(`Imported project "${result.project.name}"`)
       onImported(result.project)
     } catch (err) {
-      setError({
-        error: 'import_failed',
-        message: `Import failed: ${err instanceof Error ? err.message : String(err)}`,
-      })
+      // The import failure body is a typed ProjectImportError — the code drives
+      // which remediation the form renders, not just a message — so it is read
+      // off the HttpError whole rather than through httpErrorMessage.
+      const parsed = parseImportError(err)
+      setError(
+        parsed ?? { error: 'import_failed', message: httpErrorMessage(err, 'Import failed.') },
+      )
     } finally {
       setSubmitting(false)
     }
@@ -566,6 +546,22 @@ function ProjectImportModal({
       </div>
     </div>
   )
+}
+
+// parseImportError lifts the typed failure body off a rejected import. The
+// import endpoint answers a rejection with a ProjectImportError whose `error`
+// code selects the remediation the form shows (rename the project, restore the
+// missing repos) — a message alone would lose that, which is why this reads the
+// body rather than going through httpErrorMessage. Null for anything that isn't
+// that shape: a network drop, a proxy's HTML error page, a bare string body.
+function parseImportError(e: unknown): ProjectImportError | null {
+  if (!(e instanceof HttpError)) return null
+  try {
+    const body = JSON.parse(e.body) as ProjectImportError
+    return body && typeof body.error === 'string' ? body : null
+  } catch {
+    return null
+  }
 }
 
 function renderImportError(err: ProjectImportError): string {
