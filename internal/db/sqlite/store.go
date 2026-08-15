@@ -104,7 +104,11 @@ func New(conn *sql.DB) db.Stores {
 		// claim writes and sweeps, which collapse onto the one connection.
 		Curator:    newCuratorStore(conn),
 		GitHubApps: newGitHubAppsStore(conn, secrets),
-		JiraApps:   newJiraAppsStore(conn),
+		// GitHubDeliveries is admin-pool-only in Postgres; SQLite collapses to
+		// the one connection. Wired in local mode too — a local install GitHub
+		// can reach runs the same pre-auth receiver.
+		GitHubDeliveries: newGitHubDeliveryStore(conn),
+		JiraApps:         newJiraAppsStore(conn),
 		// ShippedDefaults is what BootstrapNewOrg/BootstrapNewTeam call.
 		// Phase 3 (handlers) reuses the eventHandlers store built above
 		// instead of duplicating its Seed SQL.

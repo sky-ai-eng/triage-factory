@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -42,6 +43,13 @@ const maxWebhookBody = 25 << 20
 // is the same bare 401, so the reply carries no information about which orgs
 // exist or which of them have an App. The mount is rate-limited (routes(),
 // signed-webhook tier) because everything up to that 401 costs reads.
+//
+// A verified delivery is then deduped on its X-GitHub-Delivery GUID before any
+// of the work above runs — see the gate below, which sits inside the rate limit
+// and after verification so neither a flood nor a forgery can claim a GUID.
+// Structural validation stays ahead of the gate, so a delivery that is bad on
+// its face answers 4xx on every attempt rather than 4xx once and then 204 as a
+// "duplicate".
 func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	orgID := r.PathValue("org_id")
 	if _, err := uuid.Parse(orgID); err != nil {
@@ -105,13 +113,95 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Signature verified past this point.
-	if eventName == "installation" {
-		s.handleInstallationEvent(w, r, orgID, body)
+
+	// Dedup gates ahead of every side effect — the mirror write and the bus
+	// publish alike. GitHub never auto-retries a failed delivery, but it
+	// redelivers on demand (the Redeliver button; POST
+	// /app/hook/deliveries/{delivery_id}/attempts), which is the recovery an
+	// operator reaches for after an outage — so a second copy of a delivery is
+	// ordinary traffic, and without this it re-runs the upsert and re-publishes.
+	deliveryID := r.Header.Get("X-GitHub-Delivery")
+	if deliveryID == "" {
+		// Every genuine delivery carries a GUID. Without one there is nothing
+		// to dedup on, so applying it would quietly void the exactly-once
+		// promise for that delivery — refused as structurally bad, like a
+		// delivery naming no event.
+		badRequest(w, "missing X-GitHub-Delivery header")
 		return
 	}
 
-	s.publishWebhookEvent(orgID, eventName, r.Header.Get("X-GitHub-Delivery"))
+	// Structural validation of the payload runs BEFORE the gate, so a delivery
+	// that is bad on its face keeps its 4xx on every attempt. Recording it
+	// first would answer the operator's redelivery with a 204 — the receiver
+	// reporting success for a payload it never applied and never could. What
+	// this leaves behind the gate is only work that can fail on TF's state
+	// rather than on the delivery, and every one of those answers 5xx.
+	var install *installationWebhook
+	if eventName == "installation" {
+		var perr error
+		if install, perr = parseInstallationWebhook(body); perr != nil {
+			badRequest(w, perr.Error())
+			return
+		}
+	}
+
+	// The installation half of the dedup key. An installation delivery was just
+	// parsed in full and its id validated non-zero, so it is already in hand;
+	// only the other events pay a narrow sniff of the body for it.
+	var installationID string
+	if install != nil {
+		installationID = strconv.FormatInt(install.Installation.ID, 10)
+	} else {
+		installationID = deliveryInstallationID(body)
+	}
+
+	fresh, err := s.githubDeliveries.MarkDeliveredSystem(r.Context(), installationID, deliveryID)
+	if err != nil {
+		internalError(w, "github-webhook", err)
+		return
+	}
+	if !fresh {
+		// Losing is terminal for this request and carries no retry: GitHub was
+		// already told the first copy succeeded, and reporting failure on the
+		// duplicate would provoke exactly the redelivery this dedup exists to
+		// absorb. Debug, not warn — an operator replaying a delivery is
+		// ordinary, not a fault.
+		githubAppLog.Debug("dropping duplicate github webhook delivery",
+			"org", orgID, "event", eventName, "delivery", deliveryID)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if install != nil {
+		s.applyInstallationEvent(w, r, orgID, deliveryID, *install)
+		return
+	}
+
+	s.publishWebhookEvent(orgID, eventName, deliveryID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// deliveryInstallationID sniffs the installation id out of a delivery body for
+// the dedup key. Every App-scoped event carries the installation object
+// whatever its event name, so one narrow envelope serves them all — except the
+// installation events themselves, whose caller already holds the fully parsed
+// payload and passes its id straight through.
+//
+// Returns "" — keying the delivery on its GUID alone — for a delivery that
+// names no installation (github_app_authorization, for one) and for a body
+// this can't parse. A malformed body is not this function's to report: an
+// installation delivery is already refused ahead of the gate, and no other
+// event requires a parseable payload to be recorded and published.
+func deliveryInstallationID(body []byte) string {
+	var envelope struct {
+		Installation struct {
+			ID int64 `json:"id"`
+		} `json:"installation"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Installation.ID == 0 {
+		return ""
+	}
+	return strconv.FormatInt(envelope.Installation.ID, 10)
 }
 
 // installationWebhook is the subset of the installation event payload the
@@ -139,23 +229,34 @@ type installationWebhook struct {
 	} `json:"installation"`
 }
 
-// handleInstallationEvent applies a verified installation event to the
-// mirror. created upserts, deleted soft-removes, suspend / unsuspend stamp
-// and clear the suspension columns; deleted and suspend additionally fire the
-// token-cache invalidate hook, because both leave every token already minted
-// from the installation dead while the cache would keep serving one until its
-// natural expiry. Any other action (new_permissions_accepted, …) is published
-// to the bus and acked — the mirror doesn't track those states.
-func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request, orgID string, body []byte) {
+// parseInstallationWebhook decodes and structurally validates an installation
+// delivery. Both failures it reports are properties of the payload itself —
+// nothing about TF's state can change either answer — so they are identical on
+// every attempt, which is what makes this safe to run ahead of the dedup gate
+// and unsafe to run behind it.
+func parseInstallationWebhook(body []byte) (*installationWebhook, error) {
 	var p installationWebhook
 	if err := json.Unmarshal(body, &p); err != nil {
-		badRequest(w, "malformed installation payload")
-		return
+		return nil, errors.New("malformed installation payload")
 	}
 	if p.Installation.ID == 0 {
-		badRequest(w, "installation payload missing installation id")
-		return
+		return nil, errors.New("installation payload missing installation id")
 	}
+	return &p, nil
+}
+
+// applyInstallationEvent applies a verified, parsed, deduped installation event
+// to the mirror. created upserts, deleted soft-removes, suspend / unsuspend
+// stamp and clear the suspension columns; deleted and suspend additionally fire
+// the token-cache invalidate hook, because both leave every token already
+// minted from the installation dead while the cache would keep serving one
+// until its natural expiry. Any other action (new_permissions_accepted, …) is
+// published to the bus and acked — the mirror doesn't track those states.
+//
+// Every failure here is a store failure, answered 5xx: the payload was
+// validated before the delivery was recorded, so nothing in this function can
+// discover that the delivery was bad.
+func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, orgID, deliveryID string, p installationWebhook) {
 	installationID := strconv.FormatInt(p.Installation.ID, 10)
 
 	// A payload that omits the account id (0) writes "" and so leaves any
@@ -174,8 +275,11 @@ func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request,
 		// here rather than defaulted in the store, because a GHES org whose
 		// host we failed to read would be mirrored as a github.com
 		// installation, which is exactly the confusion the column exists to
-		// prevent. A read failure fails the delivery instead: GitHub retries,
-		// and no row claims a host nobody established.
+		// prevent. A read failure fails the delivery instead, so no row claims a
+		// host nobody established. Nothing replays that delivery — GitHub does
+		// not auto-retry, and the dedup gate above has already recorded it, so
+		// a manual redelivery is dropped as a duplicate — but the
+		// /app/installations reconcile mints the row on its next pass.
 		host, err := s.orgGitHubHost(r.Context(), orgID)
 		if err != nil {
 			internalError(w, "github-webhook", err)
@@ -231,7 +335,7 @@ func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	default:
-		s.publishWebhookEvent(orgID, "installation", r.Header.Get("X-GitHub-Delivery"))
+		s.publishWebhookEvent(orgID, "installation", deliveryID)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

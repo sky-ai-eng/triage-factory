@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -62,11 +63,22 @@ func signWith(secret string, body []byte) string {
 }
 
 // postWebhook fires a delivery at the receiver with the given event name,
-// signature header, and raw body.
+// signature header, and raw body, under a delivery GUID no other call reuses.
+// GitHub mints one GUID per delivery, so distinct calls are distinct
+// deliveries; a test that means to send the SAME delivery twice says so with
+// postWebhookDelivery.
 func postWebhook(s *Server, event, sigHeader string, body []byte) *httptest.ResponseRecorder {
+	return postWebhookDelivery(s, event, sigHeader, body, uuid.NewString())
+}
+
+// postWebhookDelivery is postWebhook with the delivery GUID named explicitly —
+// the handle the dedup tests need to replay one delivery.
+func postWebhookDelivery(s *Server, event, sigHeader string, body []byte, deliveryID string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("POST", "/api/webhooks/github/"+runmode.LocalDefaultOrgID, bytes.NewReader(body))
 	req.Header.Set("X-GitHub-Event", event)
-	req.Header.Set("X-GitHub-Delivery", "test-delivery-1")
+	if deliveryID != "" {
+		req.Header.Set("X-GitHub-Delivery", deliveryID)
+	}
 	if sigHeader != "" {
 		req.Header.Set("X-Hub-Signature-256", sigHeader)
 	}
@@ -445,6 +457,245 @@ func TestGitHubWebhook_ReinstallAfterSuspendedDelete(t *testing.T) {
 	}
 	if got.SuspendedBy != "" {
 		t.Errorf("SuspendedBy = %q after a re-install; want \"\"", got.SuspendedBy)
+	}
+}
+
+// TestGitHubWebhook_RedeliveredInstallation_AppliesOnce is the defect the
+// dedup table exists for. GitHub never auto-retries, but an operator
+// redelivers — and a replayed installation.created used to re-run the upsert,
+// reviving a row a later delete had removed.
+//
+// A byte-identical replay of an idempotent write is invisible on its own, so
+// the sequence puts a state change between the two copies: created, deleted,
+// then the created delivery again. If the replay applied, the row comes back.
+func TestGitHubWebhook_RedeliveredInstallation_AppliesOnce(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+
+	created := []byte(`{"action":"created","installation":{"id":4242,"account":{"login":"acme","type":"Organization"},"created_at":"2026-01-01T00:00:00Z"}}`)
+	deleted := []byte(`{"action":"deleted","installation":{"id":4242,"account":{"login":"acme","type":"Organization"}}}`)
+	const createdDelivery = "gh-delivery-created"
+
+	if rec := postWebhookDelivery(s, "installation", sign(created), created, createdDelivery); rec.Code != http.StatusNoContent {
+		t.Fatalf("created status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := postWebhook(s, "installation", sign(deleted), deleted); rec.Code != http.StatusNoContent {
+		t.Fatalf("deleted status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := installations(t, s); len(got) != 0 {
+		t.Fatalf("after the delete got %d live installations, want 0", len(got))
+	}
+
+	// The redelivery. 204, not an error: GitHub was already told the first
+	// copy succeeded, and a failure here would provoke exactly the redelivery
+	// the dedup absorbs.
+	rec := postWebhookDelivery(s, "installation", sign(created), created, createdDelivery)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("redelivery status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("redelivery response has body %q, want empty", rec.Body.String())
+	}
+	if got := installations(t, s); len(got) != 0 {
+		t.Errorf("the redelivered created revived %d installations, want 0 — the delivery had already been applied", len(got))
+	}
+}
+
+// TestGitHubWebhook_DistinctDeliveriesSameInstallation_BothApply is the
+// negative space, and the half a reader is most likely to get wrong: dedup is
+// per delivery, never per subject. One installation produces many deliveries
+// over its life, and every one of them has to take effect — a receiver that
+// deduped on the installation id would apply the first and silently discard
+// the rest, leaving the mirror permanently stale.
+func TestGitHubWebhook_DistinctDeliveriesSameInstallation_BothApply(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+
+	first := []byte(`{"action":"created","installation":{"id":4242,"account":{"id":1234,"login":"acme","type":"Organization"},"created_at":"2026-01-01T00:00:00Z"}}`)
+	// The same installation, seen again under the account's new handle — two
+	// deliveries, two upserts, one row.
+	second := []byte(`{"action":"created","installation":{"id":4242,"account":{"id":1234,"login":"acme-renamed","type":"Organization"},"created_at":"2026-01-01T00:00:00Z"}}`)
+
+	for _, body := range [][]byte{first, second} {
+		if rec := postWebhook(s, "installation", sign(body), body); rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+		}
+	}
+
+	got := onlyInstallation(t, s)
+	if got.AccountLogin != "acme-renamed" {
+		t.Errorf("AccountLogin = %q, want %q — the second delivery never reached the mirror", got.AccountLogin, "acme-renamed")
+	}
+}
+
+// TestGitHubWebhook_RedeliveredEvent_PublishesOnce covers the other side
+// effect a duplicate must not have. Ordering carries the assertion: the bus
+// hands one subscriber its events in publish order, so a third, distinct
+// delivery arriving as the second event proves the replay in between published
+// nothing.
+func TestGitHubWebhook_RedeliveredEvent_PublishesOnce(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+
+	bus := eventbus.New()
+	s.SetEventBus(bus)
+
+	got := make(chan domain.Event, 4)
+	bus.Subscribe(eventbus.Subscriber{
+		Name:   "test-webhook-dedup-capture",
+		Filter: []string{"webhook:github:"},
+		Handle: func(e domain.Event) { got <- e },
+	})
+
+	pr := []byte(`{"action":"synchronize","number":7,"installation":{"id":4242}}`)
+	push := []byte(`{"ref":"refs/heads/main","installation":{"id":4242}}`)
+	const prDelivery = "gh-delivery-pr"
+
+	for _, delivery := range []struct {
+		event string
+		body  []byte
+		id    string
+	}{
+		{"pull_request", pr, prDelivery},
+		{"pull_request", pr, prDelivery}, // the redelivery
+		{"push", push, "gh-delivery-push"},
+	} {
+		if rec := postWebhookDelivery(s, delivery.event, sign(delivery.body), delivery.body, delivery.id); rec.Code != http.StatusNoContent {
+			t.Fatalf("%s (%s) status = %d, want 204", delivery.event, delivery.id, rec.Code)
+		}
+	}
+
+	for _, want := range []string{"webhook:github:pull_request", "webhook:github:push"} {
+		select {
+		case e := <-got:
+			if e.EventType != want {
+				t.Fatalf("published event type = %q, want %q — the redelivery published its own copy", e.EventType, want)
+			}
+		case <-t.Context().Done():
+			t.Fatal("timed out waiting for published webhook event")
+		}
+	}
+}
+
+// TestGitHubWebhook_BadSignatureDoesNotClaimDeliveryID is why the gate sits
+// after signature verification rather than before it. If an unverified request
+// could record a delivery id, anyone who could reach the route would be able to
+// burn a GUID and have the genuine delivery dropped as a duplicate.
+func TestGitHubWebhook_BadSignatureDoesNotClaimDeliveryID(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+
+	body := []byte(`{"action":"created","installation":{"id":4242,"account":{"login":"acme","type":"Organization"}}}`)
+	const delivery = "gh-delivery-contested"
+
+	if rec := postWebhookDelivery(s, "installation", "sha256=deadbeef", body, delivery); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("forged delivery status = %d, want 401", rec.Code)
+	}
+	if rec := postWebhookDelivery(s, "installation", sign(body), body, delivery); rec.Code != http.StatusNoContent {
+		t.Fatalf("genuine delivery status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := installations(t, s); len(got) != 1 {
+		t.Errorf("installations = %+v, want the genuine delivery applied — a forged copy claimed its delivery id", got)
+	}
+}
+
+// TestGitHubWebhook_MalformedPayload_StaysBadRequestOnRedelivery pins the
+// ordering between structural validation and the dedup gate. A delivery that
+// is bad on its face must answer 4xx every time it is sent — if recording it
+// came first, the operator's redelivery would be answered 204 as a
+// "duplicate", which is the receiver reporting success for a payload it never
+// applied and never could.
+func TestGitHubWebhook_MalformedPayload_StaysBadRequestOnRedelivery(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+
+	for _, tc := range []struct {
+		name     string
+		delivery string
+		body     []byte
+	}{
+		{"unparseable", "gh-delivery-garbage", []byte(`{"action":"created","installation":`)},
+		{"no installation id", "gh-delivery-no-id", []byte(`{"action":"created","installation":{"account":{"login":"acme","type":"Organization"}}}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for attempt := 1; attempt <= 2; attempt++ {
+				rec := postWebhookDelivery(s, "installation", sign(tc.body), tc.body, tc.delivery)
+				if rec.Code != http.StatusBadRequest {
+					t.Fatalf("attempt %d: status = %d, want 400 — a structurally-bad delivery does not become a duplicate", attempt, rec.Code)
+				}
+			}
+			if got := installations(t, s); len(got) != 0 {
+				t.Errorf("a rejected delivery wrote %d installations, want 0", len(got))
+			}
+		})
+	}
+}
+
+// TestGitHubWebhook_MissingDeliveryID refuses a verified delivery that carries
+// no GUID. There is nothing to dedup it on, so applying it would quietly void
+// the exactly-once promise for that delivery; 4xx keeps it from looking
+// applied.
+func TestGitHubWebhook_MissingDeliveryID(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+
+	body := []byte(`{"action":"created","installation":{"id":4242,"account":{"login":"acme","type":"Organization"}}}`)
+	rec := postWebhookDelivery(s, "installation", sign(body), body, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if got := installations(t, s); len(got) != 0 {
+		t.Errorf("a delivery with no GUID wrote %d installations, want 0", len(got))
+	}
+}
+
+// TestGitHubWebhook_InstallationlessDeliveryDedups covers the payload shape
+// that has no installation object at all (github_app_authorization, for one):
+// it keys on the delivery id alone, and a replay of it is still a duplicate.
+func TestGitHubWebhook_InstallationlessDeliveryDedups(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedWebhookApp(t, s)
+
+	bus := eventbus.New()
+	s.SetEventBus(bus)
+
+	got := make(chan domain.Event, 4)
+	bus.Subscribe(eventbus.Subscriber{
+		Name:   "test-webhook-installationless-capture",
+		Filter: []string{"webhook:github:"},
+		Handle: func(e domain.Event) { got <- e },
+	})
+
+	revoked := []byte(`{"action":"revoked","sender":{"login":"acme"}}`)
+	const delivery = "gh-delivery-authorization"
+	for range 2 {
+		if rec := postWebhookDelivery(s, "github_app_authorization", sign(revoked), revoked, delivery); rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// Same ordering sentinel as the publish test above: a later, distinct
+	// delivery arriving second proves the replay published nothing.
+	pr := []byte(`{"action":"synchronize","number":7}`)
+	if rec := postWebhook(s, "pull_request", sign(pr), pr); rec.Code != http.StatusNoContent {
+		t.Fatalf("sentinel status = %d, want 204", rec.Code)
+	}
+	for _, want := range []string{"webhook:github:github_app_authorization", "webhook:github:pull_request"} {
+		select {
+		case e := <-got:
+			if e.EventType != want {
+				t.Fatalf("published event type = %q, want %q — the redelivery published its own copy", e.EventType, want)
+			}
+		case <-t.Context().Done():
+			t.Fatal("timed out waiting for published webhook event")
+		}
 	}
 }
 
