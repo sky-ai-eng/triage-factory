@@ -240,6 +240,17 @@ func isCurrentBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
 // trigger (a follow-up is user-initiated even when the run that earned it was
 // not).
 func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text string) error {
+	// One validation gate for every arm, ahead of the routing: a live steer
+	// must refuse exactly the inputs a queued follow-up refuses. Checked here
+	// rather than in queueFollowUp so the steer arms can't hand a blank user
+	// turn to a live process, or deliver a message there is no actor to
+	// attribute the transcript row to.
+	if text == "" {
+		return fmt.Errorf("send: empty message")
+	}
+	if userID == "" {
+		return fmt.Errorf("send: empty user id")
+	}
 	// Fast path: the run's process is in THIS pod's registry → steer in place
 	// with no DB read. Self-selecting — it hits in local mode and on the pod that
 	// owns the process, and is a cheap miss on a multi control pod (whose
@@ -312,6 +323,11 @@ func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, runID, userID
 	if s.tx == nil {
 		return
 	}
+	// Detached from the request's cancellation (values kept): the message is
+	// already in front of the agent, so a requester who hung up or timed out
+	// right after the controller accepted the steer must not cost the
+	// transcript its only record of the turn.
+	ctx = context.WithoutCancel(ctx)
 	msg := &domain.Message{ConversationID: runID, UserID: userID, Role: "user", Content: text}
 	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
 		id, iErr := ts.Conversations.InsertMessage(ctx, orgID, msg)
@@ -348,14 +364,8 @@ func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, runID, userID
 // the gap before the claim; Spawner.dispatchResumeClaim composes it immediately
 // before delivery instead.
 func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, run domain.Conversation, userID, text string) error {
-	if text == "" {
-		return fmt.Errorf("send: empty message")
-	}
-	// Every write below routes under the sending user's synthetic claims, so the
-	// identity has to be here rather than resolved later.
-	if userID == "" {
-		return fmt.Errorf("send: empty user id")
-	}
+	// text and userID arrive validated: SendMessage, the sole caller, refuses
+	// both empties at its entry so every arm answers them identically.
 
 	// The gate, refused BEFORE the row is written: a queued message nothing will
 	// ever deliver is worse than a refusal. followUpBlock is the same walk the
