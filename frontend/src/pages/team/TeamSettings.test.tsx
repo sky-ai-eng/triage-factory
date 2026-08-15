@@ -149,13 +149,25 @@ describe('archiving the team', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Archive' }))
 
+    await waitFor(() => expect(screen.getByText('Archive platform?')).toBeInTheDocument())
+    const panel = document.querySelector('.dlg')!
+
+    // It OPENS WHOLE, on the first beat of its build. The panel measures an
+    // empty frame and then fills it, so a line that arrived after that beat
+    // would resize the thing the beat just claimed to have sized — which is why
+    // both reads finish before the dialog is asked for.
+    expect(panel.getAttribute('data-phase')).toBe('frame')
+    expect(panel.classList.contains('built')).toBe(false)
+
     // Every consequence is read, not assumed: the repositories from the team's
     // tracked set, the members from the roster, the live work from the preview.
-    await waitFor(() => expect(screen.getByText('Archive platform?')).toBeInTheDocument())
     expect(screen.getByText('2 repositories stop being watched')).toBeInTheDocument()
     expect(screen.getByText('2 members lose access')).toBeInTheDocument()
     expect(screen.getByText('3 delegations and 1 curator session stop now')).toBeInTheDocument()
     expect(screen.getByText('Run history and cost records are kept')).toBeInTheDocument()
+
+    // And then it arrives, through the sequence rather than instead of it.
+    await waitFor(() => expect(panel.classList.contains('built')).toBe(true), { timeout: 3000 })
 
     const confirm = screen.getAllByRole('button', { name: 'Archive' })
     fireEvent.click(confirm[confirm.length - 1])

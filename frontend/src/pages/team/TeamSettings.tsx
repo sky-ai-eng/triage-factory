@@ -226,37 +226,43 @@ export default function TeamSettings() {
   const { members, loading, error } = useMemberRoster(adapter)
 
   // ── Archive ────────────────────────────────────────────────────────────
-  // Three states rather than a boolean, because the confirm cannot be offered
-  // until the page knows what pressing it would stop, and must not be offered
-  // twice while that is being done.
-  const [archive, setArchive] = useState<'closed' | 'asking' | 'sending'>('closed')
+  // Four states rather than a boolean: the question cannot be asked until the
+  // page knows what pressing it would stop, and must not be asked twice while
+  // that is being done.
+  const [archive, setArchive] = useState<'closed' | 'reading' | 'asking' | 'sending'>('closed')
   const [preview, setPreview] = useState<ArchivePreview | null>(null)
   const [watched, setWatched] = useState<number | null>(null)
 
   const openArchive = useCallback(() => {
-    setPreview(null)
-    setWatched(null)
-    setArchive('asking')
-    void fetchArchivePreview(teamId)
-      .then(setPreview)
+    if (archive !== 'closed') return
+    setArchive('reading')
+    // BOTH READS LAND BEFORE THE DIALOG DOES, not underneath it. The build
+    // measures the empty frame and then fills it, and a panel that grows a line
+    // after that beat makes the beat a lie — so the waiting is done out here,
+    // on the button, and the dialog opens already knowing what it says.
+    void Promise.all([
+      fetchArchivePreview(teamId),
+      // The first consequence the design states, and the one number this page
+      // does not already hold. Best-effort: an unread count is a line the
+      // dialog leaves out, never a zero.
+      apiJSON<{ repos: string[] }>(`/api/settings/team/${encodeURIComponent(teamId)}/repos`)
+        .then((d) => (d.repos ?? []).length)
+        .catch(() => null),
+    ])
+      .then(([live, repos]) => {
+        setPreview(live)
+        setWatched(repos)
+        setArchive('asking')
+      })
       .catch((e) => {
-        // A confirm that cannot state its consequences is not a confirm. If the
-        // count could not be read the question is withdrawn rather than asked
-        // with the answer left blank.
+        // A confirm that cannot state its consequences is not a confirm, so the
+        // question is withdrawn rather than asked with the answer left blank.
         setArchive('closed')
         toast.error(e instanceof Error ? e.message : 'Could not check this team for live work.')
       })
-    // The first consequence the design states, and the one number this page
-    // does not already hold. Best-effort: an unread count is a line the dialog
-    // leaves out, never a zero.
-    void apiJSON<{ repos: string[] }>(`/api/settings/team/${encodeURIComponent(teamId)}/repos`)
-      .then((d) => setWatched((d.repos ?? []).length))
-      .catch(() => setWatched(null))
-  }, [teamId])
+  }, [teamId, archive])
 
   const confirmArchive = useCallback(() => {
-    // The button says "Checking…" until the preview lands; pressing it then is
-    // pressing a label, not a verb.
     if (!preview || archive === 'sending') return
     setArchive('sending')
     void archiveTeam(teamId)
@@ -280,7 +286,8 @@ export default function TeamSettings() {
 
   // What will actually happen, one line each, and what stays alongside what
   // goes. Every number is read rather than assumed; a line nothing answered is
-  // absent instead of guessed.
+  // absent instead of guessed. Settled before the dialog opens, so the list it
+  // builds is the list it ends with.
   const consequences = useMemo<DialogConsequence[]>(() => {
     const out: DialogConsequence[] = []
     if (watched !== null)
@@ -636,8 +643,10 @@ export default function TeamSettings() {
                       is kept; an org admin can restore it.
                     </span>
                   </div>
+                  {/* The waiting happens here rather than inside the dialog,
+                      so what opens is already whole. */}
                   <button type="button" className="ts-danger-btn" onClick={openArchive}>
-                    Archive
+                    {archive === 'reading' ? 'Checking…' : 'Archive'}
                   </button>
                 </div>
               </div>
@@ -753,18 +762,18 @@ export default function TeamSettings() {
       </div>
 
       {/* The one question this page cannot answer for you. It states what will
-          happen rather than asking whether you are sure, and the counts in it
-          are read from the server the moment it opens — an archive stops live
+          happen rather than asking whether you are sure, and every count in it
+          was read from the server before it opened — an archive stops live
           work, and how much is the whole reason to interrupt someone. */}
       <Dialog
-        open={archive !== 'closed'}
+        open={archive === 'asking' || archive === 'sending'}
         kind="destructive"
         build="flash"
         title={`Archive ${team.name}?`}
         body="The team stops working. Nothing it produced is deleted."
         consequences={consequences}
         note="An org admin can restore an archived team."
-        confirmLabel={archive === 'sending' ? 'Archiving…' : preview ? 'Archive' : 'Checking…'}
+        confirmLabel={archive === 'sending' ? 'Archiving…' : 'Archive'}
         onConfirm={confirmArchive}
         onCancel={() => setArchive('closed')}
       />
