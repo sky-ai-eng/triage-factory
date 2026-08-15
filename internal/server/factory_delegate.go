@@ -331,7 +331,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// already captured the state-level effect; the audit is best-
 	// effort.
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Swipes.RecordSwipe(r.Context(), orgID, task.ID, "delegate", 0)
+		_, e := tx.Swipes.RecordSwipe(r.Context(), orgID, task.ID, "delegate", 0, nil)
 		return e
 	}); err != nil {
 		factoryLog.Warn("failed to record delegate swipe", "task", task.ID, "error", err)

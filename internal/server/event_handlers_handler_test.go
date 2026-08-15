@@ -266,6 +266,45 @@ func TestHandleEventHandlerToggle_FlipsEnabled(t *testing.T) {
 	}
 }
 
+// TestHandleEventHandlerToggle_RequiresEnabled pins that an absent `enabled`
+// is rejected rather than read as false. A non-pointer bool made `{}` a
+// silent disable with a 200 — a body a client sends by mistake turning a
+// user's rule off. The explicit `{"enabled": false}` disable is covered by
+// TestHandleEventHandlerToggle_FlipsEnabled above and must keep working.
+func TestHandleEventHandlerToggle_RequiresEnabled(t *testing.T) {
+	s := newTestServer(t)
+	id := createUserRule(t, s)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+id+"/toggle", map[string]any{})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("toggle with empty body = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	// The rule is untouched — a rule created through the API starts enabled.
+	// The list call is this assertion's instrument, so its own failures are
+	// fatal and named: an error body decoded as an empty list would otherwise
+	// read as "the rule vanished" and send a reader after the wrong bug.
+	listRec := doJSON(t, s, http.MethodGet, "/api/event-handlers?kind=rule", nil)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list = %d, want 200; body=%s", listRec.Code, listRec.Body.String())
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(listRec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode listing: %v; body=%s", err, listRec.Body.String())
+	}
+	var found bool
+	for _, h := range got {
+		if h["id"] == id {
+			found = true
+			if h["enabled"] != true {
+				t.Errorf("after a refused toggle, enabled=%v want true (unchanged)", h["enabled"])
+			}
+		}
+	}
+	if !found {
+		t.Error("created rule missing from list")
+	}
+}
+
 // --- DELETE /api/event-handlers/{id} -------------------------------------
 
 func TestHandleEventHandlerDelete_UserRowHardDeletes(t *testing.T) {

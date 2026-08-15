@@ -468,7 +468,14 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	// inside the same tx so the decision and the write are consistent.
 	var staged bool
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		creds, _ := integrations.Load(ctx, tx.Secrets, orgID)
+		// Same reasoning as the register callback: a failed credential read
+		// must not read as "no PAT" and activate the App beside a live one.
+		// The load runs before any write, so failing here leaves no App row
+		// and no vaulted secrets behind.
+		creds, lerr := integrations.Load(ctx, tx.Secrets, orgID)
+		if lerr != nil {
+			return fmt.Errorf("load org credentials: %w", lerr)
+		}
 		staged = creds.GitHubPAT != ""
 		if staged {
 			githubAppLog.Info("import: live pat present, staging app inactive until cutover", "org", orgID, "app_id", canonicalAppID)

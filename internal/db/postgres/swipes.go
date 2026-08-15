@@ -30,16 +30,19 @@ func newSwipeStore(q queryer) db.SwipeStore { return &swipeStore{q: q} }
 
 var _ db.SwipeStore = (*swipeStore)(nil)
 
-func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int) (string, error) {
+func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int, snoozeUntil *time.Time) (string, error) {
 	// See sqlite/swipes.go for the full rationale. Summary: claim +
 	// delegate + reassign (TFAC-561) are responsibility-only and MUST
 	// NOT touch the lifecycle status (or in_progress / in_review tasks
 	// lose their stage during takeover/delegate/reassign via the
 	// assignee picker). Terminal swipes (dismiss / complete) write
-	// status + closed_at + close_reason. Snooze flows through
-	// SnoozeTask.
+	// status + closed_at + close_reason. Snooze writes the caller's
+	// wake time; the standalone snooze route goes through SnoozeTask.
 	terminal := action == "dismiss" || action == "complete"
 	var newStatus, closeReason string
+	// snoozeVal is what lands in tasks.snooze_until — the wake time on
+	// a snooze, NULL on every other action. See the SQLite mirror.
+	var snoozeVal any
 	switch action {
 	case "claim", "delegate", "reassign":
 		// Audit-only path.
@@ -50,13 +53,14 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		newStatus = "done"
 		closeReason = "user_completed"
 	case "snooze":
-		// Defensive: handleSwipe accepts action='snooze' and routes
-		// it here; the production FE uses /snooze + SnoozeTask
-		// instead, but a stray /swipe action=snooze should at least
-		// produce a consistent status='snoozed' rather than falling
-		// through to the 'queued' default. See SQLite mirror for the
-		// full rationale.
+		// A snoozed row with no wake time is parked forever — the
+		// wake sweep requeues on snooze_until. Refuse rather than
+		// write it. See the SQLite mirror for the full rationale.
+		if snoozeUntil == nil {
+			return "", db.ErrSnoozeUntilRequired
+		}
 		newStatus = "snoozed"
+		snoozeVal = *snoozeUntil
 	default:
 		newStatus = "queued"
 	}
@@ -94,11 +98,11 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		_, err := tx.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = $1,
-			        snooze_until = NULL,
-			        closed_at = $2,
-			        close_reason = $3
-			  WHERE org_id = $4 AND id = $5`,
-			newStatus, closedAt, reason, orgID, taskID,
+			        snooze_until = $2,
+			        closed_at = $3,
+			        close_reason = $4
+			  WHERE org_id = $5 AND id = $6`,
+			newStatus, snoozeVal, closedAt, reason, orgID, taskID,
 		)
 		return err
 	}); err != nil {

@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -64,7 +65,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		store, orgID, seedTask, readTask, readAudit := factory(t)
 		ctx := context.Background()
 		taskID := seedTask(t)
-		newStatus, err := store.RecordSwipe(ctx, orgID, taskID, "claim", 200)
+		newStatus, err := store.RecordSwipe(ctx, orgID, taskID, "claim", 200, nil)
 		if err != nil {
 			t.Fatalf("RecordSwipe: %v", err)
 		}
@@ -87,7 +88,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 	t.Run("RecordSwipe_DismissMapsToDismissed", func(t *testing.T) {
 		store, orgID, seedTask, readTask, readAudit := factory(t)
 		taskID := seedTask(t)
-		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0); err != nil {
+		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
 			t.Fatalf("RecordSwipe: %v", err)
 		}
 		status, _ := readTask(t, taskID)
@@ -107,7 +108,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// pins both halves of that contract.
 		store, orgID, seedTask, _, readAudit := factory(t)
 		taskID := seedTask(t)
-		newStatus, err := store.RecordSwipe(context.Background(), orgID, taskID, "garbage", 0)
+		newStatus, err := store.RecordSwipe(context.Background(), orgID, taskID, "garbage", 0, nil)
 		if err != nil {
 			t.Fatalf("RecordSwipe: %v", err)
 		}
@@ -136,7 +137,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		if ok, err := store.SnoozeTask(context.Background(), orgID, taskID, until, 0); err != nil || !ok {
 			t.Fatalf("snooze: ok=%v err=%v", ok, err)
 		}
-		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "claim", 0); err != nil {
+		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "claim", 0, nil); err != nil {
 			t.Fatalf("RecordSwipe: %v", err)
 		}
 		status, snoozeUntil := readTask(t, taskID)
@@ -145,6 +146,57 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		}
 		if !snoozeUntil.IsZero() {
 			t.Fatalf("snooze_until=%v want zero after RecordSwipe transition (stale snooze hides queued tasks)", snoozeUntil)
+		}
+	})
+
+	t.Run("RecordSwipe_SnoozeWritesWakeTime", func(t *testing.T) {
+		// The swipe route's snooze arm lands here (the standalone snooze
+		// route goes through SnoozeTask). Both must leave a real
+		// snooze_until: the queue's wake sweep requeues on that column,
+		// so a snoozed row without one never comes back.
+		store, orgID, seedTask, readTask, readAudit := factory(t)
+		taskID := seedTask(t)
+		until := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+		newStatus, err := store.RecordSwipe(context.Background(), orgID, taskID, "snooze", 0, &until)
+		if err != nil {
+			t.Fatalf("RecordSwipe: %v", err)
+		}
+		if newStatus != "snoozed" {
+			t.Fatalf("newStatus=%q want snoozed", newStatus)
+		}
+		status, snoozeUntil := readTask(t, taskID)
+		if status != "snoozed" {
+			t.Fatalf("task.status=%q want snoozed", status)
+		}
+		if snoozeUntil.IsZero() {
+			t.Fatalf("snooze_until is NULL after a snooze swipe — the wake sweep would never requeue this task")
+		}
+		// Same 5s slop as SnoozeTask's assertion below: SQLite roundtrips
+		// DATETIME through a string at second resolution.
+		if delta := snoozeUntil.Sub(until); delta < -5*time.Second || delta > 5*time.Second {
+			t.Fatalf("snooze_until=%v want close to %v (delta=%v)", snoozeUntil, until, delta)
+		}
+		if got := readAudit(t, taskID); !equalActions(got, []string{"snooze"}) {
+			t.Fatalf("swipe_events actions=%v want [snooze]", got)
+		}
+	})
+
+	t.Run("RecordSwipe_SnoozeWithoutWakeTimeIsRefused", func(t *testing.T) {
+		// The negative space of the case above: no dialect may persist
+		// status='snoozed' with snooze_until NULL, so a nil wake time is
+		// refused outright — audit row included, since the whole write is
+		// one tx and a refused gesture leaves no trace.
+		store, orgID, seedTask, readTask, readAudit := factory(t)
+		taskID := seedTask(t)
+		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "snooze", 0, nil); !errors.Is(err, db.ErrSnoozeUntilRequired) {
+			t.Fatalf("RecordSwipe(snooze, nil) error = %v, want ErrSnoozeUntilRequired", err)
+		}
+		status, snoozeUntil := readTask(t, taskID)
+		if status != "queued" || !snoozeUntil.IsZero() {
+			t.Fatalf("task = (%q, %v) after a refused snooze; want the seeded (queued, zero)", status, snoozeUntil)
+		}
+		if got := readAudit(t, taskID); len(got) != 0 {
+			t.Fatalf("swipe_events actions=%v want none (a refused snooze leaves no trace)", got)
 		}
 	})
 
@@ -174,7 +226,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		store, orgID, seedTask, readTask, readAudit := factory(t)
 		taskID := seedTask(t)
 		// First swipe → claimed so we can observe the transition back.
-		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "claim", 0); err != nil {
+		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "claim", 0, nil); err != nil {
 			t.Fatalf("seed swipe: %v", err)
 		}
 		ok, err := store.RequeueTask(context.Background(), orgID, taskID)
@@ -244,7 +296,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		taskID := seedTask(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if _, err := store.RecordSwipe(ctx, orgID, taskID, "claim", 0); err == nil {
+		if _, err := store.RecordSwipe(ctx, orgID, taskID, "claim", 0, nil); err == nil {
 			t.Fatalf("RecordSwipe with cancelled ctx returned nil error")
 		}
 	})

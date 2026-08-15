@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -21,6 +22,10 @@ type swipeRequest struct {
 	// TargetUserID is the reassign action's handoff target (TFAC-561) —
 	// the user the claim moves to. Unused by every other action.
 	TargetUserID string `json:"target_user_id,omitempty"`
+	// Until is the snooze action's wake time, in the same grammar the
+	// standalone snooze route takes (1h|2h|4h|tomorrow, or RFC3339).
+	// Required for snooze, unused by every other action.
+	Until string `json:"until,omitempty"`
 }
 
 // handleSwipe applies a swipe gesture to a task. It validates the action,
@@ -232,7 +237,7 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 	var newStatus string
 	swipeErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, req.Action, req.HesitationMs)
+		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, req.Action, req.HesitationMs, nil)
 		return e
 	})
 	if swipeErr != nil {
@@ -332,7 +337,7 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 	var newStatus string
 	swipeErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, req.Action, req.HesitationMs)
+		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, req.Action, req.HesitationMs, nil)
 		return e
 	})
 	if swipeErr != nil {
@@ -502,7 +507,7 @@ func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, us
 	var newStatus string
 	swipeErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, req.Action, req.HesitationMs)
+		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, req.Action, req.HesitationMs, nil)
 		return e
 	})
 	if swipeErr != nil {
@@ -538,14 +543,26 @@ func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, us
 
 // swipeLifecycle handles dismiss/snooze/complete: the swipe IS the state
 // change, so RecordSwipe lands the audit + UPDATE in one tx with no refuse
-// path. (snooze here is defensive — the FE routes snoozing through
-// /api/tasks/{id}/snooze.) Returns the new status and ok=false on a write
-// error.
+// path. (The FE routes snoozing through /api/tasks/{id}/snooze; this arm is
+// the same gesture reached through the swipe route.) Returns the new status
+// and ok=false on a write error.
 func (s *Server) swipeLifecycle(w http.ResponseWriter, r *http.Request, orgID, userID, id string, req swipeRequest) (string, bool) {
+	// A snooze needs a wake time or the row is parked forever — the queue's
+	// wake sweep requeues on snooze_until. Same grammar and validation as the
+	// standalone snooze route, so the two ways of snoozing take the same input.
+	var snoozeUntil *time.Time
+	if req.Action == "snooze" {
+		until, err := parseSnoozeUntil(req.Until)
+		if err != nil {
+			badRequest(w, "invalid snooze duration: "+err.Error())
+			return "", false
+		}
+		snoozeUntil = &until
+	}
 	var newStatus string
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, req.Action, req.HesitationMs)
+		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, req.Action, req.HesitationMs, snoozeUntil)
 		return e
 	}); err != nil {
 		internalError(w, "swipe", err)

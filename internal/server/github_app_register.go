@@ -571,7 +571,15 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	// staged bit is how the old credential stays live across the switch window
 	// without a separate mode column.
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		creds, _ := integrations.Load(r.Context(), tx.Secrets, orgID)
+		// A failed read here can't be treated as "no PAT": that would write the
+		// App active beside a live PAT, breaking the App-XOR-PAT invariant this
+		// whole staging rule exists to hold. Fail the request instead — nothing
+		// is written yet, so the rollback leaves no App row and no vaulted
+		// secrets, and the operator retries once the store recovers.
+		creds, lerr := integrations.Load(r.Context(), tx.Secrets, orgID)
+		if lerr != nil {
+			return fmt.Errorf("load org credentials: %w", lerr)
+		}
 		staged := creds.GitHubPAT != ""
 		if staged {
 			githubAppLog.Info("live pat present, staging app inactive until cutover", "org", orgID, "app_id", appIDStr)

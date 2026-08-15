@@ -22,7 +22,7 @@ func newSwipeStore(q queryer) db.SwipeStore { return &swipeStore{q: q} }
 
 var _ db.SwipeStore = (*swipeStore)(nil)
 
-func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int) (string, error) {
+func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int, snoozeUntil *time.Time) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
 	}
@@ -47,6 +47,10 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 	// clear the close columns explicitly.
 	terminal := action == "dismiss" || action == "complete"
 	var newStatus, closeReason string
+	// snoozeVal is what lands in tasks.snooze_until: the caller's wake
+	// time on a snooze, NULL on every other action (each of which is a
+	// transition out of a snooze, if the row was in one).
+	var snoozeVal any
 	switch action {
 	case "claim", "delegate", "reassign":
 		// Audit-only path — read the current status to return so the
@@ -58,17 +62,16 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		newStatus = "done"
 		closeReason = "user_completed"
 	case "snooze":
-		// Defensive: the FE routes snoozing through
-		// /api/tasks/{id}/snooze → SnoozeTask, but handleSwipe still
-		// accepts action='snooze' and falls into the dismiss/snooze/
-		// complete branch that calls RecordSwipe. If a request ever
-		// lands here, write status='snoozed' so the audit row at least
-		// matches the lifecycle write — without this, the default arm
-		// below would silently write 'queued' and the snooze "would
-		// have happened" without happening. snooze_until stays NULL
-		// (handler doesn't pass it through this path), which the FE
-		// doesn't produce in practice.
+		// The swipe route's snooze arm; the standalone snooze route
+		// goes through SnoozeTask. Both write a real wake time — the
+		// queue's wake sweep requeues on snooze_until, so a snoozed
+		// row without one never comes back. Refuse rather than write
+		// that state.
+		if snoozeUntil == nil {
+			return "", db.ErrSnoozeUntilRequired
+		}
 		newStatus = "snoozed"
+		snoozeVal = *snoozeUntil
 	default:
 		// Unknown action — same fallback as before, write 'queued'.
 		newStatus = "queued"
@@ -112,11 +115,11 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		_, err := q.ExecContext(ctx,
 			`UPDATE tasks
 			   SET status = ?,
-			       snooze_until = NULL,
+			       snooze_until = ?,
 			       closed_at = ?,
 			       close_reason = ?
 			 WHERE id = ?`,
-			newStatus, closedAt, reason, taskID,
+			newStatus, snoozeVal, closedAt, reason, taskID,
 		)
 		return err
 	})
