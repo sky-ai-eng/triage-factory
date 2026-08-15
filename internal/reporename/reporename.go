@@ -58,9 +58,18 @@ func Apply(ctx context.Context, repos db.RepoStore, resolver ghclient.Resolver, 
 		out, err := repos.RenameSystem(ctx, orgID, ref)
 		switch {
 		case errors.Is(err, db.ErrRepoSlugOccupied), errors.Is(err, db.ErrRepoIdentityAmbiguous):
-			// Terminal: stored state a rewrite cannot be applied over. Retrying
-			// changes nothing, so this is said once per observation and left
-			// alone — loud enough to act on, quiet enough not to spin.
+			// Terminal: stored state a rewrite cannot be applied over — another
+			// repository row, or a durable entity/artifact still answering to
+			// the target name. Retrying changes nothing, so this reports and
+			// moves on rather than counting as a failure of the caller's work.
+			//
+			// Error, not Warn, and it recurs on every detection until a human
+			// retires whatever holds the name. That repetition is the point:
+			// the condition is permanent, and a rename this product cannot
+			// apply is exactly the thing an operator has to be told about.
+			// The alternative — suppressing repeats — needs durable state to
+			// survive a restart, which is not worth carrying for a condition
+			// that should never occur.
 			log.ErrorContext(ctx, "repository rename refused",
 				"org", orgID, "repo", ref.Slug(), "external_id", ref.ExternalID, "error", err)
 			continue

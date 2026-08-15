@@ -15,13 +15,24 @@ import (
 // the attempt: the caller logs and moves on, and the next observation of the
 // same rename fails the same way until the conflicting row is gone.
 var (
-	// ErrRepoSlugOccupied means a different repository — one with a different
-	// provider id — already sits at the slug the rename would move onto.
-	// GitHub cannot serve two live repositories under one name, so the
-	// occupant is a repository TF still has a row for and GitHub no longer
-	// does. Moving onto it would collide with the identity index; deleting it
-	// is not this operation's call to make.
-	ErrRepoSlugOccupied = errors.New("target repository slug is already taken by another repository")
+	// ErrRepoSlugOccupied means something already answers to the slug the
+	// rename would move onto. Two causes, one remedy:
+	//
+	//   - A different repository row — one with a different provider id. GitHub
+	//     cannot serve two live repositories under one name, so the occupant is
+	//     a repository TF still has a row for and GitHub no longer does.
+	//   - A durable record keyed on that name: an entity ("owner/repo#18") or
+	//     an artifact dedup key. Untracking a repository deletes its
+	//     repo_profiles row and deliberately keeps its entities, tasks and
+	//     artifacts (tracking is forward-only), so a freed name can still be
+	//     spoken for long after the repository row is gone.
+	//
+	// Neither is resolved by deleting the occupant. The first would drop a
+	// repository row; the second would destroy durable work — an entity carries
+	// tasks, conversations and memory, and an artifact is the audit record of a
+	// real external object. Retiring stale untracked state is a user-initiated
+	// action, never a side effect of a rename.
+	ErrRepoSlugOccupied = errors.New("target repository slug is already taken")
 
 	// ErrRepoIdentityAmbiguous means more than one repository row carries the
 	// provider id the rename keys on, so "the repository being renamed" does
@@ -267,9 +278,12 @@ type RepoStore interface {
 	//     of a rename that already applied, which is the steady state.
 	//
 	// Two states are refused instead, because writing through either would
-	// destroy a row rather than move one: ErrRepoSlugOccupied when a DIFFERENT
-	// repository already holds the target slug, and ErrRepoIdentityAmbiguous
-	// when more than one row claims the id. Both are terminal for the attempt.
+	// destroy a row rather than move one: ErrRepoSlugOccupied when anything
+	// already answers to the target slug — another repository row, or a durable
+	// entity/artifact keyed on that name — and ErrRepoIdentityAmbiguous when
+	// more than one row claims the id. Both are terminal for the attempt, and
+	// a caller that retries them will fail identically until a human retires
+	// whatever holds the name.
 	//
 	// System (claims-free) variant only, and admin-pool in Postgres: the
 	// rewrite spans tables belonging to every team in the org (tracked sets,

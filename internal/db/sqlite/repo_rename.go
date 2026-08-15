@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -131,7 +132,7 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 		if err := rewriteRepoSlugRefs(ctx, tx, from, to); err != nil {
 			return err
 		}
-		if err := rewriteSlugDerivedKeys(ctx, tx, from, to); err != nil {
+		if err := rewriteSlugDerivedKeys(ctx, tx, source, from, to); err != nil {
 			return err
 		}
 		out = domain.RepoRenameOutcome{Renamed: true, From: from, To: to}
@@ -313,13 +314,19 @@ func rewritePinnedRepos(ctx context.Context, q queryer, from, to string) error {
 // repository by row id cannot remove these: a PR is identified by its
 // repository AND its number, so the composite stays a string whatever the
 // repository column becomes.
-func rewriteSlugDerivedKeys(ctx context.Context, q queryer, from, to string) error {
+func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, from, to string) error {
 	// entities.source_id — "owner/repo#18". Matched positionally rather than
 	// with LIKE: a repository name may contain '_', which LIKE reads as a
 	// wildcard, so "acme/a_i" would match "acme/api#3" and rename an entity
 	// belonging to a different repository. The offsets are Go byte lengths
 	// against a character-indexed SUBSTR, which agree because GitHub restricts
 	// a slug to ASCII.
+	//
+	// entities.source and repo_profiles.source are different vocabularies that
+	// happen to coincide while GitHub is the only provider issuing either. The
+	// repository's source is threaded through rather than hardcoded so a second
+	// provider's entities move with its repositories — but whoever adds one
+	// must check that the two vocabularies still agree.
 	if _, err := q.ExecContext(ctx, `
 		UPDATE entities
 		   SET source_id = ? || SUBSTR(source_id, ?)
@@ -328,10 +335,13 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, from, to string) err
 		        OR LOWER(SUBSTR(source_id, 1, ?)) = LOWER(?))
 	`,
 		to, len(from)+1,
-		domain.RepoSourceGitHub,
+		source,
 		from,
 		len(from)+1, from+"#",
 	); err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("%w: an entity already answers to %s: %v", db.ErrRepoSlugOccupied, to, err)
+		}
 		return fmt.Errorf("rewrite entity source ids %s -> %s: %w", from, to, err)
 	}
 
@@ -396,8 +406,31 @@ func rewriteArtifactSlugs(ctx context.Context, q queryer, from, to string) error
 			UPDATE artifacts SET target = ?, dedup_key = ?, updated_at = datetime('now')
 			 WHERE id = ?
 		`, u.target, u.dedupKey, u.id); err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("%w: an artifact already answers to %s: %v", db.ErrRepoSlugOccupied, to, err)
+			}
 			return fmt.Errorf("rewrite artifact %s for %s -> %s: %w", u.id, from, to, err)
 		}
 	}
 	return nil
+}
+
+// isUniqueViolation reports whether err is this driver's unique-constraint
+// failure. modernc's sqlite has no typed error to match on, so the message is
+// the only signal — the same string httpx.IsUniqueViolation matches, repeated
+// here rather than imported because internal/db must not depend on the server.
+//
+// It exists for the two composite keys a rename can collide on: entities'
+// (source, source_id) and artifacts' (org_id, dedup_key). Both are reachable
+// without any corruption, because untracking a repository keeps its entities
+// and artifacts while dropping the repo_profiles row that
+// slugHeldByAnotherRepository looks at — so a freed name can be spoken for by
+// records alone. Mapping the violation is what makes that a documented
+// terminal state rather than a raw driver string the caller retries forever.
+//
+// Mapped at the write rather than pre-checked on purpose: a pre-check inside
+// this transaction still races a concurrent entity insert, so the index has to
+// be the authority either way, and a second query on every rename buys nothing.
+func isUniqueViolation(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint")
 }

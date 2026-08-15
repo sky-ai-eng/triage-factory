@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -131,7 +132,7 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 		if err := rewriteRepoSlugRefs(ctx, tx, orgID, from, to); err != nil {
 			return err
 		}
-		if err := rewriteSlugDerivedKeys(ctx, tx, orgID, from, to); err != nil {
+		if err := rewriteSlugDerivedKeys(ctx, tx, orgID, source, from, to); err != nil {
 			return err
 		}
 		out = domain.RepoRenameOutcome{Renamed: true, From: from, To: to}
@@ -320,13 +321,19 @@ func rewritePinnedRepos(ctx context.Context, q queryer, orgID, from, to string) 
 // repository by row id cannot remove these: a PR is identified by its
 // repository AND its number, so the composite stays a string whatever the
 // repository column becomes.
-func rewriteSlugDerivedKeys(ctx context.Context, q queryer, orgID, from, to string) error {
+func rewriteSlugDerivedKeys(ctx context.Context, q queryer, orgID, source, from, to string) error {
 	// entities.source_id — "owner/repo#18". Matched positionally rather than
 	// with LIKE: a repository name may contain '_', which LIKE reads as a
 	// wildcard, so "acme/a_i" would match "acme/api#3" and rename an entity
 	// belonging to a different repository. The offsets are Go byte lengths
 	// against a character-indexed substr, which agree because GitHub restricts
 	// a slug to ASCII.
+	//
+	// entities.source and repo_profiles.source are different vocabularies that
+	// happen to coincide while GitHub is the only provider issuing either. The
+	// repository's source is threaded through rather than hardcoded so a second
+	// provider's entities move with its repositories — but whoever adds one
+	// must check that the two vocabularies still agree.
 	if _, err := q.ExecContext(ctx, `
 		UPDATE entities
 		   SET source_id = $1 || substr(source_id, $2)
@@ -335,10 +342,13 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, orgID, from, to stri
 		        OR lower(substr(source_id, 1, $6)) = lower($7))
 	`,
 		to, len(from)+1,
-		orgID, domain.RepoSourceGitHub,
+		orgID, source,
 		from,
 		len(from)+1, from+"#",
 	); err != nil {
+		if isUniqueViolation(err) {
+			return fmt.Errorf("%w: an entity already answers to %s: %v", db.ErrRepoSlugOccupied, to, err)
+		}
 		return fmt.Errorf("rewrite entity source ids %s -> %s: %w", from, to, err)
 	}
 
@@ -405,8 +415,36 @@ func rewriteArtifactSlugs(ctx context.Context, q queryer, orgID, from, to string
 			UPDATE artifacts SET target = $1, dedup_key = $2, updated_at = now()
 			 WHERE id = $3 AND org_id = $4
 		`, u.target, u.dedupKey, u.id, orgID); err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("%w: an artifact already answers to %s: %v", db.ErrRepoSlugOccupied, to, err)
+			}
 			return fmt.Errorf("rewrite artifact %s for %s -> %s: %w", u.id, from, to, err)
 		}
 	}
 	return nil
+}
+
+// isUniqueViolation reports whether err is Postgres' unique-constraint
+// failure, matched on SQLSTATE rather than on the message the way the SQLite
+// side must — pgx surfaces a typed error, so there is no reason to read
+// strings here.
+//
+// It exists for the two composite keys a rename can collide on: entities'
+// (org_id, source, source_id) and artifacts' (org_id, dedup_key). Both are
+// reachable without any corruption, because untracking a repository keeps its
+// entities and artifacts while dropping the repo_profiles row that
+// slugHeldByAnotherRepository looks at — so a freed name can be spoken for by
+// records alone. Mapping the violation is what makes that a documented
+// terminal state rather than a raw driver string the caller retries forever.
+//
+// Mapped at the write rather than pre-checked on purpose: a pre-check inside
+// this transaction still races a concurrent entity insert, so the index has to
+// be the authority either way, and a second query on every rename buys nothing.
+func isUniqueViolation(err error) bool {
+	// 23505 is SQLSTATE unique_violation. Spelled as the literal rather than
+	// pulled from a constants module — one code does not earn a dependency, and
+	// the codebase already names SQLSTATEs this way (42501, 23514, 22P02).
+	const uniqueViolation = "23505"
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == uniqueViolation
 }
