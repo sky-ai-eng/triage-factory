@@ -138,11 +138,7 @@ export default function PromptDrawer({
     }
     if (!promptId) return
     let cancelled = false
-    fetch(`${base}/${promptId}`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return res.json()
-      })
+    apiJSON<{ name: string; body: string; source: string; model?: string }>(`${base}/${promptId}`)
       .then((data) => {
         if (cancelled) return
         setName(data.name)
@@ -151,15 +147,11 @@ export default function PromptDrawer({
         setModel(data.model ?? '')
         setError('')
       })
-      .catch(() => {
-        if (!cancelled) setError('Failed to load prompt')
+      .catch((err) => {
+        if (!cancelled) setError(httpErrorMessage(err, 'Could not load the prompt.'))
       })
 
-    fetch(`${base}/${promptId}/stats`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return res.json()
-      })
+    apiJSON<PromptStatsData>(`${base}/${promptId}/stats`)
       .then((data) => {
         if (!cancelled) setStats(data)
       })

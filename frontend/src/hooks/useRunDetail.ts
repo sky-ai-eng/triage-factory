@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Message, Conversation, Artifact, Task, WSEvent } from '../types'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
 import { isActiveRun, isPermissionTerminalStatus } from '../lib/runStatus'
 import { useWebSocket } from './useWebSocket'
 import { usePermissionQueues } from './usePermissionQueues'
@@ -302,17 +302,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
     setError(null)
     ;(async () => {
       try {
-        // A 404 is this run's own not-found state, not a failed read — the
-        // station renders "no such run" rather than an error banner.
-        const runRes = await apiFetch(`/api/agent/conversations/${runID}`, { allow: [404] })
-        if (runRes.status === 404) {
-          if (!cancelled) {
-            setNotFound(true)
-            setLoading(false)
-          }
-          return
-        }
-        const runData = (await runRes.json()) as Conversation
+        const runData = await apiJSON<Conversation>(`/api/agent/conversations/${runID}`)
         if (cancelled) return
         setRun(runData)
         // The artifact set drives the approval list; pull it in the same load so
@@ -370,7 +360,14 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
         if (taskRow && 'taskError' in taskRow) setError(taskRow.taskError)
         else if (taskRow) setTask(taskRow)
       } catch (err) {
-        if (!cancelled) setError(httpErrorMessage(err, 'Could not load the run.'))
+        if (cancelled) return
+        // A 404 is this run's own not-found state, not a failed read — the
+        // station renders "no such run" rather than an error banner.
+        if (err instanceof HttpError && err.status === 404) {
+          setNotFound(true)
+          return
+        }
+        setError(httpErrorMessage(err, 'Could not load the run.'))
       } finally {
         if (!cancelled) setLoading(false)
       }

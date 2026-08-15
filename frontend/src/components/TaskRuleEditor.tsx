@@ -9,7 +9,7 @@ import type { RuleHandler, EventType } from '../types'
 import { toast } from './Toast/toastStore'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
 import { handlersBase } from '../lib/scope'
-import { apiJSON } from '../lib/apiClient'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 interface TaskRuleEditorProps {
   open: boolean
@@ -175,15 +175,11 @@ export default function TaskRuleEditor({
         }
 
         if (Object.keys(body).length > 0) {
-          const res = await fetch(`${base}/${encodeURIComponent(rule.id)}`, {
+          await apiFetch(`${base}/${encodeURIComponent(rule.id)}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
           })
-          if (!res.ok) {
-            const err = await res.json()
-            throw new Error(err.error || 'Failed to update rule')
-          }
         }
       } else {
         // POST — create. kind='rule' tells the unified endpoint which
@@ -202,23 +198,22 @@ export default function TaskRuleEditor({
           body.scope_predicate_json = predicateJSON
         }
 
-        const res = await fetch(base, {
+        await apiFetch(base, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         })
-        if (!res.ok) {
-          const err = await res.json()
-          throw new Error(err.error || 'Failed to create rule')
-        }
         if (effectiveTeam) noteWrittenTeam(effectiveTeam)
       }
 
       onSaved()
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Something went wrong'
+      const msg = httpErrorMessage(
+        err,
+        isEdit ? 'Could not update the rule.' : 'Could not create the rule.',
+      )
       setError(msg)
-      toast.error(`Failed to ${isEdit ? 'update' : 'create'} rule: ${msg}`)
+      toast.error(msg)
     } finally {
       setSaving(false)
     }
@@ -243,19 +238,13 @@ export default function TaskRuleEditor({
     setDeleting(true)
     setError('')
     try {
-      const res = await fetch(`${base}/${encodeURIComponent(rule.id)}`, {
-        method: 'DELETE',
-      })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.error || 'Failed to delete rule')
-      }
+      await apiFetch(`${base}/${encodeURIComponent(rule.id)}`, { method: 'DELETE' })
       onDeleted?.()
       onClose()
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Something went wrong'
+      const msg = httpErrorMessage(err, 'Could not delete the rule.')
       setError(msg)
-      toast.error(`Failed to delete rule: ${msg}`)
+      toast.error(msg)
     } finally {
       setDeleting(false)
     }

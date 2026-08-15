@@ -600,8 +600,10 @@ describe('useRunDetail resumability', () => {
         return Promise.resolve({ ok: true, status: 200, ...jsonBody([]) })
       }
       runReads++
+      // The run row goes through apiJSON now, so the stub has to answer text()
+      // as well — jsonBody awaits the promise, which is what parks the refetch.
       const body = runReads === 1 ? Promise.resolve(serverRun) : parkedRefetch.promise
-      return Promise.resolve({ ok: true, status: 200, json: () => body })
+      return Promise.resolve({ ok: true, status: 200, ...jsonBody(body) })
     })
     vi.stubGlobal('fetch', fetchMock)
     return fetchMock

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiJSON, httpErrorMessage, readJSON } from '../lib/apiClient'
 import type { DeploymentConfig, MeResponse, TeamMember, TeamMembersResponse } from '../types'
 
 /** In-flight Promise dedup for /api/config. The endpoint is read once at
@@ -66,7 +66,7 @@ function loadMe(): Promise<MeResponse | null> {
   // exists to return, so firing the handler would turn every render of a
   // logged-out surface into a redirect.
   meInFlight = apiFetch('/api/me', { allow: [401] })
-    .then((r) => (r.status === 401 ? null : (r.json() as Promise<MeResponse>)))
+    .then((r) => (r.status === 401 ? null : readJSON<MeResponse>(r, '/api/me')))
     .finally(() => {
       meInFlight = null
     })

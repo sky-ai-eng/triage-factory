@@ -197,8 +197,7 @@ export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
 const teamPath = (teamId: string) => `/api/settings/team/${encodeURIComponent(teamId)}`
 
 export async function fetchTeamSettings(teamId: string): Promise<TeamSettingsData | null> {
-  const res = await fetch(teamPath(teamId))
-  return res.ok ? ((await res.json()) as TeamSettingsData) : null
+  return apiJSON<TeamSettingsData>(teamPath(teamId)).catch(() => null)
 }
 
 // fetchTeamRepos returns the team's tracked-repo slugs, or null on failure.
@@ -206,10 +205,9 @@ export async function fetchTeamSettings(teamId: string): Promise<TeamSettingsDat
 // from this must not treat a failed load as "tracks nothing" and then write
 // [] back, wiping the team's repos (the Repos page guards the same way).
 export async function fetchTeamRepos(teamId: string): Promise<string[] | null> {
-  const res = await fetch(`${teamPath(teamId)}/repos`)
-  if (!res.ok) return null
-  const data = (await res.json()) as TeamReposData
-  return data.repos ?? []
+  return apiJSON<TeamReposData>(`${teamPath(teamId)}/repos`)
+    .then((data) => data.repos ?? [])
+    .catch(() => null)
 }
 
 // fetchTeamGitHubGroups returns just the team's saved GitHub-team mappings (no
@@ -219,10 +217,9 @@ export async function fetchTeamRepos(teamId: string): Promise<string[] | null> {
 // as fetchTeamRepos: a failed load must not read as "maps nothing." (The GET
 // also re-triggers the server's deletion reconcile, same as the group's fetch.)
 export async function fetchTeamGitHubGroups(teamId: string): Promise<GitHubGroup[] | null> {
-  const res = await fetch(`${teamPath(teamId)}/github-groups`)
-  if (!res.ok) return null
-  const data = (await res.json()) as TeamGitHubGroupsData
-  return data.groups ?? []
+  return apiJSON<TeamGitHubGroupsData>(`${teamPath(teamId)}/github-groups`)
+    .then((data) => data.groups ?? [])
+    .catch(() => null)
 }
 
 export type SaveResult = { ok: true; warning?: string } | { ok: false; error: string }
@@ -307,8 +304,7 @@ const slackChannelsPath = (teamId: string) =>
 export async function fetchTeamSlackChannels(
   teamId: string,
 ): Promise<SlackChannelsResponse | null> {
-  const res = await fetch(slackChannelsPath(teamId))
-  return res.ok ? ((await res.json()) as SlackChannelsResponse) : null
+  return apiJSON<SlackChannelsResponse>(slackChannelsPath(teamId)).catch(() => null)
 }
 
 export type SlackSaveResult =

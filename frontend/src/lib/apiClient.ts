@@ -82,15 +82,22 @@ export async function apiFetch(path: string, options: ApiFetchOptions = {}): Pro
   return resp
 }
 
-export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
-  const resp = await apiFetch(path, options)
-  // apiFetch guarantees a 2xx here, but a 2xx body isn't guaranteed to be JSON:
-  // the Vite dev server answers an unproxied /api path with a 200 index.html, and
-  // a misconfigured proxy / gateway can do the same. A bare resp.json() there
-  // throws a native SyntaxError ("Unexpected token '<'…") that bypasses
-  // httpErrorMessage's HttpError sanitizing and leaks the parser message to the
-  // UI. Re-cast a non-JSON body as an HttpError so callers land on the same clean
-  // fallback path as any other failed request.
+/** readJSON parses a response body as JSON, re-casting a non-JSON body as an
+ *  HttpError.
+ *
+ *  A 2xx body isn't guaranteed to be JSON: the Vite dev server answers an
+ *  unproxied /api path with a 200 index.html, and a misconfigured proxy /
+ *  gateway can do the same. A bare `resp.json()` there throws a native
+ *  SyntaxError ("Unexpected token '<'…") which is NOT an HttpError, so
+ *  httpErrorMessage surfaces its `.message` verbatim and the parser's words
+ *  reach the UI. Re-casting lands the caller on the same clean fallback path as
+ *  any other failed request.
+ *
+ *  `apiJSON` is `apiFetch` + this. It is exported for the one shape that can't
+ *  use apiJSON: a caller that needs the Response itself — an `allow`ed status to
+ *  branch on, a header, a 204 — and JSON on the success path. Reading that path
+ *  with a bare `resp.json()` re-opens exactly the leak above. */
+export async function readJSON<T>(resp: Response, path: string): Promise<T> {
   const text = await resp.text()
   try {
     return JSON.parse(text) as T
@@ -101,6 +108,10 @@ export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): P
       `Expected JSON from ${path} but received a non-JSON response`,
     )
   }
+}
+
+export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {
+  return readJSON<T>(await apiFetch(path, options), path)
 }
 
 /** httpErrorMessage extracts a user-facing string from a caught error,

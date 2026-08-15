@@ -18,6 +18,7 @@ const ruleTester = new RuleTester({
 })
 
 const rawFetch = (url) => ({ messageId: 'rawFetch', data: { url } })
+const opaqueFetch = { messageId: 'opaqueFetch' }
 
 describe('no-raw-api-fetch', () => {
   it('flags a raw fetch against /api, in every spelling that reached main', () => {
@@ -26,20 +27,22 @@ describe('no-raw-api-fetch', () => {
         // The wrapper itself, in both call shapes.
         "const res = await apiFetch('/api/tasks')",
         'const data = await apiJSON<Team[]>(`/api/orgs/${orgId}/teams`)',
-        // A fetch that isn't the backend: no cookie, no 401 funnel, no server
-        // `{ error }` convention — none of this rule's business.
+        // A literal that PROVES another origin: a scheme, or protocol-relative.
+        // No cookie, no 401 funnel, no server `{ error }` convention — none of
+        // this rule's business.
         "await fetch('https://api.github.com/user')",
-        'await fetch(`${base}/healthz`)',
+        "await fetch('//cdn.example.com/logo.png')",
+        "await fetch('blob:http://localhost/abc')",
+        "await fetch('data:text/plain,hi')",
+        // A root-relative path pins the whole path, so one that isn't /api
+        // can't become /api through interpolation.
         "await fetch('/healthz')",
+        'await fetch(`/healthz?since=${t}`)',
         // A path that merely starts with the same letters. `/api-docs` is a
         // different route on the same origin, and a bare startsWith would
         // claim it.
         "await fetch('/api-docs')",
         "await fetch('/apiary/things')",
-        // A computed URL is out of scope by construction: seeing it needs
-        // constant propagation, and no call site in this codebase writes one.
-        'await fetch(url)',
-        'await fetch(base + path)',
         // A method NAMED fetch on something that isn't the global.
         "await client.fetch('/api/tasks')",
         "await this.fetch('/api/tasks')",
@@ -89,6 +92,56 @@ describe('no-raw-api-fetch', () => {
         {
           code: "await fetch('/api/a'); await fetch('/api/b')",
           errors: [rawFetch('/api/a'), rawFetch('/api/b')],
+        },
+        // ── The shapes that escaped the literal-only version of this rule.
+        // Every one of these is a real call site from the sweep's follow-up:
+        // hoisting the path into a variable or a helper is how ten /api calls
+        // stayed raw through a "migrate every raw fetch" PR.
+        {
+          // GitHubTeamSelector: a local const holding an /api template.
+          code: 'const url = `/api/settings/team/${id}/groups`; await fetch(url)',
+          errors: [opaqueFetch],
+        },
+        {
+          // teamConfig: the path comes from a helper.
+          code: 'await fetch(teamPath(teamId))',
+          errors: [opaqueFetch],
+        },
+        {
+          // teamConfig again: helper call inside the template, so the first
+          // quasi is empty and proves nothing.
+          code: 'await fetch(`${teamPath(teamId)}/repos`)',
+          errors: [opaqueFetch],
+        },
+        {
+          // PromptDrawer / TaskRuleEditor: a `base` prop from lib/scope.
+          code: 'await fetch(`${base}/${promptId}`)',
+          errors: [opaqueFetch],
+        },
+        {
+          code: "await fetch(base, { method: 'POST', body })",
+          errors: [opaqueFetch],
+        },
+        // Concatenation and a bare identifier are the same story.
+        {
+          code: 'await fetch(base + path)',
+          errors: [opaqueFetch],
+        },
+        {
+          code: 'await fetch(url)',
+          errors: [opaqueFetch],
+        },
+        // A call with no argument at all still can't be proven safe.
+        {
+          code: 'await fetch()',
+          errors: [opaqueFetch],
+        },
+        // An empty first quasi proves nothing, so it can't exempt the call —
+        // and the empty string must not be quoted back as though it were the
+        // URL, which is why this reports opaque rather than raw.
+        {
+          code: "await fetch('')",
+          errors: [opaqueFetch],
         },
       ],
     })

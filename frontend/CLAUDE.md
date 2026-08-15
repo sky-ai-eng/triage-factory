@@ -8,10 +8,14 @@ here. See it for build/lint/test commands (`pnpm run build`, `./scripts/lint.sh`
 ## Calling the backend
 
 **`lib/apiClient` is the only door.** Every call to `/api/*` goes through
-`apiFetch` (a `Response`) or `apiJSON<T>` (a parsed body). A bare
-`fetch('/api/…')` is a lint error (`api/no-raw-api-fetch`); `lib/apiClient.ts`
-itself is the one exemption. Three behaviours live in the wrapper and nowhere
-else, and a raw fetch silently opts out of all three:
+`apiFetch` (a `Response`) or `apiJSON<T>` (a parsed body). `api/no-raw-api-fetch`
+errors on any `fetch()` it cannot prove points elsewhere — a literal
+`https://…`, or a root-relative path that isn't `/api`. **A computed URL is
+flagged**, including one hoisted into a variable or built by a helper: that is
+how ten `/api` calls survived the original migration, so "I can't see where this
+points" is a finding, not an exemption. `lib/apiClient.ts` is the one file-level
+exemption. Three behaviours live in the wrapper and nowhere else, and a raw
+fetch silently opts out of all three:
 
 - **The 401 funnel.** AuthContext registers a handler at mount; `apiFetch`
   invokes it on 401 so a session that expires mid-read re-authenticates. Without
@@ -27,6 +31,24 @@ Pick by what the endpoint returns: `apiJSON<T>` for a JSON body, `apiFetch` for
 a 204, a blob, a `text()` body, or when you need a response header. **A 204
 endpoint must not use `apiJSON`** — 204 is 2xx so it never throws, but there is
 no body to parse.
+
+**Never call `res.json()` on an `apiFetch` response.** That re-opens the
+non-JSON guard hole the wrapper exists to close: a 2xx HTML body throws a raw
+`SyntaxError`, which isn't an `HttpError`, so `httpErrorMessage` passes the
+parser's words straight to the UI. When a call needs the `Response` _and_ JSON
+on the success path, compose the two steps — `readJSON<T>(resp, path)` is
+`apiJSON`'s parse half, exported for exactly that:
+
+```ts
+// `allow: [401]` must stay: firing the re-auth funnel here would turn every
+// render of a logged-out surface into a redirect.
+apiFetch('/api/me', { allow: [401] }).then((r) =>
+  r.status === 401 ? null : readJSON<MeResponse>(r, '/api/me'),
+)
+```
+
+A body read best-effort (`res.json().catch(() => null)`, for a DELETE whose body
+is optional) is fine as-is — the `catch` already absorbs the parse failure.
 
 ### Tolerating a status
 
@@ -47,10 +69,12 @@ tolerates 401 is handling it, so `loadMe()` returning `null` for "not signed in"
 doesn't kick off a redirect. That is the one case where `allow` is load-bearing
 rather than a convenience.
 
-`allow` states the intent at the call site. Branching in a `catch` on
-`HttpError.status` is equally correct and preferable when you want `apiJSON`'s
-parse for the success path — `contexts/AuthContext.tsx`, `hooks/useInvites.ts`
-and `pages/InviteAccept.tsx` are the reference shape.
+`allow` states the intent at the call site, and it is the only option when
+suppressing the 401 funnel is the point. Otherwise **prefer branching in a
+`catch` on `HttpError.status`**, which keeps `apiJSON`'s parse for the success
+path — a 404 → not-found state has no funnel to suppress, so it wants the catch,
+not `allow`. `contexts/AuthContext.tsx`, `hooks/useRunDetail.ts`,
+`pages/ProjectDetail.tsx` and `hooks/useInvites.ts` are the reference shape.
 
 ### Error strings
 
@@ -107,7 +131,10 @@ URL and let the wrapper's own additions through —
 Two repo-local ESLint rules live in `frontend/eslint-rules/`, each with its own
 test file and registered in `eslint.config.js`:
 
-- `api/no-raw-api-fetch` — the above.
+- `api/no-raw-api-fetch` — the above. It reports two ways: `rawFetch` names a
+  literal `/api` path, `opaqueFetch` says the URL isn't visible to the lint. A
+  genuinely-external fetch built from a variable needs an inline disable naming
+  where it points; none exists today.
 - `run-status/no-ghost-run-status` — fails the lint when component code compares
   a conversation status against a name outside the vocabulary in `src/types.ts`
   (mirrored from `internal/domain/run_status.go`).

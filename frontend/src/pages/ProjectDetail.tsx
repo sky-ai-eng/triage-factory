@@ -23,7 +23,7 @@ import type {
   KnowledgeUploadResult,
   ProjectExportPreview,
 } from '../types'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
@@ -89,21 +89,16 @@ export default function ProjectDetail() {
     async (signal: AbortSignal) => {
       if (!id) return
       try {
-        // A 404 is this project's own not-found state, not a failed read.
-        const res = await apiFetch(`/api/projects/${encodeURIComponent(id)}`, {
-          signal,
-          allow: [404],
-        })
-        if (signal.aborted) return
-        if (res.status === 404) {
-          setMissing(true)
-          return
-        }
-        const data: Project = await res.json()
+        const data = await apiJSON<Project>(`/api/projects/${encodeURIComponent(id)}`, { signal })
         if (signal.aborted) return
         setProject(data)
       } catch (err) {
         if (signal.aborted) return
+        // A 404 is this project's own not-found state, not a failed read.
+        if (err instanceof HttpError && err.status === 404) {
+          setMissing(true)
+          return
+        }
         setLoadError(httpErrorMessage(err, 'Could not load the project.'))
       } finally {
         if (!signal.aborted) setLoading(false)
