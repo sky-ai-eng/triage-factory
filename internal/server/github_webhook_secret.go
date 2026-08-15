@@ -50,15 +50,24 @@ type webhookSecretEntry struct {
 // the limiter in front of the route already bounds how many can be in flight,
 // and a duplicated resolution is cheaper than the coordination that would
 // prevent it.
+//
+// The generation the miss hands back is what keeps that concurrency from
+// defeating the invalidation. A resolution runs outside the lock, so a rotation
+// can land while one is in flight; without the check below, the older
+// resolution's write would arrive after the invalidation and reinstate the
+// secret that was just replaced — for a full TTL, on the very deliveries the
+// invalidation exists to get right. Presenting the generation makes that write
+// lose instead of win: the next delivery misses and resolves the new secret.
 func (s *Server) webhookSecretFor(ctx context.Context, orgID string) (string, error) {
-	if secret, ok := s.webhookSecretCacheGet(orgID); ok {
+	secret, gen, ok := s.webhookSecretCacheGet(orgID)
+	if ok {
 		return secret, nil
 	}
 	secret, err := s.resolveWebhookSecret(ctx, orgID)
 	if err != nil {
 		return "", err
 	}
-	s.webhookSecretCachePut(orgID, secret)
+	s.webhookSecretCachePut(orgID, secret, gen)
 	return secret, nil
 }
 
@@ -67,11 +76,12 @@ func (s *Server) webhookSecretFor(ctx context.Context, orgID string) (string, er
 //
 // Which secret that is follows from the org's credential class. A per-org
 // registration's own webhook secret is the BYO-App answer; a PAT org has no App
-// and therefore no deliveries to verify, so the route does not exist for it.
-// Reading a missing registration row as "PAT" would be an inference that holds
-// only while PAT is the single rowless shape — an org on a deployment-level
-// shared App has no row either, and its deliveries verify against a deployment
-// secret this arm never reaches.
+// and therefore nothing a delivery could be verified against, so every delivery
+// claiming to be for it is unauthenticated by construction. Reading a missing
+// registration row as "PAT" would be an inference that holds only while PAT is
+// the single rowless shape — an org on a deployment-level shared App has no row
+// either, and its deliveries verify against a deployment secret this arm never
+// reaches.
 //
 // System (claims-free) reads throughout: the receiver is pre-auth and has only
 // a trusted org_id from the URL.
@@ -105,19 +115,27 @@ func (s *Server) resolveWebhookSecret(ctx context.Context, orgID string) (string
 }
 
 // webhookSecretCacheGet returns the cached secret for orgID when present and
-// unexpired. A hit on a cached negative returns ("", true) — distinct from the
-// ("", false) miss, which is what sends the caller to the store.
-func (s *Server) webhookSecretCacheGet(orgID string) (string, bool) {
+// unexpired. A hit on a cached negative returns ("", _, true) — distinct from
+// the ("", _, false) miss, which is what sends the caller to the store.
+//
+// The generation is the cache's invalidation counter read at the same instant
+// as the lookup, and it is the token a subsequent Put has to present. Callers
+// hand it straight back; it is meaningful only as the pair.
+func (s *Server) webhookSecretCacheGet(orgID string) (string, uint64, bool) {
 	s.webhookSecretMu.Lock()
 	defer s.webhookSecretMu.Unlock()
 	e, ok := s.webhookSecretCache[orgID]
 	if !ok || time.Now().After(e.expiresAt) {
-		return "", false
+		return "", s.webhookSecretGen, false
 	}
-	return e.secret, true
+	return e.secret, s.webhookSecretGen, true
 }
 
-// webhookSecretCachePut stores one org's resolution with a fresh TTL.
+// webhookSecretCachePut stores one org's resolution with a fresh TTL, unless an
+// invalidation has happened since gen was read — in which case the resolution
+// is older than the rotation that invalidated it and is dropped rather than
+// written. The cost of dropping it is one extra resolution on the next
+// delivery; the cost of writing it would be a TTL of the wrong secret.
 //
 // Reads report a miss on expiry but don't delete, so the sweep lives here. It
 // runs at most once per TTL window on the common path — the same
@@ -126,10 +144,13 @@ func (s *Server) webhookSecretCacheGet(orgID string) (string, bool) {
 // sweeping means every entry is live, which is a flood across distinct org ids
 // rather than a working set; the whole map goes, since this is a cache and the
 // rebuild costs one resolution per org actually delivering.
-func (s *Server) webhookSecretCachePut(orgID, secret string) {
+func (s *Server) webhookSecretCachePut(orgID, secret string, gen uint64) {
 	now := time.Now()
 	s.webhookSecretMu.Lock()
 	defer s.webhookSecretMu.Unlock()
+	if gen != s.webhookSecretGen {
+		return
+	}
 	if s.webhookSecretCache == nil {
 		s.webhookSecretCache = make(map[string]webhookSecretEntry)
 	}
@@ -157,8 +178,17 @@ func (s *Server) webhookSecretCachePut(orgID, secret string) {
 // Both directions matter: a stale positive would reject the deliveries signed
 // with the new secret, and a stale negative would reject every delivery to an
 // App that has just been registered.
+//
+// Deleting the entry is only half of it. A resolution that started before this
+// call is still in flight and still holds the pre-rotation secret, so the
+// generation moves too — that write now presents a stale token and is dropped
+// (see webhookSecretCachePut). The counter is deployment-wide rather than
+// per-org: an in-flight resolution for some other org loses its write to an
+// unrelated rotation, which costs one extra resolution and keeps the counter
+// from becoming a second attacker-keyed map.
 func (s *Server) invalidateWebhookSecret(orgID string) {
 	s.webhookSecretMu.Lock()
 	defer s.webhookSecretMu.Unlock()
 	delete(s.webhookSecretCache, orgID)
+	s.webhookSecretGen++
 }

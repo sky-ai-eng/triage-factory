@@ -634,7 +634,7 @@ func TestGitHubWebhook_NoAppSecretCached_UnderFlood(t *testing.T) {
 			t.Fatalf("delivery %d to an org with no App = %d, want 401", i+1, rec.Code)
 		}
 	}
-	if _, ok := s.webhookSecretCacheGet(runmode.LocalDefaultOrgID); !ok {
+	if _, _, ok := s.webhookSecretCacheGet(runmode.LocalDefaultOrgID); !ok {
 		t.Error("no cached entry after a flood at an org with no App; every request re-read the stores")
 	}
 }

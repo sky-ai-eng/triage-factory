@@ -270,18 +270,21 @@ type Server struct {
 	reachableRepoMu    sync.RWMutex
 	reachableRepoCache map[string]reachableRepoEntry // key: orgID\x00userID
 
-	// webhookSecretMu guards webhookSecretCache and its sweep clock — the
-	// short-TTL per-org cache of the secret the pre-auth GitHub webhook
-	// receiver verifies deliveries against. Resolving it costs a settings
-	// read, a registration read, and a vault read, all of them spent before
-	// the signature is checked, so an unauthenticated flood would otherwise
-	// pay them per request. Entries (positives and negatives alike) expire
-	// after webhookSecretTTL and are dropped explicitly when the App
-	// lifecycle rotates or tears down the secret. See
-	// github_webhook_secret.go.
+	// webhookSecretMu guards the three fields below — the short-TTL per-org
+	// cache of the secret the pre-auth GitHub webhook receiver verifies
+	// deliveries against. Resolving it costs a settings read, a registration
+	// read, and a vault read, all of them spent before the signature is
+	// checked, so an unauthenticated flood would otherwise pay them per
+	// request. Entries (positives and negatives alike) expire after
+	// webhookSecretTTL and are dropped explicitly when the App lifecycle
+	// rotates or tears down the secret. See github_webhook_secret.go.
 	webhookSecretMu    sync.Mutex
 	webhookSecretCache map[string]webhookSecretEntry // key: orgID
 	webhookSecretSweep time.Time                     // last expiry sweep, for the once-per-TTL gate
+	// webhookSecretGen counts invalidations. Resolutions run outside the
+	// lock, so it is what stops one that started before a rotation from
+	// writing the pre-rotation secret back afterwards.
+	webhookSecretGen uint64
 
 	// preAuthLimiter is the per-IP token-bucket cap on the pre-auth
 	// allowlist routes (TFAC-433). Those mounts run before any session
@@ -748,11 +751,11 @@ func (s *Server) routes() {
 	// (rate-limited upstream), and the SPA fallback (every static asset).
 	//
 	// The GitHub webhook receiver takes the separate signed-webhook tier
-	// (TFAC-809) rather than this one, alongside the Slack receiver: it
-	// authenticates each delivery by HMAC, so the human-login budget would
-	// throttle a legitimate sender, but "GitHub-paced" describes only the
-	// legitimate traffic — an anonymous caller can hit it as fast as it
-	// likes, and each attempt costs reads before the signature is checked.
+	// rather than this one, alongside the Slack receiver: it authenticates
+	// each delivery by HMAC, so the human-login budget would throttle a
+	// legitimate sender, but "GitHub-paced" describes only the legitimate
+	// traffic — an anonymous caller can hit it as fast as it likes, and each
+	// attempt costs reads before the signature is checked.
 	//
 	// Wrap ORDER matters where a cheap rejection gate also applies: the
 	// limiter goes INSIDE such a gate so a request the gate rejects costs
