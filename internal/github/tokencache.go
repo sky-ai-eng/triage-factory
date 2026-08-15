@@ -28,9 +28,11 @@ type TokenCache interface {
 	Set(orgID, installationID string, tok githubapp.Token)
 
 	// Invalidate drops the entry for (orgID, installationID). Wired to the
-	// installation.deleted webhook (via the server's onInstallationRemoved
-	// hook) so a removed installation's token isn't served from cache until
-	// its natural expiry.
+	// installation.deleted and installation.suspend webhooks (via the server's
+	// onInstallationTokensInvalid hook) so an installation whose tokens GitHub
+	// has stopped honouring isn't served from cache until their natural expiry.
+	// The resolver drops a suspended installation's entry on read as well, for
+	// the suspension a reconcile discovered rather than a delivery.
 	Invalidate(orgID, installationID string)
 }
 

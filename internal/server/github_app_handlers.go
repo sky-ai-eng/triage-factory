@@ -48,6 +48,14 @@ type githubAppInstallation struct {
 	AccountType    string `json:"account_type"`
 	AccountLogin   string `json:"account_login"`
 	InstalledAt    string `json:"installed_at"`
+	// SuspendedAt is RFC3339 when the account owner has suspended this
+	// installation, "" when it is live — the installation still holds its
+	// grant, but GitHub refuses every token minted from it. SuspendedBy is the
+	// login that suspended it, "" when unsuspended or when the source named no
+	// one. Carried so the panel can render the state; nothing in the UI reads
+	// them yet, and no other behaviour turns on them.
+	SuspendedAt string `json:"suspended_at"`
+	SuspendedBy string `json:"suspended_by"`
 }
 
 // newGitHubAppStatusResponse assembles the read-only status payload from a
@@ -77,12 +85,20 @@ func newGitHubAppStatusResponse(app *domain.OrgGitHubApp, insts []domain.OrgGitH
 		}
 	}
 	for _, inst := range insts {
-		resp.Installations = append(resp.Installations, githubAppInstallation{
+		dto := githubAppInstallation{
 			InstallationID: inst.InstallationID,
 			AccountType:    inst.AccountType,
 			AccountLogin:   inst.AccountLogin,
 			InstalledAt:    inst.InstalledAt.UTC().Format(time.RFC3339),
-		})
+		}
+		// "" rather than the zero instant formatted, so an unsuspended
+		// installation reads as unsuspended instead of as one suspended in
+		// year one.
+		if inst.Suspended() {
+			dto.SuspendedAt = inst.SuspendedAt.UTC().Format(time.RFC3339)
+			dto.SuspendedBy = inst.SuspendedBy
+		}
+		resp.Installations = append(resp.Installations, dto)
 	}
 	return resp
 }

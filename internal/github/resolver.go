@@ -789,8 +789,19 @@ func (r *resolver) installationFor(ctx context.Context, orgID string, target acc
 // fresh one (signing an App JWT with the org's PEM and exchanging it). The
 // mint path is reached only on a cache miss (~once/hour per installation),
 // so re-parsing the PEM each time is acceptable.
+//
+// A suspended installation is never served from cache. GitHub refuses every
+// token minted from one, so a cached token that outlives the suspension is a
+// credential that has already stopped working — and the webhook that would
+// have dropped it may never have arrived (GitHub does not re-deliver, and
+// local mode receives nothing), leaving the mirrored row as the only place
+// that knows. Dropping the entry and minting fresh keeps the failure honest:
+// GitHub answers for its own suspension, and the moment it is lifted the next
+// mint succeeds with nothing stale in the way.
 func (r *resolver) installationToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, inst domain.OrgGitHubAppInstallation, base string) (githubapp.Token, error) {
-	if tok, ok := r.cache.Get(orgID, inst.InstallationID); ok {
+	if inst.Suspended() {
+		r.cache.Invalidate(orgID, inst.InstallationID)
+	} else if tok, ok := r.cache.Get(orgID, inst.InstallationID); ok {
 		return tok, nil
 	}
 

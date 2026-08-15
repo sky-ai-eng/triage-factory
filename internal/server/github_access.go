@@ -82,17 +82,25 @@ func reachableSlugSet(repos []ghclient.UserRepo) map[string]bool {
 	return set
 }
 
-// invalidateInstallationTokens drops the cached installation token for every
-// given installation via the same hook the installation.deleted webhook fires
-// (onInstallationRemoved → resolver token-cache Invalidate). Used by the
-// cutover and teardown paths so a credential that just changed isn't served
-// from a stale per-installation token. nil-safe.
-func (s *Server) invalidateInstallationTokens(orgID string, insts []domain.OrgGitHubAppInstallation) {
-	if s.onInstallationRemoved == nil {
+// invalidateInstallationToken drops the cached installation token for one
+// installation via the hook the resolver wires (onInstallationTokensInvalid →
+// token-cache Invalidate). Fired by every path that learns the installation's
+// minted tokens are dead: the installation.deleted and installation.suspend
+// webhooks, and — installation by installation — the cutover and teardown
+// paths below. nil-safe.
+func (s *Server) invalidateInstallationToken(orgID, installationID string) {
+	if s.onInstallationTokensInvalid == nil {
 		return
 	}
+	s.onInstallationTokensInvalid(orgID, installationID)
+}
+
+// invalidateInstallationTokens is invalidateInstallationToken over a whole
+// list. Used by the cutover and teardown paths so a credential that just
+// changed isn't served from a stale per-installation token.
+func (s *Server) invalidateInstallationTokens(orgID string, insts []domain.OrgGitHubAppInstallation) {
 	for _, inst := range insts {
-		s.onInstallationRemoved(orgID, inst.InstallationID)
+		s.invalidateInstallationToken(orgID, inst.InstallationID)
 	}
 }
 

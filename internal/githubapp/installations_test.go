@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 
@@ -195,5 +196,57 @@ func TestListInstallations_CapturesAccountID(t *testing.T) {
 	}
 	if insts[1].AccountID != 0 {
 		t.Errorf("inst[1].AccountID = %d for a payload without one, want 0", insts[1].AccountID)
+	}
+}
+
+// TestListInstallations_CapturesSuspension pins the reconcile's half of
+// installation suspension. GitHub does not re-deliver a missed
+// installation.suspend, and local mode receives no deliveries at all, so this
+// listing is what converges a suspended installation in either case — and both
+// fields are nullable on the wire, so the null and the absent form must read
+// back as "not suspended" rather than as a parse failure.
+func TestListInstallations_CapturesSuspension(t *testing.T) {
+	key := newTestKey(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[
+			{"id": 100, "account": {"login": "acme-eng", "type": "Organization"},
+			 "suspended_at": "2026-08-15T12:00:00Z", "suspended_by": {"login": "octocat", "id": 583231}},
+			{"id": 200, "account": {"login": "solo-dev", "type": "User"}, "suspended_at": null, "suspended_by": null},
+			{"id": 300, "account": {"login": "third-co", "type": "Organization"}}
+		]`))
+	}))
+	defer srv.Close()
+
+	m, err := githubapp.NewMinter(githubapp.Config{
+		PrivateKey: key,
+		AppID:      424242,
+		APIBase:    srv.URL,
+		HTTPClient: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewMinter: %v", err)
+	}
+
+	insts, err := m.ListInstallations(context.Background())
+	if err != nil {
+		t.Fatalf("ListInstallations: %v", err)
+	}
+	if len(insts) != 3 {
+		t.Fatalf("got %d installations, want 3", len(insts))
+	}
+	want := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	if !insts[0].SuspendedAt.Equal(want) {
+		t.Errorf("inst[0].SuspendedAt = %s, want %s", insts[0].SuspendedAt, want)
+	}
+	if insts[0].SuspendedBy != "octocat" {
+		t.Errorf("inst[0].SuspendedBy = %q, want %q", insts[0].SuspendedBy, "octocat")
+	}
+	for _, i := range []int{1, 2} {
+		if !insts[i].SuspendedAt.IsZero() || insts[i].SuspendedBy != "" {
+			t.Errorf("inst[%d] = (%s, %q) for an unsuspended installation, want (zero, \"\")",
+				i, insts[i].SuspendedAt, insts[i].SuspendedBy)
+		}
 	}
 }

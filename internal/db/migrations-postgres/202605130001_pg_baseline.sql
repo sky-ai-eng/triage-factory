@@ -5949,6 +5949,16 @@ CREATE TABLE public.org_github_app_installations (
     account_login text NOT NULL,
     installed_at timestamp with time zone DEFAULT now() NOT NULL,
     removed_at timestamp with time zone,
+    -- Suspension. An account owner can suspend an installation without
+    -- uninstalling it: the grant stays, every token minted from it is refused.
+    -- An installation is suspended iff suspended_at is non-NULL; suspended_by
+    -- is the suspending GitHub login (display provenance, never a join key).
+    -- Both are written by the installation webhook (suspend / unsuspend) and
+    -- by the /app/installations reconcile, which converges a deployment that
+    -- missed a delivery. Retained when the installation is later removed; a
+    -- re-install clears them alongside removed_at.
+    suspended_at timestamp with time zone,
+    suspended_by text,
     CONSTRAINT org_github_app_installations_account_type_check
         CHECK ((account_type = ANY (ARRAY['Organization'::text, 'User'::text])))
 );

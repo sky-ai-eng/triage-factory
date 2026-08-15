@@ -17,6 +17,12 @@ export interface GitHubAppInstallation {
   account_type: string
   account_login: string
   installed_at: string
+  // RFC3339 when the account owner has suspended the installation, '' when it
+  // is live: the grant survives a suspension, but GitHub refuses every token
+  // minted from it. suspended_by is the login that suspended it ('' when
+  // unsuspended, or when GitHub named no one). Nothing renders these yet.
+  suspended_at: string
+  suspended_by: string
 }
 
 export interface GitHubAppInfo {

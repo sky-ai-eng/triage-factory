@@ -30,10 +30,13 @@ const maxWebhookBody = 25 << 20
 // another org simply fails verification.
 //
 // installation.created → UpsertInstallation; installation.deleted →
-// MarkInstallationRemoved + the resolver's token-cache invalidate hook.
-// Every other (verified) event is published to the bus for downstream
-// content processing and acked with 204. Validation failures return 4xx
-// so GitHub doesn't retry a structurally-bad delivery indefinitely.
+// MarkInstallationRemoved; installation.suspend / .unsuspend →
+// SetInstallationSuspension. deleted and suspend both fire the resolver's
+// token-cache invalidate hook, since either leaves the installation's
+// already-minted tokens dead. Every other (verified) event is published to
+// the bus for downstream content processing and acked with 204. Validation
+// failures return 4xx so GitHub doesn't retry a structurally-bad delivery
+// indefinitely.
 func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	orgID := r.PathValue("org_id")
 	if _, err := uuid.Parse(orgID); err != nil {
@@ -102,7 +105,9 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 // "User" / "Organization" type, which is exactly what the
 // org_github_app_installations CHECK constraint accepts, and carries both
 // halves of the account's identity: the numeric id the mirror resolves on and
-// the login it displays.
+// the login it displays. suspended_at / suspended_by are nullable on the wire;
+// encoding/json leaves a null as the zero value, so an unsuspended
+// installation reads back as a zero time and an empty login.
 type installationWebhook struct {
 	Action       string `json:"action"`
 	Installation struct {
@@ -112,15 +117,21 @@ type installationWebhook struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"account"`
-		CreatedAt time.Time `json:"created_at"`
+		CreatedAt   time.Time `json:"created_at"`
+		SuspendedAt time.Time `json:"suspended_at"`
+		SuspendedBy struct {
+			Login string `json:"login"`
+		} `json:"suspended_by"`
 	} `json:"installation"`
 }
 
 // handleInstallationEvent applies a verified installation event to the
-// mirror. created upserts, deleted soft-removes + fires the cache
-// invalidate hook; any other action (suspend, new_permissions_accepted,
-// …) is published to the bus and acked — the mirror only tracks
-// existence, not those finer states.
+// mirror. created upserts, deleted soft-removes, suspend / unsuspend stamp
+// and clear the suspension columns; deleted and suspend additionally fire the
+// token-cache invalidate hook, because both leave every token already minted
+// from the installation dead while the cache would keep serving one until its
+// natural expiry. Any other action (new_permissions_accepted, …) is published
+// to the bus and acked — the mirror doesn't track those states.
 func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request, orgID string, body []byte) {
 	var p installationWebhook
 	if err := json.Unmarshal(body, &p); err != nil {
@@ -143,6 +154,11 @@ func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request,
 
 	switch p.Action {
 	case "created":
+		// No suspension is carried: a just-created installation is not
+		// suspended, and the upsert writes the zero verbatim — which is what
+		// clears an inherited suspension when this `created` is a RE-install
+		// over a row that was suspended before it was removed. The account
+		// re-installed the App; they did not re-install its suspension.
 		if err := s.githubApps.UpsertInstallation(r.Context(), domain.OrgGitHubAppInstallation{
 			InstallationID: installationID,
 			OrgID:          orgID,
@@ -159,8 +175,32 @@ func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request,
 			internalError(w, "github-webhook", err)
 			return
 		}
-		if s.onInstallationRemoved != nil {
-			s.onInstallationRemoved(orgID, installationID)
+		s.invalidateInstallationToken(orgID, installationID)
+	case "suspend":
+		// A suspension is not a removal: the row stays live and the grant
+		// survives, so only the suspension columns move. GitHub stamps
+		// suspended_at on the payload, but a delivery that omits it still
+		// describes an installation that is suspended right now — falling back
+		// to the receipt time records the state rather than dropping it, since
+		// a zero timestamp IS "not suspended" in the mirror.
+		suspendedAt := p.Installation.SuspendedAt
+		if suspendedAt.IsZero() {
+			suspendedAt = time.Now().UTC()
+		}
+		if err := s.githubApps.SetInstallationSuspension(r.Context(), orgID, installationID, suspendedAt, p.Installation.SuspendedBy.Login); err != nil {
+			internalError(w, "github-webhook", err)
+			return
+		}
+		// Every token minted from a suspended installation is refused from this
+		// moment, and the cached one outlives the suspension by up to an hour.
+		s.invalidateInstallationToken(orgID, installationID)
+	case "unsuspend":
+		// Restores the prior state exactly: both columns back to NULL, nothing
+		// else on the row touched. No cache work — the installation mints again,
+		// and the entry the suspend dropped is simply re-minted on next use.
+		if err := s.githubApps.SetInstallationSuspension(r.Context(), orgID, installationID, time.Time{}, ""); err != nil {
+			internalError(w, "github-webhook", err)
+			return
 		}
 	default:
 		s.publishWebhookEvent(orgID, "installation", r.Header.Get("X-GitHub-Delivery"))

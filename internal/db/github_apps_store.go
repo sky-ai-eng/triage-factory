@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -105,7 +106,31 @@ type GitHubAppsStore interface {
 	// backfill is opportunistic — a NULL fills in on the next write that
 	// names the account, and is never re-emptied), while AccountLogin is
 	// overwritten unconditionally so a rename reaches the mirror.
+	//
+	// The suspension fields are overwritten unconditionally, like the login
+	// and unlike the id: both callers see GitHub's whole answer for the
+	// installation (the reconcile lists it, the webhook is told about it), so
+	// a zero SuspendedAt here means "GitHub says this installation is not
+	// suspended", never "this writer didn't look". That is what makes a
+	// re-install clear an inherited suspension in the same statement it clears
+	// removed_at — the installation a user just re-installed is not the
+	// suspended one they removed.
 	UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) error
+
+	// SetInstallationSuspension records a suspension transition on one
+	// installation: a non-zero suspendedAt suspends it (with suspendedBy, the
+	// suspending GitHub login, or "" when the source named no one), a zero
+	// suspendedAt clears both columns. It is the webhook's targeted write —
+	// installation.suspend / installation.unsuspend say only that the state
+	// changed, so nothing else on the row is touched.
+	//
+	// Deliberately not scoped to live rows: a suspend that arrives after the
+	// installation was removed writes the columns on the removed row, which no
+	// reader surfaces (they all filter removed_at IS NULL) and no revival
+	// depends on. A no-op (no error) on an installation the mirror has never
+	// seen — the next reconcile mints the row with the suspension already on
+	// it. Admin pool in Postgres, like the other installation writes.
+	SetInstallationSuspension(ctx context.Context, orgID, installationID string, suspendedAt time.Time, suspendedBy string) error
 
 	// MarkInstallationRemoved soft-deletes one installation by stamping
 	// removed_at = now() (a no-op on an already-removed or absent row).
