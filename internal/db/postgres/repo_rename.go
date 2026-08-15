@@ -31,14 +31,25 @@ import (
 // holds a project id for a curator key — so it can never become a foreign key
 // and belongs with the surviving group.
 //
-// Two columns hold the old slug and are deliberately NOT rewritten, because
-// they are links rather than identity: entities.url and artifacts.url. GitHub
-// redirects a renamed repository's web and API URLs, and both columns are
-// refreshed from upstream by the poller and the artifact reconciler. Rewriting
-// them would be inventing a value TF did not observe. events.payload_json and
-// external_actions are likewise untouched: both are append-only records of
-// what happened at a point in time, and at that point in time the repository
-// was called what they say it was.
+// Two columns hold the old slug and are NOT rewritten, because they are links
+// rather than identity, and GitHub redirects a renamed repository's URLs.
+// artifacts.url self-heals: its upsert refreshes the column, and moving
+// dedup_key onto the new slug is what lets the next writer find that row to
+// refresh. entities.url does not — nothing writes it after the row is created.
+//
+// TODO(TFAC-831): entities.url keeps the old slug for the life of the row. The
+// redirect covers it until the freed name is claimed by a different
+// repository, at which point the stored link resolves to a stranger's PR.
+//
+// events.payload_json and the external_actions ledger are untouched by intent
+// rather than by omission: both are append-only records of what happened at a
+// point in time, and at that point in time the repository was called what they
+// say it was.
+//
+// TODO(TFAC-830): nothing reclaims the directory the old slug named. The paths
+// stay slug-derived on purpose (a human reads them while debugging a sandbox)
+// and the new one is re-derived on next use, but the old tree is only ever
+// evicted in multi mode — the local reaper is unbounded by construction.
 //
 // Everything here runs on the ADMIN pool. The rewrite spans tables owned by
 // every team in the org — tracked sets, projects, entities, artifacts — and no
