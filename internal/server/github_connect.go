@@ -85,6 +85,32 @@ func resolveGitHubHost(orgBase string) (string, bool) {
 	return host, true
 }
 
+// orgGitHubHost fetches the org's configured base URL and resolves it to that
+// same canonical host, for callers that hold only an orgID. It is the fetching
+// sibling of resolveGitHubHost and lands on the identical string for any base
+// URL that resolveGitHubHost accepts — db.EffectiveGitHubHost applies the same
+// two rules (trim trailing slashes; an unset setting is the public host), and
+// is what the poller and the routing subscribers already key on.
+//
+// It does NOT re-validate the base URL the way resolveGitHubHost does. That
+// gate belongs to the settings writer, and a caller that is recording which
+// GitHub a row came from wants the org's answer whatever it is — refusing a
+// host the rest of the system happily uses would key this row differently from
+// every other row about the same GitHub.
+//
+// System (claims-free) read: the caller is the pre-auth webhook receiver, which
+// has a trusted org_id from the URL and no session.
+func (s *Server) orgGitHubHost(ctx context.Context, orgID string) (string, error) {
+	if s.orgs == nil {
+		return "", fmt.Errorf("read github host: orgs store not wired")
+	}
+	set, err := s.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return "", fmt.Errorf("read github host: %w", err)
+	}
+	return db.EffectiveGitHubHost(set.GitHubBaseURL), nil
+}
+
 // handleGitHubConnectStart kicks off the user-to-server OAuth dance:
 // redirect the browser to {github_base_url}/login/oauth/authorize with the
 // org App's client_id and an HMAC-signed CSRF state. Deliberately targets the

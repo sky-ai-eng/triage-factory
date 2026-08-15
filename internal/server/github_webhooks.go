@@ -183,6 +183,19 @@ func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request,
 
 	switch p.Action {
 	case "created":
+		// Which GitHub this installation lives on is the org's configured base
+		// URL — a delivery arrives over the org's own webhook secret, so the
+		// deployment that sent it is the one the org is pointed at. Resolved
+		// here rather than defaulted in the store, because a GHES org whose
+		// host we failed to read would be mirrored as a github.com
+		// installation, which is exactly the confusion the column exists to
+		// prevent. A read failure fails the delivery instead: GitHub retries,
+		// and no row claims a host nobody established.
+		host, err := s.orgGitHubHost(r.Context(), orgID)
+		if err != nil {
+			internalError(w, "github-webhook", err)
+			return
+		}
 		// No suspension is carried: a just-created installation is not
 		// suspended, and the upsert writes the zero verbatim — which is what
 		// clears an inherited suspension when this `created` is a RE-install
@@ -194,6 +207,7 @@ func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request,
 			AccountType:    p.Installation.Account.Type,
 			AccountID:      accountID,
 			AccountLogin:   p.Installation.Account.Login,
+			GitHubHost:     host,
 			InstalledAt:    p.Installation.CreatedAt,
 		}); err != nil {
 			internalError(w, "github-webhook", err)

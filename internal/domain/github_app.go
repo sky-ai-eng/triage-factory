@@ -62,7 +62,19 @@ type OrgGitHubAppInstallation struct {
 	// this was captured, which the next reconcile or webhook fills in.
 	AccountID    string
 	AccountLogin string
-	InstalledAt  time.Time
+	// GitHubHost is the GitHub deployment this installation lives on — the
+	// org's github_base_url normalized the way every other GitHub host key is
+	// (db.EffectiveGitHubHost), so the same GitHub is the same string here as
+	// in user_github_identities. It is on the row because an installation id is
+	// unique per deployment and not universally: a self-host aggregating orgs
+	// across two GHES instances can hold the same numeric id twice, meaning two
+	// unrelated installations, and telling them apart through a join to the
+	// owning org's settings is a join too many for any comparison that spans
+	// orgs. "" on a struct handed to a writer means "resolve it" — the store
+	// folds it to the public host, which is what an org with no configured base
+	// URL is on — so reads never see one.
+	GitHubHost  string
+	InstalledAt time.Time
 	// SuspendedAt is when the account owner suspended this installation, zero
 	// when it is not suspended. A suspension is not an uninstall: the grant
 	// survives, the row stays active (removed_at is untouched), and the
