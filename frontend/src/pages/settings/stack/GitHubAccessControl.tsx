@@ -565,11 +565,12 @@ export default function GitHubAccessControl({
                     <span className="font-medium text-text-secondary">@{s.githubPatLogin}</span>
                   </>
                 ) : null}
-                . Switch to a GitHub App to poll under its own bot identity with support for
-                multiple installations.
+                . Switch to a GitHub App to poll under a bot identity of its own — one that
+                doesn&rsquo;t leave with the person who set it up — and to have GitHub itself scope
+                each team&rsquo;s access to the repositories that team tracks.
               </>
             ) : (
-              'GitHub access isn’t configured for this workspace yet. Register a GitHub App to poll under its own bot identity with support for multiple installations.'
+              'GitHub access isn’t configured for this workspace yet. Register a GitHub App to poll under a bot identity of its own — one that doesn’t leave with the person who set it up — and to have GitHub itself scope each team’s access to the repositories that team tracks.'
             )}
           </p>
           <div className="flex flex-wrap items-center gap-2">
