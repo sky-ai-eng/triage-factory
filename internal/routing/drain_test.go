@@ -18,7 +18,7 @@ import (
 )
 
 // stubDelegator records every Delegate call and creates a real
-// blueprint_run row each time so MarkPendingFiringFired's FK to
+// blueprint_run row each time so MarkFired's FK to
 // blueprint_runs(id) is satisfied. Used by the drain race test to count
 // fire attempts under concurrency.
 type stubDelegator struct {
@@ -403,7 +403,7 @@ func TestDrainTask_EmptyQueue(t *testing.T) {
 // TestDrainTask_ConcurrentDrainsDoNotDoubleFire is the regression test
 // for the pop-fire-mark race: without per-task serialization, a fast-
 // terminating run fired by drainer A could trigger drainer B before A
-// reached MarkPendingFiringFired, and B would pop the same still-pending
+// reached MarkFired, and B would pop the same still-pending
 // row and call Delegate again. With the per-task mutex, the second
 // drainer blocks until the first marks the firing terminal, then sees
 // nothing pending and returns clean.
@@ -484,7 +484,7 @@ func TestRunDrainSweeper_PicksUpStuckFiring(t *testing.T) {
 	// Poll for completion: sweeper must drain within a generous window.
 	// Wait for the firing's final status rather than just stub.calls,
 	// because the sweeper increments calls inside Delegate and only
-	// then runs MarkPendingFiringFired — observing calls==1 alone
+	// then runs MarkFired — observing calls==1 alone
 	// doesn't tell us the row has been transitioned. Under -race the
 	// gap between the two becomes large enough to flake. 1s gives
 	// ~100 ticks; if status hasn't reached 'fired' by then something

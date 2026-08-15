@@ -1,7 +1,7 @@
 package domain
 
 // TokenTotals sums token usage across all assistant messages in one
-// agent run. Populated by db.RunTokenTotals; surfaced in the
+// agent run. Populated by db.TokenTotalsSystem; surfaced in the
 // AgentCard footer and in run telemetry.
 type TokenTotals struct {
 	Model               string

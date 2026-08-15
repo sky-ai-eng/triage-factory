@@ -290,11 +290,11 @@ type ResumeOutcome struct {
 // to the existing messages stream — the UI sees one coherent
 // conversation.
 //
-// This helper does NOT update runs status. The caller manages
+// This helper does NOT update conversations status. The caller manages
 // lifecycle: the memory-gate retry loop keeps the run in its current
 // state during retries and only finalizes once the gate passes or
 // gives up. Mirroring the initial invocation's status updates here
-// would produce double CompleteConversation writes with stale
+// would produce double terminal completion writes with stale
 // cost/duration fields overwriting the real totals.
 func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID, cwd, message string, opts ResumeOptions, triggerType, creatorUserID string) (*ResumeOutcome, error) {
 	if sessionID == "" {

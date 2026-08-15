@@ -619,7 +619,7 @@ func (r *Router) DrainTask(orgID, taskID string) {
 	// fired by an earlier drain can spawn a second DrainTask goroutine
 	// that pops the same pending_firings row before the first drain
 	// transitions it out of 'pending' — leading to duplicate fireDelegate
-	// calls. The MarkPendingFiringFired/Skipped guards on
+	// calls. The MarkFired/MarkSkipped guards on
 	// status='pending' protect the row's own mutation but cannot un-fire
 	// the duplicate run. This mutex closes the window: the second drain
 	// blocks until the first releases, by which point the firing has

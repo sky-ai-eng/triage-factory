@@ -185,7 +185,7 @@ func TestBuild_HappyPath_UsesStoredCostAndDuration(t *testing.T) {
 
 // TestBuild_LegacyFallback_FlagsApproximateCost covers the
 // still-running CLI path: TotalCostUSD is nil. Footer falls back to
-// RunTokenTotals (which returns zeros if there are no agent_messages
+// TokenTotalsSystem (which returns zeros if there are no messages
 // rows) and prefixes Cost with "~" to flag the estimate.
 func TestBuild_LegacyFallback_FlagsApproximateCost(t *testing.T) {
 	database := newTestDB(t)
