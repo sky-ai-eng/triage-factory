@@ -72,8 +72,10 @@ export default function TeamSettings() {
     [params, setParams],
   )
 
-  const { teams } = useTeams()
-  const team = teams[0] ?? null
+  const { teams, lastActingTeamId, loaded } = useTeams()
+  // The team the viewer is actually acting as, not whichever came back first.
+  // `teams[0]` is arbitrary once someone belongs to more than one.
+  const team = loaded ? (teams.find((t) => t.id === lastActingTeamId) ?? teams[0] ?? null) : null
   const teamId = team?.id ?? ''
   const { roleForTeam } = useTeamRole()
   // An org admin is NOT a team admin here. The gate is the viewer's own
@@ -88,6 +90,10 @@ export default function TeamSettings() {
       protectedRole: 'admin',
       roleLabels: ROLE_LABELS,
       async fetchMembers(): Promise<RosterMember[]> {
+        // Never build the URL without an id. `/api/teams//members` matches no
+        // route, so it 404s as "endpoint not found" — which reads as a missing
+        // API rather than as a request that should not have been sent.
+        if (!teamId) return []
         const data = await apiJSON<TeamRosterApiResponse>(`/api/teams/${teamId}/members`)
         return data.members.map((m) => ({
           userId: m.user_id,

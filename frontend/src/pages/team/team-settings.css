@@ -75,11 +75,16 @@
   color: var(--color-ink-3);
 }
 
-/* Five cards, wrapping. Each states its own state through its surface. */
+/* Five cards on an even grid. NOT flex-wrap: SourceCard carries no width of
+   its own, so under flex each card sized to its own content and the two
+   "coming soon" cards — which hold the longest notes — came out visibly wider
+   than the three live ones. A grid makes the tracks equal and the surface, not
+   the sentence length, the thing that distinguishes them. */
 .ts-sources {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(212px, 1fr));
   gap: var(--space-6);
+  align-items: stretch;
 }
 
 /* In-flow, so an inset hairline and no cast. The frame is warm rather than
@@ -92,6 +97,9 @@
   padding: var(--space-8);
   border-radius: var(--radius-inflow);
   box-shadow: var(--shadow-edge-alarm);
+}
+
+.ts-danger .ts-note {
   max-width: var(--container-measure);
 }
 
