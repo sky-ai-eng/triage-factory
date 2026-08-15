@@ -47,6 +47,16 @@ const repoCoverageTTL = 5 * time.Minute
 // It self-heals on the same clock, and only ever in the permissive direction on
 // a probe TF made itself — never a token handed to the wrong account, since the
 // token comes from installationFor, not from here.
+//
+// One event evicts rather than waits: a repository rename. An entry says a
+// SLUG is covered, which is only a statement about a repository for as long as
+// that slug denotes the same one — and a rename moves exactly that. So both
+// slugs go stale at once, each as a positive now vouching for the wrong thing:
+// the old one for a name this repository no longer answers to (and which
+// another may claim), the new one — if TF ever probed it — for whatever
+// repository held that name before. Unlike a grant edit, TF is the process
+// that just learned about it, so waiting out the TTL is a choice rather than
+// the only option. See RepoCoverageInvalidator.
 type repoCoverageCache struct {
 	mu      sync.Mutex
 	expires map[string]time.Time
@@ -88,9 +98,37 @@ func (c *repoCoverageCache) markCovered(orgID, owner, repo string) {
 	c.expires[coverageKey(orgID, owner, repo)] = c.timeNow().Add(repoCoverageTTL)
 }
 
+// forget drops owner/repo's entry so the next call re-probes. A miss is a
+// no-op — the cache holds positives only, so "not there" is already the
+// answer forget produces.
+func (c *repoCoverageCache) forget(orgID, owner, repo string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.expires, coverageKey(orgID, owner, repo))
+}
+
 // coverageKey joins org + slug with a NUL so no pair can alias another by
 // concatenation; the slug is lowercased to match GitHub's case-insensitive
 // owner/repo handling.
 func coverageKey(orgID, owner, repo string) string {
 	return orgID + "\x00" + strings.ToLower(owner+"/"+repo)
+}
+
+// RepoCoverageInvalidator is the optional Resolver extension that drops a
+// cached repo-coverage decision. Same optional-extension shape as
+// ScopedResolver / RateLimitReader: a Resolver that doesn't implement it (a
+// test fake) has no cache to evict from, so the caller type-asserts and skips.
+//
+// The one caller is the rename handler. Coverage is keyed on the slug, so a
+// rename invalidates the entry for BOTH names at once. The cache holds
+// positives only, and after the rename each of them vouches for the wrong
+// repository: the old slug's for one that no longer answers to that name, the
+// new slug's for whatever repository was called that before. Both have to be
+// re-probed rather than inherited.
+type RepoCoverageInvalidator interface {
+	InvalidateRepoCoverage(orgID, owner, repo string)
+}
+
+func (r *resolver) InvalidateRepoCoverage(orgID, owner, repo string) {
+	r.coverage.forget(orgID, owner, repo)
 }

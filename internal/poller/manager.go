@@ -13,6 +13,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/reporename"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/tracker"
@@ -571,6 +572,16 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			continue
 		}
 		anyFunctional = true
+		// Rename detection, before the intersection rather than after it: a
+		// renamed repository is precisely the one the intersection can no
+		// longer see, because TF still spells it the old way and GitHub
+		// answers with the new one. The grant carries every repo's id
+		// alongside its current name, so the condition — same id, different
+		// name — is readable here with no request of its own, and over the
+		// WHOLE grant rather than the tracked subset.
+		if renamed := m.applyRepoRenames(ctx, orgID, grant); renamed > 0 {
+			repos = m.reloadConfiguredRepos(ctx, orgID, repos)
+		}
 		scoped := intersectConfigured(repos, grant, covered)
 		if len(scoped) == 0 {
 			continue
@@ -890,6 +901,48 @@ func (m *Manager) recordRepoIDs(ctx context.Context, orgID string, scoped []stri
 	if filled > 0 {
 		githubLog.InfoContext(ctx, "recorded repository ids", "org", orgID, "filled", filled)
 	}
+}
+
+// applyRepoRenames reconciles the tracked repositories' slugs against the
+// names GitHub used in this grant listing, returning how many moved.
+//
+// Scoped to the whole grant, unlike recordRepoIDs above: filling an id needs a
+// row to fill and so follows the tracked intersection, but detecting a rename
+// needs the observation the intersection has already dropped. A grant entry
+// for a repository TF does not track matches no stored identity and costs one
+// map lookup.
+func (m *Manager) applyRepoRenames(ctx context.Context, orgID string, grant []ghclient.UserRepo) int {
+	if m.repos == nil {
+		return 0
+	}
+	observed := make([]domain.RepoRef, 0, len(grant))
+	for _, g := range grant {
+		id := g.ExternalID()
+		if id == "" {
+			continue
+		}
+		owner, repo, ok := strings.Cut(g.FullName, "/")
+		if !ok {
+			continue
+		}
+		observed = append(observed, domain.RepoRef{
+			Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
+		})
+	}
+	return reporename.Apply(ctx, m.repos, m.resolver, githubLog, orgID, observed)
+}
+
+// reloadConfiguredRepos re-reads the tracked set after a rename moved a slug
+// inside it, so this cycle's intersection matches the repository under its new
+// name instead of skipping it until the next one. Re-rotated to the same
+// cursor the first read was, so the round-robin position survives.
+func (m *Manager) reloadConfiguredRepos(ctx context.Context, orgID string, current []string) []string {
+	refreshed, err := m.repos.ListConfiguredNamesSystem(ctx, orgID)
+	if err != nil {
+		githubLog.WarnContext(ctx, "re-read configured repos after a rename failed", "org", orgID, "error", err)
+		return current
+	}
+	return rotateFromCursor(refreshed, m.githubCursor(orgID))
 }
 
 func intersectConfigured(configured []string, grant []ghclient.UserRepo, covered map[string]bool) []string {
