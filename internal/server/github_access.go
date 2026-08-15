@@ -364,6 +364,12 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 
 	githubAppLog.Info("switched to pat, app torn down locally", "org", orgID, "app_id", app.AppID)
 
+	// The webhook secret went with the App. Drop the receiver's cached
+	// resolution now: the org verifies nothing from here on, and a cached
+	// positive would keep accepting deliveries signed with the destroyed
+	// secret until its TTL ran out.
+	s.invalidateWebhookSecret(orgID)
+
 	// Per-installation cached tokens die with the teardown; drop them now
 	// rather than waiting out their ~1h expiry. onGitHubChanged re-dues polling
 	// under the PAT and evicts the reachable-repo cache.
@@ -448,6 +454,11 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 	}
 
 	githubAppLog.Info("discarded staged app", "org", orgID, "app_id", app.AppID)
+
+	// Same teardown as switch-to-pat as far as the receiver is concerned: the
+	// registration and its webhook secret are gone, so the cached resolution
+	// has to go with them.
+	s.invalidateWebhookSecret(orgID)
 
 	// Discarding a staged App doesn't change the live credential (the PAT was
 	// and stays live), so there's no poller restart — just drop any cached

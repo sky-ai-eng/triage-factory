@@ -270,6 +270,22 @@ type Server struct {
 	reachableRepoMu    sync.RWMutex
 	reachableRepoCache map[string]reachableRepoEntry // key: orgID\x00userID
 
+	// webhookSecretMu guards the three fields below — the short-TTL per-org
+	// cache of the secret the pre-auth GitHub webhook receiver verifies
+	// deliveries against. Resolving it costs a settings read, a registration
+	// read, and a vault read, all of them spent before the signature is
+	// checked, so an unauthenticated flood would otherwise pay them per
+	// request. Entries (positives and negatives alike) expire after
+	// webhookSecretTTL and are dropped explicitly when the App lifecycle
+	// rotates or tears down the secret. See github_webhook_secret.go.
+	webhookSecretMu    sync.Mutex
+	webhookSecretCache map[string]webhookSecretEntry // key: orgID
+	webhookSecretSweep time.Time                     // last expiry sweep, for the once-per-TTL gate
+	// webhookSecretGen counts invalidations. Resolutions run outside the
+	// lock, so it is what stops one that started before a rotation from
+	// writing the pre-rotation secret back afterwards.
+	webhookSecretGen uint64
+
 	// preAuthLimiter is the per-IP token-bucket cap on the pre-auth
 	// allowlist routes (TFAC-433). Those mounts run before any session
 	// exists, so they lack the implicit "needs a valid session" bound the
@@ -731,9 +747,15 @@ func (s *Server) routes() {
 	// single-use IdP code, so an IP cap adds ~no protection — and a 429
 	// mid-OAuth on a shared NAT would break a top-level navigation for no
 	// gain), /api/health (platform liveness probes hit it often),
-	// /api/config (the AuthGate boot read), the GitHub webhook receiver
-	// (HMAC-verified, GitHub-paced), the /auth/v1/ GoTrue proxy (rate-
-	// limited upstream), and the SPA fallback (every static asset).
+	// /api/config (the AuthGate boot read), the /auth/v1/ GoTrue proxy
+	// (rate-limited upstream), and the SPA fallback (every static asset).
+	//
+	// The GitHub webhook receiver takes the separate signed-webhook tier
+	// rather than this one, alongside the Slack receiver: it authenticates
+	// each delivery by HMAC, so the human-login budget would throttle a
+	// legitimate sender, but "GitHub-paced" describes only the legitimate
+	// traffic — an anonymous caller can hit it as fast as it likes, and each
+	// attempt costs reads before the signature is checked.
 	//
 	// Wrap ORDER matters where a cheap rejection gate also applies: the
 	// limiter goes INSIDE such a gate so a request the gate rejects costs
@@ -1342,7 +1364,17 @@ func (s *Server) routes() {
 	// session) and identified by org_id from the path; the handler
 	// verifies the HMAC signature against that org's stored webhook
 	// secret before any side effect, so it's on the preAuthAllowlist.
-	s.mux.Handle("POST /api/webhooks/github/{org_id}", http.HandlerFunc(s.handleGitHubWebhook))
+	//
+	// Wrapped in the signed-webhook tier — the same one the Slack receiver
+	// takes, and the tier that was built for this description: a route that
+	// authenticates every request itself, where the cap defends the cost of
+	// getting to the rejection rather than the rejection itself. Getting
+	// there is not free here: resolving the secret to verify against reads
+	// the org's settings, its registration row, and the vault, all before
+	// the signature is checked (github_webhook_secret.go caches the result
+	// per org; this bounds how fast an anonymous caller can miss that
+	// cache). No-op in local mode.
+	s.mux.Handle("POST /api/webhooks/github/{org_id}", s.signedWebhookRateLimit(http.HandlerFunc(s.handleGitHubWebhook)))
 
 	// Registered server extensions (Enterprise Edition, ee/) mount their
 	// routes here, each gated on its license feature. No-op in a community

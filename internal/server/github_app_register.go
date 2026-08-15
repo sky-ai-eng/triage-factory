@@ -635,6 +635,13 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 
 	githubAppLog.Info("registered app", "app_id", appIDStr, "slug", convResp.Slug, "org", orgID)
 
+	// The org now has a webhook secret where it had none (or a new one where
+	// it had another). GitHub starts delivering as soon as the App is
+	// installed, so drop whatever the receiver cached — a stale negative from
+	// a delivery that arrived mid-registration would reject real deliveries
+	// until it expired.
+	s.invalidateWebhookSecret(orgID)
+
 	// Land the user back where they launched registration from. The wizard
 	// (rt=setup) returns to /setup, which resumes on the now-current "Install
 	// the App" step rather than teleporting past it into team config; a

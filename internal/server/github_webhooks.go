@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -38,9 +37,17 @@ const maxWebhookBody = 25 << 20
 // the bus for downstream content processing and acked with 204. Validation
 // failures return 4xx so GitHub doesn't retry a structurally-bad delivery
 // indefinitely.
+//
+// Every refusal that depends on the org — no App, a PAT org, a bad signature —
+// is the same bare 401, so the reply carries no information about which orgs
+// exist or which of them have an App. The mount is rate-limited (routes(),
+// signed-webhook tier) because everything up to that 401 costs reads.
 func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	orgID := r.PathValue("org_id")
 	if _, err := uuid.Parse(orgID); err != nil {
+		// A 404 here says nothing about any org: the path isn't an org id at
+		// all, so this is a statement about the URL rather than about what is
+		// behind it. Every org-dependent refusal below is a uniform 401.
 		http.NotFound(w, r)
 		return
 	}
@@ -67,54 +74,32 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Which secret verifies this delivery follows from the org's credential
-	// class. A per-org registration's own webhook secret is the BYO-App answer;
-	// a PAT org has no App and therefore no deliveries to verify, so the route
-	// does not exist for it. Reading a missing registration row as "PAT" would
-	// be an inference that holds only while PAT is the single rowless shape —
-	// an org on a deployment-level shared App has no row either, and its
-	// deliveries verify against a deployment secret this arm never reaches.
+	// Resolve the secret this delivery has to verify against — credential
+	// class, then registration row, then vault entry — behind the short-TTL
+	// per-org cache in github_webhook_secret.go, so a flood costs one
+	// resolution per org per window rather than three reads per request. An
+	// org with nothing to verify against resolves to "", which is answered
+	// below exactly as a bad signature is.
 	//
-	// System (claims-free) read throughout: the handler is pre-auth and has
-	// only a trusted org_id from the URL. An unknown or unreadable class is
-	// refused before any secret lookup.
-	class, err := s.githubCredentialClass(r.Context(), orgID)
-	if err != nil {
-		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
-			// Nothing to verify against — same answer as a PAT org, and
-			// deliberately indistinguishable from one on the wire.
-			githubAppLog.Warn("webhook delivery for org with unknown credential class", "org", orgID)
-			http.NotFound(w, r)
-			return
-		}
-		internalError(w, "github-webhook", err)
-		return
-	}
-	if class != domain.GitHubCredentialClassBYOApp {
-		// A PAT org has no App and so no webhook to receive. Not an error —
-		// this endpoint simply doesn't exist for it.
-		http.NotFound(w, r)
-		return
-	}
-
-	app, err := s.githubApps.GetForOrgSystem(r.Context(), orgID)
-	if err != nil {
-		internalError(w, "github-webhook", err)
-		return
-	}
-	if app == nil || app.WebhookSecretRef == "" {
-		// No registration row (or a hookless App) behind the class — there's
-		// nothing to verify against, so this endpoint doesn't exist for it.
-		http.NotFound(w, r)
-		return
-	}
-	secret, err := s.secrets.GetSystem(r.Context(), orgID, app.WebhookSecretRef)
+	// TODO(TFAC-802): those reads still happen BEFORE verification. Per-org
+	// webhook URLs force the order — the secret is reachable only through the
+	// org, so org → secret → verify is the only one available. The
+	// shared-App receiver inverts it, resolving a deployment-level secret
+	// before any org is known.
+	secret, err := s.webhookSecretFor(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "github-webhook", err)
 		return
 	}
 	if secret == "" || !validWebhookSignature(secret, body, sigHeader) {
-		// Deliberately no body and no payload logging on a mismatch.
+		// One reply for both, deliberately. Answering "this org has no App"
+		// with a 404 and "your signature is wrong" with a 401 would let an
+		// unauthenticated caller walk a list of org ids and learn which
+		// workspaces have a GitHub App registered — an org-existence oracle on
+		// a route that requires no credential to reach. Note the empty secret
+		// must short-circuit rather than fall into the HMAC check: verifying
+		// against an empty key is a check anyone can pass. Deliberately no
+		// body and no payload logging either way.
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
