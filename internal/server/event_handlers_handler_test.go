@@ -280,9 +280,17 @@ func TestHandleEventHandlerToggle_RequiresEnabled(t *testing.T) {
 		t.Fatalf("toggle with empty body = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 	// The rule is untouched — a rule created through the API starts enabled.
+	// The list call is this assertion's instrument, so its own failures are
+	// fatal and named: an error body decoded as an empty list would otherwise
+	// read as "the rule vanished" and send a reader after the wrong bug.
 	listRec := doJSON(t, s, http.MethodGet, "/api/event-handlers?kind=rule", nil)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list = %d, want 200; body=%s", listRec.Code, listRec.Body.String())
+	}
 	var got []map[string]any
-	_ = json.Unmarshal(listRec.Body.Bytes(), &got)
+	if err := json.Unmarshal(listRec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode listing: %v; body=%s", err, listRec.Body.String())
+	}
 	var found bool
 	for _, h := range got {
 		if h["id"] == id {
