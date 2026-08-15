@@ -70,6 +70,20 @@ type Phase =
   | { kind: 'to-pat-diff'; diff: AccessDiff; login: string; pat: string }
   | { kind: 'to-pat-success'; settingsUrl: string; login: string }
 
+// What an App buys, shared by the two branches of the no-live-App paragraph
+// below — they differ only in the lead-in verb ("Switch to a GitHub App to …"
+// when a PAT is connected, "Register a GitHub App to …" when nothing is). One
+// fragment rather than one copy per branch: a sentence duplicated across a
+// ternary is one edit away from two divergent claims about what an App buys,
+// and the claim about GitHub enforcing the scope is the load-bearing half.
+const appPitch = (
+  <>
+    poll under a bot identity of its own — one that doesn&rsquo;t leave with the person who set it
+    up — and to have GitHub itself scope each team&rsquo;s access to the repositories that team
+    tracks
+  </>
+)
+
 export default function GitHubAccessControl({
   ctx,
   baseUrl,
@@ -565,12 +579,13 @@ export default function GitHubAccessControl({
                     <span className="font-medium text-text-secondary">@{s.githubPatLogin}</span>
                   </>
                 ) : null}
-                . Switch to a GitHub App to poll under a bot identity of its own — one that
-                doesn't leave with the person who set it up — and to have GitHub itself scope
-                each team&rsquo;s access to the repositories that team tracks.
+                . Switch to a GitHub App to {appPitch}.
               </>
             ) : (
-              'GitHub access isn’t configured for this workspace yet. Register a GitHub App to poll under a bot identity of its own — one that doesn’t leave with the person who set it up — and to have GitHub itself scope each team’s access to the repositories that team tracks.'
+              <>
+                GitHub access isn&rsquo;t configured for this workspace yet. Register a GitHub App
+                to {appPitch}.
+              </>
             )}
           </p>
           <div className="flex flex-wrap items-center gap-2">
