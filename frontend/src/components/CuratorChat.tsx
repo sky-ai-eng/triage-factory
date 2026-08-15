@@ -15,6 +15,7 @@ import { useOrgHref } from '../hooks/useOrgHref'
 import { linkifyMarkdown, type LinkifyContext } from '../lib/linkify'
 import { toast } from './Toast/toastStore'
 import PromptPicker from './PromptPicker'
+import { apiJSON } from '../lib/apiClient'
 import type { Message, CuratorRequestWithMessages, Project, Prompt, ToolCall } from '../types'
 
 const SYSTEM_TICKET_SPEC_PROMPT_ID = 'system-ticket-spec'
@@ -67,9 +68,8 @@ export default function CuratorChat({ project, onPatch }: Props) {
     () => () => {
       const ac = new AbortController()
       const q = promptTeamId ? `?team_id=${encodeURIComponent(promptTeamId)}` : ''
-      fetch(`/api/prompts${q}`, { signal: ac.signal })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d: Prompt[] | null) => {
+      apiJSON<Prompt[]>(`/api/prompts${q}`, { signal: ac.signal })
+        .then((d) => {
           if (ac.signal.aborted) return
           if (Array.isArray(d)) setPrompts(d)
         })
@@ -122,8 +122,7 @@ export default function CuratorChat({ project, onPatch }: Props) {
   const [jiraBaseURL, setJiraBaseURL] = useState<string | undefined>(undefined)
   useEffect(() => {
     const ac = new AbortController()
-    fetch('/api/settings/org', { signal: ac.signal })
-      .then((r) => (r.ok ? r.json() : null))
+    apiJSON<{ jira_base_url?: string }>('/api/settings/org', { signal: ac.signal })
       .then((d) => {
         if (ac.signal.aborted) return
         setJiraBaseURL(d?.jira_base_url || undefined)

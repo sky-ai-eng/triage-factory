@@ -23,7 +23,7 @@ import type {
   KnowledgeUploadResult,
   ProjectExportPreview,
 } from '../types'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
@@ -89,14 +89,14 @@ export default function ProjectDetail() {
     async (signal: AbortSignal) => {
       if (!id) return
       try {
-        const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, { signal })
+        // A 404 is this project's own not-found state, not a failed read.
+        const res = await apiFetch(`/api/projects/${encodeURIComponent(id)}`, {
+          signal,
+          allow: [404],
+        })
         if (signal.aborted) return
         if (res.status === 404) {
           setMissing(true)
-          return
-        }
-        if (!res.ok) {
-          setLoadError(await readError(res, 'Failed to load project'))
           return
         }
         const data: Project = await res.json()
@@ -104,7 +104,7 @@ export default function ProjectDetail() {
         setProject(data)
       } catch (err) {
         if (signal.aborted) return
-        setLoadError(`Failed to load project: ${err instanceof Error ? err.message : String(err)}`)
+        setLoadError(httpErrorMessage(err, 'Could not load the project.'))
       } finally {
         if (!signal.aborted) setLoading(false)
       }
@@ -179,7 +179,7 @@ export default function ProjectDetail() {
       patchSeq.current += 1
       const mySeq = patchSeq.current
       try {
-        const res = await fetch(`/api/projects/${encodeURIComponent(myID)}`, {
+        const fresh = await apiJSON<Project>(`/api/projects/${encodeURIComponent(myID)}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -188,13 +188,6 @@ export default function ProjectDetail() {
         // rather than the closure's `id` — the closure captured the
         // same value as myID, so `myID === id` would always be true
         // and the guard wouldn't actually protect against navigation.
-        if (!res.ok) {
-          if (myID === currentIDRef.current) {
-            toast.error(await readError(res, 'Failed to update project'))
-          }
-          return false
-        }
-        const fresh: Project = await res.json()
         if (myID === currentIDRef.current && mySeq > lastLandedSeq.current) {
           lastLandedSeq.current = mySeq
           setProject(fresh)
@@ -202,9 +195,7 @@ export default function ProjectDetail() {
         return true
       } catch (err) {
         if (myID === currentIDRef.current) {
-          toast.error(
-            `Failed to update project: ${err instanceof Error ? err.message : String(err)}`,
-          )
+          toast.error(httpErrorMessage(err, 'Could not update the project.'))
         }
         return false
       }
@@ -216,11 +207,7 @@ export default function ProjectDetail() {
     if (!id || !project) return
     if (!confirm(`Delete project "${project.name}"? This can't be undone.`)) return
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
-      if (!res.ok && res.status !== 204) {
-        toast.error(await readError(res, 'Failed to delete project'))
-        return
-      }
+      const res = await apiFetch(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
       const cleanupWarning = res.headers.get('X-Cleanup-Warning')
       if (cleanupWarning) {
         toast.warning(cleanupWarning)
@@ -229,7 +216,7 @@ export default function ProjectDetail() {
       }
       navigate(orgHref('/projects'))
     } catch (err) {
-      toast.error(`Failed to delete project: ${err instanceof Error ? err.message : String(err)}`)
+      toast.error(httpErrorMessage(err, 'Could not delete the project.'))
     }
   }, [id, project, navigate, orgHref])
 
@@ -645,20 +632,14 @@ function PinnedReposInline({
         return
       }
       try {
-        const res = await fetch(`/api/settings/team/${teamId}/repos`, { signal })
-        if (signal.aborted) return
-        if (!res.ok) {
-          const message = await readError(res, 'load repos')
-          setLoadError(message)
-          toast.error(message)
-          return
-        }
-        const data: { repos?: string[] } = await res.json()
+        const data = await apiJSON<{ repos?: string[] }>(`/api/settings/team/${teamId}/repos`, {
+          signal,
+        })
         if (signal.aborted) return
         setAvailable(data.repos ?? [])
       } catch (err) {
         if (signal.aborted) return
-        const message = err instanceof Error ? err.message : 'Failed to load repos'
+        const message = httpErrorMessage(err, 'Could not load the tracked repos.')
         setLoadError(message)
         toast.error(message)
       } finally {
@@ -1077,20 +1058,14 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
     refreshSeq.current += 1
     const mySeq = refreshSeq.current
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/knowledge`)
-      if (mySeq !== refreshSeq.current) return
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to load knowledge base'))
-        return
-      }
-      const data: KnowledgeFile[] = await res.json()
+      const data = await apiJSON<KnowledgeFile[]>(
+        `/api/projects/${encodeURIComponent(projectId)}/knowledge`,
+      )
       if (mySeq !== refreshSeq.current) return
       setFiles(data)
     } catch (err) {
       if (mySeq !== refreshSeq.current) return
-      toast.error(
-        `Failed to load knowledge base: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      toast.error(httpErrorMessage(err, 'Could not load the knowledge base.'))
     }
   }, [projectId])
 
@@ -1141,15 +1116,10 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
       try {
         const form = new FormData()
         for (const f of arr) form.append('file', f)
-        const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/knowledge`, {
-          method: 'POST',
-          body: form,
-        })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Upload failed'))
-          return
-        }
-        const data: { results: KnowledgeUploadResult[] } = await res.json()
+        const data = await apiJSON<{ results: KnowledgeUploadResult[] }>(
+          `/api/projects/${encodeURIComponent(projectId)}/knowledge`,
+          { method: 'POST', body: form },
+        )
         const ok = data.results.filter((r) => !r.error)
         const failed = data.results.filter((r) => r.error)
         if (ok.length > 0) {
@@ -1164,7 +1134,7 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
         }
         await refreshFiles()
       } catch (err) {
-        toast.error(`Upload failed: ${err instanceof Error ? err.message : String(err)}`)
+        toast.error(httpErrorMessage(err, 'Could not upload the files.'))
       } finally {
         uploadInflight.current -= 1
         if (uploadInflight.current === 0) setUploading(false)
@@ -1177,18 +1147,14 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
     async (file: KnowledgeFile) => {
       if (!confirm(`Remove ${file.path} from the knowledge base?`)) return
       try {
-        const res = await fetch(
+        await apiFetch(
           `/api/projects/${encodeURIComponent(projectId)}/knowledge/${encodeURIComponent(file.path)}`,
           { method: 'DELETE' },
         )
-        if (!res.ok && res.status !== 204) {
-          toast.error(await readError(res, 'Failed to remove file'))
-          return
-        }
         setFiles((prev) => prev.filter((f) => f.path !== file.path))
         if (expanded === file.path) setExpanded(null)
       } catch (err) {
-        toast.error(`Failed to remove file: ${err instanceof Error ? err.message : String(err)}`)
+        toast.error(httpErrorMessage(err, 'Could not remove the file.'))
       }
     },
     [projectId, expanded],
@@ -1320,19 +1286,13 @@ function ProjectExportModal({
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetch(`/api/projects/${encodeURIComponent(projectId)}/export/preview`)
-      .then(async (res) => {
-        if (!res.ok) {
-          throw new Error(await readError(res, 'Failed to load export preview'))
-        }
-        return (await res.json()) as ProjectExportPreview
-      })
+    apiJSON<ProjectExportPreview>(`/api/projects/${encodeURIComponent(projectId)}/export/preview`)
       .then((data) => {
         if (!cancelled) setPreview(data)
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err))
+          setError(httpErrorMessage(err, 'Could not load the export preview.'))
         }
       })
       .finally(() => {
@@ -1347,11 +1307,7 @@ function ProjectExportModal({
     setExporting(true)
     setError(null)
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/export`)
-      if (!res.ok) {
-        setError(await readError(res, 'Export failed'))
-        return
-      }
+      const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/export`)
       const blob = await res.blob()
       const fallback = `${projectName || 'project'}.tfproject`
       const filename = extractFilename(res.headers.get('Content-Disposition')) || fallback
@@ -1366,7 +1322,7 @@ function ProjectExportModal({
       toast.success(`Exported "${projectName}"`)
       onClose()
     } catch (err) {
-      setError(`Export failed: ${err instanceof Error ? err.message : String(err)}`)
+      setError(httpErrorMessage(err, 'Could not export the project.'))
     } finally {
       setExporting(false)
     }
@@ -1552,20 +1508,16 @@ function KnowledgeRow({
   useEffect(() => {
     if (!needsLazyFetch) return
     let cancelled = false
-    fetch(rawURL)
-      .then((r) => {
-        if (!r.ok) {
-          throw new Error(`Failed to load file preview (${r.status})`)
-        }
-        return r.text()
-      })
+    // The knowledge endpoint serves the file's own bytes, not JSON — apiFetch
+    // and .text(), not apiJSON.
+    apiFetch(rawURL)
+      .then((r) => r.text())
       .then((text) => {
         if (!cancelled) setLazyContent(text)
       })
       .catch((error: unknown) => {
         if (cancelled) return
-        const msg = error instanceof Error ? error.message : 'Failed to load file preview.'
-        toast.error(msg)
+        toast.error(httpErrorMessage(error, 'Could not load the file preview.'))
         setLazyContent('Failed to load file preview.')
       })
     return () => {

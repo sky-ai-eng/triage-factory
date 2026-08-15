@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { usePermissionQueues } from './usePermissionQueues'
+import { jsonBody } from '../test/apiResponse'
 
 // The queue is a projection of GET /api/agent/conversations/{id}/permissions,
 // so what matters here is how it reacts to the server's answers — including the
@@ -31,7 +32,7 @@ function stubPermissions(responses: Array<{ ok?: boolean; body?: unknown; throws
     return Promise.resolve({
       ok: r.ok,
       status: r.ok ? 200 : 500,
-      json: () => Promise.resolve(r.body),
+      ...jsonBody(r.body),
     })
   })
   vi.stubGlobal('fetch', fetchMock)

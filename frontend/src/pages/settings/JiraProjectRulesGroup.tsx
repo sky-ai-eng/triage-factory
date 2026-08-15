@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, Trash2 } from 'lucide-react'
 import { Section } from './primitives'
 import JiraStatusRule from '../../components/JiraStatusRule'
 import { emptyProject, projectIsComplete, type JiraProjectConfig } from './teamConfig'
+import { apiJSON } from '../../lib/apiClient'
 
 interface JiraStatus {
   id: string
@@ -84,13 +85,10 @@ export default function JiraProjectRulesGroup({
     setLoadingKeys((prev) => new Set([...prev, ...keys]))
     try {
       const params = keys.map((p) => `project=${encodeURIComponent(p)}`).join('&')
-      const res = await fetch(`/api/jira/statuses?${params}`)
-      if (res.ok) {
-        const statuses: JiraStatus[] = await res.json()
-        const next: Record<string, JiraStatus[]> = {}
-        for (const k of keys) next[k] = statuses
-        setStatusesByProject((current) => ({ ...current, ...next }))
-      }
+      const statuses = await apiJSON<JiraStatus[]>(`/api/jira/statuses?${params}`)
+      const next: Record<string, JiraStatus[]> = {}
+      for (const k of keys) next[k] = statuses
+      setStatusesByProject((current) => ({ ...current, ...next }))
     } catch {
       // Non-critical — the picker just shows no options until a retry.
     } finally {

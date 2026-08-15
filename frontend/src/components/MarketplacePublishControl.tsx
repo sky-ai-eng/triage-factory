@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { Store, X } from 'lucide-react'
 import { toast } from './Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import type { EventType } from '../types'
@@ -60,8 +60,9 @@ export default function MarketplacePublishControl({
 
   const refresh = useCallback(() => {
     if (!isMulti || !sourceId) return
-    fetch(`/api/marketplace/listings/by-source/${encodeURIComponent(sourceId)}`)
-      .then((res) => (res.ok ? res.json() : null))
+    apiJSON<MarketplaceListing | null>(
+      `/api/marketplace/listings/by-source/${encodeURIComponent(sourceId)}`,
+    )
       .then((data) => setListing(data ?? null))
       .catch(() => setListing(null))
   }, [isMulti, sourceId])
@@ -73,19 +74,20 @@ export default function MarketplacePublishControl({
   const setStatus = async (action: 'delist' | 'relist') => {
     if (!listing) return
     try {
-      const res = await fetch(`/api/marketplace/listings/${listing.id}/${action}`, {
-        method: 'POST',
-      })
-      if (!res.ok) {
-        toast.error(await readError(res, `Failed to ${action}`))
-        return
-      }
+      await apiFetch(`/api/marketplace/listings/${listing.id}/${action}`, { method: 'POST' })
       toast.info(
         action === 'delist' ? 'Delisted from the marketplace' : 'Relisted on the marketplace',
       )
       refresh()
     } catch (err) {
-      toast.error(`Failed to ${action}: ${(err as Error).message}`)
+      toast.error(
+        httpErrorMessage(
+          err,
+          action === 'delist'
+            ? 'Could not delist from the marketplace.'
+            : 'Could not relist on the marketplace.',
+        ),
+      )
     }
   }
 
@@ -189,8 +191,7 @@ function PublishDialog({
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    fetch('/api/event-types')
-      .then((r) => (r.ok ? r.json() : []))
+    apiJSON<EventType[]>('/api/event-types')
       .then((data) => {
         if (!cancelled && Array.isArray(data)) setCatalog(data)
       })
@@ -233,35 +234,38 @@ function PublishDialog({
     setSaving(true)
     setError('')
     try {
-      const res = isRepublish
-        ? await fetch(`/api/marketplace/listings/${existingListing!.id}/versions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, description, event_types: eventTypes }),
-          })
-        : await fetch('/api/marketplace/listings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              kind,
-              source_id: sourceId,
-              name,
-              description,
-              event_types: eventTypes,
-            }),
-          })
-      if (!res.ok) {
-        toast.error(
-          await readError(res, isRepublish ? 'Failed to publish update' : 'Failed to publish'),
-        )
-        return
+      if (isRepublish) {
+        await apiFetch(`/api/marketplace/listings/${existingListing!.id}/versions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, description, event_types: eventTypes }),
+        })
+      } else {
+        await apiFetch('/api/marketplace/listings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            kind,
+            source_id: sourceId,
+            name,
+            description,
+            event_types: eventTypes,
+          }),
+        })
       }
       toast.info(
         isRepublish ? 'Published an update to the marketplace' : 'Published to the marketplace',
       )
       onPublished()
     } catch (err) {
-      toast.error(`Failed to publish: ${(err as Error).message}`)
+      toast.error(
+        httpErrorMessage(
+          err,
+          isRepublish
+            ? 'Could not publish the update to the marketplace.'
+            : 'Could not publish to the marketplace.',
+        ),
+      )
     } finally {
       setSaving(false)
     }

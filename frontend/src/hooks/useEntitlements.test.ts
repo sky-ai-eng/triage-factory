@@ -6,6 +6,7 @@ import {
   resetEntitlementsForTest,
   FeatureGovernance,
 } from './useEntitlements'
+import { jsonBody } from '../test/apiResponse'
 
 // useEntitlements holds a module-level cache (one fetch per page), so each test
 // clears it (resetEntitlementsForTest) and stubs fetch to return the
@@ -16,9 +17,9 @@ import {
 function stubEntitlements(features: string[]) {
   const fetchMock = vi.fn((input: unknown) => {
     if (String(input).split('?')[0] === '/api/entitlements') {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ features }) })
+      return Promise.resolve({ ok: true, ...jsonBody({ features }) })
     }
-    return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) })
+    return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -76,9 +77,9 @@ describe('useEntitlements', () => {
     let features = ['governance']
     const fetchMock = vi.fn((input: unknown) => {
       if (String(input).split('?')[0] === '/api/entitlements') {
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ features }) })
+        return Promise.resolve({ ok: true, ...jsonBody({ features }) })
       }
-      return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) })
+      return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })
     })
     vi.stubGlobal('fetch', fetchMock)
 
@@ -97,7 +98,7 @@ describe('useEntitlements', () => {
     // its resolver so it lands AFTER we switch to org B. Without the guard, A's
     // stale governance set would clobber B's empty one.
     let landA!: () => void
-    const aResponse = { ok: true, json: () => Promise.resolve({ features: ['governance'] }) }
+    const aResponse = { ok: true, ...jsonBody({ features: ['governance'] }) }
     let call = 0
     const fetchMock = vi.fn(() => {
       call += 1
@@ -107,7 +108,7 @@ describe('useEntitlements', () => {
         })
       }
       // Org B resolves immediately with no entitlements.
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ features: [] }) })
+      return Promise.resolve({ ok: true, ...jsonBody({ features: [] }) })
     })
     vi.stubGlobal('fetch', fetchMock)
 
@@ -131,7 +132,7 @@ describe('useEntitlements', () => {
   it('fails closed when the probe errors (loaded, nothing licensed)', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(() => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) })),
+      vi.fn(() => Promise.resolve({ ok: false, status: 500, ...jsonBody({}) })),
     )
     const { result } = renderHook(() => useEntitlements())
 

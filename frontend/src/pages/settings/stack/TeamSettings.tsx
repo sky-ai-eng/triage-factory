@@ -45,6 +45,7 @@ import {
   type JiraProjectConfig,
   type TeamConfigForm,
 } from '../teamConfig'
+import { apiJSON } from '../../../lib/apiClient'
 import SettingsSection from './SettingsSection'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
@@ -212,9 +213,7 @@ export default function TeamSettings({
       fetchTeamSettings(endpointTeamId),
       fetchTeamRepos(endpointTeamId),
       fetchTeamGitHubGroups(endpointTeamId),
-      fetch('/api/integrations/status')
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null),
+      apiJSON<{ jira?: boolean; jira_url?: string }>('/api/integrations/status').catch(() => null),
     ])
       .then(([settings, teamRepos, teamGroups, integ]) => {
         if (cancelled) return

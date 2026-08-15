@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { fetchPendingPermissions, ttlForPrompt, PERMISSION_TTL_GRACE_MS } from './permissions'
+import { jsonBody } from '../test/apiResponse'
 
 // fetchPendingPermissions is the boundary between "the server told us what is
 // pending" and "we couldn't ask". Those are different facts and the caller acts
@@ -21,10 +22,7 @@ describe('fetchPendingPermissions', () => {
     stubFetch(() =>
       Promise.resolve({
         ok: true,
-        json: () =>
-          Promise.resolve([
-            { tool_call_id: 'toolu_1', tool_name: 'Bash', input: { command: 'ls' } },
-          ]),
+        ...jsonBody([{ tool_call_id: 'toolu_1', tool_name: 'Bash', input: { command: 'ls' } }]),
       }),
     )
     const got = await fetchPendingPermissions('run-1')
@@ -36,20 +34,23 @@ describe('fetchPendingPermissions', () => {
     // [] is the server stating there is nothing outstanding — the caller clears
     // its queue on it. null is the absence of an answer, on which the caller
     // must change nothing; collapsing the two blanks live prompts on a blip.
-    stubFetch(() => Promise.resolve({ ok: true, json: () => Promise.resolve([]) }))
+    stubFetch(() => Promise.resolve({ ok: true, ...jsonBody([]) }))
     expect(await fetchPendingPermissions('run-1')).toEqual([])
 
-    stubFetch(() => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve(null) }))
+    stubFetch(() => Promise.resolve({ ok: false, status: 500, ...jsonBody(null) }))
     expect(await fetchPendingPermissions('run-1')).toBeNull()
 
     stubFetch(() => Promise.reject(new Error('network down')))
     expect(await fetchPendingPermissions('run-1')).toBeNull()
 
-    stubFetch(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ error: 'nope' }) }))
+    stubFetch(() => Promise.resolve({ ok: true, ...jsonBody({ error: 'nope' }) }))
     expect(await fetchPendingPermissions('run-1')).toBeNull()
 
+    // A 2xx whose body isn't JSON — the dev server's index.html is the real
+    // case. apiJSON re-casts it as an HttpError, so this lands in the same
+    // "couldn't ask" arm rather than throwing a raw SyntaxError at the caller.
     stubFetch(() =>
-      Promise.resolve({ ok: true, json: () => Promise.reject(new SyntaxError('bad json')) }),
+      Promise.resolve({ ok: true, text: () => Promise.resolve('<!doctype html><html></html>') }),
     )
     expect(await fetchPendingPermissions('run-1')).toBeNull()
   })
@@ -61,7 +62,7 @@ describe('fetchPendingPermissions', () => {
     stubFetch(() =>
       Promise.resolve({
         ok: true,
-        json: () => Promise.resolve([{ tool_call_id: 'toolu_1', tool_name: 'Bash' }]),
+        ...jsonBody([{ tool_call_id: 'toolu_1', tool_name: 'Bash' }]),
       }),
     )
     const got = await fetchPendingPermissions('run-1')

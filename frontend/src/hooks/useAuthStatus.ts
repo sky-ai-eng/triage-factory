@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { apiJSON } from '../lib/apiClient'
 
 interface AuthStatus {
   // configured = "a provisioned tenant exists" (the user has run the
@@ -58,11 +59,14 @@ export function useAuthStatus(orgKey?: string, pollMs?: number): AuthStatus {
       }
     }
 
+    // Every failure — a non-2xx, a network drop, a body that isn't JSON —
+    // lands in the same arm: stop the spinner, keep the last known status, let
+    // the next tick try again. This is a gate poll, not a user action; there is
+    // no message to show and nothing to retry by hand.
     const load = () => {
-      fetch('/api/integrations/status')
-        .then((res) => (res.ok ? res.json() : null))
+      apiJSON<Omit<AuthStatus, 'loading'>>('/api/integrations/status')
         .then((data) => {
-          if (cancelled || !data) return
+          if (cancelled) return
           setStatus({ ...data, loading: false })
           // Once the org is fully configured the gate admits the user, so
           // there's nothing left to poll for — drop the interval.

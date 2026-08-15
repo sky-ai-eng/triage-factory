@@ -21,7 +21,7 @@ import EventBadge from './EventBadge'
 import TaskRuleEditor from './TaskRuleEditor'
 import type { RuleHandler } from '../types'
 import { toast } from './Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 interface TaskRulesPanelProps {
   open: boolean
@@ -51,11 +51,7 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true)
 
-    fetch('/api/event-handlers?kind=rule')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      })
+    apiJSON<RuleHandler[]>('/api/event-handlers?kind=rule')
       .then((data) => {
         if (!cancelled) {
           setRules(Array.isArray(data) ? data : [])
@@ -79,18 +75,14 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
     setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: !prev } : r)))
 
     try {
-      const res = await fetch(`/api/event-handlers/${encodeURIComponent(rule.id)}`, {
+      await apiFetch(`/api/event-handlers/${encodeURIComponent(rule.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: !prev }),
       })
-      if (!res.ok) {
-        setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: prev } : r)))
-        toast.error(await readError(res, 'Failed to toggle rule'))
-      }
     } catch (err) {
       setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: prev } : r)))
-      toast.error(`Failed to toggle rule: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not toggle the rule.'))
     }
   }, [])
 
@@ -106,18 +98,14 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
       setRules(reordered) // Optimistic
 
       try {
-        const res = await fetch('/api/event-handlers/reorder', {
+        await apiFetch('/api/event-handlers/reorder', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(reordered.map((r) => r.id)),
         })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to reorder rules'))
-          refresh() // Revert on failure
-        }
       } catch (err) {
-        toast.error(`Failed to reorder rules: ${(err as Error).message}`)
-        refresh()
+        toast.error(httpErrorMessage(err, 'Could not reorder the rules.'))
+        refresh() // Revert on failure
       }
     },
     [rules, refresh],

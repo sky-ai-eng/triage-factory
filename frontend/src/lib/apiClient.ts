@@ -1,25 +1,25 @@
 /**
- * apiClient wraps fetch with the cookie + org-prefix conventions the
- * D8 multi-mode flow needs:
+ * apiClient is the only door to `/api/*`. Every call to the backend goes
+ * through `apiFetch` or `apiJSON`; a bare `fetch('/api/…')` anywhere else is a
+ * lint error (`api/no-raw-api-fetch`). That is not a style preference — three
+ * behaviours live in here and only here:
  *
  *  - `credentials: 'include'` is set unconditionally so the sid cookie
  *    travels on every request. In local mode no cookie exists so this
  *    is a no-op.
- *  - `org` is opt-in: when provided as a string, the path is prefixed
- *    with `/api/orgs/<org>/`. Cross-org endpoints (`/api/me`,
- *    `/api/auth/*`, `/api/config`) call without `org`. This is the
- *    inverse of sky-frontend's pattern: we make org-scoping explicit
- *    rather than the default, because most D7 endpoints aren't
- *    retrofitted yet — defaulting to a prefix would 404 them all.
- *  - Non-2xx responses throw HttpError so callers can branch on
- *    `status === 401` for re-auth. No automatic redirect at the
- *    wrapper layer; that's the caller's call (AuthContext catches 401
- *    on /api/me and AuthGate handles routing).
+ *  - 401 is funneled to AuthContext via the registered handler — AuthContext
+ *    registers a callback at mount, the wrapper invokes it on 401. That is what
+ *    re-authenticates a session that expires mid-read, and it decouples the
+ *    fetch layer from the router. A raw fetch never reaches it, so the page
+ *    just renders a failed read and stays there.
+ *  - Non-2xx responses throw HttpError, so `httpErrorMessage` can turn any
+ *    failure into the same user-facing string. No automatic redirect at the
+ *    wrapper layer; that's the caller's call (AuthContext catches 401 on
+ *    /api/me and AuthGate handles routing).
  *
- * The wrapper is also the chokepoint where 401 is funneled to
- * AuthContext via the registered handler — AuthContext registers a
- * callback at startup, the wrapper invokes it on 401. Decouples the
- * fetch layer from the router.
+ * Paths are written in full — `/api/orgs/${orgId}/…`. There is no org-prefixing
+ * option: the prefix is one interpolation at the call site, and a helper that
+ * hides it splits every path in the app into two spellings for no gain.
  */
 
 export class HttpError extends Error {
@@ -43,27 +43,22 @@ export function setUnauthHandler(handler: UnauthHandler | null) {
 }
 
 export interface ApiFetchOptions extends RequestInit {
-  /** When provided, prefix the path with `/api/orgs/<org>/`. The
-   *  caller is responsible for not double-prefixing — `path` should
-   *  start with a slash and NOT include `/api/` (we add it). For
-   *  cross-org endpoints (auth, /api/me, /api/config), omit `org` and
-   *  pass the full `/api/...` path. */
-  org?: string
-}
-
-function resolveUrl(path: string, org: string | undefined): string {
-  if (org) {
-    const cleaned = path.startsWith('/') ? path : '/' + path
-    return '/api/orgs/' + encodeURIComponent(org) + cleaned
-  }
-  return path
+  /** Statuses that resolve rather than throw — the response comes back and the
+   *  caller branches on `status` itself. This is how a call says "a 404 here is
+   *  an answer, not a failure" at the site where that is true, instead of in a
+   *  catch block that has to re-derive it.
+   *
+   *  Listing 401 also suppresses the global re-auth handler: a caller that
+   *  tolerates 401 is handling it (`loadMe()` returning null for "not signed
+   *  in" must not kick off a re-auth), and one knob covering both opt-outs
+   *  keeps them from drifting apart. */
+  allow?: number[]
 }
 
 export async function apiFetch(path: string, options: ApiFetchOptions = {}): Promise<Response> {
-  const { org, headers, ...rest } = options
-  const url = resolveUrl(path, org)
+  const { allow, headers, ...rest } = options
 
-  const resp = await fetch(url, {
+  const resp = await fetch(path, {
     ...rest,
     credentials: 'include',
     headers: {
@@ -71,14 +66,16 @@ export async function apiFetch(path: string, options: ApiFetchOptions = {}): Pro
     },
   })
 
-  if (resp.status === 401 && unauthHandler) {
+  const allowed = allow?.includes(resp.status) ?? false
+
+  if (resp.status === 401 && !allowed && unauthHandler) {
     // Notify AuthContext before throwing so the redirect happens even
     // when the caller doesn't catch. Throwing still lets the caller's
     // try/catch surface the failure for messaging.
     unauthHandler()
   }
 
-  if (!resp.ok) {
+  if (!resp.ok && !allowed) {
     const body = await resp.text().catch(() => '')
     throw new HttpError(resp.status, body)
   }
@@ -101,7 +98,7 @@ export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): P
     throw new HttpError(
       resp.status,
       text,
-      `Expected JSON from ${resolveUrl(path, options.org)} but received a non-JSON response`,
+      `Expected JSON from ${path} but received a non-JSON response`,
     )
   }
 }

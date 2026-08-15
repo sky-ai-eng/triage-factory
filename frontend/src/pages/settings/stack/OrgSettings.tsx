@@ -28,7 +28,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import TeamPicker from '../../../components/TeamPicker'
 import { toast } from '../../../components/Toast/toastStore'
 import { noteWrittenTeam, useWriteTeam } from '../../../hooks/useTeams'
-import { readError } from '../../../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../../../lib/apiClient'
 import {
   hostOf,
   normalizeBaseUrl,
@@ -993,12 +993,12 @@ function SkillsImport() {
     if (importing) return
     setImporting(true)
     try {
-      const res = await fetch('/api/skills/import', { method: 'POST' })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to import skills'))
-        return
-      }
-      const result = await res.json()
+      const result = await apiJSON<{
+        errors?: string[]
+        imported: number
+        skipped: number
+        scanned: number
+      }>('/api/skills/import', { method: 'POST' })
       if (result.errors?.length) {
         toast.error(
           `${result.errors.length} skill${result.errors.length !== 1 ? 's' : ''} failed to import: ${result.errors[0]}`,
@@ -1014,7 +1014,7 @@ function SkillsImport() {
         )
       }
     } catch (err) {
-      toast.error(`Failed to import skills: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not import the skills.'))
     } finally {
       setImporting(false)
     }
@@ -1065,22 +1065,17 @@ function SkillPasteImport() {
     if (submitting || !content.trim() || !ready) return
     setSubmitting(true)
     try {
-      const res = await fetch('/api/skills/upload', {
+      const created = await apiJSON<{ name: string }>('/api/skills/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content, team_id: team }),
       })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to import skill'))
-        return
-      }
-      const created = await res.json()
       if (team) noteWrittenTeam(team)
       toast.success(`Imported "${created.name}" into the prompt library`)
       setContent('')
       if (fileRef.current) fileRef.current.value = ''
     } catch (err) {
-      toast.error(`Failed to import skill: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not import the skill.'))
     } finally {
       setSubmitting(false)
     }
@@ -1135,7 +1130,12 @@ function DangerZone() {
       type="button"
       onClick={async () => {
         if (!confirm('Clear all stored tokens? You will need to re-authenticate.')) return
-        await fetch('/api/integrations', { method: 'DELETE' })
+        try {
+          await apiFetch('/api/integrations', { method: 'DELETE' })
+        } catch (err) {
+          toast.error(httpErrorMessage(err, 'Could not clear the stored tokens.'))
+          return
+        }
         window.location.reload()
       }}
       className="rounded-xl border border-dismiss/20 px-4 py-2 text-[13px] text-dismiss transition-colors hover:border-dismiss/30 hover:text-dismiss/80"

@@ -15,7 +15,7 @@
 // `usePermissionQueues` builds on it; `useRunDetail` consumes that hook filtered
 // to its single run. The UI lives in components/permissions/PermissionPrompt.
 
-import { readError } from './api'
+import { apiFetch, apiJSON, httpErrorMessage } from './apiClient'
 
 // PendingPermission is one in-flight tool-approval prompt, as the pending-set
 // endpoint returns it. tool_call_id is the tool_use id of the call being gated
@@ -83,9 +83,7 @@ export function ttlForPrompt(prompt: PendingPermission): number {
 // reachability hole this endpoint exists to close.
 export async function fetchPendingPermissions(runID: string): Promise<PendingPermission[] | null> {
   try {
-    const res = await fetch(`/api/agent/conversations/${runID}/permissions`)
-    if (!res.ok) return null
-    const data = await res.json()
+    const data = await apiJSON<unknown>(`/api/agent/conversations/${runID}/permissions`)
     if (!Array.isArray(data)) return null
     // Normalize at the boundary rather than trusting the cast: `input` is what
     // the user is actually approving, and PermissionPrompt indexes it directly,
@@ -117,18 +115,20 @@ export async function resolvePermission(
   decision: PermissionDecisionInput,
 ): Promise<PermissionResolveResult> {
   try {
-    const res = await fetch(`/api/agent/conversations/${runID}/permissions/${toolCallID}`, {
+    // 404 is an outcome, not a failure: the prompt was already answered or
+    // timed out, and either way the caller drops it. `allow` puts that at the
+    // call site instead of a status re-derived in the catch.
+    const res = await apiFetch(`/api/agent/conversations/${runID}/permissions/${toolCallID}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(decision),
+      allow: [404],
     })
-    if (res.ok) return { kind: 'resolved' }
-    if (res.status === 404) return { kind: 'gone' }
-    return { kind: 'error', message: await readError(res, 'Failed to answer permission request') }
+    return res.status === 404 ? { kind: 'gone' } : { kind: 'resolved' }
   } catch (err) {
     return {
       kind: 'error',
-      message: `Failed to answer permission request: ${(err as Error).message}`,
+      message: httpErrorMessage(err, 'Could not answer the permission request.'),
     }
   }
 }

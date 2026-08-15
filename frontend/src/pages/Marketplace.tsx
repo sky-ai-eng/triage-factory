@@ -5,7 +5,7 @@ import { Store, ThumbsUp, X } from 'lucide-react'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useTeams, useWriteTeam, noteWrittenTeam } from '../hooks/useTeams'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { toast } from '../components/Toast/toastStore'
 import SearchField from '../components/SearchField'
 import TeamPicker from '../components/TeamPicker'
@@ -122,8 +122,7 @@ export default function Marketplace() {
   // Event-type catalog — same source BindingGraph/MarketplacePublishControl
   // use for their event-type pickers, reused here for the facet chips.
   useEffect(() => {
-    fetch('/api/event-types')
-      .then((r) => (r.ok ? r.json() : []))
+    apiJSON<EventType[]>('/api/event-types')
       .then((data) => {
         if (Array.isArray(data)) setCatalog(data)
       })
@@ -148,17 +147,9 @@ export default function Marketplace() {
       ]
         .filter(Boolean)
         .join('&')
-      const res = await fetch(`/api/marketplace/listings?${qs}`)
-      if (!res.ok) {
-        const msg = await readError(res, 'Failed to load marketplace listings')
-        setLoadError(msg)
-        return
-      }
-      setListings(await res.json())
+      setListings(await apiJSON<ListingSummary[]>(`/api/marketplace/listings?${qs}`))
     } catch (err) {
-      setLoadError(
-        `Failed to load marketplace listings: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      setLoadError(httpErrorMessage(err, 'Could not load the marketplace listings.'))
     } finally {
       setLoading(false)
     }
@@ -173,15 +164,9 @@ export default function Marketplace() {
     setDetail(null)
     setDetailLoading(true)
     try {
-      const res = await fetch(`/api/marketplace/listings/${encodeURIComponent(id)}`)
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to load listing'))
-        setSelectedId(null)
-        return
-      }
-      setDetail(await res.json())
+      setDetail(await apiJSON<ListingDetail>(`/api/marketplace/listings/${encodeURIComponent(id)}`))
     } catch (err) {
-      toast.error(`Failed to load listing: ${err instanceof Error ? err.message : String(err)}`)
+      toast.error(httpErrorMessage(err, 'Could not load the listing.'))
       setSelectedId(null)
     } finally {
       setDetailLoading(false)
@@ -214,20 +199,11 @@ export default function Marketplace() {
           : prev,
       )
       try {
-        const res = await fetch(
-          `/api/marketplace/listings/${encodeURIComponent(listing.id)}/vote`,
-          {
-            method: nextVoted ? 'PUT' : 'DELETE',
-          },
-        )
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to update your vote'))
-          refresh()
-        }
+        await apiFetch(`/api/marketplace/listings/${encodeURIComponent(listing.id)}/vote`, {
+          method: nextVoted ? 'PUT' : 'DELETE',
+        })
       } catch (err) {
-        toast.error(
-          `Failed to update your vote: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        toast.error(httpErrorMessage(err, 'Could not update your vote.'))
         refresh()
       }
     },
@@ -715,25 +691,16 @@ function InstallControl({
     async (teamId: string) => {
       setSubmitting(true)
       try {
-        const res = await fetch(
-          `/api/marketplace/listings/${encodeURIComponent(listing.id)}/install`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ team_id: teamId }),
-          },
-        )
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to copy to your team'))
-          return
-        }
+        await apiFetch(`/api/marketplace/listings/${encodeURIComponent(listing.id)}/install`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ team_id: teamId }),
+        })
         if (teamId) noteWrittenTeam(teamId)
         setInstalledTeamId(teamId)
         onInstalled(listing.id)
       } catch (err) {
-        toast.error(
-          `Failed to copy to your team: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        toast.error(httpErrorMessage(err, 'Could not copy this to your team.'))
       } finally {
         setSubmitting(false)
       }

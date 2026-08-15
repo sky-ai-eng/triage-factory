@@ -60,6 +60,7 @@ vi.mock('../hooks/useEntitlements', () => ({
 }))
 
 import Usage from './Usage'
+import { jsonBody } from '../test/apiResponse'
 
 // --- fixtures -------------------------------------------------------------
 
@@ -148,19 +149,14 @@ const ORG_TEAM_CAPS: UsageTeamCapsResponse = {
 }
 
 // stubUsageFetch routes GET /api/usage/* by path (query stripped) to a canned
-// payload; an unmapped path resolves to a 404-shaped response (readError-safe).
+// payload; an unmapped path resolves to a 404 whose body apiClient can read.
 function stubUsageFetch(payloads: Record<string, unknown>) {
   const fetchMock = vi.fn((input: unknown, _init?: RequestInit) => {
     const path = String(input).split('?')[0]
     if (path in payloads) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(payloads[path]) })
+      return Promise.resolve({ ok: true, ...jsonBody(payloads[path]) })
     }
-    return Promise.resolve({
-      ok: false,
-      status: 404,
-      clone: () => ({ json: () => Promise.resolve({ error: 'not found' }) }),
-      text: () => Promise.resolve('not found'),
-    })
+    return Promise.resolve({ ok: false, status: 404, ...jsonBody({ error: 'not found' }) })
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock

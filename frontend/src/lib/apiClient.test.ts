@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { httpErrorMessage, HttpError, apiJSON } from './apiClient'
+import { apiFetch, apiJSON, httpErrorMessage, HttpError, setUnauthHandler } from './apiClient'
 
 describe('httpErrorMessage', () => {
   it('returns the server JSON { error } string when present', () => {
@@ -81,5 +81,74 @@ describe('apiJSON non-JSON guard', () => {
     const err = await caught(apiJSON('/api/sso/connection'))
     expect(err).toBeInstanceOf(HttpError)
     expect((err as HttpError).status).toBe(404)
+  })
+})
+
+describe('apiFetch allow', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    setUnauthHandler(null)
+  })
+
+  function stubFetch(status: number, body = '') {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: status >= 200 && status < 300,
+        status,
+        text: () => Promise.resolve(body),
+      } as unknown as Response),
+    )
+  }
+
+  const caught = (p: Promise<unknown>) =>
+    p.then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+  it('resolves a listed status instead of throwing, and hands back the response', async () => {
+    stubFetch(404, 'not found')
+    const res = await apiFetch('/api/agent/conversations/x/permissions/y', { allow: [404] })
+    // The point of `allow` is that the caller branches on the status itself —
+    // a 404 that means "already answered" is an outcome, not a failure.
+    expect(res.status).toBe(404)
+  })
+
+  it('still throws for a status the caller did not list', async () => {
+    stubFetch(409, JSON.stringify({ error: 'a turn is in flight' }))
+    const err = await caught(apiFetch('/api/thing', { allow: [404] }))
+    expect(err).toBeInstanceOf(HttpError)
+    expect((err as HttpError).status).toBe(409)
+  })
+
+  it('does not invoke the unauth handler when 401 is allowed', async () => {
+    // loadMe()'s case: "not signed in" is the answer the caller wants, so
+    // firing the global re-auth funnel would turn every logged-out render into
+    // a redirect.
+    const onUnauth = vi.fn()
+    setUnauthHandler(onUnauth)
+    stubFetch(401, '')
+    const res = await apiFetch('/api/me', { allow: [401] })
+    expect(res.status).toBe(401)
+    expect(onUnauth).not.toHaveBeenCalled()
+  })
+
+  it('invokes the unauth handler on a plain 401', async () => {
+    // The behaviour the whole sweep exists to restore: a session that expires
+    // mid-read re-authenticates instead of rendering a dead page.
+    const onUnauth = vi.fn()
+    setUnauthHandler(onUnauth)
+    stubFetch(401, '')
+    const err = await caught(apiFetch('/api/repos'))
+    expect(onUnauth).toHaveBeenCalledTimes(1)
+    expect(err).toBeInstanceOf(HttpError)
+  })
+
+  it('threads allow through apiJSON, parsing the allowed status body', async () => {
+    stubFetch(409, JSON.stringify({ error: 'already pending' }))
+    await expect(apiJSON<{ error: string }>('/api/invites', { allow: [409] })).resolves.toEqual({
+      error: 'already pending',
+    })
   })
 })

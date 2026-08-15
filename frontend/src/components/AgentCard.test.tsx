@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router'
 import AgentCard from './AgentCard'
 import { QUEUE_DWELL_VISIBLE_MS } from '../lib/runStatus'
 import type { Conversation, Task } from '../types'
+import { jsonBody } from '../test/apiResponse'
 
 // useOrgHref pulls in deployment-config + org-context fetches we don't need
 // here; the identity resolver keeps the card's Links/hrefs simple.
@@ -53,20 +54,19 @@ describe('AgentCard artifacts affordance', () => {
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: () =>
-          Promise.resolve([
-            {
-              id: 'pr1',
-              kind: 'pull_request',
-              provider: 'github',
-              state: 'draft',
-              target: 'org/repo#18',
-              external_id: '18',
-              url: 'https://gh/pr',
-              details: null,
-              created_at: '2026-06-25T00:00:00Z',
-            },
-          ]),
+        ...jsonBody([
+          {
+            id: 'pr1',
+            kind: 'pull_request',
+            provider: 'github',
+            state: 'draft',
+            target: 'org/repo#18',
+            external_id: '18',
+            url: 'https://gh/pr',
+            details: null,
+            created_at: '2026-06-25T00:00:00Z',
+          },
+        ]),
       }),
     )
     renderCard({ artifact_count: 2 })
@@ -79,7 +79,10 @@ describe('AgentCard artifacts affordance', () => {
 
     // Popover lazy-fetches and renders the list.
     expect(await screen.findByText('org/repo#18')).toBeInTheDocument()
-    expect(globalThis.fetch).toHaveBeenCalledWith('/api/agent/conversations/r1/artifacts')
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      '/api/agent/conversations/r1/artifacts',
+      expect.anything(),
+    )
   })
 
   it('forwards a PR row to onOpenArtifact and closes the popover', async () => {
@@ -87,20 +90,19 @@ describe('AgentCard artifacts affordance', () => {
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: () =>
-          Promise.resolve([
-            {
-              id: 'pr1',
-              kind: 'pull_request',
-              provider: 'github',
-              state: 'draft',
-              target: 'org/repo#18',
-              external_id: '18',
-              url: 'https://gh/pr',
-              details: null,
-              created_at: '2026-06-25T00:00:00Z',
-            },
-          ]),
+        ...jsonBody([
+          {
+            id: 'pr1',
+            kind: 'pull_request',
+            provider: 'github',
+            state: 'draft',
+            target: 'org/repo#18',
+            external_id: '18',
+            url: 'https://gh/pr',
+            details: null,
+            created_at: '2026-06-25T00:00:00Z',
+          },
+        ]),
       }),
     )
     const onOpenArtifact = renderCard({ artifact_count: 1 })
@@ -152,20 +154,19 @@ describe('AgentCard attention row', () => {
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: () =>
-          Promise.resolve([
-            {
-              id: 'pr1',
-              kind: 'pull_request',
-              provider: 'github',
-              state: 'draft',
-              target: 'org/repo#18',
-              external_id: '18',
-              url: 'https://gh/pr',
-              details: null,
-              created_at: '2026-06-25T00:00:00Z',
-            },
-          ]),
+        ...jsonBody([
+          {
+            id: 'pr1',
+            kind: 'pull_request',
+            provider: 'github',
+            state: 'draft',
+            target: 'org/repo#18',
+            external_id: '18',
+            url: 'https://gh/pr',
+            details: null,
+            created_at: '2026-06-25T00:00:00Z',
+          },
+        ]),
       }),
     )
     const onOpenArtifact = renderCard({
@@ -184,7 +185,10 @@ describe('AgentCard attention row', () => {
     // The popover (the same list the footer button opens) raises with the
     // run's artifacts; nothing opened directly.
     expect(await screen.findByText('org/repo#18')).toBeInTheDocument()
-    expect(globalThis.fetch).toHaveBeenCalledWith('/api/agent/conversations/r1/artifacts')
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      '/api/agent/conversations/r1/artifacts',
+      expect.anything(),
+    )
     expect(onOpenArtifact).not.toHaveBeenCalled()
   })
 })

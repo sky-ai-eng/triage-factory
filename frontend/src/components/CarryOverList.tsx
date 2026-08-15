@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { ExternalLink, RotateCw } from 'lucide-react'
 import { toast } from './Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import TeamPicker from './TeamPicker'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
 
@@ -83,17 +83,9 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   const fetchStock = useCallback(async () => {
     try {
       const tf = teamRef.current
-      const res = await fetch('/api/jira/stock' + (tf ? `?team_id=${encodeURIComponent(tf)}` : ''))
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        console.error('carry-over fetch failed:', data.error || `HTTP ${res.status}`)
-        if (mountedRef.current) {
-          setError('Failed to load tickets')
-          setPolling(false)
-        }
-        return
-      }
-      const data: StockResponse = await res.json()
+      const data = await apiJSON<StockResponse>(
+        '/api/jira/stock' + (tf ? `?team_id=${encodeURIComponent(tf)}` : ''),
+      )
       if (!mountedRef.current) return
       if (data.status === 'polling') {
         setPolling(true)
@@ -129,7 +121,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
     } catch (err) {
       console.error('carry-over fetch failed:', err)
       if (mountedRef.current) {
-        setError('Failed to load tickets')
+        setError(httpErrorMessage(err, 'Could not load the tickets.'))
         setPolling(false)
       }
     }
@@ -186,20 +178,15 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         issue_key,
         action,
       }))
-      const res = await fetch('/api/jira/stock', {
+      const body = await apiJSON<{
+        applied: number
+        failed?: { issue_key: string; action: string; error: string }[]
+      }>('/api/jira/stock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ actions, team_id: team }),
       })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to save carry-over selections'))
-        return
-      }
       if (team) noteWrittenTeam(team)
-      const body = (await res.json()) as {
-        applied: number
-        failed?: { issue_key: string; action: string; error: string }[]
-      }
       const failedList = body.failed ?? []
       if (failedList.length === 0) {
         onSave()
@@ -231,7 +218,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         }, {}),
       )
     } catch (err) {
-      toast.error(`Failed to save carry-over: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not save the carry-over selections.'))
     } finally {
       if (mountedRef.current) setSaving(false)
     }

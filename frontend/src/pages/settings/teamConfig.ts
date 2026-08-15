@@ -12,7 +12,7 @@
 // savers let a surface that only touched one slice (e.g. Settings'
 // change-aware save) write just that one.
 
-import { readError } from '../../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
 import type { JiraStatusRuleValue } from '../../components/JiraStatusRule'
 import type { GitHubTeamCandidate } from '../../lib/githubTeams'
 import type { SlackChannelsResponse } from '../../types'
@@ -235,42 +235,43 @@ export async function saveTeamSettings(teamId: string, form: TeamConfigForm): Pr
   const projects = form.jira_projects
     .map((p) => ({ ...p, key: p.key.trim() }))
     .filter((p) => p.key !== '')
-  const res = await fetch(teamPath(teamId), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ai_model: form.default_model,
-      ai_auto_delegate_enabled: form.auto_delegate_enabled,
-      branch_template: form.branch_template,
-      review_posture: form.review_posture,
-      base_branch_push_policy: form.base_branch_push_policy,
-      ai_reprioritize_threshold: form.ai_reprioritize_threshold,
-      ai_preference_update_interval: form.ai_preference_update_interval,
-      permission_absent_autodeny_enabled: form.permission_absent_autodeny_enabled,
-      permission_absent_grace_seconds: form.permission_absent_grace_seconds,
-      jira_projects: projects,
-    }),
-  })
-  if (!res.ok) {
-    return { ok: false, error: await readError(res, 'Failed to save team settings') }
+  try {
+    const body = await apiJSON<{ warning?: string } | null>(teamPath(teamId), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ai_model: form.default_model,
+        ai_auto_delegate_enabled: form.auto_delegate_enabled,
+        branch_template: form.branch_template,
+        review_posture: form.review_posture,
+        base_branch_push_policy: form.base_branch_push_policy,
+        ai_reprioritize_threshold: form.ai_reprioritize_threshold,
+        ai_preference_update_interval: form.ai_preference_update_interval,
+        permission_absent_autodeny_enabled: form.permission_absent_autodeny_enabled,
+        permission_absent_grace_seconds: form.permission_absent_grace_seconds,
+        jira_projects: projects,
+      }),
+    })
+    return { ok: true, warning: body?.warning }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the team settings.') }
   }
-  const body = (await res.json().catch(() => null)) as { warning?: string } | null
-  return { ok: true, warning: body?.warning }
 }
 
 // saveTeamRepos persists the tracked-repo set via PUT /api/settings/team/
 // {id}/repos. Re-PUTting the same set re-triggers profiling, so callers that
 // save unconditionally (vs. only-on-change) should be aware.
 export async function saveTeamRepos(teamId: string, repos: string[]): Promise<SaveResult> {
-  const res = await fetch(`${teamPath(teamId)}/repos`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ repos }),
-  })
-  if (!res.ok) {
-    return { ok: false, error: await readError(res, 'Failed to save repositories') }
+  try {
+    await apiFetch(`${teamPath(teamId)}/repos`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repos }),
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the repositories.') }
   }
-  return { ok: true }
 }
 
 // saveTeamGitHubGroups persists the GitHub-team → TF-team mappings via PUT
@@ -279,15 +280,16 @@ export async function saveTeamGitHubGroups(
   teamId: string,
   groups: GitHubGroup[],
 ): Promise<SaveResult> {
-  const res = await fetch(`${teamPath(teamId)}/github-groups`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ groups }),
-  })
-  if (!res.ok) {
-    return { ok: false, error: await readError(res, 'Failed to save GitHub teams') }
+  try {
+    await apiFetch(`${teamPath(teamId)}/github-groups`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groups }),
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the GitHub teams.') }
   }
-  return { ok: true }
 }
 
 // slackChannelsPath is the ee/slack channel-tracking route — deliberately
@@ -321,15 +323,16 @@ export async function saveTeamSlackChannels(
   teamId: string,
   channelIds: string[],
 ): Promise<SlackSaveResult> {
-  const res = await fetch(slackChannelsPath(teamId), {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ channel_ids: channelIds }),
-  })
-  if (!res.ok) {
-    return { ok: false, error: await readError(res, 'Failed to save Slack channels') }
+  try {
+    const data = await apiJSON<SlackChannelsResponse>(slackChannelsPath(teamId), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel_ids: channelIds }),
+    })
+    return { ok: true, data }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the Slack channels.') }
   }
-  return { ok: true, data: (await res.json()) as SlackChannelsResponse }
 }
 
 // reassignSlackChannelPrimary makes teamId the primary tracker of channelId
@@ -338,15 +341,16 @@ export async function reassignSlackChannelPrimary(
   channelId: string,
   teamId: string,
 ): Promise<SaveResult> {
-  const res = await fetch(`/api/slack/channels/${encodeURIComponent(channelId)}/primary`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ team_id: teamId }),
-  })
-  if (!res.ok) {
-    return { ok: false, error: await readError(res, 'Failed to reassign the primary team') }
+  try {
+    await apiFetch(`/api/slack/channels/${encodeURIComponent(channelId)}/primary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team_id: teamId }),
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not reassign the primary team.') }
   }
-  return { ok: true }
 }
 
 // partialFailure builds a "<saved> saved, but <failed> did not — <err>"

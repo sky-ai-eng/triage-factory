@@ -71,7 +71,7 @@ beforeEach(() => {
   apiMocks.apiJSON.mockReset()
   apiMocks.apiFetch.mockReset()
   apiMocks.apiJSON.mockImplementation(async (path: string, opts?: { method?: string }) => {
-    if (path === '/members') return { members: [OWNER_ROW] }
+    if (path === '/api/orgs/org-1/members') return { members: [OWNER_ROW] }
     if (path === '/api/invites') {
       if (opts?.method === 'POST') {
         return {
@@ -146,7 +146,7 @@ describe('OrgPage — pending invites', () => {
       return undefined as unknown as Response
     })
     apiMocks.apiJSON.mockImplementation(async (path: string, opts?: { method?: string }) => {
-      if (path === '/members') return { members: [OWNER_ROW] }
+      if (path === '/api/orgs/org-1/members') return { members: [OWNER_ROW] }
       if (path === '/api/invites') {
         if (opts?.method === 'POST') throw new HttpError(500, 'boom') // re-create fails
         return invitesState // GET reflects the now-empty (revoked) state

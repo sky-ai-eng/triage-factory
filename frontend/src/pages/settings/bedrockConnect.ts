@@ -11,6 +11,7 @@
 // non-secret config (region / model / endpoint). The backend owns that rule;
 // this module just forwards the form verbatim.
 
+import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
 import type { BedrockAuthMethod, OrgConfigForm } from './orgConfig'
 
 // BEDROCK_AUTH_OPTIONS is the shared label set for the auth-method picker,
@@ -68,18 +69,14 @@ export async function connectBedrock(
   payload: Record<string, string>,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    const res = await fetch('/api/bedrock/connect', {
+    await apiFetch('/api/bedrock/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
-    const resBody = await res.json().catch(() => ({}))
-    if (!res.ok) {
-      return { ok: false, error: resBody.error || 'Could not save the Bedrock credentials' }
-    }
     return { ok: true }
-  } catch {
-    return { ok: false, error: 'Could not connect to server' }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the Bedrock credentials.') }
   }
 }
 
@@ -96,14 +93,14 @@ export async function fetchBedrockRoleSetup(): Promise<
   | { ok: false; error: string }
 > {
   try {
-    const res = await fetch('/api/bedrock/role-setup', {
+    const resBody = await apiJSON<{
+      caller_identity_arn?: string
+      external_id?: string
+      trust_policy?: string
+    }>('/api/bedrock/role-setup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     })
-    const resBody = await res.json().catch(() => ({}))
-    if (!res.ok) {
-      return { ok: false, error: resBody.error || 'Could not fetch the role setup details' }
-    }
     return {
       ok: true,
       caller_identity_arn: resBody.caller_identity_arn || '',

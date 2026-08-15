@@ -9,6 +9,7 @@ import type { RuleHandler, EventType } from '../types'
 import { toast } from './Toast/toastStore'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
 import { handlersBase } from '../lib/scope'
+import { apiJSON } from '../lib/apiClient'
 
 interface TaskRuleEditorProps {
   open: boolean
@@ -86,8 +87,7 @@ export default function TaskRuleEditor({
   useEffect(() => {
     if (!open) return
     let cancelled = false
-    fetch('/api/event-types')
-      .then((r) => r.json())
+    apiJSON<EventType[]>('/api/event-types')
       .then((data) => {
         if (!cancelled) setEventTypes(data)
       })

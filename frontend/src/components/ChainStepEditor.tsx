@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { Prompt } from '../types'
 import PromptPicker from './PromptPicker'
+import { apiJSON } from '../lib/apiClient'
 
 interface Props {
   // The chain prompt's own id, so the picker can hide it from the
@@ -49,9 +50,8 @@ export default function ChainStepEditor({
   useEffect(() => {
     let cancelled = false
     const q = lockedTeamId ? `?team_id=${encodeURIComponent(lockedTeamId)}` : ''
-    fetch(`/api/prompts${q}`)
-      .then((res) => res.json())
-      .then((data: Prompt[]) => {
+    apiJSON<Prompt[]>(`/api/prompts${q}`)
+      .then((data) => {
         if (!cancelled) setAllPrompts(data)
       })
       .catch(() => {})

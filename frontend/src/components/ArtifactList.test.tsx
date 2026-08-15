@@ -2,12 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ArtifactList from './ArtifactList'
 import type { Artifact } from '../types'
+import { jsonBody } from '../test/apiResponse'
 
 // One fetch mock returning the given artifact list for GET …/artifacts.
 function mockArtifacts(arts: Artifact[]) {
   const fetchMock = vi.fn().mockResolvedValue({
     ok: true,
-    json: () => Promise.resolve(arts),
+    ...jsonBody(arts),
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -56,7 +57,10 @@ describe('ArtifactList', () => {
     expect(screen.getByText('draft')).toBeInTheDocument()
 
     // The run-scoped read API was hit.
-    expect(fetchMock).toHaveBeenCalledWith('/api/agent/conversations/r1/artifacts')
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/agent/conversations/r1/artifacts',
+      expect.anything(),
+    )
 
     // The branch row links out to its url; the PR row carries an external link too.
     const links = screen.getAllByRole('link')
@@ -158,11 +162,11 @@ describe('ArtifactList', () => {
     const onResolved = vi.fn()
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve([draft]) })
+      .mockResolvedValueOnce({ ok: true, ...jsonBody([draft]) })
       .mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve([{ ...draft, state: 'closed' }]),
+        ...jsonBody([{ ...draft, state: 'closed' }]),
       })
     vi.stubGlobal('fetch', fetchMock)
     render(<ArtifactList runId="r1" pendingArtifactIds={['pr1']} onResolved={onResolved} />)
@@ -170,7 +174,10 @@ describe('ArtifactList', () => {
     fireEvent.click(await screen.findByRole('button', { name: /dismiss pull request/i }))
 
     await waitFor(() => expect(onResolved).toHaveBeenCalled())
-    expect(fetchMock).toHaveBeenCalledWith('/api/artifacts/pr1/dismiss', { method: 'POST' })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/artifacts/pr1/dismiss',
+      expect.objectContaining({ method: 'POST' }),
+    )
     // The reloaded row shows its resolved state and, no longer actionable,
     // loses the [x] even before the run projection catches up.
     expect(await screen.findByText('closed')).toBeInTheDocument()
@@ -181,10 +188,10 @@ describe('ArtifactList', () => {
     const draft = art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'org/repo#18' })
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve([draft]) })
+      .mockResolvedValueOnce({ ok: true, ...jsonBody([draft]) })
       .mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve([{ ...draft, state: 'open' }]),
+        ...jsonBody([{ ...draft, state: 'open' }]),
       })
     vi.stubGlobal('fetch', fetchMock)
     const { rerender } = render(<ArtifactList runId="r1" refreshKey="2:pr1" />)
@@ -201,12 +208,11 @@ describe('ArtifactList', () => {
     const draft = art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'org/repo#18' })
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve([draft]) })
+      .mockResolvedValueOnce({ ok: true, ...jsonBody([draft]) })
       .mockResolvedValueOnce({
         ok: false,
         status: 500,
         text: () => Promise.resolve(''),
-        clone: () => ({ json: () => Promise.resolve({ error: 'blip' }) }),
       })
     vi.stubGlobal('fetch', fetchMock)
     const { rerender } = render(<ArtifactList runId="r1" refreshKey="2:pr1" />)
@@ -218,7 +224,7 @@ describe('ArtifactList', () => {
     // The rows were true a moment ago — a transient failure must not blank an
     // always-mounted list; the next set-shape change retries.
     expect(screen.getByText('org/repo#18')).toBeInTheDocument()
-    expect(screen.queryByText(/Couldn't load artifacts/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Couldn't load this run's artifacts/)).not.toBeInTheDocument()
   })
 
   it('ignores the previous run’s in-flight response after a run change', async () => {
@@ -234,7 +240,7 @@ describe('ArtifactList', () => {
     // The run goes away (a cleared selection) with r1's fetch still in flight;
     // the falsy runId means no new load ever runs to supersede it.
     rerender(<ArtifactList runId="" />)
-    resolveOld({ ok: true, json: () => Promise.resolve([oldRow]) })
+    resolveOld({ ok: true, ...jsonBody([oldRow]) })
     // Let the stale promise chain run to completion before asserting.
     await new Promise((r) => setTimeout(r, 0))
 
@@ -249,29 +255,28 @@ describe('ArtifactList', () => {
     expect(await screen.findByText(/No artifacts yet/)).toBeInTheDocument()
   })
 
-  it('surfaces a load error with context, preferring the server JSON error', async () => {
+  it('surfaces a load error, preferring the server JSON error', async () => {
     failingFetch({ status: 500, jsonBody: { error: 'boom' } })
     render(<ArtifactList runId="r1" />)
-    // Context is preserved ("Couldn't load artifacts: …"), not a bare "boom".
-    await waitFor(() =>
-      expect(screen.getByText(/Couldn't load artifacts: boom/)).toBeInTheDocument(),
-    )
+    // The server's message reaches the user verbatim — no fallback prefix.
+    await waitFor(() => expect(screen.getByText('boom')).toBeInTheDocument())
   })
 
-  it('falls back to a non-JSON error body', async () => {
+  it('falls back to the caller sentence for a non-JSON error body', async () => {
+    // The raw body ("<html>Bad Gateway</html>") must never reach the UI.
     failingFetch({ status: 502, textBody: '<html>Bad Gateway</html>' })
     render(<ArtifactList runId="r1" />)
     await waitFor(() =>
-      expect(
-        screen.getByText(/Couldn't load artifacts: <html>Bad Gateway<\/html>/),
-      ).toBeInTheDocument(),
+      expect(screen.getByText("Couldn't load this run's artifacts.")).toBeInTheDocument(),
     )
+    expect(screen.queryByText(/Bad Gateway/)).not.toBeInTheDocument()
   })
 })
 
-// failingFetch stubs fetch with a non-ok Response shaped enough for readError:
-// a clone().json() path (the server's JSON `error`) and a text() fallback for
-// non-JSON bodies.
+// failingFetch stubs a non-ok Response shaped the way apiClient reads one:
+// HttpError carries the body from text(), and httpErrorMessage parses the
+// server's JSON `error` out of it. There is no clone()/json() path any more —
+// the wrapper reads the body exactly once.
 function failingFetch({
   status = 500,
   jsonBody,
@@ -281,18 +286,13 @@ function failingFetch({
   jsonBody?: unknown
   textBody?: string
 }) {
+  const body = jsonBody !== undefined ? JSON.stringify(jsonBody) : textBody
   vi.stubGlobal(
     'fetch',
     vi.fn().mockResolvedValue({
       ok: false,
       status,
-      text: () => Promise.resolve(textBody),
-      clone: () => ({
-        json: () =>
-          jsonBody !== undefined
-            ? Promise.resolve(jsonBody)
-            : Promise.reject(new Error('not json')),
-      }),
+      text: () => Promise.resolve(body),
     }),
   )
 }

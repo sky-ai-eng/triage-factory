@@ -40,7 +40,9 @@ function useOrgRosterAdapter(orgId: string): MemberRosterAdapter {
       roles: ORG_ROLES,
       protectedRole: 'owner',
       async fetchMembers(): Promise<RosterMember[]> {
-        const data = await apiJSON<{ members: OrgMemberApiRow[] }>('/members', { org: orgId })
+        const data = await apiJSON<{ members: OrgMemberApiRow[] }>(
+          `/api/orgs/${encodeURIComponent(orgId)}/members`,
+        )
         return data.members.map((m) => ({
           userId: m.user_id,
           displayName: m.display_name,
@@ -53,22 +55,22 @@ function useOrgRosterAdapter(orgId: string): MemberRosterAdapter {
       async changeRole(userId, role) {
         // Mutations return 204 (no body) — apiFetch (not apiJSON) so a missing
         // JSON body isn't parsed; it still throws HttpError on the 409 guard.
-        await apiFetch(`/members/${userId}`, {
-          org: orgId,
+        await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/members/${userId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ role }),
         })
       },
       async remove(userId) {
-        await apiFetch(`/members/${userId}`, { org: orgId, method: 'DELETE' })
+        await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/members/${userId}`, {
+          method: 'DELETE',
+        })
       },
       async transferOwnership(newOwnerUserId) {
         // Owner-only on the backend (gated on tf.user_owns_org + the
         // guard_org_owner_transfer trigger). 204 on success; apiFetch throws
         // HttpError on 403/409/422 so the picker surfaces the friendly message.
-        await apiFetch('/transfer-ownership', {
-          org: orgId,
+        await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/transfer-ownership`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ new_owner_user_id: newOwnerUserId }),

@@ -16,6 +16,8 @@
 // onboarding deployment picker, NOT inferred from the field group: Cloud
 // authenticates with an Atlassian API token (email + token, Basic / REST v3),
 // Data Center with a personal access token (Bearer / REST v2).
+import { apiFetch, httpErrorMessage } from '../../lib/apiClient'
+
 export type JiraDeployment = 'cloud' | 'data_center'
 
 // JIRA_DEPLOYMENT_OPTIONS is the shared label set for the deployment picker,
@@ -82,17 +84,13 @@ export async function connectJira(
       ? { url: url.trim(), email: creds.jira_email.trim(), token: creds.jira_api_token.trim() }
       : { url: url.trim(), pat: creds.jira_pat.trim() }
   try {
-    const res = await fetch(`/api/orgs/${orgId}/jira/access/credential`, {
+    await apiFetch(`/api/orgs/${orgId}/jira/access/credential`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-    const resBody = await res.json().catch(() => ({}))
-    if (!res.ok) {
-      return { ok: false, error: resBody.error || 'Connection failed' }
-    }
     return { ok: true }
-  } catch {
-    return { ok: false, error: 'Could not connect to server' }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'The connection failed.') }
   }
 }

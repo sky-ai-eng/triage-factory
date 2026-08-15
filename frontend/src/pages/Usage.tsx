@@ -17,7 +17,8 @@ import { useOptionalAuth } from '../contexts/AuthContext'
 import { useEntitlements, FeatureGovernance } from '../hooks/useEntitlements'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
-import { avatarProxyUrl, readError } from '../lib/api'
+import { avatarProxyUrl } from '../lib/api'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import type {
   AccessChangeRow,
   AccessLogResponse,
@@ -143,16 +144,14 @@ function useUsageFetch<T>(url: string | null): UsageFetch<T> {
       // Deliberately do NOT clear data/error here — the last good data stays on
       // screen until the new response lands, so a refetch never flashes.
       try {
-        const res = await fetch(url)
-        if (!res.ok) throw new Error(await readError(res, 'Failed to load usage'))
-        const body = (await res.json()) as T
+        const body = await apiJSON<T>(url)
         if (!signal.cancelled) {
           setData(body)
           setError(null)
         }
       } catch (err) {
         if (!signal.cancelled) {
-          setError(err instanceof Error ? err.message : String(err))
+          setError(httpErrorMessage(err, 'Could not load the usage data.'))
         }
       }
     },
@@ -161,6 +160,9 @@ function useUsageFetch<T>(url: string | null): UsageFetch<T> {
 
   useEffect(() => {
     const signal = { cancelled: false }
+    // Fetch-on-mount/url-change: load owns its own setState calls; the effect
+    // just kicks it. Same safe pattern AuthContext uses.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load(signal) // immediate on mount + whenever the url (window/team) changes
     // Poll only while visible — a backgrounded tab shouldn't churn the DB — and
     // refetch the instant it regains focus so it's never stale on return.
@@ -1224,13 +1226,14 @@ function CapRow({ team, spend }: { team: UsageTeamCap; spend: number }) {
     setStatus('saving')
     setError(null)
     try {
-      const res = await fetch(`/api/usage/teams/${team.team_id}/cap`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ max_daily_cost_usd: payload }),
-      })
-      if (!res.ok) throw new Error(await readError(res, 'Failed to save cap'))
-      const body = (await res.json()) as { max_daily_cost_usd: number | null }
+      const body = await apiJSON<{ max_daily_cost_usd: number | null }>(
+        `/api/usage/teams/${team.team_id}/cap`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ max_daily_cost_usd: payload }),
+        },
+      )
       // Adopt the echoed value as BOTH the input and the persisted baseline, so the
       // row reads clean immediately and a subsequent no-op blur won't re-PUT.
       const echoed = body.max_daily_cost_usd == null ? '' : String(body.max_daily_cost_usd)
@@ -1239,7 +1242,7 @@ function CapRow({ team, spend }: { team: UsageTeamCap; spend: number }) {
       setStatus('saved')
     } catch (err) {
       setStatus('error')
-      setError(err instanceof Error ? err.message : String(err))
+      setError(httpErrorMessage(err, 'Could not save the cap.'))
     } finally {
       savingRef.current = false
     }

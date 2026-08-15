@@ -27,6 +27,7 @@ import {
 } from '../hooks/useTeams'
 import type { Conversation, FactoryEntity, FactorySnapshot, RunStatusValue, Task } from '../types'
 import { isActiveStatus } from '../lib/runStatus'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 // Production factory page — Babylon scene driven by /api/factory/snapshot.
 // The page itself does almost nothing visual: it fetches the snapshot,
@@ -146,11 +147,7 @@ export default function Factory() {
 
     const load = () => {
       const q = teamFilterQuery(teamFilterRef.current)
-      fetch('/api/factory/snapshot' + (q ? `?${q}` : ''))
-        .then((r) => {
-          if (!r.ok) throw new Error(`Failed to load factory snapshot (${r.status})`)
-          return r.json() as Promise<FactorySnapshot>
-        })
+      apiJSON<FactorySnapshot>('/api/factory/snapshot' + (q ? `?${q}` : ''))
         .then((data) => {
           if (cancelled) return
           sceneRef.current?.applySnapshot(data)
@@ -357,7 +354,7 @@ export default function Factory() {
       const label = entityLabel(pd.entity)
       let partialFailure = ''
       try {
-        const res = await fetch('/api/factory/delegate', {
+        const body = await apiJSON<{ delegate_error?: string }>('/api/factory/delegate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -368,28 +365,14 @@ export default function Factory() {
             team_id: delegateTeam,
           }),
         })
-        if (!res.ok) {
-          let detail = `HTTP ${res.status}`
-          try {
-            const body = (await res.json()) as { error?: string }
-            if (body.error) detail = body.error
-          } catch {
-            // Body wasn't JSON; stick with the status code.
-          }
-          toast.error(`Delegate ${label}: ${detail}`, 'Delegation failed')
-          return
-        }
-        try {
-          const body = (await res.json()) as { delegate_error?: string }
-          if (body.delegate_error) {
-            partialFailure = body.delegate_error
-          }
-        } catch {
-          // Body wasn't JSON; ignore — treat as full success.
+        if (body.delegate_error) {
+          partialFailure = body.delegate_error
         }
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err)
-        toast.error(`Delegate ${label}: ${detail}`, 'Delegation failed')
+        toast.error(
+          `Delegate ${label}: ${httpErrorMessage(err, 'the delegation could not be started.')}`,
+          'Delegation failed',
+        )
         return
       }
       if (delegateTeam) noteWrittenTeam(delegateTeam)

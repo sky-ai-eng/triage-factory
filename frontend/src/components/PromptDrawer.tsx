@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useId, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { toast } from './Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import TeamPicker from './TeamPicker'
 import MarketplacePublishControl from './MarketplacePublishControl'
@@ -113,8 +113,9 @@ export default function PromptDrawer({
     if (!open) return
     let cancelled = false
     const settingsTeam = effectiveTeam || 'default'
-    fetch(`/api/settings/team/${encodeURIComponent(settingsTeam)}`)
-      .then((res) => (res.ok ? res.json() : null))
+    apiJSON<{ team_settings?: { DefaultModel?: string } }>(
+      `/api/settings/team/${encodeURIComponent(settingsTeam)}`,
+    )
       .then((data) => {
         if (!cancelled && data?.team_settings?.DefaultModel)
           setDefaultModel(data.team_settings.DefaultModel)
@@ -235,31 +236,26 @@ export default function PromptDrawer({
       // first_prompt to the blueprint endpoint, which creates prompt +
       // blueprint + step atomically (the server defaults the blueprint name to
       // the prompt name). Edit (PUT) still targets the prompt directly.
-      let res: Response
       if (isNew) {
         const firstPrompt = { name, body, model }
         const createBody = { first_prompt: firstPrompt, team_id: effectiveTeam }
-        res = await fetch(blueprintsBase(), {
+        await apiFetch(blueprintsBase(), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(createBody),
         })
       } else {
-        res = await fetch(`${base}/${promptId}`, {
+        await apiFetch(`${base}/${promptId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, body, model }),
         })
       }
-      if (!res.ok) {
-        toast.error(await readError(res, `Failed to ${isNew ? 'create' : 'save'} prompt`))
-        return
-      }
       if (isNew && effectiveTeam) noteWrittenTeam(effectiveTeam)
 
       onSaved()
     } catch (err) {
-      toast.error(`Failed to save prompt: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, `Could not ${isNew ? 'create' : 'save'} the prompt.`))
     } finally {
       setSaving(false)
     }
@@ -269,17 +265,11 @@ export default function PromptDrawer({
     if (!promptId) return
     setDeleting(true)
     try {
-      const res = await fetch(`${base}/${promptId}`, { method: 'DELETE' })
-      if (!res.ok) {
-        toast.error(
-          await readError(res, `Failed to ${source === 'user' ? 'delete' : 'hide'} prompt`),
-        )
-        return
-      }
       // Deleting a prompt that sat mid-chain in a multi-step blueprint fragments
       // the chain: the steps after it become a new, trigger-less blueprint. The
       // server flags that so we can surface it — the downstream half no longer
       // fires on its own. (The canvas refetch via onDeleted re-renders the split.)
+      const res = await apiFetch(`${base}/${promptId}`, { method: 'DELETE' })
       const deleteResp = (await res.json().catch(() => null)) as {
         orphaned_blueprint?: boolean
       } | null
@@ -288,7 +278,9 @@ export default function PromptDrawer({
       }
       onDeleted?.()
     } catch (err) {
-      toast.error(`Failed to delete prompt: ${(err as Error).message}`)
+      toast.error(
+        httpErrorMessage(err, `Could not ${source === 'user' ? 'delete' : 'hide'} the prompt.`),
+      )
     } finally {
       setDeleting(false)
     }
