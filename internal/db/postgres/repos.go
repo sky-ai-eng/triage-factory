@@ -520,6 +520,54 @@ func updateRepoCloneStatus(ctx context.Context, q queryer, orgID, owner, repo, s
 	return err
 }
 
+func (s *repoStore) FillMissingExternalIDsSystem(ctx context.Context, orgID string, refs []domain.RepoRef) (int, error) {
+	sources := make([]string, 0, len(refs))
+	owners := make([]string, 0, len(refs))
+	names := make([]string, 0, len(refs))
+	ids := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if ref.ExternalID == "" {
+			continue // absent is not an id
+		}
+		source, err := domain.NormalizeRepoSource(ref.Source)
+		if err != nil {
+			return 0, err
+		}
+		sources = append(sources, source)
+		owners = append(owners, ref.Owner)
+		names = append(names, ref.Repo)
+		ids = append(ids, ref.ExternalID)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	// One statement for the whole batch — this runs per installation per poll
+	// cycle, so the round-trip is the cost worth avoiding. external_id IS NULL
+	// makes it a no-op in the steady state (every id already recorded), which
+	// is what it will be on all but the first cycle after an upgrade.
+	rows, err := s.admin.QueryContext(ctx, `
+		UPDATE repo_profiles rp
+		   SET external_id = v.external_id
+		  FROM unnest($2::text[], $3::text[], $4::text[], $5::text[])
+		       AS v(source, owner, repo, external_id)
+		 WHERE rp.org_id = $1
+		   AND rp.source = v.source
+		   AND lower(rp.owner) = lower(v.owner)
+		   AND lower(rp.repo) = lower(v.repo)
+		   AND rp.external_id IS NULL
+		RETURNING 1
+	`, orgID, sources, owners, names, ids)
+	if err != nil {
+		return 0, fmt.Errorf("fill external ids: %w", err)
+	}
+	defer rows.Close()
+	filled := 0
+	for rows.Next() {
+		filled++
+	}
+	return filled, rows.Err()
+}
+
 func (s *repoStore) GetPullsPollStateSystem(ctx context.Context, orgID, repoID string) (string, *time.Time, error) {
 	owner, repo := splitRepoSlug(repoID)
 	if owner == "" || repo == "" {

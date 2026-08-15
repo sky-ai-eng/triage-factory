@@ -13,12 +13,27 @@ import (
 
 // UserRepo is the minimal info we need from the GitHub repos endpoint.
 type UserRepo struct {
+	// ID is GitHub's own numeric id for the repository — the half of its
+	// identity a rename does not move. Every enumeration carries it, so the
+	// poller records it for the repos it already lists each cycle rather than
+	// asking for it.
+	ID          int64  `json:"id"`
 	FullName    string `json:"full_name"`
 	HTMLURL     string `json:"html_url"`
 	Description string `json:"description"`
 	Language    string `json:"language"`
 	PushedAt    string `json:"pushed_at"`
 	Private     bool   `json:"private"`
+}
+
+// ExternalID renders UserRepo.ID the way repo_profiles.external_id stores it:
+// decimal text, empty when GitHub sent no id (which is never expected, and is
+// still not something to persist as the string "0").
+func (r UserRepo) ExternalID() string {
+	if r.ID == 0 {
+		return ""
+	}
+	return strconv.FormatInt(r.ID, 10)
 }
 
 // ListUserRepos returns all repositories the authenticated user has access to,

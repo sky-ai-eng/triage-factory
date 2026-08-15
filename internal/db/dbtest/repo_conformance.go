@@ -567,6 +567,79 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		}
 	})
 
+	t.Run("FillMissingExternalIDs_only_ever_turns_NULL_into_a_value", func(t *testing.T) {
+		// The poller's half of repository identity: it already enumerates each
+		// installation's grant every cycle, and that response carries the ids.
+		// This is the write, and its whole contract is that it is safe to run
+		// on every cycle — it fills what is missing, touches nothing else, and
+		// reports how much it filled so the steady state is visibly zero.
+		s, orgID := mk(t)
+		if err := s.SetConfigured(ctx, orgID, []string{"Acme/Api", "octo/known", "octo/bare"}); err != nil {
+			t.Fatalf("SetConfigured: %v", err)
+		}
+		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			ID: "octo/known", Owner: "octo", Repo: "known",
+			ExternalID: "111", DefaultBranch: "main",
+		}); err != nil {
+			t.Fatalf("seed known id: %v", err)
+		}
+
+		filled, err := s.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
+			// Different casing than stored — the grant's spelling is GitHub's,
+			// not necessarily the one tracked.
+			{Owner: "acme", Repo: "api", ExternalID: "1296269"},
+			// Already has one; a fill must never move it.
+			{Owner: "octo", Repo: "known", ExternalID: "999"},
+			// No id to record; not a write.
+			{Owner: "octo", Repo: "bare"},
+			// Not a configured repo; nothing to fill, and nothing created.
+			{Owner: "ghost", Repo: "repo", ExternalID: "42"},
+		})
+		if err != nil {
+			t.Fatalf("FillMissingExternalIDsSystem: %v", err)
+		}
+		if filled != 1 {
+			t.Errorf("filled = %d, want 1 — only the NULL one is a write", filled)
+		}
+
+		got, _ := s.Get(ctx, orgID, "Acme/Api")
+		if got == nil || got.ExternalID != "1296269" {
+			t.Errorf("case-differing fill = %+v, want external id 1296269", got)
+		}
+		if got != nil && got.ID != "Acme/Api" {
+			t.Errorf("fill moved the stored casing to %q; it must only write external_id", got.ID)
+		}
+		known, _ := s.Get(ctx, orgID, "octo/known")
+		if known == nil || known.ExternalID != "111" {
+			t.Errorf("known id = %+v, want 111 kept — a fill never overwrites", known)
+		}
+		bare, _ := s.Get(ctx, orgID, "octo/bare")
+		if bare == nil || bare.ExternalID != "" {
+			t.Errorf("id-less ref wrote %+v, want the row left alone", bare)
+		}
+		if ghost, _ := s.Get(ctx, orgID, "ghost/repo"); ghost != nil {
+			t.Errorf("fill created a row for an untracked repo: %+v — it writes, never creates", ghost)
+		}
+		if n, _ := s.CountConfigured(ctx, orgID); n != 3 {
+			t.Errorf("rows = %d, want 3 — a fill adds none", n)
+		}
+
+		// Steady state: running it again fills nothing.
+		filled, err = s.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
+			{Owner: "Acme", Repo: "Api", ExternalID: "1296269"},
+		})
+		if err != nil {
+			t.Fatalf("re-run: %v", err)
+		}
+		if filled != 0 {
+			t.Errorf("second run filled %d, want 0 — every cycle after the first is a no-op", filled)
+		}
+
+		if n, err := s.FillMissingExternalIDsSystem(ctx, orgID, nil); err != nil || n != 0 {
+			t.Errorf("empty batch = (%d, %v), want (0, nil)", n, err)
+		}
+	})
+
 	t.Run("GetOrCreate_refuses_an_unknown_source", func(t *testing.T) {
 		// source is app-validated rather than CHECK-constrained, so this
 		// function IS the validation. A typo must not reach the row and key

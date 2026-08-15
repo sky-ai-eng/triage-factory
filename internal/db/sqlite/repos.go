@@ -412,6 +412,49 @@ func (s *repoStore) UpsertSystem(ctx context.Context, orgID string, p domain.Rep
 	return s.Upsert(ctx, orgID, p)
 }
 
+func (s *repoStore) FillMissingExternalIDsSystem(ctx context.Context, orgID string, refs []domain.RepoRef) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	if len(refs) == 0 {
+		return 0, nil
+	}
+	filled := 0
+	// One statement per ref rather than a bulk form: SQLite is
+	// single-connection and the tracked set is tens of repos, so the loop
+	// costs nothing the bulk shape would save, and it keeps the WHERE
+	// identical to every other slug lookup in this file.
+	err := inTx(ctx, s.q, func(tx queryer) error {
+		for _, ref := range refs {
+			if ref.ExternalID == "" {
+				continue
+			}
+			source, err := domain.NormalizeRepoSource(ref.Source)
+			if err != nil {
+				return err
+			}
+			res, err := tx.ExecContext(ctx, `
+				UPDATE repo_profiles
+				   SET external_id = ?, updated_at = datetime('now')
+				 WHERE source = ?
+				   AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+				   AND external_id IS NULL
+			`, ref.ExternalID, source, ref.Owner, ref.Repo)
+			if err != nil {
+				return fmt.Errorf("fill external id for %s: %w", ref.Slug(), err)
+			}
+			if n, err := res.RowsAffected(); err == nil {
+				filled += int(n)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return filled, nil
+}
+
 func (s *repoStore) GetPullsPollStateSystem(ctx context.Context, orgID, repoID string) (string, *time.Time, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", nil, err

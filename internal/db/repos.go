@@ -192,6 +192,24 @@ type RepoStore interface {
 	// — the poller goroutine has no JWT claims, same convention as
 	// ListConfiguredNamesSystem. No-ops to ("", nil, nil) when the repo
 	// isn't in repo_profiles.
+	// FillMissingExternalIDsSystem records the provider's repository id for
+	// tracked repos that do not have one yet, and returns how many rows it
+	// filled. Refs whose repository has no row, or whose row already carries
+	// an id, are skipped — this only ever turns a NULL into a value.
+	//
+	// It exists because an id nobody records is an id nobody has: rename
+	// detection keys on (source, external_id) and treats a NULL as "not
+	// renamable", so a repository stays undetectable for as long as its id is
+	// missing. Filling it only when a repository is profiled leaves that
+	// window open for the length of the profile TTL.
+	//
+	// The caller is the poller, which already enumerates each installation's
+	// repo grant every cycle to compute the tracked∩granted intersection —
+	// that response carries the ids, so this costs no GitHub request. Matching
+	// is case-insensitive, like every other slug lookup here. A ref with an
+	// empty ExternalID is ignored rather than written: absent is not an id.
+	FillMissingExternalIDsSystem(ctx context.Context, orgID string, refs []domain.RepoRef) (int, error)
+
 	GetPullsPollStateSystem(ctx context.Context, orgID, repoID string) (etag string, polledAt *time.Time, err error)
 
 	// SetPullsPollStateSystem records the conditional-request state after
