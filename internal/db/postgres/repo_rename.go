@@ -42,10 +42,20 @@ import (
 // redirect covers it until the freed name is claimed by a different
 // repository, at which point the stored link resolves to a stranger's PR.
 //
-// events.payload_json and the external_actions ledger are untouched by intent
-// rather than by omission: both are append-only records of what happened at a
-// point in time, and at that point in time the repository was called what they
-// say it was.
+// events.payload_json is untouched by intent rather than by omission: it is an
+// append-only record of what happened at a point in time, and at that point in
+// time the repository was called what it says it was. Nothing renders it and
+// nothing resolves it.
+//
+// The external_actions ledger is frozen here too, but only its record half
+// earns that reasoning: target names the subject at the moment of the act, and
+// detail_json is a verbatim capture of the request as sent. Rewriting either
+// would make the log assert TF acted on a name that did not exist yet.
+//
+// TODO(TFAC-831): external_actions.url is a pointer rather than a record — the
+// action feed renders it as a link — and no ledger row is ever updated, so a
+// rename strands it. Once the freed name is re-claimed, an audit row links to
+// an object TF never touched.
 //
 // TODO(TFAC-830): nothing reclaims the directory the old slug named. The paths
 // stay slug-derived on purpose (a human reads them while debugging a sandbox)
