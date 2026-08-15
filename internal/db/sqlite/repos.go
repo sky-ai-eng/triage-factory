@@ -349,9 +349,16 @@ func (s *repoStore) Get(ctx context.Context, orgID, repoID string) (*domain.Repo
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	// Case-insensitive, like every other lookup that takes a caller-supplied
+	// slug. The callers that pass one they did NOT read out of this table are
+	// the ones that matter: `tfac exec workspace add owner/repo` hands the
+	// agent's argv straight through, and a miss there is reported as "repo is
+	// not configured in Triage Factory" — while the team-tracking gate on the
+	// next line of that same function matches case-insensitively and would
+	// have said yes.
 	row := s.q.QueryRowContext(ctx, `
 		SELECT `+repoProfileFullColumns+`
-		FROM repo_profiles WHERE id = ?
+		FROM repo_profiles WHERE LOWER(id) = LOWER(?)
 	`, repoID)
 	p, err := scanRepoProfileFull(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -370,7 +377,7 @@ func (s *repoStore) UpdateCloneStatus(ctx context.Context, orgID, owner, repo, s
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE repo_profiles
 		SET clone_status = ?, clone_error = ?, clone_error_kind = ?, updated_at = datetime('now')
-		WHERE owner = ? AND repo = ?
+		WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
 	`, status, nullIfEmpty(errMsg), nullIfEmpty(errKind), owner, repo)
 	return err
 }
@@ -411,7 +418,7 @@ func (s *repoStore) GetPullsPollStateSystem(ctx context.Context, orgID, repoID s
 	var etag sql.NullString
 	var polledAt sql.NullTime
 	err := s.q.QueryRowContext(ctx,
-		`SELECT pulls_etag, pulls_polled_at FROM repo_profiles WHERE id = ?`, repoID,
+		`SELECT pulls_etag, pulls_polled_at FROM repo_profiles WHERE LOWER(id) = LOWER(?)`, repoID,
 	).Scan(&etag, &polledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, nil
@@ -431,7 +438,7 @@ func (s *repoStore) SetPullsPollStateSystem(ctx context.Context, orgID, repoID, 
 		return err
 	}
 	_, err := s.q.ExecContext(ctx,
-		`UPDATE repo_profiles SET pulls_etag = ?, pulls_polled_at = ? WHERE id = ?`,
+		`UPDATE repo_profiles SET pulls_etag = ?, pulls_polled_at = ? WHERE LOWER(id) = LOWER(?)`,
 		nullIfEmpty(etag), polledAt, repoID,
 	)
 	return err

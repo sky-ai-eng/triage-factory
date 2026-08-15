@@ -502,9 +502,17 @@ func getRepoProfile(ctx context.Context, q queryer, orgID, repoID string) (*doma
 	if owner == "" || repo == "" {
 		return nil, nil
 	}
+	// Case-insensitive, like every other lookup that takes a caller-supplied
+	// slug. The callers that pass one they did NOT read out of this table are
+	// the ones that matter: `tfac exec workspace add owner/repo` hands the
+	// agent's argv straight through, and a miss there is reported as "repo is
+	// not configured in Triage Factory" — while the team-tracking gate on the
+	// next line of that same function matches case-insensitively and would
+	// have said yes.
 	row := q.QueryRowContext(ctx, `
 		SELECT `+repoProfileFullColumns+`
-		FROM repo_profiles WHERE org_id = $1 AND owner = $2 AND repo = $3
+		FROM repo_profiles
+		WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)
 	`, orgID, owner, repo)
 	p, err := pgScanRepoProfileFull(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -528,7 +536,7 @@ func updateRepoCloneStatus(ctx context.Context, q queryer, orgID, owner, repo, s
 	_, err := q.ExecContext(ctx, `
 		UPDATE repo_profiles
 		   SET clone_status = $1, clone_error = NULLIF($2, ''), clone_error_kind = NULLIF($3, '')
-		 WHERE org_id = $4 AND owner = $5 AND repo = $6
+		 WHERE org_id = $4 AND lower(owner) = lower($5) AND lower(repo) = lower($6)
 	`, status, errMsg, errKind, orgID, owner, repo)
 	return err
 }
@@ -543,7 +551,7 @@ func (s *repoStore) GetPullsPollStateSystem(ctx context.Context, orgID, repoID s
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT pulls_etag, pulls_polled_at
 		  FROM repo_profiles
-		 WHERE org_id = $1 AND owner = $2 AND repo = $3
+		 WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)
 	`, orgID, owner, repo).Scan(&etag, &polledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, nil
@@ -566,7 +574,7 @@ func (s *repoStore) SetPullsPollStateSystem(ctx context.Context, orgID, repoID, 
 	_, err := s.admin.ExecContext(ctx, `
 		UPDATE repo_profiles
 		   SET pulls_etag = NULLIF($1, ''), pulls_polled_at = $2
-		 WHERE org_id = $3 AND owner = $4 AND repo = $5
+		 WHERE org_id = $3 AND lower(owner) = lower($4) AND lower(repo) = lower($5)
 	`, etag, polledAt, orgID, owner, repo)
 	return err
 }

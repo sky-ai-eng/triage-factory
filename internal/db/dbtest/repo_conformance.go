@@ -367,6 +367,54 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		}
 	})
 
+	t.Run("slug_keyed_methods_all_match_case_insensitively", func(t *testing.T) {
+		// GitHub identifiers are case-insensitive, so every method that takes
+		// a caller-supplied slug has to resolve the same repository — one
+		// method disagreeing is a silent miss, not an error, and reads as
+		// "that repo isn't configured".
+		//
+		// The live path is an agent's `tfac exec workspace add owner/repo`,
+		// whose argv goes straight to Get; a stale-casing miss there is
+		// reported to the agent as not-configured, immediately before a
+		// team-tracking gate that WOULD have matched. The rest are pinned
+		// alongside it so the family cannot drift apart again.
+		s, orgID := mk(t)
+		if err := s.SetConfigured(ctx, orgID, []string{"Acme/Api"}); err != nil {
+			t.Fatalf("SetConfigured: %v", err)
+		}
+
+		got, err := s.Get(ctx, orgID, "acme/api")
+		if err != nil || got == nil {
+			t.Fatalf("Get with different casing: got=%v err=%v", got, err)
+		}
+		if got.ID != "Acme/Api" {
+			t.Errorf("Get returned id %q, want the stored casing Acme/Api", got.ID)
+		}
+		if sys, err := s.GetSystem(ctx, orgID, "ACME/API"); err != nil || sys == nil {
+			t.Errorf("GetSystem with different casing: got=%v err=%v", sys, err)
+		}
+
+		if err := s.UpdateCloneStatus(ctx, orgID, "acme", "api", "failed", "boom", "ssh"); err != nil {
+			t.Fatalf("UpdateCloneStatus: %v", err)
+		}
+		got, _ = s.Get(ctx, orgID, "Acme/Api")
+		if got == nil || got.CloneStatus != "failed" || got.CloneErrorKind != "ssh" {
+			t.Errorf("clone status after a differently-cased update = %+v, want failed/ssh", got)
+		}
+
+		now := time.Now().UTC().Truncate(time.Second)
+		if err := s.SetPullsPollStateSystem(ctx, orgID, "ACME/api", `"etag-v1"`, now); err != nil {
+			t.Fatalf("SetPullsPollStateSystem: %v", err)
+		}
+		etag, polledAt, err := s.GetPullsPollStateSystem(ctx, orgID, "acme/API")
+		if err != nil {
+			t.Fatalf("GetPullsPollStateSystem: %v", err)
+		}
+		if etag != `"etag-v1"` || polledAt == nil {
+			t.Errorf("poll state through differently-cased slugs = (%q, %v), want the stored pair", etag, polledAt)
+		}
+	})
+
 	t.Run("GetOrCreate_creates_then_is_idempotent", func(t *testing.T) {
 		// The core of the primitive: the first call mints the row, every
 		// call after it hands back the same one. "Same" is checked by
