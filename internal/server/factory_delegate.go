@@ -7,6 +7,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -26,18 +27,15 @@ type factoryDelegateRequest struct {
 	TeamID string `json:"team_id"`
 }
 
-// factoryDelegateResponse mirrors the /api/tasks/{id}/swipe delegate
-// response: on partial success (claim stamped, run didn't fire),
-// DelegateError carries the spawner error and ConversationID stays empty. The
-// FE renders the "delegate failed — retry" affordance on the bot-
-// claimed card regardless of whether the failure was a 400-class
-// (ErrPromptNotFound) or 500-class (DB / spawner internal) error.
-// ClaimStamped is always true on a 200 response — the user's gesture
-// committed at the claim axis even when the run didn't materialize.
+// factoryDelegateResponse is the success shape: the task the drop resolved
+// to and the run it fired. ClaimStamped is always true on a 200 — the user's
+// gesture committed at the claim axis and the run materialized. A failed
+// spawn is a real error status (422/500 via writeDelegateSpawnError), not a
+// 200 with an error field; the claim survives that failure, so the client
+// refetches and finds the task bot-claimed with no run.
 type factoryDelegateResponse struct {
 	TaskID         string `json:"task_id"`
 	ConversationID string `json:"conversation_id"`
-	DelegateError  string `json:"delegate_error,omitempty"`
 	ClaimStamped   bool   `json:"claim_stamped"`
 }
 
@@ -57,11 +55,20 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var req factoryDelegateRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	if req.EntityID == "" || req.EventType == "" || req.BlueprintID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "entity_id, event_type, and blueprint_id are required"})
+	var v httpx.Validation
+	if req.EntityID == "" {
+		v.Missing("entity_id")
+	}
+	if req.EventType == "" {
+		v.Missing("event_type")
+	}
+	if req.BlueprintID == "" {
+		v.Missing("blueprint_id")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -109,7 +116,10 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if entity.State != "active" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "entity is closed; cannot delegate"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonAlreadyTerminal,
+			Message: "entity is closed; cannot delegate",
+		})
 		return
 	}
 
@@ -132,7 +142,13 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if primaryEvent == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no matching event for entity at this station"})
+		// The body parsed fine; the (entity, event_type, dedup_key) triple it
+		// names doesn't exist — a semantic fault in what was referenced, so
+		// 422 rather than 400.
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "no matching event for entity at this station",
+		})
 		return
 	}
 
@@ -144,7 +160,10 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// run). Tests rely on this ordering to exercise the 404/409/400
 	// paths without installing a spawner.
 	if s.spawner == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "spawner not configured"})
+		httpx.WriteErrors(w, http.StatusServiceUnavailable, httpx.ErrorItem{
+			Reason:  httpx.ReasonNotConfigured,
+			Message: "spawner not configured",
+		})
 		return
 	}
 
@@ -272,12 +291,15 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, claimTeamID)
 	if err != nil {
 		factoryLog.Error("delegate aborted", "task", task.ID, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed" + localDetail(err)})
+		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
+			Reason: httpx.ReasonInternal, Message: "delegate failed" + localDetail(err),
+		})
 		return
 	}
 	if !enabled {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "bot is disabled for this team; enable it in team settings to delegate",
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "bot is disabled for this team; enable it in team settings to delegate",
 		})
 		return
 	}
@@ -293,7 +315,9 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		return e
 	}); err != nil {
 		factoryLog.Error("failed to stamp agent claim", "task", task.ID, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed" + localDetail(err)})
+		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
+			Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
+		})
 		return
 	}
 	switch handoffResult {
@@ -313,8 +337,9 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		// the user's gesture still gets a run if one isn't already
 		// underway.
 	case db.HandoffRefused:
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "task is claimed by another user; refusing to steal",
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "task is claimed by another user; refusing to steal",
 		})
 		return
 	}
@@ -354,23 +379,14 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		ActorAgentID:        a.ID,
 	})
 	if err != nil {
-		// Claim is already stamped (and broadcast), swipe audit
-		// already recorded. The run didn't fire — mirror the
-		// swipe-delegate convention: 200 OK with delegate_error
-		// populated and run_id empty. The FE reads delegate_error
-		// to render the "delegate didn't fire, retry" affordance
-		// on the now-bot-claimed card; refetch still fires so the
-		// Board picks up the new claim col + the task surfaces in
-		// the Agent lane immediately. Whether the underlying error
-		// was a 400-class (ErrPromptNotFound, ErrPromptUnspecified)
-		// or 500-class (DB, spawner internal) is irrelevant to the
-		// caller — the response shape is the same.
-		writeJSON(w, http.StatusOK, factoryDelegateResponse{
-			TaskID:         task.ID,
-			ConversationID: "",
-			DelegateError:  err.Error(),
-			ClaimStamped:   true,
-		})
+		// Claim is already stamped (and broadcast), swipe audit already
+		// recorded — the commitment is real, the run just didn't fire. That
+		// partial state is reported as the error it is (422 for a bad
+		// blueprint reference, 500 for a spawn/DB fault — the same mapping
+		// the swipe delegate arm uses), never a 200: the FE refetches on
+		// error and renders the "delegate didn't fire, retry" affordance on
+		// the now-bot-claimed card.
+		writeDelegateSpawnError(w, err)
 		return
 	}
 

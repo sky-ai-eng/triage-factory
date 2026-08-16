@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -110,6 +114,27 @@ func teamIDString(teamID *string) string {
 	return *teamID
 }
 
+// taskIDOr404 validates the {id} path value as a UUID and writes the 404 for
+// a malformed one. On Postgres tasks.id is the uuid column type, so a
+// malformed id would otherwise surface as SQLSTATE 22P02 from the first store
+// call → 500. Treating malformed ids as "task not found" keeps the API
+// portable across SQLite (id TEXT, no parse error) and Postgres, and matches
+// the disclosure rule — a malformed id names nothing the caller may learn
+// about.
+func taskIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		notFound(w, "task")
+		return "", false
+	}
+	return id, true
+}
+
+// taskStatuses is the full ?status= vocabulary — the same set the tasks
+// status CHECK constraint enforces. A filter value outside it is a client
+// fault, not an empty result.
+var taskStatuses = []string{"queued", "in_progress", "in_review", "done", "dismissed", "snoozed"}
+
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -121,14 +146,27 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	// at the tail of the Queued column. Default = false so /api/queue
 	// stays the canonical "pickable right now" projection for the
 	// Cards triage view.
-	includeSnoozed := r.URL.Query().Get("include_snoozed") == "true"
+	includeSnoozed := false
+	if raw := r.URL.Query().Get("include_snoozed"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidParam, Message: "include_snoozed must be a boolean", Field: "include_snoozed",
+			})
+			return
+		}
+		includeSnoozed = v
+	}
 	// Optional per-page team filter — a multi-team view scope, supplied as
 	// repeated ?team_id= params. Empty = the union of the viewer's teams
 	// (the RLS-scoped default); a non-empty set narrows to those teams'
 	// owned/visible tasks. Teams the caller isn't in yield nothing under
-	// RLS rather than leaking, so no extra validation is needed here — the
-	// narrow is additive on top of the visibility scope.
-	teamFilter := teamscope.FilterParam(r)
+	// RLS rather than leaking; well-formedness is checked strictly so a
+	// corrupt filter can't silently widen back to the union.
+	teamFilter, ok := teamscope.FilterParamStrict(w, r)
+	if !ok {
+		return
+	}
 	var tasks []domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -156,8 +194,19 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	status := r.URL.Query().Get("status")
+	if status != "" && !slices.Contains(taskStatuses, status) {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidParam,
+			Message: "status must be one of: " + strings.Join(taskStatuses, ", "),
+			Field:   "status",
+		})
+		return
+	}
 	// Optional per-page team filter — see handleQueue.
-	teamFilter := teamscope.FilterParam(r)
+	teamFilter, ok := teamscope.FilterParamStrict(w, r)
+	if !ok {
+		return
+	}
 	var tasks []domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -184,7 +233,10 @@ func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := taskIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var task *domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -212,10 +264,13 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := taskIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	var req snoozeRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -224,9 +279,8 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	until, err := parseSnoozeUntil(req.Until)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid snooze duration: " + err.Error()})
+	until, ok := parseSnoozeUntilField(w, req.Until)
+	if !ok {
 		return
 	}
 
@@ -274,8 +328,9 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		// cols NULL"). The store's atomic UPDATE refused because
 		// the task is currently claimed by a user or the bot.
 		// Requeue first (releases the claim) then snooze.
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "can't snooze a claimed task; requeue or complete it first",
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "can't snooze a claimed task; requeue or complete it first",
 		})
 		return
 	}
@@ -309,7 +364,10 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := taskIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	// Undo reverses a swipe — a task mutation a viewer can't make (TFAC-447).
 	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
@@ -367,7 +425,10 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := taskIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	// Requeue moves a task back to the queue — a viewer can't (TFAC-447).
 	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
@@ -420,31 +481,28 @@ func (s *Server) handleTaskAdvance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := taskIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	var body struct {
 		To string `json:"to"`
 	}
-	if !decodeJSON(w, r, &body, "invalid request body") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	if body.To != "in_progress" && body.To != "in_review" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to must be one of: in_progress, in_review"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "to must be one of: in_progress, in_review",
+			Field:   "to",
+		})
 		return
 	}
 
 	// Advancing a task's status is a team-scoped write — viewers can't (TFAC-447).
 	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
-		return
-	}
-
-	// Validate the path id as a UUID up front. On Postgres
-	// tasks.id is the uuid column type, so a malformed id surfaces as
-	// SQLSTATE 22P02 from the store call → 500. Treating malformed
-	// ids as "task not found" keeps the API portable across SQLite
-	// (id TEXT, no parse error) and Postgres.
-	if _, err := uuid.Parse(id); err != nil {
-		notFound(w, "task")
 		return
 	}
 
@@ -475,8 +533,9 @@ func (s *Server) handleTaskAdvance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !advanced {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "task not advanceable — must be claimed by you and currently in queued/in_progress/in_review",
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "task not advanceable — must be claimed by you and currently in queued/in_progress/in_review",
 		})
 		return
 	}
@@ -939,6 +998,32 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 			jiraLog.Error("failed to transition back on requeue", "issue", issueKey, "status", originalStatus, "error", err)
 		}
 	}(task.EntitySourceID, task.SourceStatus, inProgressMembers)
+}
+
+// parseSnoozeUntilField validates the "until" body field for both ways of
+// snoozing — the standalone route and the swipe arm — so the two gestures
+// take the same input and reject the same faults: absent (a snooze needs a
+// wake time or the row parks forever) and unparseable. On failure the error
+// response is already written; callers return immediately.
+func parseSnoozeUntilField(w http.ResponseWriter, raw string) (time.Time, bool) {
+	if raw == "" {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "until is required: 1h, 2h, 4h, tomorrow, or an RFC3339 timestamp",
+			Field:   "until",
+		})
+		return time.Time{}, false
+	}
+	until, err := parseSnoozeUntil(raw)
+	if err != nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "invalid snooze duration: " + err.Error(),
+			Field:   "until",
+		})
+		return time.Time{}, false
+	}
+	return until, true
 }
 
 func parseSnoozeUntil(s string) (time.Time, error) {

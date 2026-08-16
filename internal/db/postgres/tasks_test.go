@@ -548,3 +548,21 @@ func seedPgEntityEvent(t *testing.T, conn *sql.DB, orgID, suffix string) (entity
 	}
 	return entityID, eventID
 }
+
+// TestTaskStore_Postgres_MalformedIDErrors pins the failure mode the
+// handler-side uuid guards exist for: tasks.id is a uuid column, so a
+// malformed id fails the cast (SQLSTATE 22P02) — an error, not a clean
+// nil-row miss like SQLite's TEXT ids produce. The HTTP layer therefore
+// answers 404 for malformed ids before any store call
+// (TestTaskRoutes_404OnMalformedID in internal/server); if this test ever
+// starts passing a malformed id cleanly, those guards may be removable.
+func TestTaskStore_Postgres_MalformedIDErrors(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, _, _ := seedPgOrgUserAgent(t, h)
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	if _, err := stores.Tasks.Get(context.Background(), orgA, "not-a-uuid"); err == nil {
+		t.Fatal("Tasks.Get with a malformed id returned nil error; expected a uuid cast failure")
+	}
+}
