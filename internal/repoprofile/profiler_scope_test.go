@@ -120,6 +120,88 @@ func TestRunOrg_LocalShape_OrgScopedBroadcastUnchanged(t *testing.T) {
 	}
 }
 
+// TestRunOrg_BatchFailureToast_ScopedPerUser pins the toast half of the
+// delivery scope: a failed batch's warning names repo slugs, which are
+// visibility-scoped data, so with SetRecipients wired each affected user
+// gets a toast naming ONLY the repos they can see, and a user outside
+// every repo's audience gets nothing — toast included.
+func TestRunOrg_BatchFailureToast_ScopedPerUser(t *testing.T) {
+	srv := docScanServer(t)
+
+	hub := websocket.NewHub()
+	x := dialHubTestClientAs(t, hub, "user-x", "org-1")
+	y := dialHubTestClientAs(t, hub, "user-y", "org-1")
+	z := dialHubTestClientAs(t, hub, "user-z", "org-1")
+	waitForHubClients(t, hub, 3)
+
+	repos := &batchRepositoryStore{names: []string{"own/alpha", "own/beta"}}
+	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, hub)
+	p.SetRecipients(func(_ context.Context, _ string, _, repo string) ([]string, error) {
+		if repo == "alpha" {
+			return []string{"user-x"}, nil
+		}
+		return []string{"user-x", "user-y"}, nil
+	})
+	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
+		return nil, stubErr("simulated batch failure")
+	}
+
+	if _, err := p.RunOrg(context.Background(), "org-1", true); err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+
+	// user-x: doc diffs for both repos, then a toast naming both.
+	for _, want := range []string{"own/alpha", "own/beta"} {
+		if evt := decodeRepoEvent(t, x.expectMessage(t, 2*time.Second)); evt.Data.ID != want {
+			t.Errorf("user-x event = %+v; want doc diff for %s", evt, want)
+		}
+	}
+	if body := decodeToast(t, x.expectMessage(t, 2*time.Second)); body != "Profiling failed for own/alpha, own/beta — rows saved without AI summary" {
+		t.Errorf("user-x toast body = %q; want both slugs", body)
+	}
+
+	// user-y: only beta's doc diff, and a toast that must not name alpha.
+	if evt := decodeRepoEvent(t, y.expectMessage(t, 2*time.Second)); evt.Data.ID != "own/beta" {
+		t.Errorf("user-y event = %+v; want doc diff for own/beta", evt)
+	}
+	if body := decodeToast(t, y.expectMessage(t, 2*time.Second)); body != "Profiling failed for own/beta — rows saved without AI summary" {
+		t.Errorf("user-y toast body = %q; must name own/beta only", body)
+	}
+
+	// user-z is outside every audience: no events, no toast.
+	z.expectNoMessage(t, 300*time.Millisecond)
+}
+
+// TestRunOrg_BatchFailureToast_LocalOrgWide pins the N=1 half: without
+// SetRecipients the failure toast stays a single org-wide broadcast
+// naming the whole batch, exactly as before.
+func TestRunOrg_BatchFailureToast_LocalOrgWide(t *testing.T) {
+	srv := docScanServer(t)
+
+	hub := websocket.NewHub()
+	a := dialHubTestClientAs(t, hub, "user-a", "org-1")
+	b := dialHubTestClientAs(t, hub, "user-b", "org-1")
+	waitForHubClients(t, hub, 2)
+
+	repos := &batchRepositoryStore{names: []string{"own/alpha", "own/beta"}}
+	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, hub)
+	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
+		return nil, stubErr("simulated batch failure")
+	}
+
+	if _, err := p.RunOrg(context.Background(), "org-1", true); err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+
+	for name, c := range map[string]*hubTestClient{"user-a": a, "user-b": b} {
+		c.expectMessage(t, 2*time.Second) // doc diff own/alpha
+		c.expectMessage(t, 2*time.Second) // doc diff own/beta
+		if body := decodeToast(t, c.expectMessage(t, 2*time.Second)); body != "Profiling failed for own/alpha, own/beta — rows saved without AI summary" {
+			t.Errorf("%s toast body = %q; want the whole batch named", name, body)
+		}
+	}
+}
+
 // repoEventFrame is the wire shape the scope tests decode — Type plus the
 // repoevent.Update payload under data.
 type repoEventFrame struct {
@@ -133,5 +215,26 @@ func decodeRepoEvent(t *testing.T, raw []byte) repoEventFrame {
 	if err := json.Unmarshal(raw, &evt); err != nil {
 		t.Fatalf("unmarshal event %s: %v", raw, err)
 	}
+	if evt.Type != repoevent.EventType {
+		t.Fatalf("event type = %q, want %q (frame: %s)", evt.Type, repoevent.EventType, raw)
+	}
 	return evt
+}
+
+// decodeToast asserts the frame is a toast and returns its body.
+func decodeToast(t *testing.T, raw []byte) string {
+	t.Helper()
+	var evt struct {
+		Type string `json:"type"`
+		Data struct {
+			Body string `json:"body"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &evt); err != nil {
+		t.Fatalf("unmarshal event %s: %v", raw, err)
+	}
+	if evt.Type != "toast" {
+		t.Fatalf("event type = %q, want toast (frame: %s)", evt.Type, raw)
+	}
+	return evt.Data.Body
 }
