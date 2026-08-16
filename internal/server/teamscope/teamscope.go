@@ -316,18 +316,31 @@ func FilterParamStrict(w http.ResponseWriter, r *http.Request) (teams []string, 
 }
 
 // SingleParamStrict is SingleParam under the same strict-params contract as
-// FilterParamStrict: absent stays "" (no narrow), malformed is a 400 instead
-// of a silent fall-through to the default team.
+// FilterParamStrict: only a genuinely absent param means "no narrow" (""),
+// everything else must be one well-formed id. A present-but-empty
+// `?team_id=` and a repeated `?team_id=a&team_id=b` are both rejected —
+// treating either as absent (or taking the first value) would silently
+// retarget a single-team read to the caller's default team, the exact
+// fall-through this variant exists to close. Malformed ids are a 400 as in
+// FilterParamStrict.
 func SingleParamStrict(w http.ResponseWriter, r *http.Request) (team string, ok bool) {
-	v := r.URL.Query().Get("team_id")
-	if v == "" {
+	raw, present := r.URL.Query()["team_id"]
+	if !present {
 		return "", true
 	}
-	if _, err := uuid.Parse(v); err != nil {
-		writeBadTeamID(w, v)
+	if len(raw) > 1 {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidParam,
+			Message: "team_id may be given at most once on this route",
+			Field:   "team_id",
+		})
 		return "", false
 	}
-	return v, true
+	if _, err := uuid.Parse(raw[0]); err != nil {
+		writeBadTeamID(w, raw[0])
+		return "", false
+	}
+	return raw[0], true
 }
 
 func writeBadTeamID(w http.ResponseWriter, v string) {

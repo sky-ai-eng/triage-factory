@@ -77,6 +77,12 @@ func TestTaskReads_StrictQueryParams(t *testing.T) {
 		{"malformed team filter on tasks", "/api/tasks?team_id=junk"},
 		{"malformed team filter on factory", "/api/factory/snapshot?team_id=junk"},
 		{"malformed team filter on stock", "/api/jira/stock?team_id=junk"},
+		// Present-but-empty and repeated values on the single-team deck are
+		// rejected too: treating them as absent (or taking the first) would
+		// silently retarget the read to the caller's default team.
+		{"empty team filter on stock", "/api/jira/stock?team_id="},
+		{"repeated team filter on stock", "/api/jira/stock?team_id=00000000-0000-4000-8000-000000000001&team_id=00000000-0000-4000-8000-000000000002"},
+		{"empty team filter on queue", "/api/queue?team_id="},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
