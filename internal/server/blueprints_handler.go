@@ -530,8 +530,7 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 
 	// Validate each step's prompt exists + is same-team, then replace in one
 	// tx so all lookups and the final write share claims.
-	var validationErr string
-	var validationStatus int
+	var fault blueprintFault
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		for i, sid := range stepIDs {
 			stepPrompt, e := tx.Prompts.Get(r.Context(), orgID, sid)
@@ -539,16 +538,16 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 				return e
 			}
 			if stepPrompt == nil {
-				validationErr = "step " + strconv.Itoa(i) + " references a non-existent prompt"
-				validationStatus = http.StatusUnprocessableEntity
+				fault.raise(http.StatusUnprocessableEntity, httpx.ReasonNotFound,
+					"step "+strconv.Itoa(i)+" references a non-existent prompt", "steps")
 				return nil
 			}
 			// Same-team guard: a blueprint may only step through prompts its own
 			// team owns. The DB enforces this via the (step_prompt_id, team_id)
 			// composite FK on ReplaceSteps; pre-check for a clean 422.
 			if blueprint.TeamID != "" && stepPrompt.TeamID != "" && stepPrompt.TeamID != blueprint.TeamID {
-				validationErr = "step " + strconv.Itoa(i) + " references a prompt owned by another team"
-				validationStatus = http.StatusUnprocessableEntity
+				fault.raise(http.StatusUnprocessableEntity, httpx.ReasonCrossTeamRef,
+					"step "+strconv.Itoa(i)+" references a prompt owned by another team", "steps")
 				return nil
 			}
 			// Copy-only guard: a prompt belongs to at most one blueprint. If this
@@ -560,12 +559,12 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 				return e
 			}
 			if owned && ownerID != id {
-				validationErr = "step " + strconv.Itoa(i) + " references a prompt that already belongs to another blueprint — copy it to reuse."
-				validationStatus = http.StatusUnprocessableEntity
+				fault.raise(http.StatusUnprocessableEntity, httpx.ReasonConflict,
+					"step "+strconv.Itoa(i)+" references a prompt that already belongs to another blueprint — copy it to reuse.", "steps")
 				return nil
 			}
 		}
-		if validationErr != "" {
+		if fault.status != 0 {
 			return nil
 		}
 		return tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
@@ -573,14 +572,44 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 		internalError(w, "blueprints", err)
 		return
 	}
-	if validationErr != "" {
-		httpx.WriteErrors(w, validationStatus, httpx.ErrorItem{
-			Reason: httpx.ReasonCrossTeamRef, Message: validationErr, Field: "steps",
-		})
+	if fault.write(w) {
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// blueprintFault is a validation refusal raised inside a WithTx closure and
+// written after it unwinds — the response can't be written mid-tx, so the fault
+// travels back as data. It carries its own reason and field because these
+// handlers refuse for several distinct causes: a prompt that doesn't exist, one
+// another team owns, one another blueprint already claims, a size bound, an
+// attached trigger. A single reason stamped at the write site would answer
+// "something about teams" to all of them, which is true of exactly one.
+type blueprintFault struct {
+	status int
+	item   httpx.ErrorItem
+}
+
+// raise records a refusal. Every caller returns from the closure immediately
+// after, so the first one is the only one; a later raise is a bug rather than a
+// second fault to accumulate, and is dropped rather than overwriting.
+func (f *blueprintFault) raise(status int, reason, message, field string) {
+	if f.status != 0 {
+		return
+	}
+	f.status = status
+	f.item = httpx.ErrorItem{Reason: reason, Message: message, Field: field}
+}
+
+// write emits the refusal if one was raised, reporting whether it did so the
+// caller can return without falling through to the success body.
+func (f *blueprintFault) write(w http.ResponseWriter) bool {
+	if f.status == 0 {
+		return false
+	}
+	httpx.WriteErrors(w, f.status, f.item)
+	return true
 }
 
 // --- Blueprint composition (merge / split) -------------------------------
@@ -638,8 +667,7 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 		host, source *domain.Blueprint
 		merged       *domain.Blueprint
 		steps        []domain.BlueprintStep
-		failStatus   int
-		failMsg      string
+		fault        blueprintFault
 	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -655,7 +683,8 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 		// Same-team guard: both blueprints must belong to one team (MergeInto
 		// leaves team_id on the reparented steps unchanged).
 		if host.TeamID != "" && source.TeamID != "" && host.TeamID != source.TeamID {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "host and source blueprints belong to different teams"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonCrossTeamRef,
+				"host and source blueprints belong to different teams", "source_blueprint_id")
 			return nil
 		}
 		// Source must be trigger-less. Unreachable from the canvas (you can only
@@ -667,7 +696,8 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 			return e
 		}
 		if len(triggers) > 0 {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "the absorbed blueprint has its own event trigger; detach it first"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonConflict,
+				"the absorbed blueprint has its own event trigger; detach it first", "source_blueprint_id")
 			return nil
 		}
 		// Cap: the merged blueprint must stay editable via the normal steps-PUT,
@@ -682,7 +712,8 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 			return e
 		}
 		if len(hostSteps)+len(sourceSteps) > maxBlueprintSteps {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "merged blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonOutOfRange,
+				"merged blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps", "source_blueprint_id")
 			return nil
 		}
 		if e := tx.Blueprints.MergeInto(r.Context(), orgID, hostID, req.SourceBlueprintID); e != nil {
@@ -705,8 +736,7 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 		notFound(w, "source blueprint")
 		return
 	}
-	if failMsg != "" {
-		httpx.WriteErrors(w, failStatus, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: failMsg})
+	if fault.write(w) {
 		return
 	}
 	if steps == nil {
@@ -765,8 +795,7 @@ func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http
 		bp                   *domain.Blueprint
 		upstream, downstream *domain.Blueprint
 		upSteps, downSteps   []domain.BlueprintStep
-		failStatus           int
-		failMsg              string
+		fault                blueprintFault
 	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -779,7 +808,8 @@ func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http
 		}
 		// 0 < k < N: a split that keeps one side empty is a no-op.
 		if atIndex <= 0 || atIndex >= len(steps) {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "at_step_index must split the blueprint into two non-empty halves"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonOutOfRange,
+				"at_step_index must split the blueprint into two non-empty halves", "at_step_index")
 			return nil
 		}
 		// The downstream name defaults to its new step-0 prompt's name (the
@@ -818,8 +848,7 @@ func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http
 		notFound(w, "blueprint")
 		return
 	}
-	if failMsg != "" {
-		httpx.WriteErrors(w, failStatus, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: failMsg})
+	if fault.write(w) {
 		return
 	}
 	if upSteps == nil {
@@ -897,8 +926,7 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 		host, target *domain.Blueprint
 		hostOut      *domain.Blueprint
 		hostSteps    []domain.BlueprintStep
-		failStatus   int
-		failMsg      string
+		fault        blueprintFault
 	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -909,13 +937,15 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 			return e
 		}
 		if req.TargetBlueprintID == id {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "cannot reconnect a blueprint into itself"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonInvalidField,
+				"cannot reconnect a blueprint into itself", "target_blueprint_id")
 			return nil
 		}
 		// Same-team guard (MergeInto leaves team_id on the reparented steps
 		// unchanged).
 		if host.TeamID != "" && target.TeamID != "" && host.TeamID != target.TeamID {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "host and target blueprints belong to different teams"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonCrossTeamRef,
+				"host and target blueprints belong to different teams", "target_blueprint_id")
 			return nil
 		}
 		steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
@@ -925,7 +955,8 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 		// 0 < k < N: both the surviving upstream and the orphaned downstream must
 		// be non-empty (a sequence edge always sits at such a boundary).
 		if atIndex <= 0 || atIndex >= len(steps) {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "at_step_index must split the blueprint into two non-empty halves"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonOutOfRange,
+				"at_step_index must split the blueprint into two non-empty halves", "at_step_index")
 			return nil
 		}
 		// Target must be trigger-less to be absorbed (mirrors merge). The
@@ -935,7 +966,8 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 			return e
 		}
 		if len(triggers) > 0 {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "the target blueprint has its own event trigger; detach it first"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonConflict,
+				"the target blueprint has its own event trigger; detach it first", "target_blueprint_id")
 			return nil
 		}
 		// Cap: the surviving upstream (atIndex steps) + the absorbed target must
@@ -945,7 +977,8 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 			return e
 		}
 		if atIndex+len(targetSteps) > maxBlueprintSteps {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "reconnected blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonOutOfRange,
+				"reconnected blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps", "target_blueprint_id")
 			return nil
 		}
 		// Orphan name defaults to its new step-0 prompt's name (the prompt at the
@@ -987,8 +1020,7 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 		notFound(w, "target blueprint")
 		return
 	}
-	if failMsg != "" {
-		httpx.WriteErrors(w, failStatus, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: failMsg})
+	if fault.write(w) {
 		return
 	}
 	if hostSteps == nil {
@@ -1039,9 +1071,8 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 	}
 
 	var (
-		out        []blueprintWithSteps
-		failStatus int
-		failMsg    string
+		out   []blueprintWithSteps
+		fault blueprintFault
 	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
@@ -1052,13 +1083,16 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 		if e != nil {
 			switch {
 			case errors.Is(e, db.ErrDuplicateNoPrompts):
-				failStatus, failMsg = http.StatusBadRequest, "prompt_ids is required"
+				fault.raise(http.StatusBadRequest, httpx.ReasonMissingField,
+					"prompt_ids is required", "prompt_ids")
 				return nil
 			case errors.Is(e, db.ErrDuplicatePromptNotFound):
-				failStatus, failMsg = http.StatusNotFound, "a prompt id does not resolve to a blueprint step"
+				fault.raise(http.StatusNotFound, httpx.ReasonNotFound,
+					"a prompt id does not resolve to a blueprint step", "prompt_ids")
 				return nil
 			case errors.Is(e, db.ErrDuplicateCrossTeam):
-				failStatus, failMsg = http.StatusUnprocessableEntity, "prompt_ids span more than one team"
+				fault.raise(http.StatusUnprocessableEntity, httpx.ReasonCrossTeamRef,
+					"prompt_ids span more than one team", "prompt_ids")
 				return nil
 			}
 			return e
@@ -1091,8 +1125,7 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 		internalError(w, "blueprints", err)
 		return
 	}
-	if failMsg != "" {
-		httpx.WriteErrors(w, failStatus, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: failMsg})
+	if fault.write(w) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, out)
