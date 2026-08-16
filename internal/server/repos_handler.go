@@ -576,19 +576,33 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteList(w, page, result, total)
 }
 
-// readRepo resolves one registry row for a read route and annotates it with
-// the caller's can_edit. lookup performs the resolution — by id for the
-// canonical route, by ref for the by-name one — so both share this gate and
-// neither can grow its own.
+// repoAnnotation says whether a read wants can_edit resolved alongside the
+// row. Named rather than a bare bool at the call sites, because it is a
+// decision and not a flag: the row-shaped reads serialize can_edit, so they
+// pay for it; the branch list does not carry the field at all, and it is one
+// upstream call per keystroke on a type-to-filter box, so it does not pay a
+// non-admin's extra EXISTS to compute something it then discards.
+type repoAnnotation bool
+
+const (
+	withCanEdit repoAnnotation = true
+	noCanEdit   repoAnnotation = false
+)
+
+// readRepo resolves one registry row for a read route. lookup performs the
+// resolution — by id for the canonical route, by ref for the by-name one — so
+// every read shares this gate and none can grow its own.
 //
 // Resolve first, gate second, and both failures answer the same 404: a row no
 // id answers to and a row outside the caller's tracked set are indistinguishable
 // on the wire, which is what the two-valued disclosure rule asks for on a read.
 // (Writes are where the distinction is drawn — see repoMutationAccess.)
 //
-// A nil row with a nil error is that 404; the caller writes it.
+// A nil row with a nil error is that 404; the caller writes it. canEdit is
+// false whenever annotate is noCanEdit — a caller that did not ask for it must
+// not read it.
 func (s *Server) readRepo(
-	ctx context.Context, orgID, userID string,
+	ctx context.Context, orgID, userID string, annotate repoAnnotation,
 	lookup func(ctx context.Context, tx db.TxStores) (*domain.Repository, error),
 ) (*domain.Repository, bool, error) {
 	isAdmin, err := s.isOrgAdmin(ctx, orgID, userID)
@@ -609,6 +623,9 @@ func (s *Server) readRepo(
 			return e
 		}
 		row = found
+		if annotate == noCanEdit {
+			return nil
+		}
 		canEdit, e = repoCanEdit(ctx, tx, orgID, isAdmin, *found)
 		return e
 	})
@@ -630,7 +647,7 @@ func (s *Server) handleRepoGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	row, canEdit, err := s.readRepo(r.Context(), orgID, userID,
+	row, canEdit, err := s.readRepo(r.Context(), orgID, userID, withCanEdit,
 		func(ctx context.Context, tx db.TxStores) (*domain.Repository, error) {
 			return repoByID(ctx, tx.Repos.Get, orgID, id)
 		})
@@ -667,7 +684,7 @@ func (s *Server) handleRepoGetByName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	row, canEdit, err := s.readRepo(r.Context(), orgID, userID,
+	row, canEdit, err := s.readRepo(r.Context(), orgID, userID, withCanEdit,
 		func(ctx context.Context, tx db.TxStores) (*domain.Repository, error) {
 			// Ref-keyed, not id-keyed: the path segments are the provider's
 			// current NAME for the repository, and the registry id is a
@@ -926,7 +943,7 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	// is — so the id resolves to a row here and the row supplies the name. That
 	// is the general shape of this flip: TF ids on the wire, provider
 	// coordinates on the provider hop, resolved once at the boundary between.
-	row, _, err := s.readRepo(r.Context(), orgID, userID,
+	row, _, err := s.readRepo(r.Context(), orgID, userID, noCanEdit,
 		func(ctx context.Context, tx db.TxStores) (*domain.Repository, error) {
 			return repoByID(ctx, tx.Repos.Get, orgID, id)
 		})

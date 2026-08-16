@@ -204,7 +204,14 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			visibilityErrMsg = "pinned repos and tracker projects require team visibility"
 			return nil
 		}
-		pinned, pinnedErrMsg = validatePinnedRepos(r.Context(), tx.Repos, tx.TeamGitHubRepos, orgID, teamID, req.PinnedRepositoryIDs)
+		var pinnedErr error
+		pinned, pinnedErrMsg, pinnedErr = validatePinnedRepos(r.Context(), tx.Repos, tx.TeamGitHubRepos, orgID, teamID, req.PinnedRepositoryIDs)
+		if pinnedErr != nil {
+			// A store fault, not a verdict on the body — out through the
+			// error path so it lands as a 500, never as "your pins are
+			// invalid".
+			return fmt.Errorf("validate pinned repos: %w", pinnedErr)
+		}
 		if pinnedErrMsg != "" {
 			return nil // surfaced as 400 below; nothing written
 		}
@@ -717,9 +724,12 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		var pinned []string
 		var errMsg string
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			pinned, errMsg = validatePinnedRepos(r.Context(), tx.Repos, tx.TeamGitHubRepos, orgID, existing.TeamID, *req.PinnedRepositoryIDs)
-			return nil
+			var e error
+			pinned, errMsg, e = validatePinnedRepos(r.Context(), tx.Repos, tx.TeamGitHubRepos, orgID, existing.TeamID, *req.PinnedRepositoryIDs)
+			return e
 		}); err != nil {
+			// A store fault reaches here; a rejection travels in errMsg and is
+			// answered as a 400 just below.
 			internalError(w, "projects", err)
 			return
 		}
@@ -1120,20 +1130,26 @@ func validatePinnedRepoShape(repoIDs []string) ([]string, string) {
 // and nowhere else.
 //
 // Runs under the caller's claims (repositories + team_github_repos_select
-// RLS), so it must be invoked inside a WithTx for the requesting user. Returns
-// (names, "") on success and (nil, errMsg) on failure.
-func validatePinnedRepos(ctx context.Context, repos db.RepositoryStore, teamRepos db.TeamGitHubReposStore, orgID, teamID string, repoIDs []string) ([]string, string) {
+// RLS), so it must be invoked inside a WithTx for the requesting user.
+//
+// The two failure kinds are returned separately and are not interchangeable.
+// errMsg is a REJECTION — a statement about the body, safe to put in a 400 and
+// show a user. err is a store fault: the request cannot be judged at all, so
+// the caller must 500 rather than tell the client its input was invalid. They
+// were one return value before, which made a store outage answer "that is not
+// a repository in this workspace" with a driver string appended.
+func validatePinnedRepos(ctx context.Context, repos db.RepositoryStore, teamRepos db.TeamGitHubReposStore, orgID, teamID string, repoIDs []string) (names []string, errMsg string, err error) {
 	ids, errMsg := validatePinnedRepoShape(repoIDs)
 	if errMsg != "" {
-		return nil, errMsg
+		return nil, errMsg, nil
 	}
 	if len(ids) == 0 {
-		return []string{}, ""
+		return []string{}, "", nil
 	}
 
 	tracked, err := teamRepos.ListForTeam(ctx, teamID)
 	if err != nil {
-		return nil, "failed to load tracked repos: " + err.Error()
+		return nil, "", fmt.Errorf("list tracked repos for team %s: %w", teamID, err)
 	}
 	// Key both sides case-insensitively: GitHub owner/repo names are
 	// case-insensitive and the rest of the codebase folds case (TracksRepoSystem,
@@ -1153,17 +1169,18 @@ func validatePinnedRepos(ctx context.Context, repos db.RepositoryStore, teamRepo
 			// The id is the caller's to get right, so this is a rejection and
 			// not a server fault. It reports the id back rather than a name,
 			// because a name is not what was sent.
-			return nil, pinnedRepoIDsField + ": " + id + " is not a repository in this workspace"
+			return nil, pinnedRepoIDsField + ": " + id + " is not a repository in this workspace", nil
 		}
 		if err != nil {
-			return nil, "failed to load repository " + id + ": " + err.Error()
+			// Anything else is the store failing, not the id being wrong.
+			return nil, "", fmt.Errorf("read repository %s: %w", id, err)
 		}
 		if _, ok := known[strings.ToLower(row.Slug())]; !ok {
-			return nil, pinnedRepoIDsField + ": " + row.Slug() + " is not a repo this team tracks (add it on the GitHub config page first)"
+			return nil, pinnedRepoIDsField + ": " + row.Slug() + " is not a repo this team tracks (add it on the GitHub config page first)", nil
 		}
 		out = append(out, row.Slug())
 	}
-	return out, ""
+	return out, "", nil
 }
 
 // projectJSON is a project's wire shape: the domain row, with its pinned

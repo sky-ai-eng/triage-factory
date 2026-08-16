@@ -1,10 +1,13 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -78,6 +81,42 @@ func TestHandleRepoUpdate_LocalMode(t *testing.T) {
 	// There is no fallback to the by-name lookup.
 	if miss := doJSON(t, s, http.MethodGet, "/api/repos/acme%2Fapi", nil); miss.Code != http.StatusNotFound {
 		t.Errorf("GET a slug in id position = %d, want 404", miss.Code)
+	}
+}
+
+// TestReadRepo_AnnotationIsOptional pins the can_edit annotation as something a
+// read asks for rather than something it always pays. The branch list resolves
+// a repository in order to *use* its name upstream and carries no can_edit
+// field, and it is one call per keystroke on a type-to-filter box — so it must
+// not spend a non-admin's extra EXISTS computing a value it discards.
+//
+// Asserted through the return value, which is the contract's observable half:
+// noCanEdit answers false even for a caller who demonstrably may edit, so a
+// caller that did not ask for the annotation cannot read one either.
+func TestReadRepo_AnnotationIsOptional(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	repoID := seedConfiguredRepo(t, s, "acme", "api")
+
+	lookup := func(ctx context.Context, tx db.TxStores) (*domain.Repository, error) {
+		return repoByID(ctx, tx.Repos.Get, runmode.LocalDefaultOrgID, repoID)
+	}
+	orgID, userID := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+
+	row, canEdit, err := s.readRepo(t.Context(), orgID, userID, withCanEdit, lookup)
+	if err != nil || row == nil {
+		t.Fatalf("withCanEdit: row = %v, err = %v", row, err)
+	}
+	if !canEdit {
+		t.Fatal("withCanEdit: can_edit = false; local mode's single user may edit")
+	}
+
+	row, canEdit, err = s.readRepo(t.Context(), orgID, userID, noCanEdit, lookup)
+	if err != nil || row == nil {
+		t.Fatalf("noCanEdit: row = %v, err = %v", row, err)
+	}
+	if canEdit {
+		t.Error("noCanEdit: can_edit = true; the annotation was resolved for a caller that did not ask for it")
 	}
 }
 

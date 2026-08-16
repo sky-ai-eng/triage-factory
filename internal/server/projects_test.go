@@ -2,7 +2,9 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -11,10 +13,40 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// faultyRepositoryStore and faultyTeamGitHubReposStore make one read fail
+// while everything else delegates to the real store. They exist for one
+// assertion, made twice: a store that cannot answer produces an ERROR, never a
+// rejection message — the two are different answers to the caller (500 vs 400)
+// and only the store itself knows which one this is.
+type faultyRepositoryStore struct {
+	db.RepositoryStore
+	getErr error
+}
+
+func (f faultyRepositoryStore) Get(ctx context.Context, orgID, id string) (*domain.Repository, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	return f.RepositoryStore.Get(ctx, orgID, id)
+}
+
+type faultyTeamGitHubReposStore struct {
+	db.TeamGitHubReposStore
+	listErr error
+}
+
+func (f faultyTeamGitHubReposStore) ListForTeam(ctx context.Context, teamID string) ([]domain.TeamGitHubRepo, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.TeamGitHubReposStore.ListForTeam(ctx, teamID)
+}
 
 // doMultipartUpload posts files (one per map entry, all under the
 // "file" form key) to the given path and returns the recorded
@@ -723,38 +755,90 @@ func TestValidatePinnedRepos_RejectsUnconfigured(t *testing.T) {
 	orgID, teamID := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 
 	// A tracked id passes, and comes back as the name the store holds.
-	names, errMsg := validatePinnedRepos(ctx, repos, teamRepos, orgID, teamID, []string{trackedID})
-	if errMsg != "" {
+	names, errMsg, err := validatePinnedRepos(ctx, repos, teamRepos, orgID, teamID, []string{trackedID})
+	switch {
+	case err != nil:
+		t.Errorf("tracked id should not fault the store: %v", err)
+	case errMsg != "":
 		t.Errorf("tracked id should pass, got %q", errMsg)
-	} else if len(names) != 1 || names[0] != "sky-ai-eng/configured" {
+	case len(names) != 1 || names[0] != "sky-ai-eng/configured":
 		t.Errorf("resolved names = %v, want [sky-ai-eng/configured]", names)
 	}
 
-	// Mix of tracked + untracked rejects on the untracked one, naming it.
-	if _, errMsg := validatePinnedRepos(ctx, repos, teamRepos, orgID, teamID, []string{trackedID, untrackedID}); errMsg == "" {
-		t.Error("untracked id should reject")
-	} else if !strings.Contains(errMsg, "stranger/repo") {
-		t.Errorf("error should name the offending repo, got %q", errMsg)
-	}
-
-	// An id nothing answers to is a rejection, not a 500 — and it reports the
-	// id back, because an id is what the caller sent.
-	if _, errMsg := validatePinnedRepos(ctx, repos, teamRepos, orgID, teamID, []string{"not-an-id"}); errMsg == "" {
-		t.Error("unknown id should reject")
-	} else if !strings.Contains(errMsg, "not-an-id") {
-		t.Errorf("error should name the offending id, got %q", errMsg)
-	}
-
-	// A name where an id belongs resolves against ids, misses, and rejects.
-	// There is deliberately no fallback to a by-name lookup.
-	if _, errMsg := validatePinnedRepos(ctx, repos, teamRepos, orgID, teamID, []string{"sky-ai-eng/configured"}); errMsg == "" {
-		t.Error("a slug in id position should reject, not resolve by name")
+	// Every case below is a REJECTION, not a store fault: err stays nil, so the
+	// handler answers 400 and never 500.
+	for _, tc := range []struct {
+		name  string
+		ids   []string
+		names string // substring the rejection must carry
+	}{
+		// Mix of tracked + untracked rejects on the untracked one, naming it.
+		{"untracked", []string{trackedID, untrackedID}, "stranger/repo"},
+		// An id nothing answers to reports the id back, because an id is what
+		// the caller sent.
+		{"unknown id", []string{"not-an-id"}, "not-an-id"},
+		// A name where an id belongs resolves against ids, misses, and
+		// rejects. There is deliberately no fallback to a by-name lookup.
+		{"slug in id position", []string{"sky-ai-eng/configured"}, "sky-ai-eng/configured"},
+	} {
+		_, errMsg, err := validatePinnedRepos(ctx, repos, teamRepos, orgID, teamID, tc.ids)
+		if err != nil {
+			t.Errorf("%s: got a store fault %v; a bad id is a rejection, not a 500", tc.name, err)
+			continue
+		}
+		if errMsg == "" {
+			t.Errorf("%s: should reject", tc.name)
+			continue
+		}
+		if !strings.Contains(errMsg, tc.names) {
+			t.Errorf("%s: error should name %q, got %q", tc.name, tc.names, errMsg)
+		}
 	}
 
 	// Empty input still passes (nothing to check).
-	if _, errMsg := validatePinnedRepos(ctx, repos, teamRepos, orgID, teamID, nil); errMsg != "" {
-		t.Errorf("nil input should pass, got %q", errMsg)
+	if _, errMsg, err := validatePinnedRepos(ctx, repos, teamRepos, orgID, teamID, nil); err != nil || errMsg != "" {
+		t.Errorf("nil input should pass, got errMsg=%q err=%v", errMsg, err)
 	}
+}
+
+// TestValidatePinnedRepos_StoreFaultIsNotARejection pins the split between the
+// two failure kinds. A store that cannot answer says nothing about whether the
+// body was valid, so it must travel as an error — the handler 500s — rather
+// than as a rejection message that would tell the user their pins are wrong
+// and hand them a driver string to read.
+func TestValidatePinnedRepos_StoreFaultIsNotARejection(t *testing.T) {
+	srv := newTestServer(t)
+	trackedID := seedConfiguredRepo(t, srv, "sky-ai-eng", "configured")
+
+	ctx := t.Context()
+	stores := sqlitestore.New(srv.db)
+	orgID, teamID := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	boom := errors.New("connection reset by peer")
+
+	t.Run("repository read", func(t *testing.T) {
+		repos := faultyRepositoryStore{RepositoryStore: stores.Repos, getErr: boom}
+		names, errMsg, err := validatePinnedRepos(ctx, repos, stores.TeamGitHubRepos, orgID, teamID, []string{trackedID})
+		if !errors.Is(err, boom) {
+			t.Fatalf("err = %v, want the store's own error wrapped", err)
+		}
+		if errMsg != "" {
+			t.Errorf("errMsg = %q; a store fault must not be reported as a bad body", errMsg)
+		}
+		if names != nil {
+			t.Errorf("names = %v, want nil on a fault", names)
+		}
+	})
+
+	t.Run("tracked-set read", func(t *testing.T) {
+		teamRepos := faultyTeamGitHubReposStore{TeamGitHubReposStore: stores.TeamGitHubRepos, listErr: boom}
+		_, errMsg, err := validatePinnedRepos(ctx, stores.Repos, teamRepos, orgID, teamID, []string{trackedID})
+		if !errors.Is(err, boom) {
+			t.Fatalf("err = %v, want the store's own error wrapped", err)
+		}
+		if errMsg != "" {
+			t.Errorf("errMsg = %q; a store fault must not be reported as a bad body", errMsg)
+		}
+	})
 }
 
 // TestProjectCreate_PaddedIDsResolve is the end-to-end regression: padded
