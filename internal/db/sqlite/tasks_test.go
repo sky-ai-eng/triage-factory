@@ -125,11 +125,11 @@ func TestTaskStore_SQLite_AssertLocalOrg(t *testing.T) {
 	}
 	store := sqlitestore.New(conn).Tasks
 
-	// Queued must refuse non-LocalDefaultOrgID even though the underlying
+	// List must refuse non-LocalDefaultOrgID even though the underlying
 	// SQL would happily run — the guard is the only place that catches
 	// a "I think I'm in multi mode" caller.
-	if _, err := store.Queued(t.Context(), "some-other-org", nil); err == nil {
-		t.Error("Queued accepted non-LocalDefaultOrgID without error")
+	if _, _, err := store.List(t.Context(), "some-other-org", db.TaskListFilter{}, db.ListOpts{Limit: 50}); err == nil {
+		t.Error("List accepted non-LocalDefaultOrgID without error")
 	}
 }
 

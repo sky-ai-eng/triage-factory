@@ -1240,10 +1240,23 @@ export type WSEvent =
   | { type: 'scoring_started'; data: { task_ids: string[] } }
   | { type: 'scoring_completed'; data: { task_ids: string[] } }
   | {
-      type: 'repo_docs_updated'
-      data: { id: string; has_readme: boolean; has_claude_md: boolean; has_agents_md: boolean }
+      // One sparse-diff event for the repositories table (mirrors Go's
+      // repoevent.Update allowlist): only the fields the backend just
+      // wrote are present, and consumers merge them into the row keyed
+      // by id — never overwrite, so a clone-status diff can't blank the
+      // AI profile text and vice versa.
+      type: 'repository_updated'
+      data: {
+        id: string
+        has_readme?: boolean
+        has_claude_md?: boolean
+        has_agents_md?: boolean
+        profile_text?: string
+        clone_status?: 'ok' | 'failed' | 'pending'
+        clone_error?: string
+        clone_error_kind?: 'ssh' | 'other'
+      }
     }
-  | { type: 'repo_profile_updated'; data: { id: string; profile_text: string } }
   | { type: 'toast'; data: ToastPayload }
 
 // ──────────────────────────────────────────────────────────────────────

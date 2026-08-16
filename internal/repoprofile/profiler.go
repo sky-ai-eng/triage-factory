@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/reporename"
 	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
@@ -41,6 +42,15 @@ type Profiler struct {
 	orgs       db.OrgsStore            // iterate active orgs at the top of each profile run
 	recorder   *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	ws         *websocket.Hub
+	// notify publishes repository_updated over ws. Built org-scoped (the
+	// local shape) in NewProfiler; SetRecipients rebuilds it with the
+	// multi-mode per-user fan-out.
+	notify *repoevent.Notifier
+	// recipients is the audience resolver SetRecipients captured (nil in
+	// local), kept alongside notify because the batch-failure toast needs
+	// it directly: its body names repo slugs, which are visibility-scoped
+	// data just like the event payloads.
+	recipients repoevent.RecipientsFunc
 
 	// batchFn runs one Haiku profiling batch. Defaulted (in NewProfiler) to a
 	// closure over profileBatch that captures the recorder + system-job
@@ -59,16 +69,65 @@ type Profiler struct {
 // recorder.
 func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, repos db.RepositoryStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Profiler {
 	p := &Profiler{resolver: resolver, secrets: secrets, llmResolve: llmResolve, repos: repos, orgs: orgs, recorder: recorder, ws: ws}
+	p.notify = repoevent.NewNotifier(ws, nil)
 	p.batchFn = func(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return profileBatch(ctx, orgID, batch, secrets, llmResolve, recorder, limiter)
 	}
 	return p
 }
 
+// SetRecipients switches the profiler's repository_updated broadcasts
+// AND its repo-naming toasts from the org-scoped local shape to the
+// multi-mode per-user fan-out: repositories is org-wide but its REST
+// read is visibility-scoped, and the websocket hub has no team axis, so
+// the audience must be resolved per emission (see internal/repoevent).
+// Multi-mode wiring only, called once at boot before any Trigger —
+// local mode never calls it, keeping the single org-wide broadcast N=1
+// has always had.
+func (p *Profiler) SetRecipients(recipients repoevent.RecipientsFunc) {
+	p.recipients = recipients
+	p.notify = repoevent.NewNotifier(p.ws, recipients)
+}
+
 // repoWithDocs groups a repository row with the documentation text to send to the LLM.
 type repoWithDocs struct {
 	profile domain.Repository
 	docs    string
+}
+
+// fireBatchFailureToast surfaces a genuinely failed profiling batch to
+// the users who can see its repos. Local (no recipients resolver): one
+// org-wide toast naming every repo in the batch — N=1, nothing to scope.
+// Multi: the slugs in the body are visibility-scoped data, so resolve
+// each repo's audience and send each affected user a toast naming only
+// the repos they can see; a user outside every repo's audience gets
+// nothing. A per-repo resolution failure skips that repo's slug (fail
+// closed, same posture as repoevent.Notifier) — the row itself was still
+// saved by the fallback upsert either way.
+func (p *Profiler) fireBatchFailureToast(ctx context.Context, orgID string, batch []repoWithDocs) {
+	const bodyFmt = "Profiling failed for %s — rows saved without AI summary"
+	if p.recipients == nil {
+		names := make([]string, len(batch))
+		for i, d := range batch {
+			names[i] = d.profile.ID
+		}
+		toast.Warning(p.ws, orgID, fmt.Sprintf(bodyFmt, strings.Join(names, ", ")))
+		return
+	}
+	perUser := map[string][]string{}
+	for _, d := range batch {
+		uids, err := p.recipients(ctx, orgID, d.profile.Owner, d.profile.Repo)
+		if err != nil {
+			repoprofileLog.Error("resolve toast audience failed; omitting repo from failure toast", "repo", d.profile.ID, "error", err)
+			continue
+		}
+		for _, uid := range uids {
+			perUser[uid] = append(perUser[uid], d.profile.ID)
+		}
+	}
+	for uid, names := range perUser {
+		toast.FireUser(p.ws, orgID, uid, toast.LevelWarning, "", fmt.Sprintf(bodyFmt, strings.Join(names, ", ")))
+	}
 }
 
 // Run iterates active orgs and profiles each one's configured repos.
@@ -291,18 +350,12 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		} else {
 			touched = true
 		}
-		if p.ws != nil {
-			p.ws.Broadcast(websocket.Event{
-				Type:  "repo_docs_updated",
-				OrgID: orgID,
-				Data: map[string]any{
-					"id":            name,
-					"has_readme":    prof.HasReadme,
-					"has_claude_md": prof.HasClaudeMd,
-					"has_agents_md": prof.HasAgentsMd,
-				},
-			})
-		}
+		p.notify.Publish(ctx, orgID, repoevent.Update{
+			ID:          name,
+			HasReadme:   repoevent.Ptr(prof.HasReadme),
+			HasClaudeMd: repoevent.Ptr(prof.HasClaudeMd),
+			HasAgentsMd: repoevent.Ptr(prof.HasAgentsMd),
+		})
 
 		if docs == "" {
 			withoutDocs = append(withoutDocs, prof)
@@ -346,11 +399,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 				repoprofileLog.Error("profile batch failed", "batch", i/profileBatchSize+1, "error", err)
 			}
 			if !backoff {
-				repoNames := make([]string, len(batch))
-				for j, d := range batch {
-					repoNames[j] = d.profile.ID
-				}
-				toast.Warning(p.ws, orgID, fmt.Sprintf("Profiling failed for %s — rows saved without AI summary", strings.Join(repoNames, ", ")))
+				p.fireBatchFailureToast(ctx, orgID, batch)
 			}
 			// Fallback: upsert without profile_text so the row at least exists.
 			for _, d := range batch {
@@ -387,16 +436,10 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			touched = true
 			if prof.ProfileText != "" {
 				profiled++
-				if p.ws != nil {
-					p.ws.Broadcast(websocket.Event{
-						Type:  "repo_profile_updated",
-						OrgID: orgID,
-						Data: map[string]any{
-							"id":           prof.ID,
-							"profile_text": prof.ProfileText,
-						},
-					})
-				}
+				p.notify.Publish(ctx, orgID, repoevent.Update{
+					ID:          prof.ID,
+					ProfileText: repoevent.Ptr(prof.ProfileText),
+				})
 			}
 		}
 	}

@@ -216,6 +216,47 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, own
 	return true, nil
 }
 
+// RepoUpdateRecipientsSystem — identical query to the Postgres impl so
+// both backends pin to one result (the TeamIDsForUserInOrgSystem
+// precedent for claims-free system reads). Production local mode never
+// calls it — the repoevent.Notifier is built without a RecipientsFunc
+// there and broadcasts org-wide — but the shared conformance suite
+// exercises it, so N=1 must not be assumed here.
+func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, owner, repo string) ([]string, error) {
+	// UNION (not UNION ALL) dedups a user who is both an org admin and a
+	// tracking-team member. No teams.deleted_at filter, deliberately —
+	// see the Postgres impl's comment: the tracking arm mirrors the REST
+	// read's visibility scoping, and archiving hides nothing.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT user_id FROM (
+			SELECT om.user_id
+			FROM org_memberships om
+			WHERE om.org_id = ? AND om.role IN ('owner', 'admin')
+			UNION
+			SELECT m.user_id
+			FROM team_github_repos g
+			JOIN teams t ON t.id = g.team_id
+			JOIN memberships m ON m.team_id = g.team_id
+			WHERE t.org_id = ?
+			  AND LOWER(g.owner) = LOWER(?) AND LOWER(g.repo) = LOWER(?)
+		)
+		ORDER BY user_id ASC
+	`, orgID, orgID, owner, repo)
+	if err != nil {
+		return nil, fmt.Errorf("repo update recipients: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan recipient: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // TracksRepoViewerScoped always reports true — this backend only ever runs
 // local mode, where N=1 has no team boundary to enforce, mirroring the
 // local-mode asymmetry of ListActiveJiraTeamScoped /

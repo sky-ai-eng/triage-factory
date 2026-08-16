@@ -87,7 +87,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
 // Track per-repo clone_status across WS events so we only fire the
 // "clone failed" toast on the *transition* into 'failed', not on every
-// repo_profile_updated event with the same failed status. Module-level
+// repository_updated event carrying the same failed status. Module-level
 // (not React state) so the dedupe survives page navigations and the
 // short-lived useWebSocket subscriptions on individual pages.
 const cloneStatusByRepo = new Map<string, 'ok' | 'failed' | 'pending'>()
@@ -130,7 +130,7 @@ function ensureConnected() {
       // or import path), fire a sticky error toast with a CTA to the
       // Repos page. Doing it here (rather than in Repos.tsx) means the
       // user sees it even when they're on Board / Settings / Tasks.
-      if (event.type === 'repo_profile_updated' && event.data && typeof event.data === 'object') {
+      if (event.type === 'repository_updated' && event.data && typeof event.data === 'object') {
         const data = event.data as {
           id?: string
           clone_status?: 'ok' | 'failed' | 'pending'

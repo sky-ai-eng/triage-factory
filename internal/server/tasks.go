@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -17,7 +16,6 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
-	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -130,101 +128,139 @@ func taskIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-// taskStatuses is the full ?status= vocabulary — the same set the tasks
-// status CHECK constraint enforces. A filter value outside it is a client
-// fault, not an empty result.
-var taskStatuses = []string{"queued", "in_progress", "in_review", "done", "dismissed", "snoozed"}
+// taskListRequest is the body of POST /api/tasks/list: the filter set plus
+// the shared paging fields. Every field is optional — `{}` is "every task I
+// can see that isn't sleeping, first page" — but nothing about it is implicit:
+// a caller that wants only the pickable queue says so, and a caller that wants
+// the last week of closed work passes the window it means.
+type taskListRequest struct {
+	// Statuses selects the lanes. Empty = all. Validated against
+	// db.TaskListStatuses; an unknown value is a client fault, not an
+	// empty page.
+	Statuses []string `json:"statuses"`
+	// TeamIDs is the per-page multi-team view scope. Empty = the union of
+	// the viewer's teams (the RLS-scoped default). Well-formedness is
+	// checked strictly: a corrupt filter must not silently widen back to
+	// the union.
+	TeamIDs []string `json:"team_ids"`
+	// OnlyUnclaimed keeps just the rows nobody has taken.
+	OnlyUnclaimed bool `json:"only_unclaimed"`
+	// IncludeSnoozed keeps rows still inside their snooze window.
+	IncludeSnoozed bool `json:"include_snoozed"`
+	// ClosedSince (RFC3339) windows done/dismissed rows by closed_at.
+	// Absent = no window. The board asks for the seven days it wants to
+	// render; the server no longer applies one behind the caller's back.
+	ClosedSince string `json:"closed_since"`
 
-func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
-	if !ok {
-		return
-	}
-	userID := ClaimsFrom(r.Context()).Subject
-	// ?include_snoozed=true keeps future-snoozed rows in the
-	// response so the Board's "show snoozed" toggle can render them
-	// at the tail of the Queued column. Default = false so /api/queue
-	// stays the canonical "pickable right now" projection for the
-	// Cards triage view.
-	includeSnoozed := false
-	if raw := r.URL.Query().Get("include_snoozed"); raw != "" {
-		v, err := strconv.ParseBool(raw)
-		if err != nil {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-				Reason: httpx.ReasonInvalidParam, Message: "include_snoozed must be a boolean", Field: "include_snoozed",
-			})
-			return
-		}
-		includeSnoozed = v
-	}
-	// Optional per-page team filter — a multi-team view scope, supplied as
-	// repeated ?team_id= params. Empty = the union of the viewer's teams
-	// (the RLS-scoped default); a non-empty set narrows to those teams'
-	// owned/visible tasks. Teams the caller isn't in yield nothing under
-	// RLS rather than leaking; well-formedness is checked strictly so a
-	// corrupt filter can't silently widen back to the union.
-	teamFilter, ok := teamscope.FilterParamStrict(w, r)
-	if !ok {
-		return
-	}
-	var tasks []domain.Task
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		if includeSnoozed {
-			tasks, e = tx.Tasks.QueuedIncludingSnoozed(r.Context(), orgID, teamFilter)
-		} else {
-			tasks, e = tx.Tasks.Queued(r.Context(), orgID, teamFilter)
-		}
-		return e
-	}); err != nil {
-		internalError(w, "tasks", err)
-		return
-	}
-	result := make([]taskJSON, len(tasks))
-	for i, t := range tasks {
-		result[i] = taskToJSON(t)
-	}
-	writeJSON(w, http.StatusOK, result)
+	httpx.PageRequest
 }
 
-func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
+// taskListFilterKey is the canonicalized form of a taskListRequest's filters —
+// sorted, deduped, and normalized — that the page token is fingerprinted
+// against. Two requests that mean the same query fingerprint identically, and
+// a token minted for one filter set is refused for another.
+type taskListFilterKey struct {
+	Statuses       []string `json:"statuses"`
+	TeamIDs        []string `json:"team_ids"`
+	OnlyUnclaimed  bool     `json:"only_unclaimed"`
+	IncludeSnoozed bool     `json:"include_snoozed"`
+	ClosedSince    string   `json:"closed_since"`
+}
+
+// handleTaskList is the tasks resource's list read — every task-list surface
+// (the triage deck, each board column) is a filter set over this one route.
+//
+// It is a POST because the filters are a body, not a query string: repeated
+// ?status=/?team_id= params were how the old GET pair drifted into two
+// spellings of the same read with different hidden defaults. A body-carrying
+// read registers through apiMutating like any other POST so the CSRF
+// same-origin check applies symmetrically — the method is what a browser
+// preflights on, not the intent. The read itself has no side effects.
+func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	status := r.URL.Query().Get("status")
-	if status != "" && !slices.Contains(taskStatuses, status) {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonInvalidParam,
-			Message: "status must be one of: " + strings.Join(taskStatuses, ", "),
-			Field:   "status",
-		})
+
+	var req taskListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	// Optional per-page team filter — see handleQueue.
-	teamFilter, ok := teamscope.FilterParamStrict(w, r)
-	if !ok {
+
+	var v httpx.Validation
+	statuses := canonicalStrings(req.Statuses)
+	for _, st := range statuses {
+		if !slices.Contains(db.TaskListStatuses, st) {
+			v.Invalid("statuses", fmt.Sprintf("unknown status %q; must be one of: %s",
+				st, strings.Join(db.TaskListStatuses, ", ")))
+		}
+	}
+	teamIDs := canonicalStrings(req.TeamIDs)
+	for _, id := range teamIDs {
+		if _, err := uuid.Parse(id); err != nil {
+			v.Invalid("team_ids", fmt.Sprintf("team id %q is not a valid team id", id))
+		}
+	}
+	var closedSince *time.Time
+	closedSinceKey := ""
+	if req.ClosedSince != "" {
+		ts, err := time.Parse(time.RFC3339, req.ClosedSince)
+		if err != nil {
+			v.Invalid("closed_since", "closed_since must be an RFC3339 timestamp")
+		} else {
+			ts = ts.UTC()
+			closedSince = &ts
+			closedSinceKey = ts.Format(time.RFC3339Nano)
+		}
+	}
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{
+		Statuses:       statuses,
+		TeamIDs:        teamIDs,
+		OnlyUnclaimed:  req.OnlyUnclaimed,
+		IncludeSnoozed: req.IncludeSnoozed,
+		ClosedSince:    closedSinceKey,
+	}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
+
 	var tasks []domain.Task
+	var total int
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		if status != "" {
-			tasks, e = tx.Tasks.ByStatus(r.Context(), orgID, status, teamFilter)
-		} else {
-			tasks, e = tx.Tasks.Queued(r.Context(), orgID, teamFilter)
-		}
+		tasks, total, e = tx.Tasks.List(r.Context(), orgID, db.TaskListFilter{
+			Statuses:       statuses,
+			TeamIDs:        teamIDs,
+			OnlyUnclaimed:  req.OnlyUnclaimed,
+			IncludeSnoozed: req.IncludeSnoozed,
+			ClosedSince:    closedSince,
+		}, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
 		return
 	}
-	result := make([]taskJSON, len(tasks))
+	items := make([]taskJSON, len(tasks))
 	for i, t := range tasks {
-		result[i] = taskToJSON(t)
+		items[i] = taskToJSON(t)
 	}
-	writeJSON(w, http.StatusOK, result)
+	httpx.WriteList(w, page, items, total)
+}
+
+// canonicalStrings sorts and dedups a filter list so the same query always
+// produces the same page-token fingerprint however the client ordered it, and
+// so a repeated value can't multiply an IN-list. Nil in, nil out — an absent
+// filter and an empty one mean the same thing (no narrowing) and must
+// fingerprint the same.
+func canonicalStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := slices.Clone(in)
+	slices.Sort(out)
+	out = slices.Compact(out)
+	return out
 }
 
 func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {

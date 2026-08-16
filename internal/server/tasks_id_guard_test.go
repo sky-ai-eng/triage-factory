@@ -61,28 +61,25 @@ func TestTaskRoutes_404OnMalformedID(t *testing.T) {
 	}
 }
 
-// TestTaskReads_StrictQueryParams is the negative space of the strict-params
-// contract on the tasks-family reads: a filter that fails to parse is
-// rejected, never resolved to a default — a corrupt filter must not widen a
-// result set (team_id), select the wrong arm (status), or silently mean
-// false (include_snoozed).
-func TestTaskReads_StrictQueryParams(t *testing.T) {
+// TestEntityDeckReads_StrictQueryParams is the negative space of the
+// strict-params contract on the query-param-carrying reads next to the tasks
+// family: a filter that fails to parse is rejected, never resolved to a
+// default — a corrupt team filter must not widen a result set back to the
+// union, and must not silently retarget a single-team deck to the caller's
+// default team. The tasks list's own filters travel in a body now; their
+// negative space is TestTaskList_StrictBody.
+func TestEntityDeckReads_StrictQueryParams(t *testing.T) {
 	cases := []struct {
 		name string
 		path string
 	}{
-		{"unknown status value", "/api/tasks?status=bogus"},
-		{"malformed include_snoozed", "/api/queue?include_snoozed=maybe"},
-		{"malformed team filter on queue", "/api/queue?team_id=junk"},
-		{"malformed team filter on tasks", "/api/tasks?team_id=junk"},
 		{"malformed team filter on factory", "/api/factory/snapshot?team_id=junk"},
 		{"malformed team filter on stock", "/api/jira/stock?team_id=junk"},
 		// Present-but-empty and repeated values on the single-team deck are
-		// rejected too: treating them as absent (or taking the first) would
+		// rejected too: treating either as absent (or taking the first) would
 		// silently retarget the read to the caller's default team.
 		{"empty team filter on stock", "/api/jira/stock?team_id="},
 		{"repeated team filter on stock", "/api/jira/stock?team_id=00000000-0000-4000-8000-000000000001&team_id=00000000-0000-4000-8000-000000000002"},
-		{"empty team filter on queue", "/api/queue?team_id="},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

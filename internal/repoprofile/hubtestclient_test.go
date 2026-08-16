@@ -28,8 +28,17 @@ type hubTestClient struct {
 
 func dialHubTestClient(t *testing.T, hub *websocket.Hub) *hubTestClient {
 	t.Helper()
+	return dialHubTestClientAs(t, hub, "", "")
+}
+
+// dialHubTestClientAs registers the connection under a (userID, orgID)
+// identity, engaging the hub's per-connection Broadcast filter — the
+// scoped sibling of dialHubTestClient's unscoped (receive-everything)
+// client.
+func dialHubTestClientAs(t *testing.T, hub *websocket.Hub, userID, orgID string) *hubTestClient {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hub.HandleWS(w, r, "", "", "")
+		hub.HandleWS(w, r, userID, orgID, "")
 	}))
 	t.Cleanup(srv.Close)
 	url := strings.Replace(srv.URL, "http://", "ws://", 1)
@@ -80,12 +89,19 @@ func (c *hubTestClient) expectMessage(t *testing.T, wait time.Duration) []byte {
 // HandleWS completing registration.
 func waitForHubClient(t *testing.T, hub *websocket.Hub) {
 	t.Helper()
+	waitForHubClients(t, hub, 1)
+}
+
+// waitForHubClients is the n-client form, for tests that dial several
+// scoped connections and must not Broadcast before the last registers.
+func waitForHubClients(t *testing.T, hub *websocket.Hub, n int) {
+	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if hub.ClientCount() > 0 {
+		if hub.ClientCount() >= n {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatal("hub never registered the dialing client")
+	t.Fatalf("hub never registered %d dialing client(s)", n)
 }

@@ -134,6 +134,14 @@ func (a *App) buildAI() {
 	// explicit re-profile button (force). Sibling to the scorer — both react
 	// to poll sentinels independently; scoring does NOT gate on profiling.
 	a.profiler = repoprofile.NewManager(a.ghResolver, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-profiler"), a.stores.Repos, a.stores.Orgs, llmRecorder, sysLimiter, a.wsHub)
+	// Multi only: scope repository_updated delivery to each repo's REST
+	// visibility (org admins + tracking-team members), resolved per
+	// emission — the hub has no team axis, so an unscoped broadcast would
+	// stream every team's repo profiles to the whole org. Local keeps the
+	// org-wide broadcast: N=1, no team boundary.
+	if !a.local() {
+		a.profiler.SetRecipients(a.stores.TeamGitHubRepos.RepoUpdateRecipientsSystem)
+	}
 	// Chain bare-clone warming off profile-cycle completion: profiling
 	// populates repositories.clone_url, which bootstrapBareClones reads.
 	// Local-only — the warm on-disk bare cache is an N=1 affordance; multi

@@ -25,7 +25,7 @@ func TestRequireOrg_MultiModeNoActiveOrg_Returns409(t *testing.T) {
 	// Multi-mode-shaped context: claims present, no org.
 	ctx := httpx.WithClaims(context.Background(), &verify.Claims{Subject: "user-with-no-org"})
 
-	r := httptest.NewRequest("GET", "/api/queue", nil).WithContext(ctx)
+	r := httptest.NewRequest("POST", "/api/tasks/list", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	orgID, ok := s.requireOrg(rec, r)
@@ -66,7 +66,7 @@ func TestRequireOrg_MultiModeNoActiveOrg_Returns409(t *testing.T) {
 func TestRequireOrg_OrgPresent_ReturnsValue(t *testing.T) {
 	s := &Server{}
 	ctx := httpx.WithOrgID(context.Background(), "00000000-0000-0000-0000-000000000abc")
-	r := httptest.NewRequest("GET", "/api/queue", nil).WithContext(ctx)
+	r := httptest.NewRequest("POST", "/api/tasks/list", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	orgID, ok := s.requireOrg(rec, r)

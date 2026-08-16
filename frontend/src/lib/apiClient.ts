@@ -114,6 +114,46 @@ export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): P
   return readJSON<T>(await apiFetch(path, options), path)
 }
 
+/** The list envelope every paginated read answers with: one page of `items`,
+ *  the `total_count` the filters match (not the page length), and the token
+ *  that addresses the next page — absent on the last one.
+ *
+ *  The token is opaque. Do not parse it, construct one, or carry it across a
+ *  change of filters: the server mints it against the filter set it was issued
+ *  for and rejects it under any other (see `apiList`). */
+export interface ListPage<T> {
+  items: T[]
+  next_page_token: string
+  total_count: number
+}
+
+/** Request shape for a `POST /api/<resource>/list` read: the route's filters
+ *  plus the two paging fields. `page_size` defaults to 50 server-side and is
+ *  capped at 200 — an out-of-range value is a 400, never a silent clamp. */
+export type ListRequest = Record<string, unknown> & {
+  page_size?: number
+  page_token?: string
+}
+
+/** apiList calls a `POST /api/<resource>/list` read and normalizes the
+ *  envelope, so callers never guard for a missing field.
+ *
+ *  It is a POST because the filters are a body — the method is about how the
+ *  request is framed, not about whether it mutates. The read itself has no
+ *  side effects. */
+export async function apiList<T>(path: string, body: ListRequest): Promise<ListPage<T>> {
+  const page = await apiJSON<Partial<ListPage<T>>>(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return {
+    items: page.items ?? [],
+    next_page_token: page.next_page_token ?? '',
+    total_count: page.total_count ?? 0,
+  }
+}
+
 /** One fault in the server's error envelope: `{"errors": [{reason, message,
  *  field?}]}`. `reason` is a stable machine code (SCREAMING_SNAKE, e.g.
  *  `NOT_CONFIGURED`); `message` is prose; `field` names the payload field at
