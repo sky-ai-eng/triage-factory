@@ -604,6 +604,57 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}
 	})
 
+	t.Run("every_ref_keyed_method_pins_the_source", func(t *testing.T) {
+		// A RepoRef names one repository, and the provider is half of that
+		// name — the identity index is (org, source, folded slug), so two
+		// providers spelling one slug are two rows. A method that folds the
+		// slug but drops the source matches whichever of them the planner
+		// reaches first, which is a wrong row rather than a missing one.
+		//
+		// GitHub is the only provider that issues repositories today, so the
+		// symptom is unreachable; the guard is that source is app-validated
+		// rather than CHECK-constrained, which makes each method's own
+		// normalize call the only thing standing between a typo and a write
+		// against a repository nothing resolves. Pinned as a family so they
+		// cannot drift apart the way they already did once.
+		s, orgID := mk(t)
+		if err := s.SetConfigured(ctx, orgID, []string{"octo/widget"}); err != nil {
+			t.Fatalf("SetConfigured: %v", err)
+		}
+		bogus := domain.RepoRef{Source: "gitlob", Owner: "octo", Repo: "widget"}
+
+		if got, err := s.GetByRef(ctx, orgID, bogus); err == nil {
+			t.Errorf("GetByRef accepted an unknown source and returned %+v; want an error", got)
+		}
+		if got, err := s.GetByRefSystem(ctx, orgID, bogus); err == nil {
+			t.Errorf("GetByRefSystem accepted an unknown source and returned %+v; want an error", got)
+		}
+		if err := s.UpdateCloneStatusByRef(ctx, orgID, bogus, "failed", "boom", "ssh"); err == nil {
+			t.Error("UpdateCloneStatusByRef accepted an unknown source; want an error")
+		}
+		if err := s.UpdateCloneStatusByRefSystem(ctx, orgID, bogus, "failed", "boom", "ssh"); err == nil {
+			t.Error("UpdateCloneStatusByRefSystem accepted an unknown source; want an error")
+		}
+		if err := s.SetPullsPollStateByRefSystem(ctx, orgID, bogus, `"etag"`, time.Now()); err == nil {
+			t.Error("SetPullsPollStateByRefSystem accepted an unknown source; want an error")
+		}
+		if _, _, err := s.GetPullsPollStateByRefSystem(ctx, orgID, bogus); err == nil {
+			t.Error("GetPullsPollStateByRefSystem accepted an unknown source; want an error")
+		}
+
+		// And none of them touched the GitHub row on the way to refusing.
+		got, err := s.GetByRef(ctx, orgID, repoRef("octo/widget"))
+		if err != nil || got == nil {
+			t.Fatalf("GetByRef after the refusals: got=%v err=%v", got, err)
+		}
+		if got.CloneStatus == "failed" {
+			t.Errorf("clone status = %q — a refused source must not write", got.CloneStatus)
+		}
+		if etag, _, _ := s.GetPullsPollStateByRefSystem(ctx, orgID, repoRef("octo/widget")); etag != "" {
+			t.Errorf("poll state = %q — a refused source must not write", etag)
+		}
+	})
+
 	t.Run("GetOrCreate_creates_then_is_idempotent", func(t *testing.T) {
 		// The core of the primitive: the first call mints the row, every
 		// call after it hands back the same one. "Same" is checked by

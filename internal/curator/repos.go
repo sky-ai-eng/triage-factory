@@ -51,7 +51,7 @@ func materializePinnedRepos(ctx context.Context, repos db.RepositoryStore, authF
 		// grant-less authenticator in multi mode and silently skip the repo
 		// (no bare seeded, no mounts built); the org-scoped read goes through
 		// the admin pool, like the spawner's *System reads from its detached
-		// goroutines. TFAC-65.
+		// goroutines.
 		profile, err := repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
 		if err != nil {
 			curatorLog.Warn("load pinned repository failed, skipping", "project", projectID, "repo", slug, "error", err)
@@ -135,7 +135,7 @@ func materializeSharedPinnedRepos(ctx context.Context, repos db.RepositoryStore,
 		// grant-less authenticator in multi mode and silently skip the repo
 		// (no bare seeded, no mounts built); the org-scoped read goes through
 		// the admin pool, like the spawner's *System reads from its detached
-		// goroutines. TFAC-65.
+		// goroutines.
 		profile, err := repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
 		if err != nil {
 			curatorLog.Warn("load pinned repository failed, skipping", "project", projectID, "repo", slug, "error", err)

@@ -608,11 +608,16 @@ func (s *repoStore) UpdateCloneStatusByRefSystem(ctx context.Context, orgID stri
 }
 
 func updateRepoCloneStatus(ctx context.Context, q queryer, orgID string, ref domain.RepoRef, status, errMsg, errKind string) error {
-	_, err := q.ExecContext(ctx, `
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return err
+	}
+	_, err = q.ExecContext(ctx, `
 		UPDATE repositories
 		   SET clone_status = $1, clone_error = NULLIF($2, ''), clone_error_kind = NULLIF($3, '')
-		 WHERE org_id = $4 AND lower(owner) = lower($5) AND lower(repo) = lower($6)
-	`, status, errMsg, errKind, orgID, ref.Owner, ref.Repo)
+		 WHERE org_id = $4 AND source = $5
+		   AND lower(owner) = lower($6) AND lower(repo) = lower($7)
+	`, status, errMsg, errKind, orgID, source, ref.Owner, ref.Repo)
 	return err
 }
 
@@ -692,13 +697,18 @@ func (s *repoStore) FillMissingExternalIDsSystem(ctx context.Context, orgID stri
 }
 
 func (s *repoStore) GetPullsPollStateByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (string, *time.Time, error) {
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return "", nil, err
+	}
 	var etag sql.NullString
 	var polledAt sql.NullTime
-	err := s.admin.QueryRowContext(ctx, `
+	err = s.admin.QueryRowContext(ctx, `
 		SELECT pulls_etag, pulls_polled_at
 		  FROM repositories
-		 WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)
-	`, orgID, ref.Owner, ref.Repo).Scan(&etag, &polledAt)
+		 WHERE org_id = $1 AND source = $2
+		   AND lower(owner) = lower($3) AND lower(repo) = lower($4)
+	`, orgID, source, ref.Owner, ref.Repo).Scan(&etag, &polledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, nil
 	}
@@ -713,11 +723,16 @@ func (s *repoStore) GetPullsPollStateByRefSystem(ctx context.Context, orgID stri
 }
 
 func (s *repoStore) SetPullsPollStateByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, etag string, polledAt time.Time) error {
-	_, err := s.admin.ExecContext(ctx, `
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return err
+	}
+	_, err = s.admin.ExecContext(ctx, `
 		UPDATE repositories
 		   SET pulls_etag = NULLIF($1, ''), pulls_polled_at = $2
-		 WHERE org_id = $3 AND lower(owner) = lower($4) AND lower(repo) = lower($5)
-	`, etag, polledAt, orgID, ref.Owner, ref.Repo)
+		 WHERE org_id = $3 AND source = $4
+		   AND lower(owner) = lower($5) AND lower(repo) = lower($6)
+	`, etag, polledAt, orgID, source, ref.Owner, ref.Repo)
 	return err
 }
 

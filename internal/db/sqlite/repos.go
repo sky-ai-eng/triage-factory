@@ -453,11 +453,15 @@ func (s *repoStore) UpdateCloneStatusByRef(ctx context.Context, orgID string, re
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return err
+	}
+	_, err = s.q.ExecContext(ctx, `
 		UPDATE repositories
 		SET clone_status = ?, clone_error = ?, clone_error_kind = ?, updated_at = datetime('now')
-		WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, status, nullIfEmpty(errMsg), nullIfEmpty(errKind), ref.Owner, ref.Repo)
+		WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, status, nullIfEmpty(errMsg), nullIfEmpty(errKind), source, ref.Owner, ref.Repo)
 	return err
 }
 
@@ -577,13 +581,17 @@ func (s *repoStore) GetPullsPollStateByRefSystem(ctx context.Context, orgID stri
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", nil, err
 	}
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return "", nil, err
+	}
 	var etag sql.NullString
 	var polledAt sql.NullTime
-	err := s.q.QueryRowContext(ctx, `
+	err = s.q.QueryRowContext(ctx, `
 		SELECT pulls_etag, pulls_polled_at
 		  FROM repositories
-		 WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, ref.Owner, ref.Repo).Scan(&etag, &polledAt)
+		 WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, source, ref.Owner, ref.Repo).Scan(&etag, &polledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, nil
 	}
@@ -601,11 +609,15 @@ func (s *repoStore) SetPullsPollStateByRefSystem(ctx context.Context, orgID stri
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return err
+	}
+	_, err = s.q.ExecContext(ctx, `
 		UPDATE repositories
 		   SET pulls_etag = ?, pulls_polled_at = ?
-		 WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, nullIfEmpty(etag), polledAt, ref.Owner, ref.Repo)
+		 WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, nullIfEmpty(etag), polledAt, source, ref.Owner, ref.Repo)
 	return err
 }
 
