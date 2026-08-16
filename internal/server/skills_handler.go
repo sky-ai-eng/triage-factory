@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 )
@@ -35,7 +36,10 @@ func (sk *skillsHandler) handleSkillsImport(w http.ResponseWriter, r *http.Reque
 	// paste/upload flow, which writes a prompts row scoped to the
 	// requesting org/team.
 	if runmode.Current() != runmode.ModeLocal {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "filesystem skill import is local-mode only; paste or upload skill markdown instead"})
+		// A route that doesn't exist in this deployment mode is a 404, not a
+		// 501 — the marketplace's mode gate already answered that way, and one
+		// condition must not have two statuses.
+		notFound(w, "route")
 		return
 	}
 	result := skills.ImportAll(r.Context(), sk.db, sk.prompts)
@@ -74,18 +78,21 @@ func (sk *skillsHandler) handleSkillUpload(w http.ResponseWriter, r *http.Reques
 	// allocated in full by the JSON decoder before rejection. 4x the
 	// content cap leaves room for JSON string escaping (worst-case
 	// \uXXXX inflation) plus the envelope fields.
-	r.Body = http.MaxBytesReader(w, r.Body, int64(maxSkillUploadBytes)*4)
 	var req skillUploadRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrictLimit(w, r, &req, int64(maxSkillUploadBytes)*4) {
 		return
 	}
 	content := strings.TrimSpace(req.Content)
 	if content == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content is required (the SKILL.md markdown)"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "content is required (the SKILL.md markdown)", Field: "content",
+		})
 		return
 	}
 	if len(content) > maxSkillUploadBytes {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "skill content exceeds the 256KiB limit"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonOutOfRange, Message: "skill content exceeds the 256KiB limit", Field: "content",
+		})
 		return
 	}
 
@@ -99,7 +106,11 @@ func (sk *skillsHandler) handleSkillUpload(w http.ResponseWriter, r *http.Reques
 		name = meta.Name
 	}
 	if name == "" || name == "." {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "skill needs a name — set frontmatter `name:` or pass name explicitly"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "skill needs a name — set frontmatter `name:` or pass name explicitly",
+			Field:   "name",
+		})
 		return
 	}
 

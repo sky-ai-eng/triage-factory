@@ -337,7 +337,7 @@ func TestHandleEventHandlerDelete_SystemRowSoftDeletes(t *testing.T) {
 	// Insert a system-source handler directly (newTestServer seeds the
 	// tenant but no handlers; provisioning would, but a single row keeps
 	// the test focused). source='system' requires creator_user_id NULL.
-	const id = "sys-handler-del"
+	id := fixtureUUID("sys-handler-del")
 	if _, err := s.db.Exec(`
 		INSERT INTO event_handlers
 			(id, org_id, team_id, kind, event_type, source, system_slug, name, default_priority, sort_order, enabled, creator_user_id)
@@ -430,16 +430,30 @@ func TestHandleEventHandlerPromote_RejectsAlreadyTrigger(t *testing.T) {
 	}
 }
 
-func TestHandleEventHandlerPromote_RequiresFields(t *testing.T) {
+// TestHandleEventHandlerPromote_ValidatesTriggerFields: promote requires the
+// two trigger fields and enforces their ranges — the checks create and PATCH
+// already applied, and whose absence here let promote persist a negative
+// breaker threshold or an out-of-band autonomy floor. Missing and out-of-range
+// are both 422: the body is well-formed, the values can't be applied.
+func TestHandleEventHandlerPromote_ValidatesTriggerFields(t *testing.T) {
 	s := newTestServer(t)
 	id := createUserRule(t, s)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+id+"/promote", map[string]any{
-		"blueprint_id": "p-promote",
-		// missing breaker_threshold + min_autonomy_suitability
-	})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", rec.Code)
+	for name, body := range map[string]map[string]any{
+		"missing both": {"blueprint_id": "p-promote"},
+		"negative breaker": {
+			"blueprint_id": "p-promote", "breaker_threshold": -1, "min_autonomy_suitability": 0.5,
+		},
+		"autonomy above one": {
+			"blueprint_id": "p-promote", "breaker_threshold": 3, "min_autonomy_suitability": 7,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/"+id+"/promote", body)
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 

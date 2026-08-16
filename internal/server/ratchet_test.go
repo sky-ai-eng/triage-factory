@@ -58,7 +58,6 @@ var ratchetAllowlist = []ratchetEntry{
 
 	// http.NotFound — Go's text-body 404 on JSON surfaces.
 	{"internal/server/github_app_register.go", "http.NotFound"},
-	{"internal/server/marketplace_handler.go", "http.NotFound"},
 	{"internal/server/middleware.go", "http.NotFound"},
 	{"ee/slack/channels_handler.go", "http.NotFound"},
 	{"ee/slack/workspaces.go", "http.NotFound"},
@@ -71,9 +70,7 @@ var ratchetAllowlist = []ratchetEntry{
 	// error-map — ad-hoc {"error": "..."} bodies.
 	{"internal/server/bedrock_connect.go", "error-map"},
 	{"internal/server/bedrock_role.go", "error-map"},
-	{"internal/server/blueprints_handler.go", "error-map"},
 	{"internal/server/credentials.go", "error-map"},
-	{"internal/server/event_handlers_handler.go", "error-map"},
 	{"internal/server/github_access.go", "error-map"},
 	{"internal/server/github_app_handlers.go", "error-map"},
 	{"internal/server/github_app_import.go", "error-map"},
@@ -82,10 +79,7 @@ var ratchetAllowlist = []ratchetEntry{
 	{"internal/server/github_webhook_health.go", "error-map"},
 	{"internal/server/jira_app_handlers.go", "error-map"},
 	{"internal/server/jira_connect.go", "error-map"},
-	{"internal/server/marketplace_handler.go", "error-map"},
 	{"internal/server/org_credentials.go", "error-map"},
-	{"internal/server/prompts_handler.go", "error-map"},
-	{"internal/server/skills_handler.go", "error-map"},
 	{"ee/slack/workspaces.go", "error-map"},
 	{"ee/sso/breakglass.go", "error-map"},
 	{"ee/sso/connection.go", "error-map"},
