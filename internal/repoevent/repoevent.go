@@ -106,6 +106,15 @@ func (n *Notifier) Publish(ctx context.Context, orgID string, upd Update) {
 		return
 	}
 	for _, uid := range userIDs {
+		// An empty id would silently widen this envelope to the whole org
+		// (the hub reads empty evt.UserID as "not user-specific"), so it
+		// is dropped like every other resolution fault — and logged,
+		// because the store contract (NOT NULL user_id) says it can't
+		// happen.
+		if uid == "" {
+			repoeventLog.Error("recipients returned an empty user id; dropping that envelope", "repo", upd.ID)
+			continue
+		}
 		n.hub.Broadcast(websocket.Event{Type: EventType, OrgID: orgID, UserID: uid, Data: upd})
 	}
 }

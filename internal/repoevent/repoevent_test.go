@@ -99,6 +99,27 @@ func TestPublish_FailsClosed(t *testing.T) {
 	}
 }
 
+// TestPublish_EmptyRecipientID_DroppedNotWidened pins the empty-id guard
+// in the fan-out loop: the hub reads empty evt.UserID as "not
+// user-specific", so a stray "" in the recipient slice would turn that
+// envelope into an org-wide broadcast — the exact disclosure the fan-out
+// prevents. It must be dropped while the legitimate recipients still
+// receive theirs.
+func TestPublish_EmptyRecipientID_DroppedNotWidened(t *testing.T) {
+	hub := &recordingHub{}
+	n := NewNotifier(hub, func(context.Context, string, string, string) ([]string, error) {
+		return []string{"", "user-a"}, nil
+	})
+	n.Publish(context.Background(), "org-1", Update{ID: "acme/api", ProfileText: Ptr("p")})
+
+	if len(hub.events) != 1 {
+		t.Fatalf("got %d events, want 1 (empty-id envelope dropped)", len(hub.events))
+	}
+	if evt := hub.events[0]; evt.UserID != "user-a" {
+		t.Errorf("event UserID = %q; want user-a, and never an empty (org-wide) envelope", evt.UserID)
+	}
+}
+
 // TestPublish_NilSafety mirrors the hub's own nil tolerance: a nil
 // Notifier and a Notifier over a nil hub both no-op, so emit sites need
 // no guards (the profiler is constructed hub-less in several tests).
