@@ -1,6 +1,9 @@
 package domain
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
 // RepoRenameOutcome is what a rename attempt did. Renamed is false for every
 // no-op — the repository has no row, the provider reports the slug TF already
@@ -133,35 +136,37 @@ func RewriteArtifactDedupKey(key, oldSlug, newSlug string) (string, bool) {
 	return provider + ":" + kind + ":" + rewritten, true
 }
 
-// RewritePinnedRepos rewrites a project's pinned "owner/repo" list, preserving
-// order. Reports false when nothing was pinned under the old slug.
+// RewriteRepoURL rewrites the repository slug inside a provider web URL —
+// "<scheme>://<host>/<owner>/<repo>[/...]". The slug sits mid-path rather than
+// at the head of the string, so this cannot share RewriteRepoSlugPrefix: the
+// match is positional on the URL's first two path segments and nowhere else,
+// because a host ("octo.api") or a later segment (a branch named after the
+// repository, ".../tree/octo/api") can spell the slug without referring to it.
 //
-// A pin already sitting on the new slug absorbs the moved one rather than
-// producing the list twice: pinned_repos is a set the UI renders, and one
-// repository listed twice is a bug wherever it came from.
-func RewritePinnedRepos(pinned []string, oldSlug, newSlug string) ([]string, bool) {
-	found := false
-	for _, p := range pinned {
-		if SameRepoSlug(p, oldSlug) {
-			found = true
-			break
-		}
+// Reports false — with s returned unchanged — for anything that is not an
+// absolute URL whose path leads with the old slug at a segment boundary. A
+// value TF never learned, or one already pointing elsewhere, is left exactly
+// as it stands; nothing is ever synthesized from the slug.
+func RewriteRepoURL(rawURL, oldSlug, newSlug string) (string, bool) {
+	if rawURL == "" || oldSlug == "" {
+		return rawURL, false
 	}
-	if !found {
-		return pinned, false
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return rawURL, false
 	}
-	out := make([]string, 0, len(pinned))
-	emitted := false
-	for _, p := range pinned {
-		if !SameRepoSlug(p, oldSlug) && !SameRepoSlug(p, newSlug) {
-			out = append(out, p)
-			continue
-		}
-		if emitted {
-			continue
-		}
-		emitted = true
-		out = append(out, newSlug)
+	p := u.Path
+	if len(p) < 1+len(oldSlug) || p[0] != '/' {
+		return rawURL, false
 	}
-	return out, true
+	if !strings.EqualFold(p[1:1+len(oldSlug)], oldSlug) {
+		return rawURL, false
+	}
+	rest := p[1+len(oldSlug):]
+	if rest != "" && rest[0] != '/' {
+		return rawURL, false
+	}
+	u.Path = "/" + newSlug + rest
+	u.RawPath = ""
+	return u.String(), true
 }

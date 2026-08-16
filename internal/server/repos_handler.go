@@ -19,6 +19,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
+// errRepoGone marks the window between a repository being visible to the
+// caller's access gate and its registry row being read a statement later. It
+// never leaves this package — the handler maps it to the same 404 an
+// out-of-tracked-set repository gets.
+var errRepoGone = errors.New("repository row no longer resolves")
+
 // handleGitHubRepos returns the repositories the Settings picker offers. The
 // source is tier-aware:
 //
@@ -465,7 +471,13 @@ type repoJSON struct {
 
 func repoToJSON(row domain.Repository, canEdit bool) repoJSON {
 	out := repoJSON{
-		ID:             row.ID,
+		// id stays the "owner/repo" slug on the wire: it is what the frontend
+		// keys rows on, what it puts back in the PATCH and branches paths, and
+		// what a person reads. row.ID is the registry handle (TFAC-834) and is
+		// deliberately NOT serialized — sending it here would compile, pass
+		// every test that doesn't assert on the field, and hand the frontend a
+		// uuid where it round-trips a slug.
+		ID:             row.Slug(),
 		Owner:          row.Owner,
 		Repo:           row.Repo,
 		Description:    row.Description,
@@ -600,7 +612,13 @@ func (s *Server) handleRepoGet(w http.ResponseWriter, r *http.Request) {
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		row, e = tx.Repos.Get(r.Context(), orgID, owner+"/"+repo)
+		// Ref-keyed, not id-keyed: the path segments are the provider's
+		// current NAME for the repository, and the registry id is a separate
+		// handle (TFAC-834). Get would take that handle and answer
+		// ErrNoSuchRepository for a slug — a 500 on a repo that exists.
+		// GetByRef's (nil, nil) miss is the answer this route wants anyway,
+		// since a name that resolves to nothing is a 404 here.
+		row, e = tx.Repos.GetByRef(r.Context(), orgID, domain.RepoRef{Owner: owner, Repo: repo})
 		if e != nil || row == nil {
 			return e
 		}
@@ -659,7 +677,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	repoID := owner + "/" + repo
+	ref := domain.RepoRef{Owner: owner, Repo: repo}
 
 	access, err := s.repoMutationAccess(r.Context(), orgID, userID, owner, repo)
 	if err != nil {
@@ -687,7 +705,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		forbidden(w, "changing repo settings requires org admin or team admin of a team tracking this repo")
 		return
 	default:
-		internalError(w, "repos", fmt.Errorf("unhandled repo write access %d for %s", access, repoID))
+		internalError(w, "repos", fmt.Errorf("unhandled repo write access %d for %s", access, ref.Slug()))
 		return
 	}
 
@@ -719,9 +737,34 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Resolve the path segment to a row and write by its id, inside the one
+	// transaction so the resolution and the write see the same row. The path
+	// segment is a name — it is what the picker rendered and what the frontend
+	// echoes back — and a name is a thing that stops resolving: a rename
+	// landing between the page load and the save used to leave the UPDATE
+	// matching zero rows while this handler answered "updated".
+	//
+	// The lookup sits beside repoMutationAccess above rather than replacing
+	// it: that gate reads team_github_repos to decide who may write, and this
+	// reads repositories to decide what is being written. A repository outside
+	// the caller's tracked set never reaches here at all.
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Repos.UpdateBaseBranch(r.Context(), orgID, repoID, branch)
+		row, e := tx.Repos.GetByRef(r.Context(), orgID, ref)
+		if e != nil {
+			return e
+		}
+		if row == nil {
+			return errRepoGone
+		}
+		return tx.Repos.UpdateBaseBranch(r.Context(), orgID, row.ID, branch)
 	}); err != nil {
+		// Either half can report the row is gone — the read as a nil, the
+		// write as a miss on an id that resolved a statement ago. Both mean
+		// the same thing to the caller, and neither is a server fault.
+		if errors.Is(err, errRepoGone) || errors.Is(err, db.ErrNoSuchRepository) {
+			notFound(w, "repo")
+			return
+		}
 		internalError(w, "repos", err)
 		return
 	}

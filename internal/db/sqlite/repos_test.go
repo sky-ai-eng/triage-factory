@@ -19,7 +19,7 @@ import (
 func anyRepository() domain.Repository {
 	id := uuid.New().String()
 	return domain.Repository{
-		ID: id + "/" + id, Owner: id, Repo: id,
+		Owner: id, Repo: id,
 	}
 }
 
@@ -44,7 +44,7 @@ func TestRepositoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if err := stores.Repos.Upsert(t.Context(), bogusOrg, anyRepository()); err == nil {
 		t.Errorf("Upsert with non-local orgID should error")
 	}
-	if _, err := stores.Repos.Get(t.Context(), bogusOrg, "any/repo"); err == nil {
+	if _, err := stores.Repos.GetByRef(t.Context(), bogusOrg, domain.RepoRefFromSlug("any/repo")); err == nil {
 		t.Errorf("Get with non-local orgID should error")
 	}
 	if _, _, err := stores.Repos.List(t.Context(), bogusOrg, db.ListOpts{}); err == nil {

@@ -17,18 +17,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// seedRepositoryStore embeds db.RepositoryStore as nil and answers only GetSystem — the one
-// read the rehydrate's seed resolution makes. profile nil models a repo with no
-// row; err models a store failure.
+// seedRepositoryStore embeds db.RepositoryStore as nil and answers only
+// GetByRefSystem — the one read the rehydrate's seed resolution makes. profile
+// nil models a repo with no row; err models a store failure.
 type seedRepositoryStore struct {
 	db.RepositoryStore
-	profile *domain.Repository
-	err     error
-	gotIDs  []string
+	profile  *domain.Repository
+	err      error
+	gotNames []string
 }
 
-func (s *seedRepositoryStore) GetSystem(_ context.Context, _, repoID string) (*domain.Repository, error) {
-	s.gotIDs = append(s.gotIDs, repoID)
+func (s *seedRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
+	s.gotNames = append(s.gotNames, ref.Slug())
 	return s.profile, s.err
 }
 
@@ -81,8 +81,8 @@ func TestGitSeedFor_MultiRoutesRebuildThroughRunGitProxy(t *testing.T) {
 	if seed.cloneURL != cloneURL {
 		t.Errorf("seed clone URL = %q, want the repository row's %q — a missing bare cannot be seeded without it", seed.cloneURL, cloneURL)
 	}
-	if len(repos.gotIDs) != 1 || repos.gotIDs[0] != "acme/widgets" {
-		t.Errorf("repository lookups = %v, want one for %q", repos.gotIDs, "acme/widgets")
+	if len(repos.gotNames) != 1 || repos.gotNames[0] != "acme/widgets" {
+		t.Errorf("repository lookups = %v, want one for %q", repos.gotNames, "acme/widgets")
 	}
 	assertEntries(t, seed.auth.GitConfigEntries(),
 		wantProxyEntries("http://10.42.0.1:4100", "https://github.com", "per-run-placeholder"))
@@ -156,8 +156,8 @@ func TestGitSeedFor_NonGitRunRootIsZero(t *testing.T) {
 	if seed := s.gitSeedFor(context.Background(), "org-1", "", "", proxySandbox("http://10.42.0.1:4100", "ph")); seed != (gitSeed{}) {
 		t.Errorf("seed for a non-git run root = %+v, want the zero value", seed)
 	}
-	if len(repos.gotIDs) != 0 {
-		t.Errorf("repository was read for a non-git run root: %v", repos.gotIDs)
+	if len(repos.gotNames) != 0 {
+		t.Errorf("repository was read for a non-git run root: %v", repos.gotNames)
 	}
 }
 

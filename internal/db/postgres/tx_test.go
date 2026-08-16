@@ -193,7 +193,7 @@ func registryNames(t *testing.T, stores db.Stores, orgID string) []string {
 	}
 	out := make([]string, 0, len(repos))
 	for _, r := range repos {
-		out = append(out, r.ID)
+		out = append(out, r.Slug())
 	}
 	return out
 }

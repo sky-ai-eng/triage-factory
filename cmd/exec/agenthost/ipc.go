@@ -222,9 +222,9 @@ func (c *IPCClient) ListRepos(ctx context.Context) ([]domain.Repository, error) 
 	return res.Repos, nil
 }
 
-func (c *IPCClient) GetRepo(ctx context.Context, repoID string) (*domain.Repository, error) {
+func (c *IPCClient) GetRepo(ctx context.Context, slug string) (*domain.Repository, error) {
 	var res repoResult
-	if err := c.call(ctx, methodGetRepo, getRepoArgs{RepoID: repoID}, &res); err != nil {
+	if err := c.call(ctx, methodGetRepo, getRepoArgs{RepoID: slug}, &res); err != nil {
 		return nil, err
 	}
 	return res.Repo, nil

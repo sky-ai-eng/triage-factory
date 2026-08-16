@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // Apply reconciles the slugs of the repositories in observed against what the
@@ -76,8 +77,29 @@ func Apply(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Reso
 		applied++
 		log.InfoContext(ctx, "repository renamed", "org", orgID, "from", out.From, "to", out.To)
 		invalidateCoverage(resolver, orgID, out.From, out.To)
+		disposeOldDirs(ctx, log, orgID, out.From)
 	}
 	return applied
+}
+
+// disposeOldDirs reclaims the directories the old slug named — the bare clone
+// and the shared curator checkout — now that nothing derives their paths. After
+// the commit and best-effort on purpose, like the coverage invalidation above:
+// a directory removal cannot join the transaction, and failing to reclaim disk
+// must never fail the rename. Local mode is the mode this exists for (its
+// reaper is deliberately unbounded, so nothing else reclaims the orphan); in
+// multi it reaches at most this pod's own disk and the TTL reaper covers the
+// fleet. A tree a live worktree still holds is skipped, and nothing retries —
+// the rename is the steady state afterwards — which is the accepted cost of
+// never deleting under a running agent.
+func disposeOldDirs(ctx context.Context, log *slog.Logger, orgID, from string) {
+	owner, repo, ok := cutSlug(from)
+	if !ok {
+		return
+	}
+	if worktree.DisposeRenamedRepoDirs(orgID, owner, repo) {
+		log.InfoContext(ctx, "reclaimed renamed repository's old directories", "org", orgID, "slug", from)
+	}
 }
 
 // invalidateCoverage drops the cached App-grant coverage decision for BOTH

@@ -25,10 +25,13 @@ func newExternalActionStore(q queryer) db.ExternalActionStore {
 var _ db.ExternalActionStore = (*externalActionStore)(nil)
 
 // externalActionColumns is the SELECT list scanned into a domain.ExternalAction
-// via scanExternalAction. Same order the Postgres impl projects.
+// via scanExternalAction. Same order the Postgres impl projects. The url slot
+// serves the maintained pointer — current_url when a repository rename has
+// moved the object, the captured url otherwise — so every feed's link resolves
+// without any reader knowing the pointer column exists.
 const externalActionColumns = `
 	id, org_id, COALESCE(team_id, ''), provider, action, target,
-	COALESCE(external_id, ''), COALESCE(url, ''), COALESCE(from_state, ''),
+	COALESCE(external_id, ''), COALESCE(current_url, url, ''), COALESCE(from_state, ''),
 	COALESCE(to_state, ''), COALESCE(conversation_id, ''), COALESCE(actor_user_id, ''),
 	credential, dedup_key, COALESCE(detail_json, ''), occurred_at
 `

@@ -60,7 +60,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}
 		// And it refused before writing: no registry row was minted for a
 		// save that could never have completed.
-		if got, _ := s.Repos.Get(ctx, orgID, keptSlug); got != nil {
+		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef(keptSlug)); got != nil {
 			t.Error("the refused save still created a registry row; the guard must run before the mint")
 		}
 	})
@@ -72,7 +72,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
-		got, err := s.Repos.Get(ctx, orgID, keptSlug)
+		got, err := s.Repos.GetByRef(ctx, orgID, repoRef(keptSlug))
 		if err != nil || got == nil {
 			t.Fatalf("Get after tracking = %v, %v; want the row tracking minted", got, err)
 		}
@@ -133,7 +133,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}
 
 		// And nothing else moves.
-		row, err := s.Repos.Get(ctx, orgID, untrackedSlug)
+		row, err := s.Repos.GetByRef(ctx, orgID, repoRef(untrackedSlug))
 		if err != nil || row == nil {
 			t.Fatalf("registry row after untracking = %v, %v; want it standing — a reference may still name it", row, err)
 		}
@@ -208,7 +208,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}); err == nil {
 			t.Error("reserving a worktree for a repository with no registry row succeeded; want an error")
 		}
-		if got, _ := s.Repos.Get(ctx, orgID, "ghost/repo"); got != nil {
+		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef("ghost/repo")); got != nil {
 			t.Errorf("the refused reservation minted a repository row: %+v", got)
 		}
 	})

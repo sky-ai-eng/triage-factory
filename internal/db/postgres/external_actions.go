@@ -38,10 +38,13 @@ var _ db.ExternalActionStore = (*externalActionStore)(nil)
 
 // pgExternalActionColumns is the SELECT list scanned into a domain.ExternalAction
 // via scanExternalAction. Nullable columns coalesce to ” so the scan targets are
-// plain strings, the same shape pgArtifactColumns uses.
+// plain strings, the same shape pgArtifactColumns uses. The url slot serves the
+// maintained pointer — current_url when a repository rename has moved the
+// object, the captured url otherwise — so every feed's link resolves without
+// any reader knowing the pointer column exists.
 const pgExternalActionColumns = `
 	id::text, org_id::text, COALESCE(team_id::text, ''), provider, action, target,
-	COALESCE(external_id, ''), COALESCE(url, ''), COALESCE(from_state, ''),
+	COALESCE(external_id, ''), COALESCE(current_url, url, ''), COALESCE(from_state, ''),
 	COALESCE(to_state, ''), COALESCE(conversation_id::text, ''),
 	COALESCE(actor_user_id::text, ''), credential, dedup_key,
 	COALESCE(detail_json, ''), occurred_at

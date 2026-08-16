@@ -513,12 +513,26 @@ func trackImportedRepos(ctx context.Context, tx db.TxStores, orgID, teamID strin
 			return fmt.Errorf("track imported repos: %w", err)
 		}
 	}
+	// The bundle names its repos by slug, so this is the edge that resolves
+	// one: ReplaceForTeam above has just brought a registry row into being for
+	// every pinned entry, and the seed is keyed on that row's id. A name with
+	// no row is a repo the caller was refused tracking on, or one dropped
+	// between the two statements — either way there is nothing to warm, and
+	// the import carries on rather than failing over a cache hint.
 	for _, slug := range pinned {
 		cloneURL := cloneURLs[slug]
 		if cloneURL == "" {
 			continue
 		}
-		if err := tx.Repos.SeedCloneURL(ctx, orgID, slug, cloneURL); err != nil {
+		owner, repo, _ := splitOwnerRepo(slug) // validated in the loop above
+		row, err := tx.Repos.GetByRef(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
+		if err != nil {
+			return fmt.Errorf("resolve pinned repo %s: %w", slug, err)
+		}
+		if row == nil {
+			continue
+		}
+		if err := tx.Repos.SeedCloneURL(ctx, orgID, row.ID, cloneURL); err != nil {
 			return fmt.Errorf("seed clone url for %s: %w", slug, err)
 		}
 	}

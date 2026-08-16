@@ -60,15 +60,15 @@ func RepoRefFromSlug(slug string) RepoRef {
 // conditional-request cursor, and the cached AI-generated profile the name
 // used to promise on its own.
 type Repository struct {
-	// ID is the slug, "owner/repo", derived by the scanners rather than read
-	// from a column — so it cannot drift from Owner/Repo, but it is a name
-	// rather than a handle, and a name is a thing that stops resolving.
+	// ID is the registry row's own id — the handle every reference to this
+	// repository is stored as, and the one value about it GitHub cannot
+	// change. A caller that holds it holds something that cannot stop
+	// resolving without an FK violation somewhere; a caller that holds the
+	// display name has to say so (RepositoryStore's *ByRef* lookups) and gets
+	// a nil row when the name no longer resolves.
 	//
-	// TODO(TFAC-834): this should be the registry row's id, with the slug
-	// rendered by a Slug() method for display and wire use only. The stored
-	// references are already ids; the store's outward contract is the last
-	// place a repository is passed around by a value GitHub can change, and
-	// the lookups that accept one miss silently when it goes stale.
+	// Zero on a Repository the caller built to hand to Upsert: the write is
+	// keyed on the identity columns below, so nothing reads it there.
 	ID    string
 	Owner string
 	Repo  string
@@ -104,4 +104,16 @@ type Repository struct {
 	// projections leave them zero-valued.
 	PullsETag     string
 	PullsPolledAt *time.Time
+}
+
+// Slug renders the repository's display name, "owner/repo" — the form the HTTP
+// payloads, the agent's argv, the websocket envelopes and the GitHub API paths
+// all use. A method rather than a field so there is exactly one renderer and no
+// second copy to fall out of step with the columns it is built from.
+func (r Repository) Slug() string { return r.Owner + "/" + r.Repo }
+
+// Ref is the repository's provider identity as a RepoRef — what to hand a
+// *ByRef* store lookup when all you have is a row you already read.
+func (r Repository) Ref() RepoRef {
+	return RepoRef{Source: r.Source, Owner: r.Owner, Repo: r.Repo, ExternalID: r.ExternalID}
 }

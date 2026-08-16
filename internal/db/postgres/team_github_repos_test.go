@@ -258,7 +258,7 @@ func TestTeamGitHubRepos_TrackedRowCarriesIdentity(t *testing.T) {
 		t.Fatalf("ReplaceForTeam: %v", err)
 	}
 
-	got, err := stores.Repos.GetSystem(ctx, orgA, "acme/api")
+	got, err := stores.Repos.GetByRefSystem(ctx, orgA, domain.RepoRefFromSlug("acme/api"))
 	if err != nil || got == nil {
 		t.Fatalf("GetSystem after tracking: got=%v err=%v — tracking must create the row immediately", got, err)
 	}

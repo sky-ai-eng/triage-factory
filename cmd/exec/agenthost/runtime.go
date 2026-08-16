@@ -38,7 +38,12 @@ type Runtime interface {
 	GetConversation(ctx context.Context) (*domain.Conversation, error)
 	GetTask(ctx context.Context, taskID string) (*domain.Task, error)
 	ListRepos(ctx context.Context) ([]domain.Repository, error)
-	GetRepo(ctx context.Context, repoID string) (*domain.Repository, error)
+
+	// GetRepo takes the "owner/repo" the agent typed and resolves it against
+	// the registry, or nil when nothing answers to that name. The agent's
+	// surface speaks names throughout — this is where one stops being a name.
+	GetRepo(ctx context.Context, slug string) (*domain.Repository, error)
+
 	TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error)
 	GetRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.RunWorktree, error)
 	ListRunWorktrees(ctx context.Context) ([]domain.RunWorktree, error)
@@ -316,8 +321,13 @@ func (r *directRuntime) ListRepos(ctx context.Context) ([]domain.Repository, err
 	return r.stores.Repos.ListSystem(ctx, r.info.OrgID)
 }
 
-func (r *directRuntime) GetRepo(ctx context.Context, repoID string) (*domain.Repository, error) {
-	return r.stores.Repos.GetSystem(ctx, r.info.OrgID, repoID)
+// GetRepo is the verb boundary for `tfac exec workspace add owner/repo`: the
+// agent's argv arrives here as a name and is resolved to a row here, so the id
+// is what everything past this point holds. A name nobody has a row for stays
+// a nil rather than an error — the caller reports it as "repo is not
+// configured in Triage Factory", which is the accurate answer.
+func (r *directRuntime) GetRepo(ctx context.Context, slug string) (*domain.Repository, error) {
+	return r.stores.Repos.GetByRefSystem(ctx, r.info.OrgID, domain.RepoRefFromSlug(slug))
 }
 
 func (r *directRuntime) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
@@ -638,9 +648,9 @@ func (r *relayRuntime) ListRepos(ctx context.Context) ([]domain.Repository, erro
 	return res.Repos, nil
 }
 
-func (r *relayRuntime) GetRepo(ctx context.Context, repoID string) (*domain.Repository, error) {
+func (r *relayRuntime) GetRepo(ctx context.Context, slug string) (*domain.Repository, error) {
 	var res repoResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetRepo, getRepoArgs{RepoID: repoID}, &res); err != nil {
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetRepo, getRepoArgs{RepoID: slug}, &res); err != nil {
 		return nil, err
 	}
 	return res.Repo, nil
