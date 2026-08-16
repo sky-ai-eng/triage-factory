@@ -33,7 +33,7 @@ import PendingPROverlay from '../components/PendingPROverlay'
 import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import AssigneePicker from '../components/board/AssigneePicker'
 import { toast } from '../components/Toast/toastStore'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
 import BoardColumn, { CollapsedColumn } from '../components/board/BoardColumn'
 import {
   applyColumnFilter,
@@ -1189,18 +1189,15 @@ export default function Board() {
       if (!task) return
       pendingDelegateTask.current = null
       try {
-        const body = await apiJSON<{ conversation_id?: string; delegate_error?: string }>(
-          `/api/tasks/${task.id}/swipe`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              action: 'delegate',
-              hesitation_ms: 0,
-              blueprint_id: promptId,
-            }),
-          },
-        )
+        const body = await apiJSON<{ conversation_id?: string }>(`/api/tasks/${task.id}/swipe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'delegate',
+            hesitation_ms: 0,
+            blueprint_id: promptId,
+          }),
+        })
         const runID = body.conversation_id
         if (runID) {
           setAgentRuns((prev) => ({
@@ -1225,17 +1222,21 @@ export default function Board() {
             delete next[task.id]
             return next
           })
-        } else if (body.delegate_error) {
-          setDelegateFailures((prev) => ({
-            ...prev,
-            [task.id]: body.delegate_error || 'spawn failed',
-          }))
         }
       } catch (err) {
-        // A failed delegate — or a body that wasn't JSON — is not silent: the
-        // card would otherwise sit unchanged with no explanation. fetchTasks
-        // below still reconciles whatever did land.
-        toast.error(httpErrorMessage(err, 'Could not delegate the task.'))
+        // A 422 (bad blueprint reference) or 500 (spawn fault) arrives AFTER
+        // the claim stamped — the task is in the bot's lane with no run, so
+        // record the inline per-card failure the retry affordance renders.
+        // Anything else (409 claim conflict, 404) means nothing landed; a
+        // toast is the right surface. fetchTasks below reconciles either way.
+        if (err instanceof HttpError && (err.status === 422 || err.status === 500)) {
+          setDelegateFailures((prev) => ({
+            ...prev,
+            [task.id]: httpErrorMessage(err, 'spawn failed'),
+          }))
+        } else {
+          toast.error(httpErrorMessage(err, 'Could not delegate the task.'))
+        }
       }
       fetchTasks()
     },

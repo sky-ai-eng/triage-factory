@@ -27,7 +27,7 @@ import {
 } from '../hooks/useTeams'
 import type { Conversation, FactoryEntity, FactorySnapshot, RunStatusValue, Task } from '../types'
 import { isActiveStatus } from '../lib/runStatus'
-import { apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiErrors, apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
 
 // Production factory page — Babylon scene driven by /api/factory/snapshot.
 // The page itself does almost nothing visual: it fetches the snapshot,
@@ -341,20 +341,17 @@ export default function Factory() {
       if (!pd) return
       // Three failure modes to surface:
       //   - Network error (fetch throws) — caught below.
-      //   - Non-2xx HTTP — input/state validation failures (entity
-      //     not found, no matching event, spawner missing). The
-      //     handler returns 400/404/409/503 + `{error: "..."}`.
-      //   - 200 OK + delegate_error — partial success: the
-      //     claim stamped (`claim_stamped: true`) but the spawn
-      //     itself didn't fire (prompt deleted between request and
-      //     execution, DB hiccup creating the run row). We still
-      //     refetch so the new claim col + bot-claimed card surface
-      //     immediately, then surface the spawn failure as a toast
-      //     so the user knows to retry.
+      //   - Pre-claim rejection — input/state validation failures (entity
+      //     not found, no matching event, spawner missing) as
+      //     400/404/409/422/503. Nothing landed; toast and stop.
+      //   - Post-claim spawn failure — a 422 (bad blueprint reference) or
+      //     500 (spawn/DB fault) AFTER the claim stamped. The task is
+      //     bot-claimed with no run, so refetch (the bot-claimed card must
+      //     surface immediately) and tell the user to retry. Distinguished
+      //     from the pre-claim 422 by the blueprint_id field attribution.
       const label = entityLabel(pd.entity)
-      let partialFailure = ''
       try {
-        const body = await apiJSON<{ delegate_error?: string }>('/api/factory/delegate', {
+        await apiJSON<{ conversation_id: string }>('/api/factory/delegate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -365,25 +362,30 @@ export default function Factory() {
             team_id: delegateTeam,
           }),
         })
-        if (body.delegate_error) {
-          partialFailure = body.delegate_error
-        }
       } catch (err) {
-        toast.error(
-          `Delegate ${label}: ${httpErrorMessage(err, 'the delegation could not be started.')}`,
-          'Delegation failed',
-        )
+        const spawnFailed =
+          err instanceof HttpError &&
+          (err.status === 500 ||
+            (err.status === 422 && apiErrors(err).some((it) => it.field === 'blueprint_id')))
+        if (spawnFailed) {
+          if (delegateTeam) noteWrittenTeam(delegateTeam)
+          const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
+          refetch?.()
+          toast.error(
+            `${label} is bot-claimed but the run didn't start: ${httpErrorMessage(err, 'spawn failed')}. Retry from the Board.`,
+            'Delegate run failed',
+          )
+        } else {
+          toast.error(
+            `Delegate ${label}: ${httpErrorMessage(err, 'the delegation could not be started.')}`,
+            'Delegation failed',
+          )
+        }
         return
       }
       if (delegateTeam) noteWrittenTeam(delegateTeam)
       const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
       refetch?.()
-      if (partialFailure) {
-        toast.error(
-          `${label} is bot-claimed but the run didn't start: ${partialFailure}. Retry from the Board.`,
-          'Delegate run failed',
-        )
-      }
     },
     [pendingDelegate, delegateTeam],
   )

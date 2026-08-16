@@ -114,18 +114,52 @@ export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): P
   return readJSON<T>(await apiFetch(path, options), path)
 }
 
-/** httpErrorMessage extracts a user-facing string from a caught error,
- *  preferring the server's JSON `{ error }` body (so a backend message — e.g.
- *  the invite 409 "already pending" or the last-owner guard — reaches the user
- *  verbatim), then the supplied fallback.
+/** One fault in the server's error envelope: `{"errors": [{reason, message,
+ *  field?}]}`. `reason` is a stable machine code (SCREAMING_SNAKE, e.g.
+ *  `NOT_CONFIGURED`); `message` is prose; `field` names the payload field at
+ *  fault when one specific field is. */
+export interface ApiErrorItem {
+  reason: string
+  message: string
+  field?: string
+}
+
+/** apiErrors extracts the envelope's error list from a caught error. Returns
+ *  every item — validation reports all failing fields at once, so a form can
+ *  highlight each `field`. A non-HttpError, a non-JSON body, or a legacy
+ *  single-string `{ error }` body (still emitted by unconverted routes)
+ *  yields `[]`; use `httpErrorMessage` when all you need is one string. */
+export function apiErrors(e: unknown): ApiErrorItem[] {
+  if (!(e instanceof HttpError)) return []
+  try {
+    const body = JSON.parse(e.body) as { errors?: unknown }
+    if (!Array.isArray(body.errors)) return []
+    return body.errors.filter(
+      (item): item is ApiErrorItem =>
+        typeof item === 'object' &&
+        item !== null &&
+        typeof (item as ApiErrorItem).reason === 'string' &&
+        typeof (item as ApiErrorItem).message === 'string',
+    )
+  } catch {
+    return []
+  }
+}
+
+/** httpErrorMessage extracts a user-facing string from a caught error: the
+ *  envelope's first `message` when present, else the legacy JSON `{ error }`
+ *  string (routes not yet converted to the envelope still emit only that),
+ *  then the supplied fallback.
  *
- *  An HttpError WITHOUT a usable JSON `{ error }` returns the fallback, not its
- *  own `.message`: that message embeds the raw response body (`HTTP <status>:
+ *  An HttpError WITHOUT a usable body returns the fallback, not its own
+ *  `.message`: that message embeds the raw response body (`HTTP <status>:
  *  <body>`), which for a non-JSON failure (a 500 HTML page, a proxy error) is
  *  large/unfriendly and must never reach the UI. Only a non-HttpError Error
  *  (a thrown TypeError, an abort) surfaces its `.message`. */
 export function httpErrorMessage(e: unknown, fallback: string): string {
   if (e instanceof HttpError) {
+    const items = apiErrors(e)
+    if (items.length > 0 && items[0].message) return items[0].message
     try {
       const body = JSON.parse(e.body) as { error?: unknown }
       if (typeof body.error === 'string' && body.error) return body.error
