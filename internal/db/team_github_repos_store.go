@@ -95,6 +95,20 @@ type TeamGitHubReposStore interface {
 	// Postgres: the router goroutine has no JWT claims.
 	TracksRepoSystem(ctx context.Context, teamID, owner, repo string) (bool, error)
 
+	// RepoUpdateRecipientsSystem returns the distinct, sorted ids of every
+	// user who may receive a repository_updated websocket event for
+	// (owner, repo) in orgID: the org's admins and owners, plus every
+	// member of a non-archived team that tracks the repo, matched
+	// case-insensitively on both fields. This deliberately mirrors the
+	// REST read's visibility (org admins get the org-wide union, members
+	// their teams' tracked sets — see handleRepositories), because the
+	// websocket hub scopes connections on (org, user) only and the
+	// repoevent.Notifier fans one event per returned id onto that axis.
+	// Admin pool in Postgres: the emitters are claims-free background
+	// jobs. Called fresh per emission so membership changes take effect
+	// immediately; local mode never calls it (N=1 broadcasts org-wide).
+	RepoUpdateRecipientsSystem(ctx context.Context, orgID, owner, repo string) ([]string, error)
+
 	// TracksRepoViewerScoped reports whether ANY team the calling user
 	// belongs to tracks (owner, repo), matched case-insensitively
 	// (TFAC-559). The app-pool, viewer-scoped sibling of TracksRepoSystem

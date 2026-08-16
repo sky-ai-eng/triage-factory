@@ -11,12 +11,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // runStartupTasks performs the one-time boot side effects, in order:
@@ -238,18 +238,17 @@ func (a *App) importLocalSkills(ctx context.Context) {
 // CTA). Local-only: the body hardcodes the sentinel org for the row-stamp +
 // broadcast.
 func (a *App) wireCloneStatusCallback() {
+	// Org-scoped notifier (no RecipientsFunc): this hook is local-only,
+	// and at N=1 the org-wide broadcast IS the REST-parity scope.
+	notify := repoevent.NewNotifier(a.wsHub, nil)
 	worktree.SetOnCloneResult(func(owner, repo string, cloneErr error) {
 		if cloneErr == nil {
 			if err := a.stores.Repos.UpdateCloneStatusSystem(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "ok", "", ""); err != nil {
 				cloneStatusLog.Error("update ok status failed", "owner", owner, "repo", repo, "error", err)
 			}
-			a.wsHub.Broadcast(websocket.Event{
-				Type:  "repo_profile_updated",
-				OrgID: runmode.LocalDefaultOrgID,
-				Data: map[string]any{
-					"id":           owner + "/" + repo,
-					"clone_status": "ok",
-				},
+			notify.Publish(context.Background(), runmode.LocalDefaultOrgID, repoevent.Update{
+				ID:          owner + "/" + repo,
+				CloneStatus: repoevent.Ptr("ok"),
 			})
 			return
 		}
@@ -278,15 +277,11 @@ func (a *App) wireCloneStatusCallback() {
 		if err := a.stores.Repos.UpdateCloneStatusSystem(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "failed", cloneErr.Error(), kind); err != nil {
 			cloneStatusLog.Error("update failed status failed", "owner", owner, "repo", repo, "error", err)
 		}
-		a.wsHub.Broadcast(websocket.Event{
-			Type:  "repo_profile_updated",
-			OrgID: runmode.LocalDefaultOrgID,
-			Data: map[string]any{
-				"id":               owner + "/" + repo,
-				"clone_status":     "failed",
-				"clone_error":      cloneErr.Error(),
-				"clone_error_kind": kind,
-			},
+		notify.Publish(context.Background(), runmode.LocalDefaultOrgID, repoevent.Update{
+			ID:             owner + "/" + repo,
+			CloneStatus:    repoevent.Ptr("failed"),
+			CloneError:     repoevent.Ptr(cloneErr.Error()),
+			CloneErrorKind: repoevent.Ptr(kind),
 		})
 	})
 }

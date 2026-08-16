@@ -6,6 +6,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -65,6 +66,13 @@ func (m *Manager) SetOnCycleComplete(fn func(orgID string)) {
 	m.mu.Lock()
 	m.onCycleComplete = fn
 	m.mu.Unlock()
+}
+
+// SetRecipients forwards to the wrapped Profiler — see
+// Profiler.SetRecipients. Multi-mode wiring only, once at boot before
+// any Trigger.
+func (m *Manager) SetRecipients(recipients repoevent.RecipientsFunc) {
+	m.profiler.SetRecipients(recipients)
 }
 
 // Trigger signals the profiling runner for orgID. force bypasses the 3-day

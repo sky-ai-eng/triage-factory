@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -25,9 +26,9 @@ import (
 // batch failing with a breaker skip must not fire the user-facing
 // "Profiling failed" toast — it's an anticipated, self-healing deferral,
 // not a genuine failure the user needs to see. The doc-scan phase still
-// broadcasts repo_docs_updated unconditionally before the batch is even
-// attempted, so the assertion here specifically checks for the toast's
-// absence, not "no message of any kind."
+// broadcasts repository_updated (doc flags) unconditionally before the
+// batch is even attempted, so the assertion here specifically checks for
+// the toast's absence, not "no message of any kind."
 func TestRunOrg_ProviderBackoff_SkipsToast(t *testing.T) {
 	readmeBody := `{"content":"` + base64.StdEncoding.EncodeToString([]byte("# readme")) + `","encoding":"base64"}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -63,8 +64,8 @@ func TestRunOrg_ProviderBackoff_SkipsToast(t *testing.T) {
 	if err := json.Unmarshal(msg, &evt); err != nil {
 		t.Fatalf("unmarshal event: %v", err)
 	}
-	if evt.Type != "repo_docs_updated" {
-		t.Fatalf("first event type = %q, want repo_docs_updated", evt.Type)
+	if evt.Type != repoevent.EventType {
+		t.Fatalf("first event type = %q, want %q", evt.Type, repoevent.EventType)
 	}
 
 	client.expectNoMessage(t, 200*time.Millisecond)

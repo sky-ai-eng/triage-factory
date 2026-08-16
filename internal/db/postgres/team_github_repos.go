@@ -256,6 +256,46 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, own
 	return true, nil
 }
 
+// RepoUpdateRecipientsSystem — identical query to the SQLite impl so both
+// backends pin to one result. Admin pool: the emitters (profiler) are
+// claims-free background jobs, and the union deliberately crosses team
+// boundaries the membership RLS policies would hide.
+func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, owner, repo string) ([]string, error) {
+	// UNION (not UNION ALL) dedups a user who is both an org admin and a
+	// tracking-team member. t.deleted_at IS NULL excludes archived teams,
+	// matching TeamIDsForUserInOrgSystem — an archived team is
+	// force-stopped and its members must not keep receiving repo events
+	// through it.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT user_id::text FROM (
+			SELECT om.user_id
+			FROM org_memberships om
+			WHERE om.org_id = $1 AND om.role IN ('owner', 'admin')
+			UNION
+			SELECT m.user_id
+			FROM team_github_repos g
+			JOIN teams t ON t.id = g.team_id
+			JOIN memberships m ON m.team_id = g.team_id
+			WHERE t.org_id = $1 AND t.deleted_at IS NULL
+			  AND lower(g.owner) = lower($2) AND lower(g.repo) = lower($3)
+		) u
+		ORDER BY user_id ASC
+	`, orgID, owner, repo)
+	if err != nil {
+		return nil, fmt.Errorf("repo update recipients: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan recipient: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID, owner, repo string) (bool, error) {
 	// Runs on the app pool so team_github_repos_select RLS auto-scopes the
 	// EXISTS to the caller's own team memberships — no team_id needed, same

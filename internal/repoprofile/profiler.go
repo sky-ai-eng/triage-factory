@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/reporename"
 	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
@@ -41,6 +42,10 @@ type Profiler struct {
 	orgs       db.OrgsStore            // iterate active orgs at the top of each profile run
 	recorder   *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	ws         *websocket.Hub
+	// notify publishes repository_updated over ws. Built org-scoped (the
+	// local shape) in NewProfiler; SetRecipients rebuilds it with the
+	// multi-mode per-user fan-out.
+	notify *repoevent.Notifier
 
 	// batchFn runs one Haiku profiling batch. Defaulted (in NewProfiler) to a
 	// closure over profileBatch that captures the recorder + system-job
@@ -59,10 +64,22 @@ type Profiler struct {
 // recorder.
 func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, repos db.RepositoryStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Profiler {
 	p := &Profiler{resolver: resolver, secrets: secrets, llmResolve: llmResolve, repos: repos, orgs: orgs, recorder: recorder, ws: ws}
+	p.notify = repoevent.NewNotifier(ws, nil)
 	p.batchFn = func(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return profileBatch(ctx, orgID, batch, secrets, llmResolve, recorder, limiter)
 	}
 	return p
+}
+
+// SetRecipients switches the profiler's repository_updated broadcasts
+// from the org-scoped local shape to the multi-mode per-user fan-out:
+// repositories is org-wide but its REST read is visibility-scoped, and
+// the websocket hub has no team axis, so the audience must be resolved
+// per emission (see internal/repoevent). Multi-mode wiring only, called
+// once at boot before any Trigger — local mode never calls it, keeping
+// the single org-wide broadcast N=1 has always had.
+func (p *Profiler) SetRecipients(recipients repoevent.RecipientsFunc) {
+	p.notify = repoevent.NewNotifier(p.ws, recipients)
 }
 
 // repoWithDocs groups a repository row with the documentation text to send to the LLM.
@@ -291,18 +308,12 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		} else {
 			touched = true
 		}
-		if p.ws != nil {
-			p.ws.Broadcast(websocket.Event{
-				Type:  "repo_docs_updated",
-				OrgID: orgID,
-				Data: map[string]any{
-					"id":            name,
-					"has_readme":    prof.HasReadme,
-					"has_claude_md": prof.HasClaudeMd,
-					"has_agents_md": prof.HasAgentsMd,
-				},
-			})
-		}
+		p.notify.Publish(ctx, orgID, repoevent.Update{
+			ID:          name,
+			HasReadme:   repoevent.Ptr(prof.HasReadme),
+			HasClaudeMd: repoevent.Ptr(prof.HasClaudeMd),
+			HasAgentsMd: repoevent.Ptr(prof.HasAgentsMd),
+		})
 
 		if docs == "" {
 			withoutDocs = append(withoutDocs, prof)
@@ -387,16 +398,10 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			touched = true
 			if prof.ProfileText != "" {
 				profiled++
-				if p.ws != nil {
-					p.ws.Broadcast(websocket.Event{
-						Type:  "repo_profile_updated",
-						OrgID: orgID,
-						Data: map[string]any{
-							"id":           prof.ID,
-							"profile_text": prof.ProfileText,
-						},
-					})
-				}
+				p.notify.Publish(ctx, orgID, repoevent.Update{
+					ID:          prof.ID,
+					ProfileText: repoevent.Ptr(prof.ProfileText),
+				})
 			}
 		}
 	}
