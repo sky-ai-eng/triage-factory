@@ -665,7 +665,7 @@ func TestProjectPatch_PaddedSlugsStoredTrimmed(t *testing.T) {
 // project from the Settings-curated list.
 func TestValidateTrackerKeys_AcceptsConfigured(t *testing.T) {
 	rules := []domain.JiraProjectStatusRules{{ProjectKey: "SKY"}, {ProjectKey: "OPS"}}
-	jira, linear, errMsg := validateTrackerKeys(rules, "SKY", "")
+	jira, linear, _, errMsg := validateTrackerKeys(rules, "SKY", "")
 	if errMsg != "" {
 		t.Fatalf("expected no error, got %q", errMsg)
 	}
@@ -683,7 +683,7 @@ func TestValidateTrackerKeys_AcceptsConfigured(t *testing.T) {
 // config after pinning) and curl users both hit this path.
 func TestValidateTrackerKeys_RejectsUnconfigured(t *testing.T) {
 	rules := []domain.JiraProjectStatusRules{{ProjectKey: "SKY"}}
-	_, _, errMsg := validateTrackerKeys(rules, "OPS", "")
+	_, _, errField, errMsg := validateTrackerKeys(rules, "OPS", "")
 	if errMsg == "" {
 		t.Fatal("expected error for unconfigured Jira key")
 	}
@@ -693,13 +693,16 @@ func TestValidateTrackerKeys_RejectsUnconfigured(t *testing.T) {
 	if !strings.Contains(errMsg, "Settings") {
 		t.Errorf("error should point at Settings, got %q", errMsg)
 	}
+	if errField != "jira_project_key" {
+		t.Errorf("errField = %q, want jira_project_key — the field travels with the message now", errField)
+	}
 }
 
 // TestValidateTrackerKeys_RejectsLinear pins the "Linear is future
 // work" decision: any non-empty Linear key is rejected outright.
 // Once Linear integration ships this assertion will need to flip.
 func TestValidateTrackerKeys_RejectsLinear(t *testing.T) {
-	_, _, errMsg := validateTrackerKeys(nil, "", "TF")
+	_, _, _, errMsg := validateTrackerKeys(nil, "", "TF")
 	if errMsg == "" {
 		t.Fatal("expected error for non-empty Linear key")
 	}
@@ -712,7 +715,7 @@ func TestValidateTrackerKeys_RejectsLinear(t *testing.T) {
 // case — the user creates a project without picking either tracker.
 // Validation should pass with empty normalized values.
 func TestValidateTrackerKeys_EmptyAcceptsBoth(t *testing.T) {
-	jira, linear, errMsg := validateTrackerKeys(nil, "", "")
+	jira, linear, _, errMsg := validateTrackerKeys(nil, "", "")
 	if errMsg != "" {
 		t.Fatalf("empty input should pass, got %q", errMsg)
 	}
@@ -726,7 +729,7 @@ func TestValidateTrackerKeys_EmptyAcceptsBoth(t *testing.T) {
 // in normalized form rather than getting stored padded.
 func TestValidateTrackerKeys_TrimsWhitespace(t *testing.T) {
 	rules := []domain.JiraProjectStatusRules{{ProjectKey: "SKY"}}
-	jira, _, errMsg := validateTrackerKeys(rules, "  SKY  ", "")
+	jira, _, _, errMsg := validateTrackerKeys(rules, "  SKY  ", "")
 	if errMsg != "" {
 		t.Fatalf("padded input should validate, got %q", errMsg)
 	}

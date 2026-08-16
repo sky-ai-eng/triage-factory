@@ -84,7 +84,6 @@ var ratchetAllowlist = []ratchetEntry{
 
 	// error-map — ad-hoc {"error": "..."} bodies.
 	{"internal/server/authz/authz.go", "error-map"},
-	{"internal/server/backfill.go", "error-map"},
 	{"internal/server/bedrock_connect.go", "error-map"},
 	{"internal/server/bedrock_role.go", "error-map"},
 	{"internal/server/blueprints_handler.go", "error-map"},
@@ -105,9 +104,6 @@ var ratchetAllowlist = []ratchetEntry{
 	{"internal/server/org_credentials.go", "error-map"},
 	{"internal/server/org_members_handler.go", "error-map"},
 	{"internal/server/orgs_handler.go", "error-map"},
-	{"internal/server/project_entities.go", "error-map"},
-	{"internal/server/projects.go", "error-map"},
-	{"internal/server/projects_knowledge_store.go", "error-map"},
 	{"internal/server/prompts_handler.go", "error-map"},
 	{"internal/server/repos_handler.go", "error-map"},
 	{"internal/server/settings.go", "error-map"},

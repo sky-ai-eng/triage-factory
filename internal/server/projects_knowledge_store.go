@@ -104,8 +104,7 @@ func (s *Server) serveKnowledgeFromStore(w http.ResponseWriter, r *http.Request,
 			notFound(w, "file")
 			return
 		}
-		projectsLog.Error("knowledge fetch: stat store failed", "project", projectID, "file", name, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read file"})
+		internalError(w, "projects", fmt.Errorf("stat knowledge file %s in store: %w", name, err))
 		return
 	}
 
@@ -124,8 +123,7 @@ func (s *Server) serveKnowledgeFromStore(w http.ResponseWriter, r *http.Request,
 				notFound(w, "file")
 				return
 			}
-			projectsLog.Error("knowledge fetch: get range failed", "project", projectID, "file", name, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read file"})
+			internalError(w, "projects", fmt.Errorf("read knowledge file range %s from store: %w", name, err))
 			return
 		}
 		defer rc.Close()
@@ -144,8 +142,7 @@ func (s *Server) serveKnowledgeFromStore(w http.ResponseWriter, r *http.Request,
 			notFound(w, "file")
 			return
 		}
-		projectsLog.Error("knowledge fetch: get store failed", "project", projectID, "file", name, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read file"})
+		internalError(w, "projects", fmt.Errorf("read knowledge file %s from store: %w", name, err))
 		return
 	}
 	defer rc.Close()
