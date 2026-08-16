@@ -1079,9 +1079,14 @@ func (s *Server) routes() {
 	// distinct from the creds stage (auth.ValidateGitHub / /api/jira/connect).
 	s.apiMutating("POST /api/github/reachability", handleGitHubReachability)
 	s.apiMutating("POST /api/repos/list", s.handleRepositories)
-	s.api("GET /api/repos/{owner}/{repo}", s.handleRepoGet)
-	s.apiMutating("PATCH /api/repos/{owner}/{repo}", s.handleRepoUpdate)
-	s.apiMutating("POST /api/repos/{owner}/{repo}/branches/list", s.handleRepoBranches)
+	// Addressed by the registry row id, which is what every repo payload
+	// carries. by-name is the slug-accepting read the API rules give a
+	// resource with a unique name, and the only one: the writes take the id
+	// they were served, so a rename cannot repoint a save.
+	s.api("GET /api/repos/by-name/{owner}/{repo}", s.handleRepoGetByName)
+	s.api("GET /api/repos/{id}", s.handleRepoGet)
+	s.apiMutating("PATCH /api/repos/{id}", s.handleRepoUpdate)
+	s.apiMutating("POST /api/repos/{id}/branches/list", s.handleRepoBranches)
 	s.apiMutating("POST /api/jira/reachability", handleJiraReachability)
 	// Validated org Anthropic-key capture — the single write path for the
 	// anthropic_api_key vault secret (an empty key clears it for "system creds").

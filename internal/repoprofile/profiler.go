@@ -239,21 +239,35 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 		owner, repo := parts[0], parts[1]
 
-		// Skip repos that were recently profiled (unless forced). Ref-keyed:
-		// name came out of the tracked set, which is the same name the
-		// GitHub fetches below are built from.
-		if !force {
-			existing, err := p.repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
-			if err != nil {
-				repoprofileLog.Warn("check existing profile failed, skipping", "repo", name, "error", err)
+		// One read of the stored row, serving three purposes: the TTL gate
+		// (skipped when forced), the registry id the websocket events below
+		// are keyed on, and proof the repository is still tracked. Ref-keyed,
+		// because name came out of the tracked set and is the same name the
+		// GitHub fetches are built from; the rename applied further down
+		// moves owner/repo and leaves the id alone, so an id read here stays
+		// the right one either way.
+		existing, existingErr := p.repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
+		switch {
+		case existingErr != nil:
+			// Forced passes skip too: without the row there is no id to key
+			// the events on, and this pass would end in a write against the
+			// same store the read just failed on. The next cycle — or a
+			// re-press of the re-profile button — retries.
+			repoprofileLog.Warn("read repository row failed, skipping", "repo", name, "error", existingErr)
+			continue
+		case existing == nil:
+			// The tracked-set list this loop walks joins tracking to the
+			// registry, and tracking rows cascade with their repository — so
+			// a name with no row was untracked between that read and this
+			// one. Profiling it anyway would upsert the row back into
+			// existence, resurrecting a repository a config save just
+			// deleted.
+			repoprofileLog.Info("repository row gone since the tracked-set read, skipping", "repo", name)
+			continue
+		case !force && existing.ProfiledAt != nil:
+			if age := time.Since(*existing.ProfiledAt); age < reprofileTTL {
+				repoprofileLog.Debug("recently profiled, skipping", "repo", name, "age", age.Round(time.Hour), "ttl", reprofileTTL)
 				continue
-			}
-			if existing != nil && existing.ProfiledAt != nil {
-				age := time.Since(*existing.ProfiledAt)
-				if age < reprofileTTL {
-					repoprofileLog.Debug("recently profiled, skipping", "repo", name, "age", age.Round(time.Hour), "ttl", reprofileTTL)
-					continue
-				}
 			}
 		}
 
@@ -313,10 +327,11 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			cloneURL = meta.SSHURL
 		}
 
-		// No ID: this is a value built to hand to UpsertSystem, which keys on
-		// the identity columns below. The registry id belongs to the row, and
-		// this code has never read one.
+		// ID is carried, not written: UpsertSystem keys on the identity
+		// columns below and ignores it. It rides along because prof travels
+		// into the batch path, and both emit sites key their event on it.
 		prof := domain.Repository{
+			ID:     existing.ID,
 			Owner:  owner,
 			Repo:   repo,
 			Source: domain.RepoSourceGitHub,
@@ -354,8 +369,10 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		} else {
 			touched = true
 		}
+		// TODO(TFAC-837): publish the row the upsert returns, not the input.
 		p.notify.Publish(ctx, orgID, repoevent.Update{
-			ID:          name,
+			ID:          prof.ID,
+			Slug:        prof.Slug(),
 			HasReadme:   repoevent.Ptr(prof.HasReadme),
 			HasClaudeMd: repoevent.Ptr(prof.HasClaudeMd),
 			HasAgentsMd: repoevent.Ptr(prof.HasAgentsMd),
@@ -441,7 +458,8 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			if prof.ProfileText != "" {
 				profiled++
 				p.notify.Publish(ctx, orgID, repoevent.Update{
-					ID:          prof.Slug(),
+					ID:          prof.ID,
+					Slug:        prof.Slug(),
 					ProfileText: repoevent.Ptr(prof.ProfileText),
 				})
 			}

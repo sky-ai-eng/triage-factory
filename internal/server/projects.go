@@ -75,11 +75,16 @@ func projectIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
 // optional — a project starts as an empty shell named by the user
 // and gets filled in over time (description, pinned repos, summary).
 type createProjectRequest struct {
-	Name             string   `json:"name"`
-	Description      string   `json:"description"`
-	PinnedRepos      []string `json:"pinned_repos"`
-	JiraProjectKey   string   `json:"jira_project_key"`
-	LinearProjectKey string   `json:"linear_project_key"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// PinnedRepositoryIDs is the pinned set as registry row ids. The field is
+	// named for what it holds rather than reusing the old `pinned_repos`: an
+	// element's meaning changed, and strict decoding turning an old-shaped
+	// body into a loud 400 is the point — the alternative is a body full of
+	// names being accepted and every one of them failing to resolve.
+	PinnedRepositoryIDs []string `json:"pinned_repository_ids"`
+	JiraProjectKey      string   `json:"jira_project_key"`
+	LinearProjectKey    string   `json:"linear_project_key"`
 	// TeamID is the acting team the write picker supplied — the team the
 	// new project (and its pinned-repo / tracker-key validation) is
 	// scoped to. Required in the UI when the caller belongs to ≥2 teams;
@@ -94,13 +99,14 @@ type createProjectRequest struct {
 }
 
 // patchProjectRequest is the PATCH body shape. Pointers distinguish
-// "absent → leave unchanged" from "explicit → overwrite". PinnedRepos
-// uses *[]string so a client can clear it with [] without colliding
-// with the absent case.
+// "absent → leave unchanged" from "explicit → overwrite".
+// PinnedRepositoryIDs uses *[]string so a client can clear it with []
+// without colliding with the absent case.
 type patchProjectRequest struct {
-	Name                      *string   `json:"name"`
-	Description               *string   `json:"description"`
-	PinnedRepos               *[]string `json:"pinned_repos"`
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+	// Registry row ids — see createProjectRequest.PinnedRepositoryIDs.
+	PinnedRepositoryIDs       *[]string `json:"pinned_repository_ids"`
 	JiraProjectKey            *string   `json:"jira_project_key"`
 	LinearProjectKey          *string   `json:"linear_project_key"`
 	SpecAuthorshipBlueprintID *string   `json:"spec_authorship_blueprint_id"`
@@ -175,7 +181,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		trackerErrField  string
 		visibilityErrMsg string
 		teamJiraRules    []domain.JiraProjectStatusRules
-		created          *domain.Project
+		created          *projectJSON
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -190,7 +196,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				return e
 			}
-		} else if len(req.PinnedRepos) > 0 || jiraKey != "" || linearKey != "" {
+		} else if len(req.PinnedRepositoryIDs) > 0 || jiraKey != "" || linearKey != "" {
 			// private/org projects have no team to validate these
 			// against in v1 — they start as a bare shell (name +
 			// description + knowledge base); pinning resources requires
@@ -198,7 +204,14 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			visibilityErrMsg = "pinned repos and tracker projects require team visibility"
 			return nil
 		}
-		pinned, pinnedErrMsg = validatePinnedRepos(r.Context(), tx.TeamGitHubRepos, teamID, req.PinnedRepos)
+		var pinnedErr error
+		pinned, pinnedErrMsg, pinnedErr = validatePinnedRepos(r.Context(), tx.Repos, tx.TeamGitHubRepos, orgID, teamID, req.PinnedRepositoryIDs)
+		if pinnedErr != nil {
+			// A store fault, not a verdict on the body — out through the
+			// error path so it lands as a 500, never as "your pins are
+			// invalid".
+			return fmt.Errorf("validate pinned repos: %w", pinnedErr)
+		}
 		if pinnedErrMsg != "" {
 			return nil // surfaced as 400 below; nothing written
 		}
@@ -245,9 +258,16 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		if createErr != nil {
 			return createErr
 		}
-		var getErr error
-		created, getErr = tx.Projects.Get(r.Context(), orgID, id)
-		return getErr
+		row, getErr := tx.Projects.Get(r.Context(), orgID, id)
+		if getErr != nil || row == nil {
+			return getErr
+		}
+		rendered, getErr := projectToJSON(r.Context(), tx.Repos, orgID, *row, nil)
+		if getErr != nil {
+			return getErr
+		}
+		created = &rendered
+		return nil
 	}); err != nil {
 		// teamscope.ErrNoTeam gets a project-flavored message (mentioning the
 		// private/org escape hatch) ahead of WriteIfSelectionError's generic
@@ -279,7 +299,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if pinnedErrMsg != "" {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidField, Message: pinnedErrMsg, Field: "pinned_repos",
+			Reason: httpx.ReasonInvalidField, Message: pinnedErrMsg, Field: pinnedRepoIDsField,
 		})
 		return
 	}
@@ -317,12 +337,19 @@ func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		projects []domain.Project
+		projects []projectJSON
 		total    int
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		projects, total, e = tx.Projects.List(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		rows, count, e := tx.Projects.List(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		if e != nil {
+			return e
+		}
+		total = count
+		// Rendered inside the read's own transaction: the pin ids come from
+		// the same registry the pin names were joined out of, so the two
+		// halves of one row cannot be read a rename apart.
+		projects, e = projectsToJSON(r.Context(), tx.Repos, orgID, rows)
 		return e
 	}); err != nil {
 		internalError(w, "projects", err)
@@ -341,11 +368,18 @@ func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var project *domain.Project
+	var project *projectJSON
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		project, e = tx.Projects.Get(r.Context(), orgID, id)
-		return e
+		row, e := tx.Projects.Get(r.Context(), orgID, id)
+		if e != nil || row == nil {
+			return e
+		}
+		rendered, e := projectToJSON(r.Context(), tx.Repos, orgID, *row, nil)
+		if e != nil {
+			return e
+		}
+		project = &rendered
+		return nil
 	}); err != nil {
 		internalError(w, "projects", err)
 		return
@@ -569,8 +603,19 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The import returns the domain row; the response carries the same wire
+	// shape every other project read does, pins included as registry ids.
+	var rendered projectJSON
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		rendered, e = projectToJSON(r.Context(), tx.Repos, orgID, *project, nil)
+		return e
+	}); err != nil {
+		internalError(w, "projects", fmt.Errorf("render imported project %s: %w", project.ID, err))
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"project":  project,
+		"project":  rendered,
 		"warnings": warnings,
 	})
 }
@@ -661,7 +706,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Description != nil {
 		updated.Description = *req.Description
 	}
-	if req.PinnedRepos != nil {
+	if req.PinnedRepositoryIDs != nil {
 		// Validate against the project's OWN team, not the org default — a
 		// non-default-team project's pins must be tracked by that team.
 		// existing.TeamID is populated by Projects.Get; the store preserves
@@ -672,22 +717,25 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 				Reason:  httpx.ReasonInvalidField,
 				Message: "this project has no team — pinned repos aren't available for a private/org visibility project",
-				Field:   "pinned_repos",
+				Field:   pinnedRepoIDsField,
 			})
 			return
 		}
 		var pinned []string
 		var errMsg string
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			pinned, errMsg = validatePinnedRepos(r.Context(), tx.TeamGitHubRepos, existing.TeamID, *req.PinnedRepos)
-			return nil
+			var e error
+			pinned, errMsg, e = validatePinnedRepos(r.Context(), tx.Repos, tx.TeamGitHubRepos, orgID, existing.TeamID, *req.PinnedRepositoryIDs)
+			return e
 		}); err != nil {
+			// A store fault reaches here; a rejection travels in errMsg and is
+			// answered as a 400 just below.
 			internalError(w, "projects", err)
 			return
 		}
 		if errMsg != "" {
 			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-				Reason: httpx.ReasonInvalidField, Message: errMsg, Field: "pinned_repos",
+				Reason: httpx.ReasonInvalidField, Message: errMsg, Field: pinnedRepoIDsField,
 			})
 			return
 		}
@@ -863,11 +911,18 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	// the worst case is the agent missing one delta on its next turn (which
 	// a follow-up PATCH or the user's next message itself can correct).
 	queuePendingContextChanges(r.Context(), s.curatorStore, orgID, *existing, updated)
-	var fresh *domain.Project
+	var fresh *projectJSON
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		fresh, e = tx.Projects.Get(r.Context(), orgID, id)
-		return e
+		row, e := tx.Projects.Get(r.Context(), orgID, id)
+		if e != nil || row == nil {
+			return e
+		}
+		rendered, e := projectToJSON(r.Context(), tx.Repos, orgID, *row, nil)
+		if e != nil {
+			return e
+		}
+		fresh = &rendered
+		return nil
 	}); err != nil {
 		internalError(w, "projects", fmt.Errorf("read back project %s after update: %w", id, err))
 		return
@@ -1028,79 +1083,174 @@ func splitOwnerRepo(slug string) (owner, repo string, ok bool) {
 	return "", "", false
 }
 
-// validatePinnedRepoShape checks the "owner/repo" slug format and
-// returns the normalized (trimmed) slice. Pure — does not touch the
-// DB — so it stays cheap to test in isolation and stays usable in
-// any future code path that just needs to canonicalize slug input.
+// pinnedRepoIDsField is the body field every pinned-repo fault is attributed
+// to. Named once so the create and PATCH arms cannot disagree about it.
+const pinnedRepoIDsField = "pinned_repository_ids"
+
+// validatePinnedRepoShape checks that each pinned entry is a non-empty
+// repository id and returns the normalized (trimmed) slice. Pure — does not
+// touch the DB — so it stays cheap to test in isolation.
 //
-// The trim-then-persist step matters: without it, " owner/repo "
-// would pass validation (the validator trims internally) but get
-// stored padded, breaking subsequent lookups by slug.
+// The trim-then-resolve step matters: an id with surrounding whitespace would
+// otherwise reach the lookup verbatim and miss, reporting "not a repository in
+// this workspace" for a repository that is one.
+//
+// Deliberately no format check beyond non-empty. A registry id is an opaque
+// handle this server minted, and the only question worth asking about one is
+// whether a row answers to it — which validatePinnedRepos asks next. A
+// shape rule here would be a second, weaker copy of that answer.
 //
 // Returns (normalized, "") on success and (nil, errMsg) on failure.
-func validatePinnedRepoShape(repos []string) ([]string, string) {
-	out := make([]string, len(repos))
-	for i, r := range repos {
+func validatePinnedRepoShape(repoIDs []string) ([]string, string) {
+	out := make([]string, len(repoIDs))
+	for i, r := range repoIDs {
 		trimmed := strings.TrimSpace(r)
 		if trimmed == "" {
-			return nil, "pinned_repos[" + strconv.Itoa(i) + "] is empty"
-		}
-		// Require exactly one '/' with non-empty owner and repo.
-		// Anything else (no slash, leading/trailing slash, multiple
-		// slashes) is rejected — the slug shape is "owner/repo".
-		parts := strings.Split(trimmed, "/")
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			return nil, "pinned_repos[" + strconv.Itoa(i) + "] must be 'owner/repo'"
+			return nil, pinnedRepoIDsField + "[" + strconv.Itoa(i) + "] is empty"
 		}
 		out[i] = trimmed
 	}
 	return out, ""
 }
 
-// validatePinnedRepos composes shape validation with the must-be-tracked
-// existence check: every slug must be a repo the project's *team* tracks
-// (team_github_repos). Repos are per-team, so pinning is
-// gated on the team's set rather than the org-wide union — a repo another
-// team tracks (and that therefore exists in the shared repositories
-// cache) is still rejected here if the project's own team doesn't track
-// it. This pins the UX contract — the frontend presents pinned_repos as a
-// multi-select over the team's tracked repos, so an untracked slug
-// arriving here is a stale client or a hand-crafted curl. Rejecting it up
-// front keeps the Curator from later trying to materialize a worktree for
-// a repo the team can't authenticate against.
+// validatePinnedRepos resolves the wire's repository ids and composes that
+// with the must-be-tracked check: every id must name a registry row, and that
+// row must be a repo the project's *team* tracks (team_github_repos). Repos
+// are per-team, so pinning is gated on the team's set rather than the org-wide
+// union — a repo another team tracks (and that therefore has a row in the
+// shared registry) is still rejected here if the project's own team doesn't
+// track it. This pins the UX contract — the frontend presents the pin picker
+// as a multi-select over the team's tracked repos, so an untracked id arriving
+// here is a stale client or a hand-crafted curl. Rejecting it up front keeps
+// the Curator from later trying to materialize a worktree for a repo the team
+// can't authenticate against.
 //
-// Runs under the caller's claims (team_github_repos_select RLS), so it
-// must be invoked inside a WithTx for the requesting user. Returns
-// (normalized, "") on success and (nil, errMsg) on failure.
-func validatePinnedRepos(ctx context.Context, teamRepos db.TeamGitHubReposStore, teamID string, slugs []string) ([]string, string) {
-	out, errMsg := validatePinnedRepoShape(slugs)
+// It returns what the store persists: each pin as the provider's current name
+// (see domain.Project.PinnedRepos). The translation lives here, at the edge,
+// and nowhere else.
+//
+// Runs under the caller's claims (repositories + team_github_repos_select
+// RLS), so it must be invoked inside a WithTx for the requesting user.
+//
+// The two failure kinds are returned separately and are not interchangeable.
+// errMsg is a REJECTION — a statement about the body, safe to put in a 400 and
+// show a user. err is a store fault: the request cannot be judged at all, so
+// the caller must 500 rather than tell the client its input was invalid. They
+// were one return value before, which made a store outage answer "that is not
+// a repository in this workspace" with a driver string appended.
+func validatePinnedRepos(ctx context.Context, repos db.RepositoryStore, teamRepos db.TeamGitHubReposStore, orgID, teamID string, repoIDs []string) (names []string, errMsg string, err error) {
+	ids, errMsg := validatePinnedRepoShape(repoIDs)
 	if errMsg != "" {
-		return nil, errMsg
+		return nil, errMsg, nil
 	}
-	if len(out) == 0 {
-		return out, ""
+	if len(ids) == 0 {
+		return []string{}, "", nil
 	}
 
 	tracked, err := teamRepos.ListForTeam(ctx, teamID)
 	if err != nil {
-		return nil, "failed to load tracked repos: " + err.Error()
+		return nil, "", fmt.Errorf("list tracked repos for team %s: %w", teamID, err)
 	}
 	// Key both sides case-insensitively: GitHub owner/repo names are
 	// case-insensitive and the rest of the codebase folds case (TracksRepoSystem,
 	// newlyAddedRepos, the registry's own identity index). A repo re-saved into
-	// team_github_repos with different capitalization than the incoming pin is
-	// the same repo, so an exact-string match would wrongly reject an
+	// team_github_repos with different capitalization than the registry row's
+	// is the same repo, so an exact-string match would wrongly reject an
 	// otherwise-valid pin.
 	known := make(map[string]struct{}, len(tracked))
 	for _, t := range tracked {
 		known[strings.ToLower(t.Slug())] = struct{}{}
 	}
-	for _, slug := range out {
-		if _, ok := known[strings.ToLower(slug)]; !ok {
-			return nil, "pinned_repos: " + slug + " is not a repo this team tracks (add it on the GitHub config page first)"
+
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		row, err := repos.Get(ctx, orgID, id)
+		if errors.Is(err, db.ErrNoSuchRepository) {
+			// The id is the caller's to get right, so this is a rejection and
+			// not a server fault. It reports the id back rather than a name,
+			// because a name is not what was sent.
+			return nil, pinnedRepoIDsField + ": " + id + " is not a repository in this workspace", nil
 		}
+		if err != nil {
+			// Anything else is the store failing, not the id being wrong.
+			return nil, "", fmt.Errorf("read repository %s: %w", id, err)
+		}
+		if _, ok := known[strings.ToLower(row.Slug())]; !ok {
+			return nil, pinnedRepoIDsField + ": " + row.Slug() + " is not a repo this team tracks (add it on the GitHub config page first)", nil
+		}
+		out = append(out, row.Slug())
 	}
-	return out, ""
+	return out, "", nil
+}
+
+// projectJSON is a project's wire shape: the domain row, with its pinned
+// repositories rendered as registry row ids.
+//
+// The embedding is what keeps this from becoming a second copy of the domain
+// struct that drifts from it — every other field is the domain's own and stays
+// so. domain.Project.PinnedRepos carries `json:"-"` for exactly this reason:
+// the one field whose wire form differs is replaced here rather than shadowed,
+// so a project serialized anywhere else cannot quietly put names back on the
+// wire.
+type projectJSON struct {
+	domain.Project
+	// PinnedRepositoryIDs is the pinned set as registry row ids, in the
+	// project's own pin order — the same ids /api/repos serves and the same
+	// ids a PATCH sends back. The repository's name is a display property the
+	// client reads off the repo, never a key it round-trips through here.
+	PinnedRepositoryIDs []string `json:"pinned_repository_ids"`
+}
+
+// projectToJSON renders one project for the wire, resolving its stored pin
+// names back to registry ids through repos.
+//
+// memo may be nil; a caller rendering a page of projects passes one so a repo
+// pinned by several of them is looked up once.
+func projectToJSON(ctx context.Context, repos db.RepositoryStore, orgID string, p domain.Project, memo map[string]string) (projectJSON, error) {
+	ids := make([]string, 0, len(p.PinnedRepos))
+	for _, slug := range p.PinnedRepos {
+		owner, repo, ok := splitOwnerRepo(slug)
+		if !ok {
+			return projectJSON{}, fmt.Errorf("project %s pins a malformed repo name %q", p.ID, slug)
+		}
+		key := strings.ToLower(slug)
+		if id, hit := memo[key]; hit {
+			ids = append(ids, id)
+			continue
+		}
+		row, err := repos.GetByRef(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
+		if err != nil {
+			return projectJSON{}, fmt.Errorf("resolve pinned repo %s of project %s: %w", slug, p.ID, err)
+		}
+		if row == nil {
+			// Not reachable, and not silently survivable either. The store
+			// builds these names by joining project_pinned_repos to
+			// repositories, so a name with no row would mean the join and this
+			// lookup disagreed inside one transaction. Dropping the pin would
+			// hand the client a short list it would then PATCH back, unpinning
+			// a repo nobody asked to unpin.
+			return projectJSON{}, fmt.Errorf("project %s pins %s, which resolves to no repository row", p.ID, slug)
+		}
+		if memo != nil {
+			memo[key] = row.ID
+		}
+		ids = append(ids, row.ID)
+	}
+	return projectJSON{Project: p, PinnedRepositoryIDs: ids}, nil
+}
+
+// projectsToJSON is projectToJSON over a page, sharing one memo across it.
+func projectsToJSON(ctx context.Context, repos db.RepositoryStore, orgID string, ps []domain.Project) ([]projectJSON, error) {
+	memo := make(map[string]string)
+	out := make([]projectJSON, len(ps))
+	for i, p := range ps {
+		j, err := projectToJSON(ctx, repos, orgID, p, memo)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = j
+	}
+	return out, nil
 }
 
 // validateTrackerKeys validates jira_project_key and linear_project_key

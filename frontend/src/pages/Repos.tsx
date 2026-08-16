@@ -19,7 +19,14 @@ import { apiFetch, apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
 const TEAM_REPOS_PATH = '/api/settings/team/default/repos'
 
 interface Repository {
+  /** The registry row id. Identity: the React key, the websocket merge
+   *  key, and the path segment every repo route is addressed by. GitHub
+   *  cannot change it, so a rename mid-session neither strands a card nor
+   *  404s a save. */
   id: string
+  /** "owner/repo" — the display name, and only that. The server renders
+   *  it (domain.Repository.Slug()); this page reads it. */
+  slug: string
   owner: string
   repo: string
   description?: string
@@ -120,7 +127,7 @@ function BranchPicker({
         // One page is what the picker shows: it is a type-to-filter box, and
         // the filter is what narrows the list, not scrolling it.
         const page = await apiList<{ name: string }>(
-          `/api/repos/${profile.owner}/${profile.repo}/branches/list`,
+          `/api/repos/${encodeURIComponent(profile.id)}/branches/list`,
           { q, page_size: 30 },
           { signal: controller.signal },
         )
@@ -139,7 +146,7 @@ function BranchPicker({
         }
       }
     },
-    [profile.owner, profile.repo],
+    [profile.id],
   )
 
   const handleOpenChange = (next: boolean) => {
@@ -365,7 +372,7 @@ function CloneFailedBadge({ profile }: { profile: Repository }) {
       <Popover.Trigger asChild>
         <button
           type="button"
-          aria-label={`Clone failed for ${profile.id}`}
+          aria-label={`Clone failed for ${profile.slug}`}
           className="
             inline-flex items-center gap-1 rounded-full
             border border-[var(--color-dismiss)]/30
@@ -496,7 +503,7 @@ function RepoCard({
       <header className="relative flex items-center gap-3">
         <StatusDot state={state} />
         <h3 className="text-[13px] font-semibold tracking-tight text-text-primary truncate">
-          {profile.id}
+          {profile.slug}
         </h3>
         {profile.clone_status === 'failed' && <CloneFailedBadge profile={profile} />}
         <div className="ml-auto flex items-center gap-3">
@@ -529,7 +536,7 @@ function RepoCard({
               <button
                 type="button"
                 onClick={() => setExpanded(true)}
-                aria-label={`Show full profile for ${profile.id}`}
+                aria-label={`Show full profile for ${profile.slug}`}
                 aria-expanded={false}
                 className="mt-1 text-[11px] font-medium text-accent/80 hover:text-accent transition-colors"
               >
@@ -540,7 +547,7 @@ function RepoCard({
               <button
                 type="button"
                 onClick={() => setExpanded(false)}
-                aria-label={`Collapse profile for ${profile.id}`}
+                aria-label={`Collapse profile for ${profile.slug}`}
                 aria-expanded={true}
                 className="mt-2 text-[11px] font-medium text-text-tertiary hover:text-text-secondary transition-colors"
               >
@@ -799,7 +806,7 @@ export default function Repos() {
 
   const handleBranchChange = (profile: Repository) => async (branch: string) => {
     try {
-      await apiFetch(`/api/repos/${profile.owner}/${profile.repo}`, {
+      await apiFetch(`/api/repos/${encodeURIComponent(profile.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ base_branch: branch || null }),

@@ -524,7 +524,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 	t.Run("UpdateBaseBranch_matches_case_insensitively", func(t *testing.T) {
 		// GitHub owner/repo identifiers are case-insensitive, and the
-		// TFAC-559 repoAccessAllowed handler gate (TracksRepoViewerScoped)
+		// TFAC-559 repoVisible handler gate (TracksRepoViewerScoped)
 		// matches case-insensitively too. If UpdateBaseBranch's lookup were
 		// case-sensitive, a caller reaching the PATCH endpoint with
 		// different casing than what's stored could pass the gate yet

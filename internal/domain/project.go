@@ -13,10 +13,22 @@ import "time"
 // curator conversation's sdk_session_id absorbs it — so there is no
 // session-id field here.
 type Project struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	PinnedRepos []string `json:"pinned_repos"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// PinnedRepos holds each pinned repository as the provider's current
+	// "owner/repo" name. That is the shape every consumer of a pin spends it
+	// in — a worktree path, a bind-mount destination, a token scope, a
+	// bundle's portable manifest — so it is the shape the store surfaces,
+	// joined out of project_pinned_repos.repository_id on read.
+	//
+	// It is NOT the wire shape. The API addresses a repository by its
+	// registry row id (`pinned_repository_ids`), and the projects handler is
+	// where the two meet: it resolves ids in, renders ids out, and is the
+	// only place that translates. Hence `json:"-"` — a project serialized
+	// straight to a response would otherwise put names back on the wire under
+	// a field no client sends.
+	PinnedRepos []string `json:"-"`
 	// CreatorUserID is the user who created the project — the identity the
 	// projects_{insert,update,delete} RLS policies' "private" branch pins
 	// visibility="private" writes to (WITH CHECK creator_user_id =
