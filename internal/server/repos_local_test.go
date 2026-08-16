@@ -25,6 +25,17 @@ func TestHandleRepoUpdate_LocalMode(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PATCH /api/repos/{id}: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
+	// The write answers with the resource, in the reads' row shape — not a
+	// status stub, and not the request body echoed back. Every field is
+	// present, including the ones the request never mentioned, because it is
+	// the stored row rather than a rendering of what was sent.
+	var patched repoJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &patched); err != nil {
+		t.Fatalf("decode the PATCH response: %v; body=%s", err, rec.Body.String())
+	}
+	if patched.ID != repoID || patched.Slug != "acme/api" || patched.BaseBranch != "develop" || !patched.CanEdit {
+		t.Errorf("PATCH response = %+v, want the updated acme/api row", patched)
+	}
 
 	page := decodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{}))
 	var found bool
@@ -56,6 +67,11 @@ func TestHandleRepoUpdate_LocalMode(t *testing.T) {
 	}
 	if got.ID != repoID || got.Slug != "acme/api" || got.BaseBranch != "develop" || !got.CanEdit {
 		t.Errorf("single read = %+v, want the acme/api list row", got)
+	}
+	// …and it is the row the write already handed back, which is what lets a
+	// client render the save's answer instead of refetching to learn it.
+	if patched != got {
+		t.Errorf("PATCH response %+v differs from the follow-up read %+v", patched, got)
 	}
 
 	// by-name answers the same row, and is the only route that takes a name.

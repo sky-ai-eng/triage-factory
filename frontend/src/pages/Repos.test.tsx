@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, act, waitFor } from '@testing-library/react'
+import { render, screen, act, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 
 import type { WSEvent } from '../types'
@@ -99,6 +99,42 @@ describe('Repos page addressing', () => {
     await waitFor(() => {
       expect(screen.getByText('the profile arrived anyway')).toBeInTheDocument()
     })
+  })
+
+  // The save renders the server's row, not the value it sent. The two agree
+  // about base_branch, so the assertion is on a field only the response
+  // carries: an optimistic merge of the request would show the card without
+  // it, and a refetch of the whole list to find it is the round trip the
+  // response exists to spare.
+  it('renders the row the base-branch save returned', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.startsWith('/api/repos/list')) return { ok: true, ...listBody([repoRow()]) }
+      if (url.includes('/branches/list')) return { ok: true, ...listBody([{ name: 'develop' }]) }
+      if (url === `/api/repos/${REPO_ID}` && init?.method === 'PATCH') {
+        return {
+          ok: true,
+          ...jsonBody(
+            repoRow({ base_branch: 'develop', profile_text: 'only the response carries this' }),
+          ),
+        }
+      }
+      if (url.includes('/repos') && url.startsWith('/api/settings/team/')) {
+        return { ok: true, ...jsonBody({ repos: ['acme/api'], role: 'admin' }) }
+      }
+      if (url.startsWith('/api/settings/org')) {
+        return { ok: true, ...jsonBody({ github_base_url: 'https://github.com' }) }
+      }
+      return { ok: true, ...jsonBody({}) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderRepos()
+    await screen.findByText('acme/api')
+
+    fireEvent.click(screen.getByRole('button', { name: /main/ }))
+    fireEvent.click(await screen.findByRole('button', { name: 'develop' }))
+
+    expect(await screen.findByText('only the response carries this')).toBeInTheDocument()
   })
 
   // The mirror of the above: an event for a repository this page has no row

@@ -47,7 +47,7 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed a repo into orgA only.
-	if err := stores.Repos.Upsert(ctx, orgA, domain.Repository{
+	if _, err := stores.Repos.Upsert(ctx, orgA, domain.Repository{
 		Owner: "octo", Repo: "widget",
 		Description: "orgA widget", ProfileText: "orgA body",
 		DefaultBranch: "main",
@@ -94,7 +94,7 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	if err != nil || rowA == nil {
 		t.Fatalf("read orgA's row: got=%v err=%v", rowA, err)
 	}
-	if err := stores.Repos.UpdateBaseBranch(ctx, orgB, rowA.ID, "hack"); !errors.Is(err, db.ErrNoSuchRepository) {
+	if _, err := stores.Repos.UpdateBaseBranch(ctx, orgB, rowA.ID, "hack"); !errors.Is(err, db.ErrNoSuchRepository) {
 		t.Errorf("cross-org UpdateBaseBranch = %v, want db.ErrNoSuchRepository", err)
 	}
 	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget")); got.BaseBranch != "" {
@@ -102,7 +102,7 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 
 	// UpdateCloneStatus cross-org must not touch orgA's row.
-	if err := stores.Repos.UpdateCloneStatusByRef(ctx, orgB, domain.RepoRef{Owner: "octo", Repo: "widget"}, "failed", "hack", "other"); err != nil {
+	if _, err := stores.Repos.UpdateCloneStatusByRef(ctx, orgB, domain.RepoRef{Owner: "octo", Repo: "widget"}, "failed", "hack", "other"); err != nil {
 		t.Fatalf("UpdateCloneStatus cross-org: %v", err)
 	}
 	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget")); got.CloneStatus == "failed" {
@@ -138,7 +138,7 @@ func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	// Seed a repo in orgA via admin so the row exists.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
-	if err := stores.Repos.UpsertSystem(ctx, orgA, domain.Repository{
+	if _, err := stores.Repos.UpsertSystem(ctx, orgA, domain.Repository{
 		Owner: "octo", Repo: "rls",
 		Description: "orgA rls repo", ProfileText: "body",
 		DefaultBranch: "main",
@@ -184,10 +184,11 @@ func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// WITH CHECK requires org_id = tf.current_org_id(), so 42501
 		// is the expected outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Upsert(ctx, orgA, domain.Repository{
+			_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Upsert(ctx, orgA, domain.Repository{
 				Owner: "octo", Repo: "rls-write",
 				Description: "x", ProfileText: "x", DefaultBranch: "main",
 			})
+			return e
 		})
 		pgtest.AssertRLSViolation(t, err)
 	})
@@ -251,6 +252,93 @@ func TestRepositoryStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 	if got := listAs(carol); len(got) != 0 {
 		t.Errorf("teamless carol ListTeamScoped = %v, want empty", got)
 	}
+}
+
+// TestRepositoryStore_Postgres_ReturnedRow_AppPool is where the returned-row
+// standard's RLS caveat is actually tested. The shared conformance run above
+// wires both pools against AdminDB (BYPASSRLS), so it pins the SQL and not the
+// policies; this one runs the same assertion through tf_app with RLS active.
+//
+// The load-bearing case is an upsert's UPDATE arm: `UPDATE … RETURNING` yields
+// a row only if the policies let the writer SELECT it. repositories_all is
+// org-scoped for USING and WITH CHECK alike, so it does today — and a policy
+// narrowed later would fail here rather than silently return nothing to a
+// caller that is about to publish it.
+func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	orgID, userID, _ := seedPgRepoOrg(t, h)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	write := func(what string, fn func(tx db.TxStores) error) {
+		t.Helper()
+		if err := stores.Tx.WithTx(ctx, orgID, userID, fn); err != nil {
+			t.Fatalf("%s under the app pool: %v", what, err)
+		}
+	}
+	// The follow-up read runs through the app pool too, so both halves of the
+	// comparison are what an RLS-scoped caller can see.
+	read := func(id string) func() (*domain.Repository, error) {
+		return func() (*domain.Repository, error) {
+			var row *domain.Repository
+			err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+				var e error
+				row, e = tx.Repos.Get(ctx, orgID, id)
+				return e
+			})
+			return row, err
+		}
+	}
+
+	var created, updated, branched, seeded domain.Repository
+	write("Upsert (insert arm)", func(tx db.TxStores) error {
+		var e error
+		created, e = tx.Repos.Upsert(ctx, orgID, domain.Repository{
+			Owner: "Acme", Repo: "Api",
+			ProfileText: "v1", DefaultBranch: "main", ExternalID: "1296269",
+		})
+		return e
+	})
+	dbtest.AssertWriteReturnedStoredRow(t, "Upsert (insert arm, app pool)", created, read(created.ID))
+
+	write("Upsert (update arm)", func(tx db.TxStores) error {
+		var e error
+		updated, e = tx.Repos.Upsert(ctx, orgID, domain.Repository{
+			Owner: "acme", Repo: "api",
+			ProfileText: "v2", DefaultBranch: "main",
+		})
+		return e
+	})
+	dbtest.AssertWriteReturnedStoredRow(t, "Upsert (update arm, app pool)", updated, read(created.ID))
+	if updated.ID != created.ID || updated.ExternalID != "1296269" {
+		t.Errorf("update arm returned %+v, want the existing row with its stored id", updated)
+	}
+
+	write("UpdateBaseBranch", func(tx db.TxStores) error {
+		var e error
+		branched, e = tx.Repos.UpdateBaseBranch(ctx, orgID, created.ID, "develop")
+		return e
+	})
+	dbtest.AssertWriteReturnedStoredRow(t, "UpdateBaseBranch (app pool)", branched, read(created.ID))
+
+	var stamped *domain.Repository
+	write("UpdateCloneStatusByRef", func(tx db.TxStores) error {
+		var e error
+		stamped, e = tx.Repos.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}, "failed", "boom", "ssh")
+		return e
+	})
+	if stamped == nil {
+		t.Fatal("UpdateCloneStatusByRef returned no row for a repository the caller can see")
+	}
+	dbtest.AssertWriteReturnedStoredRow(t, "UpdateCloneStatusByRef (app pool)", *stamped, read(created.ID))
+
+	write("SeedCloneURL", func(tx db.TxStores) error {
+		var e error
+		seeded, e = tx.Repos.SeedCloneURL(ctx, orgID, created.ID, "https://example.test/acme/api.git")
+		return e
+	})
+	dbtest.AssertWriteReturnedStoredRow(t, "SeedCloneURL (app pool)", seeded, read(created.ID))
 }
 
 func repoIDs(profiles []domain.Repository) []string {

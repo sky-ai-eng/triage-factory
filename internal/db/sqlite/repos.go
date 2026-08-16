@@ -36,13 +36,13 @@ func newRepositoryStore(q, _ queryer) db.RepositoryStore { return &repoStore{q: 
 
 var _ db.RepositoryStore = (*repoStore)(nil)
 
-func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repository) error {
+func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repository) (domain.Repository, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Repository{}, err
 	}
 	source, err := domain.NormalizeRepoSource(p.Source)
 	if err != nil {
-		return err
+		return domain.Repository{}, err
 	}
 	// source is absent from the conflict list: it is a create-time identity
 	// column, not profiling metadata. external_id refreshes only when the
@@ -56,7 +56,11 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 	// as the one create path that could still duplicate. owner/repo are absent
 	// from the SET list, so the stored casing stays sticky, and the id minted
 	// for a conflicting INSERT is discarded along with the rest of it.
-	_, err = s.q.ExecContext(ctx, `
+	//
+	// RETURNING projects the point read's column list, so the row handed back
+	// carries the COALESCEd external_id, the stored casing and the base branch
+	// and clone state this statement left alone — none of which p can describe.
+	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO repositories (id, owner, repo, source, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, profiled_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 		ON CONFLICT(org_id, source, LOWER(owner), LOWER(repo)) DO UPDATE SET
@@ -70,7 +74,7 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 			default_branch = excluded.default_branch,
 			profiled_at    = excluded.profiled_at,
 			updated_at     = datetime('now')
-	`,
+		RETURNING `+repoProfileFullColumns,
 		uuid.New().String(), p.Owner, p.Repo, source,
 		nullIfEmpty(p.ExternalID),
 		nullIfEmpty(p.Description),
@@ -80,7 +84,7 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 		nullIfEmpty(p.DefaultBranch),
 		p.ProfiledAt,
 	)
-	return err
+	return scanRepositoryFull(row)
 }
 
 func (s *repoStore) GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error) {
@@ -383,45 +387,46 @@ func (s *repoStore) CountConfigured(ctx context.Context, orgID string) (int, err
 	return count, err
 }
 
-func (s *repoStore) UpdateBaseBranch(ctx context.Context, orgID, id, baseBranch string) error {
+func (s *repoStore) UpdateBaseBranch(ctx context.Context, orgID, id, baseBranch string) (domain.Repository, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Repository{}, err
 	}
-	res, err := s.q.ExecContext(ctx, `
+	row := s.q.QueryRowContext(ctx, `
 		UPDATE repositories
 		   SET base_branch = ?, updated_at = datetime('now')
 		 WHERE id = ?
-	`, nullIfEmpty(baseBranch), id)
-	if err != nil {
-		return err
-	}
-	return errIfNoRows(res, id)
+		RETURNING `+repoProfileFullColumns,
+		nullIfEmpty(baseBranch), id)
+	return scanUpdatedRepository(row, id)
 }
 
-func (s *repoStore) SeedCloneURL(ctx context.Context, orgID, id, cloneURL string) error {
+func (s *repoStore) SeedCloneURL(ctx context.Context, orgID, id, cloneURL string) (domain.Repository, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Repository{}, err
 	}
+	// A blank seed is nothing to write, but the row still has to come back —
+	// so it is folded to the empty string the SET expression already ignores
+	// rather than short-circuited before the statement. The alternative is
+	// returning a row this method never read, which is the lie the whole
+	// returned-row rule exists to stop.
 	if strings.TrimSpace(cloneURL) == "" {
-		return nil
+		cloneURL = ""
 	}
 	// The never-clobber rule is in the SET expression rather than the WHERE,
-	// so rows-affected answers only "does this id exist" — with the rule in
-	// the WHERE, a URL already on file and a row that is gone both come back
-	// as zero, and only one of them is an error. SQL evaluates every SET
+	// so the statement matches on "does this id exist" alone — with the rule in
+	// the WHERE, a URL already on file and a row that is gone would both return
+	// no row, and only one of them is an error. SQL evaluates every SET
 	// right-hand side against the pre-update row, so clone_url here is the
 	// stored value.
-	res, err := s.q.ExecContext(ctx, `
+	row := s.q.QueryRowContext(ctx, `
 		UPDATE repositories
-		   SET clone_url  = COALESCE(NULLIF(clone_url, ''), ?),
-		       updated_at = CASE WHEN clone_url IS NULL OR clone_url = ''
+		   SET clone_url  = COALESCE(NULLIF(clone_url, ''), NULLIF(?, '')),
+		       updated_at = CASE WHEN (clone_url IS NULL OR clone_url = '') AND ? != ''
 		                         THEN datetime('now') ELSE updated_at END
 		 WHERE id = ?
-	`, cloneURL, id)
-	if err != nil {
-		return err
-	}
-	return errIfNoRows(res, id)
+		RETURNING `+repoProfileFullColumns,
+		cloneURL, cloneURL, id)
+	return scanUpdatedRepository(row, id)
 }
 
 func (s *repoStore) Get(ctx context.Context, orgID, id string) (*domain.Repository, error) {
@@ -459,34 +464,45 @@ func (s *repoStore) GetByRef(ctx context.Context, orgID string, ref domain.RepoR
 	return findRepositoryByRef(ctx, s.q, source, ref)
 }
 
-func (s *repoStore) UpdateCloneStatusByRef(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) error {
+func (s *repoStore) UpdateCloneStatusByRef(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = s.q.ExecContext(ctx, `
+	row := s.q.QueryRowContext(ctx, `
 		UPDATE repositories
 		SET clone_status = ?, clone_error = ?, clone_error_kind = ?, updated_at = datetime('now')
 		WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, status, nullIfEmpty(errMsg), nullIfEmpty(errKind), source, ref.Owner, ref.Repo)
-	return err
+		RETURNING `+repoProfileFullColumns,
+		status, nullIfEmpty(errMsg), nullIfEmpty(errKind), source, ref.Owner, ref.Repo)
+	p, err := scanRepositoryFull(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Nothing answers to the name — the documented no-op, not a fault.
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
-// errIfNoRows turns an id-keyed write that matched nothing into
-// db.ErrNoSuchRepository. A driver that cannot report rows-affected is treated
-// as a success rather than a fabricated miss — the write may well have landed.
-func errIfNoRows(res sql.Result, id string) error {
-	n, err := res.RowsAffected()
+// scanUpdatedRepository reads the row an id-keyed UPDATE … RETURNING produced,
+// turning the empty result — the write matched nothing — into
+// db.ErrNoSuchRepository. It replaces the rows-affected probe these writes used
+// to run: RETURNING answers "did this land" and "what does the row say now" in
+// one statement, so there is nothing left to count.
+func scanUpdatedRepository(row rowScanner, id string) (domain.Repository, error) {
+	p, err := scanRepositoryFull(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Repository{}, fmt.Errorf("%w: %s", db.ErrNoSuchRepository, id)
+	}
 	if err != nil {
-		return nil
+		return domain.Repository{}, err
 	}
-	if n == 0 {
-		return fmt.Errorf("%w: %s", db.ErrNoSuchRepository, id)
-	}
-	return nil
+	return p, nil
 }
 
 // --- Admin-pool (`...System`) variants ---
@@ -526,7 +542,7 @@ func (s *repoStore) ListTrackedNamesSystem(ctx context.Context, orgID string) ([
 	return out, rows.Err()
 }
 
-func (s *repoStore) UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) error {
+func (s *repoStore) UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error) {
 	return s.UpdateCloneStatusByRef(ctx, orgID, ref, status, errMsg, errKind)
 }
 
@@ -542,7 +558,7 @@ func (s *repoStore) GetByRefSystem(ctx context.Context, orgID string, ref domain
 	return s.GetByRef(ctx, orgID, ref)
 }
 
-func (s *repoStore) UpsertSystem(ctx context.Context, orgID string, p domain.Repository) error {
+func (s *repoStore) UpsertSystem(ctx context.Context, orgID string, p domain.Repository) (domain.Repository, error) {
 	return s.Upsert(ctx, orgID, p)
 }
 

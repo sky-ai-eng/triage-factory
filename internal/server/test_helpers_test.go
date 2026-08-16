@@ -112,7 +112,7 @@ func doJSON(t *testing.T, s *Server, method, path string, body any) *httptest.Re
 func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
 	ctx := context.Background()
-	if err := sqlitestore.New(s.db).Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := sqlitestore.New(s.db).Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		Owner:         owner,
 		Repo:          repo,
 		DefaultBranch: "main",
@@ -147,7 +147,7 @@ func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) string {
 // separates "no such repository" from "not yours to pin".
 func seedUntrackedRepo(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
-	if err := sqlitestore.New(s.db).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := sqlitestore.New(s.db).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		Owner:         owner,
 		Repo:          repo,
 		DefaultBranch: "main",

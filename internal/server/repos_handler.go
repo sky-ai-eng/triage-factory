@@ -848,8 +848,11 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	// run the gate, and UpdateBaseBranch reports ErrNoSuchRepository rather
 	// than a silent zero-row UPDATE, so a repository deleted in between is a
 	// 404 and not an "updated" answering for a write that did nothing.
+	var updated domain.Repository
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Repos.UpdateBaseBranch(r.Context(), orgID, row.ID, branch)
+		var e error
+		updated, e = tx.Repos.UpdateBaseBranch(r.Context(), orgID, row.ID, branch)
+		return e
 	}); err != nil {
 		if errors.Is(err, db.ErrNoSuchRepository) {
 			notFound(w, "repo")
@@ -859,9 +862,12 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO(TFAC-837): answer with the updated repoJSON once UpdateBaseBranch
-	// returns the row.
-	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+	// The resource, in the same shape the reads serve it, off the row the
+	// write returned — not a status stub, and not the request body echoed
+	// back. can_edit is true by construction: the switch above only reaches
+	// here on repoWriteAllowed, which is the same predicate the annotation
+	// reports.
+	writeJSON(w, http.StatusOK, repoToJSON(updated, true))
 }
 
 // maxBranchPageSize is the branch list's declared page ceiling. It replaces

@@ -135,11 +135,11 @@ func (s *fetchRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref d
 	return &domain.Repository{ID: "repo-id-" + ref.Repo, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
 
-func (s *fetchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) error {
+func (s *fetchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.upserts = append(s.upserts, p)
-	return nil
+	return storedRepoRow(p), nil
 }
 
 func (s *fetchRepositoryStore) upsertedByID() map[string]domain.Repository {

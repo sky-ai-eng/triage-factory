@@ -63,7 +63,7 @@ func TestProtectedBranches_UnprofiledRepoStillRefusesMainAndMaster(t *testing.T)
 func TestProtectedBranches_ProfileAddsDefaultAndBase(t *testing.T) {
 	stores := newStores(t)
 	ctx := context.Background()
-	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		Owner: "acme", Repo: "api",
 		DefaultBranch: "trunk",
 		CloneURL:      "https://x", ProfileText: "t",
@@ -76,7 +76,7 @@ func TestProtectedBranches_ProfileAddsDefaultAndBase(t *testing.T) {
 	if err != nil || row == nil {
 		t.Fatalf("GetByRef: got=%v err=%v", row, err)
 	}
-	if err := stores.Repos.UpdateBaseBranch(ctx, runmode.LocalDefaultOrgID, row.ID, "develop"); err != nil {
+	if _, err := stores.Repos.UpdateBaseBranch(ctx, runmode.LocalDefaultOrgID, row.ID, "develop"); err != nil {
 		t.Fatalf("set base branch: %v", err)
 	}
 	got, err := pushpolicy.ProtectedBranches(ctx, stores, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug("acme/api"))

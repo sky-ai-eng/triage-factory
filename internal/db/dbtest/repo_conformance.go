@@ -50,9 +50,104 @@ type RepositoryStoreFactory func(t *testing.T) (store db.RepositoryStore, orgID 
 //   - GetOrCreateSystem mints a row for an untracked repository, is
 //     idempotent, never duplicates or rewrites an existing (profiled)
 //     one, matches case-insensitively, and records an external id.
+//   - Every single-row write returns the row it persisted, and that row is
+//     the one a point read finds.
 func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
+
+	t.Run("every_single_row_write_returns_the_stored_row", func(t *testing.T) {
+		// The returned-row standard, applied to each converted method in turn.
+		// The property is one line — what the write handed back is what a point
+		// read finds — and AssertWriteReturnedStoredRow's doc covers what that
+		// one line is standing in for (RETURNING semantics, RLS visibility on
+		// the update arm, column-list drift).
+		s, orgID := mk(t)
+		read := func(id string) func() (*domain.Repository, error) {
+			return func() (*domain.Repository, error) { return s.Get(ctx, orgID, id) }
+		}
+
+		created, err := s.Upsert(ctx, orgID, domain.Repository{
+			Owner: "Acme", Repo: "Api",
+			Description: "v1", ProfileText: "v1",
+			CloneURL: "git@github.com:Acme/Api.git", DefaultBranch: "main",
+			ExternalID: "1296269",
+		})
+		if err != nil {
+			t.Fatalf("Upsert (insert arm): %v", err)
+		}
+		if created.ID == "" {
+			t.Fatal("Upsert returned a row with no id — the id is the only handle a caller that has never read this repository can get")
+		}
+		AssertWriteReturnedStoredRow(t, "Upsert (insert arm)", created, read(created.ID))
+
+		branched, err := s.UpdateBaseBranch(ctx, orgID, created.ID, "develop")
+		if err != nil {
+			t.Fatalf("UpdateBaseBranch: %v", err)
+		}
+		if branched.BaseBranch != "develop" {
+			t.Errorf("UpdateBaseBranch returned BaseBranch %q, want develop", branched.BaseBranch)
+		}
+		AssertWriteReturnedStoredRow(t, "UpdateBaseBranch", branched, read(created.ID))
+
+		// The update arm, and the case the standard is really for: this input
+		// is wrong about the row in four ways at once — the casing it spells
+		// the repository with, the id it does not carry, the base branch it
+		// says nothing about, and the row id itself — and the returned row is
+		// right about all four.
+		updated, err := s.UpsertSystem(ctx, orgID, domain.Repository{
+			Owner: "acme", Repo: "api",
+			Description: "v2", ProfileText: "v2", DefaultBranch: "main",
+		})
+		if err != nil {
+			t.Fatalf("UpsertSystem (update arm): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpsertSystem (update arm)", updated, read(created.ID))
+		if updated.ID != created.ID || updated.Slug() != "Acme/Api" {
+			t.Errorf("update arm returned %s/%s, want the existing row under its stored casing", updated.ID, updated.Slug())
+		}
+		if updated.ExternalID != "1296269" || updated.BaseBranch != "develop" {
+			t.Errorf("returned row echoes the input rather than the row: external_id=%q base_branch=%q",
+				updated.ExternalID, updated.BaseBranch)
+		}
+
+		stamped, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}, "failed", "boom", "ssh")
+		if err != nil || stamped == nil {
+			t.Fatalf("UpdateCloneStatusByRef: got=%v err=%v", stamped, err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpdateCloneStatusByRef", *stamped, read(created.ID))
+
+		stampedSys, err := s.UpdateCloneStatusByRefSystem(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}, "ok", "", "")
+		if err != nil || stampedSys == nil {
+			t.Fatalf("UpdateCloneStatusByRefSystem: got=%v err=%v", stampedSys, err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpdateCloneStatusByRefSystem", *stampedSys, read(created.ID))
+
+		// Both halves of the seed, because they differ in what the row ends up
+		// saying and agree on it being the row that comes back: the first fills
+		// an empty column, the second is outranked by what the first stored.
+		bare, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "bare"})
+		if err != nil || bare == nil {
+			t.Fatalf("GetOrCreateSystem: got=%v err=%v", bare, err)
+		}
+		seeded, err := s.SeedCloneURL(ctx, orgID, bare.ID, "https://example.test/octo/bare.git")
+		if err != nil {
+			t.Fatalf("SeedCloneURL (fills): %v", err)
+		}
+		if seeded.CloneURL != "https://example.test/octo/bare.git" {
+			t.Errorf("SeedCloneURL returned clone url %q, want the seeded one", seeded.CloneURL)
+		}
+		AssertWriteReturnedStoredRow(t, "SeedCloneURL (fills)", seeded, read(bare.ID))
+
+		kept, err := s.SeedCloneURL(ctx, orgID, bare.ID, "https://example.test/octo/second-guess.git")
+		if err != nil {
+			t.Fatalf("SeedCloneURL (never clobbers): %v", err)
+		}
+		if kept.CloneURL != "https://example.test/octo/bare.git" {
+			t.Errorf("SeedCloneURL returned clone url %q, want the stored one kept", kept.CloneURL)
+		}
+		AssertWriteReturnedStoredRow(t, "SeedCloneURL (never clobbers)", kept, read(bare.ID))
+	})
 
 	t.Run("Upsert_then_GetByRef_round_trips", func(t *testing.T) {
 		s, orgID := mk(t)
@@ -68,7 +163,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			DefaultBranch: "main",
 			ProfiledAt:    &now,
 		}
-		if err := s.Upsert(ctx, orgID, p); err != nil {
+		if _, err := s.Upsert(ctx, orgID, p); err != nil {
 			t.Fatalf("Upsert: %v", err)
 		}
 		got, err := s.GetByRef(ctx, orgID, repoRef("octo/widget"))
@@ -161,10 +256,10 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// the write must say so rather than affect zero rows while the handler
 		// answers "updated".
 		s, orgID := mk(t)
-		if err := s.UpdateBaseBranch(ctx, orgID, unknownRepoID, "develop"); !errors.Is(err, db.ErrNoSuchRepository) {
+		if _, err := s.UpdateBaseBranch(ctx, orgID, unknownRepoID, "develop"); !errors.Is(err, db.ErrNoSuchRepository) {
 			t.Errorf("UpdateBaseBranch on an unknown id = %v, want db.ErrNoSuchRepository", err)
 		}
-		if err := s.SeedCloneURL(ctx, orgID, unknownRepoID, "https://example.test/o/r.git"); !errors.Is(err, db.ErrNoSuchRepository) {
+		if _, err := s.SeedCloneURL(ctx, orgID, unknownRepoID, "https://example.test/o/r.git"); !errors.Is(err, db.ErrNoSuchRepository) {
 			t.Errorf("SeedCloneURL on an unknown id = %v, want db.ErrNoSuchRepository", err)
 		}
 	})
@@ -184,21 +279,21 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if bare == nil || known == nil {
 			t.Fatal("seed rows missing")
 		}
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "octo", Repo: "known",
 			CloneURL: "git@github.com:octo/known.git", DefaultBranch: "main",
 		}); err != nil {
 			t.Fatalf("seed a clone url: %v", err)
 		}
 
-		if err := s.SeedCloneURL(ctx, orgID, bare.ID, "https://example.test/octo/bare.git"); err != nil {
+		if _, err := s.SeedCloneURL(ctx, orgID, bare.ID, "https://example.test/octo/bare.git"); err != nil {
 			t.Fatalf("SeedCloneURL onto an empty url: %v", err)
 		}
 		if got, _ := s.Get(ctx, orgID, bare.ID); got == nil || got.CloneURL != "https://example.test/octo/bare.git" {
 			t.Errorf("clone url = %+v, want the seeded one", got)
 		}
 
-		if err := s.SeedCloneURL(ctx, orgID, known.ID, "https://example.test/octo/known.git"); err != nil {
+		if _, err := s.SeedCloneURL(ctx, orgID, known.ID, "https://example.test/octo/known.git"); err != nil {
 			t.Fatalf("SeedCloneURL over an existing url should be a no-op, got %v", err)
 		}
 		if got, _ := s.Get(ctx, orgID, known.ID); got == nil || got.CloneURL != "git@github.com:octo/known.git" {
@@ -212,7 +307,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// so a re-profile that re-runs Upsert can't clobber the
 		// setting. Same goes for clone-status fields.
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "o", Repo: "r",
 			Description: "v1", ProfileText: "v1",
 			DefaultBranch: "main",
@@ -222,12 +317,12 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if err := setBaseBranch(ctx, s, orgID, "o/r", "develop"); err != nil {
 			t.Fatalf("UpdateBaseBranch: %v", err)
 		}
-		if err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "o", Repo: "r"}, "ok", "", ""); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "o", Repo: "r"}, "ok", "", ""); err != nil {
 			t.Fatalf("UpdateCloneStatus: %v", err)
 		}
 
 		// Re-profile: same id, refreshed description + profile text.
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "o", Repo: "r",
 			Description: "v2", ProfileText: "v2",
 			DefaultBranch: "main",
@@ -254,7 +349,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		s, orgID := mk(t)
 		for _, id := range []string{"z/last", "a/first", "m/middle"} {
 			owner, repo := id[:1], id[2:]
-			if err := s.Upsert(ctx, orgID, domain.Repository{
+			if _, err := s.Upsert(ctx, orgID, domain.Repository{
 				ID: id, Owner: owner, Repo: repo,
 				DefaultBranch: "main",
 			}); err != nil {
@@ -309,13 +404,13 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 	t.Run("ListWithContent_filters_empty_profile_text", func(t *testing.T) {
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "o", Repo: "with",
 			ProfileText: "real content", DefaultBranch: "main",
 		}); err != nil {
 			t.Fatalf("Upsert with: %v", err)
 		}
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "o", Repo: "empty",
 			ProfileText: "", DefaultBranch: "main",
 		}); err != nil {
@@ -335,7 +430,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		s, orgID := mk(t)
 		// Pre-seed an existing row with profile data + user-configured
 		// state so we can assert SetConfigured doesn't clobber it.
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "keep", Repo: "me",
 			Description: "kept", ProfileText: "kept body",
 			DefaultBranch: "main",
@@ -346,7 +441,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Fatalf("UpdateBaseBranch on kept: %v", err)
 		}
 		// A row that's going to be dropped.
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "drop", Repo: "me",
 			DefaultBranch: "main",
 		}); err != nil {
@@ -403,7 +498,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// case-insensitive; the two spellings were never two repositories.
 		s, orgID := mk(t)
 		profiled := time.Now().UTC().Truncate(time.Second)
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "Acme", Repo: "Api",
 			Description: "Api service", ProfileText: "accumulated profile",
 			CloneURL: "git@github.com:Acme/Api.git", DefaultBranch: "main",
@@ -415,7 +510,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if err := setBaseBranch(ctx, s, orgID, "Acme/Api", "develop"); err != nil {
 			t.Fatalf("UpdateBaseBranch: %v", err)
 		}
-		if err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "Acme", Repo: "Api"}, "ok", "", ""); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "Acme", Repo: "Api"}, "ok", "", ""); err != nil {
 			t.Fatalf("UpdateCloneStatus: %v", err)
 		}
 		etagAt := profiled.Add(time.Hour)
@@ -502,7 +597,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// use site. The pre-D2 impl used nullIfEmpty(); the new
 		// store does the same via NULLIF / nullIfEmpty.
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "o", Repo: "r",
 			DefaultBranch: "main",
 		}); err != nil {
@@ -532,7 +627,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// the update is issued with different casing ("acme/API") and must
 		// still find the row.
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "Acme", Repo: "Api",
 			DefaultBranch: "main",
 		}); err != nil {
@@ -552,14 +647,14 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 	t.Run("UpdateCloneStatus_records_outcome", func(t *testing.T) {
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "o", Repo: "r",
 			DefaultBranch: "main",
 		}); err != nil {
 			t.Fatalf("Upsert: %v", err)
 		}
 		// ok path: empty err fields collapse to NULL → empty string on read.
-		if err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "o", Repo: "r"}, "ok", "", ""); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "o", Repo: "r"}, "ok", "", ""); err != nil {
 			t.Fatalf("UpdateCloneStatus ok: %v", err)
 		}
 		got, _ := s.GetByRef(ctx, orgID, repoRef("o/r"))
@@ -567,7 +662,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Errorf("ok status mismatch: %+v", got)
 		}
 		// failed path: ssh-kind capture for SSH preflight confirms.
-		if err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "o", Repo: "r"}, "failed", "permission denied", "ssh"); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "o", Repo: "r"}, "failed", "permission denied", "ssh"); err != nil {
 			t.Fatalf("UpdateCloneStatus failed: %v", err)
 		}
 		got, _ = s.GetByRef(ctx, orgID, repoRef("o/r"))
@@ -583,7 +678,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// raw SQL UPDATE silently affects 0 rows — store contract
 		// mirrors that, no error.
 		s, orgID := mk(t)
-		if err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "ghost", Repo: "repo"}, "ok", "", ""); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "ghost", Repo: "repo"}, "ok", "", ""); err != nil {
 			t.Errorf("UpdateCloneStatus on absent repo should be a no-op, got %v", err)
 		}
 	})
@@ -615,7 +710,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Errorf("GetSystem with different casing: got=%v err=%v", sys, err)
 		}
 
-		if err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}, "failed", "boom", "ssh"); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}, "failed", "boom", "ssh"); err != nil {
 			t.Fatalf("UpdateCloneStatus: %v", err)
 		}
 		got, _ = s.GetByRef(ctx, orgID, repoRef("Acme/Api"))
@@ -661,10 +756,10 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if got, err := s.GetByRefSystem(ctx, orgID, bogus); err == nil {
 			t.Errorf("GetByRefSystem accepted an unknown source and returned %+v; want an error", got)
 		}
-		if err := s.UpdateCloneStatusByRef(ctx, orgID, bogus, "failed", "boom", "ssh"); err == nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, bogus, "failed", "boom", "ssh"); err == nil {
 			t.Error("UpdateCloneStatusByRef accepted an unknown source; want an error")
 		}
-		if err := s.UpdateCloneStatusByRefSystem(ctx, orgID, bogus, "failed", "boom", "ssh"); err == nil {
+		if _, err := s.UpdateCloneStatusByRefSystem(ctx, orgID, bogus, "failed", "boom", "ssh"); err == nil {
 			t.Error("UpdateCloneStatusByRefSystem accepted an unknown source; want an error")
 		}
 		if err := s.SetPullsPollStateByRefSystem(ctx, orgID, bogus, `"etag"`, time.Now()); err == nil {
@@ -736,7 +831,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// as it stands — one row, same id, every cached column intact.
 		s, orgID := mk(t)
 		profiled := time.Now().UTC().Truncate(time.Second)
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "octo", Repo: "widget",
 			Description: "Widget service", ProfileText: "Service profile body",
 			CloneURL: "git@github.com:octo/widget.git", DefaultBranch: "main",
@@ -747,7 +842,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if err := setBaseBranch(ctx, s, orgID, "octo/widget", "develop"); err != nil {
 			t.Fatalf("UpdateBaseBranch: %v", err)
 		}
-		if err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "widget"}, "ok", "", ""); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "widget"}, "ok", "", ""); err != nil {
 			t.Fatalf("UpdateCloneStatus: %v", err)
 		}
 
@@ -849,7 +944,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if err := s.SetConfigured(ctx, orgID, []string{"Acme/Api", "octo/known", "octo/bare"}); err != nil {
 			t.Fatalf("SetConfigured: %v", err)
 		}
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "octo", Repo: "known",
 			ExternalID: "111", DefaultBranch: "main",
 		}); err != nil {
@@ -933,7 +1028,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// re-profile carrying an id refreshes it while one carrying none
 		// leaves the stored id alone.
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "octo", Repo: "widget",
 			Source: domain.RepoSourceGitHub, ExternalID: "1296269",
 			ProfileText: "v1", DefaultBranch: "main",
@@ -946,7 +1041,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}
 
 		// A re-profile that carries no id keeps the one on the row.
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "octo", Repo: "widget",
 			ProfileText: "v2", DefaultBranch: "main",
 		}); err != nil {
@@ -962,7 +1057,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 		// One that carries a different id takes it: GitHub is authoritative
 		// for what the slug resolves to now.
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "octo", Repo: "widget",
 			ExternalID: "77", ProfileText: "v3", DefaultBranch: "main",
 		}); err != nil {
@@ -980,7 +1075,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// case-sensitive key rather than the folded identity. The stored
 		// casing wins, matching what the tracked-set reconcile does.
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "Acme", Repo: "Api",
 			ProfileText: "v1", DefaultBranch: "main",
 		}); err != nil {
@@ -990,7 +1085,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Fatalf("UpdateBaseBranch: %v", err)
 		}
 
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "acme", Repo: "api",
 			ProfileText: "v2", DefaultBranch: "main", ExternalID: "1296269",
 		}); err != nil {
@@ -1017,7 +1112,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 	t.Run("Upsert_refuses_an_unknown_source", func(t *testing.T) {
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.Repository{
+		if _, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "octo", Repo: "widget", Source: "gitlob",
 		}); err == nil {
 			t.Error("Upsert accepted an unknown source; want an error")
@@ -1130,7 +1225,8 @@ func setBaseBranch(ctx context.Context, s db.RepositoryStore, orgID, slug, branc
 	if row == nil {
 		return fmt.Errorf("%w: %s", db.ErrNoSuchRepository, slug)
 	}
-	return s.UpdateBaseBranch(ctx, orgID, row.ID, branch)
+	_, err = s.UpdateBaseBranch(ctx, orgID, row.ID, branch)
+	return err
 }
 
 func projectIDs(profiles []domain.Repository) []string {

@@ -458,7 +458,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Repos.GetSystem(ctx, orgID, repoID); err != nil {
 			t.Errorf("Repos.GetSystem: %v", err)
 		}
-		if err := stores.Repos.UpdateCloneStatusByRefSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "conformance-repo"}, "ok", "", ""); err != nil {
+		if _, err := stores.Repos.UpdateCloneStatusByRefSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "conformance-repo"}, "ok", "", ""); err != nil {
 			t.Errorf("Repos.UpdateCloneStatusByRefSystem: %v", err)
 		}
 	})
