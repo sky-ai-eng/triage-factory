@@ -3,19 +3,20 @@ package dbtest
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// InstallationGrantBackend is one wired backend for the grant-mirror suite.
+// ReachableReposBackend is one wired backend for the grant-mirror suite.
 // Installations are staged through the store rather than raw SQL (both dialects
 // expose UpsertInstallation), so the only fixture a backend has to supply by
 // hand is a tracked repository — team_github_repos has no store method that
 // works claims-free on both pools.
-type InstallationGrantBackend struct {
+type ReachableReposBackend struct {
 	Apps   db.GitHubAppsStore
-	Mirror db.InstallationReposStore
+	Mirror db.ReachableReposStore
 	// OrgID every call in the suite passes. SQLite pins the local sentinel;
 	// Postgres mints a real org.
 	OrgID string
@@ -23,10 +24,10 @@ type InstallationGrantBackend struct {
 	TrackRepo func(t *testing.T, owner, repo string)
 }
 
-// InstallationGrantFactory returns a fresh, isolated backend per subtest.
-type InstallationGrantFactory func(t *testing.T) InstallationGrantBackend
+// ReachableReposFactory returns a fresh, isolated backend per subtest.
+type ReachableReposFactory func(t *testing.T) ReachableReposBackend
 
-// RunInstallationGrantConformance is the shared assertion suite for the
+// RunReachableReposConformance is the shared assertion suite for the
 // App-installation grant mirror — the record of what each installation can
 // actually reach, and the two derived states it exists to make computable.
 //
@@ -48,13 +49,13 @@ type InstallationGrantFactory func(t *testing.T) InstallationGrantBackend
 //   - Both derived states — reach without purpose and scope drift — including
 //     the case-folding both comparisons need and the gate that keeps an
 //     un-mirrored org from reporting its entire tracked set as drift.
-func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) {
+func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 	t.Helper()
 	ctx := context.Background()
 
 	// install stages a live installation row — the FK parent every mirror row
 	// hangs off, and the thing the reads join through.
-	install := func(t *testing.T, b InstallationGrantBackend, installationID, login, selection string) {
+	install := func(t *testing.T, b ReachableReposBackend, installationID, login, selection string) {
 		t.Helper()
 		if err := b.Apps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 			InstallationID:      installationID,
@@ -67,8 +68,8 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		}
 	}
 
-	entry := func(b InstallationGrantBackend, installationID, owner, repo, externalID string) domain.InstallationRepository {
-		return domain.InstallationRepository{
+	entry := func(b ReachableReposBackend, installationID, owner, repo, externalID string) domain.ReachableRepository {
+		return domain.ReachableRepository{
 			OrgID:          b.OrgID,
 			InstallationID: installationID,
 			Owner:          owner,
@@ -77,7 +78,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		}
 	}
 
-	slugs := func(t *testing.T, rows []domain.InstallationRepository) []string {
+	slugs := func(t *testing.T, rows []domain.ReachableRepository) []string {
 		t.Helper()
 		out := make([]string, 0, len(rows))
 		for _, r := range rows {
@@ -109,7 +110,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 	t.Run("ReplaceIsGitHubsAnswerIncludingRemovals", func(t *testing.T) {
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "web", "11"),
 		}); err != nil {
@@ -119,7 +120,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		// The account owner narrows the selection: web out, worker in. A mirror
 		// that only ever grew would keep reporting reach the App has lost, which
 		// is the failure the whole table exists to prevent.
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "worker", "12"),
 		}); err != nil {
@@ -139,7 +140,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		// comparison a rename cannot break.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "424242"),
 			entry(b, "1", "acme", "web", ""), // an entry GitHub sent no id for
 		}); err != nil {
@@ -172,7 +173,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		// impossible rather than merely avoided — no writer has to remember.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "Acme", "API", "10"),
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
@@ -196,7 +197,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		// what the mirror must still hold.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -204,7 +205,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 
 		bad := entry(b, "1", "acme", "web", "11")
 		bad.Source = "gitlab" // not a provider this schema knows
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "worker", "12"),
 			bad,
 		}); err == nil {
@@ -225,12 +226,12 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
 		install(t, b, "2", "other", domain.RepositorySelectionAll)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem (1): %v", err)
 		}
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "2", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "2", []domain.ReachableRepository{
 			entry(b, "2", "other", "tool", "20"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem (2): %v", err)
@@ -255,7 +256,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		// cleared.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -282,12 +283,12 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
 		install(t, b, "2", "other", domain.RepositorySelectionAll)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem (1): %v", err)
 		}
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "2", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "2", []domain.ReachableRepository{
 			entry(b, "2", "other", "tool", "20"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem (2): %v", err)
@@ -368,7 +369,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
 		b.TrackRepo(t, "acme", "api")
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "secrets", "11"),
 			entry(b, "1", "acme", "payroll", "12"),
@@ -390,7 +391,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
 		b.TrackRepo(t, "Acme", "API")
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -411,7 +412,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		// as a live security problem.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "secrets", "11"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -436,7 +437,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		b.TrackRepo(t, "acme", "api")
 		b.TrackRepo(t, "acme", "legacy")
 		b.TrackRepo(t, "Acme", "Web") // folds onto the granted acme/web
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "web", "11"),
 		}); err != nil {
@@ -458,7 +459,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
 		b.TrackRepo(t, "acme", "legacy")
 		b.TrackRepo(t, "Acme", "Legacy")
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -500,7 +501,7 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
 		b.TrackRepo(t, "acme", "api")
 		b.TrackRepo(t, "acme", "legacy")
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.InstallationRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -520,6 +521,301 @@ func RunInstallationGrantConformance(t *testing.T, mk InstallationGrantFactory) 
 		}
 		if len(got) != 0 {
 			t.Errorf("scope drift = %v after the installation was removed; want none", trackedSlugs(got))
+		}
+	})
+
+	// ---------------------------------------------------------------
+	// The generalized half: the reads the picker and the write gate run, and
+	// the PAT tier that has no installation to hang off.
+	// ---------------------------------------------------------------
+
+	patEntry := func(b ReachableReposBackend, owner, repo, language, description string) domain.ReachableRepository {
+		return domain.ReachableRepository{
+			OrgID:       b.OrgID,
+			Owner:       owner,
+			Repo:        repo,
+			Language:    language,
+			Description: description,
+		}
+	}
+
+	listSlugs := func(t *testing.T, b ReachableReposBackend, class domain.GitHubCredentialClass, q string, opts db.ListOpts) ([]string, int) {
+		t.Helper()
+		rows, total, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, class, q, opts)
+		if err != nil {
+			t.Fatalf("ListReachableSystem(%q, %q): %v", class, q, err)
+		}
+		return slugs(t, rows), total
+	}
+
+	t.Run("PATTierNeedsNoInstallation", func(t *testing.T) {
+		// The whole point of generalizing the mirror: a PAT org has no
+		// installation row to cascade from, so its entries hang off the host.
+		// Nothing here stages an installation, and the write must still land.
+		b := mk(t)
+		if err := b.Mirror.ReplaceForPATSystem(ctx, b.OrgID, "https://github.com", []domain.ReachableRepository{
+			patEntry(b, "acme", "web", "Go", ""),
+			patEntry(b, "acme", "api", "Go", ""),
+		}); err != nil {
+			t.Fatalf("ReplaceForPATSystem: %v", err)
+		}
+		got, total := listSlugs(t, b, domain.GitHubCredentialClassPAT, "", db.Unwindowed)
+		equal(t, "pat list", got, []string{"acme/api", "acme/web"})
+		if total != 2 {
+			t.Errorf("total = %d; want 2 — a store-backed list can count itself, which a proxy list could not", total)
+		}
+	})
+
+	t.Run("PATReplaceIsWholeClassIncludingAHostChange", func(t *testing.T) {
+		// An org authenticates against one GitHub deployment at a time. Rows left
+		// by a previous GitHubBaseURL are the old deployment's repositories, not a
+		// second scope to keep — serving them beside the new host's would answer
+		// with a reach the org does not have.
+		b := mk(t)
+		if err := b.Mirror.ReplaceForPATSystem(ctx, b.OrgID, "https://ghe.internal", []domain.ReachableRepository{
+			patEntry(b, "old", "repo", "", ""),
+		}); err != nil {
+			t.Fatalf("ReplaceForPATSystem(old host): %v", err)
+		}
+		if err := b.Mirror.ReplaceForPATSystem(ctx, b.OrgID, "https://github.com", []domain.ReachableRepository{
+			patEntry(b, "new", "repo", "", ""),
+		}); err != nil {
+			t.Fatalf("ReplaceForPATSystem(new host): %v", err)
+		}
+		got, total := listSlugs(t, b, domain.GitHubCredentialClassPAT, "", db.Unwindowed)
+		equal(t, "pat list after host change", got, []string{"new/repo"})
+		if total != 1 {
+			t.Errorf("total = %d after a host change; want 1", total)
+		}
+	})
+
+	t.Run("ClassesDoNotBleedIntoEachOther", func(t *testing.T) {
+		// An org mid-cutover has both answers on file. Every read filters on the
+		// org's CURRENT class, so the other tier's rows are inert rather than
+		// merged in — the union would be a reach the org does not have.
+		b := mk(t)
+		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
+			entry(b, "1", "acme", "granted", "10"),
+		}); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem: %v", err)
+		}
+		if err := b.Mirror.ReplaceForPATSystem(ctx, b.OrgID, "https://github.com", []domain.ReachableRepository{
+			patEntry(b, "acme", "personal", "", ""),
+		}); err != nil {
+			t.Fatalf("ReplaceForPATSystem: %v", err)
+		}
+
+		app, appTotal := listSlugs(t, b, domain.GitHubCredentialClassBYOApp, "", db.Unwindowed)
+		equal(t, "byo_app list", app, []string{"acme/granted"})
+		pat, patTotal := listSlugs(t, b, domain.GitHubCredentialClassPAT, "", db.Unwindowed)
+		equal(t, "pat list", pat, []string{"acme/personal"})
+		if appTotal != 1 || patTotal != 1 {
+			t.Errorf("totals = (%d, %d); want (1, 1) — each class counts only its own", appTotal, patTotal)
+		}
+	})
+
+	t.Run("ListFiltersOnSlugDescriptionAndLanguage", func(t *testing.T) {
+		// The three fields the picker used to filter on in the browser. Moving the
+		// filter server-side is what lets the surface stop holding the whole set in
+		// memory, so all three have to survive the move.
+		b := mk(t)
+		if err := b.Mirror.ReplaceForPATSystem(ctx, b.OrgID, "https://github.com", []domain.ReachableRepository{
+			patEntry(b, "acme", "api", "Go", "the billing service"),
+			patEntry(b, "acme", "web", "TypeScript", "the storefront"),
+			patEntry(b, "other", "tool", "Rust", "a helper"),
+		}); err != nil {
+			t.Fatalf("ReplaceForPATSystem: %v", err)
+		}
+
+		bySlug, total := listSlugs(t, b, domain.GitHubCredentialClassPAT, "acme/", db.Unwindowed)
+		equal(t, "slug filter", bySlug, []string{"acme/api", "acme/web"})
+		if total != 2 {
+			t.Errorf("slug-filter total = %d; want 2 — the total is what the filter matches, not the page", total)
+		}
+		byDesc, _ := listSlugs(t, b, domain.GitHubCredentialClassPAT, "storefront", db.Unwindowed)
+		equal(t, "description filter", byDesc, []string{"acme/web"})
+		byLang, _ := listSlugs(t, b, domain.GitHubCredentialClassPAT, "rust", db.Unwindowed)
+		equal(t, "language filter", byLang, []string{"other/tool"})
+		// Case-insensitive on the slug too: GitHub identifiers are.
+		byCase, _ := listSlugs(t, b, domain.GitHubCredentialClassPAT, "ACME/API", db.Unwindowed)
+		equal(t, "case-insensitive filter", byCase, []string{"acme/api"})
+	})
+
+	t.Run("ListFilterTreatsMetacharactersLiterally", func(t *testing.T) {
+		// A search box takes whatever is typed. An unescaped % would match every
+		// row, which reads as "the filter did nothing" rather than as "no match".
+		b := mk(t)
+		if err := b.Mirror.ReplaceForPATSystem(ctx, b.OrgID, "https://github.com", []domain.ReachableRepository{
+			patEntry(b, "acme", "api", "", ""),
+		}); err != nil {
+			t.Fatalf("ReplaceForPATSystem: %v", err)
+		}
+		got, total := listSlugs(t, b, domain.GitHubCredentialClassPAT, "%", db.Unwindowed)
+		if len(got) != 0 || total != 0 {
+			t.Errorf("filter %%%% matched %v (total %d); want nothing — the metacharacter is a literal here", got, total)
+		}
+	})
+
+	t.Run("ListPagesOnATotalOrder", func(t *testing.T) {
+		// Offset paging over a set without a total order drops and repeats rows.
+		// The folded slug is that order, and the per-class unique index proves no
+		// two rows tie on it.
+		b := mk(t)
+		if err := b.Mirror.ReplaceForPATSystem(ctx, b.OrgID, "https://github.com", []domain.ReachableRepository{
+			patEntry(b, "acme", "c", "", ""),
+			patEntry(b, "acme", "a", "", ""),
+			patEntry(b, "acme", "b", "", ""),
+		}); err != nil {
+			t.Fatalf("ReplaceForPATSystem: %v", err)
+		}
+		first, total := listSlugs(t, b, domain.GitHubCredentialClassPAT, "", db.ListOpts{Limit: 2})
+		equal(t, "page 1", first, []string{"acme/a", "acme/b"})
+		if total != 3 {
+			t.Errorf("page-1 total = %d; want the filtered total 3, not the page length", total)
+		}
+		second, total := listSlugs(t, b, domain.GitHubCredentialClassPAT, "", db.ListOpts{Limit: 2, Offset: 2})
+		equal(t, "page 2", second, []string{"acme/c"})
+		if total != 3 {
+			t.Errorf("page-2 total = %d; want 3 on every page", total)
+		}
+	})
+
+	t.Run("StateReportsTheStalestScope", func(t *testing.T) {
+		// A cache is only as fresh as its oldest scope. An org with two
+		// installations, one refreshed now and one long ago, is stale for the
+		// repositories on the second account — and taking the newest would report
+		// it fresh and never refresh the half that needs it.
+		b := mk(t)
+		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
+		install(t, b, "2", "beta", domain.RepositorySelectionSelected)
+
+		empty, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp)
+		if err != nil {
+			t.Fatalf("ReachableStateSystem(empty): %v", err)
+		}
+		if empty.Known() || empty.Count != 0 {
+			t.Errorf("state = %+v before any write; want unknown and empty — the readiness gate keys on it", empty)
+		}
+
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
+			entry(b, "1", "acme", "api", "10"),
+		}); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem(1): %v", err)
+		}
+		afterFirst, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp)
+		if err != nil {
+			t.Fatalf("ReachableStateSystem(after first): %v", err)
+		}
+		if !afterFirst.Known() || afterFirst.Count != 1 || afterFirst.ObservedAt.IsZero() {
+			t.Fatalf("state = %+v after one scope; want known, one row, and an observed_at", afterFirst)
+		}
+
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "2", []domain.ReachableRepository{
+			entry(b, "2", "beta", "web", "20"),
+		}); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem(2): %v", err)
+		}
+		afterSecond, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp)
+		if err != nil {
+			t.Fatalf("ReachableStateSystem(after second): %v", err)
+		}
+		if afterSecond.Count != 2 {
+			t.Errorf("state count = %d across two scopes; want 2", afterSecond.Count)
+		}
+		if afterSecond.ObservedAt.After(afterFirst.ObservedAt) {
+			t.Errorf("observed_at moved forward to %v when the older scope still reads %v; the state must describe the STALEST scope",
+				afterSecond.ObservedAt, afterFirst.ObservedAt)
+		}
+	})
+
+	t.Run("AnEmptyRefreshIsKnownNotUnlooked", func(t *testing.T) {
+		// The distinction row counts cannot express. An installation narrowed to
+		// no repositories writes zero entries, exactly like a refresh that never
+		// ran — and read as the latter, the picker says "discovering
+		// repositories…" forever and asks for a fresh enumeration on every open.
+		b := mk(t)
+		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", nil); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem(empty): %v", err)
+		}
+		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp)
+		if err != nil {
+			t.Fatalf("ReachableStateSystem: %v", err)
+		}
+		if !state.Known() {
+			t.Error("a successful refresh that found nothing reads as never-refreshed; the readiness gate cannot tell them apart")
+		}
+		if state.Count != 0 {
+			t.Errorf("count = %d after an empty refresh; want 0", state.Count)
+		}
+		if state.StaleAt(state.ObservedAt.Add(time.Minute), time.Hour) {
+			t.Error("an empty-but-refreshed scope reads as stale a minute later; it would re-enumerate on every open")
+		}
+	})
+
+	t.Run("RetiringAnInstallationRetiresItsRefresh", func(t *testing.T) {
+		// The mirror image: once an installation is gone, the refresh that
+		// established its reach must stop vouching for it, or an org whose only
+		// installation was removed keeps reading as "looked at, found nothing".
+		b := mk(t)
+		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, "1", []domain.ReachableRepository{
+			entry(b, "1", "acme", "api", "10"),
+		}); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem: %v", err)
+		}
+		if err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
+			t.Fatalf("MarkInstallationRemoved: %v", err)
+		}
+		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp)
+		if err != nil {
+			t.Fatalf("ReachableStateSystem: %v", err)
+		}
+		if state.Known() {
+			t.Error("the removed installation's refresh still vouches for the org's reach")
+		}
+	})
+
+	t.Run("SlugSetAnswersTheWriteGate", func(t *testing.T) {
+		// The write gate's read: bounded by the caller's selection rather than by
+		// org size, keyed lowercase because GitHub identifiers are
+		// case-insensitive, and silent about slugs it does not hold — which is what
+		// makes an absent slug a rejection rather than a lookup failure.
+		b := mk(t)
+		if err := b.Mirror.ReplaceForPATSystem(ctx, b.OrgID, "https://github.com", []domain.ReachableRepository{
+			patEntry(b, "Acme", "API", "", ""),
+		}); err != nil {
+			t.Fatalf("ReplaceForPATSystem: %v", err)
+		}
+		got, err := b.Mirror.ReachableSlugsSystem(ctx, b.OrgID, domain.GitHubCredentialClassPAT,
+			[]string{"acme/api", "acme/ghost"})
+		if err != nil {
+			t.Fatalf("ReachableSlugsSystem: %v", err)
+		}
+		if _, ok := got["acme/api"]; !ok {
+			t.Errorf("reachable set = %v; want it to hold acme/api despite the stored casing", got)
+		}
+		if _, ok := got["acme/ghost"]; ok {
+			t.Errorf("reachable set = %v; want acme/ghost absent", got)
+		}
+
+		// The other class holds nothing, so the same selection comes back empty
+		// rather than borrowing the PAT tier's answer.
+		other, err := b.Mirror.ReachableSlugsSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp,
+			[]string{"acme/api"})
+		if err != nil {
+			t.Fatalf("ReachableSlugsSystem(other class): %v", err)
+		}
+		if len(other) != 0 {
+			t.Errorf("byo_app slug set = %v; want empty — a class answers only for its own entries", other)
+		}
+
+		// An empty selection is an empty answer, not an error and not the world.
+		if none, err := b.Mirror.ReachableSlugsSystem(ctx, b.OrgID, domain.GitHubCredentialClassPAT, nil); err != nil {
+			t.Fatalf("ReachableSlugsSystem(nil): %v", err)
+		} else if len(none) != 0 {
+			t.Errorf("empty selection returned %v; want nothing", none)
 		}
 	})
 }

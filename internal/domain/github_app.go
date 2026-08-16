@@ -140,19 +140,29 @@ func (i OrgGitHubAppInstallation) GrantsEveryRepository() bool {
 	return i.RepositorySelection == RepositorySelectionAll
 }
 
-// InstallationRepository is one entry in an installation's repository grant —
-// a repository the App can reach through that installation, whether or not any
-// team tracks it.
+// ReachableRepository is one entry in an org's reachable-repo cache — a
+// repository the org's GitHub credentials can reach, whether or not any team
+// tracks it.
 //
-// It is deliberately NOT a Repository: the grant is a cache of an external
-// fact, rebuilt in full on every reconcile, while a repository row is a registry
-// of a TF entity that worktrees, entities and clone state hang off. A grant
-// entry with no registry row behind it is the normal case — it is exactly what
-// "reach without purpose" means — so this type carries everything a reader
-// needs without a join.
-type InstallationRepository struct {
-	OrgID          string
+// It is deliberately NOT a Repository: reachability is a cache of an external
+// fact, rebuilt in full on every refresh, while a repository row is a registry
+// of a TF entity that worktrees, entities and clone state hang off. A reachable
+// entry with no registry row behind it is the normal case — under an App it is
+// exactly what "reach without purpose" means, and under a PAT it is every
+// repository the user can see but nobody tracks — so this type carries
+// everything a reader needs without a join.
+type ReachableRepository struct {
+	OrgID string
+	// CredentialClass is which credential system observed this reach. Every
+	// read filters on the org's current class, so a tier switch cannot serve the
+	// previous tier's answer alongside the new one.
+	CredentialClass GitHubCredentialClass
+	// InstallationID scopes a byo_app entry to the installation it was read
+	// through; empty on a pat entry, which has no installation row to hang off.
 	InstallationID string
+	// Host scopes a pat entry to the GitHub deployment it was read against;
+	// empty on a byo_app entry, which inherits the host from its installation.
+	Host string
 	// Source is the provider that issued the repository (RepoSourceGitHub
 	// today); empty on a struct built without one, which the stores normalize on
 	// write. It exists so the join to the registry is written against the same
@@ -160,15 +170,63 @@ type InstallationRepository struct {
 	Source string
 	Owner  string
 	Repo   string
-	// ExternalID is GitHub's own repository id, which
-	// GET /installation/repositories returns for every entry. "" when the source
-	// sent none, which is a supported state: the slug matches anyway.
+	// ExternalID is GitHub's own repository id, which both enumerations return
+	// for every entry. "" when the source sent none, which is a supported state:
+	// the slug matches anyway.
 	ExternalID string
-	// ObservedAt is when the reconcile that wrote this row ran. Display
-	// provenance for "the grant as of…", never a join key.
+	// The display fields the repository picker renders, mirrored from the same
+	// repository objects the enumeration already returns.
+	Description string
+	Language    string
+	HTMLURL     string
+	// PushedAt is GitHub's own timestamp string, passed through verbatim. It is
+	// never parsed or compared here.
+	PushedAt string
+	Private  bool
+	// ObservedAt is when the refresh that wrote this row ran — display
+	// provenance for "as of…" and the staleness gate the TTL and the write gate
+	// both read.
 	ObservedAt time.Time
 }
 
 // Slug renders the entry as the "owner/repo" string every slug-keyed column and
 // store method uses.
-func (r InstallationRepository) Slug() string { return r.Owner + "/" + r.Repo }
+func (r ReachableRepository) Slug() string { return r.Owner + "/" + r.Repo }
+
+// ReachableCacheState is what a consumer needs to know about an org's cache
+// without reading a single row of it: whether it has ever been refreshed, how
+// much is in it, and how old the stalest part is.
+//
+// Refreshed and Count are separate on purpose, and conflating them is the bug
+// this type exists to prevent. A scope that genuinely reaches NOTHING — an App
+// installed on an account and then narrowed to no repositories — leaves zero
+// rows behind, exactly like a refresh that never ran. Read off the row count,
+// that org's picker would say "discovering repositories…" forever and kick a
+// refresh on every open, which is the unbounded enumeration the TTL exists to
+// prevent. Refreshed answers "have we looked"; Count answers "what did we find".
+//
+// ObservedAt is the OLDEST instant across the class's refreshed scopes, not the
+// newest. A cache is only as fresh as its stalest scope: an org with two App
+// installations, one refreshed a minute ago and one a week ago, is a week stale
+// for the repositories on the second account, and taking the newest would report
+// it fresh and never refresh the half that needs it.
+type ReachableCacheState struct {
+	Refreshed  bool
+	Count      int
+	ObservedAt time.Time
+}
+
+// Known reports whether any scope of this org and class has been refreshed. It
+// is what the picker's readiness discriminator answers off — false is "we have
+// not looked yet", never "you have no repositories".
+func (s ReachableCacheState) Known() bool { return s.Refreshed }
+
+// StaleAt reports whether the cache is older than ttl as of now. A cache nobody
+// has refreshed is stale by definition — there is nothing to serve and nothing
+// to date — so a caller that wants to distinguish the two checks Known first.
+func (s ReachableCacheState) StaleAt(now time.Time, ttl time.Duration) bool {
+	if !s.Refreshed || s.ObservedAt.IsZero() {
+		return true
+	}
+	return now.Sub(s.ObservedAt) >= ttl
+}

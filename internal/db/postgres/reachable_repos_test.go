@@ -9,7 +9,7 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
-// TestInstallationGrant_Postgres runs the shared grant-mirror conformance suite
+// TestReachableRepos_Postgres runs the shared reachable-repo conformance suite
 // against the Postgres impl. AdminDB serves both pool slots: the mirror is
 // admin-pool-only by RLS (tf_app is denied every write to it), exactly like the
 // installation rows it hangs off.
@@ -18,11 +18,11 @@ import (
 // ReplaceForTeam, which is an app-pool write needing JWT claims and which would
 // also reconcile repositories — a table the drift queries deliberately do not
 // read, since get-or-create mints rows there for repositories no team tracks.
-func TestInstallationGrant_Postgres(t *testing.T) {
+func TestReachableRepos_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
 	var n int // per-subtest uniqueness for slugs
-	dbtest.RunInstallationGrantConformance(t, func(t *testing.T) dbtest.InstallationGrantBackend {
+	dbtest.RunReachableReposConformance(t, func(t *testing.T) dbtest.ReachableReposBackend {
 		t.Helper()
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -32,9 +32,9 @@ func TestInstallationGrant_Postgres(t *testing.T) {
 		orgID := pgtest.SeedOrg(t, h, fmt.Sprintf("grant-org%d", n), owner)
 		teamID := pgtest.SeedTeam(t, h, orgID, "default")
 
-		return dbtest.InstallationGrantBackend{
+		return dbtest.ReachableReposBackend{
 			Apps:   stores.GitHubApps,
-			Mirror: stores.InstallationRepos,
+			Mirror: stores.ReachableRepos,
 			OrgID:  orgID,
 			TrackRepo: func(t *testing.T, repoOwner, repo string) {
 				t.Helper()

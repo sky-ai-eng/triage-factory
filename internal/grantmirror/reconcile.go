@@ -83,9 +83,21 @@ func (s resolverSource) grantListerFor(ctx context.Context, orgID, accountLogin 
 // trigger could only make the mirror STALER than the interval the operator
 // configured, while adding a second number to reason about when the page says
 // "as of".
+//
+// # The second caller
+//
+// internal/reachcache also drives this pass — it is the App tier's half of the
+// reachable-repo refresh the repository picker and the team-repos write gate
+// read — and that caller DOES gate on a TTL, because its other tier is a full
+// PAT enumeration and one freshness contract across both tiers is the point.
+// Nothing changes here: the TTL lives in the caller, this pass stays the single
+// writer of App-tier entries, and running it twice is idempotent by
+// construction (a replace, not a merge). It is deliberately the same Reconciler
+// instance in both, so the two cadences cannot disagree about what an
+// installation reaches.
 type Reconciler struct {
 	apps    db.GitHubAppsStore
-	mirror  db.InstallationReposStore
+	mirror  db.ReachableReposStore
 	clients clientSource
 }
 
@@ -93,7 +105,7 @@ type Reconciler struct {
 // mirror, and the per-(org, account) GitHub client resolver — App installation
 // token in multi, keychain PAT in local, exactly as every other GitHub-facing
 // background pass resolves.
-func NewReconciler(apps db.GitHubAppsStore, mirror db.InstallationReposStore, resolver github.Resolver) *Reconciler {
+func NewReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, resolver github.Resolver) *Reconciler {
 	return &Reconciler{apps: apps, mirror: mirror, clients: resolverSource{resolver: resolver}}
 }
 
@@ -196,7 +208,7 @@ func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, in
 		return nil
 	}
 
-	entries := make([]domain.InstallationRepository, 0, len(repos))
+	entries := make([]domain.ReachableRepository, 0, len(repos))
 	for _, repo := range repos {
 		owner, name, ok := splitFullName(repo.FullName)
 		if !ok {
@@ -208,16 +220,23 @@ func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, in
 			// keep the previous answer, and say why.
 			return fmt.Errorf("grant entry %q is not a repository slug; refusing to write a partial grant", repo.FullName)
 		}
-		entries = append(entries, domain.InstallationRepository{
+		entries = append(entries, domain.ReachableRepository{
 			OrgID:          orgID,
 			InstallationID: inst.InstallationID,
 			Source:         domain.RepoSourceGitHub,
 			Owner:          owner,
 			Repo:           name,
-			// The listing returns whole repository objects, so the id costs
-			// nothing here. It is what lets a grant entry and a registry row be
-			// matched by id when their slugs momentarily disagree mid-rename.
-			ExternalID: repo.ExternalID(),
+			// The listing returns whole repository objects, so the id and the
+			// display fields cost nothing here. The id is what lets a cache entry
+			// and a registry row be matched when their slugs momentarily disagree
+			// mid-rename; the rest is what the picker renders, which is why it is
+			// mirrored rather than re-fetched at read time.
+			ExternalID:  repo.ExternalID(),
+			Description: repo.Description,
+			Language:    repo.Language,
+			HTMLURL:     repo.HTMLURL,
+			PushedAt:    repo.PushedAt,
+			Private:     repo.Private,
 		})
 	}
 

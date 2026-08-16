@@ -6299,121 +6299,269 @@ GRANT ALL ON TABLE public.org_github_app_installations TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_github_app_installations TO tf_app;
 
 
--- The set of repositories a GitHub App installation can reach, mirrored so it
--- can be compared against the set TF actually tracks.
+-- The reachable-repo cache: one mirror of "which repositories can this org
+-- reach", populated by BOTH credential classes and read by every consumer —
+-- the repository picker, the team-repos write gate, and the two App-tier drift
+-- findings below.
 --
--- GET /installation/repositories is already called once per installation per
--- poll cycle to compute the tracked-granted intersection, and the answer is
--- then discarded. Nothing can therefore compute, server-side, either of the two
--- states an operator needs to see:
+-- The framing is the one the App-only grant mirror was built on and it is
+-- unchanged: the reachable set is a CACHE of an external fact, rebuilt in full
+-- per refresh, with no durable identity, surviving nothing. `repositories` is a
+-- REGISTRY of TF entities that worktrees, entities, clone state and a hand-set
+-- base_branch hang off. A reachable row is deliberately not a registry row —
+-- the cache contains repositories nobody tracks, and that is the entire content
+-- of the reach-without-purpose finding.
+--
+-- # Why the cache is not a column on repositories
+--
+-- The App-tier relationship really is 1:N — a repository belongs to one GitHub
+-- account, an account has at most one installation of a given App, and a
+-- workspace has exactly one App — so a nullable granted_installation_id on the
+-- repository row would be relationally correct. It is still wrong, for four
+-- reasons:
+--
+--  1. It changes what a repository row means. That table is the repositories TF
+--     works with; the cache deliberately contains repositories nobody tracks,
+--     which is the entire content of reach without purpose. Merging them makes
+--     an "all repositories" installation on a 3,000-repo org mint 3,000 rows
+--     that the profiler and every context loader then iterate.
+--  2. Two lifecycles, two owners, contradictory answers to "exists".
+--     Repository identity is TF-owned and durable — worktrees, entities, clone
+--     state and a hand-set base_branch hang off it. Reachability is
+--     GitHub-owned and ephemeral: revoked from a selective grant it must
+--     vanish, while the repository row must survive because a task may
+--     reference it.
+--  3. The never-empty invariant gets harder. As its own table that invariant is
+--     a scoped transaction over rows only the refresh writes. As a column it
+--     is a wide UPDATE nulling a field across a table five subsystems write.
+--  4. It re-introduces the provider-specific column the repository-identity
+--     work designed out: an installation id is a GitHub App concept, and GitLab
+--     has none.
+--
+-- # What both tiers being here buys
+--
+-- Two consumers were asking GitHub the same question live, differently, per
+-- credential class:
+--
+--   * the picker (POST /api/github/repos/list) proxied GET /user/repos on a PAT
+--     org and GET /installation/repositories on an App org. Because it was a
+--     proxy list it could not report a total — and it could not for two
+--     DIFFERENT reasons per tier, which is the tell that the shape was wrong.
+--     /user/repos returns a bare array with no count at all;
+--     /installation/repositories does return total_count, but one
+--     installation's, and the picker serves the union across all of them.
+--   * the team-repos write gate re-asked, and kept its own in-process,
+--     per-(org, user) map to avoid asking twice — a cache that died on restart
+--     and, in multi mode, lived on whichever pod happened to serve the picker
+--     rather than the one that later served the write.
+--
+-- A table answers both, identically on both tiers, and can COUNT(*).
+--
+-- The two App-tier findings this table was first built for are unchanged, and
+-- are still derivable from nothing else TF stores:
 --
 --   * reach without purpose — the App can reach a repository no team tracks,
 --     which means TF holds write access to code nobody asked it to touch;
 --   * scope drift — a team tracks a repository outside the grant, which means
 --     that repository is silently unpollable.
 --
--- Both are security findings rather than cosmetics, and neither is derivable
--- from state TF keeps today.
---
--- # Why this is its own table and not a column on repositories
---
--- The relationship really is 1:N — a repository belongs to one GitHub account,
--- an account has at most one installation of a given App, and a workspace has
--- exactly one App — so a nullable granted_installation_id on the repository row
--- would be relationally correct. It is still wrong, for four reasons:
---
---  1. It changes what a repository row means. That table is the repositories TF
---     works with; the grant deliberately contains repositories nobody tracks,
---     which is the entire content of reach without purpose. Merging them makes
---     an "all repositories" installation on a 3,000-repo org mint 3,000 rows
---     that the profiler and every context loader then iterate.
---  2. Two lifecycles, two owners, contradictory answers to "exists".
---     Repository identity is TF-owned and durable — worktrees, entities, clone
---     state and a hand-set base_branch hang off it. Grant membership is
---     GitHub-owned and ephemeral: revoked from a selective grant it must
---     vanish, while the repository row must survive because a task may
---     reference it.
---  3. The never-empty invariant gets harder. As its own table that invariant is
---     a scoped transaction over rows only the reconcile writes. As a column it
---     is a wide UPDATE nulling a field across a table five subsystems write.
---  4. It re-introduces the provider-specific column the repository-identity
---     work designed out: an installation id is a GitHub App concept, and GitLab
---     has none.
---
--- The framing: the grant is a CACHE of an external fact; the repository row is a
--- REGISTRY of a TF entity. This table is rebuilt in full every pass, needs no
--- durable identity, and survives nothing.
-CREATE TABLE public.installation_repositories (
+-- Both are security findings rather than cosmetics, and both read only the
+-- 'byo_app' rows: they are statements about an App's grant, and a PAT's reach
+-- is not a grant TF holds.
+CREATE TABLE public.reachable_repositories (
     org_id uuid NOT NULL,
-    installation_id text NOT NULL,
+    -- credential_class: which credential system observed this reach. It is part
+    -- of the key rather than a derived attribute because an org that switches
+    -- tiers has, for a moment, both answers on file, and serving the union of
+    -- them would be serving a reach the org no longer has. Every read filters on
+    -- the org's CURRENT class, so the other tier's rows are inert until their
+    -- next refresh replaces them.
+    credential_class text NOT NULL
+        CONSTRAINT reachable_repositories_class_check
+        CHECK (credential_class IN ('pat', 'byo_app')),
+    -- installation_id / host: the credential INSTANCE the reach was observed
+    -- through — the scope one refresh replaces atomically.
+    --
+    -- The App tier keeps the installation FK it always had, which is also how it
+    -- keeps inheriting host scoping (an installation id is unique per GitHub
+    -- deployment, and the installation row records which deployment that is) and
+    -- how an uninstall still takes the mirror with it.
+    --
+    -- The PAT tier has no installation row to hang off, so it carries the host
+    -- directly. That is not bookkeeping: an org that repoints GitHubBaseURL is
+    -- looking at a different deployment's repositories, and a mirror that did
+    -- not record which one it read would answer the new host with the old host's
+    -- set.
+    installation_id text,
+    host text,
     -- source: the provider that issued this repository, carried so the join to
-    -- the registry can be written against the same key the registry is keyed
-    -- under (org_id, source, lower(owner), lower(repo)) rather than against a
-    -- literal. It is not part of this table's own key: every row here hangs off
-    -- a GitHub App installation, so 'github' is the only value it can hold.
+    -- the registry is written against the same key the registry is keyed under
+    -- (org_id, source, lower(owner), lower(repo)) rather than against a literal.
+    -- Not part of this table's own key: every row here is reached through a
+    -- GitHub credential, so 'github' is the only value it can hold.
     source text DEFAULT 'github'::text NOT NULL,
     owner text NOT NULL,
     repo text NOT NULL,
-    -- external_id: GitHub's own repository id, present because
-    -- GET /installation/repositories returns whole repository objects. It is
-    -- what lets a grant entry and a registry row be matched by id even when
-    -- their slugs momentarily disagree mid-rename. Nullable, and NULL is a
-    -- supported state rather than a gap to backfill: a row without an id is
-    -- matched by slug exactly as it would be anyway.
+    -- external_id: the provider's own repository id. It is what lets a cache
+    -- entry and a registry row be matched by id even when their slugs
+    -- momentarily disagree mid-rename. Nullable, and NULL is a supported state
+    -- rather than a gap to backfill: a row without an id is matched by slug
+    -- exactly as it would be anyway.
     external_id text,
-    -- observed_at: when this pass recorded the row. Display provenance ("the
-    -- grant as of…"), never a join key and never a staleness gate — the whole
-    -- table is replaced atomically, so every row in one installation's mirror
-    -- carries the same instant.
-    observed_at timestamp with time zone DEFAULT now() NOT NULL
+    -- The picker's display fields, mirrored because the picker is now served
+    -- from here rather than proxied. Both enumerations return whole repository
+    -- objects, so recording them costs nothing beyond the width of the row, and
+    -- the alternative — a slug-only cache plus a live fetch to decorate it —
+    -- would put the upstream call back on the read this table exists to take it
+    -- off. Empty string rather than NULL throughout: these are display strings
+    -- with no meaningful absent state, and '' renders the same as a missing
+    -- field without every reader having to say so.
+    description text DEFAULT ''::text NOT NULL,
+    language text DEFAULT ''::text NOT NULL,
+    html_url text DEFAULT ''::text NOT NULL,
+    -- pushed_at: GitHub's own timestamp string, stored verbatim as text. It is
+    -- passed through to the client and never compared, sorted on, or arithmetic
+    -- done to here — parsing it into a real timestamp would be claiming a
+    -- precision this column does not need and inviting a NULL for the repos that
+    -- have never been pushed to.
+    pushed_at text DEFAULT ''::text NOT NULL,
+    private boolean DEFAULT false NOT NULL,
+    -- observed_at: when the refresh that wrote this row ran. Unlike the App-only
+    -- mirror this replaces, it IS a staleness gate here as well as display
+    -- provenance: the TTL that bounds how often a 3,000-repo account is
+    -- re-enumerated reads it, and so does the write gate deciding whether to
+    -- trust the cache or probe upstream. One refresh replaces a whole scope
+    -- atomically, so every row in one scope carries the same instant.
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- Exactly one scope column per class, and it is the database that says so.
+    -- The two are alternatives, never both and never neither: a row with both
+    -- would have two answers to "what does one refresh replace", and a row with
+    -- neither could not be replaced at all.
+    CONSTRAINT reachable_repositories_scope_check
+        CHECK ((credential_class = 'byo_app' AND installation_id IS NOT NULL AND host IS NULL)
+            OR (credential_class = 'pat'     AND installation_id IS NULL     AND host IS NOT NULL))
 );
 
--- Host scoping is inherited through this FK rather than stored: an installation
--- id is unique per GitHub deployment, and the installation row is the thing that
--- records which deployment that is.
-ALTER TABLE ONLY public.installation_repositories
-    ADD CONSTRAINT installation_repositories_installation_fkey
+ALTER TABLE ONLY public.reachable_repositories
+    ADD CONSTRAINT reachable_repositories_installation_fkey
     FOREIGN KEY (org_id, installation_id)
     REFERENCES public.org_github_app_installations (org_id, installation_id) ON DELETE CASCADE;
 
--- The natural key, folded, for the reason repositories_identity states: GitHub
--- identifiers are case-insensitive, so a case-sensitive index behind a
--- case-insensitive guard admits duplicates whenever two writers race — neither
--- sees the other's uncommitted row and their keys then differ. The database has
--- to be the thing that refuses.
-CREATE UNIQUE INDEX installation_repositories_identity
-    ON public.installation_repositories USING btree (org_id, installation_id, lower(owner), lower(repo));
+-- The natural key, per class, folded. Folded for the reason repositories_identity
+-- states: GitHub identifiers are case-insensitive, so a case-sensitive index
+-- behind a case-insensitive guard admits duplicates whenever two writers race —
+-- neither sees the other's uncommitted row and their keys then differ. The
+-- database has to be the thing that refuses.
+--
+-- Two partial indexes rather than one over coalesce(installation_id, host): the
+-- scope columns are genuinely different columns with different nullability, and
+-- a coalesced key would silently collide an installation whose id equals another
+-- org's host string.
+CREATE UNIQUE INDEX reachable_repositories_app_identity
+    ON public.reachable_repositories USING btree (org_id, installation_id, lower(owner), lower(repo))
+    WHERE credential_class = 'byo_app';
+
+CREATE UNIQUE INDEX reachable_repositories_pat_identity
+    ON public.reachable_repositories USING btree (org_id, host, lower(owner), lower(repo))
+    WHERE credential_class = 'pat';
 
 -- The registry join, and the drift queries that run over it. Deliberately the
 -- same shape as repositories_identity — (org_id, source, lower(owner),
--- lower(repo)) — so the two sides of "is this granted repository tracked?" are
+-- lower(repo)) — so the two sides of "is this reachable repository tracked?" are
 -- keyed identically and either can drive the join.
-CREATE INDEX installation_repositories_registry_join
-    ON public.installation_repositories USING btree (org_id, source, lower(owner), lower(repo));
+CREATE INDEX reachable_repositories_registry_join
+    ON public.reachable_repositories USING btree (org_id, source, lower(owner), lower(repo));
 
-ALTER TABLE public.installation_repositories ENABLE ROW LEVEL SECURITY;
+-- The picker's own read: one org's current class, ordered by folded slug. The
+-- order is part of the index because offset paging over an unordered set drops
+-- and repeats rows, and the folded slug is a total order (the per-class unique
+-- index above proves no two rows tie on it).
+CREATE INDEX reachable_repositories_picker
+    ON public.reachable_repositories USING btree (org_id, credential_class, lower(owner), lower(repo));
 
--- Same posture as the installation rows this table hangs off: the mirror is
--- GitHub-side state written exclusively by the reconcile on the admin pool, so
+ALTER TABLE public.reachable_repositories ENABLE ROW LEVEL SECURITY;
+
+-- Same posture as the installation rows the App tier's half hangs off: the cache
+-- is GitHub-side state written exclusively by the refresh on the admin pool, so
 -- app-pool members read it and never write it. There is no user gesture that
--- adds or removes a grant entry — that happens on GitHub, and TF discovers it.
-CREATE POLICY installation_repositories_select ON public.installation_repositories FOR SELECT TO tf_app
+-- adds or removes a reachable entry — that happens on GitHub, and TF discovers
+-- it. The picker's force-refresh control is process control over the refresh
+-- pass, not a write to this table.
+CREATE POLICY reachable_repositories_select ON public.reachable_repositories FOR SELECT TO tf_app
     USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
-CREATE POLICY installation_repositories_insert ON public.installation_repositories FOR INSERT TO tf_app
+CREATE POLICY reachable_repositories_insert ON public.reachable_repositories FOR INSERT TO tf_app
     WITH CHECK (false);
 
-CREATE POLICY installation_repositories_update ON public.installation_repositories FOR UPDATE TO tf_app
+CREATE POLICY reachable_repositories_update ON public.reachable_repositories FOR UPDATE TO tf_app
     USING (false);
 
-CREATE POLICY installation_repositories_delete ON public.installation_repositories FOR DELETE TO tf_app
+CREATE POLICY reachable_repositories_delete ON public.reachable_repositories FOR DELETE TO tf_app
     USING (false);
 
-GRANT ALL ON TABLE public.installation_repositories TO postgres;
-GRANT ALL ON TABLE public.installation_repositories TO anon;
-GRANT ALL ON TABLE public.installation_repositories TO authenticated;
-GRANT ALL ON TABLE public.installation_repositories TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.installation_repositories TO tf_app;
+GRANT ALL ON TABLE public.reachable_repositories TO postgres;
+GRANT ALL ON TABLE public.reachable_repositories TO anon;
+GRANT ALL ON TABLE public.reachable_repositories TO authenticated;
+GRANT ALL ON TABLE public.reachable_repositories TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.reachable_repositories TO tf_app;
+
+
+-- The refreshes themselves, one row per scope. Its whole job is to make "we have
+-- not looked yet" representable, because the repository rows cannot: a scope that
+-- genuinely reaches NOTHING writes zero of them, so row count alone reads a
+-- legitimately empty grant as an un-run refresh — the picker would say
+-- "discovering repositories…" forever and kick a refresh on every open, which is
+-- exactly the unbounded enumeration the TTL exists to prevent.
+--
+-- No FK, deliberately. The scope column holds an installation id for one class
+-- and a host for the other, so there is no single parent to point at; the two
+-- writers that retire an installation (the store's soft-removal, and the
+-- standalone clear) delete the matching row in the same transaction as the
+-- repository rows.
+--
+-- What it does NOT try to represent is a scope that has never been refreshed at
+-- all — a freshly-installed installation has no row here, so it does not drag the
+-- org's staleness back. That case is covered by the forced refresh every
+-- credential change fires, which is the mechanism for reach moving without a
+-- timestamp moving, and it is why nothing here has to enumerate the scopes it
+-- expects to see.
+--
+-- Same RLS posture as the repository rows it accompanies: app-pool members read
+-- it, every app-pool write is denied, because a refresh is not a user gesture.
+CREATE TABLE public.reachable_scopes (
+    org_id uuid NOT NULL,
+    credential_class text NOT NULL
+        CONSTRAINT reachable_scopes_class_check
+        CHECK (credential_class IN ('pat', 'byo_app')),
+    -- scope: the credential instance one refresh replaces — the installation id
+    -- for byo_app, the host for pat. Recorded as opaque text: this table records
+    -- THAT a scope was refreshed and when, and never joins on it.
+    scope text NOT NULL,
+    refreshed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.reachable_scopes
+    ADD CONSTRAINT reachable_scopes_pkey PRIMARY KEY (org_id, credential_class, scope);
+
+ALTER TABLE public.reachable_scopes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY reachable_scopes_select ON public.reachable_scopes FOR SELECT TO tf_app
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+CREATE POLICY reachable_scopes_insert ON public.reachable_scopes FOR INSERT TO tf_app
+    WITH CHECK (false);
+
+CREATE POLICY reachable_scopes_update ON public.reachable_scopes FOR UPDATE TO tf_app
+    USING (false);
+
+CREATE POLICY reachable_scopes_delete ON public.reachable_scopes FOR DELETE TO tf_app
+    USING (false);
+
+GRANT ALL ON TABLE public.reachable_scopes TO postgres;
+GRANT ALL ON TABLE public.reachable_scopes TO anon;
+GRANT ALL ON TABLE public.reachable_scopes TO authenticated;
+GRANT ALL ON TABLE public.reachable_scopes TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.reachable_scopes TO tf_app;
 
 
 -- GitHub webhook delivery dedup: github_webhook_deliveries. The receiver read

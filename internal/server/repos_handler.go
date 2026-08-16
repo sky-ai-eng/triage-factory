@@ -15,33 +15,92 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// handleGitHubRepos returns the repositories the Settings picker offers. The
-// source is tier-aware:
+// --------------------------------------------------------------------
+// POST /api/github/repos/list — the repository picker's option list, and
+// POST /api/github/repos/refresh — its explicit refresh.
 //
-//   - App org (own App registered + active + ≥1 installation): the union of
-//     each installation's repositories (GET /installation/repositories). A
-//     GitHub App installation token can't call GET /user/repos — it 4xxs — and
-//     under an App the only repos worth offering are the ones the App is
-//     installed on.
-//   - PAT-only org (no App / no installations): the authenticated user's repos
-//     (GET /user/repos) — identical to the pre-App behavior.
+// The picker used to proxy GitHub live on every read, from a different endpoint
+// per credential class, which is why it was the one list on this surface that
+// could not report a total. It now reads reachable_repositories — one mirror
+// both tiers populate — so it is an ordinary store-backed list: a real
+// total_count, a server-side filter, offset paging, and a schema identical
+// whether the org authenticates with a PAT or its own App.
 //
-// githubRepoListRequest is the body of POST /api/github/repos/list. The
-// picker read has no filters — it is "everything this org's credentials can
-// see" — so the body is the paging pair alone.
+// Nothing here calls GitHub. A stale or empty mirror kicks an out-of-band
+// refresh (internal/reachcache) and answers from what is on hand; on a large PAT
+// account the enumeration this replaces is ~30 upstream pages, which is a
+// multi-second request nobody should be waiting through.
+// --------------------------------------------------------------------
+
+// githubRepoListRequest is the body of POST /api/github/repos/list: the
+// server-side search the picker used to do in the browser, plus the paging pair.
 type githubRepoListRequest struct {
+	// Q is a case-insensitive substring matched against the slug, the
+	// description and the language. Empty matches everything.
+	Q string `json:"q"`
 	httpx.PageRequest
 }
 
-// maxGitHubRepoPageSize is the picker's declared page ceiling, set to GitHub's
-// own per_page maximum: every page is one upstream call, and asking for more
-// than the upstream will return in one response would mean walking pages
-// behind the caller's back.
-const maxGitHubRepoPageSize = 100
+// githubRepoListFilterKey is the canonicalized filter set the page token is
+// fingerprinted against. Canonicalized to lowercase-and-trimmed because that is
+// what the store matches on, so two spellings of one query are one query and a
+// token minted under either addresses the same result set.
+type githubRepoListFilterKey struct {
+	Q string `json:"q"`
+}
+
+// Readiness discriminator for the picker list. A first-ever open has nothing to
+// serve, and an empty list there reads as "you have no repositories" rather than
+// "we have not looked yet" — so the two states are told apart by a field rather
+// than by an empty array. Modelled on the Jira stock deck's readiness gate: one
+// schema in both states, every key present, the client rendering off `status`.
+const (
+	// githubRepoStatusReady means the rows below are the mirror's answer. It is
+	// the answer even when the mirror is stale — the refresh this read kicked
+	// lands out of band — and even when the answer is legitimately empty (an App
+	// installed on no repositories).
+	githubRepoStatusReady = "ready"
+	// githubRepoStatusDiscovering means nothing has been mirrored for this org
+	// yet and a refresh has been asked for. items is empty and total_count is 0
+	// because those are the true counts of what is known, not a claim about what
+	// exists.
+	githubRepoStatusDiscovering = "discovering"
+)
+
+// githubRepoJSON is one picker option. The field set is the picker's own — the
+// columns the mirror carries for it — and deliberately not "whatever GitHub's
+// repository object has", which is what a proxy list leaks by default.
+type githubRepoJSON struct {
+	FullName    string `json:"full_name"`
+	HTMLURL     string `json:"html_url"`
+	Description string `json:"description"`
+	Language    string `json:"language"`
+	PushedAt    string `json:"pushed_at"`
+	Private     bool   `json:"private"`
+}
+
+// githubRepoListResponse is the list envelope plus the readiness discriminator.
+//
+// next_page_token carries no omitempty, unlike httpx's shared envelope: this
+// route promises the same keys in both readiness states, and a discovering
+// response has no next page by construction. "" and absent mean the same thing
+// to every client (the API client normalizes a missing token to ""), so the
+// only difference is that a reader can tell the two states apart field-for-field.
+type githubRepoListResponse struct {
+	Items         []githubRepoJSON `json:"items"`
+	NextPageToken string           `json:"next_page_token"`
+	// TotalCount is what the filter matches across every page — a real number
+	// on both credential classes, which is the whole point of sourcing this
+	// locally. It is never null here; a proxy list's "this resource cannot count
+	// itself" no longer applies.
+	TotalCount int    `json:"total_count"`
+	Status     string `json:"status"`
+}
 
 func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFrom(r.Context())
@@ -51,291 +110,218 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	// pageCursorFaults collects the cursor's own faults; the PAT arm below
-	// decodes it (the App arm decodes its two-part form itself).
-	var pageCursorFaults httpx.Validation
-	page := httpx.ResolvePage(&pageCursorFaults, req.PageRequest,
-		httpx.FilterFingerprint(struct{}{}), maxGitHubRepoPageSize)
-	if pageCursorFaults.Flush(w, http.StatusBadRequest) {
+	q := strings.ToLower(strings.TrimSpace(req.Q))
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(githubRepoListFilterKey{Q: q}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
-	// Decide App-vs-PAT here rather than widening the resolver (which
-	// deliberately hides which tier resolved): this handler is the one consumer
-	// that must branch, so it reads the App registration + installations
-	// itself.
-	//
-	// WHICH source to read is the org's credential class, not whether an App
-	// registration happens to exist — a rowless org is a PAT org today and would
-	// equally be an org on a deployment-level shared App, which this handler
-	// would then render from the wrong source. An unreadable or unrecognised
-	// class fails the request: the picker's whole job is to show the grant, and
-	// showing the wrong org's idea of a grant is worse than showing an error.
-	class, err := s.githubCredentialClass(r.Context(), orgID)
+	// The configuration preflight runs BEFORE the mirror read, and it is what
+	// keeps an unconfigured org out of the readiness state: "we have not looked
+	// yet" is a promise that looking will eventually produce something, and for
+	// an org with no usable credential it never will. It costs no GitHub call —
+	// every read here is the store or the keychain.
+	pre, ok := s.pickerCredentialClass(w, r, orgID, userID)
+	if !ok {
+		return
+	}
+	class := pre.class
+
+	state, err := s.reachableRepos.ReachableStateSystem(r.Context(), orgID, class)
 	if err != nil {
-		reposLog.Error("resolve github credential class failed", "org", orgID, "error", err)
+		reposLog.Error("read reachable repo cache state failed", "org", orgID, "error", err)
 		internalError(w, "repos", err)
 		return
 	}
-
-	var (
-		app      *domain.OrgGitHubApp
-		insts    []domain.OrgGitHubAppInstallation
-		instsErr error
-	)
-	switch class {
-	case domain.GitHubCredentialClassPAT:
-		// Nothing to read: a PAT org has no App and no installations, and both
-		// stay nil so the PAT path below runs exactly as it did pre-App.
-
-	case domain.GitHubCredentialClassBYOApp:
-		if s.githubApps != nil {
-			// Both reads degrade to the PAT path on error rather than blanking the
-			// picker, but log either failure — these silent points are what made the
-			// original dead-end untraceable (TFAC-324). instsErr is also load-bearing
-			// below: a failed installations read leaves insts nil, which must not
-			// masquerade as a positive "installed on zero accounts".
-			var appErr error
-			app, appErr = s.githubApps.GetForOrgSystem(r.Context(), orgID)
-			if appErr != nil {
-				reposLog.Warn("read app registration failed, falling back to pat path", "org", orgID, "error", appErr)
-			}
-			insts, instsErr = s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
-			if instsErr != nil {
-				reposLog.Warn("list installations failed, falling back to pat path", "org", orgID, "error", instsErr)
-			}
+	// Serve stale, kick the refresh. The trigger is idempotent inside the
+	// refresher's own TTL, so N opens across one window cost one enumeration; a
+	// fresh mirror asks for nothing at all, which is what makes the steady-state
+	// read reach GitHub zero times.
+	if state.StaleAt(time.Now(), reachcache.TTL) {
+		s.kickReachRefresh(orgID, false)
+	}
+	// Known, not "has rows": a scope that genuinely reaches nothing writes zero
+	// entries, so keying the readiness state on the count would leave an org with
+	// an empty grant saying "discovering repositories…" forever — and kicking a
+	// refresh on every open, which is the unbounded enumeration the TTL exists to
+	// prevent.
+	if !state.Known() {
+		// ...and this is where an unestablished preflight has to be paid for. The
+		// readiness state is a PROMISE that looking will produce something, and
+		// the preflight is what backs it; when its installations read failed we
+		// could not establish that, so an org whose mirror is also empty would be
+		// told to wait for a discovery that may never resolve. Serving the error
+		// is the honest answer — and it costs nothing in the common case, because
+		// a failed read on an org that HAS a mirror never reaches here.
+		if pre.err != nil {
+			reposLog.Error("cannot establish whether discovery will resolve", "org", orgID, "error", pre.err)
+			internalError(w, "repos", pre.err)
+			return
 		}
-
-	default:
-		// Unreachable: githubCredentialClass already refused an unknown class.
-		// Kept explicit so a class added to the type without a decision here
-		// fails visibly rather than rendering the picker from the PAT source.
-		reposLog.Error("unhandled github credential class", "org", orgID, "class", class)
-		internalError(w, "repos", ErrUnknownGitHubCredentialClass)
+		writeJSON(w, http.StatusOK, githubRepoListResponse{
+			Items:  []githubRepoJSON{},
+			Status: githubRepoStatusDiscovering,
+		})
 		return
 	}
 
-	var (
-		repos      []ghclient.UserRepo
-		nextCursor string
-	)
-	if app != nil && app.Active && len(insts) > 0 {
-		var err error
-		repos, nextCursor, err = s.installationReposPage(r.Context(), orgID, insts, page.Limit, page.Cursor)
-		if err != nil {
-			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				reposLog.Warn("app installed but resolver produced no credentials for any installation", "org", orgID, "error", err)
-				writeNotConfigured(w, "GitHub is not connected for this workspace")
-				return
-			}
-			if errors.Is(err, errInvalidPageCursor) {
-				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-					Reason: httpx.ReasonInvalidParam, Message: err.Error(), Field: "page_token",
-				})
-				return
-			}
-			reposLog.Warn("fetch installation repos failed", "org", orgID, "error", err)
-			writeUpstreamGitHub(w, "failed to fetch repos from GitHub", err)
-			return
-		}
-	} else {
-		// PAT path — identical to the pre-App behavior. Credentials + per-org
-		// base URL read through the app pool inside WithTx so SecretStore
-		// decrypts under the user's claims and org_settings_select RLS is
-		// enforced — same shape the rest of the settings surface
-		// uses.
-		var (
-			creds  auth.Credentials
-			orgSet domain.OrgSettings
-		)
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			// A failed credential read is a backend fault, not "no
-			// credentials": swallowing it here answered "GitHub not
-			// configured" and told the user to re-enter a token they
-			// already have.
-			var lerr error
-			creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
-			if lerr != nil {
-				return fmt.Errorf("load integration credentials: %w", lerr)
-			}
-			orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
-			return lerr
-		}); err != nil {
-			internalError(w, "repos", err)
-			return
-		}
-		if creds.GitHubPAT == "" || creds.GitHubURL == "" {
-			// An active App installed on zero accounts dead-ends here in the
-			// PAT fallback — no installation token to use, no PAT to borrow.
-			// Surface that as its own 400 the picker can key install guidance
-			// off, instead of the generic "not configured" that reads as
-			// "add a PAT". This is the first-run dead-end TFAC-324 unblocks.
-			//
-			// A non-nil app here means the class switch above put it there, so
-			// this message is only ever offered to an org that really is in the
-			// BYO-App system — "install your App" is never shown to a PAT org
-			// that merely failed to bind a token.
-			//
-			// instsErr == nil is load-bearing: only a *successful* read of zero
-			// installations means "not installed". A failed read also leaves
-			// insts empty, and reporting that as "not installed" would mislead
-			// on a transient store error — so it falls through to the generic
-			// message instead.
-			if app != nil && app.Active && instsErr == nil && len(insts) == 0 {
-				reposLog.Warn("app registered and active but installed on zero accounts, and no pat configured", "org", orgID)
-				writeNotConfigured(w, "the GitHub App is not installed on any account")
-				return
-			}
-			reposLog.Warn("github not configured, no usable app installation and no pat", "org", orgID)
-			writeNotConfigured(w, "GitHub is not connected for this workspace")
-			return
-		}
-		baseURL := orgSet.GitHubBaseURL
-		if baseURL == "" {
-			baseURL = creds.GitHubURL
-		}
-
-		client := ghclient.NewClient(baseURL, creds.GitHubPAT)
-		var cursorFaults httpx.Validation
-		upstreamPage, _ := upstreamPageFromCursor(&cursorFaults, page.Cursor)
-		if cursorFaults.Flush(w, http.StatusBadRequest) {
-			return
-		}
-		var err error
-		repos, err = client.ListUserReposPage(r.Context(), page.Limit, upstreamPage)
-		if err != nil {
-			reposLog.Warn("fetch user repos failed", "org", orgID, "error", err)
-			writeUpstreamGitHub(w, "failed to fetch repos from GitHub", err)
-			return
-		}
-		// A full page means GitHub has more; a short one is the end.
-		if len(repos) == page.Limit {
-			nextCursor = strconv.Itoa(upstreamPage + 1)
-		}
-	}
-
-	// Warm the reachable-repo enumeration cache so the immediate-next
-	// team-repos PUT validates the selection against this in-memory set in ~µs
-	// instead of re-enumerating the org. We just paid for the enumeration; the
-	// gate shouldn't pay for it again. Only the lowercased slug set is needed
-	// for the membership check, so we keep that rather than the full UserRepo
-	// slice. TTL-bounded and evicted on SetOnGitHubChanged.
-	//
-	// **Only a COMPLETE enumeration may be cached** — the first page with no
-	// next page. rejectUnreachableRepo treats a cache hit as authoritative for
-	// membership, so a partial set would make it reject repos the user
-	// genuinely can select and genuinely saw, just on a later page. When the
-	// listing pages, we warm nothing and the write gate falls to its cold path,
-	// which probes only the selected slugs and is correct by construction.
-	if page.Cursor == "" && nextCursor == "" {
-		slugs := make(map[string]struct{}, len(repos))
-		for _, repo := range repos {
-			if repo.FullName != "" {
-				slugs[strings.ToLower(repo.FullName)] = struct{}{}
-			}
-		}
-		s.reachableRepoCachePut(orgID, userID, slugs)
-	}
-
-	httpx.WriteProxyList(w, page, repos, nextCursor)
-}
-
-// installationReposPage serves ONE page of the App-org picker: it walks the
-// installations in order and pages each in turn, so the cursor is
-// "<installation index>:<upstream page>". It is the App-org replacement for
-// ListUserRepos, which an installation token cannot call — the repos an
-// installation can reach are exactly what the org's App can act on.
-//
-// The union's global sort is deliberately gone. A proxy list resumes from an
-// upstream position, and no upstream position can express "the next slice of a
-// set sorted across N independent accounts" — producing that would mean
-// re-fetching every installation on every page, which is the fetch-the-world
-// read pagination exists to retire. The order is instead: each account's repos
-// in GitHub's own order, accounts in installation order. A repo belongs to
-// exactly one account, so the accounts partition the union and no row is
-// served twice.
-//
-// A per-installation failure is fatal here, unlike the whole-union walk that
-// skipped past one: a page is a position, and silently skipping an account
-// would renumber every later page.
-func (s *Server) installationReposPage(ctx context.Context, orgID string, insts []domain.OrgGitHubAppInstallation, perPage int, cursor string) ([]ghclient.UserRepo, string, error) {
-	if s.ghResolver == nil {
-		return nil, "", ghclient.ErrNoGitHubCredentials
-	}
-	instIdx, upstreamPage, err := parseInstallationCursor(cursor)
+	rows, total, err := s.reachableRepos.ListReachableSystem(r.Context(), orgID, class, q,
+		db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 	if err != nil {
-		return nil, "", err
+		reposLog.Error("list reachable repos failed", "org", orgID, "error", err)
+		internalError(w, "repos", err)
+		return
 	}
-
-	// Walk forward from the cursor's installation: an account whose token
-	// cannot be resolved contributes nothing, so rather than serving an empty
-	// page we move on to the next one. Every other outcome returns from inside
-	// the loop, so falling out the bottom means exactly one thing — every
-	// account from the cursor onward was credential-less.
-	startIdx := instIdx
-	for ; instIdx < len(insts); instIdx, upstreamPage = instIdx+1, 1 {
-		inst := insts[instIdx]
-		client, err := s.ghResolver.ClientFor(ctx, orgID, inst.AccountLogin)
-		if err != nil {
-			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				continue
-			}
-			// Real DB/vault/RLS failure — propagate so the handler can 502
-			// rather than silently skipping an account mid-walk.
-			return nil, "", err
-		}
-
-		repos, _, err := client.ListInstallationReposPage(ctx, perPage, upstreamPage)
-		if err != nil {
-			return nil, "", fmt.Errorf("list installation repositories for org %s: %w", orgID, err)
-		}
-		if len(repos) == perPage {
-			// A full page: stay on this installation.
-			return repos, fmt.Sprintf("%d:%d", instIdx, upstreamPage+1), nil
-		}
-		if instIdx+1 < len(insts) {
-			// Short page: this account is exhausted, the next one starts fresh.
-			return repos, fmt.Sprintf("%d:1", instIdx+1), nil
-		}
-		return repos, "", nil
+	items := make([]githubRepoJSON, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, githubRepoJSON{
+			FullName:    row.Slug(),
+			HTMLURL:     row.HTMLURL,
+			Description: row.Description,
+			Language:    row.Language,
+			PushedAt:    row.PushedAt,
+			Private:     row.Private,
+		})
 	}
-	// Where the walk started decides what falling out means. From the first
-	// installation, nothing the App reaches has a usable token — the App is not
-	// configured, and saying so is what tells the user to fix a credential.
-	// From a later one, earlier pages were served fine, so this is just the
-	// last page of the union: empty, with no next cursor.
-	if startIdx == 0 {
-		return nil, "", ghclient.ErrNoGitHubCredentials
-	}
-	return nil, "", nil
+	writeJSON(w, http.StatusOK, githubRepoListResponse{
+		Items:         items,
+		NextPageToken: httpx.NextPageToken(page, len(items), total),
+		TotalCount:    total,
+		Status:        githubRepoStatusReady,
+	})
 }
 
-// parseInstallationCursor decodes "<installation index>:<upstream page>". An
-// empty cursor is the first page of the first installation. The token is
-// opaque and only this server mints one, so anything else is a tampered or
-// stale token.
-func parseInstallationCursor(cursor string) (instIdx, page int, err error) {
-	if cursor == "" {
-		return 0, 1, nil
+// handleGitHubReposRefresh forces a reachable-mirror refresh past the TTL.
+//
+// A verb route rather than a field write, because it is process control over a
+// background pass plus the GitHub calls that pass makes — there is no row a
+// caller could set to mean this. It answers 202 the moment the refresh is asked
+// for: the pass runs out of band, and the client learns it landed from the
+// `github_repos_updated` websocket ping or its next read.
+//
+// It is the affordance the TTL requires. A repository granted since the last
+// refresh is invisible to the picker and rejected by the write gate until the
+// mirror moves, and waiting out six hours is not a fix; every credential change
+// forces the same refresh for the same reason. Gated to the same audience as the
+// list read — reachability is an org-level fact about the org's own credential —
+// and bounded by the refresher's per-org single flight, so a caller that clicks
+// it repeatedly gets one enumeration, not one per click.
+//
+// POST /api/github/repos/refresh
+func (s *Server) handleGitHubReposRefresh(w http.ResponseWriter, r *http.Request) {
+	// No body is decoded: the refresh takes no arguments, exactly like the
+	// sibling verb routes (archive, restore, revoke), so there is no payload
+	// schema for a caller to get wrong.
+	orgID := OrgIDFrom(r.Context())
+	if s.reachTrigger == nil {
+		// No refresh manager wired: this process cannot ask for one and must not
+		// report that it did. 503 rather than 500 — it is a capability this
+		// deployment does not have here, not a fault in the request.
+		httpx.WriteErrors(w, http.StatusServiceUnavailable, httpx.ErrorItem{
+			Reason:  httpx.ReasonNotConfigured,
+			Message: "repository refresh is not configured on this server",
+		})
+		return
 	}
-	idxRaw, pageRaw, found := strings.Cut(cursor, ":")
-	if !found {
-		return 0, 0, errInvalidPageCursor
-	}
-	instIdx, err = strconv.Atoi(idxRaw)
-	if err != nil || instIdx < 0 {
-		return 0, 0, errInvalidPageCursor
-	}
-	page, err = strconv.Atoi(pageRaw)
-	if err != nil || page < 1 {
-		return 0, 0, errInvalidPageCursor
-	}
-	return instIdx, page, nil
+	s.kickReachRefresh(orgID, true)
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "refreshing"})
 }
 
-// errInvalidPageCursor marks a page_token whose payload this server did not
-// mint. It is a client fault (400), not an upstream one.
-var errInvalidPageCursor = errors.New("page_token is not a valid page token")
+// pickerPreflight is what the configuration check established. class is the
+// credential class the org's reachable entries are keyed under; err is set when
+// the check could not be COMPLETED — as opposed to completing and finding the
+// org unusable, which refuses the request outright.
+//
+// A non-nil err is deliberately not fatal on its own. It means one thing was
+// unreadable, and what that thing decides is only whether the org is usable at
+// all — not what the picker serves, which is the mirror. So a request whose
+// mirror answers is served, and only a request that would otherwise fall into
+// the readiness state has to reckon with it: that state promises discovery will
+// resolve, and an unestablished preflight cannot back the promise.
+type pickerPreflight struct {
+	class domain.GitHubCredentialClass
+	err   error
+}
+
+// pickerCredentialClass resolves the class the org's reachable entries are keyed
+// under, and refuses the request when GitHub is established to be unusable for
+// the org. It writes the response on every false return.
+//
+// The two refusals are deliberately different, and the difference is the
+// first-run dead-end this handler exists to keep diagnosable: an org whose App
+// is registered and active but installed nowhere is told to install it, while
+// everything else gets the generic "not connected". Reporting the first as the
+// second reads as "add a PAT", which is the one thing that will not help.
+//
+// A third outcome — "we could not tell" — is neither of those and is reported
+// through pickerPreflight.err rather than as a refusal, because the two claims
+// it could be mistaken for are both wrong: "not installed" is a claim only a
+// SUCCESSFUL read of zero installations can support, and a hard failure would
+// blank a picker whose data is sitting in the mirror and did not need this read
+// at all.
+func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, orgID, userID string) (pickerPreflight, bool) {
+	// The EFFECTIVE class — the org's stored class narrowed by the App-XOR-PAT
+	// gate — because that is what the refresh keys its rows under. An
+	// unreadable or unrecognised class fails the request: the picker's whole job
+	// is to show what the org can reach, and showing the wrong credential
+	// system's idea of that is worse than showing an error.
+	class, err := s.reachableCredentialClass(r.Context(), orgID)
+	if err != nil {
+		// The class is not optional: it is the key every subsequent read uses, so
+		// there is nothing to serve without it.
+		reposLog.Error("resolve reachable credential class failed", "org", orgID, "error", err)
+		internalError(w, "repos", err)
+		return pickerPreflight{}, false
+	}
+	if class == domain.GitHubCredentialClassBYOApp {
+		// An active App with at least one installation is usable by definition —
+		// the installations ARE the reach. A read failure here is carried rather
+		// than refused: reporting it would mean claiming "not installed", which
+		// only a successful read of zero installations can support.
+		insts, err := s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
+		if err != nil {
+			reposLog.Warn("list installations failed; serving the mirror if there is one", "org", orgID, "error", err)
+			return pickerPreflight{class: class, err: err}, true
+		}
+		if len(insts) == 0 {
+			reposLog.Warn("app registered and active but installed on zero accounts", "org", orgID)
+			writeNotConfigured(w, "the GitHub App is not installed on any account")
+			return pickerPreflight{}, false
+		}
+		return pickerPreflight{class: class}, true
+	}
+
+	// PAT tier. Credentials + per-org base URL read through the app pool inside
+	// WithTx so SecretStore decrypts under the user's claims and
+	// org_settings_select RLS is enforced — the same shape the rest of the
+	// settings surface uses.
+	var (
+		creds  auth.Credentials
+		orgSet domain.OrgSettings
+	)
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// A failed credential read is a backend fault, not "no credentials":
+		// swallowing it here answered "GitHub not configured" and told the user to
+		// re-enter a token they already have.
+		var lerr error
+		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
+		if lerr != nil {
+			return fmt.Errorf("load integration credentials: %w", lerr)
+		}
+		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
+		return lerr
+	}); err != nil {
+		internalError(w, "repos", err)
+		return pickerPreflight{}, false
+	}
+	if creds.GitHubPAT == "" || (orgSet.GitHubBaseURL == "" && creds.GitHubURL == "") {
+		reposLog.Warn("github not configured, no usable app installation and no pat", "org", orgID)
+		writeNotConfigured(w, "GitHub is not connected for this workspace")
+		return pickerPreflight{}, false
+	}
+	return pickerPreflight{class: class}, true
+}
 
 // isOrgAdmin reports whether userID is an org admin of orgID, short-circuiting
 // to true under local mode (N=1 has a single implicit owner and no team

@@ -41,17 +41,36 @@ func (r UserRepo) ExternalID() string {
 // maxFetchPages is reached (TFAC-571) — truncation logs a WARN rather than
 // silently returning a partial list.
 func (c *Client) ListUserRepos(ctx context.Context) ([]UserRepo, error) {
+	repos, _, err := c.ListUserReposComplete(ctx)
+	return repos, err
+}
+
+// ListUserReposComplete is ListUserRepos plus the one bit the slice cannot
+// carry: whether the listing is EVERY repository the credential can see.
+//
+// It is the PAT twin of ListInstallationReposComplete, and it exists for the
+// same caller: the reachable-repo cache, whose contract is "this is everything
+// the org can reach". A truncated answer written as if it were complete makes
+// every repository past the cut look unreachable — which the picker then does
+// not offer and the write gate then rejects — so the caller's correct response
+// to complete=false is to leave the previous answer in place.
+//
+// Only the page cap can truncate here. Unlike /installation/repositories,
+// GET /user/repos returns a bare array with no total to cross-check against, so
+// "GitHub said there were more than we read" is not a distinguishable state and
+// a short page is the only end-of-list signal there is.
+func (c *Client) ListUserReposComplete(ctx context.Context) ([]UserRepo, bool, error) {
 	var all []UserRepo
 
 	for page := 1; ; page++ {
 		if page > maxFetchPages {
 			githubLog.Warn("user repos list truncated at page cap; some repos may be missing",
 				"resource", "user/repos", "page_cap", maxFetchPages)
-			break
+			return all, false, nil
 		}
 		repos, err := c.ListUserReposPage(ctx, 100, page)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if len(repos) == 0 {
 			break
@@ -59,7 +78,7 @@ func (c *Client) ListUserRepos(ctx context.Context) ([]UserRepo, error) {
 		all = append(all, repos...)
 	}
 
-	return all, nil
+	return all, true, nil
 }
 
 // ListUserReposPage fetches ONE upstream page of GET /user/repos. It is the

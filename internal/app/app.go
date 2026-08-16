@@ -31,6 +31,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
@@ -40,6 +41,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
+	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
@@ -125,6 +127,12 @@ type App struct {
 	profiler   *repoprofile.Manager
 	classifier *projectclassify.Manager
 	reconciler *reconcile.Manager
+	// reachCache refreshes the reachable-repo mirror the repository picker and
+	// the team-repos write gate read. grantReconciler is the App-installation
+	// grant reconcile it shares with the poller — one instance, two cadences
+	// (the poller's per-cycle pass, and this manager's TTL-gated/forceable one).
+	reachCache      *reachcache.Manager
+	grantReconciler *grantmirror.Reconciler
 	// marketplaceStats is nil in local mode (TFAC-540): the marketplace is
 	// multi-mode only, so there's nothing to aggregate — see buildAI and
 	// registerSubscribers, which both branch on this being nil rather than
