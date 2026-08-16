@@ -369,6 +369,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		} else {
 			touched = true
 		}
+		// TODO(TFAC-837): publish the row the upsert returns, not the input.
 		p.notify.Publish(ctx, orgID, repoevent.Update{
 			ID:          prof.ID,
 			Slug:        prof.Slug(),

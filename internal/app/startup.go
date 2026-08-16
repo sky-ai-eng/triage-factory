@@ -247,6 +247,7 @@ func (a *App) wireCloneStatusCallback() {
 	// nothing to update and nothing for a client to merge into — the stamp
 	// above no-ops on it too — so it publishes nothing rather than an event
 	// with an empty key.
+	// TODO(TFAC-837): drop the lookup once the clone-status write returns the row.
 	publish := func(upd repoevent.Update, ref domain.RepoRef) {
 		row, err := a.stores.Repos.GetByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref)
 		if err != nil {

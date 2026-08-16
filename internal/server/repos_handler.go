@@ -873,6 +873,8 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO(TFAC-837): answer with the updated repoJSON once UpdateBaseBranch
+	// returns the row.
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
