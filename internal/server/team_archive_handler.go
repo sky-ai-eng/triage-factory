@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -44,13 +43,16 @@ type teamArchiveResultJSON struct {
 
 // resolveTeamForLifecycle runs the shared front gate for every archive/restore
 // endpoint: multi-mode only, active org resolved, a syntactically valid team_id
-// that belongs to the org, and an org-admin caller. Non-org-admin 404s (not
-// 403) — the same non-disclosure posture as handleTeamCreate, so a non-admin
-// never learns the team exists. Returns the resolved (orgID, userID, teamID) and
-// ok=false when a response was already written.
+// that belongs to the org, and an org-admin caller. A non-org-admin gets 403,
+// not 404: VerifyTeamInOrg has already established that the team is in the
+// caller's org, which means GET /api/teams lists it for them, so hiding it
+// here would deny the existence of a row they can see. 404 stays where it
+// belongs — the team isn't in this org, or the id isn't an id. Returns the
+// resolved (orgID, userID, teamID) and ok=false when a response was already
+// written.
 func (th *teamsHandler) resolveTeamForLifecycle(w http.ResponseWriter, r *http.Request) (orgID, userID, teamID string, ok bool) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		notFound(w, "route")
 		return "", "", "", false
 	}
 	orgID, ok = requireOrg(w, r)
@@ -59,9 +61,8 @@ func (th *teamsHandler) resolveTeamForLifecycle(w http.ResponseWriter, r *http.R
 	}
 	userID = ClaimsFrom(r.Context()).Subject
 
-	teamID = r.PathValue("team_id")
-	if _, err := uuid.Parse(teamID); err != nil {
-		http.NotFound(w, r)
+	teamID, ok = uuidPathOr404(w, r, "team_id", "team")
+	if !ok {
 		return "", "", "", false
 	}
 	// Cross-org 404 before the role gate — non-disclosure of teams in other orgs.
@@ -74,9 +75,7 @@ func (th *teamsHandler) resolveTeamForLifecycle(w http.ResponseWriter, r *http.R
 		return "", "", "", false
 	}
 	if !isAdmin {
-		// 404 not 403 — a non-admin learns only that the surface doesn't exist
-		// for them, never that the team does (matches handleTeamCreate).
-		http.NotFound(w, r)
+		forbidden(w, "org admin role required")
 		return "", "", "", false
 	}
 	return orgID, userID, teamID, true
@@ -143,7 +142,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if team.DeletedAt != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "team is already archived"})
+		conflict(w, "team is already archived")
 		return
 	}
 
@@ -154,7 +153,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		return tx.Teams.Archive(r.Context(), teamID)
 	}); err != nil {
 		if errors.Is(err, db.ErrTeamNotFound) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "team is already archived"})
+			conflict(w, "team is already archived")
 			return
 		}
 		internalError(w, "teams", err)
@@ -235,7 +234,7 @@ func (th *teamsHandler) handleTeamRestore(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if team.DeletedAt == nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "team is not archived"})
+		conflict(w, "team is not archived")
 		return
 	}
 
@@ -244,7 +243,7 @@ func (th *teamsHandler) handleTeamRestore(w http.ResponseWriter, r *http.Request
 	}); err != nil {
 		if errors.Is(err, db.ErrTeamNotFound) {
 			// Restored in a race past GetSystem — treat as already-restored.
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "team is not archived"})
+			conflict(w, "team is not archived")
 			return
 		}
 		internalError(w, "teams", err)
@@ -272,7 +271,7 @@ type archivedTeamJSON struct {
 // GET /api/teams/archived
 func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		notFound(w, "route")
 		return
 	}
 	orgID, ok := requireOrg(w, r)
@@ -286,7 +285,10 @@ func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !isAdmin {
-		http.NotFound(w, r)
+		// The caller is an org member by construction (requireOrg resolved
+		// their active org), so the org is visible and the denial names the
+		// role rather than hiding the surface.
+		forbidden(w, "org admin role required")
 		return
 	}
 

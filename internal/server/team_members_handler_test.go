@@ -213,15 +213,17 @@ func TestTeamRosterList_BotRow(t *testing.T) {
 	}
 }
 
-// TestTeamMemberRoleChange_NonManagerIs404: a plain member can't change roles —
-// the team-admin-or-org-admin gate answers 404, and the row is untouched.
-func TestTeamMemberRoleChange_NonManagerIs404(t *testing.T) {
+// TestTeamMemberRoleChange_NonManagerIsForbidden: a plain member can't change
+// roles — the team-admin-or-org-admin gate answers 403 (the team is in their
+// org and they can list it, so the denial names the missing role rather than
+// hiding the team), and the row is untouched.
+func TestTeamMemberRoleChange_NonManagerIsForbidden(t *testing.T) {
 	r := newTeamMembersRig(t)
 
 	rec := httptest.NewRecorder()
 	r.tmh.handleTeamMemberRoleChange(rec, r.req(http.MethodPatch, r.memb, r.admin, map[string]string{"role": "member"}))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (non-manager); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (non-manager); body=%s", rec.Code, rec.Body.String())
 	}
 	if got := r.teamRoleOf(t, r.admin); got != "admin" {
 		t.Errorf("admin role = %q after blocked change, want admin (unchanged)", got)
@@ -349,14 +351,14 @@ func TestTeamMemberRemove_AdminRemovesMember(t *testing.T) {
 }
 
 // TestTeamMemberRemove_NonManagerCantRemoveOther: a plain member removing a
-// different user is 404 (not self, not a manager) and the target stays.
+// different user is 403 (not self, not a manager) and the target stays.
 func TestTeamMemberRemove_NonManagerCantRemoveOther(t *testing.T) {
 	r := newTeamMembersRig(t)
 
 	rec := httptest.NewRecorder()
 	r.tmh.handleTeamMemberRemove(rec, r.req(http.MethodDelete, r.memb, r.admin, nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (non-manager removing other); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (non-manager removing other); body=%s", rec.Code, rec.Body.String())
 	}
 	if !r.isTeamMember(t, r.admin) {
 		t.Errorf("admin removed by non-manager, want still a member")
@@ -418,8 +420,8 @@ func TestTeamMemberAdd_DuplicateIs409(t *testing.T) {
 	}
 }
 
-// TestTeamMemberAdd_NonManagerIs404: a plain member can't add anyone — 404.
-func TestTeamMemberAdd_NonManagerIs404(t *testing.T) {
+// TestTeamMemberAdd_NonManagerIsForbidden: a plain member can't add anyone — 403.
+func TestTeamMemberAdd_NonManagerIsForbidden(t *testing.T) {
 	r := newTeamMembersRig(t)
 
 	newcomer := pgtest.SeedUser(t, r.h, "newcomer")
@@ -430,8 +432,8 @@ func TestTeamMemberAdd_NonManagerIs404(t *testing.T) {
 	r.tmh.handleTeamMemberAdd(rec, r.req(http.MethodPost, r.memb, "", map[string]string{
 		"user_id": newcomer, "role": "member",
 	}))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (non-manager add); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (non-manager add); body=%s", rec.Code, rec.Body.String())
 	}
 	if r.isTeamMember(t, newcomer) {
 		t.Errorf("newcomer added by non-manager, want not a member")

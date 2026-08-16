@@ -96,11 +96,11 @@ func TestHandleFleetPlacement_RejectsBadKind(t *testing.T) {
 	}
 }
 
-func TestHandleFleetPlacement_UnwiredResolver503(t *testing.T) {
+func TestHandleFleetPlacement_UnwiredResolverNotConfigured(t *testing.T) {
 	s := &Server{az: &authz.Checker{}} // placement nil
 	rec := httptest.NewRecorder()
 	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org=org1&repo=acme/web"))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("nil resolver should 503, got %d", rec.Code)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("nil resolver should 409 NOT_CONFIGURED, got %d", rec.Code)
 	}
 }

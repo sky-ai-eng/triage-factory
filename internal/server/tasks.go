@@ -315,6 +315,10 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !validHesitationField(w, req.HesitationMs) {
+		return
+	}
+
 	until, ok := parseSnoozeUntilField(w, req.Until)
 	if !ok {
 		return
@@ -1059,7 +1063,36 @@ func parseSnoozeUntilField(w http.ResponseWriter, raw string) (time.Time, bool) 
 		})
 		return time.Time{}, false
 	}
+	// A wake time already in the past parks the task in a state the sweeper
+	// wakes on its next pass — a snooze that reports success and does nothing.
+	// The four presets are future by construction, so this only bites the
+	// RFC3339 arm, which is the arm the UI never sends and an API caller does.
+	if !until.After(time.Now()) {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonOutOfRange,
+			Message: "until must be in the future",
+			Field:   "until",
+		})
+		return time.Time{}, false
+	}
 	return until, true
+}
+
+// validHesitationField rejects a negative hesitation. It is the milliseconds a
+// user spent deciding before the gesture, so below zero is not a slow decision
+// but a broken clock or a hand-written body — and it lands in swipe_events,
+// where it skews the dwell-time aggregates nothing downstream re-validates.
+// On failure the error response is already written.
+func validHesitationField(w http.ResponseWriter, ms int) bool {
+	if ms < 0 {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonOutOfRange,
+			Message: "hesitation_ms must be zero or greater",
+			Field:   "hesitation_ms",
+		})
+		return false
+	}
+	return true
 }
 
 func parseSnoozeUntil(s string) (time.Time, error) {

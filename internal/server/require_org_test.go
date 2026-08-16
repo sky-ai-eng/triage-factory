@@ -43,7 +43,6 @@ func TestRequireOrg_MultiModeNoActiveOrg_Returns409(t *testing.T) {
 			Reason  string `json:"reason"`
 			Message string `json:"message"`
 		} `json:"errors"`
-		Error string `json:"error"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode body: %v", err)
@@ -53,9 +52,6 @@ func TestRequireOrg_MultiModeNoActiveOrg_Returns409(t *testing.T) {
 	}
 	if len(body.Errors) == 1 && body.Errors[0].Message == "" {
 		t.Error("message field is empty; should describe how to pick an org")
-	}
-	if body.Error == "" {
-		t.Error("legacy error key is empty; the dual-key shim should mirror the first message")
 	}
 }
 

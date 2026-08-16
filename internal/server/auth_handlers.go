@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -183,7 +184,9 @@ func (s *Server) SetAuthDeps(
 // GET /api/auth/oauth/saml?provider_id=<gotrue-uuid>&return_to=/some/path
 func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
-		http.NotFound(w, r)
+		// The whole hosted-auth surface is absent in local mode: a route that
+		// doesn't exist in this deployment mode answers 404.
+		notFound(w, "route")
 		return
 	}
 	provider := r.PathValue("provider")
@@ -214,7 +217,7 @@ func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 		if s.loginExtension().StartSSO(w, r, provider, returnTo) {
 			return
 		}
-		http.Error(w, "unsupported provider", http.StatusNotFound)
+		notFound(w, "provider")
 	}
 }
 
@@ -228,12 +231,12 @@ func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) issueOAuthStateCookie(w http.ResponseWriter, r *http.Request, returnTo, providerID string, test bool) (codeVerifier, csrf string, ok bool) {
 	csrfRaw := make([]byte, 16)
 	if _, err := rand.Read(csrfRaw); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		internalError(w, "auth", fmt.Errorf("read csrf entropy: %w", err))
 		return "", "", false
 	}
 	codeVerifier, err := generatePKCEVerifier()
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		internalError(w, "auth", fmt.Errorf("generate pkce verifier: %w", err))
 		return "", "", false
 	}
 	csrf = hex.EncodeToString(csrfRaw)
@@ -247,7 +250,7 @@ func (s *Server) issueOAuthStateCookie(w http.ResponseWriter, r *http.Request, r
 	}
 	signed, err := state.sign(s.deployCfg.hmacKey)
 	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		internalError(w, "auth", fmt.Errorf("sign oauth state: %w", err))
 		return "", "", false
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -284,7 +287,9 @@ func (s *Server) redirectLoginError(w http.ResponseWriter, r *http.Request, code
 // GET /api/auth/callback?state=<csrf>&code=<auth_code>
 func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
-		http.NotFound(w, r)
+		// The whole hosted-auth surface is absent in local mode: a route that
+		// doesn't exist in this deployment mode answers 404.
+		notFound(w, "route")
 		return
 	}
 
@@ -292,19 +297,19 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// No state cookie yet → method unknown (state not parsed).
 		s.recordLoginFailure(r, "missing_state_cookie", "", "")
-		http.Error(w, "missing state cookie", http.StatusBadRequest)
+		badRequest(w, "missing state cookie")
 		return
 	}
 	state, err := parseStateCookie(stateCookie.Value, s.deployCfg.hmacKey)
 	if err != nil {
 		authLog.Warn("state cookie parse failed", "error", err)
 		s.recordLoginFailure(r, "state_parse_failed", "", "")
-		http.Error(w, "invalid state", http.StatusBadRequest)
+		badRequest(w, "invalid state")
 		return
 	}
 	if r.URL.Query().Get("state") != state.CSRF {
 		s.recordLoginFailure(r, "state_mismatch", authMethod(state.ProviderID != ""), "")
-		http.Error(w, "state mismatch", http.StatusBadRequest)
+		badRequest(w, "state mismatch")
 		return
 	}
 
@@ -365,7 +370,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	authCode := r.URL.Query().Get("code")
 	if authCode == "" {
 		s.recordLoginFailure(r, "missing_code", authMethod(state.ProviderID != ""), "")
-		http.Error(w, "missing code", http.StatusBadRequest)
+		badRequest(w, "missing code")
 		return
 	}
 
@@ -378,7 +383,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		authLog.Warn("pkce exchange failed", "error", err)
 		s.recordLoginFailure(r, "exchange_failed", authMethod(state.ProviderID != ""), "")
-		http.Error(w, "token exchange failed", http.StatusBadRequest)
+		badRequest(w, "token exchange failed")
 		return
 	}
 
@@ -386,7 +391,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		authLog.Warn("verify callback jwt failed", "error", err)
 		s.recordLoginFailure(r, "verify_failed", authMethod(state.ProviderID != ""), "")
-		http.Error(w, "invalid token", http.StatusUnauthorized)
+		writeUnauth(w)
 		return
 	}
 
@@ -394,7 +399,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// claims verified, so the email is known even though the sub is malformed.
 		s.recordLoginFailure(r, "bad_sub", authMethod(state.ProviderID != ""), claims.Email)
-		http.Error(w, "invalid sub", http.StatusBadRequest)
+		badRequest(w, "invalid sub")
 		return
 	}
 
@@ -412,9 +417,8 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// JIT, and the session all key on the human, not the per-provider identity.
 	userUUID, err := resolveOrCreatePrincipal(r.Context(), s.db, authUserID, claims, isSSO)
 	if err != nil {
-		authLog.Error("resolve principal failed", "identity", authUserID, "error", err)
 		s.recordLoginFailure(r, "principal_resolve_failed", authMethod(isSSO), claims.Email)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		internalError(w, "auth", fmt.Errorf("resolve principal %s: %w", authUserID, err))
 		return
 	}
 
@@ -466,8 +470,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if !defaultOrg.Valid {
 		defaultOrg, err = s.lookupEarliestMembership(r.Context(), s.db, userUUID)
 		if err != nil {
-			authLog.Error("resolve active org failed", "user", userUUID, "error", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			internalError(w, "auth", fmt.Errorf("resolve active org for %s: %w", userUUID, err))
 			return
 		}
 	}
@@ -483,8 +486,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		r.UserAgent(), clientIP(r), defaultOrg,
 	)
 	if err != nil {
-		authLog.Error("create session failed", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		internalError(w, "auth", fmt.Errorf("create session: %w", err))
 		return
 	}
 
@@ -521,7 +523,9 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 // POST /api/auth/logout
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
-		http.NotFound(w, r)
+		// The whole hosted-auth surface is absent in local mode: a route that
+		// doesn't exist in this deployment mode answers 404.
+		notFound(w, "route")
 		return
 	}
 	cookie, err := r.Cookie(s.sidCookieName())
@@ -587,7 +591,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // POST /api/auth/logout/all
 func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
-		http.NotFound(w, r)
+		// The whole hosted-auth surface is absent in local mode: a route that
+		// doesn't exist in this deployment mode answers 404.
+		notFound(w, "route")
 		return
 	}
 	claims := ClaimsFrom(r.Context())
@@ -597,7 +603,7 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	}
 	userID, err := uuid.Parse(claims.Subject)
 	if err != nil {
-		http.Error(w, "invalid sub", http.StatusBadRequest)
+		badRequest(w, "invalid sub")
 		return
 	}
 
@@ -606,8 +612,7 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	// of the active-set query.
 	active, err := s.authDeps.sessions.ListActiveForUserSystem(r.Context(), userID)
 	if err != nil {
-		authLog.Error("logout-all list failed", "user", userID, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		internalError(w, "auth", fmt.Errorf("list active sessions for %s: %w", userID, err))
 		return
 	}
 
@@ -624,8 +629,7 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 
 	n, err := s.authDeps.sessions.RevokeAllForUserSystem(r.Context(), userID)
 	if err != nil {
-		authLog.Error("revoke-all failed", "user", userID, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		internalError(w, "auth", fmt.Errorf("revoke all sessions for %s: %w", userID, err))
 		return
 	}
 	authLog.Info("logout-all revoked sessions", "user", userID, "count", n)
@@ -678,7 +682,9 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 // the org exists to a user who isn't in it.
 func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
-		http.NotFound(w, r)
+		// The whole hosted-auth surface is absent in local mode: a route that
+		// doesn't exist in this deployment mode answers 404.
+		notFound(w, "route")
 		return
 	}
 	claims := ClaimsFrom(r.Context())
@@ -701,25 +707,28 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		OrgID string `json:"org_id"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+	// Strict, capped decoding like every other body: the raw decoder here
+	// accepted trailing junk and unknown fields.
+	if !httpx.DecodeJSONStrictLimit(w, r, &body, 1<<10) {
 		return
 	}
 	orgUUID, err := uuid.Parse(body.OrgID)
 	if err != nil {
-		http.Error(w, "invalid org_id", http.StatusBadRequest)
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "org_id must be a valid org id", Field: "org_id",
+		})
 		return
 	}
 
 	ok, err := s.az.UserHasOrgAccess(r.Context(), claims.Subject, orgUUID.String())
 	if err != nil {
-		authLog.Error("active-org membership check failed", "user", claims.Subject, "org", orgUUID, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		internalError(w, "auth", fmt.Errorf("active-org membership check %s/%s: %w", claims.Subject, orgUUID, err))
 		return
 	}
 	if !ok {
-		// 404 not 403 — same posture as withOrg.
-		http.NotFound(w, r)
+		// 404 not 403 — same posture as withOrg: an org the caller isn't a
+		// member of must not be confirmed to exist.
+		notFound(w, "org")
 		return
 	}
 
@@ -731,8 +740,7 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 			writeUnauth(w)
 			return
 		}
-		authLog.Error("update active-org failed", "sid", sessions.LogID(sess.ID), "org", orgUUID, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		internalError(w, "auth", fmt.Errorf("update active org for session %s: %w", sessions.LogID(sess.ID), err))
 		return
 	}
 
@@ -937,8 +945,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
-		authLog.Error("/api/me failed", "user", claims.Subject, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		internalError(w, "auth", fmt.Errorf("/api/me for %s: %w", claims.Subject, err))
 		return
 	}
 
@@ -1073,8 +1080,7 @@ func (s *Server) handleMeIdentities(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
-		authLog.Error("/api/me/identities failed", "user", claims.Subject, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		internalError(w, "auth", fmt.Errorf("/api/me/identities for %s: %w", claims.Subject, err))
 		return
 	}
 

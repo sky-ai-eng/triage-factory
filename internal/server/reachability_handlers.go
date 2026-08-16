@@ -8,6 +8,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/reachability"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // reachabilityRequest is the URL-only body both reachability endpoints accept.
@@ -33,12 +34,12 @@ type reachabilityRequest struct {
 // POST /api/github/reachability   body: {"url": "https://github.com"}
 func handleGitHubReachability(w http.ResponseWriter, r *http.Request) {
 	var req reachabilityRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	base, ok := normalizeReachabilityURL(req.URL)
+	base, ok := normalizeBaseURL(req.URL)
 	if !ok {
-		badRequest(w, "url must be a valid http(s) URL")
+		invalidBaseURLField(w, "url")
 		return
 	}
 	writeJSON(w, http.StatusOK, reachability.Probe(r.Context(), ghclient.APIBase(base)))
@@ -52,19 +53,31 @@ func handleGitHubReachability(w http.ResponseWriter, r *http.Request) {
 // POST /api/jira/reachability   body: {"url": "https://jira.example.com"}
 func handleJiraReachability(w http.ResponseWriter, r *http.Request) {
 	var req reachabilityRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	base, ok := normalizeReachabilityURL(req.URL)
+	base, ok := normalizeBaseURL(req.URL)
 	if !ok {
-		badRequest(w, "url must be a valid http(s) URL")
+		invalidBaseURLField(w, "url")
 		return
 	}
 	writeJSON(w, http.StatusOK, reachability.Probe(r.Context(), jira.ReachabilityURL(base)))
 }
 
-// normalizeReachabilityURL validates a user-entered base URL for a probe and
-// returns its canonical form (scheme://host[/path], trailing slash trimmed). A
+// invalidBaseURLField writes the rejection every base-URL door gives, so the
+// probe and the settings write that persists the probed value name one rule.
+func invalidBaseURLField(w http.ResponseWriter, field string) {
+	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		Reason:  httpx.ReasonInvalidField,
+		Message: field + " must be a valid http(s) URL with no credentials, query, or fragment",
+		Field:   field,
+	})
+}
+
+// normalizeBaseURL validates a user-entered GitHub/Jira base URL and returns
+// its canonical form (scheme://host[/path], trailing slash trimmed). One
+// function for the probe and for the settings write that persists the same
+// value, so a URL the probe accepts is exactly the one the column can hold. A
 // base URL must parse, use http or https, and carry a host — and must NOT
 // carry credentials (userinfo), a query, or a fragment. Those forms are
 // rejected as bad input (a 400 at the handler) rather than flowing into a
@@ -75,7 +88,7 @@ func handleJiraReachability(w http.ResponseWriter, r *http.Request) {
 // the API at the host root, so it flows into APIBase's /api/v3 suffix — but the
 // reachability verdict is host-level (the probe only asks whether that host
 // answers), so an odd path can't produce a wrong reachable/unreachable result.
-func normalizeReachabilityURL(raw string) (string, bool) {
+func normalizeBaseURL(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", false

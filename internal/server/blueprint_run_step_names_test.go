@@ -31,7 +31,7 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 	taskID := seedBlueprintRunTask(t, s, "owner/repo#names")
 
 	// The plan a delegation freezes onto the run at mint — prompt names and all.
-	const plannedID = "br-named"
+	plannedID := fixtureUUID("br-named")
 	if _, err := sqlitestore.New(s.db).Blueprints.CreateRun(ctx, runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:           plannedID,
 		BlueprintID:  bpID,
@@ -71,7 +71,7 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 
 	// The defensive branch: a run with no frozen plan falls back to the live
 	// steps, which carry a prompt id and no name.
-	const unplannedID = "br-unnamed"
+	unplannedID := fixtureUUID("br-unnamed")
 	if _, err := sqlitestore.New(s.db).Blueprints.CreateRun(ctx, runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:           unplannedID,
 		BlueprintID:  bpID,

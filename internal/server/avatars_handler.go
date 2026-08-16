@@ -15,11 +15,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Avatar proxy (TFAC-480). User/member avatars come from OAuth metadata
@@ -402,11 +402,10 @@ func (h *avatarsHandler) handleAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetID := r.PathValue("user_id")
-	if _, err := uuid.Parse(targetID); err != nil {
-		// A malformed id is "not found" (parity with the other id-path handlers),
-		// not a 500 from a uuid cast.
-		http.NotFound(w, r)
+	// A malformed id is "not found" (parity with the other id-path handlers),
+	// not a 500 from a uuid cast.
+	targetID, ok := uuidPathOr404(w, r, "user_id", "avatar")
+	if !ok {
 		return
 	}
 
@@ -422,7 +421,7 @@ func (h *avatarsHandler) handleAvatar(w http.ResponseWriter, r *http.Request) {
 	if avatarURL == "" {
 		// No avatar configured, or the target isn't visible under the caller's
 		// org-scoped RLS. Either way the frontend falls back to a monogram.
-		http.NotFound(w, r)
+		notFound(w, "avatar")
 		return
 	}
 
@@ -432,7 +431,9 @@ func (h *avatarsHandler) handleAvatar(w http.ResponseWriter, r *http.Request) {
 		// fetch() already logged the specific cause (Warn for an SSRF rejection,
 		// Debug otherwise), rate-limited by its cache; the frontend Avatar's
 		// onError falls back to a monogram, so just 502 here.
-		http.Error(w, "avatar unavailable", http.StatusBadGateway)
+		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{
+			Reason: httpx.ReasonUpstreamUnavailable, Message: "avatar unavailable",
+		})
 		return
 	}
 

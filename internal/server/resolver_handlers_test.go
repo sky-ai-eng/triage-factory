@@ -19,6 +19,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // TFAC-327: the review diff/submit, pending-PR submit, branches, and
@@ -133,17 +134,21 @@ func TestArtifactGet_AppOnlyOrg_Success(t *testing.T) {
 	}
 }
 
-func TestArtifactGet_NoCredentials_503(t *testing.T) {
+// TestArtifactGet_NoCredentials_NotConfigured: an artifact read on a workspace
+// with no GitHub credential is 409 NOT_CONFIGURED — server-side configuration
+// the caller must fix, not a transient upstream outage (the 503 it used to
+// answer read as "try again later").
+func TestArtifactGet_NoCredentials_NotConfigured(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	logs := captureLog(t)
 
 	artID := seedDraftPRArtifact(t, srv, "acme", "api")
 	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("get = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("get = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
-	assertErrorBody(t, rec.Body.Bytes(), "GitHub credentials not configured")
+	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 	assertLogged(t, logs, "github not configured")
 }
 
@@ -174,16 +179,16 @@ func TestRepoBranches_AppOnlyOrg_Success(t *testing.T) {
 	}
 }
 
-func TestRepoBranches_NoCredentials_400(t *testing.T) {
+func TestRepoBranches_NoCredentials_NotConfigured(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	logs := captureLog(t)
 
 	rec := doJSON(t, srv, http.MethodGet, "/api/repos/acme/api/branches", nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("branches = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("branches = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
-	assertErrorBody(t, rec.Body.Bytes(), "GitHub not configured")
+	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 	assertLogged(t, logs, "github not configured")
 }
 
@@ -220,17 +225,6 @@ func TestProjectBundleProbe_NoCredentials_SurfacesError(t *testing.T) {
 	// that the no-credentials resolve surfaces rather than being swallowed.
 	if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 		t.Errorf("err = %v, want it to wrap ErrNoGitHubCredentials", err)
-	}
-}
-
-func assertErrorBody(t *testing.T, body []byte, want string) {
-	t.Helper()
-	var out map[string]string
-	if err := json.Unmarshal(body, &out); err != nil {
-		t.Fatalf("decode error body: %v; raw=%s", err, string(body))
-	}
-	if out["error"] != want {
-		t.Errorf("error = %q, want %q", out["error"], want)
 	}
 }
 

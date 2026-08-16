@@ -444,8 +444,11 @@ func TestOrgSettingsPost_TouchesNoCredential(t *testing.T) {
 		t.Fatalf("seed creds: %v", err)
 	}
 
+	// github_pat / jira_pat aren't fields on this route, and strict decoding
+	// says so rather than accepting them silently — which is itself the
+	// guarantee this test is about. Clear only the URLs.
 	postJSONResp(t, s, "/api/settings/org", map[string]any{
-		"github_base_url": "", "jira_base_url": "", "github_pat": "", "jira_pat": "",
+		"github_base_url": "", "jira_base_url": "",
 	})
 
 	stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT)

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { useAuth } from '../contexts/AuthContext'
-import { apiJSON, httpErrorMessage, HttpError } from '../lib/apiClient'
+import { apiErrors, apiJSON, httpErrorMessage, HttpError } from '../lib/apiClient'
 import type { AcceptInviteResponse, InvitePreview } from '../types'
 
 /**
@@ -18,8 +18,9 @@ import type { AcceptInviteResponse, InvitePreview } from '../types'
  *      the token riding return_to (safe through normalizeReturnTo).
  *   3. Valid + logged in → explicit Accept → POST /api/invites/accept → route
  *      into the org the backend just dropped them into.
- *   4. Wrong identity (409) → the actionable mismatch message + "log out and
- *      sign in as {invited_email}".
+ *   4. Wrong identity (409 INVITE_EMAIL_MISMATCH) → the actionable mismatch
+ *      message, which names both the invited address and the signed-in one,
+ *      plus "log out and sign in with the invited account".
  *
  * Multi-mode only: the route is registered in MultiRoutes; local mode never
  * mounts it (and the backend 404s every invite route there).
@@ -36,10 +37,10 @@ export default function InviteAccept() {
 
   const [accepting, setAccepting] = useState(false)
   const [acceptError, setAcceptError] = useState<string | null>(null)
-  // Set on the 409 wrong-identity case: the visitor is signed in as someone
-  // other than the invited address. Carries the message + the invited email so
-  // we can offer "log out and sign in as {invited_email}".
-  const [mismatch, setMismatch] = useState<{ message: string; invitedEmail: string } | null>(null)
+  // Set on the 409 INVITE_EMAIL_MISMATCH case: the visitor is signed in as
+  // someone other than the invited address. The server's message names both
+  // addresses, so it is rendered verbatim above the switch-account button.
+  const [mismatch, setMismatch] = useState<{ message: string } | null>(null)
 
   const loadPreview = useCallback(async () => {
     if (!token) {
@@ -96,14 +97,13 @@ export default function InviteAccept() {
       navigate('/orgs/' + res.org_id, { replace: true })
     } catch (e) {
       if (e instanceof HttpError && e.status === 409) {
-        const body = safeParseError(e.body)
-        if (body?.invited_email) {
-          setMismatch({
-            message: body.error ?? 'This invitation was sent to a different email.',
-            invitedEmail: body.invited_email,
-          })
+        const item = apiErrors(e)[0]
+        if (item?.reason === 'INVITE_EMAIL_MISMATCH') {
+          // The message names both addresses — the invited one and the one
+          // the caller is signed in as — so the card renders it verbatim.
+          setMismatch({ message: item.message })
         } else {
-          setAcceptError(body?.error ?? 'This invitation can no longer be accepted.')
+          setAcceptError(httpErrorMessage(e, 'This invitation can no longer be accepted.'))
         }
       } else if (e instanceof HttpError && (e.status === 404 || e.status === 400)) {
         setAcceptError('This invitation could not be found.')
@@ -167,7 +167,7 @@ export default function InviteAccept() {
       <Card title="Signed in as the wrong account">
         <p className="mb-4 text-[13px] leading-relaxed text-text-tertiary">{mismatch.message}</p>
         <PrimaryButton onClick={() => void handleSwitchAccount()}>
-          Log out and sign in as {mismatch.invitedEmail}
+          Log out and sign in with the invited account
         </PrimaryButton>
       </Card>
     )
@@ -220,16 +220,6 @@ function terminalMessage(status: InvitePreview['status'] | undefined): string {
     default:
       // not_found, or an unexpected/empty status.
       return 'We couldn’t find this invitation. The link may be incorrect or no longer valid.'
-  }
-}
-
-// safeParseError pulls { error, invited_email } out of an HttpError body that
-// may or may not be JSON.
-function safeParseError(body: string): { error?: string; invited_email?: string } | null {
-  try {
-    return JSON.parse(body) as { error?: string; invited_email?: string }
-  } catch {
-    return null
   }
 }
 

@@ -99,7 +99,11 @@ func (h *workspacesHandler) adminGate(w http.ResponseWriter, r *http.Request) (o
 		return "", "", false
 	}
 	if !isAdmin {
-		http.NotFound(w, r)
+		// The caller is a member of this org, so the org is visible to them:
+		// name the missing role rather than denying it exists.
+		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+			Reason: httpx.ReasonForbidden, Message: "org admin role required",
+		})
 		return "", "", false
 	}
 	return orgID, userID, true
@@ -185,7 +189,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		AppToken      string `json:"app_token"`
 		Transport     string `json:"transport"`
 	}
-	if !httpx.DecodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	botToken := strings.TrimSpace(body.BotToken)
@@ -318,18 +322,14 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 			// Deliberately generic: a workspace admin may learn "already
 			// connected", never which org holds it (the app-single-org
 			// invariant).
-			httpx.WriteJSON(w, http.StatusConflict, map[string]string{
-				"error": "this app is already connected",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this app is already connected"})
 			return
 		}
 		if httpx.IsUniqueViolation(err) {
 			// The (workspace, app) composite PK's backstop — see Upsert's
 			// doc. Same non-disclosure posture as the app-single-org 409
 			// above, distinct wording since it's the narrower conflict.
-			httpx.WriteJSON(w, http.StatusConflict, map[string]string{
-				"error": "this workspace+app is already connected",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this workspace+app is already connected"})
 			return
 		}
 		httpx.InternalError(w, "slack", err)
@@ -359,7 +359,7 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 	workspaceID := r.PathValue("workspace_id")
 	apiAppID := r.PathValue("api_app_id")
 	if workspaceID == "" || apiAppID == "" {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "workspace")
 		return
 	}
 
@@ -403,7 +403,7 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !existed {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "workspace")
 		return
 	}
 
@@ -425,9 +425,7 @@ func (h *workspacesHandler) handleManifest(w http.ResponseWriter, r *http.Reques
 	}
 	publicURL := h.publicURL()
 	if transport == transportEventsAPI && publicURL == "" {
-		httpx.WriteJSON(w, http.StatusConflict, map[string]string{
-			"error": "set TF_PUBLIC_URL / deploy config first",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "set TF_PUBLIC_URL / deploy config first"})
 		return
 	}
 

@@ -12,25 +12,33 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// decodeEnvelope parses a recorded error response into the envelope plus the
-// legacy shim key, so every test asserts against what actually went over the
-// wire rather than the Go structs that produced it.
-func decodeEnvelope(t *testing.T, rec *httptest.ResponseRecorder) (items []ErrorItem, legacy string) {
+// decodeEnvelope parses a recorded error response into the envelope, so every
+// test asserts against what actually went over the wire rather than the Go
+// structs that produced it. It decodes into a map first because the envelope's
+// shape is part of the contract: the response must carry `errors` and nothing
+// else, and a resurrected top-level `error` key would otherwise pass unnoticed.
+func decodeEnvelope(t *testing.T, rec *httptest.ResponseRecorder) []ErrorItem {
 	t.Helper()
-	var body struct {
-		Errors []ErrorItem `json:"errors"`
-		Error  string      `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("response is not JSON: %v (body=%q)", err, rec.Body.String())
 	}
-	return body.Errors, body.Error
+	for k := range raw {
+		if k != "errors" {
+			t.Errorf("envelope carries an extra key %q; the contract is errors-only (body=%s)", k, rec.Body.String())
+		}
+	}
+	var items []ErrorItem
+	if err := json.Unmarshal(raw["errors"], &items); err != nil {
+		t.Fatalf("errors is not a list of items: %v (body=%q)", err, rec.Body.String())
+	}
+	return items
 }
 
 // TestWriteErrors_Shape pins the envelope contract: an errors list carrying
-// reason/message/field, field omitted when unset, and the legacy top-level
-// "error" key mirroring the first item's message (the dual-key shim that
-// holds until every frontend call site reads the envelope).
+// reason/message/field, field omitted when unset, and nothing else in the
+// body — the dual-key shim that mirrored the first message under a top-level
+// "error" is gone now that every consumer reads the list.
 func TestWriteErrors_Shape(t *testing.T) {
 	rec := httptest.NewRecorder()
 	WriteErrors(rec, http.StatusBadRequest,
@@ -44,7 +52,7 @@ func TestWriteErrors_Shape(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", ct)
 	}
-	items, legacy := decodeEnvelope(t, rec)
+	items := decodeEnvelope(t, rec)
 	if len(items) != 2 {
 		t.Fatalf("len(errors) = %d, want 2", len(items))
 	}
@@ -53,9 +61,6 @@ func TestWriteErrors_Shape(t *testing.T) {
 	}
 	if items[1].Reason != ReasonConflict || items[1].Field != "" {
 		t.Errorf("second item = %+v", items[1])
-	}
-	if legacy != "name is required" {
-		t.Errorf("legacy error key = %q, want the first item's message", legacy)
 	}
 	// The second item must not serialize a "field" key at all — omitempty is
 	// part of the contract ("field appears only for payload-field faults").
@@ -76,7 +81,7 @@ func TestWriteErrors_Shape(t *testing.T) {
 func TestWriteErrors_NoItems(t *testing.T) {
 	rec := httptest.NewRecorder()
 	WriteErrors(rec, http.StatusInternalServerError)
-	items, _ := decodeEnvelope(t, rec)
+	items := decodeEnvelope(t, rec)
 	if len(items) != 1 || items[0].Reason != ReasonInternal {
 		t.Errorf("zero-item call produced %+v, want one INTERNAL item", items)
 	}
@@ -103,12 +108,9 @@ func TestHelpers_EmitEnvelope(t *testing.T) {
 			if rec.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)
 			}
-			items, legacy := decodeEnvelope(t, rec)
+			items := decodeEnvelope(t, rec)
 			if len(items) != 1 || items[0].Reason != tc.wantReason || items[0].Message != tc.wantMsg {
 				t.Errorf("items = %+v, want one {%s, %q}", items, tc.wantReason, tc.wantMsg)
-			}
-			if legacy != tc.wantMsg {
-				t.Errorf("legacy error key = %q, want %q", legacy, tc.wantMsg)
 			}
 		})
 	}
@@ -127,7 +129,7 @@ func TestRequireOrg_Envelope(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Errorf("status = %d, want 409", rec.Code)
 	}
-	items, _ := decodeEnvelope(t, rec)
+	items := decodeEnvelope(t, rec)
 	if len(items) != 1 || items[0].Reason != ReasonNoActiveOrg {
 		t.Errorf("items = %+v, want one NO_ACTIVE_ORG", items)
 	}
@@ -159,12 +161,9 @@ func TestInternalError_Envelope(t *testing.T) {
 			if rec.Code != http.StatusInternalServerError {
 				t.Errorf("status = %d, want 500", rec.Code)
 			}
-			items, legacy := decodeEnvelope(t, rec)
+			items := decodeEnvelope(t, rec)
 			if len(items) != 1 || items[0].Reason != ReasonInternal || items[0].Message != tc.wantMsg {
 				t.Errorf("items = %+v, want one {INTERNAL, %q}", items, tc.wantMsg)
-			}
-			if legacy != tc.wantMsg {
-				t.Errorf("legacy error key = %q, want %q", legacy, tc.wantMsg)
 			}
 		})
 	}
@@ -184,7 +183,7 @@ func TestValidation_AccumulatesAllFaults(t *testing.T) {
 	if !v.Flush(rec, http.StatusBadRequest) {
 		t.Fatal("Flush with faults reported nothing written")
 	}
-	items, legacy := decodeEnvelope(t, rec)
+	items := decodeEnvelope(t, rec)
 	wantReasons := []string{ReasonMissingField, ReasonInvalidField, ReasonOutOfRange, ReasonInvalidParam}
 	wantFields := []string{"entity_id", "action", "limit", "team_id"}
 	if len(items) != len(wantReasons) {
@@ -194,9 +193,6 @@ func TestValidation_AccumulatesAllFaults(t *testing.T) {
 		if items[i].Reason != wantReasons[i] || items[i].Field != wantFields[i] {
 			t.Errorf("item %d = %+v, want {%s, field %s}", i, items[i], wantReasons[i], wantFields[i])
 		}
-	}
-	if legacy != "entity_id is required" {
-		t.Errorf("legacy error key = %q, want the first fault's message", legacy)
 	}
 
 	var clean Validation
@@ -246,7 +242,7 @@ func TestDecodeJSONStrict(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("status = %d, want 400", rec.Code)
 			}
-			items, _ := decodeEnvelope(t, rec)
+			items := decodeEnvelope(t, rec)
 			if len(items) != 1 || items[0].Reason != tc.wantReason || items[0].Field != tc.wantField {
 				t.Errorf("items = %+v, want one {%s, field %q}", items, tc.wantReason, tc.wantField)
 			}
@@ -272,7 +268,7 @@ func TestDecodeJSONStrict_BodyCap(t *testing.T) {
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("status = %d, want 413", rec.Code)
 	}
-	items, _ := decodeEnvelope(t, rec)
+	items := decodeEnvelope(t, rec)
 	if len(items) != 1 || items[0].Reason != ReasonPayloadTooLarge {
 		t.Errorf("items = %+v, want one PAYLOAD_TOO_LARGE", items)
 	}

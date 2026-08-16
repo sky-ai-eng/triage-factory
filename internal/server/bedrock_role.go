@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Bedrock role mode (TFAC-616): the short-lived-credential Bedrock method.
@@ -50,25 +51,28 @@ func (se *settingsHandler) handleBedrockRoleSetup(w http.ResponseWriter, r *http
 	}
 	resolver := se.bedrockRoleResolver()
 	if resolver == nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "Bedrock role mode requires the multi-mode control service (this deployment has no ambient AWS identity to assume roles with)"})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonNotConfigured,
+			Message: "Bedrock role mode requires the multi-mode control service (this deployment has no ambient AWS identity to assume roles with)",
+		})
 		return
 	}
 
 	callerARN, err := resolver.CallerIdentityARN(r.Context())
 	if err != nil {
 		if errors.Is(err, llmcred.ErrNoAmbientIdentity) {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": operatorRemediationMsg})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason: httpx.ReasonNotConfigured, Message: operatorRemediationMsg,
+			})
 			return
 		}
-		settingsLog.Error("bedrock role-setup caller identity failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to resolve the control service's AWS identity"})
+		internalError(w, "settings", fmt.Errorf("resolve control-service AWS identity: %w", err))
 		return
 	}
 
 	externalID, err := se.resolveExternalID(r.Context(), orgID, userID)
 	if err != nil {
-		settingsLog.Error("bedrock role-setup external id failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to prepare the External ID"})
+		internalError(w, "settings", fmt.Errorf("prepare bedrock external id: %w", err))
 		return
 	}
 
@@ -87,16 +91,25 @@ func (se *settingsHandler) handleBedrockRoleSetup(w http.ResponseWriter, r *http
 // shared region / base-url validation.
 func (se *settingsHandler) handleBedrockRoleConnect(w http.ResponseWriter, r *http.Request, orgID, userID string, req bedrockConnectRequest) {
 	if req.RoleARN == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "role ARN is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "role ARN is required", Field: "role_arn",
+		})
 		return
 	}
 	if !bedrockRoleARNRe.MatchString(req.RoleARN) {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("%q does not look like an IAM role ARN (e.g. arn:aws:iam::123456789012:role/tf-bedrock)", req.RoleARN)})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: fmt.Sprintf("%q does not look like an IAM role ARN (e.g. arn:aws:iam::123456789012:role/tf-bedrock)", req.RoleARN),
+			Field:   "role_arn",
+		})
 		return
 	}
 	resolver := se.bedrockRoleResolver()
 	if resolver == nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "Bedrock role mode requires the multi-mode control service (this deployment has no ambient AWS identity to assume roles with)"})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonNotConfigured,
+			Message: "Bedrock role mode requires the multi-mode control service (this deployment has no ambient AWS identity to assume roles with)",
+		})
 		return
 	}
 
@@ -105,8 +118,7 @@ func (se *settingsHandler) handleBedrockRoleConnect(w http.ResponseWriter, r *ht
 	// value the customer's trust policy references. It is stable thereafter.
 	externalID, err := se.resolveExternalID(r.Context(), orgID, userID)
 	if err != nil {
-		settingsLog.Error("bedrock role connect external id failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to prepare the External ID"})
+		internalError(w, "settings", fmt.Errorf("prepare bedrock external id: %w", err))
 		return
 	}
 
@@ -116,15 +128,31 @@ func (se *settingsHandler) handleBedrockRoleConnect(w http.ResponseWriter, r *ht
 		switch {
 		case errors.Is(err, llmcred.ErrNoAmbientIdentity):
 			// Operator problem — the org admin can't fix it from the UI.
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": operatorRemediationMsg})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason: httpx.ReasonNotConfigured, Message: operatorRemediationMsg,
+			})
 		case errors.Is(err, llmcred.ErrAssumeRoleDenied):
 			// Org-admin problem — trust policy or External ID mismatch.
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("AssumeRole was denied — check the role's trust policy allows the control service and the External ID matches %q (re-open the setup to copy the trust-policy snippet)", externalID)})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason:  httpx.ReasonUpstreamRejected,
+				Message: fmt.Sprintf("AssumeRole was denied — check the role's trust policy allows the control service and the External ID matches %q (re-open the setup to copy the trust-policy snippet)", externalID),
+				Field:   "role_arn",
+			})
 		case errors.Is(err, llmcred.ErrRoleMisconfigured):
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason: httpx.ReasonUpstreamRejected, Message: err.Error(), Field: "role_arn",
+			})
 		default:
+			// The raw AWS error stays in the log; only local mode sees it in
+			// the body (LocalDetail), because an SDK error can carry account
+			// ids, ARNs and request ids that belong to the operator, not to
+			// another tenant's browser.
 			settingsLog.Error("bedrock role connect probe failed", "error", err)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("AssumeRole failed: %v", err)})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason:  httpx.ReasonUpstreamRejected,
+				Message: "AssumeRole failed" + httpx.LocalDetail(err),
+				Field:   "role_arn",
+			})
 		}
 		return
 	}
@@ -181,8 +209,7 @@ func (se *settingsHandler) handleBedrockRoleConnect(w http.ResponseWriter, r *ht
 		return recordCredentialRemovals(r.Context(), tx, orgID, userID,
 			[]string{domain.CredentialKindAnthropicKey})
 	}); err != nil {
-		settingsLog.Error("bedrock role connect persist failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store Bedrock role configuration"})
+		internalError(w, "settings", fmt.Errorf("persist bedrock role configuration: %w", err))
 		return
 	}
 

@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Connect GitHub — the user-to-server OAuth handler that binds a
@@ -480,7 +481,7 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req githubIdentityPATRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	pat := strings.TrimSpace(req.PAT)
@@ -502,10 +503,7 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 	}
 	ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
 	if !okHost {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "Your workspace's GitHub URL looks misconfigured. Ask your admin to fix it in Workspace Settings.",
-			"field": "github_pat",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your workspace's GitHub URL looks misconfigured. Ask your admin to fix it in Workspace Settings.", Field: "github_pat"})
 		return
 	}
 
@@ -514,23 +512,14 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 		// Keep the two failure shapes distinct, like the Connect flow: a host we
 		// couldn't reach (infra) vs. a token the host rejected (your action).
 		if errors.Is(err, auth.ErrGitHubHostUnreachable) {
-			writeJSON(w, http.StatusBadGateway, map[string]string{
-				"error": fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your GitHub server, not the token — try again.", ghWeb),
-				"field": "github_pat",
-			})
+			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your GitHub server, not the token — try again.", ghWeb), Field: "github_pat"})
 			return
 		}
 		if errors.Is(err, errGitHubNoLogin) {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": "GitHub didn't return a username for that token.",
-				"field": "github_pat",
-			})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub didn't return a username for that token.", Field: "github_pat"})
 			return
 		}
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "That token didn't validate against " + ghWeb + ". Double-check it and try again.",
-			"field": "github_pat",
-		})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token didn't validate against " + ghWeb + ". Double-check it and try again.", Field: "github_pat"})
 		return
 	}
 

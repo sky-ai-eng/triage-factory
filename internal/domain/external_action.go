@@ -342,6 +342,35 @@ const (
 	CredentialNone = "none"
 )
 
+// ExternalActionTypes is the closed action vocabulary — every Action* constant
+// above, in declaration order. Read APIs validate a caller's ?action= filter
+// against it so a typo is a rejected request rather than an authoritative-
+// looking empty page. Hand-maintained like AllEventTypes: a new Action*
+// constant belongs here too, or the feed can't be filtered by it.
+func ExternalActionTypes() []string {
+	return []string{
+		ActionPRCreated, ActionPRMarkedReady, ActionPRConvertedToDraft, ActionPREdited,
+		ActionPRClosed, ActionPRReopened, ActionPRMerged, ActionPRAutoMergeEnabled,
+		ActionPRAutoMergeDisabled, ActionPRReverted, ActionPRBranchUpdated,
+		ActionReviewSubmitted, ActionReviewDismissed, ActionReviewCommentEdited,
+		ActionReviewCommentDeleted, ActionCommentPosted, ActionCommentEdited,
+		ActionCommentDeleted, ActionReactionAdded, ActionReactionRemoved, ActionLabelAdded,
+		ActionLabelRemoved, ActionConversationLocked, ActionConversationUnlocked,
+		ActionWorkflowDispatched, ActionWorkflowRunCancelled, ActionBranchPushed,
+		ActionLinkedBranchCreated, ActionBranchPushFailed, ActionGitDenied,
+		ActionEgressDenied, ActionGHWriteDenied, ActionGHChannelWrite, ActionGraphQLWrite,
+		ActionIssueCreated, ActionIssueTransitioned, ActionIssueAssigned, ActionIssueUpdated,
+		ActionIssueCommentPosted, ActionIssueClosed, ActionIssueReopened, ActionIssueDeleted,
+		ActionIssuePinned, ActionIssueUnpinned, ActionIssueTransferred,
+		ActionReviewRequested, ActionReviewRequestRemoved, ActionRepoCreated,
+		ActionRepoEdited, ActionRepoDeleted, ActionRepoForked, ActionRepoArchived,
+		ActionRepoUnarchived, ActionLabelDefined, ActionLabelDefinitionEdited,
+		ActionLabelDefinitionDeleted, ActionReleaseCreated, ActionReleaseEdited,
+		ActionReleaseDeleted, ActionSlackMessagePosted, ActionSlackMessageEdited,
+		ActionSlackReactionAdded,
+	}
+}
+
 // BranchPushDedupKey builds the deterministic dedup key for a branch push:
 // "branch:<runID>:<ref>:<sha>". The git pre-push hook and the git-proxy
 // receive-pack backstop both observe the SAME push (same run, ref, sha), so they

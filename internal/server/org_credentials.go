@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Org integration credentials as first-class resources: the GitHub bot PAT and
@@ -65,7 +66,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req githubPATRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
@@ -92,10 +93,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "this workspace's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here",
-				"field": "pat",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this workspace's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here", Field: "pat"})
 			return
 		}
 		internalError(w, "github-access", err)
@@ -116,19 +114,13 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if app != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "this workspace uses a GitHub App — use the switch flow",
-			"field": "pat",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this workspace uses a GitHub App — use the switch flow", Field: "pat"})
 		return
 	}
 
 	ghUser, err := auth.ValidateGitHub(ctx, baseURL, pat)
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "GitHub: " + err.Error(),
-			"field": "pat",
-		})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub: " + err.Error(), Field: "pat"})
 		return
 	}
 
@@ -153,10 +145,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.githubCredentialClass(ctx, orgID); err != nil {
 		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
 			settingsOrgLog.Error("unknown github credential class; refusing to bind a pat", "org", orgID)
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "this workspace's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here",
-				"field": "pat",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this workspace's GitHub credential is managed in a way this version doesn't recognize — don't bind a token here", Field: "pat"})
 			return
 		}
 		internalError(w, "github-access", err)
@@ -166,10 +155,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "github-access", err)
 		return
 	} else if app != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "this workspace uses a GitHub App — use the switch flow",
-			"field": "pat",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this workspace uses a GitHub App — use the switch flow", Field: "pat"})
 		return
 	}
 
@@ -407,7 +393,7 @@ func (s *Server) kickGitHubChanged(r *http.Request, orgID string) {
 // {error, field} shape the credential surfaces already return on a 422 so the
 // frontend can highlight one control either way.
 func badRequestField(w http.ResponseWriter, msg, field string) {
-	writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg, "field": field})
+	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidBody, Message: msg, Field: field})
 }
 
 // recordOrgCredentialClear writes the credential_removed rows for a bulk

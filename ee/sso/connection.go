@@ -149,7 +149,7 @@ func (h *ssoConnectionHandler) currentConnection(ctx context.Context, orgID, use
 // non-admin, etc.). The shared preamble for all three handlers.
 func (h *ssoConnectionHandler) adminGate(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "route")
 		return "", "", false
 	}
 	orgID, ok = httpx.RequireOrg(w, r)
@@ -157,7 +157,7 @@ func (h *ssoConnectionHandler) adminGate(w http.ResponseWriter, r *http.Request)
 		return "", "", false
 	}
 	if !entitlements.For(orgID).Has(entitlements.FeatureSSO) {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "route")
 		return "", "", false
 	}
 	userID = httpx.ClaimsFrom(r.Context()).Subject
@@ -167,7 +167,10 @@ func (h *ssoConnectionHandler) adminGate(w http.ResponseWriter, r *http.Request)
 		return "", "", false
 	}
 	if !isAdmin {
-		http.NotFound(w, r)
+		// Visible org, missing role: 403, matching the core admin gates.
+		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+			Reason: httpx.ReasonForbidden, Message: "org admin role required",
+		})
 		return "", "", false
 	}
 	return orgID, userID, true
@@ -205,7 +208,7 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 	var body struct {
 		MetadataURL string `json:"metadata_url"`
 	}
-	if !httpx.DecodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	metadataURL := strings.TrimSpace(body.MetadataURL)
@@ -245,9 +248,7 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 
 	token := strings.TrimSpace(secretenv.Get(envServiceRoleToken))
 	if token == "" {
-		httpx.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "SSO admin token not configured — run `triagefactory jwk-init` and set " + envServiceRoleToken,
-		})
+		httpx.WriteErrors(w, http.StatusServiceUnavailable, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "SSO admin token not configured — run `triagefactory jwk-init` and set " + envServiceRoleToken})
 		return
 	}
 	gotrueURL := h.gotrueURL()
@@ -281,9 +282,7 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 		return e
 	}); err != nil {
 		if httpx.IsUniqueViolation(err) {
-			httpx.WriteJSON(w, http.StatusConflict, map[string]string{
-				"error": "this identity provider is already registered",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this identity provider is already registered"})
 			return
 		}
 		ssoLog.Warn("GoTrue SAML provider created but sso_connections write failed; provider is orphaned",
@@ -309,7 +308,7 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 	var body struct {
 		Enabled *bool `json:"enabled"`
 	}
-	if !httpx.DecodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	if body.Enabled == nil {
@@ -328,7 +327,7 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		return
 	}
 	if existing == nil {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "sso connection")
 		return
 	}
 
@@ -369,7 +368,7 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 		return e
 	}); err != nil {
 		if errors.Is(err, errNoConnection) {
-			http.NotFound(w, r)
+			httpx.NotFound(w, "sso connection")
 			return
 		}
 		httpx.InternalError(w, "sso", err)
@@ -393,7 +392,7 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 	var body struct {
 		Enforced *bool `json:"enforced"`
 	}
-	if !httpx.DecodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	if body.Enforced == nil {
@@ -412,7 +411,7 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 		return
 	}
 	if existing == nil {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "sso connection")
 		return
 	}
 
@@ -474,19 +473,13 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 	}); err != nil {
 		switch {
 		case errors.Is(err, errEnforceNotEnabled):
-			httpx.WriteJSON(w, http.StatusConflict, map[string]string{
-				"error": "enable the connection before requiring SSO",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "enable the connection before requiring SSO"})
 		case errors.Is(err, errEnforceNotTested):
-			httpx.WriteJSON(w, http.StatusConflict, map[string]string{
-				"error": "run a successful Test before requiring SSO",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "run a successful Test before requiring SSO"})
 		case errors.Is(err, errEnforceNoVerifiedDomain):
-			httpx.WriteJSON(w, http.StatusConflict, map[string]string{
-				"error": "verify a domain before requiring SSO",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "verify a domain before requiring SSO"})
 		case errors.Is(err, errNoConnection):
-			http.NotFound(w, r)
+			httpx.NotFound(w, "sso connection")
 		default:
 			httpx.InternalError(w, "sso", err)
 		}

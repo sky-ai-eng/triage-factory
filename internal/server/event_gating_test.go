@@ -202,10 +202,9 @@ func TestHandleEventHandlerCreate_RejectsGatedEventType(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var got map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got["error"] != "event source not enabled for this organization" {
-		t.Errorf("error message = %q", got["error"])
+	got := firstErrorMessage(t, rec)
+	if got != "event source not enabled for this organization" {
+		t.Errorf("error message = %q", got)
 	}
 }
 

@@ -359,11 +359,15 @@ func TestGitHubAppWebhookReplay_Gates(t *testing.T) {
 		if rec.Code != http.StatusBadGateway {
 			t.Fatalf("status=%d body=%s, want 502", rec.Code, rec.Body.String())
 		}
-		var out map[string]string
+		var out struct {
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
 		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if out["error"] == "" {
+		if len(out.Errors) == 0 || out.Errors[0].Message == "" {
 			t.Error("502 with no error message; the panel renders this string")
 		}
 	})

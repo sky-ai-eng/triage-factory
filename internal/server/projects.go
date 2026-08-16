@@ -21,6 +21,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/projectbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -30,6 +31,45 @@ import (
 // family hangs work onto. This file is pure CRUD + on-disk knowledge
 // dir cleanup; the Curator runtime, classifier, and UI all land in
 // later tickets and can hit the same handlers without changes here.
+
+// writeKnowledgePathError shapes resolveKnowledgePath's (status, message)
+// pair: a client-side path fault names the path segment it came from, a
+// server-side resolution failure is a plain 500. The message is already
+// generic — resolveKnowledgePath logs the underlying error, which can carry
+// filesystem layout, and only returns text safe to hand back.
+func writeKnowledgePathError(w http.ResponseWriter, status int, msg string) {
+	if status == http.StatusBadRequest {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidParam, Message: msg, Field: "path",
+		})
+		return
+	}
+	httpx.WriteErrors(w, status, httpx.ErrorItem{Reason: httpx.ReasonInternal, Message: msg})
+}
+
+// writeNotARegularFile answers a knowledge path that resolved to something
+// this endpoint will not stream — a symlink, a directory, a device node.
+func writeNotARegularFile(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		Reason: httpx.ReasonInvalidParam, Message: "not a regular file", Field: "path",
+	})
+}
+
+// writeInvalidVisibility answers the one enum both create and PATCH validate.
+func writeInvalidVisibility(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		Reason:  httpx.ReasonInvalidField,
+		Message: "visibility must be one of private, team, org",
+		Field:   "visibility",
+	})
+}
+
+// projectIDOr404 guards the {id} path value on every project-scoped route —
+// projects.id is a uuid column on Postgres. See uuidPathOr404. Shared with the
+// curator and knowledge surfaces, which address projects the same way.
+func projectIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
+	return uuidPathOr404(w, r, "id", "project")
+}
 
 // createProjectRequest is the POST body shape. Most fields are
 // optional — a project starts as an empty shell named by the user
@@ -86,12 +126,14 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var req createProjectRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name",
+		})
 		return
 	}
 	jiraKey := strings.TrimSpace(req.JiraProjectKey)
@@ -102,7 +144,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		visibility = domain.ProjectVisibilityTeam
 	}
 	if !domain.ValidProjectVisibility(visibility) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "visibility must be one of private, team, org"})
+		writeInvalidVisibility(w)
 		return
 	}
 	// Multi-mode-only feature (TFAC-562): local's N=1 tenancy has no
@@ -130,6 +172,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		pinned           []string
 		pinnedErrMsg     string
 		trackerErrMsg    string
+		trackerErrField  string
 		visibilityErrMsg string
 		teamJiraRules    []domain.JiraProjectStatusRules
 		created          *domain.Project
@@ -166,7 +209,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if jiraKey != "" || linearKey != "" {
-			jiraKey, linearKey, trackerErrMsg = validateTrackerKeys(teamJiraRules, jiraKey, linearKey)
+			jiraKey, linearKey, trackerErrField, trackerErrMsg = validateTrackerKeys(teamJiraRules, jiraKey, linearKey)
 			if trackerErrMsg != "" {
 				return nil // surfaced as 400 below; nothing written
 			}
@@ -210,14 +253,18 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		// private/org escape hatch) ahead of WriteIfSelectionError's generic
 		// one; ErrRequired/ErrForbidden fall through to that generic 400.
 		if errors.Is(err, teamscope.ErrNoTeam) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "join a team to create a team-visibility project, or choose private/org visibility"})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: "join a team to create a team-visibility project, or choose private/org visibility",
+				Field:   "visibility",
+			})
 			return
 		}
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		if errors.Is(err, db.ErrVisibilityForbidden) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "you don't have permission to create a project with that visibility"})
+			forbidden(w, "you don't have permission to create a project with that visibility")
 			return
 		}
 		projectsLog.Error("create failed", "error", err)
@@ -225,15 +272,21 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if visibilityErrMsg != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": visibilityErrMsg})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: visibilityErrMsg, Field: "visibility",
+		})
 		return
 	}
 	if pinnedErrMsg != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": pinnedErrMsg})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: pinnedErrMsg, Field: "pinned_repos",
+		})
 		return
 	}
-	if trackerErrMsg != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": trackerErrMsg})
+	if trackerErrField != "" {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: trackerErrMsg, Field: trackerErrField,
+		})
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
@@ -263,7 +316,10 @@ func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var project *domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -317,7 +373,10 @@ func (s *Server) handleProjectExportPreview(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	preview, err := projectbundle.Preview(r.Context(), s.tx, s.kb, orgID, userID, id)
 	if err != nil {
 		if errors.Is(err, projectbundle.ErrProjectNotFound) {
@@ -336,7 +395,10 @@ func (s *Server) handleProjectExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var project *domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -375,7 +437,9 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, projectBundleMaxUploadBytes)
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart parse: " + err.Error()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidBody, Message: "multipart parse: " + err.Error(),
+		})
 		return
 	}
 	defer func() {
@@ -386,18 +450,24 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 
 	file, _, err := r.FormFile("bundle")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bundle file is required (form field 'bundle')"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "bundle file is required (form field 'bundle')", Field: "bundle",
+		})
 		return
 	}
 	defer file.Close()
 
 	size, err := file.Seek(0, io.SeekEnd)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to determine bundle size"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidBody, Message: "failed to determine bundle size", Field: "bundle",
+		})
 		return
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to rewind bundle"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidBody, Message: "failed to rewind bundle", Field: "bundle",
+		})
 		return
 	}
 
@@ -437,23 +507,41 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var dupNameErr *projectbundle.DuplicateNameError
 		if errors.As(err, &dupNameErr) {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":   "duplicate_name",
-				"message": "rename or delete the existing project first",
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonDuplicateName,
+				Message: dupNameErr.Error() + " — rename or delete the existing project first",
 			})
 			return
 		}
 		var missingReposErr *projectbundle.MissingReposError
 		if errors.As(err, &missingReposErr) {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":         "missing_repos",
-				"missing_repos": missingReposErr.Missing,
-			})
+			// One item per unreachable repo, each carrying the probe's own
+			// reason: the envelope reports every failure, so the uploader
+			// sees the whole list instead of the first name.
+			items := make([]httpx.ErrorItem, 0, len(missingReposErr.Missing))
+			for _, m := range missingReposErr.Missing {
+				items = append(items, httpx.ErrorItem{
+					Reason:  httpx.ReasonNotFound,
+					Message: "pinned repo " + m.Repo + " is unreachable with this workspace's GitHub credentials: " + m.Error,
+					Field:   "pinned_repos",
+				})
+			}
+			httpx.WriteErrors(w, http.StatusConflict, items...)
 			return
 		}
-		var unsupported *projectbundle.UnsupportedFormatError
-		if errors.As(err, &unsupported) || errors.Is(err, projectbundle.ErrManifestMissing) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		if errors.Is(err, projectbundle.ErrPermissionDenied) {
+			// Visible resource, refused action: adding to the team's tracked
+			// set is an admin write. Surfaced as a 500 before this.
+			forbidden(w, err.Error())
+			return
+		}
+		if projectbundle.IsClientFault(err) {
+			// Malformed zip, unparseable manifest, an entry past the
+			// extraction budget, a path that escapes the tree: all properties
+			// of the uploaded file, all previously answered 500.
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidBody, Message: err.Error(), Field: "bundle",
+			})
 			return
 		}
 		internalError(w, "projects", err)
@@ -499,9 +587,12 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var req patchProjectRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -539,7 +630,9 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Name != nil {
 		trimmed := strings.TrimSpace(*req.Name)
 		if trimmed == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name cannot be empty"})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidField, Message: "name cannot be empty", Field: "name",
+			})
 			return
 		}
 		updated.Name = trimmed
@@ -555,8 +648,10 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		// private/org-visibility project has no team), not a malformed row —
 		// pinned repos just aren't available for one in v1.
 		if existing.TeamID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "this project has no team — pinned repos aren't available for a private/org visibility project",
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: "this project has no team — pinned repos aren't available for a private/org visibility project",
+				Field:   "pinned_repos",
 			})
 			return
 		}
@@ -570,7 +665,9 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errMsg != "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidField, Message: errMsg, Field: "pinned_repos",
+			})
 			return
 		}
 		updated.PinnedRepos = pinned
@@ -602,8 +699,10 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			// since TFAC-562 (a private/org-visibility project has no
 			// team) — a tracker key just isn't available for one in v1.
 			if existing.TeamID == "" {
-				writeJSON(w, http.StatusBadRequest, map[string]string{
-					"error": "this project has no team — a tracker project key isn't available for a private/org visibility project",
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+					Reason:  httpx.ReasonInvalidField,
+					Message: "this project has no team — a tracker project key isn't available for a private/org visibility project",
+					Field:   "jira_project_key",
 				})
 				return
 			}
@@ -613,13 +712,14 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 				teamRules, rerr = tx.JiraStatusRules.ListForTeam(r.Context(), existing.TeamID)
 				return rerr
 			}); err != nil {
-				projectsLog.Error("patch: jira rules load failed", "error", err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load Jira rules"})
+				internalError(w, "projects", fmt.Errorf("load jira rules for project %s: %w", existing.ID, err))
 				return
 			}
-			jiraKey, _, errMsg := validateTrackerKeys(teamRules, *req.JiraProjectKey, "")
+			jiraKey, _, errField, errMsg := validateTrackerKeys(teamRules, *req.JiraProjectKey, "")
 			if errMsg != "" {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+					Reason: httpx.ReasonInvalidField, Message: errMsg, Field: errField,
+				})
 				return
 			}
 			updated.JiraProjectKey = jiraKey
@@ -631,9 +731,11 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		// explicit. When the Linear integration ships, this branch will
 		// need its own rule lookup — but only when the input is
 		// non-empty, mirroring the Jira pattern above.
-		_, linearKey, errMsg := validateTrackerKeys(nil, "", *req.LinearProjectKey)
+		_, linearKey, errField, errMsg := validateTrackerKeys(nil, "", *req.LinearProjectKey)
 		if errMsg != "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidField, Message: errMsg, Field: errField,
+			})
 			return
 		}
 		updated.LinearProjectKey = linearKey
@@ -654,8 +756,10 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			// project has no team) — a blueprint override just isn't
 			// available for one in v1.
 			if existing.TeamID == "" {
-				writeJSON(w, http.StatusBadRequest, map[string]string{
-					"error": "this project has no team — a spec-authorship blueprint override isn't available for a private/org visibility project",
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+					Reason:  httpx.ReasonInvalidField,
+					Message: "this project has no team — a spec-authorship blueprint override isn't available for a private/org visibility project",
+					Field:   "spec_authorship_blueprint_id",
 				})
 				return
 			}
@@ -665,8 +769,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 				visible, e = tx.Blueprints.List(r.Context(), orgID, existing.TeamID)
 				return e
 			}); err != nil {
-				projectsLog.Error("patch: blueprint list failed", "project", existing.ID, "error", err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load blueprint" + localDetail(err)})
+				internalError(w, "projects", fmt.Errorf("list blueprints for project %s: %w", existing.ID, err))
 				return
 			}
 			found := false
@@ -679,7 +782,11 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			if !found {
 				// Same 400 for "unknown" and "other team's" — don't leak the
 				// existence of another team's blueprint by id.
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "spec_authorship_blueprint_id references unknown blueprint"})
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+					Reason:  httpx.ReasonInvalidField,
+					Message: "spec_authorship_blueprint_id references unknown blueprint",
+					Field:   "spec_authorship_blueprint_id",
+				})
 				return
 			}
 		}
@@ -688,7 +795,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Visibility != nil {
 		v := strings.TrimSpace(*req.Visibility)
 		if !domain.ValidProjectVisibility(v) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "visibility must be one of private, team, org"})
+			writeInvalidVisibility(w)
 			return
 		}
 		// Multi-mode-only (TFAC-562) — mirrors the create-path guard.
@@ -702,8 +809,10 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		// created private/org with no team can't become team-visibility
 		// without recreating it. existing.TeamID never changes here (no
 		// PATCH field sets it), so this only fires for that teamless case.
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "this project has no team — team visibility isn't available for it",
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "this project has no team — team visibility isn't available for it",
+			Field:   "visibility",
 		})
 		return
 	}
@@ -712,7 +821,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		return tx.Projects.Update(r.Context(), orgID, updated)
 	}); err != nil {
 		if errors.Is(err, db.ErrVisibilityForbidden) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "you don't have permission to change this project to that visibility"})
+			forbidden(w, "you don't have permission to change this project to that visibility")
 			return
 		}
 		internalError(w, "projects", err)
@@ -735,8 +844,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		fresh, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		projectsLog.Error("patch: read-back after update failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "updated but read-back failed" + localDetail(err)})
+		internalError(w, "projects", fmt.Errorf("read back project %s after update: %w", id, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, fresh)
@@ -748,7 +856,10 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	// Take the same per-project lock that PATCH uses. Without this,
 	// an in-flight autosave (holding the lock, mid read-merge-write)
@@ -981,7 +1092,11 @@ func validatePinnedRepos(ctx context.Context, teamRepos db.TeamGitHubReposStore,
 //
 // Returns the normalized values and an empty error string on success,
 // or two empty strings and an error message on failure.
-func validateTrackerKeys(teamRules []domain.JiraProjectStatusRules, jiraKey, linearKey string) (string, string, string) {
+// validateTrackerKeys returns the normalized keys plus, on rejection, the
+// body field at fault and its message — the field travels with the message so
+// the envelope can attribute the error instead of leaving the client to parse
+// a "jira_project_key: ..." prefix out of the prose.
+func validateTrackerKeys(teamRules []domain.JiraProjectStatusRules, jiraKey, linearKey string) (jira, linear, errField, errMsg string) {
 	jiraNorm := normalizeJiraProjectKey(jiraKey)
 	linearNorm := strings.TrimSpace(linearKey)
 
@@ -991,18 +1106,18 @@ func validateTrackerKeys(teamRules []domain.JiraProjectStatusRules, jiraKey, lin
 		// the frontend renders a disabled Linear picker, so a
 		// non-empty value arriving here is a bypass attempt or a
 		// stale client.
-		return "", "", "linear_project_key: Linear integration is not configured"
+		return "", "", "linear_project_key", "Linear integration is not configured"
 	}
 
 	if jiraNorm == "" {
-		return "", "", ""
+		return "", "", "", ""
 	}
 	for _, p := range teamRules {
 		if p.ProjectKey == jiraNorm {
-			return jiraNorm, "", ""
+			return jiraNorm, "", "", ""
 		}
 	}
-	return "", "", "jira_project_key: " + jiraNorm + " is not in the configured Jira projects list (add it on the Settings page first)"
+	return "", "", "jira_project_key", jiraNorm + " is not in the configured Jira projects list (add it on the Settings page first)"
 }
 
 // queuePendingContextChanges diffs the project's pre-PATCH state against the
@@ -1150,15 +1265,17 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var project *domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		projectsLog.Error("knowledge list: db get failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
+		internalError(w, "projects", fmt.Errorf("load project %s: %w", id, err))
 		return
 	}
 	if project == nil {
@@ -1170,8 +1287,7 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 	if runmode.Current() == runmode.ModeMulti {
 		files, err := s.listKnowledgeFromStore(r.Context(), orgID, id)
 		if err != nil {
-			projectsLog.Error("knowledge list: store list failed", "project", id, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read knowledge base"})
+			internalError(w, "projects", fmt.Errorf("list knowledge from store for project %s: %w", id, err))
 			return
 		}
 		writeJSON(w, http.StatusOK, files)
@@ -1179,15 +1295,13 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 	}
 	root, err := curator.KnowledgeDir(orgID, id)
 	if err != nil {
-		projectsLog.Error("knowledge list: resolve dir failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read knowledge base"})
+		internalError(w, "projects", fmt.Errorf("resolve knowledge dir for project %s: %w", id, err))
 		return
 	}
 	kbDir := filepath.Join(root, "knowledge-base")
 	files, err := readKnowledgeFiles(kbDir)
 	if err != nil {
-		projectsLog.Error("knowledge list: read dir failed", "dir", kbDir, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read knowledge base"})
+		internalError(w, "projects", fmt.Errorf("read knowledge dir %s: %w", kbDir, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, files)
@@ -1464,15 +1578,17 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var project *domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		projectsLog.Error("knowledge fetch: db get failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
+		internalError(w, "projects", fmt.Errorf("load project %s: %w", id, err))
 		return
 	}
 	if project == nil {
@@ -1481,7 +1597,7 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 	}
 	_, full, status, errMsg := resolveKnowledgePath(orgID, id, r.PathValue("path"))
 	if errMsg != "" {
-		writeJSON(w, status, map[string]string{"error": errMsg})
+		writeKnowledgePathError(w, status, errMsg)
 		return
 	}
 	// Multi mode: stream from the blob store with single-range support (video
@@ -1497,12 +1613,11 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 			notFound(w, "file")
 			return
 		}
-		projectsLog.Error("knowledge fetch: lstat failed", "path", full, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read file"})
+		internalError(w, "projects", fmt.Errorf("lstat knowledge file %s: %w", full, err))
 		return
 	}
 	if linfo.Mode()&os.ModeSymlink != 0 || !linfo.Mode().IsRegular() {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "not a regular file"})
+		writeNotARegularFile(w)
 		return
 	}
 	// O_NOFOLLOW closes the TOCTOU window between Lstat and Open:
@@ -1523,12 +1638,12 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 		// 500 so the operator can spot them — collapsing all
 		// failures to "not a regular file" 400 would mask real
 		// production issues behind a misleading client error.
-		projectsLog.Error("knowledge fetch: open failed", "path", full, "error", err)
 		if isSymlinkRejection(err) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "not a regular file"})
+			projectsLog.Error("knowledge fetch: open failed", "path", full, "error", err)
+			writeNotARegularFile(w)
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read file"})
+		internalError(w, "projects", fmt.Errorf("open knowledge file %s: %w", full, err))
 		return
 	}
 	defer f.Close()
@@ -1566,7 +1681,10 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	// Parse the multipart body BEFORE taking the per-project lock.
 	// ParseMultipartForm reads the whole request off the wire — the
@@ -1582,7 +1700,9 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	// file doesn't poison siblings that were within budget.
 	r.Body = http.MaxBytesReader(w, r.Body, knowledgeMaxRequestBytes)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart parse: " + err.Error()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidBody, Message: "multipart parse: " + err.Error(),
+		})
 		return
 	}
 	defer func() {
@@ -1594,7 +1714,9 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	}()
 	files := r.MultipartForm.File["file"]
 	if len(files) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no files in upload (use form field 'file')"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "no files in upload (use form field 'file')", Field: "file",
+		})
 		return
 	}
 
@@ -1623,8 +1745,7 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		project, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		projectsLog.Error("knowledge upload: db get failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
+		internalError(w, "projects", fmt.Errorf("load project %s: %w", id, err))
 		return
 	}
 	if project == nil {
@@ -1639,14 +1760,12 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	if !multi {
 		root, err := curator.KnowledgeDir(orgID, id)
 		if err != nil {
-			projectsLog.Error("knowledge upload: resolve dir failed", "project", id, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to resolve knowledge dir"})
+			internalError(w, "projects", fmt.Errorf("resolve knowledge dir for project %s: %w", id, err))
 			return
 		}
 		kbDir = filepath.Join(root, "knowledge-base")
 		if err := os.MkdirAll(kbDir, 0o755); err != nil {
-			projectsLog.Error("knowledge upload: mkdir failed", "dir", kbDir, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create knowledge dir"})
+			internalError(w, "projects", fmt.Errorf("create knowledge dir %s: %w", kbDir, err))
 			return
 		}
 	}
@@ -1831,7 +1950,10 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	// Same per-project lock as upload + project PATCH/DELETE.
 	// Holding the lock keeps the file remove + updated_at bump
@@ -1852,8 +1974,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		project, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		projectsLog.Error("knowledge delete: db get failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
+		internalError(w, "projects", fmt.Errorf("load project %s: %w", id, err))
 		return
 	}
 	if project == nil {
@@ -1862,7 +1983,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 	}
 	_, full, status, errMsg := resolveKnowledgePath(orgID, id, r.PathValue("path"))
 	if errMsg != "" {
-		writeJSON(w, status, map[string]string{"error": errMsg})
+		writeKnowledgePathError(w, status, errMsg)
 		return
 	}
 	multi := runmode.Current() == runmode.ModeMulti
@@ -1873,8 +1994,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		name := filepath.Base(full)
 		exists, err := s.kb.Exists(r.Context(), orgID, id, name)
 		if err != nil {
-			projectsLog.Error("knowledge delete: store exists failed", "project", id, "file", name, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove file"})
+			internalError(w, "projects", fmt.Errorf("check knowledge file %s in store: %w", name, err))
 			return
 		}
 		if !exists {
@@ -1882,8 +2002,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if err := s.kb.Delete(r.Context(), orgID, id, name); err != nil {
-			projectsLog.Error("knowledge delete: store delete failed", "project", id, "file", name, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove file"})
+			internalError(w, "projects", fmt.Errorf("delete knowledge file %s from store: %w", name, err))
 			return
 		}
 	} else if err := os.Remove(full); err != nil {
@@ -1891,15 +2010,13 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 			notFound(w, "file")
 			return
 		}
-		projectsLog.Error("knowledge delete: remove failed", "path", full, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove file"})
+		internalError(w, "projects", fmt.Errorf("remove knowledge file %s: %w", full, err))
 		return
 	}
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Projects.BumpUpdatedAt(r.Context(), orgID, id)
 	}); err != nil {
-		projectsLog.Error("knowledge delete: bump updated_at failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update project state"})
+		internalError(w, "projects", fmt.Errorf("bump updated_at for project %s: %w", id, err))
 		return
 	}
 	if multi {

@@ -117,7 +117,9 @@ func TestHandleDiscover_LocalMode_FallsToGitHub(t *testing.T) {
 	}
 }
 
-// TestHandleDiscover_OversizeBody_Rejected locks in the pre-auth body cap.
+// TestHandleDiscover_OversizeBody_Rejected locks in the pre-auth body cap. The
+// kernel's decoder answers 413 PAYLOAD_TOO_LARGE for a body past the cap,
+// rather than folding it into the generic 400 the old lenient decoder gave.
 func TestHandleDiscover_OversizeBody_Rejected(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 
@@ -127,8 +129,8 @@ func TestHandleDiscover_OversizeBody_Rejected(t *testing.T) {
 	rec := httptest.NewRecorder()
 	(&loginExt{}).handleDiscover(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 for an over-cap body (body=%q)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 for an over-cap body (body=%q)", rec.Code, rec.Body.String())
 	}
 }
 

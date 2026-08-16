@@ -332,9 +332,11 @@ func TestBedrockConnect_ExclusivityWithAnthropic(t *testing.T) {
 	}
 }
 
-// TestBedrockConnect_ValidationErrors pins the 422 shapes: bad method,
-// missing/malformed region, malformed endpoint override, partial key pair,
-// and blank secrets with nothing stored to keep.
+// TestBedrockConnect_ValidationErrors pins the rejections: a bad method,
+// missing/malformed region, a malformed endpoint override and a partial key
+// pair are shape faults (400 — the epic's 400-vs-422 line), while blank
+// secrets with nothing stored to keep is semantic (422: the body is
+// well-formed, there is just nothing to carry forward).
 func TestBedrockConnect_ValidationErrors(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -343,23 +345,24 @@ func TestBedrockConnect_ValidationErrors(t *testing.T) {
 	cases := []struct {
 		name string
 		body map[string]any
+		want int
 	}{
-		{"unknown_method", map[string]any{"auth_method": "iam", "region": "us-east-1"}},
-		{"missing_region", map[string]any{"auth_method": "bearer", "bearer_token": "b"}},
-		{"malformed_region", map[string]any{"auth_method": "bearer", "bearer_token": "b", "region": "US EAST"}},
-		{"base_url_with_path", map[string]any{"auth_method": "bearer", "bearer_token": "b", "region": "us-east-1", "base_url": "https://x.example.com/v1"}},
-		{"base_url_http", map[string]any{"auth_method": "bearer", "bearer_token": "b", "region": "us-east-1", "base_url": "http://x.example.com"}},
-		{"base_url_no_scheme", map[string]any{"auth_method": "bearer", "bearer_token": "b", "region": "us-east-1", "base_url": "x.example.com"}},
-		{"partial_pair_id_only", map[string]any{"auth_method": "access_keys", "access_key_id": "AKIA", "region": "us-east-1"}},
-		{"partial_pair_secret_only", map[string]any{"auth_method": "access_keys", "secret_access_key": "s", "region": "us-east-1"}},
-		{"blank_bearer_nothing_stored", map[string]any{"auth_method": "bearer", "region": "us-east-1"}},
-		{"blank_keys_nothing_stored", map[string]any{"auth_method": "access_keys", "region": "us-east-1"}},
+		{"unknown_method", map[string]any{"auth_method": "iam", "region": "us-east-1"}, http.StatusBadRequest},
+		{"missing_region", map[string]any{"auth_method": "bearer", "bearer_token": "b"}, http.StatusBadRequest},
+		{"malformed_region", map[string]any{"auth_method": "bearer", "bearer_token": "b", "region": "US EAST"}, http.StatusBadRequest},
+		{"base_url_with_path", map[string]any{"auth_method": "bearer", "bearer_token": "b", "region": "us-east-1", "base_url": "https://x.example.com/v1"}, http.StatusUnprocessableEntity},
+		{"base_url_http", map[string]any{"auth_method": "bearer", "bearer_token": "b", "region": "us-east-1", "base_url": "http://x.example.com"}, http.StatusUnprocessableEntity},
+		{"base_url_no_scheme", map[string]any{"auth_method": "bearer", "bearer_token": "b", "region": "us-east-1", "base_url": "x.example.com"}, http.StatusUnprocessableEntity},
+		{"partial_pair_id_only", map[string]any{"auth_method": "access_keys", "access_key_id": "AKIA", "region": "us-east-1"}, http.StatusBadRequest},
+		{"partial_pair_secret_only", map[string]any{"auth_method": "access_keys", "secret_access_key": "s", "region": "us-east-1"}, http.StatusBadRequest},
+		{"blank_bearer_nothing_stored", map[string]any{"auth_method": "bearer", "region": "us-east-1"}, http.StatusBadRequest},
+		{"blank_keys_nothing_stored", map[string]any{"auth_method": "access_keys", "region": "us-east-1"}, http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			rec := doJSON(t, s, "POST", "/api/bedrock/connect", c.body)
-			if rec.Code != http.StatusUnprocessableEntity {
-				t.Errorf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
+			if rec.Code != c.want {
+				t.Errorf("status=%d body=%s, want %d", rec.Code, rec.Body.String(), c.want)
 			}
 		})
 	}
@@ -371,7 +374,8 @@ func TestBedrockConnect_ValidationErrors(t *testing.T) {
 
 // TestBedrockConnect_MethodSwitchRequiresSecrets pins that keep-current
 // does not cross auth methods: blank secrets with a DIFFERENT method
-// stored is a 422, not a silent half-switch.
+// stored is a rejection (400 MISSING_FIELD — the request omitted a field it
+// had to carry), not a silent half-switch.
 func TestBedrockConnect_MethodSwitchRequiresSecrets(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -385,8 +389,8 @@ func TestBedrockConnect_MethodSwitchRequiresSecrets(t *testing.T) {
 	rec := doJSON(t, s, "POST", "/api/bedrock/connect", map[string]any{
 		"auth_method": "access_keys", "region": "us-east-1",
 	})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status=%d body=%s, want 422 (no stored pair to keep)", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400 (no stored pair to keep)", rec.Code, rec.Body.String())
 	}
 	// The stored bearer config is untouched by the rejected switch.
 	if view := getOrgBedrockView(t, s); view.Method != "bearer" {
@@ -396,7 +400,8 @@ func TestBedrockConnect_MethodSwitchRequiresSecrets(t *testing.T) {
 
 // TestBedrockConnect_BulkPostNoBackDoor pins that the bulk org-settings
 // POST is not a write path for any Bedrock field — the validated connect
-// endpoint is the only door, mirroring the Anthropic rule.
+// endpoint is the only door, mirroring the Anthropic rule. Strict decoding
+// now rejects the attempt outright rather than ignoring the fields.
 func TestBedrockConnect_BulkPostNoBackDoor(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -411,8 +416,8 @@ func TestBedrockConnect_BulkPostNoBackDoor(t *testing.T) {
 		"github_poll_interval":     "5m0s",
 		"jira_poll_interval":       "5m0s",
 	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bulk settings status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bulk settings status=%d body=%s, want 400", rec.Code, rec.Body.String())
 	}
 	for _, k := range integrations.BedrockKeys() {
 		if got := mustSecret(t, s, k); got != "" {

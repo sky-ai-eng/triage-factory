@@ -69,6 +69,9 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if !validHesitationField(w, req.HesitationMs) {
+		return
+	}
 
 	// Viewers can't act on a team's tasks (TFAC-447). Every swipe action is a
 	// team-scoped write (claim/delegate stamp the responsibility axis;

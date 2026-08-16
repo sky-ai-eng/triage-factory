@@ -33,7 +33,7 @@ func execSQL(t *testing.T, database *sql.DB, query string, args ...any) {
 func seedSteerRun(t *testing.T, database *sql.DB, suffix, status string) string {
 	t.Helper()
 	const eventType = "github:pr:ci_check_failed"
-	e, ev, p, tk, rn := "e_"+suffix, "ev_"+suffix, "p_"+suffix, "t_"+suffix, "r_"+suffix
+	e, ev, p, tk, rn := fixtureUUID("e_"+suffix), fixtureUUID("ev_"+suffix), fixtureUUID("p_"+suffix), fixtureUUID("t_"+suffix), fixtureUUID("r_"+suffix)
 	execSQL(t, database, `INSERT INTO entities (id, source, source_id, kind, state) VALUES (?, 'github', ?, 'pr', 'active')`, e, "owner/repo#"+suffix)
 	execSQL(t, database, `INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')`, ev, e, eventType)
 	execSQL(t, database, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES (?, 'P', 'b', ?, ?)`, p, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
@@ -132,19 +132,20 @@ func TestHandleMessage_UnknownRunNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/r_absent/message", map[string]string{"text": "hello"})
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+fixtureUUID("r_absent")+"/message", map[string]string{"text": "hello"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (unknown run)", rec.Code)
 	}
 }
 
 // TestHandleMessage_EmptyTextRejected: a blank message is 400 before the
-// run is even looked up.
+// run is even looked up. The path id must still be well-formed — the uuid
+// guard runs ahead of body validation, so a junk id would answer 404 first.
 func TestHandleMessage_EmptyTextRejected(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/whatever/message", map[string]string{"text": "   "})
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+fixtureUUID("r_blank")+"/message", map[string]string{"text": "   "})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for empty text", rec.Code)
 	}
@@ -210,11 +211,11 @@ func TestHandleAgentStop_UnknownRunNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/r_absent/stop", nil)
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+fixtureUUID("r_absent")+"/stop", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (unknown run)", rec.Code)
 	}
-	if body := rec.Body.String(); strings.Contains(body, "r_absent") {
+	if body := rec.Body.String(); strings.Contains(body, fixtureUUID("r_absent")) {
 		t.Errorf("404 body %q echoes the requested id back", body)
 	}
 }
@@ -263,7 +264,7 @@ func TestHandleAgentPermission_UnknownRunNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/r_absent/permissions/req-1", map[string]string{"behavior": "allow"})
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+fixtureUUID("r_absent")+"/permissions/req-1", map[string]string{"behavior": "allow"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (unknown run)", rec.Code)
 	}
@@ -275,7 +276,7 @@ func TestHandleAgentPermission_InvalidBehaviorRejected(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/r1/permissions/req-x", map[string]string{"behavior": "maybe"})
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+fixtureUUID("r1")+"/permissions/req-x", map[string]string{"behavior": "maybe"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (invalid behavior)", rec.Code)
 	}

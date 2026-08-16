@@ -314,8 +314,9 @@ func TestCredentialClass_BulkSettingsSaveIsNoBackDoor(t *testing.T) {
 	assertCredentialClass(t, s, domain.GitHubCredentialClassBYOApp, "registering the App")
 
 	for _, tc := range []struct {
-		name string
-		body map[string]any
+		name       string
+		body       map[string]any
+		wantStatus int // 0 = 200
 	}{
 		{
 			name: "ordinary_save",
@@ -326,9 +327,10 @@ func TestCredentialClass_BulkSettingsSaveIsNoBackDoor(t *testing.T) {
 			},
 		},
 		{
-			// The handler has no such field, so this lands as an ignored key —
-			// pinned because "the API quietly grew one" is exactly how a
-			// projection turns into a second, contradictable choice.
+			// The handler has no such field, so strict decoding rejects the
+			// request — pinned because "the API quietly grew one" is exactly
+			// how a projection turns into a second, contradictable choice.
+			// Either way the class must not move.
 			name: "save_attempting_to_carry_the_class",
 			body: map[string]any{
 				"github_base_url":         "https://github.com",
@@ -336,12 +338,17 @@ func TestCredentialClass_BulkSettingsSaveIsNoBackDoor(t *testing.T) {
 				"jira_poll_interval":      "5m0s",
 				"github_credential_class": "pat",
 			},
+			wantStatus: http.StatusBadRequest,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := doJSON(t, s, http.MethodPost, "/api/settings/org", tc.body)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("settings save = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			want := tc.wantStatus
+			if want == 0 {
+				want = http.StatusOK
+			}
+			if rec.Code != want {
+				t.Fatalf("settings save = %d, want %d; body=%s", rec.Code, want, rec.Body.String())
 			}
 			assertCredentialClass(t, s, domain.GitHubCredentialClassBYOApp, "a bulk org-settings save")
 		})

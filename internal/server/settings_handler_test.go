@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // TestDefaultedCloneProtocolView_ModeAware pins the API GET view:
@@ -221,16 +222,8 @@ func TestTeamSettingsPost_PickupCanonical_Rejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	// This arm errors via the shared badRequest helper, which now emits the
-	// envelope; the legacy "error" key survives via the dual-key shim.
-	var resp struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if !strings.Contains(resp.Error, "canonical must be empty") {
-		t.Errorf("error should mention pickup canonical invariant, got: %q", resp.Error)
+	if msg := firstErrorMessage(t, rec); !strings.Contains(msg, "canonical must be empty") {
+		t.Errorf("error should mention pickup canonical invariant, got: %q", msg)
 	}
 }
 
@@ -246,10 +239,9 @@ func TestTeamSettingsPost_InProgressCanonicalNotInMembers_Rejected(t *testing.T)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "not in members") {
-		t.Errorf("error should mention canonical not in members, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "not in members") {
+		t.Errorf("error should mention canonical not in members, got: %q", resp)
 	}
 }
 
@@ -265,10 +257,9 @@ func TestTeamSettingsPost_InProgressMembersWithoutCanonical_Rejected(t *testing.
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "canonical is required") {
-		t.Errorf("error should mention canonical required, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "canonical is required") {
+		t.Errorf("error should mention canonical required, got: %q", resp)
 	}
 }
 
@@ -284,10 +275,9 @@ func TestTeamSettingsPost_DoneCanonicalNotInMembers_Rejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "not in members") {
-		t.Errorf("error should mention canonical not in members, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "not in members") {
+		t.Errorf("error should mention canonical not in members, got: %q", resp)
 	}
 }
 
@@ -391,10 +381,9 @@ func TestTeamSettingsPost_DuplicateProjectKey_Rejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 on duplicate project key, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "duplicate project key") {
-		t.Errorf("error should mention duplicate, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "duplicate project key") {
+		t.Errorf("error should mention duplicate, got: %q", resp)
 	}
 }
 
@@ -974,10 +963,9 @@ func TestOrgSettingsPost_DailyCostCap_NegativeRejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("negative cap should 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "max_daily_cost_usd must be >= 0") {
-		t.Errorf("expected >= 0 validation message, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "max_daily_cost_usd must be >= 0") {
+		t.Errorf("expected >= 0 validation message, got: %q", resp)
 	}
 }
 
@@ -1042,10 +1030,9 @@ func TestOrgSettingsPost_ConcurrentRuns_NegativeRejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("negative limit should 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "max_concurrent_runs must be >= 0") {
-		t.Errorf("expected >= 0 validation message, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "max_concurrent_runs must be >= 0") {
+		t.Errorf("expected >= 0 validation message, got: %q", resp)
 	}
 }
 
@@ -1059,10 +1046,9 @@ func TestOrgSettingsPost_ConcurrentRuns_OversizedRejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("oversized limit should 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "max_concurrent_runs must be at most") {
-		t.Errorf("expected upper-bound validation message, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "max_concurrent_runs must be at most") {
+		t.Errorf("expected upper-bound validation message, got: %q", resp)
 	}
 	// The ceiling itself is accepted.
 	postJSONResp(t, s, "/api/settings/org",
@@ -1111,27 +1097,26 @@ func TestTeamSettingsGet_GraceBoundsAdvertised(t *testing.T) {
 	}
 }
 
-// TestTeamSettingsPost_GraceClampedToBand pins the POST-side clamp: an
-// over-ceiling value snaps to the max, an under-floor value to the min, and an
-// in-band value round-trips verbatim — so the persisted ms always matches the
-// honored band (and what the slider can express).
-func TestTeamSettingsPost_GraceClampedToBand(t *testing.T) {
+// TestTeamSettingsPost_GraceOutOfBandRejected pins the POST-side band check: a
+// value outside [min, max] is REJECTED, and an in-band one round-trips
+// verbatim. It used to clamp, which answered "saved" for a grace the caller
+// never asked for — invisible to an API client, since the UI slider can only
+// express in-band values in the first place.
+func TestTeamSettingsPost_GraceOutOfBandRejected(t *testing.T) {
 	s := newTestServer(t)
 
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{
-		"permission_absent_grace_seconds": 99999,
-	})
-	if ms, _, _ := teamGrace(t, s); ms != delegate.AbsentGraceMaxSeconds*1000 {
-		t.Errorf("after POST 99999s, stored grace = %dms, want %dms (clamped to max)",
-			ms, delegate.AbsentGraceMaxSeconds*1000)
-	}
-
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{
-		"permission_absent_grace_seconds": 0,
-	})
-	if ms, _, _ := teamGrace(t, s); ms != delegate.AbsentGraceMinSeconds*1000 {
-		t.Errorf("after POST 0s, stored grace = %dms, want %dms (clamped to min)",
-			ms, delegate.AbsentGraceMinSeconds*1000)
+	before, _, _ := teamGrace(t, s)
+	for _, secs := range []int{99999, 0, -1} {
+		rec := doJSON(t, s, "POST", "/api/settings/team/default", map[string]any{
+			"permission_absent_grace_seconds": secs,
+		})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("POST grace %ds = %d, want 400; body=%s", secs, rec.Code, rec.Body.String())
+		}
+		assertFirstError(t, rec, httpx.ReasonOutOfRange, "permission_absent_grace_seconds")
+		if ms, _, _ := teamGrace(t, s); ms != before {
+			t.Errorf("rejected grace %ds still moved the stored value to %dms", secs, ms)
+		}
 	}
 
 	postJSONResp(t, s, "/api/settings/team/default", map[string]any{

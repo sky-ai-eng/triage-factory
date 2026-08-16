@@ -337,10 +337,10 @@ func TestHandleRepoBranches_TeamScoped(t *testing.T) {
 	}
 
 	// memberB's team does track acme/web — passes the gate and reaches the
-	// (unconfigured, in this test) GitHub resolver, which 400s distinctly
-	// from the gate's 404.
-	if rec := branches(rig.memberB, "acme", "web"); rec.Code != http.StatusBadRequest {
-		t.Fatalf("memberB GET acme/web/branches: status = %d, want 400 (gate passed, no GitHub creds); body=%s", rec.Code, rec.Body.String())
+	// (unconfigured, in this test) GitHub resolver, which answers 409
+	// NOT_CONFIGURED, distinctly from the gate's 404.
+	if rec := branches(rig.memberB, "acme", "web"); rec.Code != http.StatusConflict {
+		t.Fatalf("memberB GET acme/web/branches: status = %d, want 409 (gate passed, no GitHub creds); body=%s", rec.Code, rec.Body.String())
 	}
 }
 

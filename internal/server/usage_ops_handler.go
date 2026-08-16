@@ -46,12 +46,13 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if h.runQueue == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "run queue not ready"})
+		// This pod holds no run-queue reader — deployment shape, not an outage.
+		writeNotConfigured(w, "the run queue reader is not configured on this deployment")
 		return
 	}
 	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
 	if errMsg != "" {
-		badRequest(w, errMsg)
+		writeBadActivityParam(w, errMsg)
 		return
 	}
 

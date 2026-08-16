@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Bring-your-own-App import. The second way into App mode, for orgs
@@ -56,15 +57,23 @@ type githubAppPermissionRow struct {
 	Feature    string `json:"feature,omitempty"`
 }
 
-// githubAppImportErrorResponse is the 422 body for a permission gap: the full
-// granted-vs-required table plus whether the gap is Blocking. Blocking=true is a
-// hard gap (a core permission is missing — accept_partial can't override it);
-// Blocking=false means only soft gaps remain, which the frontend resubmits past
-// with accept_partial=true after an acknowledgment.
+// githubAppImportErrorResponse is the 422 body for a permission gap: the
+// standard error envelope, plus the full granted-vs-required table and whether
+// the gap is Blocking. Blocking=true is a hard gap (a core permission is
+// missing — accept_partial can't override it); Blocking=false means only soft
+// gaps remain, which the frontend resubmits past with accept_partial=true after
+// an acknowledgment. The extra keys ride alongside `errors` because the table is
+// structured data no envelope field can hold; the message itself is in the
+// envelope like every other fault, so the shared client parser reads it.
 type githubAppImportErrorResponse struct {
-	Error       string                   `json:"error"`
+	Errors      []httpx.ErrorItem        `json:"errors"`
 	Permissions []githubAppPermissionRow `json:"permissions"`
 	Blocking    bool                     `json:"blocking"`
+}
+
+// permissionGapErrors wraps a preflight message in the standard envelope.
+func permissionGapErrors(msg string) []httpx.ErrorItem {
+	return []httpx.ErrorItem{{Reason: httpx.ReasonPermissionGap, Message: msg}}
 }
 
 // githubAppImportResponse is the success body: the same status payload the
@@ -264,20 +273,16 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req githubAppImportRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	appIDStr := strings.TrimSpace(req.AppID)
 	if appIDStr == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "An App ID is required.", "field": "app_id",
-		})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An App ID is required.", Field: "app_id"})
 		return
 	}
 	if strings.TrimSpace(req.PEM) == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "The App's private key (PEM) is required.", "field": "pem",
-		})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's private key (PEM) is required.", Field: "pem"})
 		return
 	}
 
@@ -294,9 +299,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if existing != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "org already has a GitHub App registered; remove it first",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "org already has a GitHub App registered; remove it first"})
 		return
 	}
 
@@ -318,19 +321,13 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	// Parse the PEM (garbage → 422).
 	key, err := githubapp.ParsePrivateKey([]byte(req.PEM))
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "That private key (PEM) couldn't be parsed. Paste the full contents of the App's .pem file, including the BEGIN/END lines.",
-			"field": "pem",
-		})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "That private key (PEM) couldn't be parsed. Paste the full contents of the App's .pem file, including the BEGIN/END lines.", Field: "pem"})
 		return
 	}
 
 	appID, err := strconv.ParseInt(appIDStr, 10, 64)
 	if err != nil || appID <= 0 {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "App ID must be a positive number (the numeric App ID, not the client ID).",
-			"field": "app_id",
-		})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "App ID must be a positive number (the numeric App ID, not the client ID).", Field: "app_id"})
 		return
 	}
 
@@ -348,10 +345,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		// dominant cause. A transient GitHub outage would also land here — rare
 		// enough that the actionable message is the better default.
 		githubAppLog.Error("import: get app failed", "org", orgID, "error", err)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "App ID and private key don't match, or the key was revoked. Double-check the App ID and re-download the private key from the App's GitHub settings.",
-			"field": "app_id",
-		})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "App ID and private key don't match, or the key was revoked. Double-check the App ID and re-download the private key from the App's GitHub settings.", Field: "app_id"})
 		return
 	}
 
@@ -360,10 +354,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	// mechanism makes the cross-pair case 401 above, this is the cheap belt-and-
 	// suspenders that also pins the canonical id we persist under.
 	if app.ID != appID {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": fmt.Sprintf("That private key belongs to a different App (ID %d) than the App ID you entered (%d).", app.ID, appID),
-			"field": "app_id",
-		})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: fmt.Sprintf("That private key belongs to a different App (ID %d) than the App ID you entered (%d).", app.ID, appID), Field: "app_id"})
 		return
 	}
 
@@ -373,7 +364,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	rows, hardGaps, softGaps := preflightImportPermissions(app.Permissions)
 	if len(hardGaps) > 0 {
 		writeJSON(w, http.StatusUnprocessableEntity, githubAppImportErrorResponse{
-			Error:       hardGapMessage(hardGaps),
+			Errors:      permissionGapErrors(hardGapMessage(hardGaps)),
 			Permissions: rows,
 			Blocking:    true,
 		})
@@ -381,7 +372,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(softGaps) > 0 && !req.AcceptPartial {
 		writeJSON(w, http.StatusUnprocessableEntity, githubAppImportErrorResponse{
-			Error:       softGapMessage(softGaps),
+			Errors:      permissionGapErrors(softGapMessage(softGaps)),
 			Permissions: rows,
 			Blocking:    false,
 		})
@@ -396,10 +387,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	if hasClientSecret {
 		switch checkAppClientSecret(ctx, apiBase, app.ClientID, clientSecret) {
 		case clientSecretBad:
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": "That client secret is not valid for this App. Generate a fresh client secret in the App's GitHub settings (Apps can hold two at once, so this won't disturb an existing consumer), then paste it here.",
-				"field": "client_secret",
-			})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That client secret is not valid for this App. Generate a fresh client secret in the App's GitHub settings (Apps can hold two at once, so this won't disturb an existing consumer), then paste it here.", Field: "client_secret"})
 			return
 		case clientSecretValid:
 			clientSecretValidated = true
@@ -539,9 +527,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		}
 		var exists *db.ErrGitHubAppExists
 		if errors.As(err, &exists) {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "org already has a GitHub App registered; remove it first",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "org already has a GitHub App registered; remove it first"})
 			return
 		}
 		internalError(w, "github-app", err)

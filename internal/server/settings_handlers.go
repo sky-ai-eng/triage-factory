@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -81,7 +82,7 @@ func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) 
 	userID := ClaimsFrom(r.Context()).Subject
 	orgID := OrgIDFrom(r.Context())
 	var req userSettingsUpdate
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -235,7 +236,7 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req teamSettingsUpdate
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -320,18 +321,25 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 			teamSet.PermissionAbsentAutodenyEnabled = *req.PermissionAbsentAutodenyEnabled
 		}
 		if req.PermissionAbsentGraceSeconds != nil {
-			// Accept seconds from the UI; store ms. Clamp into the honored band
-			// [AbsentGraceMinSeconds, AbsentGraceMaxSeconds] so a 0/negative input
-			// can't disable the grace by collapsing it and an over-large one can't
-			// pretend to exceed permTimeout(). The spawner re-clamps against the
-			// live permTimeout() at run time, but a sane band here keeps the
-			// persisted value honest and matches the UI slider's range.
+			// Accept seconds from the UI; store ms. Outside the honored band
+			// [AbsentGraceMinSeconds, AbsentGraceMaxSeconds] is REJECTED, not
+			// clamped: a 0 would disable the grace by collapsing it and an
+			// over-large one would pretend to exceed permTimeout(), and a clamp
+			// answers "saved" for a value the caller never asked for. The UI
+			// slider is bound to the band this endpoint advertises
+			// (permission_absent_grace_{min,max}_seconds on the settings GET),
+			// so this is the same rule the form already enforces — it just also
+			// holds for an API caller with no slider. The spawner still
+			// re-clamps against the live permTimeout() at run time.
 			secs := *req.PermissionAbsentGraceSeconds
-			if secs < delegate.AbsentGraceMinSeconds {
-				secs = delegate.AbsentGraceMinSeconds
-			}
-			if secs > delegate.AbsentGraceMaxSeconds {
-				secs = delegate.AbsentGraceMaxSeconds
+			if secs < delegate.AbsentGraceMinSeconds || secs > delegate.AbsentGraceMaxSeconds {
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+					Reason: httpx.ReasonOutOfRange,
+					Message: fmt.Sprintf("permission_absent_grace_seconds must be between %d and %d",
+						delegate.AbsentGraceMinSeconds, delegate.AbsentGraceMaxSeconds),
+					Field: "permission_absent_grace_seconds",
+				})
+				return errAbortHandler
 			}
 			teamSet.PermissionAbsentGraceMS = secs * 1000
 		}
@@ -507,7 +515,12 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
+		// A vault fault is a 500, never "not configured" — the status read
+		// drives the whole settings page's connected/disconnected rendering.
+		creds, err = integrations.Load(r.Context(), tx.Secrets, orgID)
+		if err != nil {
+			return fmt.Errorf("load integration credentials: %w", err)
+		}
 		// The login the org PAT authenticates as, recorded on the agents row by
 		// every PAT bind. Only meaningful while the BOUND PAT is the credential —
 		// an App org's bot login (<slug>[bot]) resolves live from the
@@ -634,7 +647,7 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req orgSettingsUpdate
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -675,17 +688,42 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if app != nil {
-				writeJSON(w, http.StatusConflict, map[string]string{
-					"error": "this workspace's GitHub App is registered against this host — remove the App before clearing it",
-					"field": "github_base_url",
+				httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+					Reason:  httpx.ReasonConflict,
+					Message: "this workspace's GitHub App is registered against this host — remove the App before clearing it",
+					Field:   "github_base_url",
 				})
 				return
 			}
 		}
-		orgSet.GitHubBaseURL = *req.GitHubBaseURL
+		// Non-empty hosts go through the same validator + canonicalizer the
+		// reachability probe uses, so what the column holds is what the probe
+		// accepted. Persisting verbatim let a value the probe merely tolerated
+		// ("  https://ghes.example.com/ ") through, and the App/PAT host
+		// derivation reads the column, not the probe's answer. Empty is a
+		// deliberate clear, gated above, and skips the check.
+		if *req.GitHubBaseURL != "" {
+			base, ok := normalizeBaseURL(*req.GitHubBaseURL)
+			if !ok {
+				invalidBaseURLField(w, "github_base_url")
+				return
+			}
+			orgSet.GitHubBaseURL = base
+		} else {
+			orgSet.GitHubBaseURL = ""
+		}
 	}
 	if req.JiraBaseURL != nil {
-		orgSet.JiraBaseURL = *req.JiraBaseURL
+		if *req.JiraBaseURL != "" {
+			base, ok := normalizeBaseURL(*req.JiraBaseURL)
+			if !ok {
+				invalidBaseURLField(w, "jira_base_url")
+				return
+			}
+			orgSet.JiraBaseURL = base
+		} else {
+			orgSet.JiraBaseURL = ""
+		}
 	}
 	// A malformed duration is rejected rather than silently ignored — the old
 	// parse-and-drop behavior meant a typo'd interval reported "saved" while
@@ -765,11 +803,14 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		err := worktree.PreflightSSH(ctx, sshHost)
 		cancel()
 		if err != nil {
+			// The probe's stderr used to ride along in its own key, a
+			// dialect only this route spoke. It is already the second half
+			// of the message, and the full output is in the log line above.
 			settingsOrgLog.Warn("blocked ssh switch", "ssh_host", sshHost, "error", err)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error":  fmt.Sprintf("SSH preflight against %s failed — fix your SSH setup or keep HTTPS. %s", sshHost, err.Error()),
-				"field":  "github_clone_protocol",
-				"stderr": err.Error(),
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: fmt.Sprintf("SSH preflight against %s failed — fix your SSH setup or keep HTTPS. %s", sshHost, err.Error()),
+				Field:   "github_clone_protocol",
 			})
 			return
 		}

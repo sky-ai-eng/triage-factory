@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // githubAppStatusResponse is the read-only shape the Workspace Settings
@@ -274,7 +275,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 	// what made the original picker dead-end untraceable).
 	if err := s.githubApps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
 		githubAppLog.Error("refresh installations failed", "org", orgID, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to refresh GitHub App installations" + localDetail(err)})
+		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "failed to refresh GitHub App installations" + localDetail(err)})
 		return
 	}
 

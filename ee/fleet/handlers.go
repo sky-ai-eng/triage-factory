@@ -2,7 +2,6 @@ package fleet
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"sort"
 	"strconv"
@@ -353,8 +352,7 @@ func (h *handler) handleDrain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req drainRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.BadRequest(w, "invalid JSON body: expected {\"draining\": true|false}")
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	matched, err := h.stores.Instances.SetDraining(r.Context(), id, req.Draining)

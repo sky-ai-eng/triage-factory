@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // GitHub access is strictly either/or per org (TFAC-328): a GitHub App XOR a
@@ -172,7 +173,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if app.Active {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": msgAppAlreadyLive})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: msgAppAlreadyLive})
 		return
 	}
 
@@ -184,7 +185,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		// The detail (which can carry vault/keychain topology) goes to the log,
 		// not the response body — even though this is org-admin-only.
 		githubAppLog.Error("cutover: backfill installations failed", "org", orgID, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to sync App installations from GitHub"})
+		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "failed to sync App installations from GitHub"})
 		return
 	}
 	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
@@ -193,7 +194,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if len(insts) == 0 {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": msgAppNotInstalled})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: msgAppNotInstalled})
 		return
 	}
 
@@ -229,7 +230,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if app.Active {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": msgAppAlreadyLive})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: msgAppAlreadyLive})
 		return
 	}
 	insts, err = s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
@@ -238,7 +239,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if len(insts) == 0 {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": msgAppNotInstalled})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: msgAppNotInstalled})
 		return
 	}
 
@@ -322,7 +323,7 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 	ctx := r.Context()
 
 	var req switchPATRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	pat := strings.TrimSpace(req.PAT)
@@ -353,10 +354,7 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 	// identity, so we persist it for OrgIdentityFor (TFAC-452).
 	ghUser, err := auth.ValidateGitHub(ctx, base, pat)
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "That token didn't validate against " + base + ". Double-check it and try again.",
-			"field": "pat",
-		})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token didn't validate against " + base + ". Double-check it and try again.", Field: "pat"})
 		return
 	}
 
@@ -488,7 +486,7 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 		notFound(w, "github app")
 		return
 	} else if app.Active {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": msgAppIsLiveCred})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: msgAppIsLiveCred})
 		return
 	}
 
@@ -515,7 +513,7 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if app.Active {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": msgAppIsLiveCred})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: msgAppIsLiveCred})
 		return
 	}
 
@@ -648,9 +646,7 @@ func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.
 			// The detail (which can carry vault/keychain topology from the PEM
 			// read) goes to the log, not the response body.
 			githubAppLog.Error("cutover-preflight: enumerate app repos failed", "org", orgID, "error", err)
-			writeJSON(w, http.StatusBadGateway, map[string]string{
-				"error": "failed to enumerate App repositories",
-			})
+			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "failed to enumerate App repositories"})
 			return
 		}
 	}
@@ -733,7 +729,7 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 	ctx := r.Context()
 
 	var req switchPATRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	pat := strings.TrimSpace(req.PAT)
@@ -750,10 +746,7 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 
 	ghUser, err := auth.ValidateGitHub(ctx, base, pat)
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "That token didn't validate against " + base + ". Double-check it and try again.",
-			"field": "pat",
-		})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token didn't validate against " + base + ". Double-check it and try again.", Field: "pat"})
 		return
 	}
 
@@ -762,9 +755,7 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 		// The detail (ListUserRepos folds GitHub's response body into the
 		// error) goes to the log, not the response body.
 		githubAccessLog.Error("pat-preflight: enumerate repos failed", "org", orgID, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error": "failed to enumerate repositories for that token",
-		})
+		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "failed to enumerate repositories for that token"})
 		return
 	}
 

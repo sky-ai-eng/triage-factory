@@ -4,16 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -28,13 +31,30 @@ type agentHandler struct {
 	reconciler func() *reconcile.Reconciler
 }
 
+// conversationIDOr404 guards the {conversationID} path value — conversations.id
+// is a uuid column on Postgres. See uuidPathOr404.
+func conversationIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
+	return uuidPathOr404(w, r, "conversationID", "run")
+}
+
+// writeDelegationUnavailable answers the routes that need a wired spawner on a
+// deployment that has none (delegation disabled). Server-side configuration,
+// not a request fault, and not a transient upstream — 409 NOT_CONFIGURED, the
+// same answer every other unconfigured-integration route gives.
+func writeDelegationUnavailable(w http.ResponseWriter) {
+	writeNotConfigured(w, "delegation is not configured on this deployment")
+}
+
 func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	conversationID := r.PathValue("conversationID")
+	conversationID, ok := conversationIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var run *domain.Conversation
 	var resp map[string]any
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -53,8 +73,10 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		// Derive has_unresolved_artifacts (+ per-kind counts) from the run's
 		// artifact set. Only read the artifacts when the run has any —
 		// counts==0 means there's nothing unresolved, so skip the list. A list
-		// failure is best-effort: it omits the derived flags (logged) but must not
-		// fail the status fetch or touch the authoritative count above.
+		// failure is best-effort BY DESIGN — this is display enrichment on top
+		// of an authoritative row, so it omits the derived flags (logged) but
+		// must not fail the status fetch or touch the count above. The
+		// swallowed-error sweep leaves it swallowed deliberately.
 		var arts []domain.Artifact
 		if counts[run.ID] > 0 {
 			if a, lerr := tx.Artifacts.ListByRun(r.Context(), orgID, run.ID); lerr != nil {
@@ -143,11 +165,16 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	conversationID := r.PathValue("conversationID")
+	conversationID, ok := conversationIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	rc := ag.reconciler()
 	if rc == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "reconciler not ready"})
+		// Same reading as a missing spawner: this deployment runs no
+		// reconciler, so the route has nothing to drive.
+		writeNotConfigured(w, "artifact reconciliation is not configured on this deployment")
 		return
 	}
 
@@ -251,7 +278,10 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	conversationID := r.PathValue("conversationID")
+	conversationID, ok := conversationIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	var run *domain.Conversation
 	var arts []domain.Artifact
@@ -312,7 +342,10 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	conversationID := r.PathValue("conversationID")
+	conversationID, ok := conversationIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	var run *domain.Conversation
 	var actions []domain.ExternalAction
@@ -448,25 +481,35 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	conversationID := r.PathValue("conversationID")
+	conversationID, ok := conversationIDOr404(w, r)
+	if !ok {
+		return
+	}
 	// since_id is an optional watermark: the caller already holds every row up
 	// to it and wants only what came after. A client repairing a transcript it
 	// built from websocket frames polls with it.
 	//
-	// Anything that isn't a usable watermark normalizes to 0 — the whole
-	// transcript, which is what every other caller asks for — rather than a
-	// 400, since a watermark describes what the caller already has, not a
-	// selector it can get wrong in a way worth failing a read over. That
-	// covers three cases, and each is normalized here rather than passed down:
-	// absent, unparseable, and negative. A negative one would reach the store
-	// as `id > -N`, which happens to select the whole transcript today only
-	// because ids start at 1 — a coincidence, not a contract, so the store is
-	// never handed a watermark that means nothing. Surrounding whitespace is
-	// trimmed first (the convention for query params here); without that, a
-	// stray space would silently demote a real watermark to a full read.
-	sinceID, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("since_id")))
-	if err != nil || sinceID < 0 {
-		sinceID = 0
+	// Absent means no watermark — the whole transcript, which is what every
+	// other caller asks for. Anything else must be a usable watermark: an
+	// unparseable or negative value is a 400 rather than a silent fall-back to
+	// the full read, because "give me what I'm missing" answered with "here is
+	// everything" is the widening a corrupt param must never buy. A negative
+	// one would also reach the store as `id > -N`, which selects the whole
+	// transcript today only because ids start at 1 — a coincidence, not a
+	// contract. Surrounding whitespace is trimmed first (the convention for
+	// query params here).
+	sinceID := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("since_id")); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < 0 {
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidParam,
+				Message: "since_id must be a non-negative integer",
+				Field:   "since_id",
+			})
+			return
+		}
+		sinceID = v
 	}
 	var messages []domain.Message
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -491,28 +534,46 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 // meanings of `open` that a user could only tell apart by which button they
 // pressed.
 //
-// A conversation not visible to the caller's org, and one that already
-// concluded, both read as ErrNoActiveRun → 404, and both get the same body so
-// the response can't be used to probe which ids exist. Anything else Stop
-// returns is an internal fault on the way to stopping a run that really was
-// active — a failed read, a failed park — and goes through internalError,
-// which logs it and redacts the detail in multi mode. Reporting those as 404
-// would tell the user their run is gone when it is still running.
+// A conversation not visible to the caller's org is 404 and discloses
+// nothing — the visibility read is RLS-scoped, so an id from another tenant
+// is indistinguishable from one that never existed. A conversation the caller
+// CAN see that has already concluded is 409 ALREADY_TERMINAL, the same answer
+// its sibling /message gives for the same state: the two verbs used to
+// disagree (404 here, 409 there) about one condition on one resource.
+// Anything else Stop returns is an internal fault on the way to stopping a run
+// that really was active — a failed read, a failed park — and goes through
+// internalError, which logs it and redacts the detail in multi mode. Reporting
+// those as 404 would tell the user their run is gone when it is still running.
 func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	conversationID := r.PathValue("conversationID")
+	conversationID, ok := conversationIDOr404(w, r)
+	if !ok {
+		return
+	}
 	spawner := ag.spawner()
 	if spawner == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
+		writeDelegationUnavailable(w)
+		return
+	}
+	visible, err := ag.runVisible(r.Context(), orgID, userID, conversationID)
+	if err != nil {
+		internalError(w, "agent", err)
+		return
+	}
+	if !visible {
+		notFound(w, "run")
 		return
 	}
 	if err := spawner.Stop(orgID, conversationID, userID); err != nil {
 		if errors.Is(err, delegate.ErrNoActiveRun) {
-			notFound(w, "run")
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonAlreadyTerminal,
+				Message: "this conversation has already concluded; there is nothing to stop",
+			})
 			return
 		}
 		internalError(w, "agent", err)
@@ -559,22 +620,27 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	conversationID := r.PathValue("conversationID")
+	conversationID, ok := conversationIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	var body struct {
 		Text string `json:"text"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	if strings.TrimSpace(body.Text) == "" {
-		badRequest(w, "text is required")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "text is required", Field: "text",
+		})
 		return
 	}
 
 	spawner := ag.spawner()
 	if spawner == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
+		writeDelegationUnavailable(w)
 		return
 	}
 
@@ -597,7 +663,18 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 			notFound(w, "run")
 			return
 		}
-		writeJSON(w, steerErrorStatus(err), map[string]string{"error": err.Error()})
+		status, reason := steerErrorStatus(err)
+		if status == http.StatusInternalServerError {
+			// Never the raw text: a steer failure at this rung is a server
+			// fault whose error may carry driver/process detail, so it takes
+			// internalError's log-and-redact path like any other 500.
+			internalError(w, "agent", err)
+			return
+		}
+		// The 4xx arms are all delegate sentinels — author-written state
+		// descriptions with nothing internal in them, and the text is the
+		// answer ("this conversation has moved on"), so it is surfaced.
+		httpx.WriteErrors(w, status, httpx.ErrorItem{Reason: reason, Message: err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
@@ -626,20 +703,26 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 // TFAC-585) is 504 Gateway Timeout — the reply-leg contract's "run owner did
 // not acknowledge; the run may be mid-teardown" case; the UI already
 // tolerates a failed steer. Everything else is a server-side 500.
-func steerErrorStatus(err error) int {
+//
+// The reason travels with the status because two of these conflicts are not
+// the same class: a concluded conversation is ALREADY_TERMINAL (permanent,
+// matching what /stop answers for the same state), while a lost race or a
+// parked process is a plain CONFLICT the client resolves by re-reading.
+func steerErrorStatus(err error) (int, string) {
 	switch {
 	case errors.Is(err, delegate.ErrWorkspaceExpired):
-		return http.StatusGone
+		return http.StatusGone, httpx.ReasonConflict
 	case errors.Is(err, delegate.ErrSignalAckTimeout):
-		return http.StatusGatewayTimeout
+		return http.StatusGatewayTimeout, httpx.ReasonUpstreamUnavailable
+	case errors.Is(err, delegate.ErrConversationConcluded):
+		return http.StatusConflict, httpx.ReasonAlreadyTerminal
 	case errors.Is(err, delegate.ErrNoLiveProcess),
 		errors.Is(err, delegate.ErrRunNotSteerable),
 		errors.Is(err, delegate.ErrRunNotResumable),
-		errors.Is(err, delegate.ErrConversationConcluded),
 		errors.Is(err, delegate.ErrStepHandedOff):
-		return http.StatusConflict
+		return http.StatusConflict, httpx.ReasonConflict
 	default:
-		return http.StatusInternalServerError
+		return http.StatusInternalServerError, httpx.ReasonInternal
 	}
 }
 
@@ -656,7 +739,10 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	conversationID := r.PathValue("conversationID")
+	conversationID, ok := conversationIDOr404(w, r)
+	if !ok {
+		return
+	}
 	toolCallID := r.PathValue("toolCallID")
 
 	var body struct {
@@ -664,17 +750,19 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 		Message      string         `json:"message"`
 		UpdatedInput map[string]any `json:"updated_input"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	if body.Behavior != "allow" && body.Behavior != "deny" {
-		badRequest(w, `behavior must be "allow" or "deny"`)
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: `behavior must be "allow" or "deny"`, Field: "behavior",
+		})
 		return
 	}
 
 	spawner := ag.spawner()
 	if spawner == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
+		writeDelegationUnavailable(w)
 		return
 	}
 
@@ -699,7 +787,9 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	case errors.Is(err, delegate.ErrNoPendingPermission):
 		notFound(w, "permission request")
 	case errors.Is(err, delegate.ErrSignalAckTimeout):
-		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": err.Error()})
+		httpx.WriteErrors(w, http.StatusGatewayTimeout, httpx.ErrorItem{
+			Reason: httpx.ReasonUpstreamUnavailable, Message: err.Error(),
+		})
 	case err != nil:
 		internalError(w, "agent", err)
 	default:
@@ -726,7 +816,10 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	conversationID := r.PathValue("conversationID")
+	conversationID, ok := conversationIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	var pending []domain.ConversationPermission
 	var exists bool
@@ -767,8 +860,10 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 //   - blueprint_step_count for the runs that belong to a blueprint: one
 //     StepPlanLengths over the deduped blueprint_run ids.
 //
-// Best-effort: a ListByRuns or StepPlanLengths failure drops what that read
-// contributes (logged) but leaves counts and the rest intact. Shared by the
+// Deliberately best-effort: a ListByRuns or StepPlanLengths failure drops what
+// that read contributes (logged) but leaves counts and the rest intact. These
+// are display annotations on rows the caller can already see, so surfacing the
+// failure would fail a whole board refresh over a badge. Shared by the
 // single-task and batched (task_ids) run-list paths.
 func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) ([]map[string]any, error) {
 	runIDs := make([]string, len(runs))
@@ -859,7 +954,22 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 
 	taskID := r.URL.Query().Get("task_id")
 	if taskID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "task_id or task_ids query parameter required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidParam,
+			Message: "task_id or task_ids query parameter required",
+			Field:   "task_id",
+		})
+		return
+	}
+	if _, err := uuid.Parse(taskID); err != nil {
+		// tasks.id is a uuid column on Postgres, so a malformed selector would
+		// otherwise reach the store as a 22P02 → 500. It's a query param, not
+		// a path id, so it fails as a bad param rather than a 404.
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidParam,
+			Message: "task_id must be a valid task id",
+			Field:   "task_id",
+		})
 		return
 	}
 	var out []map[string]any
@@ -903,26 +1013,47 @@ const maxBatchTaskIDs = 500
 func (ag *agentHandler) handleConversationsBatched(w http.ResponseWriter, r *http.Request, orgID, userID, raw string) {
 	taskIDs := splitCommaList(raw)
 	if len(taskIDs) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "task_ids must contain at least one id"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidParam, Message: "task_ids must contain at least one id", Field: "task_ids",
+		})
 		return
 	}
 	if len(taskIDs) > maxBatchTaskIDs {
-		// Bound the DB work / payload one request can trigger. The board sends
-		// its visible tasks in column order (active columns first, then done —
-		// which is 7-day- but not count-capped), so truncating the tail drops
-		// the oldest done cards' run enrichment (they just miss a run badge
-		// until a WS update), never the active work. Logged so an oversized
-		// board is observable. This is the request bound; the SQLite
-		// variable-limit safety is separate (the store reads chunk regardless).
-		serverLog.Warn("batched run-list task_ids exceeded cap; truncating",
-			"requested", len(taskIDs), "cap", maxBatchTaskIDs)
-		taskIDs = taskIDs[:maxBatchTaskIDs]
+		// Bound the DB work / payload one request can trigger. This used to
+		// truncate the tail and log it, which answered a 500-task board with a
+		// 500-task-shaped payload the caller had no way to know was partial —
+		// the silent-truncation class the contract forbids. The caller pages
+		// instead.
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonOutOfRange,
+			Message: fmt.Sprintf("task_ids accepts at most %d ids per request; got %d", maxBatchTaskIDs, len(taskIDs)),
+			Field:   "task_ids",
+		})
+		return
 	}
+	for _, id := range taskIDs {
+		if _, err := uuid.Parse(id); err != nil {
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidParam,
+				Message: fmt.Sprintf("task_ids contains %q, which is not a valid task id", id),
+				Field:   "task_ids",
+			})
+			return
+		}
+	}
+	// include= is a closed vocabulary: an unknown value is a client fault, not
+	// a silently dropped request for data it will then not find in the reply.
 	includeMessages := false
 	for _, inc := range splitCommaList(r.URL.Query().Get("include")) {
-		if inc == "messages" {
-			includeMessages = true
+		if inc != "messages" {
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidParam,
+				Message: fmt.Sprintf("include %q is not supported; the only value is: messages", inc),
+				Field:   "include",
+			})
+			return
 		}
+		includeMessages = true
 	}
 
 	runsByTask := map[string][]map[string]any{}

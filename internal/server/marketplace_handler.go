@@ -32,12 +32,12 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
@@ -63,7 +63,7 @@ var errMarketplaceSourceNotFound = errors.New("marketplace: source object not fo
 // marketplace has none; see the file doc comment.
 func (mh *marketplaceHandler) gateMarketplace(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		notFound(w, "route")
 		return "", "", false
 	}
 	orgID, ok = requireOrg(w, r)
@@ -196,23 +196,23 @@ func (mh *marketplaceHandler) handleMarketplacePublish(w http.ResponseWriter, r 
 	}
 
 	var req publishListingRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.Kind != domain.ListingKindPrompt && req.Kind != domain.ListingKindBlueprint {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be 'prompt' or 'blueprint'"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidParam, Message: "kind must be 'prompt' or 'blueprint'", Field: "kind"})
 		return
 	}
 	if req.SourceID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "source_id is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "source_id is required", Field: "source_id"})
 		return
 	}
 	if strings.TrimSpace(req.Name) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name"})
 		return
 	}
 	if err := validateMarketplaceEventTypes(req.EventTypes); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: err.Error()})
 		return
 	}
 
@@ -249,7 +249,7 @@ func (mh *marketplaceHandler) handleMarketplacePublish(w http.ResponseWriter, r 
 		return
 	}
 	if existingListing != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": duplicateSourceMessage(req.Kind, existingListing.Status)})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: duplicateSourceMessage(req.Kind, existingListing.Status), Field: "source_id"})
 		return
 	}
 
@@ -280,9 +280,7 @@ func (mh *marketplaceHandler) handleMarketplacePublish(w http.ResponseWriter, r 
 			// A concurrent publish of the same source won the race between our
 			// pre-check and this insert — translate the partial-unique-index hit
 			// to the same friendly 409 rather than a raw constraint error.
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "this " + req.Kind + " is already published — use the republish endpoint to push an update",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this " + req.Kind + " is already published — use the republish endpoint to push an update"})
 			return
 		}
 		internalError(w, "marketplace", err)
@@ -314,18 +312,21 @@ func (mh *marketplaceHandler) handleMarketplaceListingVersionCreate(w http.Respo
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
+	id, ok := marketplaceListingIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	var req publishVersionRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if strings.TrimSpace(req.Name) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name"})
 		return
 	}
 	if err := validateMarketplaceEventTypes(req.EventTypes); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: err.Error()})
 		return
 	}
 
@@ -365,9 +366,7 @@ func (mh *marketplaceHandler) handleMarketplaceListingVersionCreate(w http.Respo
 		return
 	}
 	if sourceUnavailable {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "the source object this listing was published from no longer exists — it can be delisted but not republished",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "the source object this listing was published from no longer exists — it can be delisted but not republished"})
 		return
 	}
 
@@ -440,7 +439,10 @@ func (mh *marketplaceHandler) handleMarketplaceListingDelist(w http.ResponseWrit
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
+	id, ok := marketplaceListingIDOr404(w, r)
+	if !ok {
+		return
+	}
 	if _, ok := mh.gateMarketplaceListingWrite(w, r, orgID, userID, id); !ok {
 		return
 	}
@@ -464,7 +466,10 @@ func (mh *marketplaceHandler) handleMarketplaceListingRelist(w http.ResponseWrit
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
+	id, ok := marketplaceListingIDOr404(w, r)
+	if !ok {
+		return
+	}
 	if _, ok := mh.gateMarketplaceListingWrite(w, r, orgID, userID, id); !ok {
 		return
 	}
@@ -499,7 +504,10 @@ func (mh *marketplaceHandler) handleMarketplaceListingBySource(w http.ResponseWr
 	if !ok {
 		return
 	}
-	sourceID := r.PathValue("source_id")
+	sourceID, ok := uuidPathOr404(w, r, "source_id", "listing")
+	if !ok {
+		return
+	}
 
 	var listing *domain.ListingSummary
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -510,7 +518,21 @@ func (mh *marketplaceHandler) handleMarketplaceListingBySource(w http.ResponseWr
 		internalError(w, "marketplace", err)
 		return
 	}
+	if listing == nil {
+		// 404, not the 200-with-literal-null this used to answer: it was the
+		// only single read in the surface that reported absence in the body.
+		notFound(w, "listing")
+		return
+	}
 	writeJSON(w, http.StatusOK, listing)
+}
+
+// marketplaceListingIDOr404 guards the {id} path value on every listing route
+// — marketplace_listings.id is a uuid column on Postgres. See uuidPathOr404.
+// get/vote/unvote/install guarded already; versions/delist/relist did not, so
+// a malformed id reached the store as a 22P02 → 500.
+func marketplaceListingIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
+	return uuidPathOr404(w, r, "id", "listing")
 }
 
 // handleMarketplaceList serves the browse page: search + event-type/kind
@@ -534,12 +556,12 @@ func (mh *marketplaceHandler) handleMarketplaceList(w http.ResponseWriter, r *ht
 		Sort:      strings.TrimSpace(r.URL.Query().Get("sort")),
 	}
 	if f.Kind != "" && f.Kind != domain.ListingKindPrompt && f.Kind != domain.ListingKindBlueprint {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be 'prompt' or 'blueprint'"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidParam, Message: "kind must be 'prompt' or 'blueprint'", Field: "kind"})
 		return
 	}
 	if f.Sort != "" && f.Sort != domain.ListingSortInstalls && f.Sort != domain.ListingSortVotes &&
 		f.Sort != domain.ListingSortRecent && f.Sort != domain.ListingSortMostUsed {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sort must be 'installs', 'votes', 'recent', or 'used'"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidParam, Message: "sort must be 'installs', 'votes', 'recent', or 'used'", Field: "sort"})
 		return
 	}
 	if f.Sort == "" {
@@ -580,13 +602,8 @@ func (mh *marketplaceHandler) handleMarketplaceGet(w http.ResponseWriter, r *htt
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
-	// Validate up front: id is a uuid column on Postgres, so a malformed
-	// value surfaces as a SQLSTATE 22P02 cast error from the store call
-	// (→ 500) rather than a clean miss. Treating malformed ids as "not
-	// found" mirrors the house pattern (see tasks.go's comment).
-	if _, err := uuid.Parse(id); err != nil {
-		notFound(w, "listing")
+	id, ok := marketplaceListingIDOr404(w, r)
+	if !ok {
 		return
 	}
 
@@ -624,9 +641,8 @@ func (mh *marketplaceHandler) handleMarketplaceVote(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
-	if _, err := uuid.Parse(id); err != nil {
-		notFound(w, "listing")
+	id, ok := marketplaceListingIDOr404(w, r)
+	if !ok {
 		return
 	}
 
@@ -674,9 +690,8 @@ func (mh *marketplaceHandler) handleMarketplaceUnvote(w http.ResponseWriter, r *
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
-	if _, err := uuid.Parse(id); err != nil {
-		notFound(w, "listing")
+	id, ok := marketplaceListingIDOr404(w, r)
+	if !ok {
 		return
 	}
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -725,14 +740,13 @@ func (mh *marketplaceHandler) handleMarketplaceInstall(w http.ResponseWriter, r 
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
-	if _, err := uuid.Parse(id); err != nil {
-		notFound(w, "listing")
+	id, ok := marketplaceListingIDOr404(w, r)
+	if !ok {
 		return
 	}
 
 	var req installListingRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -798,7 +812,7 @@ func (mh *marketplaceHandler) handleMarketplaceInstall(w http.ResponseWriter, r 
 		return
 	}
 	if delisted {
-		writeJSON(w, http.StatusGone, map[string]string{"error": "this listing has been delisted and can no longer be installed"})
+		httpx.WriteErrors(w, http.StatusGone, httpx.ErrorItem{Reason: httpx.ReasonAlreadyTerminal, Message: "this listing has been delisted and can no longer be installed"})
 		return
 	}
 

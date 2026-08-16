@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // inviteTTL is how long a created invite stays redeemable. 7 days matches
@@ -74,7 +76,9 @@ type createInviteResponse struct {
 // POST /api/invites  body: { email, role, target_team_id? }
 func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The invite surface is multi-mode only; a route absent in this
+		// deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, ok := requireOrg(w, r)
@@ -89,8 +93,9 @@ func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if !isAdmin {
-		// 404 not 403 — non-disclosure posture, same as teams_handler.
-		http.NotFound(w, r)
+		// The caller is a member of this org (requireOrg resolved it from
+		// their session), so name the missing role rather than hiding it.
+		forbidden(w, "org admin role required")
 		return
 	}
 
@@ -107,12 +112,23 @@ func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Requ
 	}
 
 	var body createInviteRequest
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	email := strings.ToLower(strings.TrimSpace(body.Email))
 	if email == "" {
-		badRequest(w, "email is required")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "email is required", Field: "email",
+		})
+		return
+	}
+	// Shape-check the address. Unvalidated, a typo minted a durable invite
+	// nobody could ever redeem — the accept path matches the caller's verified
+	// email exactly, so an address that can't be an address is a ghost row.
+	if _, err := mail.ParseAddress(email); err != nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "email must be a valid email address", Field: "email",
+		})
 		return
 	}
 
@@ -144,9 +160,7 @@ func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if alreadyMember {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "that person is already a member of this org",
-		})
+		conflict(w, "that person is already a member of this org")
 		return
 	}
 
@@ -161,13 +175,17 @@ func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Requ
 		role = "member"
 	}
 	if role != "admin" && role != "member" {
-		badRequest(w, "role must be 'admin' or 'member'")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "role must be 'admin' or 'member'", Field: "role",
+		})
 		return
 	}
 	targetTeamID := strings.TrimSpace(body.TargetTeamID)
 	if targetTeamID != "" {
 		if _, err := uuid.Parse(targetTeamID); err != nil {
-			badRequest(w, "target_team_id must be a valid UUID")
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidField, Message: "target_team_id must be a valid UUID", Field: "target_team_id",
+			})
 			return
 		}
 	}
@@ -236,9 +254,7 @@ func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Requ
 		if isUniqueViolation(err) {
 			// org_invites_active_uniq — a pending invite to this address
 			// already exists. Re-inviting after revoke/accept is allowed.
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "an invite for that email is already pending",
-			})
+			conflict(w, "an invite for that email is already pending")
 			return
 		}
 		internalError(w, "invites", err)
@@ -277,7 +293,9 @@ type inviteListItem struct {
 // GET /api/invites
 func (ih *invitesHandler) handleInviteList(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The invite surface is multi-mode only; a route absent in this
+		// deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, ok := requireOrg(w, r)
@@ -292,7 +310,7 @@ func (ih *invitesHandler) handleInviteList(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !isAdmin {
-		http.NotFound(w, r)
+		forbidden(w, "org admin role required")
 		return
 	}
 
@@ -327,7 +345,9 @@ func (ih *invitesHandler) handleInviteList(w http.ResponseWriter, r *http.Reques
 // POST /api/invites/{id}/revoke
 func (ih *invitesHandler) handleInviteRevoke(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The invite surface is multi-mode only; a route absent in this
+		// deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, ok := requireOrg(w, r)
@@ -342,13 +362,12 @@ func (ih *invitesHandler) handleInviteRevoke(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if !isAdmin {
-		http.NotFound(w, r)
+		forbidden(w, "org admin role required")
 		return
 	}
 
-	inviteID := r.PathValue("id")
-	if _, err := uuid.Parse(inviteID); err != nil {
-		http.NotFound(w, r)
+	inviteID, ok := uuidPathOr404(w, r, "id", "invite")
+	if !ok {
 		return
 	}
 
@@ -389,10 +408,10 @@ func (ih *invitesHandler) handleInviteRevoke(w http.ResponseWriter, r *http.Requ
 	}
 	switch outcome {
 	case db.RevokeNotFound:
-		http.NotFound(w, r)
+		notFound(w, "invite")
 	case db.RevokeAlreadyAccepted:
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "invite has already been accepted",
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason: httpx.ReasonAlreadyTerminal, Message: "invite has already been accepted",
 		})
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
@@ -417,12 +436,16 @@ type invitePreviewResponse struct {
 // GET /api/invites/preview?token=…
 func (ih *invitesHandler) handleInvitePreview(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The invite surface is multi-mode only; a route absent in this
+		// deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	token := r.URL.Query().Get("token")
 	if token == "" {
-		badRequest(w, "token is required")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidParam, Message: "token is required", Field: "token",
+		})
 		return
 	}
 	hash := sha256.Sum256([]byte(token))
@@ -454,7 +477,9 @@ func (ih *invitesHandler) handleInvitePreview(w http.ResponseWriter, r *http.Req
 // POST /api/invites/accept  body: { token }
 func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The invite surface is multi-mode only; a route absent in this
+		// deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	claims := ClaimsFrom(r.Context())
@@ -478,11 +503,17 @@ func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Requ
 	var body struct {
 		Token string `json:"token"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
-	if strings.TrimSpace(body.Token) == "" {
-		badRequest(w, "token is required")
+	// Trim first and hash what was validated: the emptiness check used to trim
+	// while the hash used the raw value, so a token with stray whitespace
+	// passed the check and then matched nothing.
+	body.Token = strings.TrimSpace(body.Token)
+	if body.Token == "" {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "token is required", Field: "token",
+		})
 		return
 	}
 
@@ -493,21 +524,23 @@ func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if invite == nil {
-		http.NotFound(w, r)
+		notFound(w, "invite")
 		return
 	}
 
 	// State gates, in priority order.
 	if invite.RevokedAt != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this invitation has been revoked"})
+		conflict(w, "this invitation has been revoked")
 		return
 	}
 	if invite.AcceptedAt != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this invitation has already been accepted"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason: httpx.ReasonAlreadyTerminal, Message: "this invitation has already been accepted",
+		})
 		return
 	}
 	if timeNow().After(invite.ExpiresAt) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this invitation has expired"})
+		conflict(w, "this invitation has expired")
 		return
 	}
 
@@ -516,13 +549,16 @@ func (ih *invitesHandler) handleInviteAccept(w http.ResponseWriter, r *http.Requ
 	// provider_token at the OAuth callback, match against /user/emails).
 	callerEmail := strings.ToLower(strings.TrimSpace(claims.Email))
 	if callerEmail == "" || callerEmail != invite.Email {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": fmt.Sprintf(
+		// Its own reason rather than the former private invited_email key:
+		// the message names both addresses, and the client keys the
+		// switch-account affordance on the code.
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason: httpx.ReasonInviteEmailMismatch,
+			Message: fmt.Sprintf(
 				"This invitation was sent to %s, but you're signed in as %s. "+
 					"Sign in with %s to accept it, or ask your admin to re-invite %s.",
 				invite.Email, displayEmail(callerEmail), invite.Email, invite.Email,
 			),
-			"invited_email": invite.Email,
 		})
 		return
 	}

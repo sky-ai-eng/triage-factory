@@ -219,7 +219,7 @@ func TestRunResponse_HasUnresolved_List(t *testing.T) {
 		"octo/repo", 9, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/9", "T", "B", true))
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_id=t_pklist", nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_id="+fixtureUUID("t_pklist"), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET runs = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -246,10 +246,10 @@ func TestRunResponse_ArtifactCount_List(t *testing.T) {
 	// seedSteerRun mints task t_lst with run r_lst and prompt p_lst; add a
 	// second run on the same task so the list path counts more than one run.
 	run1 := seedSteerRun(t, s.db, "lst", "completed")
-	const taskID = "t_lst"
-	const run2 = "r_lst2"
+	taskID := fixtureUUID("t_lst")
+	run2 := fixtureUUID("r_lst2")
 	brID := seedBlueprintRunSQLite(t, s.db, taskID)
-	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES (?, ?, 'p_lst', 'completed', 'manual', ?, 0)`, run2, taskID, brID)
+	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES (?, ?, ?, 'completed', 'manual', ?, 0)`, run2, taskID, fixtureUUID("p_lst"), brID)
 
 	mkComment := func(key string) domain.Artifact {
 		return domain.Artifact{

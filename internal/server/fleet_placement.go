@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // placementResolver is the narrow view the explainer needs of
@@ -75,13 +76,17 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.placement == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "placement resolver not ready"})
+		// This pod runs no placement resolver — deployment shape, not a
+		// transient outage.
+		writeNotConfigured(w, "the placement resolver is not configured on this deployment")
 		return
 	}
 
 	orgID := strings.TrimSpace(r.URL.Query().Get("org"))
 	if orgID == "" {
-		badRequest(w, "org query parameter is required")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidParam, Message: "org query parameter is required", Field: "org",
+		})
 		return
 	}
 	// Match RequireOrgAdmin's path-org validation: reject a non-uuid org in
@@ -101,19 +106,38 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 		kind = domain.PlacementKindRepo
 	}
 	if kind != domain.PlacementKindRepo && kind != domain.PlacementKindProject {
-		badRequest(w, "kind must be 'repo' or 'project'")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidParam, Message: "kind must be 'repo' or 'project'", Field: "kind",
+		})
 		return
 	}
-	// Read the key value from ?repo= for a repo key or ?project= for a project
-	// key — either query-parameter NAME is accepted so the URL reads naturally
-	// for each kind (repo=owner/repo, or project=<id>). The value itself is the
-	// owner/repo string or the project id.
-	keyValue := strings.TrimSpace(r.URL.Query().Get("repo"))
-	if keyValue == "" {
-		keyValue = strings.TrimSpace(r.URL.Query().Get("project"))
+	// The key parameter is named for its kind: ?repo=owner/repo for a repo
+	// key, ?project=<id> for a project key. They used to be interchangeable
+	// regardless of kind, with repo silently winning when both appeared — so
+	// ?kind=project&repo=x explained a placement for a key the caller never
+	// asked about. Each kind now reads only its own parameter, and the other
+	// one being present is a client fault rather than a silent preference.
+	keyParam := "repo"
+	if kind == domain.PlacementKindProject {
+		keyParam = "project"
 	}
+	otherParam := "project"
+	if keyParam == "project" {
+		otherParam = "repo"
+	}
+	if r.URL.Query().Get(otherParam) != "" {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidParam,
+			Message: "kind=" + kind + " reads its key from " + keyParam + "; remove " + otherParam,
+			Field:   otherParam,
+		})
+		return
+	}
+	keyValue := strings.TrimSpace(r.URL.Query().Get(keyParam))
 	if keyValue == "" {
-		badRequest(w, "repo (or project) query parameter is required")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidParam, Message: keyParam + " query parameter is required", Field: keyParam,
+		})
 		return
 	}
 

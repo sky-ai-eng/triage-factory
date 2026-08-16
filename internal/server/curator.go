@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -44,6 +45,13 @@ type curatorHandler struct {
 // The turn id on the wire (request_id) is the turn's user-message id
 // rendered as a decimal string.
 
+// writeCuratorUnavailable answers the curator routes on a deployment whose
+// process runs no curator runtime — configuration, not a request fault, so it
+// takes the same 409 NOT_CONFIGURED every other unconfigured subsystem gives.
+func writeCuratorUnavailable(w http.ResponseWriter) {
+	writeNotConfigured(w, "the curator is not configured on this deployment")
+}
+
 type curatorSendRequest struct {
 	Content string `json:"content"`
 }
@@ -70,10 +78,13 @@ func (ch *curatorHandler) handleCuratorSend(w http.ResponseWriter, r *http.Reque
 	userID := ClaimsFrom(r.Context()).Subject
 	cur := ch.runtime()
 	if cur == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "curator runtime not started"})
+		writeCuratorUnavailable(w)
 		return
 	}
-	projectID := r.PathValue("id")
+	projectID, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var project *domain.Project
 	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -89,12 +100,14 @@ func (ch *curatorHandler) handleCuratorSend(w http.ResponseWriter, r *http.Reque
 	}
 
 	var req curatorSendRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	content := strings.TrimSpace(req.Content)
 	if content == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "content is required", Field: "content",
+		})
 		return
 	}
 
@@ -108,7 +121,9 @@ func (ch *curatorHandler) handleCuratorSend(w http.ResponseWriter, r *http.Reque
 		// anywhere — surface it as 503 (retryable once an executor is back),
 		// not a 500.
 		if errors.Is(err, curator.ErrNoCuratorExecutor) {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+			httpx.WriteErrors(w, http.StatusServiceUnavailable, httpx.ErrorItem{
+				Reason: httpx.ReasonUpstreamUnavailable, Message: err.Error(),
+			})
 			return
 		}
 		internalError(w, "curator", err)
@@ -123,7 +138,10 @@ func (ch *curatorHandler) handleCuratorHistory(w http.ResponseWriter, r *http.Re
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	projectID := r.PathValue("id")
+	projectID, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var (
 		project  *domain.Project
 		messages []domain.Message
@@ -310,11 +328,14 @@ func (ch *curatorHandler) handleCuratorCancel(w http.ResponseWriter, r *http.Req
 	}
 	cur := ch.runtime()
 	if cur == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "curator runtime not started"})
+		writeCuratorUnavailable(w)
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	projectID := r.PathValue("id")
+	projectID, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var (
 		project  *domain.Project
 		inFlight *db.CuratorInFlightTurn
@@ -338,7 +359,7 @@ func (ch *curatorHandler) handleCuratorCancel(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if inFlight == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no in-flight curator request"})
+		notFound(w, "in-flight curator request")
 		return
 	}
 	requestID := strconv.FormatInt(inFlight.MessageID, 10)
@@ -424,7 +445,10 @@ func (ch *curatorHandler) handleCuratorReset(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	projectID := r.PathValue("id")
+	projectID, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var project *domain.Project
 	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -446,9 +470,7 @@ func (ch *curatorHandler) handleCuratorReset(w http.ResponseWriter, r *http.Requ
 		return e
 	}); err != nil {
 		if errors.Is(err, db.ErrCuratorInFlight) {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "in-flight curator request — cancel it before resetting",
-			})
+			conflict(w, "in-flight curator request — cancel it before resetting")
 			return
 		}
 		internalError(w, "curator", err)

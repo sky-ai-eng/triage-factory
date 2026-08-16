@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
@@ -92,7 +93,10 @@ func (ph *promptsHandler) handlePromptGet(w http.ResponseWriter, r *http.Request
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "prompt")
+	if !ok {
+		return
+	}
 	var prompt *domain.Prompt
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -116,22 +120,28 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req prompts.CreateRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name",
+		})
 		return
 	}
 	// A prompt is the step content unit — it always carries a body (the
 	// mission). Ordering prompts into a multi-step composition is the
 	// blueprint's job, not a prompt-kind discriminator.
 	if req.Body == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "body is required", Field: "body",
+		})
 		return
 	}
 	if !prompts.ValidModel(req.Model) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": prompts.InvalidModelError()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(), Field: "model",
+		})
 		return
 	}
 
@@ -194,22 +204,31 @@ func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "prompt")
+	if !ok {
+		return
+	}
 
 	var req prompts.UpdateRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name",
+		})
 		return
 	}
 	if req.Body == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "body is required", Field: "body",
+		})
 		return
 	}
 	if !prompts.ValidModel(req.Model) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": prompts.InvalidModelError()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(), Field: "model",
+		})
 		return
 	}
 
@@ -253,7 +272,10 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "prompt")
+	if !ok {
+		return
+	}
 
 	// Pre-load to resolve the prompt's team for the viewer gate (TFAC-447): a
 	// viewer can read a prompt but not delete it. A missing prompt falls through
@@ -402,14 +424,31 @@ func (ph *promptsHandler) handlePromptStats(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
-	var stats *domain.PromptStats
+	id, ok := uuidPathOr404(w, r, "id", "prompt")
+	if !ok {
+		return
+	}
+	var (
+		stats  *domain.PromptStats
+		prompt *domain.Prompt
+	)
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// Read the prompt first: Stats aggregates over runs, so a prompt that
+		// doesn't exist (or isn't visible) produced an all-zero row that read
+		// as a real, quiet prompt — while the sibling GET 404s the same id.
 		var e error
+		prompt, e = tx.Prompts.Get(r.Context(), orgID, id)
+		if e != nil || prompt == nil {
+			return e
+		}
 		stats, e = tx.Prompts.Stats(r.Context(), orgID, id)
 		return e
 	}); err != nil {
 		internalError(w, "prompts", err)
+		return
+	}
+	if prompt == nil {
+		notFound(w, "prompt")
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)

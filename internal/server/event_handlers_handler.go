@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
 
@@ -73,9 +74,7 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 	userID := ClaimsFrom(r.Context()).Subject
 	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
 	if kind != "" && kind != domain.EventHandlerKindRule && kind != domain.EventHandlerKindTrigger {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "kind must be 'rule', 'trigger', or omitted (returns both)",
-		})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidParam, Message: "kind must be 'rule', 'trigger', or omitted (returns both)", Field: "kind"})
 		return
 	}
 	// ?team_id= narrows to one team's handlers (+ org-visible) on the
@@ -155,21 +154,19 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var req createEventHandlerRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.Kind != domain.EventHandlerKindRule && req.Kind != domain.EventHandlerKindTrigger {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "kind must be 'rule' or 'trigger'",
-		})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "kind must be 'rule' or 'trigger'", Field: "kind"})
 		return
 	}
 	if req.EventType == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "event_type is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "event_type is required", Field: "event_type"})
 		return
 	}
 	if _, ok := events.Get(req.EventType); !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown event_type: " + req.EventType})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "unknown event_type: " + req.EventType, Field: "event_type"})
 		return
 	}
 	// TFAC-524: a gated-off event source can't be handed a new handler. Only
@@ -177,12 +174,12 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	// promote/retarget can't change it either (the router freeze in Part 6
 	// makes an enabled-but-gated handler inert regardless).
 	if !entitlements.EventTypeAllowed(orgID, req.EventType) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "event source not enabled for this organization"})
+		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{Reason: httpx.ReasonForbidden, Message: "event source not enabled for this organization", Field: "event_type"})
 		return
 	}
 	canonical, err := events.ValidatePredicateJSON(req.EventType, req.ScopePredicateJSON)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: err.Error(), Field: "scope_predicate_json"})
 		return
 	}
 
@@ -210,14 +207,14 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	switch req.Kind {
 	case domain.EventHandlerKindRule:
 		if req.Name == nil || strings.TrimSpace(*req.Name) == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required for kind=rule"})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "name is required for kind=rule", Field: "name"})
 			return
 		}
 		h.Name = strings.TrimSpace(*req.Name)
 		priority := 0.5
 		if req.DefaultPriority != nil {
 			if *req.DefaultPriority < 0 || *req.DefaultPriority > 1 {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "default_priority must be between 0 and 1"})
+				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "default_priority must be between 0 and 1", Field: "default_priority"})
 				return
 			}
 			priority = *req.DefaultPriority
@@ -235,7 +232,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 
 	case domain.EventHandlerKindTrigger:
 		if req.BlueprintID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "blueprint_id is required for kind=trigger"})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "blueprint_id is required for kind=trigger", Field: "blueprint_id"})
 			return
 		}
 		// Verify the blueprint exists (clearer 404 than the downstream FK
@@ -283,11 +280,11 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 			return
 		}
 		if crossTeamBlueprint {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "blueprint_id references a blueprint owned by another team"})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: "blueprint_id references a blueprint owned by another team", Field: "blueprint_id"})
 			return
 		}
 		if blueprintHasTrigger {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 			return
 		}
 		h.BlueprintID = req.BlueprintID
@@ -295,7 +292,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 		threshold := 4
 		if req.BreakerThreshold != nil {
 			if *req.BreakerThreshold <= 0 {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "breaker_threshold must be positive"})
+				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "breaker_threshold must be positive", Field: "breaker_threshold"})
 				return
 			}
 			threshold = *req.BreakerThreshold
@@ -304,7 +301,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 		minAutonomy := 0.0
 		if req.MinAutonomySuitability != nil {
 			if *req.MinAutonomySuitability < 0 || *req.MinAutonomySuitability > 1 {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "min_autonomy_suitability must be between 0 and 1"})
+				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "min_autonomy_suitability must be between 0 and 1", Field: "min_autonomy_suitability"})
 				return
 			}
 			minAutonomy = *req.MinAutonomySuitability
@@ -338,15 +335,11 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 		// generic 409 and log the raw error for operators.
 		if isUniqueViolation(err) {
 			eventHandlersLog.Warn("create conflict", "kind", h.Kind, "event_type", h.EventType, "error", err)
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "An event handler with this configuration already exists.",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonDuplicateName, Message: "an event handler with this configuration already exists"})
 			return
 		}
 		eventHandlersLog.Error("create failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "Failed to create event handler.",
-		})
+		internalError(w, "event_handlers", err)
 		return
 	}
 	if fresh != nil {
@@ -386,10 +379,13 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "event handler")
+	if !ok {
+		return
+	}
 
 	var req patchEventHandlerRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -436,7 +432,7 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 			}
 			canonical, err := events.ValidatePredicateJSON(existing.EventType, raw)
 			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: err.Error(), Field: "scope_predicate_json"})
 				return
 			}
 			if canonical == "" {
@@ -452,14 +448,14 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		if req.Name != nil {
 			trimmed := strings.TrimSpace(*req.Name)
 			if trimmed == "" {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name cannot be empty"})
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "name cannot be empty", Field: "name"})
 				return
 			}
 			updated.Name = trimmed
 		}
 		if req.DefaultPriority != nil {
 			if *req.DefaultPriority < 0 || *req.DefaultPriority > 1 {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "default_priority must be between 0 and 1"})
+				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "default_priority must be between 0 and 1", Field: "default_priority"})
 				return
 			}
 			v := *req.DefaultPriority
@@ -473,7 +469,7 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 	case domain.EventHandlerKindTrigger:
 		if req.BreakerThreshold != nil {
 			if *req.BreakerThreshold <= 0 {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "breaker_threshold must be positive"})
+				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "breaker_threshold must be positive", Field: "breaker_threshold"})
 				return
 			}
 			v := *req.BreakerThreshold
@@ -481,7 +477,7 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		}
 		if req.MinAutonomySuitability != nil {
 			if *req.MinAutonomySuitability < 0 || *req.MinAutonomySuitability > 1 {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "min_autonomy_suitability must be between 0 and 1"})
+				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "min_autonomy_suitability must be between 0 and 1", Field: "min_autonomy_suitability"})
 				return
 			}
 			v := *req.MinAutonomySuitability
@@ -521,7 +517,10 @@ func (eh *eventHandlersHandler) handleEventHandlerDelete(w http.ResponseWriter, 
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "event handler")
+	if !ok {
+		return
+	}
 
 	// Viewers can't delete a rule/trigger (TFAC-447). A missing handler passes
 	// through to the 404 below.
@@ -558,14 +557,17 @@ func (eh *eventHandlersHandler) handleEventHandlerToggle(w http.ResponseWriter, 
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "event handler")
+	if !ok {
+		return
+	}
 	// Enabled is a pointer so an absent field stays distinguishable from an
 	// explicit false: a non-pointer bool zero-values an empty body into a
 	// disable, silently turning the handler off with a 200.
 	var req struct {
 		Enabled *bool `json:"enabled"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.Enabled == nil {
@@ -619,18 +621,34 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "event handler")
+	if !ok {
+		return
+	}
 
 	var req promoteEventHandlerRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.BlueprintID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "blueprint_id is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "blueprint_id is required", Field: "blueprint_id"})
 		return
 	}
-	if req.BreakerThreshold == nil || req.MinAutonomySuitability == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "breaker_threshold and min_autonomy_suitability are required"})
+	var v httpx.Validation
+	if req.BreakerThreshold == nil {
+		v.Missing("breaker_threshold")
+	} else if *req.BreakerThreshold <= 0 {
+		// The range checks create and PATCH enforce. Promote skipped them, so
+		// it could persist breaker_threshold:-1 / min_autonomy_suitability:7 —
+		// values the same fields reject through every other door.
+		v.OutOfRange("breaker_threshold", "breaker_threshold must be positive")
+	}
+	if req.MinAutonomySuitability == nil {
+		v.Missing("min_autonomy_suitability")
+	} else if *req.MinAutonomySuitability < 0 || *req.MinAutonomySuitability > 1 {
+		v.OutOfRange("min_autonomy_suitability", "min_autonomy_suitability must be between 0 and 1")
+	}
+	if v.Flush(w, http.StatusUnprocessableEntity) {
 		return
 	}
 
@@ -675,7 +693,7 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		return
 	}
 	if existing.Kind != domain.EventHandlerKindRule {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "only rules can be promoted"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "only rules can be promoted"})
 		return
 	}
 	if blueprint == nil {
@@ -686,13 +704,13 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 	// own team owns. The DB enforces this via the (blueprint_id, team_id)
 	// composite FK on the Promote UPDATE; pre-check for a clean 400.
 	if existing.TeamID != "" && blueprint.TeamID != "" && blueprint.TeamID != existing.TeamID {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "blueprint_id references a blueprint owned by another team"})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: "blueprint_id references a blueprint owned by another team", Field: "blueprint_id"})
 		return
 	}
 	// A blueprint is fired by exactly one event: refuse promoting a second
 	// trigger onto an already-triggered blueprint with a clean 409.
 	if blueprintHasTrigger {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 		return
 	}
 
@@ -700,7 +718,7 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 	if req.ScopePredicateJSON != nil {
 		canonical, verr := events.ValidatePredicateJSON(existing.EventType, *req.ScopePredicateJSON)
 		if verr != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": verr.Error()})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: verr.Error(), Field: "scope_predicate_json"})
 			return
 		}
 		if canonical == "" {
@@ -732,7 +750,7 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		// clean 409, not a raw 500.
 		if isUniqueViolation(err) {
 			eventHandlersLog.Warn("promote conflict, blueprint already triggered", "error", err)
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 			return
 		}
 		internalError(w, "event_handlers", err)
@@ -759,14 +777,17 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "event handler")
+	if !ok {
+		return
+	}
 
 	var req retargetEventHandlerRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.BlueprintID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "blueprint_id is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "blueprint_id is required", Field: "blueprint_id"})
 		return
 	}
 
@@ -824,7 +845,7 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 	}); err != nil {
 		if isUniqueViolation(err) {
 			eventHandlersLog.Warn("retarget conflict, blueprint already triggered", "error", err)
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 			return
 		}
 		internalError(w, "event_handlers", err)
@@ -835,7 +856,7 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 		return
 	}
 	if notTrigger {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "only triggers can be retargeted"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "only triggers can be retargeted"})
 		return
 	}
 	if noChange {
@@ -847,11 +868,11 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 		return
 	}
 	if crossTeam {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "blueprint_id references a blueprint owned by another team"})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: "blueprint_id references a blueprint owned by another team", Field: "blueprint_id"})
 		return
 	}
 	if hasTrigger {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 		return
 	}
 	writeJSON(w, http.StatusOK, fresh)
@@ -868,11 +889,14 @@ func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter,
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var ids []string
-	if !decodeJSON(w, r, &ids, "expected array of handler IDs") {
+	// A bare JSON array body — strict decoding still applies (single value,
+	// no trailing junk, capped size); DisallowUnknownFields has nothing to
+	// reject on a slice.
+	if !httpx.DecodeJSONStrict(w, r, &ids) {
 		return
 	}
 	if len(ids) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "empty ID list"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "ids must contain at least one id", Field: "ids"})
 		return
 	}
 	// Reorder rewrites sort_order across a team's handler list — a viewer can't

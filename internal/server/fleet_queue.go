@@ -57,7 +57,8 @@ func (s *Server) handleFleetQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.fleetQueue == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "fleet queue reader not ready"})
+		// This pod runs no queue reader — deployment shape, not an outage.
+		writeNotConfigured(w, "the fleet queue reader is not configured on this deployment")
 		return
 	}
 

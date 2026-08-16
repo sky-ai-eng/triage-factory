@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { HttpError } from '../lib/apiClient'
+import { apiErrors } from '../lib/apiClient'
 
 // RosterMember is the normalized row <MemberRoster> renders, independent of
 // which tier (org or team) the adapter fetched it from. githubUsername /
@@ -172,18 +172,12 @@ export function initialFor(member: Pick<RosterMember, 'displayName' | 'githubUse
   return (source.trim()[0] ?? '?').toUpperCase()
 }
 
-// messageFrom prefers the server's JSON { error } message (so the last-owner
-// 409's friendly text reaches the user verbatim) and falls back to the error's
-// own message, then a generic line. Exported so the transfer-ownership picker
+// messageFrom prefers the server's envelope message (so the last-owner 409's
+// friendly text reaches the user verbatim) and falls back to the error's own
+// message, then a generic line. Exported so the transfer-ownership picker
 // surfaces the same backend errors (403/409/422) the inline roster mutations do.
 export function messageFrom(e: unknown, fallback: string): string {
-  if (e instanceof HttpError) {
-    try {
-      const body = JSON.parse(e.body) as { error?: unknown }
-      if (typeof body.error === 'string' && body.error) return body.error
-    } catch {
-      // body wasn't JSON — fall through to the generic handling below.
-    }
-  }
+  const item = apiErrors(e)[0]
+  if (item?.message) return item.message
   return e instanceof Error ? e.message : fallback
 }

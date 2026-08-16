@@ -117,7 +117,7 @@ func (az *Checker) VerifyTeamInOrg(w http.ResponseWriter, r *http.Request, orgID
 		return false
 	}
 	if !belongs {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "team")
 		return false
 	}
 	return true
@@ -162,7 +162,9 @@ func (az *Checker) VerifyTeamNotArchived(w http.ResponseWriter, r *http.Request,
 		return false
 	}
 	if archived.Valid && archived.Bool {
-		httpx.WriteJSON(w, http.StatusForbidden, map[string]any{"error": archivedTeamMessage, "archived": true})
+		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+			Reason: httpx.ReasonTeamArchived, Message: archivedTeamMessage,
+		})
 		return false
 	}
 	return true
@@ -187,7 +189,7 @@ func (az *Checker) RequireTeamAdmin(w http.ResponseWriter, r *http.Request, orgI
 		return false
 	}
 	if !isAdmin {
-		httpx.WriteJSON(w, http.StatusForbidden, map[string]string{"error": "team admin role required"})
+		writeForbidden(w, "team admin role required")
 		return false
 	}
 	return true
@@ -205,7 +207,7 @@ func (az *Checker) RequireOrgAdminRole(w http.ResponseWriter, r *http.Request, o
 		return false
 	}
 	if !isAdmin {
-		httpx.WriteJSON(w, http.StatusForbidden, map[string]string{"error": "org admin role required"})
+		writeForbidden(w, "org admin role required")
 		return false
 	}
 	return true
@@ -367,7 +369,7 @@ func (az *Checker) RequireTeamWrite(w http.ResponseWriter, r *http.Request, orgI
 		return false
 	}
 	if !canWrite {
-		httpx.WriteJSON(w, http.StatusForbidden, map[string]string{"error": viewOnlyMessage})
+		writeForbidden(w, viewOnlyMessage)
 		return false
 	}
 	return true
@@ -423,7 +425,7 @@ func (az *Checker) RequireTaskWrite(w http.ResponseWriter, r *http.Request, orgI
 	// Not visible → let the handler 404 (don't disclose existence). Visible but
 	// not writable → the role boundary; 403.
 	if visible && !canWrite {
-		httpx.WriteJSON(w, http.StatusForbidden, map[string]string{"error": viewOnlyMessage})
+		writeForbidden(w, viewOnlyMessage)
 		return false
 	}
 	return true
@@ -448,6 +450,16 @@ func (az *Checker) UserOwnsOrg(ctx context.Context, userID, orgID string) (bool,
 	return ok, err
 }
 
+// writeForbidden answers a visible-but-refused action: the caller may see the
+// resource, so the denial names the missing role rather than hiding behind a
+// 404. Which of the two a given gate uses is the disclosure rule's call, not
+// this helper's.
+func writeForbidden(w http.ResponseWriter, msg string) {
+	httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+		Reason: httpx.ReasonForbidden, Message: msg,
+	})
+}
+
 // RequireOrgMember validates {org_id} from the URL path and checks the caller
 // is a member of that org (any role). Returns (orgID, userID, true) on success;
 // writes an error and returns ("", "", false) on failure. The read-only sibling
@@ -455,7 +467,7 @@ func (az *Checker) UserOwnsOrg(ctx context.Context, userID, orgID string) (bool,
 func (az *Checker) RequireOrgMember(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	rawOrgID := r.PathValue("org_id")
 	if _, err := uuid.Parse(rawOrgID); err != nil {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "org")
 		return
 	}
 
@@ -476,7 +488,7 @@ func (az *Checker) RequireOrgMember(w http.ResponseWriter, r *http.Request) (org
 		return
 	}
 	if !hasAccess {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "org")
 		return
 	}
 	return rawOrgID, userID, true
@@ -488,7 +500,7 @@ func (az *Checker) RequireOrgMember(w http.ResponseWriter, r *http.Request) (org
 func (az *Checker) RequireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	rawOrgID := r.PathValue("org_id")
 	if _, err := uuid.Parse(rawOrgID); err != nil {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "org")
 		return
 	}
 
@@ -509,7 +521,22 @@ func (az *Checker) RequireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgI
 		return
 	}
 	if !isAdmin {
-		http.NotFound(w, r)
+		// Two-valued denial, per the disclosure rule: a caller who can see
+		// the org gets 403 for the role they lack, and only a caller who
+		// cannot see it at all gets 404. Answering 404 to a member reads as
+		// a bug — they can list the org everywhere else in the app. The
+		// membership read only runs on the denial path, so the admin path
+		// still costs one query.
+		hasAccess, accessErr := az.UserHasOrgAccess(r.Context(), userID, rawOrgID)
+		if accessErr != nil {
+			httpx.InternalError(w, "authz", fmt.Errorf("member check %s/%s: %w", userID, rawOrgID, accessErr))
+			return
+		}
+		if hasAccess {
+			writeForbidden(w, "org admin role required")
+			return
+		}
+		httpx.NotFound(w, "org")
 		return
 	}
 	return rawOrgID, userID, true

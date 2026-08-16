@@ -13,6 +13,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // --------------------------------------------------------------------
@@ -98,7 +99,7 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Repos []string `json:"repos"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 

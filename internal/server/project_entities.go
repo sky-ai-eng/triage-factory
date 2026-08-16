@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -44,7 +45,10 @@ func (pe *projectEntitiesHandler) handleProjectEntities(w http.ResponseWriter, r
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	projectID := r.PathValue("id")
+	projectID, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var project *domain.Project
 	var entities []domain.ProjectPanelEntity
 	if err := pe.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -59,8 +63,7 @@ func (pe *projectEntitiesHandler) handleProjectEntities(w http.ResponseWriter, r
 		entities, e = tx.Entities.ListProjectPanel(r.Context(), orgID, projectID)
 		return e
 	}); err != nil {
-		entitiesLog.Error("load project entities failed", "project", projectID, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project entities"})
+		internalError(w, "entities", fmt.Errorf("load entities for project %s: %w", projectID, err))
 		return
 	}
 	if project == nil {

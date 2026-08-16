@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
-	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
@@ -672,8 +671,10 @@ func TestMarketplaceListingBySource_ShowsDelisted(t *testing.T) {
 	}
 }
 
-// TestMarketplaceListingBySource_RoundTrip: the by-source lookup is null
-// before publish and resolves the active listing after.
+// TestMarketplaceListingBySource_RoundTrip: the by-source lookup 404s before
+// publish — it used to answer 200 with a literal null, the only single read in
+// the surface that reported absence in the body — and resolves the active
+// listing after.
 func TestMarketplaceListingBySource_RoundTrip(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "lookup-me", "mission", "", "")
@@ -681,11 +682,8 @@ func TestMarketplaceListingBySource_RoundTrip(t *testing.T) {
 	beforeReq := r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil)
 	beforeReq.SetPathValue("source_id", promptID)
 	beforeRec := doMarketplaceJSON(r.mh.handleMarketplaceListingBySource, beforeReq)
-	if beforeRec.Code != http.StatusOK {
-		t.Fatalf("by-source before publish: status = %d, want 200; body=%s", beforeRec.Code, beforeRec.Body.String())
-	}
-	if body := strings.TrimSpace(beforeRec.Body.String()); body != "null" {
-		t.Fatalf("by-source before publish = %q, want null", body)
+	if beforeRec.Code != http.StatusNotFound {
+		t.Fatalf("by-source before publish: status = %d, want 404; body=%s", beforeRec.Code, beforeRec.Body.String())
 	}
 
 	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,

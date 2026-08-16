@@ -4,7 +4,7 @@
 // flow) — see startGitHubAppRegistration. The endpoints are org-scoped
 // under /api/orgs/{org_id}/github/app.
 
-import { apiFetch, apiJSON, HttpError, httpErrorMessage } from './apiClient'
+import { apiErrors, apiFetch, apiJSON, HttpError, httpErrorMessage } from './apiClient'
 import { isHttpUrl } from './reachability'
 
 // asError turns any failed call into an Error carrying the clean user-facing
@@ -256,29 +256,32 @@ export async function importGitHubApp(
     )
     return { ok: true, result }
   } catch (e) {
-    // The failure body is structured, not just a message: the permission table
-    // is what the form renders on a gap. httpErrorMessage would give us the
-    // `error` string alone, so read the body off the HttpError directly and
-    // fall back to it only when the shape isn't there.
+    // Every rejection carries its message in the standard envelope, read
+    // through the shared parser so the field attribution comes with it. A
+    // permission gap adds to that rather than replacing it: alongside `errors`
+    // its body carries the granted-vs-required table the form renders, which no
+    // envelope field can hold (see githubAppImportErrorResponse). So check for
+    // the table first — the message is the same one either way.
+    const item = apiErrors(e)[0]
     if (e instanceof HttpError) {
       try {
         const body = JSON.parse(e.body) as {
-          error?: string
           permissions?: GitHubAppPermissionRow[]
           blocking?: boolean
-          field?: string
         }
-        return {
-          ok: false,
-          error: body.error || fallback,
-          permissions: body.permissions,
-          blocking: body.blocking,
-          field: body.field,
+        if (body.permissions) {
+          return {
+            ok: false,
+            error: item?.message || fallback,
+            permissions: body.permissions,
+            blocking: body.blocking,
+          }
         }
       } catch {
         // Body wasn't JSON — fall through.
       }
     }
+    if (item) return { ok: false, error: item.message || fallback, field: item.field }
     return { ok: false, error: httpErrorMessage(e, fallback) }
   }
 }

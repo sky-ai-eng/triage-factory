@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 )
 
@@ -42,16 +43,14 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil || runmode.Current() == runmode.ModeLocal {
 		// Multi-mode only: local provisions its single tenant through
 		// /api/setup/start. 404 matches the "feature absent" posture.
-		http.NotFound(w, r)
+		notFound(w, "route")
 		return
 	}
 
 	// Defense-in-depth behind the UI gate: the onboarding CTA is hidden
 	// when org creation is prevented, but the endpoint must refuse too.
 	if !runmode.OrgCreationEnabled() {
-		writeJSON(w, http.StatusForbidden, map[string]string{
-			"error": "org creation is disabled on this instance",
-		})
+		forbidden(w, "org creation is disabled on this instance")
 		return
 	}
 
@@ -78,24 +77,30 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name string `json:"name"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	name := strings.TrimSpace(body.Name)
 	if name == "" {
-		badRequest(w, "name is required")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name",
+		})
 		return
 	}
 	// Cap the stored display name. The column is unbounded TEXT and the
 	// slug derived below is length-capped separately, so without this a
 	// pathologically long name would persist verbatim.
 	if utf8.RuneCountInString(name) > 200 {
-		badRequest(w, "name must be 200 characters or fewer")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonOutOfRange, Message: "name must be 200 characters or fewer", Field: "name",
+		})
 		return
 	}
 	slugBase := slugify(name)
 	if slugBase == "" {
-		badRequest(w, "name must contain letters or numbers")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "name must contain letters or numbers", Field: "name",
+		})
 		return
 	}
 

@@ -45,7 +45,7 @@ func TestBlueprintRunGet_ProjectsFrozenStepsNotLive(t *testing.T) {
 	// Mint the run with a length-1 plan frozen onto it, exactly as delegate.go
 	// does at mint — snapshot the single resolved step. Cancelled mirrors the
 	// repro (the run was cancelled before the blueprint was edited).
-	const brID = "br-frozen"
+	brID := fixtureUUID("br-frozen")
 	if _, err := sqlitestore.New(s.db).Blueprints.CreateRun(ctx, runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:           brID,
 		BlueprintID:  bpID,

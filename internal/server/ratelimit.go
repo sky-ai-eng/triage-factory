@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Pre-auth allowlist rate-limit tuning (TFAC-433). One shared per-IP
@@ -246,7 +247,9 @@ func rateLimitWith(limiter *ipRateLimiter, next http.Handler) http.Handler {
 				secs = 1
 			}
 			w.Header().Set("Retry-After", strconv.Itoa(secs))
-			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			httpx.WriteErrors(w, http.StatusTooManyRequests, httpx.ErrorItem{
+				Reason: httpx.ReasonRateLimited, Message: "rate limit exceeded",
+			})
 			return
 		}
 		next.ServeHTTP(w, r)

@@ -629,10 +629,10 @@ func TestArtifactApprove_NonDraft_409(t *testing.T) {
 func seedDraftPRArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo string, number int) (artifactID, runID, taskID string) {
 	t.Helper()
 	runID = seedSteerRun(t, s.db, suffix, "completed")
-	taskID = "t_" + suffix
+	taskID = fixtureUUID("t_" + suffix)
 	// conversation_memory row so the human-verdict UPDATE has a target (the termination
 	// upsert guarantees this in production).
-	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, runID, "e_"+suffix, "", "agent self-report"); err != nil {
+	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, runID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	a := domain.NewPullRequestArtifact(owner+"/"+repo, number, "PR_node", "feature/x", "main",

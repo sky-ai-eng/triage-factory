@@ -134,6 +134,63 @@ const (
 	ArtifactStateMessagePosted = "posted"
 )
 
+// ArtifactKinds is the closed kind vocabulary, and ArtifactStates the union of
+// every per-kind state above. Read APIs validate a caller's ?kind= / ?state=
+// filter against them so a typo is a rejected request rather than an
+// authoritative-looking empty page.
+func ArtifactKinds() []string {
+	return []string{
+		ArtifactKindBranch, ArtifactKindPullRequest, ArtifactKindReview,
+		ArtifactKindIssue, ArtifactKindComment, ArtifactKindMessage,
+	}
+}
+
+// artifactStatesByKind is every kind's full lifecycle, one entry per kind in
+// ArtifactKinds. ArtifactStates is derived from it rather than hand-listed, so
+// a state added to a kind above joins the read filters' vocabulary with it — a
+// separately maintained union drifts silently, and the failure mode is a valid
+// request rejected as a typo.
+var artifactStatesByKind = map[string][]string{
+	ArtifactKindBranch: {ArtifactStateBranchPushed, ArtifactStateBranchDeleted},
+	ArtifactKindPullRequest: {
+		ArtifactStatePRPending, ArtifactStatePRDraft, ArtifactStatePROpen,
+		ArtifactStatePRMerged, ArtifactStatePRClosed,
+	},
+	ArtifactKindReview: {
+		ArtifactStateReviewPending, ArtifactStateReviewSubmitted, ArtifactStateReviewDismissed,
+	},
+	ArtifactKindIssue:   {ArtifactStateIssueCreated, ArtifactStateIssueUpdated},
+	ArtifactKindComment: {ArtifactStateCommentPosted, ArtifactStateCommentDeleted},
+	ArtifactKindMessage: {ArtifactStateMessagePosted},
+}
+
+// ArtifactStates is the deduplicated union of the per-kind lifecycles. A state
+// is only meaningful read with its kind (values alias across kinds), so this is
+// a filter vocabulary, not a per-kind contract. Iteration is over ArtifactKinds
+// rather than the map, so the order is stable for the "want one of …" message.
+func ArtifactStates() []string {
+	out := make([]string, 0, len(artifactStatesByKind))
+	seen := map[string]bool{}
+	for _, kind := range ArtifactKinds() {
+		for _, state := range artifactStatesByKind[kind] {
+			if seen[state] {
+				continue
+			}
+			seen[state] = true
+			out = append(out, state)
+		}
+	}
+	return out
+}
+
+// ArtifactProviders is the closed provider vocabulary, for the same use.
+func ArtifactProviders() []string {
+	return []string{
+		ArtifactProviderGitHub, ArtifactProviderJira, ArtifactProviderLinear,
+		ArtifactProviderGit, ArtifactProviderSlack, ArtifactProviderNetwork,
+	}
+}
+
 // ArtifactDedupKey builds the stable, provider-natural key Upsert
 // conflicts on: provider:kind:resource[:anchor]. The same logical artifact
 // maps to the same key regardless of which writer observed it, so a PR

@@ -16,6 +16,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // handleGitHubRepos returns the repositories the Settings picker offers. The
@@ -94,11 +95,11 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 				reposLog.Warn("app installed but resolver produced no credentials for any installation", "org", orgID, "error", err)
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
+				writeNotConfigured(w, "GitHub is not connected for this workspace")
 				return
 			}
 			reposLog.Warn("fetch installation repos failed", "org", orgID, "error", err)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch repos from GitHub" + localDetail(err)})
+			writeUpstreamGitHub(w, "failed to fetch repos from GitHub", err)
 			return
 		}
 	} else {
@@ -112,8 +113,15 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 			orgSet domain.OrgSettings
 		)
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
+			// A failed credential read is a backend fault, not "no
+			// credentials": swallowing it here answered "GitHub not
+			// configured" and told the user to re-enter a token they
+			// already have.
 			var lerr error
+			creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
+			if lerr != nil {
+				return fmt.Errorf("load integration credentials: %w", lerr)
+			}
 			orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
 			return lerr
 		}); err != nil {
@@ -139,11 +147,11 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 			// message instead.
 			if app != nil && app.Active && instsErr == nil && len(insts) == 0 {
 				reposLog.Warn("app registered and active but installed on zero accounts, and no pat configured", "org", orgID)
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub App is not installed on any account"})
+				writeNotConfigured(w, "the GitHub App is not installed on any account")
 				return
 			}
 			reposLog.Warn("github not configured, no usable app installation and no pat", "org", orgID)
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
+			writeNotConfigured(w, "GitHub is not connected for this workspace")
 			return
 		}
 		baseURL := orgSet.GitHubBaseURL
@@ -156,7 +164,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		repos, err = client.ListUserRepos(r.Context())
 		if err != nil {
 			reposLog.Warn("fetch user repos failed", "org", orgID, "error", err)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch repos from GitHub" + localDetail(err)})
+			writeUpstreamGitHub(w, "failed to fetch repos from GitHub", err)
 			return
 		}
 	}
@@ -476,7 +484,9 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	if owner == "" || repo == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing owner/repo"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidID, Message: "owner and repo are required",
+		})
 		return
 	}
 	repoID := owner + "/" + repo
@@ -504,9 +514,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		// The inverse of the above: this repo *is* in the caller's own
 		// GET /api/repos list, so 404 would read as a bug. Say plainly
 		// that it's a permission boundary.
-		writeJSON(w, http.StatusForbidden, map[string]string{
-			"error": "changing repo settings requires org admin or team admin of a team tracking this repo",
-		})
+		forbidden(w, "changing repo settings requires org admin or team admin of a team tracking this repo")
 		return
 	default:
 		internalError(w, "repos", fmt.Errorf("unhandled repo write access %d for %s", access, repoID))
@@ -518,24 +526,34 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BaseBranch json.RawMessage `json:"base_branch,omitempty"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
-	if req.BaseBranch != nil {
-		var branch string
-		if string(req.BaseBranch) == "null" {
-			branch = "" // explicit null → clear
-		} else if err := json.Unmarshal(req.BaseBranch, &branch); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid base_branch value"})
-			return
-		}
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			return tx.Repos.UpdateBaseBranch(r.Context(), orgID, repoID, branch)
-		}); err != nil {
-			internalError(w, "repos", err)
-			return
-		}
+	// A PATCH that names no field wrote nothing, so it must not answer
+	// "updated" — the one response a client cannot tell from a real write.
+	if req.BaseBranch == nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "no fields to update: provide base_branch (null clears it)",
+			Field:   "base_branch",
+		})
+		return
+	}
+	var branch string
+	if string(req.BaseBranch) == "null" {
+		branch = "" // explicit null → clear
+	} else if err := json.Unmarshal(req.BaseBranch, &branch); err != nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "base_branch must be a string or null", Field: "base_branch",
+		})
+		return
+	}
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		return tx.Repos.UpdateBaseBranch(r.Context(), orgID, repoID, branch)
+	}); err != nil {
+		internalError(w, "repos", err)
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
@@ -549,7 +567,9 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	repo := r.PathValue("repo")
 	if owner == "" || repo == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing owner/repo"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidID, Message: "owner and repo are required",
+		})
 		return
 	}
 
@@ -575,7 +595,7 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			reposLog.Warn("github not configured", "org", orgID, "owner", owner, "repo", repo, "error", err)
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub not configured"})
+			writeNotConfigured(w, "GitHub is not connected for this workspace")
 			return
 		}
 		internalError(w, "repos", err)
@@ -586,7 +606,7 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	branches, err := client.ListBranches(r.Context(), owner, repo, query, 30)
 	if err != nil {
 		reposLog.Warn("fetch branches failed", "org", orgID, "owner", owner, "repo", repo, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch branches from GitHub" + localDetail(err)})
+		writeUpstreamGitHub(w, "failed to fetch branches from GitHub", err)
 		return
 	}
 

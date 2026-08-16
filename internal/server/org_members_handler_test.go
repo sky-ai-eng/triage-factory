@@ -251,15 +251,17 @@ func TestOrgMembersList_AnyMemberReads(t *testing.T) {
 	}
 }
 
-// TestOrgMemberRoleChange_NonAdminIs404: a plain member cannot change roles —
-// the org-admin gate answers 404 (not 403), and the row is untouched.
-func TestOrgMemberRoleChange_NonAdminIs404(t *testing.T) {
+// TestOrgMemberRoleChange_NonAdminIsForbidden: a plain member cannot change
+// roles — the org-admin gate answers 403 naming the missing role (a member can
+// see their own org, so a 404 would deny something they can list), and the row
+// is untouched.
+func TestOrgMemberRoleChange_NonAdminIsForbidden(t *testing.T) {
 	r := newOrgMembersRig(t)
 
 	rec := httptest.NewRecorder()
 	r.omh.handleOrgMemberRoleChange(rec, r.req(http.MethodPatch, r.memb, r.admin, map[string]string{"role": "member"}))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (non-admin); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (non-admin); body=%s", rec.Code, rec.Body.String())
 	}
 	if got := r.roleOf(t, r.admin); got != "admin" {
 		t.Errorf("admin role = %q after blocked change, want admin (unchanged)", got)
@@ -399,14 +401,15 @@ func TestOrgMemberRemove_SelfLeaveRevokesOwnSession(t *testing.T) {
 }
 
 // TestOrgMemberRemove_NonAdminCantRemoveOther: a plain member removing a
-// *different* user is 404 (not self, not admin) and the target stays.
+// *different* user is 403 (not self, not admin) — they are a member of this
+// org, so the denial names the missing role — and the target stays.
 func TestOrgMemberRemove_NonAdminCantRemoveOther(t *testing.T) {
 	r := newOrgMembersRig(t)
 
 	rec := httptest.NewRecorder()
 	r.omh.handleOrgMemberRemove(rec, r.req(http.MethodDelete, r.memb, r.admin, nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (non-admin removing other); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (non-admin removing other); body=%s", rec.Code, rec.Body.String())
 	}
 	if !r.isMember(t, r.admin) {
 		t.Errorf("admin removed by non-admin, want still a member")

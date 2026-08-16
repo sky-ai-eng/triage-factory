@@ -19,7 +19,7 @@ import (
 // whitespace) and rejects anything trailing it with a 400. The trailing
 // `}` / `]` cases are the ones dec.More() alone misses, since More()
 // reports false at the close of the current array/object.
-func TestDecodeJSON_RejectsTrailingData(t *testing.T) {
+func TestDecodeJSONStrict_RejectsTrailingData(t *testing.T) {
 	type payload struct {
 		A int `json:"a"`
 	}
@@ -42,12 +42,12 @@ func TestDecodeJSON_RejectsTrailingData(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest("POST", "/", strings.NewReader(tc.body))
 			var v payload
-			got := DecodeJSON(rec, req, &v, "")
+			got := DecodeJSONStrict(rec, req, &v)
 			if got != tc.wantAccept {
-				t.Errorf("DecodeJSON(%q) accepted=%v, want %v (status=%d)", tc.body, got, tc.wantAccept, rec.Code)
+				t.Errorf("DecodeJSONStrict(%q) accepted=%v, want %v (status=%d)", tc.body, got, tc.wantAccept, rec.Code)
 			}
 			if !tc.wantAccept && rec.Code != 400 {
-				t.Errorf("DecodeJSON(%q) rejected but status=%d, want 400", tc.body, rec.Code)
+				t.Errorf("DecodeJSONStrict(%q) rejected but status=%d, want 400", tc.body, rec.Code)
 			}
 		})
 	}

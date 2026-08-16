@@ -11,6 +11,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 func mustEntity(t *testing.T, database *sql.DB, source, sourceID, kind, title string) *domain.Entity {
@@ -205,6 +206,65 @@ func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 	}
 }
 
+// TestBackfill_BatchAccounting pins the batch-policy invariant: every
+// submitted id is accounted for. A request-level fault — an empty list, a
+// blank id, a repeated id — fails the whole call rather than being dropped
+// mid-loop, and a well-formed batch answers applied + failed = submitted.
+func TestBackfill_BatchAccounting(t *testing.T) {
+	s := newTestServer(t)
+	seedConfiguredRepo(t, s, "owner", "repo")
+	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	a := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "A")
+
+	// Request-level faults, each rejected whole.
+	for _, tc := range []struct {
+		name string
+		ids  []string
+	}{
+		{"empty list", []string{}},
+		{"blank id", []string{a.ID, "  "}},
+		{"duplicate id", []string{a.ID, a.ID}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doJSON(t, s, http.MethodPost, "/api/projects/"+pid+"/backfill", map[string]any{"entity_ids": tc.ids})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			assertFirstError(t, rec, httpx.ReasonInvalidField, "entity_ids")
+		})
+	}
+
+	// A well-formed batch: three submitted, one assignable, two failures.
+	closed := mustEntity(t, s.db, "github", "owner/repo#9", "pr", "closed")
+	if _, err := s.db.Exec(`UPDATE entities SET state='closed' WHERE id=?`, closed.ID); err != nil {
+		t.Fatalf("close entity: %v", err)
+	}
+	submitted := []string{a.ID, closed.ID, "00000000-0000-4000-8000-0000000009ff"}
+	rec := doJSON(t, s, http.MethodPost, "/api/projects/"+pid+"/backfill", map[string]any{"entity_ids": submitted})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Applied int               `json:"applied"`
+		Failed  []backfillFailure `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Applied+len(resp.Failed) != len(submitted) {
+		t.Errorf("applied(%d) + failed(%d) = %d, want %d — every submitted id must be accounted for",
+			resp.Applied, len(resp.Failed), resp.Applied+len(resp.Failed), len(submitted))
+	}
+	for _, f := range resp.Failed {
+		if len(f.Errors) == 0 || f.Errors[0].Reason == "" {
+			t.Errorf("failed row %s carries no structured reason: %+v", f.EntityID, f.Errors)
+		}
+	}
+}
+
 // TestBackfill_RejectsOutOfScopeAndClosed verifies the server-side
 // eligibility gate: a stale or tampered request with ids for closed
 // entities or entities outside the project's tracker scope must be
@@ -252,7 +312,10 @@ func TestBackfill_RejectsOutOfScopeAndClosed(t *testing.T) {
 	}
 	failedByID := map[string]string{}
 	for _, f := range resp.Failed {
-		failedByID[f.EntityID] = f.Error
+		if len(f.Errors) == 0 {
+			t.Fatalf("failed row %s carries no errors item", f.EntityID)
+		}
+		failedByID[f.EntityID] = f.Errors[0].Message
 	}
 	if msg := failedByID[outScope.ID]; msg == "" || !strings.Contains(msg, "outside") {
 		t.Errorf("out-of-scope github entity: failure = %q, want 'outside ... scope'", msg)

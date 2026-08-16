@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ExternalLink } from 'lucide-react'
 import { toast } from './Toast/toastStore'
-import { apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiJSON, httpErrorMessage, type ApiErrorItem } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
 interface BackfillCandidate {
@@ -16,9 +16,12 @@ interface BackfillCandidate {
   current_project_name: string
 }
 
+/** One per-item result in a batch response: the item's id plus the same
+ *  error-item shape the request-level envelope uses, so a row failure is read
+ *  exactly like any other server error. */
 interface BackfillFailure {
   entity_id: string
-  error: string
+  errors: ApiErrorItem[]
 }
 
 interface Props {
@@ -150,7 +153,7 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
       setSelected(new Set(failed.map((f) => f.entity_id)))
       setFailures(
         failed.reduce<Record<string, string>>((acc, f) => {
-          acc[f.entity_id] = f.error
+          acc[f.entity_id] = f.errors?.[0]?.message ?? 'assignment failed'
           return acc
         }, {}),
       )

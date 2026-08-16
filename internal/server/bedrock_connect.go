@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Bedrock connect — the AWS analog of handleAnthropicConnect and the SINGLE
@@ -141,7 +142,7 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 		return
 	}
 	var req bedrockConnectRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	req.AuthMethod = strings.TrimSpace(req.AuthMethod)
@@ -178,8 +179,7 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 			return recordCredentialRemovals(r.Context(), tx, orgID, userID,
 				[]string{domain.CredentialKindBedrock})
 		}); err != nil {
-			settingsLog.Error("bedrock connect clear failed", "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update Bedrock credentials"})
+			internalError(w, "settings", fmt.Errorf("clear bedrock credentials: %w", err))
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
@@ -187,20 +187,32 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 	}
 
 	if req.AuthMethod != bedrockAuthMethodBearer && req.AuthMethod != bedrockAuthMethodAccessKeys && req.AuthMethod != bedrockAuthMethodRole {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": `auth_method must be "role", "bearer", "access_keys", or "none"`})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: `auth_method must be "role", "bearer", "access_keys", or "none"`,
+			Field:   "auth_method",
+		})
 		return
 	}
 	if req.Region == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "region is required (it names the Bedrock endpoint and the SigV4 signing scope)"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "region is required (it names the Bedrock endpoint and the SigV4 signing scope)",
+			Field:   "region",
+		})
 		return
 	}
 	if !awsRegionRe.MatchString(req.Region) {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": fmt.Sprintf("region %q does not look like an AWS region (e.g. us-east-1, us-gov-west-1)", req.Region)})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: fmt.Sprintf("region %q does not look like an AWS region (e.g. us-east-1, us-gov-west-1)", req.Region),
+			Field:   "region",
+		})
 		return
 	}
 	if req.BaseURL != "" {
 		if err := validateBedrockBaseURL(req.BaseURL); err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: err.Error()})
 			return
 		}
 	}
@@ -215,7 +227,11 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 	// keep-current logic can misread them.
 	if req.AuthMethod == bedrockAuthMethodAccessKeys &&
 		(req.AccessKeyID == "") != (req.SecretAccessKey == "") {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "provide both the access key ID and the secret access key (or neither, to keep the stored pair)"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "provide both the access key ID and the secret access key (or neither, to keep the stored pair)",
+			Field:   "access_key_id",
+		})
 		return
 	}
 	secretsProvided := req.BearerToken != "" || req.AccessKeyID != "" || req.SecretAccessKey != "" || req.SessionToken != ""
@@ -333,11 +349,12 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 			[]string{domain.CredentialKindAnthropicKey})
 	}); err != nil {
 		if missing, ok := err.(bedrockMissingSecretError); ok {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": string(missing)})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason: httpx.ReasonMissingField, Message: string(missing),
+			})
 			return
 		}
-		settingsLog.Error("bedrock connect persist failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store Bedrock credentials"})
+		internalError(w, "settings", fmt.Errorf("persist bedrock credentials: %w", err))
 		return
 	}
 

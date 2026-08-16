@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -62,6 +63,16 @@ func newTestServer(t *testing.T) *Server {
 	}
 	stores := sqlitestore.New(database)
 	return New(database, stores)
+}
+
+// fixtureUUID derives a stable uuid from a readable seed, so fixtures keep
+// their legible names ("r_msg", "t_ba") while producing ids the handlers'
+// path guards accept — those guards answer 404 for anything that isn't a uuid,
+// because on Postgres the columns behind them are uuid typed. Same seed →
+// same id, within a run and across runs, so a test can name an id it expects
+// to see in a response without threading the value through.
+func fixtureUUID(seed string) string {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(seed)).String()
 }
 
 // doJSON performs a JSON request against the server's mux and returns

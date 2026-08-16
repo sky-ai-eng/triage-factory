@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/review"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // reviewArtifactJSON is the wire shape the review overlay consumes. The whole
@@ -128,7 +130,7 @@ func (ah *artifactsHandler) reviewUpdate(w http.ResponseWriter, r *http.Request,
 	// state), so reject it as a conflict rather than return a misleading 200 on an
 	// artifact the user can no longer act on. Mirrors the reviewApprove guard.
 	if art.State != domain.ArtifactStateReviewPending {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending (state: " + art.State + ")"})
+		writeReviewNotPending(w, art.State)
 		return
 	}
 
@@ -136,7 +138,7 @@ func (ah *artifactsHandler) reviewUpdate(w http.ResponseWriter, r *http.Request,
 		ReviewBody  *string `json:"review_body"`
 		ReviewEvent *string `json:"review_event"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -153,7 +155,11 @@ func (ah *artifactsHandler) reviewUpdate(w http.ResponseWriter, r *http.Request,
 		// rejection. review_event also doubles as the ready sentinel, so an empty
 		// or bogus value would silently un-park the run as well as fail the submit.
 		if !validReviewEvent(*req.ReviewEvent) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "review_event must be one of APPROVE, COMMENT, REQUEST_CHANGES"})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: "review_event must be one of APPROVE, COMMENT, REQUEST_CHANGES",
+				Field:   "review_event",
+			})
 			return
 		}
 		details.ReviewEvent = *req.ReviewEvent
@@ -185,10 +191,21 @@ func (ah *artifactsHandler) updateReviewDetailsPending(w http.ResponseWriter, r 
 		return false
 	}
 	if !updated {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending — it was just submitted or dismissed"})
+		conflict(w, "this review is no longer pending — it was just submitted or dismissed")
 		return false
 	}
 	return true
+}
+
+// writeReviewNotPending answers a review-artifact mutation whose row has
+// already settled: 409 ALREADY_TERMINAL naming the state it settled into. The
+// CAS losers below are a different class — a race the caller resolves by
+// re-reading — and keep the generic CONFLICT.
+func writeReviewNotPending(w http.ResponseWriter, state string) {
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+		Reason:  httpx.ReasonAlreadyTerminal,
+		Message: "this review is no longer pending (state: " + state + ")",
+	})
 }
 
 // reviewApprove creates and submits the staged review to GitHub atomically
@@ -224,7 +241,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// state-specific 409 without claim churn. Advisory only — the CAS below is
 	// the real guard.
 	if art.State != domain.ArtifactStateReviewPending {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending approval (state: " + art.State + ")"})
+		writeReviewNotPending(w, art.State)
 		return
 	}
 
@@ -251,7 +268,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !claimed {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending approval — it was just submitted or dismissed"})
+		conflict(w, "this review is no longer pending approval — it was just submitted or dismissed")
 		return
 	}
 	if fresh == nil {
@@ -290,7 +307,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// approve.
 	if details.ReviewEvent == "" {
 		releaseClaim()
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review has not been finalized by the agent yet"})
+		conflict(w, "this review has not been finalized by the agent yet")
 		return
 	}
 
@@ -328,8 +345,9 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 			// Raised before the GitHub call — nothing was published, so this is a
 			// content problem the user fixes in the overlay.
 			releaseClaim()
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": unanchored.Error() + " — edit or delete it, then approve again",
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: unanchored.Error() + " — edit or delete it, then approve again",
 			})
 			return
 		}
@@ -342,8 +360,9 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 			artifactsLog.Error("staged review comments disagree on their anchor commit",
 				"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 			releaseClaim()
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": divergent.Error() + " — refresh the review, then approve again",
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: divergent.Error() + " — refresh the review, then approve again",
 			})
 			return
 		}
@@ -351,7 +370,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		// Release the claim so the user can retry — nothing reached GitHub.
 		releaseClaim()
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+		writeUpstreamGitHub(w, "GitHub API error", err)
 		return
 	}
 	submittedEvent := res.Event
@@ -448,7 +467,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 // ready sentinel (a started-but-unfinalized review is still abandonable).
 func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Artifact) {
 	if art.State != domain.ArtifactStateReviewPending {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending (state: " + art.State + ")"})
+		writeReviewNotPending(w, art.State)
 		return
 	}
 
@@ -471,7 +490,7 @@ func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !flipped {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending — it was just submitted or dismissed"})
+		conflict(w, "this review is no longer pending — it was just submitted or dismissed")
 		return
 	}
 
@@ -499,7 +518,11 @@ func (ah *artifactsHandler) handleReviewRefresh(w http.ResponseWriter, r *http.R
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	art, ok := ah.loadArtifact(w, r, orgID, userID, r.PathValue("id"))
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
+	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}
@@ -526,7 +549,7 @@ func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request
 	// Only a finalized, still-pending review can be refreshed: a submitted/dismissed
 	// one is terminal, and an unfinalized draft is still the agent's to shape.
 	if art.State != domain.ArtifactStateReviewPending {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending (state: " + art.State + ")"})
+		writeReviewNotPending(w, art.State)
 		return
 	}
 	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
@@ -535,7 +558,7 @@ func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if details.ReviewEvent == "" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review has not been finalized by the agent yet"})
+		conflict(w, "this review has not been finalized by the agent yet")
 		return
 	}
 
@@ -547,7 +570,7 @@ func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request
 	if err != nil || pr.HeadSHA == "" {
 		artifactsLog.Warn("review refresh: live PR head unavailable",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't fetch the PR's current head from GitHub" + localDetail(err)})
+		writeUpstreamGitHub(w, "couldn't fetch the PR's current head from GitHub", err)
 		return
 	}
 	liveHead := pr.HeadSHA
@@ -574,7 +597,7 @@ func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request
 		// head we couldn't fully verify.
 		if o.MapErr != nil {
 			artifactsLog.Warn("review refresh: reconcile failed", "artifact", art.ID, "head", liveHead, "error", o.MapErr)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't reconcile a comment against the current head" + localDetail(o.MapErr)})
+			writeUpstreamGitHub(w, "couldn't reconcile a comment against the current head", o.MapErr)
 			return
 		}
 		if o.Outdated() {
@@ -616,19 +639,28 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
 	commentID := r.PathValue("commentId")
 
 	var req struct {
 		Body string `json:"body"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	if req.Body == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body is required"})
+	if strings.TrimSpace(req.Body) == "" {
+		// Trim before the emptiness check and store what was validated: a
+		// whitespace-only comment body is as empty as "" and would otherwise
+		// post a blank comment to GitHub.
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "body is required", Field: "body",
+		})
 		return
 	}
+	req.Body = strings.TrimSpace(req.Body)
 
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
@@ -641,7 +673,7 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 	// Only a still-pending review can be edited: once submitted, its comments are
 	// public and immutable through this path.
 	if art.State != domain.ArtifactStateReviewPending {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending (state: " + art.State + ")"})
+		writeReviewNotPending(w, art.State)
 		return
 	}
 	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
@@ -681,7 +713,10 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
 	commentID := r.PathValue("commentId")
 
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
@@ -693,7 +728,7 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 		return
 	}
 	if art.State != domain.ArtifactStateReviewPending {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this review is no longer pending (state: " + art.State + ")"})
+		writeReviewNotPending(w, art.State)
 		return
 	}
 	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)

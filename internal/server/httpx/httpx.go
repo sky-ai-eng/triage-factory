@@ -134,51 +134,23 @@ func WriteUnauth(w http.ResponseWriter) {
 	WriteErrors(w, http.StatusUnauthorized, ErrorItem{Reason: ReasonUnauthenticated, Message: "unauthenticated"})
 }
 
-// DecodeJSON decodes a single top-level JSON value from the request body into
-// v (which must be a pointer). It rejects any trailing content after that
-// value — a second value, junk bytes, or a stray }/] — and allows only
-// trailing whitespace. On failure it writes a 400 (msg, or "invalid request
-// body" when msg is empty) and returns false; callers should return
-// immediately.
-//
-// The trailing check requires the next decode to hit io.EOF rather than using
-// dec.More(): More() reports false at a top-level } or ], so a body like
-// `{...}}` would otherwise be accepted.
-func DecodeJSON(w http.ResponseWriter, r *http.Request, v any, msg string) bool {
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(v); err != nil {
-		if msg == "" {
-			msg = "invalid request body"
-		}
-		BadRequest(w, msg)
-		return false
-	}
-	var rest json.RawMessage
-	if err := dec.Decode(&rest); err != io.EOF {
-		if msg == "" {
-			msg = "invalid request body"
-		}
-		BadRequest(w, msg)
-		return false
-	}
-	return true
-}
-
 // DefaultMaxBodyBytes is DecodeJSONStrict's request-body cap. 1 MiB clears
 // every ordinary JSON body by orders of magnitude; routes that genuinely
 // carry more (bundle imports, file uploads) use DecodeJSONStrictLimit.
 const DefaultMaxBodyBytes = 1 << 20
 
-// DecodeJSONStrict is DecodeJSON plus the strictness DecodeJSON lacks:
-// unknown fields are rejected (400 UNKNOWN_FIELD naming the field) instead of
-// silently ignored, and the body is capped at DefaultMaxBodyBytes (413
-// PAYLOAD_TOO_LARGE). The single-value/trailing-junk contract is unchanged. A
-// type mismatch on a known field reports 400 INVALID_FIELD with the field
-// named. On any failure the error is already written; callers return
-// immediately.
+// DecodeJSONStrict decodes a single top-level JSON value from the request body
+// into v (which must be a pointer). Unknown fields are rejected (400
+// UNKNOWN_FIELD naming the field) rather than silently ignored, the body is
+// capped at DefaultMaxBodyBytes (413 PAYLOAD_TOO_LARGE), and a type mismatch
+// on a known field reports 400 INVALID_FIELD with the field named. Any
+// trailing content after the value — a second value, junk bytes, a stray }/] —
+// is rejected; only trailing whitespace is allowed. On any failure the error
+// is already written; callers return immediately.
 //
-// DecodeJSON remains only for handlers not yet converted to strict decoding;
-// converted handlers never go back.
+// It is the only body decoder: the lenient DecodeJSON it replaced ignored
+// unknown fields, so a misspelled field silently did nothing and every
+// kind-discriminated body silently dropped the other kind's fields.
 func DecodeJSONStrict(w http.ResponseWriter, r *http.Request, v any) bool {
 	return DecodeJSONStrictLimit(w, r, v, DefaultMaxBodyBytes)
 }
@@ -193,9 +165,9 @@ func DecodeJSONStrictLimit(w http.ResponseWriter, r *http.Request, v any, maxByt
 		writeDecodeError(w, err)
 		return false
 	}
-	// Same trailing-content check as DecodeJSON: require the next decode to
-	// hit io.EOF, because dec.More() reports false at a top-level } or ] and
-	// would accept `{...}}`.
+	// The trailing-content check requires the next decode to hit io.EOF rather
+	// than using dec.More(): More() reports false at a top-level } or ], so a
+	// body like `{...}}` would otherwise be accepted.
 	var rest json.RawMessage
 	if err := dec.Decode(&rest); err != io.EOF {
 		if maxErr := (*http.MaxBytesError)(nil); errors.As(err, &maxErr) {
