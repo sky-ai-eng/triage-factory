@@ -922,7 +922,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	// denies) rather than silently authorizing — being unable to tell whether
 	// the live branch IS the base branch, or whether the team lifted the guard,
 	// is exactly when we must not allow the push.
-	protected, err := pushpolicy.ProtectedFor(ctx, stores, info.OrgID, info.TeamID, repoID, info.IsEventTriggered)
+	protected, err := pushpolicy.ProtectedFor(ctx, stores, info.OrgID, info.TeamID, domain.RepoRef{Owner: owner, Repo: repo}, info.IsEventTriggered)
 	if err != nil {
 		return gitproxy.Decision{}, err
 	}

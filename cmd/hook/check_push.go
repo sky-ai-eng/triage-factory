@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/pushpolicy"
 )
 
@@ -60,14 +61,14 @@ func runCheckPush(host agenthost.Client, stores db.Stores, args []string, refsIn
 	if !ok {
 		return 0
 	}
-	repoID := owner + "/" + repo
+	repoRef := domain.RepoRef{Owner: owner, Repo: repo}
 
 	info, err := host.LookupRun(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hook check-push: no run context (%v); allowing push\n", err)
 		return 0
 	}
-	protected, err := pushpolicy.ProtectedFor(ctx, stores, info.OrgID, info.TeamID, repoID, info.IsEventTriggered)
+	protected, err := pushpolicy.ProtectedFor(ctx, stores, info.OrgID, info.TeamID, repoRef, info.IsEventTriggered)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hook check-push: could not evaluate base-branch push policy (%v); allowing push\n", err)
 		return 0
@@ -82,7 +83,7 @@ func runCheckPush(host agenthost.Client, stores db.Stores, args []string, refsIn
 		// refDenial) so the same mistake reads the same way in either mode.
 		fmt.Fprintf(os.Stderr,
 			"triagefactory: refusing to push %s — %s is a protected branch on %s (its base/default branch) and this team's base-branch push policy refuses pushes to it. Commit to a new branch and open a pull request instead. A team admin can change the policy in Settings → Team.\n",
-			ref, branch, repoID)
+			ref, branch, repoRef.Slug())
 		return ExitRefused
 	}
 	return 0

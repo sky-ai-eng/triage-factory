@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -47,7 +48,7 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 
 	// Seed a repo into orgA only.
 	if err := stores.Repos.Upsert(ctx, orgA, domain.Repository{
-		ID: "octo/widget", Owner: "octo", Repo: "widget",
+		Owner: "octo", Repo: "widget",
 		Description: "orgA widget", ProfileText: "orgA body",
 		DefaultBranch: "main",
 	}); err != nil {
@@ -55,7 +56,7 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 
 	// Get(orgB, octo/widget) must return nil despite the row existing.
-	if got, err := stores.Repos.Get(ctx, orgB, "octo/widget"); err != nil {
+	if got, err := stores.Repos.GetByRef(ctx, orgB, domain.RepoRefFromSlug("octo/widget")); err != nil {
 		t.Fatalf("Get cross-org: %v", err)
 	} else if got != nil {
 		t.Errorf("orgB Get returned orgA repo %s", got.ID)
@@ -84,19 +85,27 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB CountConfigured = %d, want 0", n)
 	}
 
-	// UpdateBaseBranch cross-org must not touch orgA's row.
-	if err := stores.Repos.UpdateBaseBranch(ctx, orgB, "octo/widget", "hack"); err != nil {
-		t.Fatalf("UpdateBaseBranch cross-org: %v", err)
+	// UpdateBaseBranch cross-org must not touch orgA's row. The id-keyed
+	// writer is handed orgA's REAL row id under orgB's org scope, which is the
+	// only shape of this attack that survives the split: a caller who has
+	// somehow learned the handle still cannot reach across the tenant, and
+	// gets told the row does not exist rather than silently writing nothing.
+	rowA, err := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget"))
+	if err != nil || rowA == nil {
+		t.Fatalf("read orgA's row: got=%v err=%v", rowA, err)
 	}
-	if got, _ := stores.Repos.Get(ctx, orgA, "octo/widget"); got.BaseBranch != "" {
+	if err := stores.Repos.UpdateBaseBranch(ctx, orgB, rowA.ID, "hack"); !errors.Is(err, db.ErrNoSuchRepository) {
+		t.Errorf("cross-org UpdateBaseBranch = %v, want db.ErrNoSuchRepository", err)
+	}
+	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget")); got.BaseBranch != "" {
 		t.Errorf("orgA's BaseBranch was mutated by orgB UpdateBaseBranch: got %q", got.BaseBranch)
 	}
 
 	// UpdateCloneStatus cross-org must not touch orgA's row.
-	if err := stores.Repos.UpdateCloneStatus(ctx, orgB, "octo", "widget", "failed", "hack", "other"); err != nil {
+	if err := stores.Repos.UpdateCloneStatusByRef(ctx, orgB, domain.RepoRef{Owner: "octo", Repo: "widget"}, "failed", "hack", "other"); err != nil {
 		t.Fatalf("UpdateCloneStatus cross-org: %v", err)
 	}
-	if got, _ := stores.Repos.Get(ctx, orgA, "octo/widget"); got.CloneStatus == "failed" {
+	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget")); got.CloneStatus == "failed" {
 		t.Errorf("orgA's CloneStatus was mutated by orgB UpdateCloneStatus: got %q", got.CloneStatus)
 	}
 
@@ -104,7 +113,7 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	if err := stores.Repos.SetConfigured(ctx, orgB, []string{"another/repo"}); err != nil {
 		t.Fatalf("SetConfigured cross-org: %v", err)
 	}
-	if got, _ := stores.Repos.Get(ctx, orgA, "octo/widget"); got == nil {
+	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget")); got == nil {
 		t.Errorf("orgA's repo was deleted by orgB SetConfigured")
 	}
 }
@@ -130,7 +139,7 @@ func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 	if err := stores.Repos.UpsertSystem(ctx, orgA, domain.Repository{
-		ID: "octo/rls", Owner: "octo", Repo: "rls",
+		Owner: "octo", Repo: "rls",
 		Description: "orgA rls repo", ProfileText: "body",
 		DefaultBranch: "main",
 	}); err != nil {
@@ -139,7 +148,7 @@ func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Get(ctx, orgA, "octo/rls")
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/rls"))
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -155,7 +164,7 @@ func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Get(ctx, orgA, "octo/rls")
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/rls"))
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -176,7 +185,7 @@ func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// is the expected outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
 			return pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Upsert(ctx, orgA, domain.Repository{
-				ID: "octo/rls-write", Owner: "octo", Repo: "rls-write",
+				Owner: "octo", Repo: "rls-write",
 				Description: "x", ProfileText: "x", DefaultBranch: "main",
 			})
 		})
@@ -247,7 +256,7 @@ func TestRepositoryStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 func repoIDs(profiles []domain.Repository) []string {
 	out := make([]string, len(profiles))
 	for i, p := range profiles {
-		out[i] = p.ID
+		out[i] = p.Slug()
 	}
 	return out
 }

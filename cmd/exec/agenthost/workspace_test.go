@@ -35,7 +35,7 @@ func seedWorkspaceRepo(t *testing.T, stores db.Stores, owner, repo, cloneURL str
 	t.Helper()
 	ctx := context.Background()
 	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		ID: owner + "/" + repo, Owner: owner, Repo: repo,
+		Owner: owner, Repo: repo,
 		CloneURL: cloneURL, DefaultBranch: "main", ProfileText: "test profile",
 	}); err != nil {
 		t.Fatalf("upsert repository: %v", err)
@@ -193,7 +193,7 @@ func TestLocalClient_CreateWorkspaceCheckout_Gates(t *testing.T) {
 
 	// Org-configured but team-untracked: profile only, no team row.
 	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		ID: "sky/untracked", Owner: "sky", Repo: "untracked",
+		Owner: "sky", Repo: "untracked",
 		CloneURL: "https://x", DefaultBranch: "main", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("upsert repository: %v", err)

@@ -218,7 +218,7 @@ func seedRepository(t *testing.T, database *db.DB, owner, repo, cloneURL, defaul
 	t.Helper()
 	store := sqlitestore.New(database.Conn)
 	if err := store.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
-		ID: owner + "/" + repo, Owner: owner, Repo: repo,
+		Owner: owner, Repo: repo,
 		CloneURL: cloneURL, DefaultBranch: defaultBranch,
 		ProfileText: "test profile",
 	}); err != nil {
@@ -608,7 +608,7 @@ func TestMaterializeWorkspace_RejectsUntrackedRepo(t *testing.T) {
 	seedJiraRun(t, database, "r1", "SKY-9")
 	// Org-configured but team-untracked: seed only the profile.
 	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
-		ID: "sky/untracked", Owner: "sky", Repo: "untracked",
+		Owner: "sky", Repo: "untracked",
 		CloneURL: "https://x", DefaultBranch: "main", ProfileText: "test",
 	}); err != nil {
 		t.Fatalf("upsert repository: %v", err)

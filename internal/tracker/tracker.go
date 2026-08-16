@@ -757,7 +757,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 
 			etag := ""
 			if t.repos != nil {
-				if stored, _, err := t.repos.GetPullsPollStateSystem(ctx, t.orgID, repoFull); err != nil {
+				if stored, _, err := t.repos.GetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRef{Owner: owner, Repo: name}); err != nil {
 					trackerLog.ErrorContext(ctx, "read pulls poll state failed", "repo", repoFull, "error", err)
 				} else {
 					etag = stored
@@ -913,7 +913,9 @@ func (t *Tracker) recordPullsPoll(ctx context.Context, repoFull, etag string) {
 	if t.repos == nil {
 		return
 	}
-	if err := t.repos.SetPullsPollStateSystem(ctx, t.orgID, repoFull, etag, time.Now()); err != nil {
+	// Ref-keyed: repoFull is one of the names ListTrackedNamesSystem handed
+	// this cycle, the same one that just went into the request path.
+	if err := t.repos.SetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRefFromSlug(repoFull), etag, time.Now()); err != nil {
 		trackerLog.Error("write pulls poll state failed", "repo", repoFull, "error", err)
 	}
 }

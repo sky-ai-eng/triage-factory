@@ -145,7 +145,7 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	seedJiraRun(t, database, "r1", "SKY-1")
 
 	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
-		ID: "owner/alpha", Owner: "owner", Repo: "alpha",
+		Owner: "owner", Repo: "alpha",
 		Description:   "Core API service",
 		ProfileText:   "Long LLM-generated profile text that should NOT appear in workspace list output...",
 		CloneURL:      "https://x",
@@ -158,7 +158,7 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	// no-clone-url profiles, so surfacing them here would lead the
 	// agent to options that fail at materialize time.
 	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
-		ID: "owner/skeleton", Owner: "owner", Repo: "skeleton",
+		Owner: "owner", Repo: "skeleton",
 		// CloneURL deliberately empty
 		DefaultBranch: "main",
 	}); err != nil {

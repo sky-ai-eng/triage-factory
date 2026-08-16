@@ -751,8 +751,8 @@ func (c *LocalClient) ListRepos(ctx context.Context) ([]domain.Repository, error
 	return c.rt.ListRepos(ctx)
 }
 
-func (c *LocalClient) GetRepo(ctx context.Context, repoID string) (*domain.Repository, error) {
-	return c.rt.GetRepo(ctx, repoID)
+func (c *LocalClient) GetRepo(ctx context.Context, slug string) (*domain.Repository, error) {
+	return c.rt.GetRepo(ctx, slug)
 }
 
 func (c *LocalClient) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {

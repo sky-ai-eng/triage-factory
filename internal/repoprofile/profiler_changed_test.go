@@ -184,14 +184,14 @@ type batchRepositoryStore struct {
 	failUpsert func(call int) bool
 	calls      atomic.Int64
 	mu         sync.Mutex
-	last       map[string]domain.Repository // last upsert per id (nil-safe via lazy init)
+	last       map[string]domain.Repository // last upsert per slug (nil-safe via lazy init)
 }
 
 func (s *batchRepositoryStore) ListTrackedNamesSystem(context.Context, string) ([]string, error) {
 	return s.names, nil
 }
 
-func (s *batchRepositoryStore) GetSystem(context.Context, string, string) (*domain.Repository, error) {
+func (s *batchRepositoryStore) GetByRefSystem(context.Context, string, domain.RepoRef) (*domain.Repository, error) {
 	return nil, nil
 }
 
@@ -204,7 +204,7 @@ func (s *batchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domai
 	if s.last == nil {
 		s.last = map[string]domain.Repository{}
 	}
-	s.last[p.ID] = p
+	s.last[p.Slug()] = p
 	s.mu.Unlock()
 	return nil
 }
@@ -260,7 +260,7 @@ func (s *changeRepositoryStore) ListTrackedNamesSystem(context.Context, string) 
 	return s.names, nil
 }
 
-func (s *changeRepositoryStore) GetSystem(context.Context, string, string) (*domain.Repository, error) {
+func (s *changeRepositoryStore) GetByRefSystem(context.Context, string, domain.RepoRef) (*domain.Repository, error) {
 	return nil, nil
 }
 

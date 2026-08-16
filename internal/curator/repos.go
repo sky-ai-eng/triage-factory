@@ -6,6 +6,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -43,12 +44,15 @@ func materializePinnedRepos(ctx context.Context, repos db.RepositoryStore, authF
 			curatorLog.Warn("malformed pinned repo, skipping", "project", projectID, "repo", slug)
 			continue
 		}
-		// GetSystem: this dispatch goroutine holds no synthetic-claims tx,
-		// so an app-pool Get would 42501 on the grant-less authenticator in
-		// multi mode and silently skip the repo (no bare seeded, no mounts
-		// built); the org-scoped profile read goes through the admin pool,
-		// like the spawner's *System reads from its detached goroutines. TFAC-65.
-		profile, err := repos.GetSystem(ctx, orgID, slug)
+		// GetByRefSystem: a pinned repo is stored as a name, so the lookup
+		// says it holds one and a name nobody has a row for comes back nil
+		// (handled just below). System because this dispatch goroutine holds
+		// no synthetic-claims tx, so an app-pool read would 42501 on the
+		// grant-less authenticator in multi mode and silently skip the repo
+		// (no bare seeded, no mounts built); the org-scoped read goes through
+		// the admin pool, like the spawner's *System reads from its detached
+		// goroutines.
+		profile, err := repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
 		if err != nil {
 			curatorLog.Warn("load pinned repository failed, skipping", "project", projectID, "repo", slug, "error", err)
 			continue
@@ -124,12 +128,15 @@ func materializeSharedPinnedRepos(ctx context.Context, repos db.RepositoryStore,
 			curatorLog.Warn("malformed pinned repo, skipping", "project", projectID, "repo", slug)
 			continue
 		}
-		// GetSystem: this dispatch goroutine holds no synthetic-claims tx,
-		// so an app-pool Get would 42501 on the grant-less authenticator in
-		// multi mode and silently skip the repo (no bare seeded, no mounts
-		// built); the org-scoped profile read goes through the admin pool,
-		// like the spawner's *System reads from its detached goroutines. TFAC-65.
-		profile, err := repos.GetSystem(ctx, orgID, slug)
+		// GetByRefSystem: a pinned repo is stored as a name, so the lookup
+		// says it holds one and a name nobody has a row for comes back nil
+		// (handled just below). System because this dispatch goroutine holds
+		// no synthetic-claims tx, so an app-pool read would 42501 on the
+		// grant-less authenticator in multi mode and silently skip the repo
+		// (no bare seeded, no mounts built); the org-scoped read goes through
+		// the admin pool, like the spawner's *System reads from its detached
+		// goroutines.
+		profile, err := repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
 		if err != nil {
 			curatorLog.Warn("load pinned repository failed, skipping", "project", projectID, "repo", slug, "error", err)
 			continue

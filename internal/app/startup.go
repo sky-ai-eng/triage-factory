@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
@@ -242,12 +243,13 @@ func (a *App) wireCloneStatusCallback() {
 	// and at N=1 the org-wide broadcast IS the REST-parity scope.
 	notify := repoevent.NewNotifier(a.wsHub, nil)
 	worktree.SetOnCloneResult(func(owner, repo string, cloneErr error) {
+		ref := domain.RepoRef{Owner: owner, Repo: repo}
 		if cloneErr == nil {
-			if err := a.stores.Repos.UpdateCloneStatusSystem(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "ok", "", ""); err != nil {
+			if err := a.stores.Repos.UpdateCloneStatusByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref, "ok", "", ""); err != nil {
 				cloneStatusLog.Error("update ok status failed", "owner", owner, "repo", repo, "error", err)
 			}
 			notify.Publish(context.Background(), runmode.LocalDefaultOrgID, repoevent.Update{
-				ID:          owner + "/" + repo,
+				ID:          ref.Slug(),
 				CloneStatus: repoevent.Ptr("ok"),
 			})
 			return
@@ -274,11 +276,11 @@ func (a *App) wireCloneStatusCallback() {
 			cancel()
 		}
 
-		if err := a.stores.Repos.UpdateCloneStatusSystem(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "failed", cloneErr.Error(), kind); err != nil {
+		if err := a.stores.Repos.UpdateCloneStatusByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref, "failed", cloneErr.Error(), kind); err != nil {
 			cloneStatusLog.Error("update failed status failed", "owner", owner, "repo", repo, "error", err)
 		}
 		notify.Publish(context.Background(), runmode.LocalDefaultOrgID, repoevent.Update{
-			ID:             owner + "/" + repo,
+			ID:             ref.Slug(),
 			CloneStatus:    repoevent.Ptr("failed"),
 			CloneError:     repoevent.Ptr(cloneErr.Error()),
 			CloneErrorKind: repoevent.Ptr(kind),
