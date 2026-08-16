@@ -38,7 +38,8 @@ func DisposeRenamedRepoDirs(orgID, owner, repo string) bool {
 
 	removed := false
 	bare := paths.BareCacheDir(orgID, owner, repo)
-	if _, err := os.Stat(bare); err == nil {
+	switch _, err := os.Stat(bare); {
+	case err == nil:
 		if bareHasLiveWorktrees(bare) {
 			worktreeLog.Warn("renamed repo's old tree left in place; a live worktree holds it",
 				"owner", owner, "repo", repo, "bare", bare)
@@ -54,6 +55,11 @@ func DisposeRenamedRepoDirs(orgID, owner, repo string) bool {
 			forgetBare(bare)
 			removed = true
 		}
+	case !os.IsNotExist(err):
+		// Can't tell whether a tree is even there. Fail toward keeping it —
+		// the reaper's direction too — but visibly: a permission or I/O fault
+		// here means an orphan this call exists to reclaim may be leaking.
+		worktreeLog.Warn("stat renamed repo's bare failed", "bare", bare, "error", err)
 	}
 
 	// A shared curator checkout that outlived its bare (the registration is
@@ -62,7 +68,8 @@ func DisposeRenamedRepoDirs(orgID, owner, repo string) bool {
 	// per-repo lock held above serializes with EnsureSharedCuratorWorktree,
 	// which takes the same lock before it can bump the reader count.
 	shared := paths.CuratorSharedRepoDir(orgID, owner, repo)
-	if _, err := os.Stat(shared); err == nil {
+	switch _, err := os.Stat(shared); {
+	case err == nil:
 		if sharedReadersCount(shared) > 0 {
 			worktreeLog.Warn("renamed repo's shared curator checkout left in place; readers hold it",
 				"owner", owner, "repo", repo, "dir", shared)
@@ -73,6 +80,8 @@ func DisposeRenamedRepoDirs(orgID, owner, repo string) bool {
 		} else {
 			removed = true
 		}
+	case !os.IsNotExist(err):
+		worktreeLog.Warn("stat renamed repo's curator checkout failed", "dir", shared, "error", err)
 	}
 	return removed
 }

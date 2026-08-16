@@ -628,7 +628,7 @@ CREATE TABLE public.access_change_log (
 -- detail_json, credential, occurred_at, url as captured — is frozen, while
 -- current_url, the POINTER to where the object lives now, is maintained (a
 -- repository rename fills it; reads serve COALESCE(current_url, url)). It is
--- the only column an UPDATE may touch. See TFAC-483.
+-- the only column an UPDATE may touch.
 CREATE TABLE public.external_actions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
