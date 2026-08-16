@@ -14,11 +14,13 @@ import (
 // shared reconcile (internal/review, the same transform the agent finalize gate
 // uses), then counts how far the live head is ahead of the finalize-time head.
 //
-// Best-effort by contract: ANY failure (GitHub not configured, live-head fetch
-// error, a compare that won't load) degrades to "unknown" freshness and a nil
-// count rather than failing the overlay — a stale review must still render so the
-// human can read and act on it. Comments are left at the caller's pre-seeded
-// "unknown" default whenever their anchor can't be mapped.
+// Best-effort by contract, and deliberately exempt from the sweep that turned
+// swallowed store/vault errors into 500s: ANY failure (GitHub not configured,
+// live-head fetch error, a compare that won't load) degrades to "unknown"
+// freshness and a nil count rather than failing the overlay — this is a display
+// annotation on a review the caller can already read and act on, and "unknown"
+// is an honest value the wire shape carries. Comments are left at the caller's
+// pre-seeded "unknown" default whenever their anchor can't be mapped.
 //
 // Freshness joins each out-comment to its staged comment by stable TF-local id, so
 // it never depends on slice ordering.

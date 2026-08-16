@@ -31,6 +31,13 @@ import (
 // dir cleanup; the Curator runtime, classifier, and UI all land in
 // later tickets and can hit the same handlers without changes here.
 
+// projectIDOr404 guards the {id} path value on every project-scoped route —
+// projects.id is a uuid column on Postgres. See uuidPathOr404. Shared with the
+// curator and knowledge surfaces, which address projects the same way.
+func projectIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
+	return uuidPathOr404(w, r, "id", "project")
+}
+
 // createProjectRequest is the POST body shape. Most fields are
 // optional — a project starts as an empty shell named by the user
 // and gets filled in over time (description, pinned repos, summary).

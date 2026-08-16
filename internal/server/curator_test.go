@@ -310,17 +310,18 @@ func TestHandleCuratorReset_409OnRunningTurn(t *testing.T) {
 	}
 }
 
-func TestHandleCuratorSend_503WhenRuntimeUnset(t *testing.T) {
-	// SetCurator never called → handler returns 503 rather than nil-
-	// dereferencing. Real binaries always wire it via main.go, but
+func TestHandleCuratorSend_NotConfiguredWhenRuntimeUnset(t *testing.T) {
+	// SetCurator never called → handler answers 409 NOT_CONFIGURED rather than
+	// nil-dereferencing: a deployment that runs no curator is configuration,
+	// not a transient outage. Real binaries always wire it via main.go, but
 	// we keep the guard so a future test or a partial init can't
 	// crash the server.
 	srv := newTestServer(t)
 	projectID, _ := srv.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "no-curator"})
 
 	rr := doJSON(t, srv, http.MethodPost, "/api/projects/"+projectID+"/curator/messages", map[string]string{"content": "hi"})
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503", rr.Code)
+	if rr.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", rr.Code)
 	}
 }
 

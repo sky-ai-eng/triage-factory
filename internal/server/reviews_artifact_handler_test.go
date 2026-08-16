@@ -26,8 +26,8 @@ import (
 func seedReviewArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo string, number int, event string) (artifactID, runID, taskID string) {
 	t.Helper()
 	runID = seedSteerRun(t, s.db, suffix, "completed")
-	taskID = "t_" + suffix
-	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, runID, "e_"+suffix, "", "agent self-report"); err != nil {
+	taskID = fixtureUUID("t_" + suffix)
+	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, runID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	line := 3

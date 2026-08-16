@@ -83,15 +83,12 @@ var ratchetAllowlist = []ratchetEntry{
 	{"ee/fleet/handlers.go", "request-decode"},
 
 	// error-map — ad-hoc {"error": "..."} bodies.
-	{"internal/server/agent.go", "error-map"},
-	{"internal/server/artifacts_handler.go", "error-map"},
 	{"internal/server/authz/authz.go", "error-map"},
 	{"internal/server/backfill.go", "error-map"},
 	{"internal/server/bedrock_connect.go", "error-map"},
 	{"internal/server/bedrock_role.go", "error-map"},
 	{"internal/server/blueprints_handler.go", "error-map"},
 	{"internal/server/credentials.go", "error-map"},
-	{"internal/server/curator.go", "error-map"},
 	{"internal/server/event_handlers_handler.go", "error-map"},
 	{"internal/server/fleet_placement.go", "error-map"},
 	{"internal/server/fleet_queue.go", "error-map"},
@@ -113,7 +110,6 @@ var ratchetAllowlist = []ratchetEntry{
 	{"internal/server/projects_knowledge_store.go", "error-map"},
 	{"internal/server/prompts_handler.go", "error-map"},
 	{"internal/server/repos_handler.go", "error-map"},
-	{"internal/server/reviews_artifact_handler.go", "error-map"},
 	{"internal/server/settings.go", "error-map"},
 	{"internal/server/settings_handlers.go", "error-map"},
 	{"internal/server/skills_handler.go", "error-map"},

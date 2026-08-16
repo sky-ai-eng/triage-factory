@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -33,6 +34,23 @@ type artifactsHandler struct {
 	// closure over s.spawner) used to feed the drafting agent a <system-note> when
 	// a human resolves one of its artifacts (TFAC-493).
 	spawner func() *delegate.Spawner
+}
+
+// artifactIDOr404 guards the {id} path value on every artifact-addressed route
+// — artifacts.id is a uuid column on Postgres. See uuidPathOr404.
+func artifactIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
+	return uuidPathOr404(w, r, "id", "artifact")
+}
+
+// writeUpstreamGitHub answers a GitHub call that failed: 502 with a static,
+// author-written prefix and the raw detail appended only in local mode (the
+// LocalDetail seam). The caller logs the error itself — this only shapes the
+// response.
+func writeUpstreamGitHub(w http.ResponseWriter, msg string, err error) {
+	httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{
+		Reason:  httpx.ReasonUpstreamUnavailable,
+		Message: msg + httpx.LocalDetail(err),
+	})
 }
 
 // injectArtifactNote feeds the artifact's drafting run the agent-facing
@@ -110,7 +128,7 @@ func (ah *artifactsHandler) ghForArtifact(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			artifactsLog.Warn("github not configured", "org", orgID, "owner", o, "repo", rp, "error", err)
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
+			writeNotConfigured(w, "GitHub is not connected for this workspace")
 			return nil, "", "", 0, false
 		}
 		internalError(w, "artifacts", err)
@@ -129,7 +147,10 @@ func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Req
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
@@ -150,6 +171,10 @@ func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// A details parse failure is deliberately swallowed on this read: the
+	// fields it would supply are the fallback for a failed live fetch, so a
+	// corrupt row degrades to empty title/body rather than failing an overlay
+	// that could still render the live PR.
 	details, _ := domain.ParsePRArtifactDetails(art.DetailsJSON)
 	title := details.Snapshot.Title
 	body := details.Snapshot.Body
@@ -187,7 +212,10 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
@@ -208,7 +236,7 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 		Title *string `json:"title"`
 		Body  *string `json:"body"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -231,7 +259,7 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 			// We can't reconstruct the omitted field without the current PR state,
 			// and guessing from a stale snapshot risks clobbering. Fail loudly.
 			artifactsLog.Warn("GetPR for partial-edit baseline failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't read the current PR to apply a partial edit" + localDetail(err)})
+			writeUpstreamGitHub(w, "couldn't read the current PR to apply a partial edit", err)
 			return
 		}
 		title = live.Title
@@ -248,7 +276,9 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	// out at approval. Fail fast and store the trimmed value.
 	title = strings.TrimSpace(title)
 	if title == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "title cannot be empty or whitespace-only"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "title cannot be empty or whitespace-only", Field: "title",
+		})
 		return
 	}
 
@@ -257,7 +287,7 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	// a readable reason.
 	if err := gh.UpdatePR(r.Context(), owner, repo, number, title, body); err != nil {
 		artifactsLog.Warn("UpdatePR failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+		writeUpstreamGitHub(w, "GitHub API error", err)
 		return
 	}
 
@@ -301,7 +331,10 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
@@ -332,7 +365,11 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 		var files []ghclient.PRFile
 		if files, err = gh.GetCompareFiles(r.Context(), owner, repo, finBase, finHead); err == nil {
 			if diff = ghclient.SingleFileDiff(files, file); diff == "" {
-				writeJSON(w, http.StatusNotFound, map[string]string{"error": "file " + file + " is not part of this review's diff (or lies beyond the file-listing cap)"})
+				httpx.WriteErrors(w, http.StatusNotFound, httpx.ErrorItem{
+					Reason:  httpx.ReasonNotFound,
+					Message: "file " + file + " is not part of this review's diff (or lies beyond the file-listing cap)",
+					Field:   "file",
+				})
 				return
 			}
 		}
@@ -350,7 +387,11 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 			if files, err = gh.GetPRFiles(r.Context(), owner, repo, number); err == nil {
 				if file != "" {
 					if diff = ghclient.SingleFileDiff(files, file); diff == "" {
-						writeJSON(w, http.StatusNotFound, map[string]string{"error": "file " + file + " is not part of this PR's diff (or lies beyond the file-listing cap)"})
+						httpx.WriteErrors(w, http.StatusNotFound, httpx.ErrorItem{
+							Reason:  httpx.ReasonNotFound,
+							Message: "file " + file + " is not part of this PR's diff (or lies beyond the file-listing cap)",
+							Field:   "file",
+						})
 						return
 					}
 				} else {
@@ -363,7 +404,7 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		artifactsLog.Error("artifact diff failed",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "finalize_frame", useFin, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+		writeUpstreamGitHub(w, "GitHub API error", err)
 		return
 	}
 
@@ -422,7 +463,10 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
@@ -450,7 +494,10 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// gated here rather than in resolvePR, which the read paths (GET/diff) share
 	// and must keep serving non-draft PRs.
 	if art.State != domain.ArtifactStatePRDraft {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this PR is no longer a draft awaiting approval (state: " + art.State + ")"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonAlreadyTerminal,
+			Message: "this PR is no longer a draft awaiting approval (state: " + art.State + ")",
+		})
 		return
 	}
 
@@ -469,7 +516,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	live, err := gh.GetPRBasic(r.Context(), owner, repo, number)
 	if err != nil {
 		artifactsLog.Warn("approve GetPR failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't read the PR to promote it" + localDetail(err)})
+		writeUpstreamGitHub(w, "couldn't read the PR to promote it", err)
 		return
 	}
 	finalTitle := live.Title
@@ -480,12 +527,12 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.agentRuns, orgID, art.ConversationID, "PR")
 	if err := gh.UpdatePR(r.Context(), owner, repo, number, finalTitle, footeredBody); err != nil {
 		artifactsLog.Warn("approve UpdatePR (footer) failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+		writeUpstreamGitHub(w, "GitHub API error", err)
 		return
 	}
 	if err := gh.MarkPRReady(r.Context(), owner, repo, number); err != nil {
 		artifactsLog.Warn("MarkPRReady failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+		writeUpstreamGitHub(w, "GitHub API error", err)
 		return
 	}
 
@@ -574,7 +621,10 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
@@ -595,7 +645,10 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	// terminal — there's no draft to abandon — so 409 rather than re-closing a PR
 	// the user already shipped or a prior dismiss already retired.
 	if art.State != domain.ArtifactStatePRDraft {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this PR is no longer a draft awaiting resolution (state: " + art.State + ")"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonAlreadyTerminal,
+			Message: "this PR is no longer a draft awaiting resolution (state: " + art.State + ")",
+		})
 		return
 	}
 

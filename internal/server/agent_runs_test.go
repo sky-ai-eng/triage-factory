@@ -12,6 +12,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // TestHandleConversations_Batched pins the aggregated run-list path the Board uses
@@ -23,14 +24,14 @@ func TestHandleConversations_Batched(t *testing.T) {
 
 	// Task A: a primary (newest) run plus an older run on the same task.
 	primaryA := seedSteerRun(t, s.db, "ba", "completed") // run r_ba on task t_ba, started_at≈now
-	const taskA = "t_ba"
-	const olderA = "r_ba_old"
+	taskA := fixtureUUID("t_ba")
+	olderA := fixtureUUID("r_ba_old")
 	brOld := seedBlueprintRunSQLite(t, s.db, taskA)
-	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, started_at) VALUES (?, ?, 'p_ba', 'completed', 'manual', ?, 0, '2020-01-01 00:00:00')`, olderA, taskA, brOld)
+	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, started_at) VALUES (?, ?, ?, 'completed', 'manual', ?, 0, '2020-01-01 00:00:00')`, olderA, taskA, fixtureUUID("p_ba"), brOld)
 
 	// Task B: a single run.
 	primaryB := seedSteerRun(t, s.db, "bb", "running") // run r_bb on task t_bb
-	const taskB = "t_bb"
+	taskB := fixtureUUID("t_bb")
 
 	store := sqlitestore.New(s.db)
 	seedMsg := func(runID, content string) {
@@ -114,12 +115,14 @@ func TestHandleConversations_MissingParams(t *testing.T) {
 }
 
 // TestHandleConversations_BatchedCap pins the task_ids cap: a request beyond
-// maxBatchTaskIDs is truncated to the first N (not rejected), so a real task at
-// the head still resolves while one placed past the cap is dropped.
+// maxBatchTaskIDs is REJECTED, not truncated. Truncation answered an oversized
+// board with a board-shaped payload silently missing its tail — the caller had
+// no way to tell the difference between "that task has no runs" and "we
+// stopped reading at 500".
 func TestHandleConversations_BatchedCap(t *testing.T) {
 	s := newTestServer(t)
 	_ = seedSteerRun(t, s.db, "cap", "running") // run on task t_cap
-	const taskID = "t_cap"
+	taskID := fixtureUUID("t_cap")
 
 	pad := func(n int) []string {
 		ids := make([]string, n)
@@ -128,39 +131,62 @@ func TestHandleConversations_BatchedCap(t *testing.T) {
 		}
 		return ids
 	}
-	runsFor := func(ids []string) map[string][]map[string]any {
-		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+strings.Join(ids, ","), nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("GET batched (cap) = %d, want 200; body=%s", rec.Code, rec.Body.String())
-		}
-		var resp struct {
-			Runs map[string][]map[string]any `json:"runs"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		return resp.Runs
+
+	// At the cap: still served, in full.
+	within := append([]string{taskID}, pad(maxBatchTaskIDs-1)...)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+strings.Join(within, ","), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET batched at cap = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Runs map[string][]map[string]any `json:"runs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Runs[taskID]) != 1 {
+		t.Errorf("at cap: task runs = %d, want 1", len(resp.Runs[taskID]))
 	}
 
-	// Real task at the head, then > cap padding → kept after truncation.
-	head := append([]string{taskID}, pad(maxBatchTaskIDs+50)...)
-	if got := runsFor(head); len(got[taskID]) != 1 {
-		t.Errorf("head within cap: task runs = %d, want 1", len(got[taskID]))
+	// One past the cap: 400 OUT_OF_RANGE naming the param, nothing served.
+	over := append([]string{taskID}, pad(maxBatchTaskIDs)...)
+	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+strings.Join(over, ","), nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("GET batched over cap = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
+	assertFirstError(t, rec, httpx.ReasonOutOfRange, "task_ids")
+}
 
-	// Real task placed just past the cap (after maxBatchTaskIDs padding ids) →
-	// truncated out, so it's absent from the response.
-	tail := append(pad(maxBatchTaskIDs), taskID)
-	if got := runsFor(tail); len(got[taskID]) != 0 {
-		t.Errorf("tail beyond cap: task should be truncated out, got %d runs", len(got[taskID]))
+// TestHandleConversations_BatchedRejectsMalformedIDs: task_ids is a selector,
+// so a value that can't be a task id fails the call rather than reaching a
+// Postgres uuid column as a 22P02.
+func TestHandleConversations_BatchedRejectsMalformedIDs(t *testing.T) {
+	s := newTestServer(t)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+uuid.New().String()+",not-an-id", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
+	assertFirstError(t, rec, httpx.ReasonInvalidParam, "task_ids")
+}
+
+// TestHandleConversations_RejectsUnknownInclude: include= is a closed
+// vocabulary — a typo must not silently return a payload without the section
+// the caller asked for.
+func TestHandleConversations_RejectsUnknownInclude(t *testing.T) {
+	s := newTestServer(t)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+uuid.New().String()+"&include=messsages", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonInvalidParam, "include")
 }
 
 // TestHandleMessages_SinceID pins the transcript read's optional watermark: the
 // run station polls with it to repair rows whose websocket frame was dropped,
 // and every other caller — which passes nothing — must keep getting the whole
-// transcript. An unparseable value reads as no watermark rather than a 400: it
-// describes what the caller already holds, not what it is asking for.
+// transcript. An unparseable or negative value is a 400: answering "give me
+// what I'm missing" with the whole transcript is the silent widening a corrupt
+// param must never buy.
 func TestHandleMessages_SinceID(t *testing.T) {
 	s := newTestServer(t)
 	runID := seedSteerRun(t, s.db, "since", "running")
@@ -205,16 +231,20 @@ func TestHandleMessages_SinceID(t *testing.T) {
 	eq("since_id=0", contents("?since_id=0"), whole)
 	eq("since_id=first", contents(fmt.Sprintf("?since_id=%d", ids["first"])), []string{"second", "third"})
 	eq("since_id=third", contents(fmt.Sprintf("?since_id=%d", ids["third"])), nil)
-	eq("unparseable since_id", contents("?since_id=nonsense"), whole)
 
 	// Whitespace is trimmed before parsing, so a padded watermark is still a
 	// watermark — treating it as unparseable would quietly turn a repair read
 	// into a full transcript read on every tick.
 	eq("padded since_id", contents(fmt.Sprintf("?since_id=%%20%d%%20", ids["first"])), []string{"second", "third"})
 
-	// A negative watermark means nothing, so it normalizes to 0 rather than
-	// reaching the store as `id > -N`.
-	eq("negative since_id", contents("?since_id=-5"), whole)
+	// A watermark that isn't one fails the read rather than silently widening
+	// it back to the whole transcript.
+	for _, bad := range []string{"?since_id=nonsense", "?since_id=-5"} {
+		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/messages"+bad, nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("GET messages%s = %d, want 400; body=%s", bad, rec.Code, rec.Body.String())
+		}
+	}
 }
 
 // TestRunResponse_TokenSums pins the four token rollups onto the run wire
@@ -338,7 +368,7 @@ func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 
 	// The batched list path the board reads carries the same position, from
 	// one lookup over the deduped blueprint_run ids.
-	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids=t_chainpos", nil)
+	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+fixtureUUID("t_chainpos"), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET run list = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -348,7 +378,7 @@ func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("decode list: %v; body=%s", err, rec.Body.String())
 	}
-	runs := list.Runs["t_chainpos"]
+	runs := list.Runs[fixtureUUID("t_chainpos")]
 	if len(runs) != 1 {
 		t.Fatalf("listed runs = %d, want 1", len(runs))
 	}
