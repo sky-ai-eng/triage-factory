@@ -46,7 +46,7 @@ func TestRunOrg_ProviderBackoff_SkipsToast(t *testing.T) {
 	client := dialHubTestClient(t, hub)
 	waitForHubClient(t, hub)
 
-	repos := &batchRepoStore{names: []string{"own/withdocs"}}
+	repos := &batchRepositoryStore{names: []string{"own/withdocs"}}
 	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, hub)
 	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return nil, &systemllm.ErrProviderBackoff{Provider: "anthropic-direct:default"}
@@ -87,12 +87,12 @@ func TestRunOrg_ChangedTracksUpsertSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	newProfiler := func(repos db.RepoStore) *Profiler {
+	newProfiler := func(repos db.RepositoryStore) *Profiler {
 		return NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, nil)
 	}
 
 	t.Run("successful upsert → changed=true", func(t *testing.T) {
-		repos := &changeRepoStore{names: []string{"own/nodocs"}}
+		repos := &changeRepositoryStore{names: []string{"own/nodocs"}}
 		changed, err := newProfiler(repos).RunOrg(context.Background(), "org-1", true)
 		if err != nil {
 			t.Fatalf("RunOrg: %v", err)
@@ -103,7 +103,7 @@ func TestRunOrg_ChangedTracksUpsertSuccess(t *testing.T) {
 	})
 
 	t.Run("failed upsert → changed=false", func(t *testing.T) {
-		repos := &changeRepoStore{names: []string{"own/nodocs"}, upsertErr: errUpsertDown}
+		repos := &changeRepositoryStore{names: []string{"own/nodocs"}, upsertErr: errUpsertDown}
 		changed, err := newProfiler(repos).RunOrg(context.Background(), "org-1", true)
 		if err != nil {
 			t.Fatalf("RunOrg: %v", err)
@@ -159,7 +159,7 @@ func TestRunOrg_ChangedTracksBatchUpserts(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			repos := &batchRepoStore{names: []string{"own/withdocs"}, failUpsert: tc.failUpsert}
+			repos := &batchRepositoryStore{names: []string{"own/withdocs"}, failUpsert: tc.failUpsert}
 			p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, nil)
 			p.batchFn = tc.batchFn
 			changed, err := p.RunOrg(context.Background(), "org-1", true)
@@ -173,35 +173,35 @@ func TestRunOrg_ChangedTracksBatchUpserts(t *testing.T) {
 	}
 }
 
-// batchRepoStore serves a fixed configured-name list with a fresh
+// batchRepositoryStore serves a fixed configured-name list with a fresh
 // (never-profiled) row and fails UpsertSystem calls selected by failUpsert,
 // so a test can fail the docs-flags write while letting a later batch-path
 // write through.
-type batchRepoStore struct {
-	db.RepoStore
+type batchRepositoryStore struct {
+	db.RepositoryStore
 	names      []string
 	failUpsert func(call int) bool
 	calls      atomic.Int64
 	mu         sync.Mutex
-	last       map[string]domain.RepoProfile // last upsert per id (nil-safe via lazy init)
+	last       map[string]domain.Repository // last upsert per id (nil-safe via lazy init)
 }
 
-func (s *batchRepoStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
+func (s *batchRepositoryStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
 	return s.names, nil
 }
 
-func (s *batchRepoStore) GetSystem(context.Context, string, string) (*domain.RepoProfile, error) {
+func (s *batchRepositoryStore) GetSystem(context.Context, string, string) (*domain.Repository, error) {
 	return nil, nil
 }
 
-func (s *batchRepoStore) UpsertSystem(_ context.Context, _ string, p domain.RepoProfile) error {
+func (s *batchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) error {
 	n := int(s.calls.Add(1))
 	if s.failUpsert != nil && s.failUpsert(n) {
 		return errUpsertDown
 	}
 	s.mu.Lock()
 	if s.last == nil {
-		s.last = map[string]domain.RepoProfile{}
+		s.last = map[string]domain.Repository{}
 	}
 	s.last[p.ID] = p
 	s.mu.Unlock()
@@ -226,7 +226,7 @@ func TestRunOrg_BatchFailLeavesProfiledAtUnset(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	repos := &batchRepoStore{names: []string{"own/withdocs"}}
+	repos := &batchRepositoryStore{names: []string{"own/withdocs"}}
 	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, nil)
 	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return nil, stubErr("simulated batch failure")
@@ -246,29 +246,29 @@ func TestRunOrg_BatchFailLeavesProfiledAtUnset(t *testing.T) {
 	}
 }
 
-// changeRepoStore serves a fixed configured-name list and lets the test make
+// changeRepositoryStore serves a fixed configured-name list and lets the test make
 // UpsertSystem fail, to exercise the changed/touched accounting.
-type changeRepoStore struct {
-	db.RepoStore
+type changeRepositoryStore struct {
+	db.RepositoryStore
 	names     []string
 	upsertErr error
 	upserts   atomic.Int64
 }
 
-func (s *changeRepoStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
+func (s *changeRepositoryStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
 	return s.names, nil
 }
 
-func (s *changeRepoStore) GetSystem(context.Context, string, string) (*domain.RepoProfile, error) {
+func (s *changeRepositoryStore) GetSystem(context.Context, string, string) (*domain.Repository, error) {
 	return nil, nil
 }
 
-func (s *changeRepoStore) UpsertSystem(context.Context, string, domain.RepoProfile) error {
+func (s *changeRepositoryStore) UpsertSystem(context.Context, string, domain.Repository) error {
 	s.upserts.Add(1)
 	return s.upsertErr
 }
 
 var (
-	errUpsertDown              = stubErr("simulated repo-store upsert outage")
-	_             db.RepoStore = (*changeRepoStore)(nil)
+	errUpsertDown                    = stubErr("simulated repo-store upsert outage")
+	_             db.RepositoryStore = (*changeRepositoryStore)(nil)
 )

@@ -94,7 +94,7 @@ func TestReloadConfiguredRepos(t *testing.T) {
 // renamePollStore embeds the interface (nil) so any method this path does not
 // use panics loudly rather than silently returning a zero value.
 type renamePollStore struct {
-	db.RepoStore
+	db.RepositoryStore
 	stored        []domain.RepoRef
 	renamed       []domain.RepoRef
 	configured    []string

@@ -109,14 +109,14 @@ type Stores struct {
 	// delegate context loaders, the scorer, and the server panels.
 	Entities EntityStore
 
-	// Repos owns repo_profiles — the user-configured GitHub repos
+	// Repos owns repositories — the user-configured GitHub repos
 	// plus their cached AI profile and clone-attempt state. App pool
 	// in Postgres; consumers are the repos handler, settings, the
 	// curator, the projects handler, the poller manager, the
 	// profiler, and the workspace CLI tests. Every method accepts
 	// repoID as "owner/repo" — Postgres splits to (owner, repo) and
 	// queries by the natural key UNIQUE(org_id, owner, repo).
-	Repos RepoStore
+	Repos RepositoryStore
 
 	// PendingFirings owns the pending_firings table — the FIFO queue
 	// of intent-to-auto-delegate rows the router enqueues when an
@@ -228,8 +228,8 @@ type Stores struct {
 	// jira_project_status_rules, distinct from TeamGitHubGroups which is
 	// review routing). App pool in Postgres for the request-handler
 	// reads/writes (RLS gates by team membership / team admin); admin
-	// pool for the `...System` router-gate reads + the repo_profiles
-	// reconcile that ReplaceForTeam runs (repo_profiles is now the
+	// pool for the `...System` router-gate reads + the repositories
+	// reconcile that ReplaceForTeam runs (repositories is now the
 	// org-wide UNION of every team's rows, a derived cache).
 	TeamGitHubRepos TeamGitHubReposStore
 
@@ -478,7 +478,7 @@ type TxStores struct {
 	Conversations    ConversationStore
 	Artifacts        ArtifactStore
 	Entities         EntityStore
-	Repos            RepoStore
+	Repos            RepositoryStore
 	PendingFirings   PendingFiringsStore
 	Projects         ProjectStore
 	Events           EventStore

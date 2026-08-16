@@ -12,7 +12,7 @@ import (
 // listOutput is the JSON shape printed by `workspace list`. Two sections:
 //
 //   - available: every repo configured in Triage Factory the agent COULD
-//     `workspace add`. Sourced from the repo_profiles table. Empty list
+//     `workspace add`. Sourced from the repositories table. Empty list
 //     means no repos are configured (delegated agents shouldn't ever see
 //     this since the spawner gates on profile readiness, but the shape
 //     stays consistent).
@@ -36,7 +36,7 @@ type listAvailable struct {
 	// profile (GitHub repo metadata, captured during profiling). Helps
 	// the agent disambiguate between configured repos when the ticket
 	// text doesn't make the target obvious. Empty for repos whose
-	// profiling hasn't run yet (skeleton rows in repo_profiles).
+	// profiling hasn't run yet (skeleton rows in repositories).
 	//
 	// We deliberately omit profile_text — it's multi-KB of LLM-
 	// generated prose, would burn meaningful context on every list
@@ -113,7 +113,7 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 	}
 
 	// Available = configured-and-profilable minus already-materialized.
-	// Skeleton rows in repo_profiles (added to the configured list
+	// Skeleton rows in repositories (added to the configured list
 	// but not yet profiled — clone_url is empty) are filtered out:
 	// `workspace add` would reject them later with "no clone URL on
 	// its profile" anyway, so surfacing them here as discoverable

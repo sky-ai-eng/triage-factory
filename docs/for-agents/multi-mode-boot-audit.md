@@ -46,7 +46,7 @@
 
 ### 7. `worktree.SetOnCloneResult` is correctly gated
 - **Where:** `main.go:645-702`
-- **Local purpose:** Stamps `repo_profiles.clone_status` + broadcasts WS updates when bare clones succeed/fail.
+- **Local purpose:** Stamps `repositories.clone_status` + broadcasts WS updates when bare clones succeed/fail.
 - **Multi-mode:** Already gated per PR #226 (no live clone-status surfacing in multi for now). DONE.
 
 ## Phase 2: server-construction-time wiring
@@ -64,7 +64,7 @@
 - **Local purpose:** Startup recovery; cancels stranded curator turns so the user re-sends rather than getting a delayed mystery reply.
 - **Multi-mode:** Runs an unqualified `UPDATE curator_requests SET status='cancelled' WHERE status IN ('queued', 'running')` — process-wide. In a hosted deploy that restarts (e.g. rolling deploy of the binary), this nukes *every* tenant's in-flight chat. Arguably correct — a binary restart genuinely kills every per-project goroutine in the process — but it's worth deciding explicitly. If you accept it as correct, leave a comment; if not, scope it per-org-of-this-pod or rework to soft-cancel only orgs whose live agent goroutine had a known PID.
 
-### 10. Curator's `materializePinnedRepos` reads `repo_profiles` under the sentinel org
+### 10. Curator's `materializePinnedRepos` reads `repositories` under the sentinel org
 - **Where:** `internal/curator/repos.go:39` — `repos.Get(ctx, runmode.LocalDefaultOrgID, slug)`
 - **Local purpose:** Per-dispatch refresh of pinned-repo worktrees inside each curator chat.
 - **Multi-mode:** Per-dispatch, not strictly startup — but the curator runtime is constructed at startup (`main.go:889`) and the path is reached on every chat send. In multi mode this reads the wrong org's profile and would always return nil (no profiles in the synthetic org), silently dropping every pinned repo from every multi-mode chat. Fix: thread the project's owning orgID through `materializePinnedRepos` (the caller already has `orgID` from the curator request).

@@ -44,7 +44,7 @@ func (s *repoStore) ListIdentitiesSystem(ctx context.Context, orgID string) ([]d
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT source, owner, repo, external_id
-		  FROM repo_profiles
+		  FROM repositories
 		 WHERE external_id IS NOT NULL AND external_id <> ''
 		 ORDER BY owner, repo
 	`)
@@ -136,7 +136,7 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 // instead of silently picking a row.
 func storedSlugsForIdentity(ctx context.Context, q queryer, source, externalID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id FROM repo_profiles
+		SELECT id FROM repositories
 		 WHERE source = ? AND external_id = ?
 		 ORDER BY id
 	`, source, externalID)
@@ -160,7 +160,7 @@ func storedSlugsForIdentity(ctx context.Context, q queryer, source, externalID s
 func slugHeldByAnotherRepository(ctx context.Context, q queryer, source string, observed domain.RepoRef) (bool, error) {
 	var found int
 	err := q.QueryRowContext(ctx, `
-		SELECT 1 FROM repo_profiles
+		SELECT 1 FROM repositories
 		 WHERE source = ?
 		   AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
 		   AND (external_id IS NULL OR external_id <> ?)
@@ -179,11 +179,11 @@ func slugHeldByAnotherRepository(ctx context.Context, q queryer, source string, 
 // the slug itself, so this rewrites the primary key alongside the columns.
 func renameRepositoryRow(ctx context.Context, q queryer, source, from string, to domain.RepoRef) error {
 	if _, err := q.ExecContext(ctx, `
-		UPDATE repo_profiles
+		UPDATE repositories
 		   SET id = ?, owner = ?, repo = ?, updated_at = datetime('now')
 		 WHERE source = ? AND LOWER(id) = LOWER(?)
 	`, to.Slug(), to.Owner, to.Repo, source, from); err != nil {
-		return fmt.Errorf("rename repo_profiles %s -> %s: %w", from, to.Slug(), err)
+		return fmt.Errorf("rename repositories %s -> %s: %w", from, to.Slug(), err)
 	}
 	return nil
 }
@@ -308,7 +308,7 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, from, to str
 	// against a character-indexed SUBSTR, which agree because GitHub restricts
 	// a slug to ASCII.
 	//
-	// entities.source and repo_profiles.source are different vocabularies that
+	// entities.source and repositories.source are different vocabularies that
 	// happen to coincide while GitHub is the only provider issuing either. The
 	// repository's source is threaded through rather than hardcoded so a second
 	// provider's entities move with its repositories — but whoever adds one
@@ -409,7 +409,7 @@ func rewriteArtifactSlugs(ctx context.Context, q queryer, from, to string) error
 // It exists for the two composite keys a rename can collide on: entities'
 // (source, source_id) and artifacts' (org_id, dedup_key). Both are reachable
 // without any corruption, because untracking a repository keeps its entities
-// and artifacts while dropping the repo_profiles row that
+// and artifacts while dropping the repositories row that
 // slugHeldByAnotherRepository looks at — so a freed name can be spoken for by
 // records alone. Mapping the violation is what makes that a documented
 // terminal state rather than a raw driver string the caller retries forever.

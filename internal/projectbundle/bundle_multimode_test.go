@@ -262,7 +262,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 
 	// The pinned repo is tracked for the destination team (the
 	// repo-selection-save semantic), and the clone URL got seeded into
-	// the destination org's repo_profiles.
+	// the destination org's repositories.
 	var tracked int
 	if err := h.AdminDB.QueryRow(`
 		SELECT COUNT(*) FROM team_github_repos WHERE team_id = $1 AND owner = 'sky-ai-eng' AND repo = 'triage-factory'
@@ -274,7 +274,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	}
 	var cloneURL string
 	if err := h.AdminDB.QueryRow(`
-		SELECT COALESCE(clone_url, '') FROM repo_profiles WHERE org_id = $1 AND owner = 'sky-ai-eng' AND repo = 'triage-factory'
+		SELECT COALESCE(clone_url, '') FROM repositories WHERE org_id = $1 AND owner = 'sky-ai-eng' AND repo = 'triage-factory'
 	`, dstOrg).Scan(&cloneURL); err != nil {
 		t.Fatalf("read repo profile: %v", err)
 	}

@@ -65,7 +65,7 @@ func TestSyntheticClaimsWithTx_Postgres_CrossOrgLeakage(t *testing.T) {
 	// Seed a repo in orgB through the admin pool so the row exists
 	// regardless of claims.
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO repo_profiles (org_id, owner, repo, profiled_at)
+		INSERT INTO repositories (org_id, owner, repo, profiled_at)
 		VALUES ($1, 'orgb-owner', 'orgb-repo', now())
 	`, orgB); err != nil {
 		t.Fatalf("seed orgB repo: %v", err)
@@ -74,9 +74,9 @@ func TestSyntheticClaimsWithTx_Postgres_CrossOrgLeakage(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	// Run SyntheticClaimsWithTx with userA's claims (orgA). Inside
-	// fn, try to read orgB's repos via the app-pool RepoStore. RLS
+	// fn, try to read orgB's repos via the app-pool RepositoryStore. RLS
 	// must reject the read because tf.current_org_id() resolves to
-	// orgA and repo_profiles_all gates on (org_id = current_org_id()).
+	// orgA and repositories_all gates on (org_id = current_org_id()).
 	if err := stores.Tx.SyntheticClaimsWithTx(context.Background(), orgA, userA, func(tx db.TxStores) error {
 		got, err := tx.Repos.List(context.Background(), orgB)
 		if err != nil {

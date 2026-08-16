@@ -16,7 +16,7 @@ import (
 //
 // Tracked repositories are inserted by raw SQL rather than through
 // ReplaceForTeam, which is an app-pool write needing JWT claims and which would
-// also reconcile repo_profiles — a table the drift queries deliberately do not
+// also reconcile repositories — a table the drift queries deliberately do not
 // read, since get-or-create mints rows there for repositories no team tracks.
 func TestInstallationGrant_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)

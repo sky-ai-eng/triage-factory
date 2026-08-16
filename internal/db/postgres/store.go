@@ -199,11 +199,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// equivalent consumers (repos/settings/projects handlers,
 		// curator) and admin for the `...System` variants the
 		// poller bootstrap + startup clone-status writes use. RLS
-		// policy repo_profiles_all gates on (org_id = current_org_id()
+		// policy repositories_all gates on (org_id = current_org_id()
 		// AND user_has_org_access) on the app side; admin bypasses
 		// RLS, and org_id stays in every WHERE clause as defense
 		// in depth.
-		Repos: newRepoStore(app, admin),
+		Repos: newRepositoryStore(app, admin),
 		// PendingFirings wires admin — the router has no per-user
 		// identity (system service) and the drain sweeper runs as a
 		// background goroutine, so impersonating any one user via
@@ -284,7 +284,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// team-row write inside ReplaceForTeam (RLS gates by team admin)
 		// and admin for ListForTeamSystem + ListForOrgSystem +
 		// TracksRepoSystem (router gate, no JWT claims) + the
-		// repo_profiles reconcile (org-wide union, commits autonomously).
+		// repositories reconcile (org-wide union, commits autonomously).
 		TeamGitHubRepos: newTeamGitHubReposStore(app, admin),
 		// Curator holds both pools: app for the claims-bound send/history/
 		// dispatch message writes (the per-project goroutine wraps each
@@ -470,7 +470,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Conversations:    newConversationStore(tx, tx),
 		Artifacts:        newArtifactStore(tx, tx),
 		Entities:         newEntityStore(tx, tx),
-		Repos:            newRepoStore(tx, tx),
+		Repos:            newRepositoryStore(tx, tx),
 		PendingFirings:   newPendingFiringsStore(tx),
 		Projects:         newProjectStore(tx, tx),
 		Events:           newEventStore(tx, tx),

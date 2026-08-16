@@ -132,7 +132,7 @@ type Curator struct {
 // stores carries the Tx runner (for SyntheticClaimsWithTx wraps), the
 // CuratorStore (per-turn message writes plus the admin-pool …System claim
 // doors), the ConversationStore (transcript inserts), the PromptStore (skill
-// materialization), and the RepoStore (pinned-repo materialization). Every
+// materialization), and the RepositoryStore (pinned-repo materialization). Every
 // row read/write the curator issues goes through a claims-bound tx or an
 // admin-pool door, so no raw *sql.DB handle is retained.
 func New(stores db.Stores, wsHub *websocket.Hub, model string) *Curator {

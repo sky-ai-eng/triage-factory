@@ -8,7 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-//go:generate go run github.com/vektra/mockery/v2 --name=RepoStore --output=./mocks --case=underscore --with-expecter
+//go:generate go run github.com/vektra/mockery/v2 --name=RepositoryStore --output=./mocks --case=underscore --with-expecter
 
 // Errors RenameSystem refuses a rewrite with. Both describe stored state a
 // rename cannot be applied over without losing a row, so both are terminal for
@@ -23,7 +23,7 @@ var (
 	//     a repository TF still has a row for and GitHub no longer does.
 	//   - A durable record keyed on that name: an entity ("owner/repo#18") or
 	//     an artifact dedup key. Untracking a repository deletes its
-	//     repo_profiles row and deliberately keeps its entities, tasks and
+	//     repositories row and deliberately keeps its entities, tasks and
 	//     artifacts (tracking is forward-only), so a freed name can still be
 	//     spoken for long after the repository row is gone.
 	//
@@ -42,7 +42,7 @@ var (
 	ErrRepoIdentityAmbiguous = errors.New("more than one repository row carries this provider id")
 )
 
-// RepoStore owns the repo_profiles table — the user-configured GitHub
+// RepositoryStore owns the repositories table — the user-configured GitHub
 // repos plus their AI-generated profile cache and clone-attempt state.
 //
 // All methods take orgID; local mode passes runmode.LocalDefaultOrgID.
@@ -55,7 +55,7 @@ var (
 //
 // The store API surfaces every repo by its natural "owner/repo"
 // string as repoID — that's what callers pass and what
-// domain.RepoProfile.ID returns. SQLite stores that string directly
+// domain.Repository.ID returns. SQLite stores that string directly
 // in the id column. Postgres uses a synthetic uuid id internally
 // plus a UNIQUE(org_id, source, owner, repo) natural key; the
 // Postgres impl splits the passed-in "owner/repo" and queries by
@@ -67,7 +67,7 @@ var (
 // match a repo without naming one, which is unambiguous while GitHub
 // is the only provider that issues repositories. The methods that DO
 // name one take a domain.RepoRef.
-type RepoStore interface {
+type RepositoryStore interface {
 	// Upsert inserts or updates a repo profile. On conflict it
 	// refreshes profiling metadata (description, has_readme,
 	// has_claude_md, has_agents_md, profile_text, clone_url,
@@ -81,11 +81,11 @@ type RepoStore interface {
 	// and leaves it alone when empty — the profiler reads the id off the
 	// same /repos/{owner}/{repo} response it takes default_branch and
 	// clone_url from, and a caller with no id has learned nothing to write.
-	Upsert(ctx context.Context, orgID string, p domain.RepoProfile) error
+	Upsert(ctx context.Context, orgID string, p domain.Repository) error
 
 	// List returns every configured repo, including those without
 	// profile text. Ordered by repoID for stable display.
-	List(ctx context.Context, orgID string) ([]domain.RepoProfile, error)
+	List(ctx context.Context, orgID string) ([]domain.Repository, error)
 
 	// ListTeamScoped is the non-admin discovery read (TFAC-559): it
 	// returns only the configured repos tracked by at least one of the
@@ -104,15 +104,15 @@ type RepoStore interface {
 	// Local mode (SQLite, N=1): returns the same set as List — there is
 	// no other team to scope away, mirroring the local-mode asymmetry of
 	// ListActiveJiraTeamScoped / FactoryReadStore.Entities.
-	ListTeamScoped(ctx context.Context, orgID string) ([]domain.RepoProfile, error)
+	ListTeamScoped(ctx context.Context, orgID string) ([]domain.Repository, error)
 
 	// ListWithContent returns only repos that have a non-empty
 	// profile_text — the subset the curator + delegate context
 	// loaders care about. Subset of List by predicate; safe to call
 	// before the profiler completes (returns empty slice).
-	ListWithContent(ctx context.Context, orgID string) ([]domain.RepoProfile, error)
+	ListWithContent(ctx context.Context, orgID string) ([]domain.Repository, error)
 
-	// SetConfigured syncs the repo_profiles table with the given
+	// SetConfigured syncs the repositories table with the given
 	// "owner/repo" list. New entries get skeleton rows (no profile
 	// text); entries no longer in the list are deleted. Single
 	// transaction so the table can't observe a partial mid-sync
@@ -149,7 +149,7 @@ type RepoStore interface {
 
 	// Get returns a single repo profile by "owner/repo" id, or nil
 	// if not configured.
-	Get(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error)
+	Get(ctx context.Context, orgID, repoID string) (*domain.Repository, error)
 
 	// GetOrCreateSystem returns the row for one repository, minting a bare
 	// one if it does not exist yet. It is the single primitive that brings
@@ -176,7 +176,7 @@ type RepoStore interface {
 	//
 	// System (claims-free) variant only: the callers that learn about a
 	// repository are background jobs. Control-plane ones — the executor's
-	// Postgres role holds SELECT and UPDATE on repo_profiles, not INSERT, so
+	// Postgres role holds SELECT and UPDATE on repositories, not INSERT, so
 	// a repository is brought into the table by the side that polls and
 	// tracks, never by a running agent's pod.
 	//
@@ -186,7 +186,7 @@ type RepoStore interface {
 	// case-sensitive and so cannot see the case-differing race, which is
 	// precisely why the impls serialize on the case-folded identity instead of
 	// leaning on it.
-	GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.RepoProfile, error)
+	GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
 
 	// UpdateCloneStatus records the outcome of an EnsureBareClone
 	// attempt for the given repo. status is "ok" | "failed" |
@@ -196,7 +196,7 @@ type RepoStore interface {
 	// when the failure is on the git/transport side, and empty for
 	// status="ok".
 	//
-	// No-ops silently when the repo isn't in repo_profiles
+	// No-ops silently when the repo isn't in repositories
 	// (configured-repos-only invariant — clone hooks fire after
 	// repo selection).
 	UpdateCloneStatus(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error
@@ -211,12 +211,12 @@ type RepoStore interface {
 	// before any request can have arrived). Behavior is identical
 	// to the non-System variants — same SQL, same return shape.
 
-	ListSystem(ctx context.Context, orgID string) ([]domain.RepoProfile, error)
+	ListSystem(ctx context.Context, orgID string) ([]domain.Repository, error)
 	ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error)
 	UpdateCloneStatusSystem(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error
 	CountConfiguredSystem(ctx context.Context, orgID string) (int, error)
-	GetSystem(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error)
-	UpsertSystem(ctx context.Context, orgID string, p domain.RepoProfile) error
+	GetSystem(ctx context.Context, orgID, repoID string) (*domain.Repository, error)
+	UpsertSystem(ctx context.Context, orgID string, p domain.Repository) error
 
 	// GetPullsPollStateSystem returns the stored conditional-request
 	// state for a repo's open-PR listing: the last ETag and the last
@@ -224,7 +224,7 @@ type RepoStore interface {
 	// when the repo has never been listed. System (claims-free) variant
 	// — the poller goroutine has no JWT claims, same convention as
 	// ListConfiguredNamesSystem. No-ops to ("", nil, nil) when the repo
-	// isn't in repo_profiles.
+	// isn't in repositories.
 	// FillMissingExternalIDsSystem records the provider's repository id for
 	// tracked repos that do not have one yet, and returns how many rows it
 	// filled. Refs whose repository has no row, or whose row already carries
@@ -297,6 +297,6 @@ type RepoStore interface {
 	// a successful open-PR list. On a 304 the caller passes the stored
 	// etag back unchanged (only polledAt advances); on a 200 it passes
 	// the fresh etag. No-ops silently when the repo isn't in
-	// repo_profiles (configured-repos-only invariant). System variant.
+	// repositories (configured-repos-only invariant). System variant.
 	SetPullsPollStateSystem(ctx context.Context, orgID, repoID, etag string, polledAt time.Time) error
 }

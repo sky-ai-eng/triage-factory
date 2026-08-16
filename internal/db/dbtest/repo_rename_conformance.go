@@ -12,7 +12,7 @@ import (
 
 // RepoRenameFactory is what a per-backend test file hands to
 // RunRepoRenameConformance. Returns:
-//   - the WHOLE store bundle, not just RepoStore: the rewrite spans tables
+//   - the WHOLE store bundle, not just RepositoryStore: the rewrite spans tables
 //     six other stores own, and the assertions read each one back through its
 //     own store so the harness never learns a backend's column layout,
 //   - the orgID to pass to every call,
@@ -367,7 +367,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// promises to keep.
 		//
 		// This is ordinary product state, not corruption: untracking a
-		// repository drops its repo_profiles row and deliberately keeps its
+		// repository drops its repositories row and deliberately keeps its
 		// entities, so the repository-row guard cannot see that the name is
 		// still spoken for. Refusing is the answer, classified so the caller
 		// treats it as terminal rather than retrying it every poll cycle.

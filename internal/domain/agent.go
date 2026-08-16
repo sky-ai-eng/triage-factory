@@ -38,7 +38,7 @@ func (o RunOutcome) Valid() bool {
 
 // RunFailureKind is the machine-readable discriminator for WHY a run
 // reached status='failed' — the same pattern as
-// repo_profiles.clone_error_kind. It exists so the UI can render
+// repositories.clone_error_kind. It exists so the UI can render
 // specific failures specifically (a memory-limit kill points at the
 // knob to turn) without anything in the chain matching on message
 // text: the backend classifies with errors.Is, the enum rides the

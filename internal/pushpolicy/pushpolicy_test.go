@@ -63,7 +63,7 @@ func TestProtectedBranches_UnprofiledRepoStillRefusesMainAndMaster(t *testing.T)
 func TestProtectedBranches_ProfileAddsDefaultAndBase(t *testing.T) {
 	stores := newStores(t)
 	ctx := context.Background()
-	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.RepoProfile{
+	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		ID: "acme/api", Owner: "acme", Repo: "api",
 		DefaultBranch: "trunk",
 		CloneURL:      "https://x", ProfileText: "t",

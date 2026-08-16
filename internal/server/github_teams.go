@@ -90,7 +90,7 @@ func (s *Server) userTeamsLocal(ctx context.Context, orgID, userID string) ([]gh
 func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]ghclient.UserTeam, error) {
 	var (
 		login string
-		repos []domain.RepoProfile
+		repos []domain.Repository
 	)
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		orgSet, lerr := tx.Orgs.GetSettings(ctx, orgID)

@@ -32,7 +32,7 @@ import (
 //
 // Best-effort by construction: a rename TF fails to apply is one it re-detects
 // on the next observation, and no caller's real work is worth failing over it.
-func Apply(ctx context.Context, repos db.RepoStore, resolver ghclient.Resolver, log *slog.Logger, orgID string, observed []domain.RepoRef) int {
+func Apply(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Resolver, log *slog.Logger, orgID string, observed []domain.RepoRef) int {
 	if repos == nil || len(observed) == 0 {
 		return 0
 	}

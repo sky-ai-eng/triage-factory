@@ -1172,7 +1172,7 @@ const orgClaudeKeyStep: WizardStep = {
 
 // Step 5 · Repositories (first team step). Embeds the shared RepoPickerModal
 // inline (footer hidden — the wizard owns Continue/Back) and runs the single
-// team load. Persisting the repo set writes repo_profiles, which is BOTH half
+// team load. Persisting the repo set writes `repositories`, which is BOTH half
 // of the backend's setup-complete gate (GitHub + ≥1 repo) AND what makes the
 // next step's GitHub-team candidates enumerable — the structural fix for the
 // always-empty-teams bug: candidates are built from persisted repo-owners, so

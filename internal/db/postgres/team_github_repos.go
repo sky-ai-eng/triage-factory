@@ -16,7 +16,7 @@ import (
 // the pool-split rationale.
 //
 //   - app: ListForTeam + the whole of ReplaceForTeam (team-row write +
-//     repo_profiles reconcile, atomic in the caller's claims tx, org-
+//     repositories reconcile, atomic in the caller's claims tx, org-
 //     serialized by an advisory lock). RLS gates the team-row write by
 //     team admin; the cross-team union read inside it goes through the
 //     tf.org_tracked_repos() SECURITY DEFINER helper.
@@ -121,11 +121,11 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 	}
 
 	// Everything runs in the caller's app-pool tx (RLS gates the team-row
-	// write by team admin) so the team-row mutation and the repo_profiles
+	// write by team admin) so the team-row mutation and the repositories
 	// reconcile are atomic. A per-org transaction advisory lock serializes
 	// concurrent same-org saves so the union recompute can't race a
-	// sibling team's write into an inconsistent repo_profiles. The key is
-	// hashtextextended (64-bit) so distinct orgs don't collide onto the
+	// sibling team's write into an inconsistent repositories table. The key
+	// is hashtextextended (64-bit) so distinct orgs don't collide onto the
 	// same lock and serialize against each other.
 	return inTx(ctx, s.app, func(tx queryer) error {
 		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, orgID); err != nil {
@@ -171,7 +171,7 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 		if err != nil {
 			return fmt.Errorf("read org %s tracked-repo union: %w", orgID, err)
 		}
-		return reconcileRepoProfilesFromUnion(ctx, tx, orgID, union)
+		return reconcileRepositoriesFromUnion(ctx, tx, orgID, union)
 	})
 }
 
@@ -188,27 +188,27 @@ func listTeamGitHubReposForOrg(ctx context.Context, q queryer, orgID string) ([]
 	`, orgID))
 }
 
-// reconcileRepoProfilesFromUnion makes repo_profiles (for orgID) match
+// reconcileRepositoriesFromUnion makes repositories (for orgID) match
 // the union of tracked repos: deletes rows for repos no team tracks
 // anymore and inserts skeleton rows for newly-tracked repos. Mirrors
-// RepoStore.SetConfigured's delete-removed / insert-skeleton logic —
-// repo_profiles is now a derived cache of team_github_repos. The union is
-// case-folded to one canonical row per logical repo
+// RepositoryStore.SetConfigured's delete-removed / insert-skeleton logic —
+// the repositories table is now a derived cache of team_github_repos. The
+// union is case-folded to one canonical row per logical repo
 // (NormalizeTeamGitHubRepos).
 //
 // Matching is case-INSENSITIVE on both axes (GitHub identifiers are): a
 // repo still tracked under different casing keeps its existing row rather
 // than being deleted + reinserted, so the cached profile_text /
 // base_branch / clone status / etag survive a mere casing change. Casing
-// is therefore sticky — repo_profiles keeps the first casing it was
+// is therefore sticky — repositories keeps the first casing it was
 // created with (case-equivalent to whatever team_github_repos now holds).
-func reconcileRepoProfilesFromUnion(ctx context.Context, q queryer, orgID string, rawUnion []domain.TeamGitHubRepo) error {
+func reconcileRepositoriesFromUnion(ctx context.Context, q queryer, orgID string, rawUnion []domain.TeamGitHubRepo) error {
 	desired, err := domain.NormalizeTeamGitHubRepos(rawUnion)
 	if err != nil {
 		return fmt.Errorf("normalize repo union: %w", err)
 	}
 	// Case-folded keys for the GC match. An empty union deletes every
-	// repo_profiles row for the org (unnest of empty arrays is empty, so
+	// repositories row for the org (unnest of empty arrays is empty, so
 	// NOT IN (empty) keeps nothing).
 	lowOwners := make([]string, len(desired))
 	lowNames := make([]string, len(desired))
@@ -217,13 +217,13 @@ func reconcileRepoProfilesFromUnion(ctx context.Context, q queryer, orgID string
 		lowNames[i] = strings.ToLower(r.Repo)
 	}
 	if _, err := q.ExecContext(ctx, `
-		DELETE FROM repo_profiles
+		DELETE FROM repositories
 		WHERE org_id = $1
 		  AND (lower(owner), lower(repo)) NOT IN (
 		      SELECT * FROM unnest($2::text[], $3::text[])
 		  )
 	`, orgID, lowOwners, lowNames); err != nil {
-		return fmt.Errorf("gc repo_profiles: %w", err)
+		return fmt.Errorf("gc repositories: %w", err)
 	}
 	// Create a row only for repos not already present case-insensitively;
 	// existing rows keep their casing + cached columns (sticky casing). This
@@ -233,7 +233,7 @@ func reconcileRepoProfilesFromUnion(ctx context.Context, q queryer, orgID string
 	// the identity columns cannot differ by which path created the row. The
 	// tracked set is GitHub's by construction, so source is the default.
 	for _, r := range desired {
-		if err := insertRepoProfileRow(ctx, q, orgID, domain.RepoRef{Owner: r.Owner, Repo: r.Repo}); err != nil {
+		if err := insertRepositoryRow(ctx, q, orgID, domain.RepoRef{Owner: r.Owner, Repo: r.Repo}); err != nil {
 			return err
 		}
 	}

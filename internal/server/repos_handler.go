@@ -311,12 +311,12 @@ const (
 )
 
 // repoMutationAccess resolves the write gate for a repo's org-wide
-// configuration. repo_profiles carries no team_id, so a write by any member
+// configuration. repositories carries no team_id, so a write by any member
 // of any tracking team lands on every tracking team's runs — membership is
 // therefore the read gate only, and mutating requires an admin: org admin,
 // or team admin of at least one team that tracks the repo.
 //
-// There is no DB backstop for this. repo_profiles_all's RLS is org-wide by
+// There is no DB backstop for this. repositories_all's RLS is org-wide by
 // construction (it cannot express team scoping for an entity that has no
 // team), so this predicate is the whole enforcement — keep it here, in front
 // of every mutating repo handler.
@@ -358,12 +358,12 @@ func (s *Server) repoMutationAccess(ctx context.Context, orgID, userID, owner, r
 	}
 }
 
-// handleRepoProfiles returns configured repo profiles from the DB. Org
+// handleRepositories returns configured repo profiles from the DB. Org
 // admins get the org-wide union; non-admin members get only the repos
-// tracked by their own teams (TFAC-559) — repo_profiles is org-wide, so an
+// tracked by their own teams (TFAC-559) — repositories is org-wide, so an
 // unscoped read would leak every team's repos to a teammate on none of them.
 // Local mode (N=1) has no team boundary and stays unscoped.
-func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return
@@ -382,7 +382,7 @@ func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
 	// and team admin are orthogonal, and only the server knows which teams
 	// tracking a given repo the caller administers.
 	var (
-		profiles []domain.RepoProfile
+		profiles []domain.Repository
 		canEdit  []bool
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -542,7 +542,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRepoBranches returns branches for a repo, with optional search
-// filtering. Gated the same as handleRepoProfiles/handleRepoUpdate
+// filtering. Gated the same as handleRepositories/handleRepoUpdate
 // (TFAC-559): a non-admin member can only list branches for a repo their own
 // team tracks.
 func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
@@ -600,7 +600,7 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 
 // Repo *tracking* selection is per-team: writes go through
 // PUT /api/settings/team/{id}/repos (handleTeamReposPut), which writes
-// team_github_repos and reconciles the org-wide repo_profiles union. The
+// team_github_repos and reconciles the org-wide repositories union. The
 // old org-global POST /api/repos was removed in favor of that single,
 // team-admin-gated entry point; GET /api/repos (the union profiles),
 // PATCH /api/repos/{owner}/{repo} (base_branch), and GET

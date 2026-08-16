@@ -459,10 +459,10 @@ func decodeCuratorState(entries map[string]*zip.File, projectID, newSessionID, u
 //     (TracksRepoSystem) drops the importing team's handlers for the
 //     repo, so polled events from it never create tasks until the user
 //     re-saves the repo selection. Written via ReplaceForTeam (current
-//     set ∪ pinned), which also reconciles the org-shared repo_profiles
+//     set ∪ pinned), which also reconciles the org-shared repositories
 //     cache — skeleton rows for newly-tracked repos — atomically inside
 //     the caller's WithTx.
-//   - repo_profiles.clone_url — pre-seeded with the URL discovered
+//   - repositories.clone_url — pre-seeded with the URL discovered
 //     during preflight (SeedCloneURL never clobbers an existing value),
 //     so the first poll doesn't have to re-resolve it.
 //

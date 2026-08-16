@@ -13,7 +13,7 @@ import (
 // repo-profiler, project-classifier) are boot-launched background
 // goroutines with no JWT-claims context, so an app-pool INSERT under the
 // system_llm_runs_all RLS policy would be rejected — same reason
-// repo_profiles' `...System` writes and the PendingFirings/EventQueue
+// repositories' `...System` writes and the PendingFirings/EventQueue
 // stores route through admin. The org-scoped RLS policy gates the
 // app-pool reads a future spend view will make; org_id stays in the
 // INSERT as defense in depth. See TFAC-451.

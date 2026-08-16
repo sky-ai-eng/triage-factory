@@ -43,7 +43,7 @@ func translateVisibilityErr(err error) error {
 //     routes through admin so the classifier can pair each org's
 //     unclassified entities against that org's projects without
 //     impersonating any one user. Same pattern EntityStore /
-//     RepoStore / ConversationStore use.
+//     RepositoryStore / ConversationStore use.
 //
 // pinned_repos is jsonb in Postgres vs text-JSON in SQLite. The
 // jsonb cast happens at the placeholder level ($N::jsonb) — callers

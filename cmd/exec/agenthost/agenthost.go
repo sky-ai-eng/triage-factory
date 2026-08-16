@@ -229,8 +229,8 @@ type Client interface {
 
 	GetConversation(ctx context.Context) (*domain.Conversation, error)
 	GetTask(ctx context.Context, taskID string) (*domain.Task, error)
-	ListRepos(ctx context.Context) ([]domain.RepoProfile, error)
-	GetRepo(ctx context.Context, repoID string) (*domain.RepoProfile, error)
+	ListRepos(ctx context.Context) ([]domain.Repository, error)
+	GetRepo(ctx context.Context, repoID string) (*domain.Repository, error)
 	// TeamTracksRepo reports whether the run's team tracks owner/repo — the
 	// gate `workspace add` applies (alongside the org-configured check) so it
 	// only materializes repos the proxy will then authorize pushes to.

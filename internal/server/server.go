@@ -43,7 +43,7 @@ type Server struct {
 	blueprints       db.BlueprintStore       // used by event-handler + project test fixtures
 	tasks            db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
 	agentRuns        db.ConversationStore    // agent run lifecycle + transcript
-	repos            db.RepoStore            // repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
+	repos            db.RepositoryStore      // repositories CRUD for repos/settings/projects handlers and curator pinned-repo materialization
 	projects         db.ProjectStore         // projects CRUD for projects/curator/backfill/project_entities handlers
 	curatorStore     db.CuratorStore         // curator view of conversations/messages/claims — handler-side System writes (cancel release, pending-context producer) go through here; claims-bound reads ride tx.Curator
 	events           db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
@@ -1138,7 +1138,7 @@ func (s *Server) routes() {
 	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
 	// distinct from the creds stage (auth.ValidateGitHub / /api/jira/connect).
 	s.apiMutating("POST /api/github/reachability", handleGitHubReachability)
-	s.api("GET /api/repos", s.handleRepoProfiles)
+	s.api("GET /api/repos", s.handleRepositories)
 	s.apiMutating("PATCH /api/repos/{owner}/{repo}", s.handleRepoUpdate)
 	s.api("GET /api/repos/{owner}/{repo}/branches", s.handleRepoBranches)
 	s.apiMutating("POST /api/jira/reachability", handleJiraReachability)

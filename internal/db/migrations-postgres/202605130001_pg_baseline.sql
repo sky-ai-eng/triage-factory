@@ -332,8 +332,8 @@ $$;
 -- Name: org_tracked_repos(uuid); Type: FUNCTION; Schema: tf; Owner: -
 --
 
--- The cross-team union read behind team_github_repos -> repo_profiles
--- reconciliation. repo_profiles is the org-wide UNION of every
+-- The cross-team union read behind team_github_repos -> repositories
+-- reconciliation. repositories is the org-wide UNION of every
 -- team's tracked repos, but the team_github_repos SELECT policy is
 -- team-membership-scoped, so a team admin's app-pool tx can't see sibling
 -- teams' rows. This SECURITY DEFINER helper bypasses that per-team SELECT
@@ -573,7 +573,7 @@ CREATE TABLE public.agents (
 -- computed so org spend reconciles with the Anthropic bill and a "system
 -- overhead" line exists alongside conversation / claim spend rows.
 -- Org-level, no team_id by design: scorer batches mix teams, and
--- repo_profiles/entities carry no team. System-written (admin pool); the
+-- repositories/entities carry no team. System-written (admin pool); the
 -- app pool only reads, gated by the org-scoped RLS policy below. See TFAC-451.
 CREATE TABLE public.system_llm_runs (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -875,7 +875,7 @@ CREATE TABLE public.team_github_groups (
 -- The GitHub *tracking-scope* twin of jira_project_status_rules and the
 -- source of truth for which repos a team cares about. NOT the same as
 -- team_github_groups above (CODEOWNERS review-routing teams) — this is
--- the tracking selection. repo_profiles is the org-shared UNION of every
+-- the tracking selection. repositories is the org-shared UNION of every
 -- team's rows here, a derived poll/profile/ETag cache reconciled on every
 -- write and never user-written directly anymore. No org_id column: org
 -- scope rides the teams FK, mirroring jira_project_status_rules. Local
@@ -1140,7 +1140,7 @@ CREATE TABLE public.prompts (
 
 
 --
--- Name: repo_profiles; Type: TABLE; Schema: public; Owner: -
+-- Name: repositories; Type: TABLE; Schema: public; Owner: -
 --
 
 -- Every repository reference elsewhere in this schema is case-normalized
@@ -1160,7 +1160,7 @@ CREATE TABLE public.prompts (
 -- backfill — a row without an id behaves exactly as it does today,
 -- everywhere — and it fills in from GitHub payloads TF already fetches, never
 -- from a fetch added to obtain it.
-CREATE TABLE public.repo_profiles (
+CREATE TABLE public.repositories (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     owner text NOT NULL,
@@ -2162,11 +2162,11 @@ ALTER TABLE ONLY public.prompts
 
 
 --
--- Name: repo_profiles repo_profiles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: repositories repositories_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.repo_profiles
-    ADD CONSTRAINT repo_profiles_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.repositories
+    ADD CONSTRAINT repositories_pkey PRIMARY KEY (id);
 
 
 --
@@ -2516,7 +2516,7 @@ CREATE INDEX idx_pending_firings_entity_pending ON public.pending_firings USING 
 
 
 --
--- Name: idx_repo_profiles_org_owner_repo; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_repositories_org_owner_repo; Type: INDEX; Schema: public; Owner: -
 --
 
 -- The repository natural key. It includes source because two providers may
@@ -2532,16 +2532,16 @@ CREATE INDEX idx_pending_firings_entity_pending ON public.pending_firings USING 
 --
 -- An expression key has to be an index rather than a UNIQUE constraint; the
 -- store infers it by expression list in ON CONFLICT.
-CREATE UNIQUE INDEX repo_profiles_identity ON public.repo_profiles USING btree (org_id, source, lower(owner), lower(repo));
+CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (org_id, source, lower(owner), lower(repo));
 
 
 --
--- Name: idx_repo_profiles_org_owner_repo; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_repositories_org_owner_repo; Type: INDEX; Schema: public; Owner: -
 --
 
 -- Kept alongside the folded key: it serves the ordered org-wide list
 -- (WHERE org_id ORDER BY owner, repo), which the folded index cannot.
-CREATE INDEX idx_repo_profiles_org_owner_repo ON public.repo_profiles USING btree (org_id, owner, repo);
+CREATE INDEX idx_repositories_org_owner_repo ON public.repositories USING btree (org_id, owner, repo);
 
 
 --
@@ -2978,10 +2978,10 @@ CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.prompts FOR EACH ROW EXECU
 
 
 --
--- Name: repo_profiles set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: repositories set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.repo_profiles FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.repositories FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
 --
@@ -3387,11 +3387,11 @@ ALTER TABLE ONLY public.prompts
 
 
 --
--- Name: repo_profiles repo_profiles_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: repositories repositories_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.repo_profiles
-    ADD CONSTRAINT repo_profiles_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.repositories
+    ADD CONSTRAINT repositories_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
 --
@@ -4334,16 +4334,16 @@ CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.c
 
 
 --
--- Name: repo_profiles; Type: ROW SECURITY; Schema: public; Owner: -
+-- Name: repositories; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
-ALTER TABLE public.repo_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.repositories ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: repo_profiles repo_profiles_all; Type: POLICY; Schema: public; Owner: -
+-- Name: repositories repositories_all; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY repo_profiles_all ON public.repo_profiles USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+CREATE POLICY repositories_all ON public.repositories USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
 --
@@ -4356,7 +4356,7 @@ ALTER TABLE public.system_llm_runs ENABLE ROW LEVEL SECURITY;
 -- Name: system_llm_runs system_llm_runs_all; Type: POLICY; Schema: public; Owner: -
 --
 
--- Mirrors repo_profiles_all: org-scoped read/write under the app pool.
+-- Mirrors repositories_all: org-scoped read/write under the app pool.
 -- The table is system-written via the admin pool (BYPASSRLS), so in
 -- practice only the org-scoped SELECT side is exercised by tf_app; the
 -- WITH CHECK is retained for symmetry with the rest of the schema.
@@ -5201,14 +5201,14 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.prompts TO tf_app;
 
 
 --
--- Name: TABLE repo_profiles; Type: ACL; Schema: public; Owner: -
+-- Name: TABLE repositories; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON TABLE public.repo_profiles TO postgres;
-GRANT ALL ON TABLE public.repo_profiles TO anon;
-GRANT ALL ON TABLE public.repo_profiles TO authenticated;
-GRANT ALL ON TABLE public.repo_profiles TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.repo_profiles TO tf_app;
+GRANT ALL ON TABLE public.repositories TO postgres;
+GRANT ALL ON TABLE public.repositories TO anon;
+GRANT ALL ON TABLE public.repositories TO authenticated;
+GRANT ALL ON TABLE public.repositories TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.repositories TO tf_app;
 
 
 --
@@ -6138,7 +6138,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_github_app_installation
 -- Both are security findings rather than cosmetics, and neither is derivable
 -- from state TF keeps today.
 --
--- # Why this is its own table and not a column on repo_profiles
+-- # Why this is its own table and not a column on repositories
 --
 -- The relationship really is 1:N — a repository belongs to one GitHub account,
 -- an account has at most one installation of a given App, and a workspace has
@@ -6199,7 +6199,7 @@ ALTER TABLE ONLY public.installation_repositories
     FOREIGN KEY (org_id, installation_id)
     REFERENCES public.org_github_app_installations (org_id, installation_id) ON DELETE CASCADE;
 
--- The natural key, folded, for the reason repo_profiles_identity states: GitHub
+-- The natural key, folded, for the reason repositories_identity states: GitHub
 -- identifiers are case-insensitive, so a case-sensitive index behind a
 -- case-insensitive guard admits duplicates whenever two writers race — neither
 -- sees the other's uncommitted row and their keys then differ. The database has
@@ -6208,7 +6208,7 @@ CREATE UNIQUE INDEX installation_repositories_identity
     ON public.installation_repositories USING btree (org_id, installation_id, lower(owner), lower(repo));
 
 -- The registry join, and the drift queries that run over it. Deliberately the
--- same shape as repo_profiles_identity — (org_id, source, lower(owner),
+-- same shape as repositories_identity — (org_id, source, lower(owner),
 -- lower(repo)) — so the two sides of "is this granted repository tracked?" are
 -- keyed identically and either can drive the join.
 CREATE INDEX installation_repositories_registry_join
@@ -8857,10 +8857,10 @@ GRANT SELECT ON TABLE public.users TO tf_system;
 -- not the users table itself.
 GRANT SELECT ON TABLE public.user_github_identities TO tf_system;
 GRANT SELECT ON TABLE public.team_github_repos TO tf_system;
--- repo_profiles: UpdateCloneStatusSystem is local-mode-only in the current
+-- repositories: UpdateCloneStatusSystem is local-mode-only in the current
 -- call graph, granted ahead of the multi-mode bare-clone-cache path it's
 -- designed for.
-GRANT SELECT, UPDATE ON TABLE public.repo_profiles TO tf_system;
+GRANT SELECT, UPDATE ON TABLE public.repositories TO tf_system;
 GRANT SELECT ON TABLE public.org_github_apps TO tf_system;
 GRANT SELECT ON TABLE public.org_github_app_installations TO tf_system;
 GRANT SELECT ON TABLE public.events TO tf_system;

@@ -52,7 +52,7 @@ func TestProfiler_FetchErrorLeavesRowUntouched(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	repos := &fetchRepoStore{names: []string{"bad/errors", "good/nodocs"}}
+	repos := &fetchRepositoryStore{names: []string{"bad/errors", "good/nodocs"}}
 	p := NewProfiler(
 		fixedResolver{client: github.NewClient(srv.URL, "tok")},
 		nil, // secrets unused: no with-docs repo reaches profileBatch
@@ -113,36 +113,36 @@ func (oneOrgStore) GetSettingsSystem(context.Context, string) (domain.OrgSetting
 	return domain.OrgSettings{}, nil // GitHubCloneProtocol "" → HTTPS
 }
 
-// fetchRepoStore returns a fixed configured-name list and captures every
+// fetchRepositoryStore returns a fixed configured-name list and captures every
 // UpsertSystem so the test can assert which repos were persisted vs skipped.
-type fetchRepoStore struct {
-	db.RepoStore
+type fetchRepositoryStore struct {
+	db.RepositoryStore
 	names   []string
 	mu      sync.Mutex
-	upserts []domain.RepoProfile
+	upserts []domain.Repository
 }
 
-func (s *fetchRepoStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
+func (s *fetchRepositoryStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
 	return s.names, nil
 }
 
 // GetSystem is consulted only on the non-forced TTL path; the test forces, so
 // this stays a stub returning "no existing row."
-func (s *fetchRepoStore) GetSystem(context.Context, string, string) (*domain.RepoProfile, error) {
+func (s *fetchRepositoryStore) GetSystem(context.Context, string, string) (*domain.Repository, error) {
 	return nil, nil
 }
 
-func (s *fetchRepoStore) UpsertSystem(_ context.Context, _ string, p domain.RepoProfile) error {
+func (s *fetchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.upserts = append(s.upserts, p)
 	return nil
 }
 
-func (s *fetchRepoStore) upsertedByID() map[string]domain.RepoProfile {
+func (s *fetchRepositoryStore) upsertedByID() map[string]domain.Repository {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m := make(map[string]domain.RepoProfile, len(s.upserts))
+	m := make(map[string]domain.Repository, len(s.upserts))
 	for _, p := range s.upserts {
 		m[p.ID] = p
 	}
@@ -161,7 +161,7 @@ func (f fixedResolver) ClientFor(context.Context, string, string) (*github.Clien
 }
 
 var (
-	_ db.OrgsStore    = oneOrgStore{}
-	_ db.RepoStore    = (*fetchRepoStore)(nil)
-	_ github.Resolver = fixedResolver{}
+	_ db.OrgsStore       = oneOrgStore{}
+	_ db.RepositoryStore = (*fetchRepositoryStore)(nil)
+	_ github.Resolver    = fixedResolver{}
 )

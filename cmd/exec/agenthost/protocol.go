@@ -198,7 +198,7 @@ type taskResult struct {
 }
 
 type reposResult struct {
-	Repos []domain.RepoProfile `json:"repos"`
+	Repos []domain.Repository `json:"repos"`
 }
 
 type getRepoArgs struct {
@@ -206,7 +206,7 @@ type getRepoArgs struct {
 }
 
 type repoResult struct {
-	Repo *domain.RepoProfile `json:"repo,omitempty"`
+	Repo *domain.Repository `json:"repo,omitempty"`
 }
 
 type teamTracksRepoArgs struct {

@@ -37,8 +37,8 @@ type Runtime interface {
 	ListRunArtifacts(ctx context.Context) ([]domain.Artifact, error)
 	GetConversation(ctx context.Context) (*domain.Conversation, error)
 	GetTask(ctx context.Context, taskID string) (*domain.Task, error)
-	ListRepos(ctx context.Context) ([]domain.RepoProfile, error)
-	GetRepo(ctx context.Context, repoID string) (*domain.RepoProfile, error)
+	ListRepos(ctx context.Context) ([]domain.Repository, error)
+	GetRepo(ctx context.Context, repoID string) (*domain.Repository, error)
 	TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error)
 	GetRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.RunWorktree, error)
 	ListRunWorktrees(ctx context.Context) ([]domain.RunWorktree, error)
@@ -312,11 +312,11 @@ func (r *directRuntime) GetTask(ctx context.Context, taskID string) (*domain.Tas
 	return r.stores.Tasks.GetSystem(ctx, r.info.OrgID, taskID)
 }
 
-func (r *directRuntime) ListRepos(ctx context.Context) ([]domain.RepoProfile, error) {
+func (r *directRuntime) ListRepos(ctx context.Context) ([]domain.Repository, error) {
 	return r.stores.Repos.ListSystem(ctx, r.info.OrgID)
 }
 
-func (r *directRuntime) GetRepo(ctx context.Context, repoID string) (*domain.RepoProfile, error) {
+func (r *directRuntime) GetRepo(ctx context.Context, repoID string) (*domain.Repository, error) {
 	return r.stores.Repos.GetSystem(ctx, r.info.OrgID, repoID)
 }
 
@@ -630,7 +630,7 @@ func (r *relayRuntime) GetTask(ctx context.Context, taskID string) (*domain.Task
 	return res.Task, nil
 }
 
-func (r *relayRuntime) ListRepos(ctx context.Context) ([]domain.RepoProfile, error) {
+func (r *relayRuntime) ListRepos(ctx context.Context) ([]domain.Repository, error) {
 	var res reposResult
 	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opListRepos, emptyArgs{}, &res); err != nil {
 		return nil, err
@@ -638,7 +638,7 @@ func (r *relayRuntime) ListRepos(ctx context.Context) ([]domain.RepoProfile, err
 	return res.Repos, nil
 }
 
-func (r *relayRuntime) GetRepo(ctx context.Context, repoID string) (*domain.RepoProfile, error) {
+func (r *relayRuntime) GetRepo(ctx context.Context, repoID string) (*domain.Repository, error) {
 	var res repoResult
 	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetRepo, getRepoArgs{RepoID: repoID}, &res); err != nil {
 		return nil, err

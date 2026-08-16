@@ -119,7 +119,7 @@ type repoIDFillCall struct {
 // repoIDFillStore embeds the interface (nil) so any method this path does
 // not use panics loudly rather than silently returning a zero value.
 type repoIDFillStore struct {
-	db.RepoStore
+	db.RepositoryStore
 	calls []repoIDFillCall
 	err   error
 }

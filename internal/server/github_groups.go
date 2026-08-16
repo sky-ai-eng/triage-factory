@@ -205,7 +205,7 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 // owner just had nothing to import). Callers surface credsMissing as a
 // reconnect prompt instead of a silent empty list.
 func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string) ([]gitHubGroupCandidateJSON, bool) {
-	var repos []domain.RepoProfile
+	var repos []domain.Repository
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
 		repos, e = tx.Repos.List(ctx, orgID)
@@ -291,7 +291,7 @@ func (s *Server) annotateGitHubGroupMembership(ctx context.Context, orgID, userI
 // distinctRepoOwners returns the configured repos' owners, lowercased,
 // de-duplicated, in first-seen order. These are the GitHub orgs whose
 // teams the editor offers as candidates.
-func distinctRepoOwners(repos []domain.RepoProfile) []string {
+func distinctRepoOwners(repos []domain.Repository) []string {
 	seen := map[string]bool{}
 	out := []string{}
 	for _, p := range repos {

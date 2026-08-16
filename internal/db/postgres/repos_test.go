@@ -15,16 +15,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestRepoStore_Postgres runs the shared conformance suite against
-// the Postgres RepoStore impl. Wires both pools against AdminDB
+// TestRepositoryStore_Postgres runs the shared conformance suite against
+// the Postgres RepositoryStore impl. Wires both pools against AdminDB
 // (BYPASSRLS) so behavior tests stay independent of the auth path;
 // the cross-org leakage test below exercises the org_id filter
 // directly.
-func TestRepoStore_Postgres(t *testing.T) {
+func TestRepositoryStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
-	dbtest.RunRepoStoreConformance(t, func(t *testing.T) (db.RepoStore, string) {
+	dbtest.RunRepositoryStoreConformance(t, func(t *testing.T) (db.RepositoryStore, string) {
 		t.Helper()
 		h.Reset(t)
 		orgID, _, _ := seedPgRepoOrg(t, h)
@@ -32,11 +32,11 @@ func TestRepoStore_Postgres(t *testing.T) {
 	})
 }
 
-// TestRepoStore_Postgres_CrossOrgLeakage pins the defense-in-depth
+// TestRepositoryStore_Postgres_CrossOrgLeakage pins the defense-in-depth
 // org_id filter on every read + mutation path. RLS via
-// repo_profiles_all also enforces this, but the org_id = $N clause
+// repositories_all also enforces this, but the org_id = $N clause
 // in each query is the belt to RLS's suspenders.
-func TestRepoStore_Postgres_CrossOrgLeakage(t *testing.T) {
+func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -46,7 +46,7 @@ func TestRepoStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed a repo into orgA only.
-	if err := stores.Repos.Upsert(ctx, orgA, domain.RepoProfile{
+	if err := stores.Repos.Upsert(ctx, orgA, domain.Repository{
 		ID: "octo/widget", Owner: "octo", Repo: "widget",
 		Description: "orgA widget", ProfileText: "orgA body",
 		DefaultBranch: "main",
@@ -109,15 +109,15 @@ func TestRepoStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 }
 
-// TestRepoStore_Postgres_CrossOrgRLSDenied pins the production RLS
-// layer for repo_profiles. Where CrossOrgLeakage above wires both
+// TestRepositoryStore_Postgres_CrossOrgRLSDenied pins the production RLS
+// layer for repositories. Where CrossOrgLeakage above wires both
 // pools against AdminDB to prove the defense-in-depth WHERE-clause
 // filter is intact, this test runs the store through the app pool
-// under tf_app with real JWT claims so the actual repo_profiles_all
+// under tf_app with real JWT claims so the actual repositories_all
 // policy is exercised. Same-org reads succeed; cross-org reads are
 // silently filtered (USING); cross-org Upsert raises 42501 from the
 // WITH CHECK side of the same policy.
-func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
+func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
@@ -129,7 +129,7 @@ func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	// Seed a repo in orgA via admin so the row exists.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
-	if err := stores.Repos.UpsertSystem(ctx, orgA, domain.RepoProfile{
+	if err := stores.Repos.UpsertSystem(ctx, orgA, domain.Repository{
 		ID: "octo/rls", Owner: "octo", Repo: "rls",
 		Description: "orgA rls repo", ProfileText: "body",
 		DefaultBranch: "main",
@@ -171,11 +171,11 @@ func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_write_denied", func(t *testing.T) {
 		// bob's claims point at orgB; Upsert against orgA would land
-		// a row with org_id=orgA. The repo_profiles_all policy's
+		// a row with org_id=orgA. The repositories_all policy's
 		// WITH CHECK requires org_id = tf.current_org_id(), so 42501
 		// is the expected outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Upsert(ctx, orgA, domain.RepoProfile{
+			return pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Upsert(ctx, orgA, domain.Repository{
 				ID: "octo/rls-write", Owner: "octo", Repo: "rls-write",
 				Description: "x", ProfileText: "x", DefaultBranch: "main",
 			})
@@ -184,12 +184,12 @@ func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	})
 }
 
-// TestRepoStore_Postgres_ListTeamScoped_RLS pins the multi-mode discovery
+// TestRepositoryStore_Postgres_ListTeamScoped_RLS pins the multi-mode discovery
 // read (TFAC-559): under the app pool with real RLS, a member's
 // ListTeamScoped semi-joins through team_github_repos and returns only the
 // repos their own team(s) track — not the org-wide union. A teamless
-// member gets zero rows even though repo_profiles has entries.
-func TestRepoStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
+// member gets zero rows even though the repositories table has entries.
+func TestRepositoryStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
@@ -222,7 +222,7 @@ func TestRepoStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 
 	listAs := func(userID string) []string {
 		t.Helper()
-		var got []domain.RepoProfile
+		var got []domain.Repository
 		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
 			var e error
 			got, e = tx.Repos.ListTeamScoped(ctx, orgA)
@@ -244,7 +244,7 @@ func TestRepoStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 	}
 }
 
-func repoIDs(profiles []domain.RepoProfile) []string {
+func repoIDs(profiles []domain.Repository) []string {
 	out := make([]string, len(profiles))
 	for i, p := range profiles {
 		out[i] = p.ID

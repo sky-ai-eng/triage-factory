@@ -30,7 +30,7 @@ func TestListWorkspaces_RunNotFound(t *testing.T) {
 func TestListWorkspaces_GitHubRunAllowed(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedGitHubRun(t, database, "gh-run")
-	seedRepoProfile(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
+	seedRepository(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
 
 	out, err := listWorkspaces(hostFor(stores, "gh-run"))
 	if err != nil {
@@ -51,9 +51,9 @@ func TestListWorkspaces_GitHubRunAllowed(t *testing.T) {
 func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
-	seedRepoProfile(t, database, "owner", "alpha", "https://x", "main")
-	seedRepoProfile(t, database, "owner", "beta", "https://x", "main")
-	seedRepoProfile(t, database, "owner", "gamma", "https://x", "main")
+	seedRepository(t, database, "owner", "alpha", "https://x", "main")
+	seedRepository(t, database, "owner", "beta", "https://x", "main")
+	seedRepository(t, database, "owner", "gamma", "https://x", "main")
 
 	// Materialize one of the three.
 	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
@@ -112,7 +112,7 @@ func TestListWorkspaces_ScopedToRun(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedJiraRun(t, database, "r2", "SKY-2")
-	seedRepoProfile(t, database, "owner", "shared", "https://x", "main")
+	seedRepository(t, database, "owner", "shared", "https://x", "main")
 
 	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "r2", RepoID: "owner/shared",
@@ -144,7 +144,7 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 
-	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
+	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		ID: "owner/alpha", Owner: "owner", Repo: "alpha",
 		Description:   "Core API service",
 		ProfileText:   "Long LLM-generated profile text that should NOT appear in workspace list output...",
@@ -157,7 +157,7 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	// clone_url). MUST be filtered out — `workspace add` rejects
 	// no-clone-url profiles, so surfacing them here would lead the
 	// agent to options that fail at materialize time.
-	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
+	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		ID: "owner/skeleton", Owner: "owner", Repo: "skeleton",
 		// CloneURL deliberately empty
 		DefaultBranch: "main",

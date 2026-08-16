@@ -116,17 +116,17 @@ func repoSlugsFromJSON(t *testing.T, body []byte) []string {
 	return out
 }
 
-// TestHandleRepoProfiles_TeamScoped pins the TFAC-559 fix: GET /api/repos
+// TestHandleRepositories_TeamScoped pins the TFAC-559 fix: GET /api/repos
 // returns the org-wide union for an org admin, only the caller's own team's
 // tracked repos for a plain member, and nothing for a teamless member —
 // where before the fix every caller saw the full org-wide list regardless
 // of role or team membership.
-func TestHandleRepoProfiles_TeamScoped(t *testing.T) {
+func TestHandleRepositories_TeamScoped(t *testing.T) {
 	rig := newRepoScopeRig(t)
 
 	// Org owner (admin) sees the org-wide union: both teams' repos.
 	rec := httptest.NewRecorder()
-	rig.s.handleRepoProfiles(rec, rig.req(http.MethodGet, "/api/repos", rig.orgOwner, nil))
+	rig.s.handleRepositories(rec, rig.req(http.MethodGet, "/api/repos", rig.orgOwner, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("owner GET /api/repos: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -137,7 +137,7 @@ func TestHandleRepoProfiles_TeamScoped(t *testing.T) {
 	// teamB member sees only teamB's tracked repo (acme/web), not teamA's
 	// (acme/api) — the cross-team leak this ticket fixes.
 	rec = httptest.NewRecorder()
-	rig.s.handleRepoProfiles(rec, rig.req(http.MethodGet, "/api/repos", rig.memberB, nil))
+	rig.s.handleRepositories(rec, rig.req(http.MethodGet, "/api/repos", rig.memberB, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("memberB GET /api/repos: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -148,7 +148,7 @@ func TestHandleRepoProfiles_TeamScoped(t *testing.T) {
 	// A teamless member sees zero repos — before the fix this returned the
 	// full org-wide list to any org member regardless of team membership.
 	rec = httptest.NewRecorder()
-	rig.s.handleRepoProfiles(rec, rig.req(http.MethodGet, "/api/repos", rig.teamless, nil))
+	rig.s.handleRepositories(rec, rig.req(http.MethodGet, "/api/repos", rig.teamless, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("teamless GET /api/repos: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -164,7 +164,7 @@ func (r *repoScopeRig) baseBranch(t *testing.T, owner, repo string) string {
 	t.Helper()
 	var got *string
 	if err := r.h.AdminDB.QueryRow(
-		`SELECT base_branch FROM repo_profiles WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)`,
+		`SELECT base_branch FROM repositories WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)`,
 		r.orgID, owner, repo,
 	).Scan(&got); err != nil {
 		t.Fatalf("read base_branch for %s/%s: %v", owner, repo, err)
@@ -256,18 +256,18 @@ func TestHandleRepoUpdate_RequiresAdmin(t *testing.T) {
 	}
 }
 
-// TestHandleRepoProfiles_CanEdit pins the projection the Repos page gates
+// TestHandleRepositories_CanEdit pins the projection the Repos page gates
 // its base-branch control on: it mirrors the PATCH gate per row, so the
 // client never has to re-derive authz from role (org admin and team admin
 // are orthogonal, and only the server knows which tracking teams the caller
 // administers).
-func TestHandleRepoProfiles_CanEdit(t *testing.T) {
+func TestHandleRepositories_CanEdit(t *testing.T) {
 	rig := newRepoScopeRig(t)
 
 	canEdit := func(callerID string) map[string]bool {
 		t.Helper()
 		rec := httptest.NewRecorder()
-		rig.s.handleRepoProfiles(rec, rig.req(http.MethodGet, "/api/repos", callerID, nil))
+		rig.s.handleRepositories(rec, rig.req(http.MethodGet, "/api/repos", callerID, nil))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s GET /api/repos: status = %d; body=%s", callerID, rec.Code, rec.Body.String())
 		}

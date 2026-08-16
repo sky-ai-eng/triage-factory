@@ -72,7 +72,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	const slug = "sky-ai-eng/triage-factory"
 	const cloneURL = "https://github.com/sky-ai-eng/triage-factory.git"
 
-	if err := sqlitestore.New(database).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
+	if err := sqlitestore.New(database).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		ID:          slug,
 		Owner:       "sky-ai-eng",
 		Repo:        "triage-factory",
@@ -361,7 +361,7 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	}
 
 	// The imported pin must be tracked for the importing team, not just
-	// upserted into repo_profiles. repo_profiles is a derived cache of
+	// upserted into repositories. repositories is a derived cache of
 	// team_github_repos, and the router team↔repo gate keys off the
 	// tracking table — without this row the team's handlers are dropped
 	// for the repo and polled events create no tasks until the user

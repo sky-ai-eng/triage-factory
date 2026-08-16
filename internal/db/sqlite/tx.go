@@ -79,7 +79,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Conversations:    newConversationStore(tx),
 		Artifacts:        newArtifactStore(tx),
 		Entities:         newEntityStore(tx, tx),
-		Repos:            newRepoStore(tx, tx),
+		Repos:            newRepositoryStore(tx, tx),
 		PendingFirings:   newPendingFiringsStore(tx),
 		Projects:         newProjectStore(tx, tx),
 		Events:           newEventStore(tx, tx),

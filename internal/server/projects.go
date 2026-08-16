@@ -925,7 +925,7 @@ func validatePinnedRepoShape(repos []string) ([]string, string) {
 // existence check: every slug must be a repo the project's *team* tracks
 // (team_github_repos). Repos are per-team, so pinning is
 // gated on the team's set rather than the org-wide union — a repo another
-// team tracks (and that therefore exists in the shared repo_profiles
+// team tracks (and that therefore exists in the shared repositories
 // cache) is still rejected here if the project's own team doesn't track
 // it. This pins the UX contract — the frontend presents pinned_repos as a
 // multi-select over the team's tracked repos, so an untracked slug

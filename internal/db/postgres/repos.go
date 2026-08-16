@@ -12,25 +12,25 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// repoStore is the Postgres impl of db.RepoStore. Wired against the
+// repoStore is the Postgres impl of db.RepositoryStore. Wired against the
 // app pool in postgres.New: every consumer is request-equivalent
 // (repos handler, settings handler, projects handler, curator) or
 // runs in a startup/profiler goroutine that already operates within
-// the org's identity scope. RLS policy repo_profiles_all gates every
+// the org's identity scope. RLS policy repositories_all gates every
 // statement on (org_id = current_org_id() AND user_has_org_access);
 // org_id is also included in every WHERE/INSERT clause as defense
 // in depth.
 //
 // # Synthetic uuid vs natural "owner/repo" id
 //
-// The Postgres schema gives repo_profiles a synthetic uuid PK plus a
+// The Postgres schema gives repositories a synthetic uuid PK plus a
 // UNIQUE(org_id, source, owner, repo) natural key. The store interface
 // surfaces every repo by its "owner/repo" string — that's what every
-// caller passes and what domain.RepoProfile.ID returns. So this impl:
+// caller passes and what domain.Repository.ID returns. So this impl:
 //
 //   - Accepts `repoID` ("owner/repo") on every method, splits to
 //     (owner, repo), and queries by the natural key.
-//   - Returns RepoProfile.ID as `owner + "/" + repo` so callers see
+//   - Returns Repository.ID as `owner + "/" + repo` so callers see
 //     identical shapes between backends — the synthetic uuid never
 //     leaks across the boundary.
 //
@@ -54,21 +54,21 @@ type repoStore struct {
 	admin queryer
 }
 
-func newRepoStore(q, admin queryer) db.RepoStore {
+func newRepositoryStore(q, admin queryer) db.RepositoryStore {
 	return &repoStore{q: q, admin: admin}
 }
 
-var _ db.RepoStore = (*repoStore)(nil)
+var _ db.RepositoryStore = (*repoStore)(nil)
 
-func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.RepoProfile) error {
-	return upsertRepoProfile(ctx, s.q, orgID, p)
+func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repository) error {
+	return upsertRepository(ctx, s.q, orgID, p)
 }
 
-func (s *repoStore) UpsertSystem(ctx context.Context, orgID string, p domain.RepoProfile) error {
-	return upsertRepoProfile(ctx, s.admin, orgID, p)
+func (s *repoStore) UpsertSystem(ctx context.Context, orgID string, p domain.Repository) error {
+	return upsertRepository(ctx, s.admin, orgID, p)
 }
 
-func upsertRepoProfile(ctx context.Context, q queryer, orgID string, p domain.RepoProfile) error {
+func upsertRepository(ctx context.Context, q queryer, orgID string, p domain.Repository) error {
 	source, err := domain.NormalizeRepoSource(p.Source)
 	if err != nil {
 		return err
@@ -88,13 +88,13 @@ func upsertRepoProfile(ctx context.Context, q queryer, orgID string, p domain.Re
 	// leave it as the one create path that could still duplicate. owner/repo
 	// are absent from the SET list, so the stored casing stays sticky.
 	_, err = q.ExecContext(ctx, `
-		INSERT INTO repo_profiles
+		INSERT INTO repositories
 		  (org_id, source, owner, repo, external_id, description, has_readme, has_claude_md, has_agents_md,
 		   profile_text, clone_url, default_branch, profiled_at)
 		VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, $8, $9,
 		        NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), $13)
 		ON CONFLICT (org_id, source, lower(owner), lower(repo)) DO UPDATE SET
-		  external_id    = COALESCE(EXCLUDED.external_id, repo_profiles.external_id),
+		  external_id    = COALESCE(EXCLUDED.external_id, repositories.external_id),
 		  description    = EXCLUDED.description,
 		  has_readme     = EXCLUDED.has_readme,
 		  has_claude_md  = EXCLUDED.has_claude_md,
@@ -115,16 +115,16 @@ func upsertRepoProfile(ctx context.Context, q queryer, orgID string, p domain.Re
 	return err
 }
 
-func (s *repoStore) GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.RepoProfile, error) {
-	return getOrCreateRepoProfile(ctx, s.admin, orgID, ref)
+func (s *repoStore) GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error) {
+	return getOrCreateRepository(ctx, s.admin, orgID, ref)
 }
 
-// getOrCreateRepoProfile is the store method's body, taking a queryer so it
+// getOrCreateRepository is the store method's body, taking a queryer so it
 // composes inside a caller's transaction. Its create half is
-// insertRepoProfileRow, which the tracked-set reconcile in
+// insertRepositoryRow, which the tracked-set reconcile in
 // team_github_repos.go calls directly — that reconcile has already computed
 // which repos are new, so it skips the lookup rather than the insert.
-func getOrCreateRepoProfile(ctx context.Context, q queryer, orgID string, ref domain.RepoRef) (*domain.RepoProfile, error) {
+func getOrCreateRepository(ctx context.Context, q queryer, orgID string, ref domain.RepoRef) (*domain.Repository, error) {
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {
 		return nil, err
@@ -133,25 +133,25 @@ func getOrCreateRepoProfile(ctx context.Context, q queryer, orgID string, ref do
 	// returns is the row that exists at a single point in time rather than
 	// three separate ones. A caller that already has a tx keeps it — inTx
 	// passes a *sql.Tx through.
-	var out *domain.RepoProfile
+	var out *domain.Repository
 	err = inTx(ctx, q, func(tx queryer) error {
-		existing, err := findRepoProfileByRef(ctx, tx, orgID, source, ref)
+		existing, err := findRepositoryByRef(ctx, tx, orgID, source, ref)
 		if err != nil {
 			return err
 		}
 		if existing == nil {
-			if err := insertRepoProfileRow(ctx, tx, orgID, ref); err != nil {
+			if err := insertRepositoryRow(ctx, tx, orgID, ref); err != nil {
 				return err
 			}
 			// Re-read rather than RETURNING: the INSERT is guarded and
 			// DO NOTHING, so this is also what returns the winner's row when
 			// a concurrent creator got there first.
-			created, err := findRepoProfileByRef(ctx, tx, orgID, source, ref)
+			created, err := findRepositoryByRef(ctx, tx, orgID, source, ref)
 			if err != nil {
 				return err
 			}
 			if created == nil {
-				return fmt.Errorf("repo_profiles row for %s vanished immediately after insert", ref.Slug())
+				return fmt.Errorf("repositories row for %s vanished immediately after insert", ref.Slug())
 			}
 			out = created
 			return nil
@@ -159,7 +159,7 @@ func getOrCreateRepoProfile(ctx context.Context, q queryer, orgID string, ref do
 		// The row stands as it is, except for an id the caller just learned.
 		if ref.ExternalID != "" && existing.ExternalID != ref.ExternalID {
 			if _, err := tx.ExecContext(ctx, `
-				UPDATE repo_profiles
+				UPDATE repositories
 				   SET external_id = $1
 				 WHERE org_id = $2 AND source = $3 AND owner = $4 AND repo = $5
 			`, ref.ExternalID, orgID, source, existing.Owner, existing.Repo); err != nil {
@@ -176,16 +176,16 @@ func getOrCreateRepoProfile(ctx context.Context, q queryer, orgID string, ref do
 	return out, nil
 }
 
-// findRepoProfileByRef looks a repository up by provider identity, matching
+// findRepositoryByRef looks a repository up by provider identity, matching
 // owner/repo case-INSENSITIVELY (GitHub identifiers are). Returns nil when the
 // repository has no row.
-func findRepoProfileByRef(ctx context.Context, q queryer, orgID, source string, ref domain.RepoRef) (*domain.RepoProfile, error) {
+func findRepositoryByRef(ctx context.Context, q queryer, orgID, source string, ref domain.RepoRef) (*domain.Repository, error) {
 	row := q.QueryRowContext(ctx, `
 		SELECT `+repoProfileFullColumns+`
-		FROM repo_profiles
+		FROM repositories
 		WHERE org_id = $1 AND source = $2 AND lower(owner) = lower($3) AND lower(repo) = lower($4)
 	`, orgID, source, ref.Owner, ref.Repo)
-	p, err := pgScanRepoProfileFull(row)
+	p, err := pgScanRepositoryFull(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -195,12 +195,12 @@ func findRepoProfileByRef(ctx context.Context, q queryer, orgID, source string, 
 	return &p, nil
 }
 
-// insertRepoProfileRow is the single INSERT that brings a repository into
-// repo_profiles — get-or-create, SetConfigured, and the tracked-set reconcile
+// insertRepositoryRow is the single INSERT that brings a repository into
+// repositories — get-or-create, SetConfigured, and the tracked-set reconcile
 // all create through it, so no create path can write a row without the
 // identity columns, and all three agree on what "already exists" means.
 //
-// "Already exists" means the repo_profiles_identity index: (org_id, source)
+// "Already exists" means the repositories_identity index: (org_id, source)
 // plus the case-FOLDED slug, because GitHub identifiers are case-insensitive
 // and one repository is one row however it is spelled. Enforcing that in the
 // index rather than in a guard is what makes concurrent creates safe without a
@@ -214,33 +214,33 @@ func findRepoProfileByRef(ctx context.Context, q queryer, orgID, source string, 
 // constraint this row can violate — the identity index, and the slug primary
 // key on the SQLite side — means the same thing, that the repository is
 // already here, and a targeted clause would raise on the one it did not name.
-func insertRepoProfileRow(ctx context.Context, q queryer, orgID string, ref domain.RepoRef) error {
+func insertRepositoryRow(ctx context.Context, q queryer, orgID string, ref domain.RepoRef) error {
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {
 		return err
 	}
 	if _, err := q.ExecContext(ctx, `
-		INSERT INTO repo_profiles (org_id, source, owner, repo, external_id)
+		INSERT INTO repositories (org_id, source, owner, repo, external_id)
 		VALUES ($1, $2, $3, $4, NULLIF($5, ''))
 		ON CONFLICT DO NOTHING
 	`, orgID, source, ref.Owner, ref.Repo, ref.ExternalID); err != nil {
-		return fmt.Errorf("insert repo_profiles[%s]: %w", ref.Slug(), err)
+		return fmt.Errorf("insert repositories[%s]: %w", ref.Slug(), err)
 	}
 	return nil
 }
 
-func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
-	return listRepoProfiles(ctx, s.q, orgID)
+func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.Repository, error) {
+	return listRepositories(ctx, s.q, orgID)
 }
 
-func (s *repoStore) ListSystem(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
-	return listRepoProfiles(ctx, s.admin, orgID)
+func (s *repoStore) ListSystem(ctx context.Context, orgID string) ([]domain.Repository, error) {
+	return listRepositories(ctx, s.admin, orgID)
 }
 
-func listRepoProfiles(ctx context.Context, q queryer, orgID string) ([]domain.RepoProfile, error) {
+func listRepositories(ctx context.Context, q queryer, orgID string) ([]domain.Repository, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+repoProfileFullColumns+`
-		FROM repo_profiles
+		FROM repositories
 		WHERE org_id = $1
 		ORDER BY owner, repo
 	`, orgID)
@@ -249,9 +249,9 @@ func listRepoProfiles(ctx context.Context, q queryer, orgID string) ([]domain.Re
 	}
 	defer rows.Close()
 
-	out := []domain.RepoProfile{}
+	out := []domain.Repository{}
 	for rows.Next() {
-		p, err := pgScanRepoProfileFull(rows)
+		p, err := pgScanRepositoryFull(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -260,7 +260,7 @@ func listRepoProfiles(ctx context.Context, q queryer, orgID string) ([]domain.Re
 	return out, rows.Err()
 }
 
-// repoProfileTrackedByViewerTeams scopes a repo_profiles row (alias rp) to
+// repoProfileTrackedByViewerTeams scopes a repositories row (alias rp) to
 // the tracked repos of the viewer's teams — the RLS-does-the-scoping
 // semi-join pattern factory.go's factoryGitHubRepoTrackedExists and
 // entities.go's jiraTeamProjectMembershipExists use for the same class of
@@ -277,10 +277,10 @@ const repoProfileTrackedByViewerTeams = `EXISTS (
 	  AND lower(g.repo) = lower(rp.repo)
 )`
 
-func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
+func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string) ([]domain.Repository, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+repoProfileFullColumnsAliased+`
-		FROM repo_profiles rp
+		FROM repositories rp
 		WHERE rp.org_id = $1
 		  AND `+repoProfileTrackedByViewerTeams+`
 		ORDER BY rp.owner, rp.repo
@@ -290,9 +290,9 @@ func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string) ([]domain.
 	}
 	defer rows.Close()
 
-	out := []domain.RepoProfile{}
+	out := []domain.Repository{}
 	for rows.Next() {
-		p, err := pgScanRepoProfileFull(rows)
+		p, err := pgScanRepositoryFull(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -301,11 +301,11 @@ func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string) ([]domain.
 	return out, rows.Err()
 }
 
-func (s *repoStore) ListWithContent(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
+func (s *repoStore) ListWithContent(ctx context.Context, orgID string) ([]domain.Repository, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT owner, repo, description, has_readme, has_claude_md, has_agents_md,
 		       profile_text, clone_url, default_branch, base_branch
-		FROM repo_profiles
+		FROM repositories
 		WHERE org_id = $1
 		  AND profile_text IS NOT NULL AND profile_text != ''
 		ORDER BY owner, repo
@@ -315,9 +315,9 @@ func (s *repoStore) ListWithContent(ctx context.Context, orgID string) ([]domain
 	}
 	defer rows.Close()
 
-	out := []domain.RepoProfile{}
+	out := []domain.Repository{}
 	for rows.Next() {
-		var p domain.RepoProfile
+		var p domain.Repository
 		var description, profileText, cloneURL, defaultBranch, baseBranch sql.NullString
 		if err := rows.Scan(&p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch); err != nil {
 			return nil, err
@@ -354,7 +354,7 @@ func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames [
 
 		// List existing (owner/repo) entries scoped to org.
 		rows, err := tx.QueryContext(ctx,
-			`SELECT owner, repo FROM repo_profiles WHERE org_id = $1`, orgID)
+			`SELECT owner, repo FROM repositories WHERE org_id = $1`, orgID)
 		if err != nil {
 			return err
 		}
@@ -377,7 +377,7 @@ func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames [
 			id := e.owner + "/" + e.repo
 			if !desired[strings.ToLower(id)] {
 				if _, err := tx.ExecContext(ctx,
-					`DELETE FROM repo_profiles WHERE org_id = $1 AND owner = $2 AND repo = $3`,
+					`DELETE FROM repositories WHERE org_id = $1 AND owner = $2 AND repo = $3`,
 					orgID, e.owner, e.repo,
 				); err != nil {
 					return err
@@ -396,7 +396,7 @@ func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames [
 			if owner == "" || repo == "" {
 				continue
 			}
-			if err := insertRepoProfileRow(ctx, tx, orgID, domain.RepoRef{Owner: owner, Repo: repo}); err != nil {
+			if err := insertRepositoryRow(ctx, tx, orgID, domain.RepoRef{Owner: owner, Repo: repo}); err != nil {
 				return err
 			}
 		}
@@ -414,7 +414,7 @@ func (s *repoStore) ListConfiguredNamesSystem(ctx context.Context, orgID string)
 
 func listConfiguredRepoNames(ctx context.Context, q queryer, orgID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT owner, repo FROM repo_profiles WHERE org_id = $1 ORDER BY owner, repo`,
+		`SELECT owner, repo FROM repositories WHERE org_id = $1 ORDER BY owner, repo`,
 		orgID,
 	)
 	if err != nil {
@@ -444,7 +444,7 @@ func (s *repoStore) CountConfiguredSystem(ctx context.Context, orgID string) (in
 func countConfiguredRepos(ctx context.Context, q queryer, orgID string) (int, error) {
 	var count int
 	err := q.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM repo_profiles WHERE org_id = $1`, orgID,
+		`SELECT COUNT(*) FROM repositories WHERE org_id = $1`, orgID,
 	).Scan(&count)
 	return count, err
 }
@@ -459,7 +459,7 @@ func (s *repoStore) UpdateBaseBranch(ctx context.Context, orgID, repoID, baseBra
 	// case-insensitively, so a caller reaching this with different casing than
 	// what's stored must still find the row rather than silently affecting 0.
 	_, err := s.q.ExecContext(ctx, `
-		UPDATE repo_profiles
+		UPDATE repositories
 		   SET base_branch = NULLIF($1, '')
 		 WHERE org_id = $2 AND lower(owner) = lower($3) AND lower(repo) = lower($4)
 	`, baseBranch, orgID, owner, repo)
@@ -472,7 +472,7 @@ func (s *repoStore) SeedCloneURL(ctx context.Context, orgID, repoID, cloneURL st
 		return nil
 	}
 	_, err := s.q.ExecContext(ctx, `
-		UPDATE repo_profiles
+		UPDATE repositories
 		   SET clone_url = $1, updated_at = now()
 		 WHERE org_id = $2 AND lower(owner) = lower($3) AND lower(repo) = lower($4)
 		   AND (clone_url IS NULL OR clone_url = '')
@@ -480,15 +480,15 @@ func (s *repoStore) SeedCloneURL(ctx context.Context, orgID, repoID, cloneURL st
 	return err
 }
 
-func (s *repoStore) Get(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error) {
-	return getRepoProfile(ctx, s.q, orgID, repoID)
+func (s *repoStore) Get(ctx context.Context, orgID, repoID string) (*domain.Repository, error) {
+	return getRepository(ctx, s.q, orgID, repoID)
 }
 
-func (s *repoStore) GetSystem(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error) {
-	return getRepoProfile(ctx, s.admin, orgID, repoID)
+func (s *repoStore) GetSystem(ctx context.Context, orgID, repoID string) (*domain.Repository, error) {
+	return getRepository(ctx, s.admin, orgID, repoID)
 }
 
-func getRepoProfile(ctx context.Context, q queryer, orgID, repoID string) (*domain.RepoProfile, error) {
+func getRepository(ctx context.Context, q queryer, orgID, repoID string) (*domain.Repository, error) {
 	owner, repo := splitRepoSlug(repoID)
 	if owner == "" || repo == "" {
 		return nil, nil
@@ -502,10 +502,10 @@ func getRepoProfile(ctx context.Context, q queryer, orgID, repoID string) (*doma
 	// have said yes.
 	row := q.QueryRowContext(ctx, `
 		SELECT `+repoProfileFullColumns+`
-		FROM repo_profiles
+		FROM repositories
 		WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)
 	`, orgID, owner, repo)
-	p, err := pgScanRepoProfileFull(row)
+	p, err := pgScanRepositoryFull(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -525,7 +525,7 @@ func (s *repoStore) UpdateCloneStatusSystem(ctx context.Context, orgID, owner, r
 
 func updateRepoCloneStatus(ctx context.Context, q queryer, orgID, owner, repo, status, errMsg, errKind string) error {
 	_, err := q.ExecContext(ctx, `
-		UPDATE repo_profiles
+		UPDATE repositories
 		   SET clone_status = $1, clone_error = NULLIF($2, ''), clone_error_kind = NULLIF($3, '')
 		 WHERE org_id = $4 AND lower(owner) = lower($5) AND lower(repo) = lower($6)
 	`, status, errMsg, errKind, orgID, owner, repo)
@@ -558,7 +558,7 @@ func (s *repoStore) FillMissingExternalIDsSystem(ctx context.Context, orgID stri
 	// makes it a no-op in the steady state (every id already recorded), which
 	// is what it will be on all but the first cycle after an upgrade.
 	rows, err := s.admin.QueryContext(ctx, `
-		UPDATE repo_profiles rp
+		UPDATE repositories rp
 		   SET external_id = v.external_id
 		  FROM unnest($2::text[], $3::text[], $4::text[], $5::text[])
 		       AS v(source, owner, repo, external_id)
@@ -589,7 +589,7 @@ func (s *repoStore) GetPullsPollStateSystem(ctx context.Context, orgID, repoID s
 	var polledAt sql.NullTime
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT pulls_etag, pulls_polled_at
-		  FROM repo_profiles
+		  FROM repositories
 		 WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)
 	`, orgID, owner, repo).Scan(&etag, &polledAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -611,7 +611,7 @@ func (s *repoStore) SetPullsPollStateSystem(ctx context.Context, orgID, repoID, 
 		return nil
 	}
 	_, err := s.admin.ExecContext(ctx, `
-		UPDATE repo_profiles
+		UPDATE repositories
 		   SET pulls_etag = NULLIF($1, ''), pulls_polled_at = $2
 		 WHERE org_id = $3 AND lower(owner) = lower($4) AND lower(repo) = lower($5)
 	`, etag, polledAt, orgID, owner, repo)
@@ -625,7 +625,7 @@ type pgRowScanner interface {
 	Scan(dest ...any) error
 }
 
-// repoProfileFullColumns is the projection pgScanRepoProfileFull reads, named
+// repoProfileFullColumns is the projection pgScanRepositoryFull reads, named
 // once so the queries that share it cannot drift out of column order.
 // repoProfileFullColumnsAliased is the same list qualified for the `rp` alias
 // ListTeamScoped's semi-join needs.
@@ -639,12 +639,12 @@ const (
 		       rp.clone_status, rp.clone_error, rp.clone_error_kind`
 )
 
-// pgScanRepoProfileFull reads the projection shared by Get, List, and the
+// pgScanRepositoryFull reads the projection shared by Get, List, and the
 // get-or-create lookup (no id column — the natural key is reconstructed
 // from owner + "/" + repo so callers see the "owner/repo" form
 // uniformly across backends).
-func pgScanRepoProfileFull(row pgRowScanner) (domain.RepoProfile, error) {
-	var p domain.RepoProfile
+func pgScanRepositoryFull(row pgRowScanner) (domain.Repository, error) {
+	var p domain.Repository
 	var externalID, description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind sql.NullString
 	var profiledAt sql.NullTime
 	if err := row.Scan(&p.Owner, &p.Repo, &p.Source, &externalID, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind); err != nil {

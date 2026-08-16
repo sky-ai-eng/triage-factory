@@ -109,7 +109,7 @@ func TestCheckPush_UnprofiledRepoStillRefusesMain(t *testing.T) {
 // repo, not just the two universal names.
 func TestCheckPush_ProfiledDefaultBranchIsProtected(t *testing.T) {
 	stores := newPolicyStores(t)
-	if err := stores.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
+	if err := stores.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		ID: "octo/repo", Owner: "octo", Repo: "repo",
 		DefaultBranch: "trunk", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {

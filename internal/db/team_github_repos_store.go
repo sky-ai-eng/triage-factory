@@ -11,14 +11,14 @@ import (
 // source of truth for which repos a team tracks. The GitHub
 // tracking-scope twin of jira_project_status_rules.
 //
-// # repo_profiles is derived from this table
+// # repositories is derived from this table
 //
-// repo_profiles stays org-shared and stays the polled set, but it is now
+// repositories stays org-shared and stays the polled set, but it is now
 // a *derived cache*: the org-wide UNION of every team's rows here. It is
 // never user-written directly anymore — ReplaceForTeam mutates the team's
-// rows AND reconciles repo_profiles to the new union atomically, in one
-// transaction. The poller keeps reading repo_profiles via
-// RepoStore.ListConfiguredNamesSystem, unchanged.
+// rows AND reconciles repositories to the new union atomically, in one
+// transaction. The poller keeps reading repositories via
+// RepositoryStore.ListConfiguredNamesSystem, unchanged.
 //
 // # Pool split (Postgres)
 //
@@ -34,7 +34,7 @@ import (
 //     non-boundary team scope is bypassed. The whole team-write +
 //     reconcile runs in the caller's tx (atomic), serialized per org by a
 //     transaction advisory lock so concurrent same-org saves can't race
-//     repo_profiles into an inconsistent state.
+//     repositories into an inconsistent state.
 //   - ListForTeamSystem, ListForOrgSystem, TracksRepoSystem run on the
 //     admin pool. The router gate + any poll caller resolve tracking
 //     without a JWT-claims context.
@@ -56,7 +56,7 @@ type TeamGitHubReposStore interface {
 
 	// ListForOrgSystem returns the DISTINCT (owner, repo) union across
 	// every team in the org, ordered by (owner, repo) — the polled set
-	// without going through repo_profiles. Admin pool in Postgres: the
+	// without going through repositories. Admin pool in Postgres: the
 	// union spans teams the caller may not belong to.
 	ListForOrgSystem(ctx context.Context, orgID string) ([]domain.TeamGitHubRepo, error)
 
@@ -75,11 +75,11 @@ type TeamGitHubReposStore interface {
 	// semantics mirroring JiraStatusRulesStore.ReplaceForTeam. Passing an
 	// empty slice clears every row for the team.
 	//
-	// In the same transaction it reconciles the org-shared repo_profiles
+	// In the same transaction it reconciles the org-shared repositories
 	// cache to the new org-wide union: newly-tracked repos get a skeleton
 	// row, a repo no team tracks anymore is GC'd, and a repo still tracked
 	// by another team survives with its cached profile intact. Atomic — if
-	// the tx rolls back, neither team_github_repos nor repo_profiles moves.
+	// the tx rolls back, neither team_github_repos nor repositories moves.
 	// Postgres serializes concurrent same-org calls with a per-org
 	// transaction advisory lock so the union recompute can't race; the
 	// cross-team union read goes through the tf.org_tracked_repos(org)
@@ -115,7 +115,7 @@ type TeamGitHubReposStore interface {
 	// plus an explicit team-admin predicate on the matched row.
 	//
 	// This is the mutation gate for org-wide repo configuration
-	// (repo_profiles carries no team_id, so a write by a member of one
+	// (repositories carries no team_id, so a write by a member of one
 	// tracking team lands on every tracking team's runs). Membership alone
 	// is the *read* gate — TracksRepoViewerScoped — and the two are
 	// deliberately separate: a caller who sees a repo in their list but
