@@ -37,6 +37,13 @@ var listRouteExceptions = map[string]string{
 	// writes its own envelope with httpx.NextPageToken. See
 	// conversationListResponse.
 	"POST /api/agent/conversations/list": "grouped response shape",
+	// Carries a readiness discriminator beside the list, because a first-ever
+	// open has nothing mirrored yet and an empty array there reads as "you have
+	// no repositories" rather than "we have not looked yet". Still resolves a
+	// page, still answers every paging key (with a real total_count on both
+	// credential classes), and mints its next token with httpx.NextPageToken.
+	// See githubRepoListResponse.
+	"POST /api/github/repos/list": "readiness discriminator beside the list",
 }
 
 func TestListRoutesResolveAPage(t *testing.T) {

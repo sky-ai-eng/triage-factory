@@ -59,7 +59,7 @@ type fakeMirror struct {
 
 func newFakeMirror() *fakeMirror { return &fakeMirror{rows: map[string][]string{}} }
 
-func (f *fakeMirror) ReplaceForInstallationSystem(_ context.Context, _, installationID string, repos []domain.InstallationRepository) error {
+func (f *fakeMirror) ReplaceForInstallationSystem(_ context.Context, _, installationID string, repos []domain.ReachableRepository) error {
 	f.replaces++
 	if f.err != nil {
 		return f.err
@@ -78,16 +78,36 @@ func (f *fakeMirror) ClearForInstallationSystem(_ context.Context, _, installati
 	return nil
 }
 
-func (f *fakeMirror) ListForOrgSystem(context.Context, string) ([]domain.InstallationRepository, error) {
+func (f *fakeMirror) ListForOrgSystem(context.Context, string) ([]domain.ReachableRepository, error) {
 	return nil, nil
 }
 
-func (f *fakeMirror) ListReachWithoutPurposeSystem(context.Context, string) ([]domain.InstallationRepository, error) {
+func (f *fakeMirror) ListReachWithoutPurposeSystem(context.Context, string) ([]domain.ReachableRepository, error) {
 	return nil, nil
 }
 
 func (f *fakeMirror) ListScopeDriftSystem(context.Context, string) ([]domain.TeamGitHubRepo, error) {
 	return nil, nil
+}
+
+// The PAT-tier half of the store. The reconcile is the App tier's writer and
+// never reaches these, so they exist only to satisfy the interface — and they
+// panic rather than no-op, so a reconcile that grew a PAT code path would fail
+// loudly here instead of writing nothing and passing.
+func (f *fakeMirror) ReplaceForPATSystem(context.Context, string, string, []domain.ReachableRepository) error {
+	panic("grantmirror must not write pat-tier entries")
+}
+
+func (f *fakeMirror) ListReachableSystem(context.Context, string, domain.GitHubCredentialClass, string, db.ListOpts) ([]domain.ReachableRepository, int, error) {
+	panic("grantmirror must not read the picker list")
+}
+
+func (f *fakeMirror) ReachableStateSystem(context.Context, string, domain.GitHubCredentialClass) (domain.ReachableCacheState, error) {
+	panic("grantmirror must not read cache state")
+}
+
+func (f *fakeMirror) ReachableSlugsSystem(context.Context, string, domain.GitHubCredentialClass, []string) (map[string]struct{}, error) {
+	panic("grantmirror must not read the write gate's slug set")
 }
 
 // fakeGrants answers per account login: a grant, whether the listing was
@@ -139,7 +159,7 @@ func live(installationID, login string) domain.OrgGitHubAppInstallation {
 	}
 }
 
-func newReconciler(apps db.GitHubAppsStore, mirror db.InstallationReposStore, grants clientSource) *Reconciler {
+func newReconciler(apps db.GitHubAppsStore, mirror db.ReachableReposStore, grants clientSource) *Reconciler {
 	return &Reconciler{apps: apps, mirror: mirror, clients: grants}
 }
 
@@ -305,8 +325,8 @@ func TestRunOrg_NoInstallationsIsANoOp(t *testing.T) {
 func TestRunOrg_CarriesRepositoryIDs(t *testing.T) {
 	apps := &fakeApps{app: activeApp(), installs: []domain.OrgGitHubAppInstallation{live("1", "acme")}}
 	mirror := newFakeMirror()
-	var captured []domain.InstallationRepository
-	capture := &capturingMirror{fakeMirror: mirror, onReplace: func(rows []domain.InstallationRepository) {
+	var captured []domain.ReachableRepository
+	capture := &capturingMirror{fakeMirror: mirror, onReplace: func(rows []domain.ReachableRepository) {
 		captured = rows
 	}}
 	grants := fakeGrants{byLogin: map[string]grantAnswer{
@@ -368,10 +388,10 @@ func TestRunOrg_AnUnnameableEntryRefusesTheWholeAnswer(t *testing.T) {
 // replace, which is what pins the mapping from GitHub's payload onto the row.
 type capturingMirror struct {
 	*fakeMirror
-	onReplace func([]domain.InstallationRepository)
+	onReplace func([]domain.ReachableRepository)
 }
 
-func (c *capturingMirror) ReplaceForInstallationSystem(ctx context.Context, orgID, installationID string, repos []domain.InstallationRepository) error {
+func (c *capturingMirror) ReplaceForInstallationSystem(ctx context.Context, orgID, installationID string, repos []domain.ReachableRepository) error {
 	c.onReplace(repos)
 	return c.fakeMirror.ReplaceForInstallationSystem(ctx, orgID, installationID, repos)
 }

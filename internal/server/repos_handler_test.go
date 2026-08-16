@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +18,6 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -30,6 +30,17 @@ import (
 func newAppRepoStub(t *testing.T, reposByInstall map[string][]string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
+	// GET /app/installations — what the grant refresh reconciles existence
+	// against before it reads any grant. Registered explicitly rather than left
+	// to the subtree pattern below, which would redirect the GET onto the
+	// token-mint handler and answer 405. The stub reports exactly the
+	// installations its repo map has entries for, so a refresh neither
+	// soft-removes a seeded installation nor discovers one the fixture never
+	// staged.
+	mux.HandleFunc("GET /api/v3/app/installations", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(stubInstallations(reposByInstall))
+	})
 	mux.HandleFunc("/api/v3/app/installations/", func(w http.ResponseWriter, r *http.Request) {
 		// The real endpoint is POST /app/installations/{id}/access_tokens —
 		// reject other methods so a regression that issues the wrong verb fails
@@ -75,6 +86,36 @@ func newAppRepoStub(t *testing.T, reposByInstall map[string][]string) *httptest.
 	return srv
 }
 
+// stubInstallations renders the installation objects GET /app/installations
+// answers with, one per key of a repo map. The account login is derived from the
+// first slug's owner so the fixture does not have to state it twice — a grant
+// map and an account list that disagreed would send the refresh looking for a
+// token it cannot mint.
+func stubInstallations(reposByInstall map[string][]string) []map[string]any {
+	out := make([]map[string]any, 0, len(reposByInstall))
+	for id, slugs := range reposByInstall {
+		login := "acme"
+		if len(slugs) > 0 {
+			if owner, _, ok := strings.Cut(slugs[0], "/"); ok {
+				login = owner
+			}
+		}
+		// GitHub reports the installation id as a number; TF stores it as text.
+		// The fixture keys the map by the stored form, so it converts back here
+		// rather than making every caller write the id twice.
+		numericID, err := strconv.ParseInt(id, 10, 64)
+		if err != nil {
+			continue
+		}
+		out = append(out, map[string]any{
+			"id":         numericID,
+			"account":    map[string]any{"login": login, "type": "Organization"},
+			"created_at": "2026-01-02T03:04:05Z",
+		})
+	}
+	return out
+}
+
 func testRSAPEM(t *testing.T) string {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -111,22 +152,51 @@ func seedApp(t *testing.T, s *Server, stub *httptest.Server, installs []domain.O
 	}
 }
 
-// fetchPickerRepos walks every page of the picker's proxy list and returns the
-// concatenation, so the assertions below read the whole enumeration whether it
-// arrived in one page or several.
-func fetchPickerRepos(t *testing.T, s *Server) []ghclient.UserRepo {
+// pickerPage is the picker's response envelope: the shared list keys plus the
+// readiness discriminator. Decoded as its own type rather than through
+// decodeList because `status` is the field most of these assertions are about.
+type pickerPage struct {
+	Items         []githubRepoJSON `json:"items"`
+	NextPageToken string           `json:"next_page_token"`
+	TotalCount    int              `json:"total_count"`
+	Status        string           `json:"status"`
+}
+
+// fetchPickerPage reads one page of the picker list with the given body.
+func fetchPickerPage(t *testing.T, s *Server, body map[string]any) pickerPage {
 	t.Helper()
-	var all []ghclient.UserRepo
+	rec := doJSON(t, s, http.MethodPost, "/api/github/repos/list", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("picker list = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var page pickerPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode picker page: %v; body=%s", err, rec.Body.String())
+	}
+	return page
+}
+
+// fetchPickerRepos walks every page of the picker list and returns the
+// concatenated slugs, so the assertions below read the whole set whether it
+// arrived in one page or several. It also pins the two properties every page
+// owes on both credential classes: a real total_count (never the null a proxy
+// list answered) and the ready discriminator.
+func fetchPickerRepos(t *testing.T, s *Server) []string {
+	t.Helper()
+	var all []string
 	body := map[string]any{}
 	for range 10 { // a fixture never needs 10 pages; the bound stops a token loop
-		rec := doJSON(t, s, http.MethodPost, "/api/github/repos/list", body)
-		page := decodeList[ghclient.UserRepo](t, rec)
-		// A proxy list cannot count its upstream, so total_count is null.
-		if page.TotalCount != nil {
-			t.Errorf("total_count = %d, want null on a proxy list", *page.TotalCount)
+		page := fetchPickerPage(t, s, body)
+		if page.Status != githubRepoStatusReady {
+			t.Fatalf("picker status = %q, want %q — the mirror was refreshed before this read", page.Status, githubRepoStatusReady)
 		}
-		all = append(all, page.Items...)
+		for _, item := range page.Items {
+			all = append(all, item.FullName)
+		}
 		if page.NextPageToken == "" {
+			if page.TotalCount != len(all) {
+				t.Errorf("total_count = %d after walking %d rows; want them equal", page.TotalCount, len(all))
+			}
 			return all
 		}
 		body = map[string]any{"page_token": page.NextPageToken}
@@ -135,16 +205,8 @@ func fetchPickerRepos(t *testing.T, s *Server) []ghclient.UserRepo {
 	return nil
 }
 
-func fullNames(repos []ghclient.UserRepo) []string {
-	out := make([]string, len(repos))
-	for i, r := range repos {
-		out[i] = r.FullName
-	}
-	return out
-}
-
 // App org with a single installation: the picker lists that installation's
-// repositories rather than calling /user/repos.
+// repositories, sourced from the mirror the grant refresh wrote.
 func TestHandleGitHubRepos_AppSingleInstallation(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -154,18 +216,21 @@ func TestHandleGitHubRepos_AppSingleInstallation(t *testing.T) {
 	seedApp(t, srv, stub, []domain.OrgGitHubAppInstallation{
 		{InstallationID: "111", AccountType: "Organization", AccountLogin: "acme"},
 	})
+	reach := wireReachRefresh(t, srv)
+	reach.refresh(t, runmode.LocalDefaultOrgID, true)
 
-	got := fullNames(fetchPickerRepos(t, srv))
+	got := fetchPickerRepos(t, srv)
 	want := []string{"acme/api", "acme/web"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("repos = %v, want %v", got, want)
 	}
 }
 
-// App org where every installation's repo-list call fails: the handler must
-// surface a fetch error (502), not return an empty list that reads as "no
-// repositories" and warms the reachable-repo cache with an empty set.
-func TestHandleGitHubRepos_AppListFailureSurfacesError(t *testing.T) {
+// App org where the installation's repo-list call fails: the refresh writes
+// nothing, and the picker must say so. Answering an empty READY list would read
+// as "your App reaches no repositories", which is a claim only a successful
+// enumeration can make — the whole reason the readiness discriminator exists.
+func TestHandleGitHubRepos_AppListFailureLeavesTheMirrorUnclaimed(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	mux := http.NewServeMux()
@@ -192,23 +257,29 @@ func TestHandleGitHubRepos_AppListFailureSurfacesError(t *testing.T) {
 	seedApp(t, srv, stub, []domain.OrgGitHubAppInstallation{
 		{InstallationID: "111", AccountType: "Organization", AccountLogin: "acme"},
 	})
+	wireReachRefresh(t, srv)
 
-	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("picker list = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	page := fetchPickerPage(t, srv, map[string]any{})
+	if page.Status != githubRepoStatusDiscovering {
+		t.Errorf("picker status = %q after a failed enumeration; want %q — an empty ready list would claim the App reaches nothing",
+			page.Status, githubRepoStatusDiscovering)
+	}
+	if len(page.Items) != 0 || page.TotalCount != 0 {
+		t.Errorf("picker returned %d items / total %d with nothing mirrored; want none", len(page.Items), page.TotalCount)
 	}
 }
 
-// App org whose App is registered + active but installed on zero accounts,
-// with no PAT to fall back to: the picker returns a distinct 400 the frontend
-// keys install guidance off — not the generic "GitHub not configured" that
-// reads as "add a PAT". This is the first-run dead-end TFAC-324 makes
-// diagnosable.
+// App org whose App is registered + active but installed on zero accounts, with
+// no PAT to fall back to: the picker returns a distinct 409 the frontend keys
+// install guidance off — not the generic "GitHub not configured" that reads as
+// "add a PAT". This is the first-run dead-end TFAC-324 makes diagnosable, and it
+// is a preflight: it fires before the mirror is consulted, because "we have not
+// looked yet" promises that looking will eventually produce something.
 func TestHandleGitHubRepos_AppActiveZeroInstallations(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	// The stub is only here to wire the org's base URL + PEM; the zero-install
-	// case falls into the PAT path and never makes a GitHub call.
+	// case never makes a GitHub call.
 	stub := newAppRepoStub(t, nil)
 	seedApp(t, srv, stub, nil) // active App, zero installations
 
@@ -222,52 +293,47 @@ func TestHandleGitHubRepos_AppActiveZeroInstallations(t *testing.T) {
 	}
 }
 
-// A failed installations read (transient DB/store error) leaves insts nil,
-// which must NOT be reported as "not installed" — that claim is only valid on a
-// positive read of zero installations. The handler degrades to the PAT path and
-// returns the generic "not configured" instead. Guards the regression where the
-// swallowed read error masqueraded as an empty install set.
+// A failed installations read (transient DB/store error) must NOT be reported as
+// "not installed" — that claim is only valid on a positive read of zero
+// installations. The preflight degrades to serving whatever is mirrored, which
+// for a fresh org is the readiness state: honest about not knowing, rather than
+// asserting a configuration problem the read never established.
 func TestHandleGitHubRepos_AppListInstallationsErrorNotReportedAsUninstalled(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
+	seedBYOAppCredentialClass(t, srv, runmode.LocalDefaultOrgID)
 	srv.githubApps = &fakeGitHubAppsStore{
 		app:     &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "123", Slug: "acme-bot", Active: true},
 		listErr: errors.New("transient store failure"),
 	}
 
-	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("picker list = %d, want 409; body=%s", rec.Code, rec.Body.String())
-	}
-	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
-	if body := rec.Body.String(); strings.Contains(body, "not installed") {
-		t.Errorf("body=%s, want the generic not-connected message (a failed read must not report 'not installed')", body)
+	page := fetchPickerPage(t, srv, map[string]any{})
+	if page.Status != githubRepoStatusDiscovering {
+		t.Errorf("picker status = %q on a failed installations read; want %q", page.Status, githubRepoStatusDiscovering)
 	}
 }
 
-// App org with multiple installations: the picker walks the installations in
-// order, so the concatenation of its pages is every installation's repos.
-//
-// The old union deduped by full name and sorted globally; a proxy list resumes
-// from an upstream position and cannot do either without re-fetching every
-// account per page. A repository belongs to exactly one account, so the
-// accounts partition the result and the dedup was defensive rather than
-// load-bearing.
-func TestHandleGitHubRepos_AppMultiInstallationDedup(t *testing.T) {
+// App org with multiple installations: the mirror carries every installation's
+// grant, and the picker's order is the folded slug across all of them — one
+// order for the whole set, not per-account runs, because a list with a search
+// box over it is read alphabetically and offset paging needs a total order.
+func TestHandleGitHubRepos_AppMultiInstallation(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	stub := newAppRepoStub(t, map[string][]string{
 		"111": {"acme/api", "shared/lib"},
-		"222": {"beta/web", "shared/lib"}, // shared/lib overlaps → deduped
+		"222": {"beta/web"},
 	})
 	seedApp(t, srv, stub, []domain.OrgGitHubAppInstallation{
 		{InstallationID: "111", AccountType: "Organization", AccountLogin: "acme"},
 		{InstallationID: "222", AccountType: "Organization", AccountLogin: "beta"},
 	})
+	reach := wireReachRefresh(t, srv)
+	reach.refresh(t, runmode.LocalDefaultOrgID, true)
 
-	got := fullNames(fetchPickerRepos(t, srv))
-	want := []string{"acme/api", "shared/lib", "beta/web", "shared/lib"}
+	got := fetchPickerRepos(t, srv)
+	want := []string{"acme/api", "beta/web", "shared/lib"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("repos = %v, want %v (each installation's repos, in installation order)", got, want)
+		t.Errorf("repos = %v, want %v (every installation's repos, in one folded-slug order)", got, want)
 	}
 }

@@ -199,8 +199,8 @@ const MAX_ROWS_TO_WALK = 2000
  *  already has, and turns a quietly wrong answer into a visible failure.
  *
  *  `pageSize` exists for the routes that declare a smaller maximum than the
- *  standard 200 — the GitHub repos proxy is capped at the upstream's own 100,
- *  and asking for more is a 400. */
+ *  standard 200 — a proxy list capped at its upstream's own page size, where
+ *  asking for more is a 400. */
 export async function apiListAll<T>(
   path: string,
   body: ListRequest = {},

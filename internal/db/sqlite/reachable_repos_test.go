@@ -10,7 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestInstallationGrant_SQLite runs the shared grant-mirror conformance suite
+// TestReachableRepos_SQLite runs the shared reachable-repo conformance suite
 // against the SQLite impl. Each subtest opens a fresh in-memory DB.
 //
 // The org is the local sentinel rather than a fresh uuid: local mode is N=1 and
@@ -19,8 +19,8 @@ import (
 // raw SQL rather than through ReplaceForTeam, which is a full-set replace and
 // would drop the previous repository each time the suite tracks another one.
 // The registry row is minted first because the tracking row references it.
-func TestInstallationGrant_SQLite(t *testing.T) {
-	dbtest.RunInstallationGrantConformance(t, func(t *testing.T) dbtest.InstallationGrantBackend {
+func TestReachableRepos_SQLite(t *testing.T) {
+	dbtest.RunReachableReposConformance(t, func(t *testing.T) dbtest.ReachableReposBackend {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
@@ -43,9 +43,9 @@ func TestInstallationGrant_SQLite(t *testing.T) {
 			t.Fatalf("seed team: %v", err)
 		}
 
-		return dbtest.InstallationGrantBackend{
+		return dbtest.ReachableReposBackend{
 			Apps:   stores.GitHubApps,
-			Mirror: stores.InstallationRepos,
+			Mirror: stores.ReachableRepos,
 			OrgID:  orgID,
 			TrackRepo: func(t *testing.T, owner, repo string) {
 				t.Helper()

@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
+	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
@@ -187,6 +188,37 @@ func (a *App) buildAI() {
 		a.marketplaceStats = marketplacestats.NewManager(marketplacestats.NewAggregator(a.stores.Marketplace))
 		aiLog.Info("marketplace stats manager ready (per-org runners)")
 	}
+
+	// The App-installation grant reconcile, built here because two callers need
+	// the same instance: buildRouting hands its RunOrg to the poller (once per
+	// org per GitHub cycle, no TTL) and the reachable-cache refresher below
+	// makes it the App tier's refresh (TTL-gated, forceable). One reconcile
+	// object, two cadences — rather than a second enumeration path that could
+	// disagree with the first about what an installation reaches.
+	a.grantReconciler = grantmirror.NewReconciler(a.stores.GitHubApps, a.stores.ReachableRepos, a.ghResolver)
+
+	// Reachable-repo cache: per-org Runners refreshing the mirror the repository
+	// picker and the team-repos write gate both read. Sibling to the profiler in
+	// shape (TTL + force, per-org single flight) and deliberately NOT a
+	// system:poll: subscriber: its PAT arm is a full account enumeration, and
+	// hanging that off every poll completion would spend the rate-limit budget
+	// the pollers themselves need. It is kicked by the reads that care —
+	// a stale-mirror picker open — and forced by every credential change.
+	//
+	// The class resolver is built from the same two stores the server builds its
+	// own from: it is stateless, so two copies are two callers of one pair of
+	// reads rather than two answers, and keeping the definition in one type is
+	// what stops writer and reader from keying an org differently.
+	a.reachCache = reachcache.NewManager(reachcache.NewRefresher(
+		reachcache.NewClassResolver(a.stores.Orgs, a.stores.GitHubApps),
+		a.stores.ReachableRepos, a.ghResolver, a.grantReconciler.RunOrg, a.wsHub,
+	))
+	// SetReachTrigger: same relay-wrapper reasoning as SetScorerTrigger above —
+	// the picker read and the refresh control may land on a standby control pod,
+	// which builds a Manager (buildAI runs on every brain-capable role) that
+	// nothing would ever drive.
+	a.srv.SetReachTrigger(a.triggerReach)
+	reachLog.Info("reachable-repo cache manager ready (per-org runners)", "ttl", reachcache.TTL)
 }
 
 // buildExecution constructs the delegation spawner and the curator runtime,
@@ -577,9 +609,7 @@ func (a *App) buildRouting() {
 	// would go silent for precisely the org whose mirror needs correcting. Its
 	// leader gating is the poller's own, which is the same brain lease every
 	// other timer-driven pass sits behind.
-	a.pollerMgr.ReconcileGrant = grantmirror.NewReconciler(
-		a.stores.GitHubApps, a.stores.InstallationRepos, a.ghResolver,
-	).RunOrg
+	a.pollerMgr.ReconcileGrant = a.grantReconciler.RunOrg
 	a.pollerMgr.OnError = func(source, orgID string, err error) {
 		// Throttle key includes orgID so a chronic failure on one tenant
 		// doesn't suppress a fresh failure on another. Process-level errors

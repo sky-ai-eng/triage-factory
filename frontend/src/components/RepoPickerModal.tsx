@@ -1,21 +1,15 @@
-import { useState, useEffect, useId, useMemo, useCallback, useRef } from 'react'
+import { useState, useEffect, useId, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { RotateCw, ExternalLink } from 'lucide-react'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID, getGitHubAppStatus, getGitHubAppInstallURL } from '../lib/githubApp'
+import { listReachableRepos, refreshReachableRepos } from '../lib/githubRepos'
+import type { GitHubRepo, RepoListStatus } from '../lib/githubRepos'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import { useWebSocket } from '../hooks/useWebSocket'
 import SearchField from './SearchField'
-import { apiListAll, httpErrorMessage } from '../lib/apiClient'
-
-interface GitHubRepo {
-  full_name: string
-  html_url: string
-  description: string
-  language: string
-  pushed_at: string
-  private: boolean
-}
+import { httpErrorMessage } from '../lib/apiClient'
 
 interface Props {
   /** Initially selected repo full_names */
@@ -28,10 +22,6 @@ interface Props {
   inline?: boolean
   /** If provided, shows a Back button in inline mode */
   onBack?: () => void
-  /** Pre-fetched repo list — skips the /api/github/repos fetch if provided */
-  cachedRepos?: GitHubRepo[]
-  /** Called with fetched repos so the parent can cache them */
-  onReposFetched?: (repos: GitHubRepo[]) => void
   /**
    * True while the parent's onSave (the team-repos PUT) is in flight. Disables
    * the Continue/Save button and swaps in a spinner so a slow save on a large
@@ -59,20 +49,39 @@ interface Props {
 
 export type { GitHubRepo }
 
+/** How long to wait after the last keystroke before asking the server for the
+ *  filtered page. The filter is a round trip now rather than an array scan, so
+ *  a request per character would be both wasteful and out of order. */
+const SEARCH_DEBOUNCE_MS = 250
+
+/** How long the refresh control keeps spinning without hearing back. The
+ *  refresh is out of band and announces itself with a websocket ping, so this is
+ *  only the floor under a refresh that fails server-side and never pings —
+ *  long enough to cover a real enumeration of a large account. */
+const REFRESH_SPINNER_TIMEOUT_MS = 30_000
+
+/** How often to re-ask while the workspace has never been looked at. Only the
+ *  discovering state polls — a loaded picker waits for the ping — so this is a
+ *  backstop for a first open whose websocket ping never lands, not a substitute
+ *  for it. */
+const DISCOVERY_POLL_MS = 4_000
+
 export default function RepoPickerModal({
   selected,
   onSave,
   onClose,
   inline,
   onBack,
-  cachedRepos,
-  onReposFetched,
   saving = false,
   hideFooter = false,
   onSelectionChange,
 }: Props) {
-  const [repos, setRepos] = useState<GitHubRepo[]>(cachedRepos ?? [])
-  const [loading, setLoading] = useState(!cachedRepos)
+  const [repos, setRepos] = useState<GitHubRepo[]>([])
+  const [total, setTotal] = useState(0)
+  const [nextToken, setNextToken] = useState('')
+  const [listStatus, setListStatus] = useState<RepoListStatus>('ready')
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [checked, setChecked] = useState<Set<string>>(new Set(selected))
@@ -139,49 +148,109 @@ export default function RepoPickerModal({
     }
   }, [orgId])
 
-  const fetchRepos = useCallback(async () => {
+  // Whether the server has ever looked at this workspace's reachable set. It is
+  // a discriminator on the response rather than "items is empty", because an
+  // empty list would read as "you have no repositories" — a different and
+  // alarming claim.
+  const discovering = listStatus === 'discovering'
+
+  // The query the held page was fetched under. loadMore pairs the server's
+  // token with it, because a token is only valid for the search it was minted
+  // for — keeping the two together in one ref is what stops them ever pairing
+  // across a keystroke.
+  const loadedQuery = useRef('')
+
+  const fetchPage = useCallback(async (q: string) => {
     setLoading(true)
     setError('')
     try {
-      // Walk the proxy list to completion: the picker filters client-side
-      // over the whole reachable set, and a partial set would silently hide
-      // repos the user can genuinely select. apiListAll owns the walk and its
-      // ceiling, so this surface can't drift from the others — and past that
-      // ceiling it throws, which the catch below renders. The 100 is the
-      // route's own declared maximum (GitHub's per_page), not a choice here.
-      const all = await apiListAll<GitHubRepo>('/api/github/repos/list', {}, {}, 100)
-      setRepos(all)
-      onReposFetched?.(all)
+      const page = await listReachableRepos(q)
+      setRepos(page.items)
+      setTotal(page.total_count)
+      setNextToken(page.next_page_token)
+      setListStatus(page.status)
+      loadedQuery.current = q
     } catch (err) {
       console.error('Failed to fetch repos:', err)
-      // TFAC-324's distinct 400: an active App installed on zero accounts (and
+      // TFAC-324's distinct fault: an active App installed on zero accounts (and
       // no PAT to borrow) dead-ends the picker here. Point the user at the
       // install affordance rather than the generic "couldn't fetch" copy.
       const message = httpErrorMessage(err, 'Failed to fetch repositories')
       setError(
-        message === 'GitHub App is not installed on any account'
+        message === 'the GitHub App is not installed on any account'
           ? 'Your GitHub App isn’t installed on any account yet. Install it from the “Install the App” step (or the App installation section in Settings), then try again.'
           : 'Failed to fetch repositories',
       )
     } finally {
       setLoading(false)
     }
-  }, [onReposFetched])
+  }, [])
 
+  const loadMore = useCallback(async () => {
+    if (!nextToken || loading) return
+    setLoading(true)
+    try {
+      const page = await listReachableRepos(loadedQuery.current, nextToken)
+      setRepos((prev) => [...prev, ...page.items])
+      setTotal(page.total_count)
+      setNextToken(page.next_page_token)
+    } catch (err) {
+      // Keep what is on screen: blanking the list because one further page
+      // failed is worse than showing a short one with a retry still offered.
+      setError(httpErrorMessage(err, 'Failed to fetch more repositories'))
+    } finally {
+      setLoading(false)
+    }
+  }, [nextToken, loading])
+
+  // Debounced search → first page. Also the mount fetch (the initial search is
+  // empty), which is why there is no separate on-mount effect.
   useEffect(() => {
-    if (!cachedRepos) fetchRepos()
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    const id = setTimeout(() => fetchPage(search.trim()), SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(id)
+  }, [search, fetchPage])
 
-  const filtered = useMemo(() => {
-    if (!search.trim()) return repos
-    const q = search.toLowerCase()
-    return repos.filter(
-      (r) =>
-        r.full_name.toLowerCase().includes(q) ||
-        (r.description || '').toLowerCase().includes(q) ||
-        (r.language || '').toLowerCase().includes(q),
-    )
-  }, [repos, search])
+  // The server refreshes the reachable set out of band — on a first-ever open,
+  // on the refresh control, and whenever GitHub credentials change — and says
+  // so with a payload-free ping. Refetching on it is what turns "discovering
+  // repositories…" into a list without the user reloading.
+  useWebSocket(
+    useCallback(
+      (event) => {
+        if (event.type !== 'github_repos_updated') return
+        setRefreshing(false)
+        fetchPage(loadedQuery.current)
+      },
+      [fetchPage],
+    ),
+  )
+
+  // The ping is the fast path, not the only one. While the workspace has never
+  // been looked at there is nothing on screen at all, so this state needs to
+  // resolve even where the ping doesn't land — a socket that reconnected mid
+  // refresh, or the setup wizard on a page whose socket isn't up yet. Polls only
+  // in the discovering state, so a loaded picker costs nothing.
+  useEffect(() => {
+    if (!discovering) return
+    const id = setInterval(() => fetchPage(loadedQuery.current), DISCOVERY_POLL_MS)
+    return () => clearInterval(id)
+  }, [discovering, fetchPage])
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true)
+    setError('')
+    try {
+      await refreshReachableRepos()
+      // The refresh runs out of band, so the ping below is what normally ends
+      // this spinner. Time it out anyway: a refresh that fails server-side (an
+      // expired credential, a GitHub outage) never pings, and a control stuck on
+      // "Refreshing…" forever is a worse lie than one that just stops.
+      setTimeout(() => setRefreshing(false), REFRESH_SPINNER_TIMEOUT_MS)
+    } catch (err) {
+      setRefreshing(false)
+      setError(httpErrorMessage(err, 'Could not refresh the repository list.'))
+    }
+  }, [])
 
   const toggle = (name: string) => {
     setChecked((prev) => {
@@ -217,7 +286,8 @@ export default function RepoPickerModal({
         )}
       </div>
 
-      {/* Search */}
+      {/* Search — server-side, so this narrows the whole reachable set rather
+          than the page already in the DOM. */}
       <div className={inline ? 'pb-3' : 'px-6 pb-3'}>
         {inline ? (
           <SearchField
@@ -236,12 +306,32 @@ export default function RepoPickerModal({
             className="w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors"
           />
         )}
+        {/* The count is renderable at all because the list is served from a
+            local mirror with a real total — a proxy list could only ever say
+            "showing N". The refresh beside it is the answer to "I just granted
+            the App another repo and it isn't here", which is otherwise a wait. */}
+        <div className="flex items-center justify-between mt-2">
+          <span className="text-[11px] text-text-tertiary">
+            {discovering
+              ? 'Discovering repositories…'
+              : `Showing ${repos.length} of ${total} repositor${total === 1 ? 'y' : 'ies'}`}
+          </span>
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={refreshing}
+            className="flex items-center gap-1.5 text-[11px] font-medium text-text-tertiary hover:text-text-primary disabled:opacity-40 transition-colors"
+          >
+            <RotateCw size={11} className={refreshing ? 'animate-spin' : ''} />
+            {refreshing ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
       </div>
 
       {/* List — capped to a sensible height inline (the wizard); the overlay
           fills its modal. */}
       <div className={`overflow-y-auto min-h-0 ${inline ? 'max-h-[22rem]' : 'flex-1 px-6'}`}>
-        {loading && (
+        {(loading || discovering) && repos.length === 0 && !error && (
           <div className="space-y-1 py-2">
             {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
               <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-xl">
@@ -266,7 +356,7 @@ export default function RepoPickerModal({
             <div className="text-[13px] text-text-secondary text-center">{error}</div>
             <button
               type="button"
-              onClick={fetchRepos}
+              onClick={() => fetchPage(search.trim())}
               className="flex items-center gap-1.5 text-[12px] font-medium text-accent hover:text-accent/80 transition-colors"
             >
               <RotateCw size={13} />
@@ -275,7 +365,11 @@ export default function RepoPickerModal({
           </div>
         )}
 
-        {!loading && !error && filtered.length === 0 && (
+        {/* Empty, and we know it is empty. The discovering state is handled by
+            the skeleton above, so reaching here means the server answered a
+            READY page with nothing in it — which is a real answer about the
+            workspace rather than a list that has not loaded. */}
+        {!loading && !discovering && !error && repos.length === 0 && (
           <div className="flex flex-col items-center justify-center gap-3 py-8">
             <p className="text-[13px] text-text-tertiary text-center">
               {search
@@ -298,9 +392,8 @@ export default function RepoPickerModal({
           </div>
         )}
 
-        {!loading &&
-          !error &&
-          filtered.map((repo) => {
+        {!error &&
+          repos.map((repo) => {
             const isChecked = checked.has(repo.full_name)
             return (
               <button
@@ -356,6 +449,24 @@ export default function RepoPickerModal({
               </button>
             )
           })}
+
+        {/* The list pages now, so there is a "there is more" affordance rather
+            than a walk that pulls the whole account into memory. Selections
+            made on an earlier page survive it — the checked set is keyed by
+            slug, not by row position. */}
+        {nextToken && !error && (
+          <div className="flex justify-center py-3">
+            <button
+              type="button"
+              onClick={loadMore}
+              disabled={loading}
+              className="flex items-center gap-1.5 text-[12px] font-medium text-accent hover:text-accent/80 disabled:opacity-40 transition-colors"
+            >
+              {loading && <RotateCw size={12} className="animate-spin" />}
+              {loading ? 'Loading…' : `Show more (${total - repos.length} left)`}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Footer — omitted when the host (the setup wizard) drives its own

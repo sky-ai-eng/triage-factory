@@ -26,6 +26,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
+	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -53,6 +54,7 @@ type Server struct {
 	orgs             db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
 	jiraRules        db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
 	githubApps       db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
+	reachableRepos   db.ReachableReposStore  // the reachable-repo mirror the picker lists from and the team-repos write gate validates against
 	githubDeliveries db.GitHubDeliveryStore  // applied webhook deliveries, so a redelivery is dropped before the mirror write and the bus publish
 	authEvents       db.AuthEventStore       // TFAC-76: SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
 	// tx runs handler-cleanup write batches under the request user's
@@ -172,6 +174,10 @@ type Server struct {
 	// repo-set change both want an immediate re-profile rather than waiting
 	// out a poll interval. Nil until SetProfilerTrigger runs.
 	profilerTrigger func(orgID string, force bool)
+	// reachTrigger kicks the per-org reachable-repo refresh manager.
+	// force=true bypasses its TTL — the picker's refresh control and every
+	// credential change. Nil until SetReachTrigger runs.
+	reachTrigger func(orgID string, force bool)
 	// dashboardBackfill seeds a bound user's trailing-window PR history into the
 	// entity store so the personal dashboard isn't blank for history that
 	// predates tracking (TFAC-396). Multi-mode only — wired to the poller's
@@ -260,17 +266,6 @@ type Server struct {
 	// TFAC-579 local-mode-only caveat: acquireKeyedLock backs multi mode
 	// with a real cross-pod advisory lock instead.
 	githubAppRegMu sync.Map // map[orgID]*sync.Mutex
-
-	// reachableRepoMu guards reachableRepoCache — the in-process
-	// enumeration cache the team-repos write gate consults before
-	// re-enumerating the org. The picker
-	// (handleGitHubRepos) warms it on the way out; the immediate-next
-	// PUT /api/settings/team/{id}/repos validates against this set in
-	// ~µs instead of paying the full ListUserRepos cost a second time.
-	// Entries are TTL-bounded (reachableCacheTTL) and evicted per-org
-	// when GitHub creds/installations rotate (SetOnGitHubChanged).
-	reachableRepoMu    sync.RWMutex
-	reachableRepoCache map[string]reachableRepoEntry // key: orgID\x00userID
 
 	// webhookSecretMu guards the three fields below — the short-TTL per-org
 	// cache of the secret the pre-auth GitHub webhook receiver verifies
@@ -367,87 +362,6 @@ type Server struct {
 	// nil on an executor (no /readyz there — it serves a separate
 	// localhost healthz).
 	leaseStatus LeaseStatusFunc
-}
-
-// reachableRepoEntry is one cached picker enumeration: the lowercased
-// "owner/repo" slug set the user's GitHub credential can reach, plus the
-// wall-clock instant the entry stops being trusted.
-type reachableRepoEntry struct {
-	set       map[string]struct{}
-	expiresAt time.Time
-}
-
-// reachableCacheTTL bounds how long a picker enumeration is trusted to satisfy
-// a write. Long enough to cover the realistic "open picker → think → click
-// Continue" window; short enough that a stale enumeration can't mask a
-// credential revocation for more than a few minutes (eviction on
-// SetOnGitHubChanged handles the explicit-rotation case immediately).
-const reachableCacheTTL = 3 * time.Minute
-
-// reachableCacheKey namespaces the cache per (orgID, userID). A NUL separator
-// keeps two orgs/users whose IDs would otherwise concatenate ambiguously from
-// colliding.
-func reachableCacheKey(orgID, userID string) string {
-	return orgID + "\x00" + userID
-}
-
-// reachableRepoCacheGet returns the cached reachable slug set for (orgID,
-// userID) when present and unexpired. A miss (absent or stale) returns
-// (nil, false); a stale entry is reclaimed by the next put's sweep or an
-// org evict (the read path holds only an RLock and so can't delete).
-func (s *Server) reachableRepoCacheGet(orgID, userID string) (map[string]struct{}, bool) {
-	s.reachableRepoMu.RLock()
-	defer s.reachableRepoMu.RUnlock()
-	e, ok := s.reachableRepoCache[reachableCacheKey(orgID, userID)]
-	if !ok || time.Now().After(e.expiresAt) {
-		return nil, false
-	}
-	return e.set, true
-}
-
-// reachableRepoCachePut stores the picker enumeration for (orgID, userID) with
-// a fresh TTL. The set is stored by reference — callers must not mutate it
-// after handing it over.
-//
-// It also opportunistically sweeps already-expired entries while it holds the
-// write lock. Reads return a miss on expiry but can't delete (RLock only), so
-// without this the map would retain every distinct (orgID, userID) ever seen.
-// A put happens once per picker fetch, so the very workload that would grow
-// the map unboundedly — many distinct pairs churning through — is also what
-// drives the sweep, keeping it to roughly the live set.
-func (s *Server) reachableRepoCachePut(orgID, userID string, set map[string]struct{}) {
-	now := time.Now()
-	s.reachableRepoMu.Lock()
-	defer s.reachableRepoMu.Unlock()
-	if s.reachableRepoCache == nil {
-		s.reachableRepoCache = make(map[string]reachableRepoEntry)
-	}
-	for k, e := range s.reachableRepoCache {
-		if now.After(e.expiresAt) {
-			delete(s.reachableRepoCache, k)
-		}
-	}
-	s.reachableRepoCache[reachableCacheKey(orgID, userID)] = reachableRepoEntry{
-		set:       set,
-		expiresAt: now.Add(reachableCacheTTL),
-	}
-}
-
-// evictReachableRepoCache drops every cached enumeration for the org. Called
-// when the org's GitHub credentials or App installations rotate
-// (SetOnGitHubChanged): a stale enumeration built under the old credential
-// must not satisfy a write under the new one. Entries are keyed
-// orgID\x00userID, so we evict by orgID prefix to clear all of the org's
-// users at once.
-func (s *Server) evictReachableRepoCache(orgID string) {
-	prefix := orgID + "\x00"
-	s.reachableRepoMu.Lock()
-	defer s.reachableRepoMu.Unlock()
-	for k := range s.reachableRepoCache {
-		if strings.HasPrefix(k, prefix) {
-			delete(s.reachableRepoCache, k)
-		}
-	}
 }
 
 // agentEnabledForOrg returns the resolved agent and whether the bot is
@@ -582,6 +496,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		orgs:             stores.Orgs,
 		jiraRules:        stores.JiraStatusRules,
 		githubApps:       stores.GitHubApps,
+		reachableRepos:   stores.ReachableRepos,
 		githubDeliveries: stores.GitHubDeliveries,
 		jiraApps:         stores.JiraApps,
 		authEvents:       stores.AuthEvents,
@@ -1157,6 +1072,7 @@ func (s *Server) routes() {
 	// Proxy list: the rows come from GitHub, which reports no total for this
 	// read, so total_count is null and page_token wraps the upstream cursor.
 	s.apiMutating("POST /api/github/repos/list", s.handleGitHubRepos)
+	s.apiMutating("POST /api/github/repos/refresh", s.handleGitHubReposRefresh)
 	se := &settingsHandler{tx: s.tx, az: s.az, bedrockRole: func() bedrockRoleResolver { return s.bedrockRole }}
 	s.apiMutating("POST /api/github/preflight-ssh", se.handleGitHubPreflightSSH)
 	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
@@ -1556,20 +1472,23 @@ func (s *Server) SetKBChangedDoorbell(fn func(op, orgID, projectID string)) {
 // driven by the system:poll "profiler" subscriber off that poll's completion.
 // The orgID is the tenant whose creds changed — closure re-resolves via SecretStore.
 //
-// The registered callback is wrapped so the reachable-repo enumeration cache
-// is evicted for the org *before* the re-due runs: a creds
-// rotation, App install, or repo-set change can move which repos the org can
-// reach, and a stale cached enumeration must never satisfy the next write.
+// The registered callback is wrapped so a FORCED reachable-repo refresh is
+// kicked for the org alongside the re-due. A creds rotation, an App install, or
+// a host repoint moves which repositories the org can reach without moving the
+// timestamp the mirror's TTL reads, so the mirror is wrong in fact while looking
+// fresh — the one staleness a TTL cannot detect, which is why the explicit force
+// exists at all.
 //
-// Handlers fire this callback in a goroutine, so the
-// eviction is asynchronous: a second write landing in the same instant as a
-// first could still read the pre-eviction cache. That race is benign — the
-// cache was just validated as correct, and the near-simultaneous second write
-// is still checked against it. Eviction exists to retire a *stale* enumeration
-// over the TTL window, not to serialize against a concurrent write.
+// The refresh is out of band by construction (it is a Manager trigger, not a
+// call), so this stays as cheap as the eviction it replaces. A repo-TRACKING
+// save also lands here — tracking is not reachability, so that refresh is
+// redundant — and it is left in rather than special-cased: it is one
+// enumeration per human Save gesture, and splitting the hook into
+// "creds changed" and "repos changed" variants would put the burden of picking
+// the right one on six call sites.
 func (s *Server) SetOnGitHubChanged(fn func(orgID string)) {
 	s.onGitHubChanged = func(orgID string) {
-		s.evictReachableRepoCache(orgID)
+		s.kickReachRefresh(orgID, true)
 		if fn != nil {
 			fn(orgID)
 		}
@@ -1596,6 +1515,43 @@ func (s *Server) SetScorerTrigger(fn func(orgID string)) {
 // rather than waiting for the next poll cycle's TTL-gated pass.
 func (s *Server) SetProfilerTrigger(fn func(orgID string, force bool)) {
 	s.profilerTrigger = fn
+}
+
+// reachableCredentialClass resolves which credential class this org's
+// reachable-repo entries are keyed under — the stored class narrowed by the
+// App-XOR-PAT gate, which is the same narrowing the refresh applies when it
+// writes them. The picker and the team-repos write gate both key on it, and
+// keying a read differently from the write is how a mirror reads as empty for an
+// org that has one.
+//
+// Built per call rather than held: it is two store pointers and no state, so
+// constructing it here costs nothing and it always reads whichever stores this
+// Server currently holds.
+func (s *Server) reachableCredentialClass(ctx context.Context, orgID string) (domain.GitHubCredentialClass, error) {
+	return reachcache.NewClassResolver(s.orgs, s.githubApps).For(ctx, orgID)
+}
+
+// SetReachTrigger registers the per-org reachable-repo refresh trigger (the
+// reachcache Manager's Trigger). force=true bypasses its TTL. Used by the
+// picker read (non-forced, when the mirror is empty or stale), the explicit
+// refresh control, and every GitHub credential change.
+//
+// Nil until wired — bare test constructions and any role that builds no
+// background managers. kickReachRefresh nil-checks it, so a picker read on such
+// a Server serves whatever the mirror holds and asks for nothing.
+func (s *Server) SetReachTrigger(fn func(orgID string, force bool)) {
+	s.reachTrigger = fn
+}
+
+// kickReachRefresh asks for a reachable-mirror refresh, out of band. It never
+// blocks the caller and never reports failure: a refresh that does not happen
+// costs a staler mirror on the next read, which is the same cost as the TTL not
+// having elapsed yet, and a request has nothing useful to do with the error.
+func (s *Server) kickReachRefresh(orgID string, force bool) {
+	if s.reachTrigger == nil || orgID == "" {
+		return
+	}
+	s.reachTrigger(orgID, force)
 }
 
 // SetReconciler registers the shared artifact Reconciler that backs the Tier-2

@@ -1213,6 +1213,11 @@ export type WSEvent =
     }
   | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }
+  // The workspace's reachable-repo mirror was refreshed. Payload-free: the
+  // repository picker refetches through the REST read, which carries the
+  // scoping — the cheap tier, and what turns a first-ever open's "discovering
+  // repositories…" into a list without the client polling for it.
+  | { type: 'github_repos_updated'; data: Record<string, never> }
   | {
       // Claim-axis change. Exactly one of the two ID fields
       // is populated when claim landed; both empty when claim was

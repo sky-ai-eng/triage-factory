@@ -320,8 +320,8 @@ func nullTime(t time.Time) any {
 // Written here rather than left to the reconcile so a `deleted` webhook clears
 // the grant at the moment it arrives instead of a poll interval later; the
 // reconcile's own soft-remove arm gets the same clear for free. This is the one
-// place outside InstallationReposStore that writes installation_repositories,
-// and it does so because the two writes are one fact.
+// place outside ReachableReposStore that writes reachable_repositories, and it
+// does so because the two writes are one fact.
 func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, orgID, installationID string) error {
 	if !isValidUUID(orgID) {
 		return nil
@@ -334,9 +334,17 @@ func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, orgID, in
 		`, orgID, installationID); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `
-			DELETE FROM installation_repositories
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM reachable_repositories
 			 WHERE org_id = $1 AND installation_id = $2
+		`, orgID, installationID); err != nil {
+			return err
+		}
+		// And the scope marker: an installation that reaches nothing must not keep
+		// vouching that its reach was ever established.
+		_, err := tx.ExecContext(ctx, `
+			DELETE FROM reachable_scopes
+			 WHERE org_id = $1 AND credential_class = 'byo_app' AND scope = $2
 		`, orgID, installationID)
 		return err
 	})
