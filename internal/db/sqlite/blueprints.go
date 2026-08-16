@@ -953,7 +953,7 @@ func (s *blueprintStore) ListRuns(ctx context.Context, orgID string, f db.Bluepr
 	return out, total, rows.Err()
 }
 
-func (s *blueprintStore) GetRunForRun(ctx context.Context, orgID, runID string) (*domain.BlueprintRun, *int, error) {
+func (s *blueprintStore) GetRunForStepRun(ctx context.Context, orgID, stepRunID string) (*domain.BlueprintRun, *int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, nil, err
 	}
@@ -961,7 +961,7 @@ func (s *blueprintStore) GetRunForRun(ctx context.Context, orgID, runID string) 
 		blueprintRunID sql.NullString
 		stepIndex      sql.NullInt64
 	)
-	err := s.q.QueryRowContext(ctx, `SELECT blueprint_run_id, blueprint_step_index FROM conversations WHERE id = ?`, runID).
+	err := s.q.QueryRowContext(ctx, `SELECT blueprint_run_id, blueprint_step_index FROM conversations WHERE id = ?`, stepRunID).
 		Scan(&blueprintRunID, &stepIndex)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, nil
@@ -984,8 +984,8 @@ func (s *blueprintStore) GetRunForRun(ctx context.Context, orgID, runID string) 
 	return br, idx, nil
 }
 
-func (s *blueprintStore) GetRunForRunSystem(ctx context.Context, orgID, runID string) (*domain.BlueprintRun, *int, error) {
-	return s.GetRunForRun(ctx, orgID, runID)
+func (s *blueprintStore) GetRunForStepRunSystem(ctx context.Context, orgID, stepRunID string) (*domain.BlueprintRun, *int, error) {
+	return s.GetRunForStepRun(ctx, orgID, stepRunID)
 }
 
 func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {

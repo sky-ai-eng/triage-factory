@@ -23,9 +23,9 @@ func TestRun_ImplicitCompletionConcludesWithFinalText(t *testing.T) {
 		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
 	}
 	// `continue`, not `finish`: stopping says "my part is done", and only
-	// decideBlueprintStep knows whether that ends the task. It resolves a
-	// final-step continue to a structural finish, so a single run is
-	// unaffected — but the loop must not be the thing that decides.
+	// blueprintDecisionForStepRun knows whether that ends the task. It
+	// resolves a final-step continue to a structural finish, so a single run
+	// is unaffected — but the loop must not be the thing that decides.
 	if got.Outcome != domain.RunOutcomeContinue {
 		t.Errorf("outcome = %q, want continue", got.Outcome)
 	}

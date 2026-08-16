@@ -55,7 +55,7 @@ const toolHostDialTimeout = 60 * time.Second
 func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model, triggerType, creatorUserID string) engagementDisposition {
 	model = nativeWireModel(model)
 	orgID := cfg.orgID
-	namespace := memoryNamespace(cfg.blueprintRunID, runID)
+	namespace := memoryNamespace(cfg.blueprintRunID)
 	claudeCwd := cfg.wtPath
 
 	// The park a stop lands on, wherever the stop catches this engagement.

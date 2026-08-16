@@ -740,8 +740,8 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// there is no JSON envelope to parse on this path.
 		//
 		// The outcome is `continue`, not `finish`, on every step: stopping
-		// means "my part is done", and only decideBlueprintStep knows whether
-		// a part being done ends the task. On a final or single step it
+		// means "my part is done", and only blueprintDecisionForStepRun knows
+		// whether a part being done ends the task. On a final or single step it
 		// resolves `continue` to a structural finish, so the common case is
 		// unchanged; on a non-final step it hands off. Ending the whole task
 		// early is the deliberate act, and it goes through stop_blueprint.

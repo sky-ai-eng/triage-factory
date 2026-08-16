@@ -425,7 +425,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // runtime: under the SDK a terminal step reports `finish`, while the native
 // loop stamps `continue` on every ordinary completion, final and single-step
 // runs included (internal/agentloop, internal/delegate/blueprint.go's
-// decideBlueprintStep is what resolves it against position).
+// blueprintDecisionForStepRun is what resolves it against position).
 //
 // The derived approval keys are emitted only when the answer is definitive: when
 // the run has no artifacts (artifactCount == 0, so nothing can be unresolved) or

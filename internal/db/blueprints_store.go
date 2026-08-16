@@ -158,7 +158,7 @@ func DedupPreserveOrder(ids []string) []string {
 //     conversations; RunsForBlueprint returns the slice of step rows linked
 //     to a blueprint_run).
 //     Step advancement reads each step run's terminal conversations.outcome (see
-//     delegate.decideBlueprintStep); there is no separate verdict channel.
+//     delegate.blueprintDecisionForStepRun); there is no separate verdict channel.
 //
 // Audiences:
 //
@@ -499,10 +499,13 @@ type BlueprintStore interface {
 	// caller already held, so a run whose id was lost was invisible forever.
 	ListRuns(ctx context.Context, orgID string, f BlueprintRunListFilter, opts ListOpts) ([]domain.BlueprintRun, int, error)
 
-	// GetRunForRun returns the blueprint run that owns a step run, plus the
-	// step index. Returns (nil, nil, nil) when the supplied run is not part of
-	// a multi-step blueprint (single-run delegation).
-	GetRunForRun(ctx context.Context, orgID string, runID string) (*domain.BlueprintRun, *int, error)
+	// GetRunForStepRun returns the blueprint run that owns a step run, plus the
+	// step index. stepRunID is a conversations row (a step's run); the returned
+	// run is a blueprint_runs row — the two ids this method translates between
+	// are both called "run", which is why the name says which end is which.
+	// Returns (nil, nil, nil) when the supplied run is not part of a multi-step
+	// blueprint (single-run delegation).
+	GetRunForStepRun(ctx context.Context, orgID string, stepRunID string) (*domain.BlueprintRun, *int, error)
 
 	// MarkRunStatus transitions a blueprint run to a terminal status and
 	// records optional abort metadata. Returns (true, nil) when the row was
@@ -576,7 +579,7 @@ type BlueprintStore interface {
 	// supplied BlueprintRun.TriggerType.
 	ListStepsSystem(ctx context.Context, orgID string, blueprintID string) ([]domain.BlueprintStep, error)
 	GetRunSystem(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)
-	GetRunForRunSystem(ctx context.Context, orgID string, runID string) (*domain.BlueprintRun, *int, error)
+	GetRunForStepRunSystem(ctx context.Context, orgID string, stepRunID string) (*domain.BlueprintRun, *int, error)
 	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 	RunsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 	ActiveStepRunIDsSystem(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)

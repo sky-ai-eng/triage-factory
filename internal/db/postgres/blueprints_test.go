@@ -291,7 +291,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	assertClaimReleased(childID2)
 }
 
-// MarkRunStatus → GetRunForRun on a real Postgres tx. Covers the UUID/TEXT
+// MarkRunStatus → GetRunForStepRun on a real Postgres tx. Covers the UUID/TEXT
 // column split (blueprint_runs.id UUID, blueprint_id TEXT).
 func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -373,32 +373,32 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 		t.Error("expected changed=false on terminal row (race guard)")
 	}
 
-	// GetRunForRun resolves step → blueprint.
-	cr2, idx, err := blueprints.GetRunForRun(ctx, orgID, stepRunID)
+	// GetRunForStepRun resolves step → blueprint.
+	cr2, idx, err := blueprints.GetRunForStepRun(ctx, orgID, stepRunID)
 	if err != nil {
-		t.Fatalf("GetRunForRun: %v", err)
+		t.Fatalf("GetRunForStepRun: %v", err)
 	}
 	if cr2 == nil || cr2.ID != blueprintRunID {
-		t.Errorf("GetRunForRun blueprint = %+v, want id=%s", cr2, blueprintRunID)
+		t.Errorf("GetRunForStepRun blueprint = %+v, want id=%s", cr2, blueprintRunID)
 	}
 	if idx == nil || *idx != 0 {
-		t.Errorf("GetRunForRun stepIdx = %v, want 0", idx)
+		t.Errorf("GetRunForStepRun stepIdx = %v, want 0", idx)
 	}
 
-	// GetRunForRunSystem mirrors GetRunForRun for goroutine-internal
+	// GetRunForStepRunSystem mirrors GetRunForStepRun for goroutine-internal
 	// callers (blueprint orchestrator cleanup, post-resume finalize) that
 	// have no JWT-claims context. The contract is identical — both
 	// arms read the same row — so the assertion is just that the
 	// admin-pool variant returns the same values.
-	cr3, idx3, err := blueprints.GetRunForRunSystem(ctx, orgID, stepRunID)
+	cr3, idx3, err := blueprints.GetRunForStepRunSystem(ctx, orgID, stepRunID)
 	if err != nil {
-		t.Fatalf("GetRunForRunSystem: %v", err)
+		t.Fatalf("GetRunForStepRunSystem: %v", err)
 	}
 	if cr3 == nil || cr3.ID != blueprintRunID {
-		t.Errorf("GetRunForRunSystem blueprint = %+v, want id=%s", cr3, blueprintRunID)
+		t.Errorf("GetRunForStepRunSystem blueprint = %+v, want id=%s", cr3, blueprintRunID)
 	}
 	if idx3 == nil || *idx3 != 0 {
-		t.Errorf("GetRunForRunSystem stepIdx = %v, want 0", idx3)
+		t.Errorf("GetRunForStepRunSystem stepIdx = %v, want 0", idx3)
 	}
 }
 
@@ -563,7 +563,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 	// The blueprint_runs_select RLS policy was widened so event-triggered
 	// rows (creator_user_id NULL) resolve via plain org membership
 	// rather than the creator-equals-caller predicate. Without that,
-	// the request-facing GetRun / GetRunForRun / CancelBlueprint paths
+	// the request-facing GetRun / GetRunForStepRun / CancelBlueprint paths
 	// would silently 404 on every auto-fired blueprint because the
 	// app-pool SELECT can't match a NULL creator. Verify a WithTx
 	// read of the event-triggered row succeeds.

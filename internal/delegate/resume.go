@@ -194,7 +194,7 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *d
 	if blobs == nil {
 		return true
 	}
-	ok, err := blobs.Exists(ctx, snapshotKey(orgID, memoryNamespace(run.BlueprintRunID, run.ID)))
+	ok, err := blobs.Exists(ctx, snapshotKey(orgID, memoryNamespace(run.BlueprintRunID)))
 	if err != nil {
 		delegateLog.Warn("resume: snapshot existence check failed", "run", run.ID, "error", err)
 		return true

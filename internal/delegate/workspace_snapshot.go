@@ -350,7 +350,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 	if blobs == nil {
 		return "", "", fmt.Errorf("worktree %q missing and no blob store to rehydrate from", run.WorktreePath)
 	}
-	keyID := memoryNamespace(run.BlueprintRunID, run.ID)
+	keyID := memoryNamespace(run.BlueprintRunID)
 	rc, err := blobs.Get(ctx, snapshotKey(orgID, keyID))
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -524,19 +524,20 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 	return nil
 }
 
-// DiscardWorkspaceSnapshot deletes the durable workspace snapshot for a
-// standalone (non-blueprint) run that has reached a terminal state via the
-// approval path: the artifact-approve handler calls it for a standalone run
-// whose approval is its terminal — the single-run mirror of terminateBlueprint's
-// snapshot cleanup. Keyed by run_id (a standalone run's snapshot key).
-// Idempotent and nil-safe.
-func (s *Spawner) DiscardWorkspaceSnapshot(orgID, runID string) {
-	s.discardWorkspaceSnapshot(context.Background(), orgID, runID)
+// DiscardWorkspaceSnapshot is the exported seam onto the snapshot discard, for
+// a caller outside the package that terminates a blueprint's work by a route of
+// its own rather than through terminateBlueprint. Idempotent and nil-safe.
+//
+// It takes the blueprint run id, not a conversation id: the snapshot key is the
+// memory namespace (see snapshotKey), so a conversation id names a blob that
+// was never written and the discard silently does nothing.
+func (s *Spawner) DiscardWorkspaceSnapshot(orgID, blueprintRunID string) {
+	s.discardWorkspaceSnapshot(context.Background(), orgID, blueprintRunID)
 }
 
 // discardWorkspaceSnapshot deletes a parked workspace's snapshot blob once the
 // run/blueprint it belonged to reaches a terminal state, so durable storage
-// doesn't accumulate orphans. keyID is memoryNamespace(blueprintRunID, runID).
+// doesn't accumulate orphans. keyID is memoryNamespace(blueprintRunID).
 // Idempotent — Delete on a missing key is a no-op — so terminal paths call it
 // unconditionally without first checking whether a snapshot was ever written.
 func (s *Spawner) discardWorkspaceSnapshot(ctx context.Context, orgID, keyID string) {

@@ -745,7 +745,7 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		// terminal-on-last task closure. A non-blueprint run (origin <> 'blueprint'
 		// — a future interactive/ad-hoc run) is task-less by construction (NULL
 		// task_id), so there is nothing to close: leave taskID empty and no-op below.
-		br, _, bpErr := tx.Blueprints.GetRunForRun(ctx, orgID, runID)
+		br, _, bpErr := tx.Blueprints.GetRunForStepRun(ctx, orgID, runID)
 		if bpErr != nil {
 			return fmt.Errorf("blueprint lookup: %w", bpErr)
 		}

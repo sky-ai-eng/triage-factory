@@ -992,19 +992,19 @@ func (s *blueprintStore) ListRuns(ctx context.Context, orgID string, f db.Bluepr
 	return out, total, rows.Err()
 }
 
-func (s *blueprintStore) GetRunForRun(ctx context.Context, orgID, runID string) (*domain.BlueprintRun, *int, error) {
-	return getRunForBlueprintRun(ctx, s.app, s.GetRun, orgID, runID)
+func (s *blueprintStore) GetRunForStepRun(ctx context.Context, orgID, stepRunID string) (*domain.BlueprintRun, *int, error) {
+	return getRunForBlueprintRun(ctx, s.app, s.GetRun, orgID, stepRunID)
 }
 
-func (s *blueprintStore) GetRunForRunSystem(ctx context.Context, orgID, runID string) (*domain.BlueprintRun, *int, error) {
-	return getRunForBlueprintRun(ctx, s.admin, s.GetRunSystem, orgID, runID)
+func (s *blueprintStore) GetRunForStepRunSystem(ctx context.Context, orgID, stepRunID string) (*domain.BlueprintRun, *int, error) {
+	return getRunForBlueprintRun(ctx, s.admin, s.GetRunSystem, orgID, stepRunID)
 }
 
-func getRunForBlueprintRun(ctx context.Context, q queryer, getRun func(context.Context, string, string) (*domain.BlueprintRun, error), orgID, runID string) (*domain.BlueprintRun, *int, error) {
-	if !isValidUUID(runID) {
+func getRunForBlueprintRun(ctx context.Context, q queryer, getRun func(context.Context, string, string) (*domain.BlueprintRun, error), orgID, stepRunID string) (*domain.BlueprintRun, *int, error) {
+	if !isValidUUID(stepRunID) {
 		return nil, nil, nil
 	}
-	blueprintRunID, stepIndex, err := readRunBlueprintPointer(ctx, q, orgID, runID)
+	blueprintRunID, stepIndex, err := readRunBlueprintPointer(ctx, q, orgID, stepRunID)
 	if err != nil || blueprintRunID == "" {
 		return nil, nil, err
 	}

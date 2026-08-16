@@ -19,13 +19,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// blueprintStepOutcome is the orchestrator's decision after a completed
-// blueprint step, derived from the step's conversations.outcome and its position.
-type blueprintStepOutcome int
+// blueprintStepDecision is the orchestrator's decision after a completed
+// blueprint step, derived from the step run's conversations.outcome and the
+// step's position. Named a decision, not an outcome: an outcome is what the
+// agent reported (domain.RunOutcome, on the conversation), and this is what the
+// orchestrator does about it — the two appear in the same scope below.
+type blueprintStepDecision int
 
 const (
 	// blueprintStepAdvance moves to the next step (a non-final `continue`).
-	blueprintStepAdvance blueprintStepOutcome = iota
+	blueprintStepAdvance blueprintStepDecision = iota
 	// blueprintStepFinish terminates the blueprint completed and closes the
 	// task — an explicit `finish`, a final-step `continue` (structural
 	// finish), or an unambiguous missing outcome on the final step.
@@ -35,16 +38,18 @@ const (
 	blueprintStepAbort
 )
 
-// decideBlueprintStep maps a completed step's terminal outcome + position to
-// the orchestrator's next move. Only valid for a step whose run reached
-// status='completed'; the non-terminal statuses (open, cancelled, failed) are
-// handled by the caller before this is consulted.
+// blueprintDecisionForStepRun maps a completed step RUN's terminal outcome +
+// the step's position to the orchestrator's next move. runOutcome is the step
+// run's conversations.outcome — the step itself (a blueprint_steps row) carries
+// no outcome, which is why this reads the run and is named for it. Only valid
+// for a step whose run reached status='completed'; the non-terminal statuses
+// (open, cancelled, failed) are handled by the caller before this is consulted.
 //
 // abortReason is non-empty only for the missing-outcome-on-a-non-final-step
 // case ("no-outcome"); for an explicit abort it is empty and the caller
 // copies conversations.outcome_reason into blueprint_runs.abort_reason.
-func decideBlueprintStep(outcome string, isFinal bool) (decision blueprintStepOutcome, abortReason string) {
-	switch domain.RunOutcome(outcome) {
+func blueprintDecisionForStepRun(runOutcome string, isFinal bool) (decision blueprintStepDecision, abortReason string) {
+	switch domain.RunOutcome(runOutcome) {
 	case domain.RunOutcomeContinue:
 		// continue hands off to the next step — except on the final step,
 		// where there is no next step and continue resolves to a structural
@@ -73,7 +78,7 @@ func decideBlueprintStep(outcome string, isFinal bool) (decision blueprintStepOu
 		// holds continue/finish/abort, or NULL). Never close a task on a value
 		// we don't understand: abort and leave it open for a human, regardless
 		// of position. Mirrors the old "unknown verdict → abort" floor.
-		return blueprintStepAbort, "unknown-outcome: " + outcome
+		return blueprintStepAbort, "unknown-outcome: " + runOutcome
 	}
 }
 
@@ -590,7 +595,7 @@ func (s *Spawner) markBlueprintRunStatusAsUser(ctx context.Context, orgID, userI
 // run). Local mode passes runmode.LocalDefaultUserID; multi-mode handlers
 // extract it from JWT claims.
 func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
-	cr, stepIdx, err := s.blueprints.GetRunForRunSystem(context.Background(), orgID, stepRunID)
+	cr, stepIdx, err := s.blueprints.GetRunForStepRunSystem(context.Background(), orgID, stepRunID)
 	if err != nil || cr == nil {
 		return
 	}
@@ -652,20 +657,20 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 		isFinal = *stepIdx >= len(cr.StepPlan)-1
 	}
 
-	status, reason := blueprintTerminalForResumedStep(stepRun, isFinal)
+	status, reason := blueprintTerminalForResumedStepRun(stepRun, isFinal)
 	s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
 		status, reason, stepIdx, false)
 }
 
-// blueprintTerminalForResumedStep maps a resumed step run's terminal state +
+// blueprintTerminalForResumedStepRun maps a resumed step run's terminal state +
 // position to the blueprint's terminal status. Mirrors runBlueprint's in-loop
 // disposition for the resume path: a clean completion routes through
-// decideBlueprintStep (finish/advance/abort), and the non-terminal-completed
-// statuses map to the matching blueprint terminal.
-func blueprintTerminalForResumedStep(stepRun *domain.Conversation, isFinal bool) (domain.BlueprintRunStatus, string) {
+// blueprintDecisionForStepRun (finish/advance/abort), and the
+// non-terminal-completed statuses map to the matching blueprint terminal.
+func blueprintTerminalForResumedStepRun(stepRun *domain.Conversation, isFinal bool) (domain.BlueprintRunStatus, string) {
 	switch stepRun.Status {
 	case "completed":
-		decision, abortReason := decideBlueprintStep(stepRun.Outcome, isFinal)
+		decision, abortReason := blueprintDecisionForStepRun(stepRun.Outcome, isFinal)
 		switch decision {
 		case blueprintStepFinish:
 			return domain.BlueprintRunStatusCompleted, ""

@@ -194,7 +194,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
-			namespace:     memoryNamespace(cfg.blueprintRunID, runID),
+			namespace:     memoryNamespace(cfg.blueprintRunID),
 			claudeCwd:     cfg.wtPath,
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
@@ -320,7 +320,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// the workspace snapshot, and which prior memories count as this run's own
 	// handoff rather than history. Exported below so per-run scratch paths the
 	// prompts name (the review passes' shared drop point) resolve deterministically.
-	namespace := memoryNamespace(cfg.blueprintRunID, runID)
+	namespace := memoryNamespace(cfg.blueprintRunID)
 
 	// Whether this tree is still ours decides what MAY be written in it, not what
 	// the agent gets. Once a launch has handed the tree to the sandbox uid — a warm
@@ -764,7 +764,7 @@ func (s *Spawner) processCompletion(
 	// blueprint siblings. Derived from the caller-supplied blueprint_run_id —
 	// no DB fetch, so it can't silently fall back to the wrong key on a
 	// transient read error.
-	namespace := memoryNamespace(blueprintRunID, runID)
+	namespace := memoryNamespace(blueprintRunID)
 
 	// Classify the turn-end up front. A no-conclusion turn (prose / nothing) is
 	// NOT a termination — the run is open. Park it open (snapshot for the
@@ -883,7 +883,7 @@ func (s *Spawner) processCompletion(
 	// sidecar: a human resolves it independently and it never blocks step
 	// progression. So there's no external-action coercion and no approval park
 	// here — the step completes with its real outcome (continue advances,
-	// finish terminates) per decideBlueprintStep, and the approval state is
+	// finish terminates) per blueprintDecisionForStepRun, and the approval state is
 	// derived downstream from the unresolved-artifact set (has_unresolved_artifacts).
 
 	// Every non-failed terminal snapshots its workspace — while the worktree and

@@ -43,10 +43,13 @@ const maxCompletionRetries = 3
 // the current run rather than to history. It is the blueprint_run_id the run
 // belongs to. Every run is a blueprint step now (a single prompt is a 1-step
 // blueprint), so there is no run-id fallback — the value is always the
-// blueprint_run_id. The runID arg is retained so call sites read uniformly and a
-// future change can't silently mis-key.
-func memoryNamespace(blueprintRunID, runID string) string {
-	_ = runID
+// blueprint_run_id.
+//
+// It stays a named function over an identity return because the name is what
+// tells a call site which of the two ids in scope keys the workspace: a
+// conversation id reads as an equally plausible argument and silently keys a
+// tree nothing else will look under.
+func memoryNamespace(blueprintRunID string) string {
 	return blueprintRunID
 }
 

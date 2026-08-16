@@ -721,7 +721,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 			extraTools = s.collectExtraTools(p.AllowedTools)
 		}
 	}
-	namespace := memoryNamespace(blueprintRunID, run.ID)
+	namespace := memoryNamespace(blueprintRunID)
 
 	// Per-run cancel handle, mirroring dispatchClaimedRun's own — a
 	// Cancel() arriving in the narrow window before this registers falls
@@ -1040,7 +1040,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		return
 	}
 	isFinal := stepIdx >= len(plan)-1
-	decision, abortReason := decideBlueprintStep(stepRun.Outcome, isFinal)
+	decision, abortReason := blueprintDecisionForStepRun(stepRun.Outcome, isFinal)
 	switch decision {
 	case blueprintStepAdvance:
 		next := stepIdx + 1

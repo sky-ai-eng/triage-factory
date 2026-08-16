@@ -392,18 +392,29 @@ func RepoDir(owner, repo string) (string, error) {
 	return repoDir(owner, repo)
 }
 
-func runDir(runID string) string {
-	return filepath.Join(os.TempDir(), runsDir, runID)
+// rootKey names the id a run root is keyed by — see RunRoot for which id that
+// is, and why this family does not spell it runID.
+func runDir(rootKey string) string {
+	return filepath.Join(os.TempDir(), runsDir, rootKey)
 }
 
-// RunRoot returns the run-root path for a given runID, without
+// RunRoot returns the run-root path for a given rootKey, without
 // creating it. The Jira lazy-worktree CLI calls this from a delegated
 // agent process to derive the parent directory under which `workspace
 // add` materializes per-repo worktrees as `{runRoot}/{owner}/{repo}/`.
 // Callers who need the directory to exist on disk should use MakeRunRoot
 // instead.
-func RunRoot(runID string) string {
-	return runDir(runID)
+//
+// rootKey is a key, not a conversation id, and this family takes no view on
+// which id a caller keys its tree by — it only requires that the caller uses
+// the same one for the make, the derive, and the remove. The orchestrator keys
+// every delegated run's tree by the blueprint run id (the memory namespace), so
+// one blueprint's steps share a root; the in-jail agent host derives the same
+// path from its conversation id only as the fallback for a run whose recorded
+// worktree_path is missing, which is exactly where the two diverge (see
+// cmd/exec/agenthost's WorkspaceRoots).
+func RunRoot(rootKey string) string {
+	return runDir(rootKey)
 }
 
 // MakeRunRoot creates the run-root directory and returns its absolute
@@ -413,11 +424,11 @@ func RunRoot(runID string) string {
 // worktrees as subdirs).
 //
 // Single-purpose vs. CreateForBranch: CreateForBranch creates a worktree
-// AT runDir(runID); MakeRunRoot creates only the directory itself, with
+// AT runDir(rootKey); MakeRunRoot creates only the directory itself, with
 // no git contents. The Jira lazy path uses MakeRunRoot so the agent has
 // somewhere to land before it has chosen which repo(s) to materialize.
-func MakeRunRoot(runID string) (string, error) {
-	dir := runDir(runID)
+func MakeRunRoot(rootKey string) (string, error) {
+	dir := runDir(rootKey)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("mkdir run root: %w", err)
 	}
@@ -433,10 +444,10 @@ func MakeRunRoot(runID string) (string, error) {
 // Safe if missing. Cleanup of the bare-side worktree registrations is
 // handled by RemoveAt + pruneAll for each individual worktree before
 // this is called; this is the final sweep of the parent dir itself.
-func RemoveRunRoot(runID string) {
+func RemoveRunRoot(rootKey string) {
 	// Privileged seam (see RemoveAt's doc): the run root is sandbox-owned
 	// by teardown time in multi mode.
-	_ = sandbox.RemoveRunTree(context.Background(), runDir(runID))
+	_ = sandbox.RemoveRunTree(context.Background(), runDir(rootKey))
 }
 
 // MakeRunCwd creates a throwaway cwd for delegated runs that have no worktree.

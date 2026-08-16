@@ -27,19 +27,19 @@ func seedDraftPRArtifact(t *testing.T, s *Spawner, runID string) {
 	}
 }
 
-// --- decideBlueprintStep: the advancement decision matrix ------------------
+// --- blueprintDecisionForStepRun: the advancement decision matrix -----------
 
-// TestDecideBlueprintStep pins the position-gated mapping from a completed
-// step's conversations.outcome to the orchestrator's next move — the logic that
-// replaced the chain-verdict switch. It is the single place advancement /
-// finish / abort flow through conversations.outcome, so the whole matrix is covered
-// here without spawning an agent.
-func TestDecideBlueprintStep(t *testing.T) {
+// TestBlueprintDecisionForStepRun pins the position-gated mapping from a
+// completed step run's conversations.outcome to the orchestrator's next move —
+// the logic that replaced the chain-verdict switch. It is the single place
+// advancement / finish / abort flow through conversations.outcome, so the whole
+// matrix is covered here without spawning an agent.
+func TestBlueprintDecisionForStepRun(t *testing.T) {
 	cases := []struct {
 		name       string
 		outcome    string
 		isFinal    bool
-		want       blueprintStepOutcome
+		want       blueprintStepDecision
 		wantReason string
 	}{
 		// continue advances mid-blueprint; on the last step there is no next
@@ -76,12 +76,12 @@ func TestDecideBlueprintStep(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, reason := decideBlueprintStep(tc.outcome, tc.isFinal)
+			got, reason := blueprintDecisionForStepRun(tc.outcome, tc.isFinal)
 			if got != tc.want {
-				t.Errorf("decideBlueprintStep(%q, final=%v) decision = %v, want %v", tc.outcome, tc.isFinal, got, tc.want)
+				t.Errorf("blueprintDecisionForStepRun(%q, final=%v) decision = %v, want %v", tc.outcome, tc.isFinal, got, tc.want)
 			}
 			if reason != tc.wantReason {
-				t.Errorf("decideBlueprintStep(%q, final=%v) reason = %q, want %q", tc.outcome, tc.isFinal, reason, tc.wantReason)
+				t.Errorf("blueprintDecisionForStepRun(%q, final=%v) reason = %q, want %q", tc.outcome, tc.isFinal, reason, tc.wantReason)
 			}
 		})
 	}

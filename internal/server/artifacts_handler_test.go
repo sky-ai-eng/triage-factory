@@ -382,7 +382,7 @@ func TestArtifactDismiss_AbortedBlueprintLeavesTaskOpen(t *testing.T) {
 // against the actual model: a future user-triggered run (origin='interactive') is
 // neither a blueprint nor a task run — it carries a NULL blueprint_run_id AND a
 // NULL task_id (both allowed once origin <> 'blueprint'). Resolving an artifact on
-// such a run must be a clean no-op for task closure: GetRunForRun routes to the
+// such a run must be a clean no-op for task closure: GetRunForStepRun routes to the
 // standalone branch, the run has no task, and the taskID == "" guard short-circuits
 // — no task is closed, no error. (No such run exists in production today; this
 // pins the forward-compat path so it can't regress into closing a phantom task.)
