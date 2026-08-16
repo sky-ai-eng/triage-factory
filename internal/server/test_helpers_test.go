@@ -107,10 +107,17 @@ func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) {
 	}); err != nil {
 		t.Fatalf("seed configured repo %s/%s: %v", owner, repo, err)
 	}
+	// Scoped the same way the store's own resolver is, on all four columns of
+	// the folded identity index. The fixture is single-org today, so org_id and
+	// source cannot yet select the wrong row — which is the reason to bind them
+	// now, while "there is only one" is an accident of the fixture rather than
+	// something this query is entitled to assume.
 	var repositoryID string
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT id FROM repositories WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, owner, repo).Scan(&repositoryID); err != nil {
+		SELECT id FROM repositories
+		 WHERE org_id = ? AND source = ?
+		   AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, runmode.LocalDefaultOrgID, domain.RepoSourceGitHub, owner, repo).Scan(&repositoryID); err != nil {
 		t.Fatalf("resolve repository id for %s/%s: %v", owner, repo, err)
 	}
 	if _, err := s.db.ExecContext(ctx, `

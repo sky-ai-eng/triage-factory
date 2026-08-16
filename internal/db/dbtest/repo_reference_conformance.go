@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -42,6 +43,27 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		keptSlug      = "octo/kept"
 		untrackedSlug = "octo/dropped"
 	)
+
+	t.Run("Tracking_refuses_a_team_from_another_org", func(t *testing.T) {
+		// orgID scopes the registry rows the save mints; teamID goes straight
+		// onto the tracking row. If the two name different tenants the row is
+		// invisible — a team in one org pointing at a repository in another,
+		// which no org-scoped read returns — so the save would look like it
+		// worked and nothing would be tracked or polled. Refused instead.
+		s, orgID, _, _ := mk(t)
+		const foreignTeam = "00000000-0000-0000-0000-0000000000ff"
+		err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, foreignTeam, []domain.TeamGitHubRepo{
+			{Owner: "octo", Repo: "kept"},
+		})
+		if !errors.Is(err, db.ErrTeamNotInOrg) {
+			t.Fatalf("ReplaceForTeam with a team outside the org = %v, want db.ErrTeamNotInOrg", err)
+		}
+		// And it refused before writing: no registry row was minted for a
+		// save that could never have completed.
+		if got, _ := s.Repos.Get(ctx, orgID, keptSlug); got != nil {
+			t.Error("the refused save still created a registry row; the guard must run before the mint")
+		}
+	})
 
 	t.Run("Tracking_brings_the_repository_into_the_registry", func(t *testing.T) {
 		s, orgID, teamID, _ := mk(t)

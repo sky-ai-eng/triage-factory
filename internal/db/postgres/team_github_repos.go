@@ -137,6 +137,18 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, orgID); err != nil {
 			return fmt.Errorf("lock org for repo tracking write: %w", err)
 		}
+		// The two arguments have to describe one tenant. orgID scopes the
+		// registry rows this mints; teamID is written straight onto the
+		// tracking row. A mismatched pair would point a team in one org at a
+		// repository in another — a row no org-scoped read can see, so the
+		// save would report success and nothing would be tracked or polled.
+		//
+		// On the app pool the team_github_repos_insert policy already refuses
+		// it (tf.team_in_current_org), so this is the admin pool's only check
+		// and the app pool's legible error instead of an RLS denial.
+		if err := assertTeamInOrg(ctx, tx, orgID, teamID); err != nil {
+			return err
+		}
 
 		// The registry row comes first: a tracking row references it, so it has
 		// to exist before the insert that points at it. This is also the whole
@@ -243,9 +255,10 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			SELECT m.user_id
 			FROM team_github_repos g
 			JOIN teams t ON t.id = g.team_id
+			JOIN repositories r ON r.id = g.repository_id
 			JOIN memberships m ON m.team_id = g.team_id
 			WHERE t.org_id = $1
-			  AND lower(g.owner) = lower($2) AND lower(g.repo) = lower($3)
+			  AND lower(r.owner) = lower($2) AND lower(r.repo) = lower($3)
 		) u
 		ORDER BY user_id ASC
 	`, orgID, owner, repo)
@@ -309,4 +322,21 @@ func (s *teamGitHubReposStore) TracksRepoViewerAdminScoped(ctx context.Context, 
 		return false, fmt.Errorf("tracks repo viewer admin scoped: %w", err)
 	}
 	return ok, nil
+}
+
+// assertTeamInOrg refuses a write whose orgID and teamID name different
+// tenants. Under RLS the teams row is invisible outside the caller's org, so
+// the same query answers for both pools: the admin pool is filtered by the
+// org_id predicate, the app pool by the policy on top of it.
+func assertTeamInOrg(ctx context.Context, q queryer, orgID, teamID string) error {
+	var ok bool
+	if err := q.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM teams WHERE id = $1 AND org_id = $2)
+	`, teamID, orgID).Scan(&ok); err != nil {
+		return fmt.Errorf("verify team %s belongs to org %s: %w", teamID, orgID, err)
+	}
+	if !ok {
+		return fmt.Errorf("%w: team %s, org %s", db.ErrTeamNotInOrg, teamID, orgID)
+	}
+	return nil
 }

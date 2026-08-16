@@ -144,6 +144,16 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 		return err
 	}
 	return inTx(ctx, s.q, func(tx queryer) error {
+		// The two arguments have to describe one tenant. Local mode is N=1 so
+		// assertLocalOrg has already pinned orgID, but the teamID is still the
+		// caller's word — and the tracking row a mismatch would write is one
+		// no org-scoped read returns, so the save would report success and
+		// track nothing. Checked before the registry mint so a refused save
+		// leaves no row behind.
+		if err := assertTeamInOrg(ctx, tx, orgID, teamID); err != nil {
+			return err
+		}
+
 		// The registry row comes first: a tracking row references it, so it has
 		// to exist before the insert that points at it. This is also the whole
 		// of what used to be a reconcile — the union recompute existed to keep
@@ -236,9 +246,10 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			SELECT m.user_id
 			FROM team_github_repos g
 			JOIN teams t ON t.id = g.team_id
+			JOIN repositories r ON r.id = g.repository_id
 			JOIN memberships m ON m.team_id = g.team_id
 			WHERE t.org_id = ?
-			  AND LOWER(g.owner) = LOWER(?) AND LOWER(g.repo) = LOWER(?)
+			  AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?)
 		)
 		ORDER BY user_id ASC
 	`, orgID, orgID, owner, repo)
@@ -287,4 +298,21 @@ func (s *teamGitHubReposStore) TracksRepoViewerAdminScoped(ctx context.Context, 
 		return false, err
 	}
 	return true, nil
+}
+
+// assertTeamInOrg refuses a write whose orgID and teamID name different
+// tenants. Local mode is N=1, so assertLocalOrg has already pinned orgID and
+// this can only fire on a teamID from nowhere — which is still worth naming,
+// since the tracking row it would write is one no org-scoped read returns.
+func assertTeamInOrg(ctx context.Context, q queryer, orgID, teamID string) error {
+	var ok bool
+	if err := q.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM teams WHERE id = ? AND org_id = ?)
+	`, teamID, orgID).Scan(&ok); err != nil {
+		return fmt.Errorf("verify team %s belongs to org %s: %w", teamID, orgID, err)
+	}
+	if !ok {
+		return fmt.Errorf("%w: team %s, org %s", db.ErrTeamNotInOrg, teamID, orgID)
+	}
+	return nil
 }

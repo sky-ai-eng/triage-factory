@@ -2,9 +2,17 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrTeamNotInOrg reports a write whose orgID and teamID name different
+// tenants. It is returned rather than tolerated because the row such a write
+// produces is invisible: the tracking row would live under one org's team and
+// point at another org's repository, so every org-scoped read filters it out
+// and the caller sees a save that succeeded and tracked nothing.
+var ErrTeamNotInOrg = errors.New("db: team does not belong to that org")
 
 // TeamGitHubReposStore owns the team_github_repos table — the per-team
 // GitHub repo selection (one row per (team_id, repository_id)) and the
