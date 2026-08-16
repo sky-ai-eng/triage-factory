@@ -1509,14 +1509,19 @@ CREATE TABLE public.conversations (
     outcome text,
     outcome_reason text,
     -- failure_kind is the machine-readable discriminator for WHY status
-    -- reached 'failed' (domain.RunFailureKind: memory_limit / crash /
-    -- no_result / agent_error). App-validated; NULL = no classification.
+    -- reached 'failed' — the domain.RunFailureKind vocabulary (memory_limit,
+    -- crash, executor_lost, …). App-validated; NULL = no classification.
     failure_kind text,
-    -- park_reason is WHY the conversation was parked `open`
-    -- (domain.ParkReason: idle / user_cancelled / system_cancelled /
-    -- blueprint_cancelled / launch_failed / drained). App-validated; NULL =
-    -- never parked, or resumed since. The MODEL's stop reason is a per-turn
-    -- fact and lives on messages.stop_reason, not here.
+    -- park_reason is WHY the conversation was parked `open` — the closed
+    -- domain.ParkReason vocabulary (idle, user_cancelled, blueprint_terminal,
+    -- …). App-validated; NULL = never parked, or resumed since. The MODEL's
+    -- stop reason is a per-turn fact and lives on messages.stop_reason.
+    --
+    -- Neither list above is exhaustive, deliberately: the Go set is the
+    -- authority and a comment is the one mirror no test can pin. Copying the
+    -- members here makes a second source that silently falls behind — which
+    -- is not hypothetical, it is what happened to failure_kind, which listed
+    -- four of its six values until this line was written.
     park_reason text,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
