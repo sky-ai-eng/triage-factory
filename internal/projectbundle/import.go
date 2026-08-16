@@ -333,7 +333,7 @@ func ensureUniqueProjectName(ctx context.Context, projects db.ProjectStore, orgI
 	// Unwindowed (ListOpts zero Limit): a uniqueness check must see every
 	// project, not a page of them — a duplicate on page two is still a
 	// duplicate.
-	rows, _, err := projects.List(ctx, orgID, db.ListOpts{})
+	rows, _, err := projects.List(ctx, orgID, db.Unwindowed)
 	if err != nil {
 		return fmt.Errorf("list projects: %w", err)
 	}

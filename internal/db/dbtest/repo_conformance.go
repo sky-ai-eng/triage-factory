@@ -184,7 +184,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 		// The unwindowed read (Limit 0) is the internal callers' escape
 		// hatch and must return everything rather than an empty page.
-		if all, _, err := s.List(ctx, orgID, db.ListOpts{}); err != nil || len(all) != 3 {
+		if all, _, err := s.List(ctx, orgID, db.Unwindowed); err != nil || len(all) != 3 {
 			t.Errorf("unwindowed List = %d rows, %v; want all 3", len(all), err)
 		}
 	})

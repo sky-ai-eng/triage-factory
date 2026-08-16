@@ -449,6 +449,18 @@ type ConversationStore interface {
 	//
 	// SinceID and BeforeID are alternatives; setting both is a caller bug and
 	// the impls apply SinceID.
+	//
+	// **Every direction here cuts at the OLD end, and that is what keeps a
+	// tool call paired with its result.** A tool-result row is always newer
+	// than the assistant row that requested it, and a client pairs the two by
+	// tool_call_id across the rows it holds. Newest-N and BeforeID both drop
+	// the oldest rows, so the only pair a window can break is one whose
+	// assistant row it also dropped — and a renderer walking assistant rows
+	// never looks for that result. Breaking a pair the other way needs a
+	// window bounded at the NEW end while the caller holds rows below it: a
+	// middle slice. Nothing here can express one, and a future read that
+	// could — "jump to timestamp", say — would need its own answer for
+	// pairing before it shipped.
 	MessagesWindow(ctx context.Context, orgID, runID string, w MessageWindow) ([]domain.Message, error)
 
 	// MessagesForRuns is the batched form of Messages: every message

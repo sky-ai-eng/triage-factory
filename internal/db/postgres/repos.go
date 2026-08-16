@@ -276,7 +276,7 @@ func (s *repoStore) List(ctx context.Context, orgID string, opts db.ListOpts) ([
 func (s *repoStore) ListSystem(ctx context.Context, orgID string) ([]domain.Repository, error) {
 	// System callers resolve the whole registry (a slug lookup, a profiling
 	// pass), so they take the unwindowed read and discard the count.
-	rows, _, err := listRepositories(ctx, s.admin, orgID, db.ListOpts{})
+	rows, _, err := listRepositories(ctx, s.admin, orgID, db.Unwindowed)
 	return rows, err
 }
 

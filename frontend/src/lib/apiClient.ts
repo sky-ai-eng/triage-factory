@@ -147,8 +147,13 @@ export type ListRequest = Record<string, unknown> & {
  *  side effects.
  *
  *  `options` passes through to `apiFetch` for the few callers that need an
- *  AbortSignal or an `allow` status; the method, content type, and body are
- *  the hook's own and cannot be overridden. */
+ *  AbortSignal or an `allow` status. The method, content type, and body are
+ *  the hook's own: the caller's headers are spread FIRST so its
+ *  `Content-Type` cannot win. That ordering is load-bearing rather than
+ *  stylistic — the list routes decode strictly, and a caller that set some
+ *  other content type would send a JSON body under a header the server
+ *  doesn't decode as JSON, failing the request for a reason nothing in the
+ *  call site names. */
 export async function apiList<T>(
   path: string,
   body: ListRequest,
@@ -157,7 +162,7 @@ export async function apiList<T>(
   const page = await apiJSON<Partial<ListPage<T>>>(path, {
     ...options,
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...options.headers },
+    headers: { ...options.headers, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
   return {

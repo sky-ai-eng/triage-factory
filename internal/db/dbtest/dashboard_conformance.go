@@ -153,7 +153,7 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 		seed(t, domain.PRSnapshot{Number: 21, Author: username, State: "OPEN", Repo: "owner/repo"})
 		seed(t, domain.PRSnapshot{Number: 22, Author: "stranger", State: "OPEN", Repo: "owner/repo"})
 
-		prs, total, err := store.PRs(context.Background(), orgID, username, db.ListOpts{})
+		prs, total, err := store.PRs(context.Background(), orgID, username, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("PRs: %v", err)
 		}

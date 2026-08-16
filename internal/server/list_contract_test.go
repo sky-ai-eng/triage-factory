@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -72,30 +73,55 @@ func TestListRoutesResolveAPage(t *testing.T) {
 // rather than the AST because the thing being forbidden is a spelling: both
 // forms produce the identical value, and the point is that one of them states
 // the intent and the other hides it.
+//
+// It walks the whole module rather than this package. Scoping it to the
+// handlers was the obvious reading — a bare literal only becomes an unbounded
+// response body here — but it is the wrong one twice over: a store's own
+// `...System` variant and an importer reaching for every row are the same
+// judgment call, and a rule that stops at a directory boundary is a rule
+// somebody lands on the wrong side of. One did, in the commit that added this.
 func TestNoBareListOptsLiteral(t *testing.T) {
-	for _, dir := range []string{".", "authz", "httpx", "teamscope"} {
-		entries, err := os.ReadDir(dir)
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("resolve module root: %v", err)
+	}
+	walked := 0
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			t.Fatalf("read %s: %v", dir, err)
+			return err
 		}
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				continue
+		if d.IsDir() {
+			// Everything outside the Go tree, plus the build outputs that would
+			// make this walk slow and noisy.
+			switch d.Name() {
+			case ".git", "node_modules", "frontend", "target", "dist", "vendor":
+				return fs.SkipDir
 			}
-			path := filepath.Join(dir, name)
-			src, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("read %s: %v", path, err)
-			}
-			for i, line := range strings.Split(string(src), "\n") {
-				if strings.Contains(line, "db.ListOpts{}") {
-					t.Errorf("%s:%d constructs a bare db.ListOpts{}. If the read genuinely "+
-						"wants every row, say db.Unwindowed; if it feeds a response, pass the "+
-						"window httpx.ResolvePage returned.", path, i+1)
-				}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		walked++
+		rel, _ := filepath.Rel(root, path)
+		for i, line := range strings.Split(string(src), "\n") {
+			if strings.Contains(line, "db.ListOpts{}") {
+				t.Errorf("%s:%d constructs a bare db.ListOpts{}. If the read genuinely "+
+					"wants every row, say db.Unwindowed; if it feeds a response, pass the "+
+					"window httpx.ResolvePage returned.", rel, i+1)
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	if walked == 0 {
+		t.Fatal("walked no Go files — the scan is broken, not the tree")
 	}
 }
 

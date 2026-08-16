@@ -471,7 +471,7 @@ func (s *repoStore) UpdateCloneStatus(ctx context.Context, orgID, owner, repo, s
 
 func (s *repoStore) ListSystem(ctx context.Context, orgID string) ([]domain.Repository, error) {
 	// Unwindowed: system callers resolve the whole registry.
-	rows, _, err := s.List(ctx, orgID, db.ListOpts{})
+	rows, _, err := s.List(ctx, orgID, db.Unwindowed)
 	return rows, err
 }
 

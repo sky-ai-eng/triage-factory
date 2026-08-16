@@ -37,9 +37,19 @@ type ListOpts struct {
 var Unwindowed = ListOpts{}
 
 // LikeEscape escapes the LIKE metacharacters in a literal so it matches
-// itself. Callers pair it with `ESCAPE '\\'` in the statement. Both dialects
-// treat `\\` as an ordinary character in a string literal by default, which is
-// why the escape character must be declared explicitly rather than assumed.
+// itself. The escape character it inserts is a single backslash, and the
+// statement must declare that same character — the clause is exactly
+//
+//	ESCAPE '\'
+//
+// one backslash between the quotes. Spelling it `ESCAPE '\\'` is not an
+// escaped backslash: neither dialect treats a backslash as special inside a
+// string literal, so those quotes hold a TWO-character string, and SQLite
+// rejects it outright ("ESCAPE expression must be a single character"). That
+// exact mistake shipped in the backfill-candidates predicate, where the query
+// lived in a Go raw string and the doubling read as ordinary Go escaping.
+// Declaring the character is still required rather than assumed, because
+// neither dialect defaults to one.
 func LikeEscape(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))

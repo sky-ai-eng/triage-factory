@@ -178,7 +178,7 @@ func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Projec
 // gate.
 func (s *projectStore) ListSystem(ctx context.Context, orgID string) ([]domain.Project, error) {
 	// Unwindowed: system callers resolve the whole set.
-	rows, _, err := s.List(ctx, orgID, db.ListOpts{})
+	rows, _, err := s.List(ctx, orgID, db.Unwindowed)
 	return rows, err
 }
 

@@ -149,7 +149,7 @@ func (s *projectStore) List(ctx context.Context, orgID string, opts db.ListOpts)
 
 func (s *projectStore) ListSystem(ctx context.Context, orgID string) ([]domain.Project, error) {
 	// Unwindowed: system callers resolve the whole set.
-	rows, _, err := listProjects(ctx, s.admin, orgID, db.ListOpts{})
+	rows, _, err := listProjects(ctx, s.admin, orgID, db.Unwindowed)
 	return rows, err
 }
 
