@@ -60,7 +60,16 @@ func RepoRefFromSlug(slug string) RepoRef {
 // conditional-request cursor, and the cached AI-generated profile the name
 // used to promise on its own.
 type Repository struct {
-	ID    string // "owner/repo"
+	// ID is the slug, "owner/repo", derived by the scanners rather than read
+	// from a column — so it cannot drift from Owner/Repo, but it is a name
+	// rather than a handle, and a name is a thing that stops resolving.
+	//
+	// TODO(TFAC-834): this should be the registry row's id, with the slug
+	// rendered by a Slug() method for display and wire use only. The stored
+	// references are already ids; the store's outward contract is the last
+	// place a repository is passed around by a value GitHub can change, and
+	// the lookups that accept one miss silently when it goes stale.
+	ID    string
 	Owner string
 	Repo  string
 
