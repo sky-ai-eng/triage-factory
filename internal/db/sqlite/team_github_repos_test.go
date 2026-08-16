@@ -314,9 +314,9 @@ func TestTeamGitHubRepos_SQLite_TrackedRowCarriesIdentity(t *testing.T) {
 		t.Fatalf("ReplaceForTeam: %v", err)
 	}
 
-	got, err := stores.Repos.Get(ctx, runmode.LocalDefaultOrgID, "acme/api")
+	got, err := stores.Repos.GetByRef(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug("acme/api"))
 	if err != nil || got == nil {
-		t.Fatalf("Get after tracking: got=%v err=%v — tracking must create the row immediately", got, err)
+		t.Fatalf("GetByRef after tracking: got=%v err=%v — tracking must create the row immediately", got, err)
 	}
 	if got.Source != domain.RepoSourceGitHub {
 		t.Errorf("source = %q, want %q", got.Source, domain.RepoSourceGitHub)

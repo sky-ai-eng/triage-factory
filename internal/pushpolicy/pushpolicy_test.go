@@ -49,7 +49,7 @@ func setPolicy(t *testing.T, stores db.Stores, policy string) {
 // exactly when a base-branch push must not slip through.
 func TestProtectedBranches_UnprofiledRepoStillRefusesMainAndMaster(t *testing.T) {
 	stores := newStores(t)
-	got, err := pushpolicy.ProtectedBranches(context.Background(), stores, runmode.LocalDefaultOrgID, "acme/never-profiled")
+	got, err := pushpolicy.ProtectedBranches(context.Background(), stores, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug("acme/never-profiled"))
 	if err != nil {
 		t.Fatalf("ProtectedBranches: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestProtectedBranches_ProfileAddsDefaultAndBase(t *testing.T) {
 	stores := newStores(t)
 	ctx := context.Background()
 	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		ID: "acme/api", Owner: "acme", Repo: "api",
+		Owner: "acme", Repo: "api",
 		DefaultBranch: "trunk",
 		CloneURL:      "https://x", ProfileText: "t",
 	}); err != nil {
@@ -72,10 +72,14 @@ func TestProtectedBranches_ProfileAddsDefaultAndBase(t *testing.T) {
 	}
 	// The configured base branch has its own write path (it's a user choice, not
 	// a profiling output), so set it the way the settings surface does.
-	if err := stores.Repos.UpdateBaseBranch(ctx, runmode.LocalDefaultOrgID, "acme/api", "develop"); err != nil {
+	row, err := stores.Repos.GetByRef(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug("acme/api"))
+	if err != nil || row == nil {
+		t.Fatalf("GetByRef: got=%v err=%v", row, err)
+	}
+	if err := stores.Repos.UpdateBaseBranch(ctx, runmode.LocalDefaultOrgID, row.ID, "develop"); err != nil {
 		t.Fatalf("set base branch: %v", err)
 	}
-	got, err := pushpolicy.ProtectedBranches(ctx, stores, runmode.LocalDefaultOrgID, "acme/api")
+	got, err := pushpolicy.ProtectedBranches(ctx, stores, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug("acme/api"))
 	if err != nil {
 		t.Fatalf("ProtectedBranches: %v", err)
 	}
@@ -151,7 +155,7 @@ func TestProtectedFor_PolicyEmptiesTheSet(t *testing.T) {
 	ctx := context.Background()
 
 	stores := newStores(t)
-	strict, err := pushpolicy.ProtectedFor(ctx, stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, "acme/api", false)
+	strict, err := pushpolicy.ProtectedFor(ctx, stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.RepoRefFromSlug("acme/api"), false)
 	if err != nil {
 		t.Fatalf("ProtectedFor (default policy): %v", err)
 	}
@@ -160,7 +164,7 @@ func TestProtectedFor_PolicyEmptiesTheSet(t *testing.T) {
 	}
 
 	setPolicy(t, stores, domain.BaseBranchPushAlways)
-	open, err := pushpolicy.ProtectedFor(ctx, stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, "acme/api", true)
+	open, err := pushpolicy.ProtectedFor(ctx, stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.RepoRefFromSlug("acme/api"), true)
 	if err != nil {
 		t.Fatalf("ProtectedFor (always): %v", err)
 	}

@@ -125,11 +125,11 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		if p.CloneURL == "" {
 			continue
 		}
-		if _, alreadyAdded := materializedSet[p.ID]; alreadyAdded {
+		if _, alreadyAdded := materializedSet[p.Slug()]; alreadyAdded {
 			continue
 		}
 		available = append(available, listAvailable{
-			Repo:        p.ID,
+			Repo:        p.Slug(),
 			Description: p.Description,
 		})
 	}

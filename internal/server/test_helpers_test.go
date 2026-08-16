@@ -111,7 +111,6 @@ func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) {
 	t.Helper()
 	ctx := context.Background()
 	if err := sqlitestore.New(s.db).Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		ID:            owner + "/" + repo,
 		Owner:         owner,
 		Repo:          repo,
 		DefaultBranch: "main",

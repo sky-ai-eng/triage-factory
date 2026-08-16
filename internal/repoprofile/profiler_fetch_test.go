@@ -128,7 +128,7 @@ func (s *fetchRepositoryStore) ListTrackedNamesSystem(context.Context, string) (
 
 // GetSystem is consulted only on the non-forced TTL path; the test forces, so
 // this stays a stub returning "no existing row."
-func (s *fetchRepositoryStore) GetSystem(context.Context, string, string) (*domain.Repository, error) {
+func (s *fetchRepositoryStore) GetByRefSystem(context.Context, string, domain.RepoRef) (*domain.Repository, error) {
 	return nil, nil
 }
 
@@ -144,7 +144,7 @@ func (s *fetchRepositoryStore) upsertedByID() map[string]domain.Repository {
 	defer s.mu.Unlock()
 	m := make(map[string]domain.Repository, len(s.upserts))
 	for _, p := range s.upserts {
-		m[p.ID] = p
+		m[p.Slug()] = p
 	}
 	return m
 }

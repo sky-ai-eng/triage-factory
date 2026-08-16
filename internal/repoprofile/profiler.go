@@ -109,7 +109,7 @@ func (p *Profiler) fireBatchFailureToast(ctx context.Context, orgID string, batc
 	if p.recipients == nil {
 		names := make([]string, len(batch))
 		for i, d := range batch {
-			names[i] = d.profile.ID
+			names[i] = d.profile.Slug()
 		}
 		toast.Warning(p.ws, orgID, fmt.Sprintf(bodyFmt, strings.Join(names, ", ")))
 		return
@@ -118,11 +118,11 @@ func (p *Profiler) fireBatchFailureToast(ctx context.Context, orgID string, batc
 	for _, d := range batch {
 		uids, err := p.recipients(ctx, orgID, d.profile.Owner, d.profile.Repo)
 		if err != nil {
-			repoprofileLog.Error("resolve toast audience failed; omitting repo from failure toast", "repo", d.profile.ID, "error", err)
+			repoprofileLog.Error("resolve toast audience failed; omitting repo from failure toast", "repo", d.profile.Slug(), "error", err)
 			continue
 		}
 		for _, uid := range uids {
-			perUser[uid] = append(perUser[uid], d.profile.ID)
+			perUser[uid] = append(perUser[uid], d.profile.Slug())
 		}
 	}
 	for uid, names := range perUser {
@@ -239,9 +239,11 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 		owner, repo := parts[0], parts[1]
 
-		// Skip repos that were recently profiled (unless forced)
+		// Skip repos that were recently profiled (unless forced). Ref-keyed:
+		// name came out of the tracked set, which is the same name the
+		// GitHub fetches below are built from.
 		if !force {
-			existing, err := p.repos.GetSystem(ctx, orgID, name)
+			existing, err := p.repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
 			if err != nil {
 				repoprofileLog.Warn("check existing profile failed, skipping", "repo", name, "error", err)
 				continue
@@ -311,8 +313,10 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			cloneURL = meta.SSHURL
 		}
 
+		// No ID: this is a value built to hand to UpsertSystem, which keys on
+		// the identity columns below. The registry id belongs to the row, and
+		// this code has never read one.
 		prof := domain.Repository{
-			ID:     name,
 			Owner:  owner,
 			Repo:   repo,
 			Source: domain.RepoSourceGitHub,
@@ -404,7 +408,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			// Fallback: upsert without profile_text so the row at least exists.
 			for _, d := range batch {
 				if uErr := p.repos.UpsertSystem(ctx, orgID, d.profile); uErr != nil {
-					repoprofileLog.Error("upsert fallback failed", "repo", d.profile.ID, "error", uErr)
+					repoprofileLog.Error("upsert fallback failed", "repo", d.profile.Slug(), "error", uErr)
 				} else {
 					touched = true
 				}
@@ -420,7 +424,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		now := time.Now()
 		for _, d := range batch {
 			prof := d.profile
-			if text := byRepo[prof.ID]; text != "" {
+			if text := byRepo[prof.Slug()]; text != "" {
 				prof.ProfileText = text
 			}
 			// Stamp on every successful batch result, even when the model
@@ -430,14 +434,14 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			// retries next cycle — error ≠ absence.)
 			prof.ProfiledAt = &now
 			if err := p.repos.UpsertSystem(ctx, orgID, prof); err != nil {
-				repoprofileLog.Error("upsert profile failed", "repo", prof.ID, "error", err)
+				repoprofileLog.Error("upsert profile failed", "repo", prof.Slug(), "error", err)
 				continue
 			}
 			touched = true
 			if prof.ProfileText != "" {
 				profiled++
 				p.notify.Publish(ctx, orgID, repoevent.Update{
-					ID:          prof.ID,
+					ID:          prof.Slug(),
 					ProfileText: repoevent.Ptr(prof.ProfileText),
 				})
 			}
@@ -498,7 +502,7 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 	inputs := make([]repoProfileInput, len(batch))
 	for i, d := range batch {
 		inputs[i] = repoProfileInput{
-			Repo: d.profile.ID,
+			Repo: d.profile.Slug(),
 			Docs: d.docs,
 		}
 	}

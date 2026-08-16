@@ -40,6 +40,22 @@ var (
 	// written from provider payloads, one repository at a time — which is why
 	// it is refused rather than resolved by picking one.
 	ErrRepoIdentityAmbiguous = errors.New("more than one repository row carries this provider id")
+
+	// ErrNoSuchRepository means an id-keyed method was handed a registry id no
+	// row answers to. Only the id-keyed methods return it, and that asymmetry
+	// is the point of splitting them from the *ByRef* ones:
+	//
+	//   - An id is a handle. It is minted by this store, it is what every
+	//     stored reference to a repository holds, and GitHub cannot change it.
+	//     One that stops resolving is a broken invariant, so the caller is
+	//     made to handle it rather than shown an empty answer that reads
+	//     exactly like "this repository was never configured".
+	//   - A name is not a handle. "Nothing answers to owner/repo" is a
+	//     legitimate, expected answer at every edge that holds one — an
+	//     agent's argv, a bundle's pinned list, a git remote — and those
+	//     callers already render it. So the *ByRef* lookups keep returning
+	//     (nil, nil) and say so in their own docs.
+	ErrNoSuchRepository = errors.New("no repository with that id")
 )
 
 // RepositoryStore owns the repositories table — the registry of repositories
@@ -59,21 +75,29 @@ var (
 // impl asserts orgID equals the local sentinel and otherwise ignores
 // it (single-tenant by design).
 //
-// # repoID identity across backends
+// # A slug is an edge format; the row id is the handle
 //
-// The store API surfaces every repo by its natural "owner/repo"
-// string as repoID — that's what callers pass and what
-// domain.Repository.ID returns. Both dialects key the row on a surrogate
-// uuid plus a folded UNIQUE(org_id, source, owner, repo) natural key, and
-// both impls split the passed-in "owner/repo" and query that natural key, so
-// the surrogate never crosses this boundary. It exists because every table
-// that references a repository stores it — that is what makes a rename a
-// one-row update — not because a caller needs it.
+// Both dialects key the row on a uuid plus a folded
+// UNIQUE(org_id, source, owner, repo) natural key, and that uuid is what
+// domain.Repository.ID carries and what every table referencing a repository
+// stores. It is the handle: a rename moves owner/repo and leaves it alone.
 //
-// source is absent from the slug-keyed methods deliberately: they
-// match a repo without naming one, which is unambiguous while GitHub
-// is the only provider that issues repositories. The methods that DO
-// name one take a domain.RepoRef.
+// So every method here is keyed one of two ways, and which one it is, is in
+// its name:
+//
+//   - id-keyed (Get, UpdateBaseBranch, SeedCloneURL) takes the registry
+//     id. A miss is ErrNoSuchRepository, never a silent no-op — see that
+//     error's doc for why the two halves differ.
+//   - ref-keyed (…ByRef) takes a domain.RepoRef, the provider's own name
+//     for the repository. Matching folds case on owner/repo (GitHub
+//     identifiers are case-insensitive) and pins ref.Source, so a ref names
+//     one repository rather than merely matching one. A miss is (nil, nil) or
+//     a no-op, because a name that resolves to nothing is an answer.
+//
+// No method takes a bare "owner/repo" string. domain.RepoRefFromSlug is the
+// edge parser for the surfaces that still speak one — HTTP path segments, an
+// agent's argv, a bundle's pinned list — and each of those resolves once, at
+// its own boundary, next to whatever access gate it already runs.
 type RepositoryStore interface {
 	// Upsert inserts or updates a repository row. On conflict it
 	// refreshes profiling metadata (description, has_readme,
@@ -91,7 +115,7 @@ type RepositoryStore interface {
 	Upsert(ctx context.Context, orgID string, p domain.Repository) error
 
 	// List returns every configured repo, including those without
-	// profile text. Ordered by repoID for stable display.
+	// profile text. Ordered by owner/repo for stable display.
 	List(ctx context.Context, orgID string) ([]domain.Repository, error)
 
 	// ListTeamScoped is the non-admin discovery read (TFAC-559): it
@@ -135,28 +159,39 @@ type RepositoryStore interface {
 	// configured yet" UI state without paying the full SELECT cost.
 	CountConfigured(ctx context.Context, orgID string) (int, error)
 
-	// UpdateBaseBranch sets the user-configured base branch for a
-	// repo. Empty string stores SQL NULL → falls back to the
-	// detected default_branch at use-site. repoID is matched
-	// case-insensitively on owner/repo (GitHub identifiers are) so a
-	// caller whose casing differs from what's stored still finds the
-	// row — TFAC-559's repoAccessAllowed handler gate matches
-	// case-insensitively too, and the two must agree or a request
-	// could pass the gate yet silently affect 0 rows here.
-	UpdateBaseBranch(ctx context.Context, orgID, repoID, baseBranch string) error
+	// UpdateBaseBranch sets the user-configured base branch for the
+	// repository with this registry id. Empty string stores SQL NULL → falls
+	// back to the detected default_branch at use-site.
+	//
+	// ErrNoSuchRepository when no row carries the id, rather than the silent
+	// zero-rows the slug-keyed predecessor produced. The caller is the PATCH
+	// handler, which resolved the id from its path segment moments earlier
+	// and would otherwise answer "updated" for a write that did nothing.
+	UpdateBaseBranch(ctx context.Context, orgID, id, baseBranch string) error
 
-	// SeedCloneURL sets clone_url for a configured repo ONLY when the
-	// stored value is NULL/empty — the project-bundle import's
-	// warm-cache seed (the URL was discovered during import preflight
-	// via the importing org's own GitHub client). Never clobbers a URL
-	// the profiler/clone hooks already wrote; no-ops silently when the
-	// repo isn't configured. repoID is "owner/repo", matched
-	// case-insensitively like UpdateBaseBranch. TFAC-109.
-	SeedCloneURL(ctx context.Context, orgID, repoID, cloneURL string) error
+	// SeedCloneURL sets clone_url for the repository with this registry id
+	// ONLY when the stored value is NULL/empty — the project-bundle import's
+	// warm-cache seed (the URL was discovered during import preflight via the
+	// importing org's own GitHub client). Never clobbers a URL the
+	// profiler/clone hooks already wrote, and leaving one in place is a
+	// success, not a miss. ErrNoSuchRepository when no row carries the id.
+	SeedCloneURL(ctx context.Context, orgID, id, cloneURL string) error
 
-	// Get returns a single repository row by "owner/repo" id, or nil
-	// if not configured.
-	Get(ctx context.Context, orgID, repoID string) (*domain.Repository, error)
+	// Get returns the repository with this registry id, or
+	// ErrNoSuchRepository. Its ref-keyed sibling is GetByRef.
+	Get(ctx context.Context, orgID, id string) (*domain.Repository, error)
+
+	// GetByRef returns the repository the provider currently calls
+	// ref.Owner/ref.Repo, or (nil, nil) when nothing does. That nil is the
+	// answer every edge holding a name already renders — "repo is not
+	// configured in Triage Factory", "no repository row for pinned repo,
+	// skipping", the universal protected-branch set — so it stays an answer
+	// rather than becoming an error.
+	//
+	// Matching folds case on owner/repo and pins ref.Source (empty means
+	// GitHub, via domain.NormalizeRepoSource); ref.ExternalID is ignored, as
+	// this asks what a name resolves to now, not what an identity was called.
+	GetByRef(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
 
 	// GetOrCreateSystem returns the row for one repository, minting a bare
 	// one if it does not exist yet. It is the single primitive that brings
@@ -195,18 +230,21 @@ type RepositoryStore interface {
 	// leaning on it.
 	GetOrCreateSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
 
-	// UpdateCloneStatus records the outcome of an EnsureBareClone
-	// attempt for the given repo. status is "ok" | "failed" |
+	// UpdateCloneStatusByRef records the outcome of an EnsureBareClone
+	// attempt for the named repo. status is "ok" | "failed" |
 	// "pending"; errMsg and errKind are stored as TEXT (empty
 	// string serializes to NULL) — kind is "ssh" when our SSH
 	// preflight has confirmed the SSH side is the cause, "other"
 	// when the failure is on the git/transport side, and empty for
 	// status="ok".
 	//
-	// No-ops silently when the repo isn't in repositories
-	// (configured-repos-only invariant — clone hooks fire after
-	// repo selection).
-	UpdateCloneStatus(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error
+	// Ref-keyed because the caller is a clone callback that knows which
+	// checkout it just attempted, not which row it belongs to. No-ops
+	// silently when nothing answers to the name: clone hooks fire after repo
+	// selection, so the row is normally there, and a repo dropped between the
+	// hook firing and this UPDATE landing is a race whose loser has nothing
+	// left to record against.
+	UpdateCloneStatusByRef(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) error
 
 	// --- Admin-pool variants (`...System`) ---
 	//
@@ -231,19 +269,21 @@ type RepositoryStore interface {
 	// entry or a task can go on naming the repository after a team untracks it.
 	// "Which repositories does TF work on" is a question about tracking, and
 	// this is the read that asks tracking.
+	//
+	// Names, not ids, and deliberately so: every consumer spends the result at
+	// an edge. The poller turns each into a /repos/{owner}/{repo} path and
+	// case-folds it against the installation grant's own FullName strings; the
+	// profiler fetches GitHub metadata under it; the dashboard backfill builds
+	// a `repo:` search qualifier from it; the round-robin resume cursor stores
+	// one. Handing back ids would make all four resolve straight back to the
+	// name, and the ids would be dead weight in the poll loop's hot path.
 	ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error)
-	UpdateCloneStatusSystem(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error
+	UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) error
 	CountConfiguredSystem(ctx context.Context, orgID string) (int, error)
-	GetSystem(ctx context.Context, orgID, repoID string) (*domain.Repository, error)
+	GetSystem(ctx context.Context, orgID, id string) (*domain.Repository, error)
+	GetByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
 	UpsertSystem(ctx context.Context, orgID string, p domain.Repository) error
 
-	// GetPullsPollStateSystem returns the stored conditional-request
-	// state for a repo's open-PR listing: the last ETag and the last
-	// successful poll time. Both are zero values ("" / nil)
-	// when the repo has never been listed. System (claims-free) variant
-	// — the poller goroutine has no JWT claims, same convention as
-	// ListTrackedNamesSystem. No-ops to ("", nil, nil) when the repo
-	// isn't in repositories.
 	// FillMissingExternalIDsSystem records the provider's repository id for
 	// tracked repos that do not have one yet, and returns how many rows it
 	// filled. Refs whose repository has no row, or whose row already carries
@@ -310,12 +350,25 @@ type RepositoryStore interface {
 	// see all of, and its callers are the poller and the profiler.
 	RenameSystem(ctx context.Context, orgID string, observed domain.RepoRef) (domain.RepoRenameOutcome, error)
 
-	GetPullsPollStateSystem(ctx context.Context, orgID, repoID string) (etag string, polledAt *time.Time, err error)
+	// GetPullsPollStateByRefSystem returns the stored conditional-request
+	// state for a repo's open-PR listing: the last ETag and the last
+	// successful poll time. Both are zero values ("" / nil) when the repo has
+	// never been listed, and likewise when nothing answers to the name.
+	//
+	// Ref-keyed, and the pair below with it, because the caller is the GitHub
+	// tracker iterating ListTrackedNamesSystem: it holds the same name it is
+	// about to put in the request path, and resolving each one to an id per
+	// repo per cycle would buy nothing — the state is a cache of one HTTP
+	// conditional request, and a name that stopped resolving mid-cycle costs
+	// exactly one unconditional re-list.
+	//
+	// System (claims-free) variant — the poller goroutine has no JWT claims,
+	// same convention as ListTrackedNamesSystem.
+	GetPullsPollStateByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (etag string, polledAt *time.Time, err error)
 
-	// SetPullsPollStateSystem records the conditional-request state after
+	// SetPullsPollStateByRefSystem records the conditional-request state after
 	// a successful open-PR list. On a 304 the caller passes the stored
 	// etag back unchanged (only polledAt advances); on a 200 it passes
-	// the fresh etag. No-ops silently when the repo isn't in
-	// repositories (configured-repos-only invariant). System variant.
-	SetPullsPollStateSystem(ctx context.Context, orgID, repoID, etag string, polledAt time.Time) error
+	// the fresh etag. No-ops silently when nothing answers to the name.
+	SetPullsPollStateByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, etag string, polledAt time.Time) error
 }

@@ -83,10 +83,10 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		// The repository row itself.
-		if got, _ := s.Repos.Get(ctx, orgID, renameOldSlug); got != nil {
+		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef(renameOldSlug)); got != nil {
 			t.Errorf("repository still resolves under the old slug: %+v", got)
 		}
-		moved, err := s.Repos.Get(ctx, orgID, renameNewSlug)
+		moved, err := s.Repos.GetByRef(ctx, orgID, repoRef(renameNewSlug))
 		if err != nil || moved == nil {
 			t.Fatalf("Get(%s) = %v, %v; want the moved row", renameNewSlug, moved, err)
 		}
@@ -206,7 +206,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if out.Renamed {
 			t.Errorf("second run reported %+v, want no rename", out)
 		}
-		if got, _ := s.Repos.Get(ctx, orgID, renameNewSlug); got == nil {
+		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef(renameNewSlug)); got == nil {
 			t.Errorf("the repository moved away on the second run")
 		}
 		ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameNewSlug+"#18")
@@ -232,7 +232,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if out.Renamed {
 			t.Errorf("outcome = %+v, want no rename for a casing-only change", out)
 		}
-		if got, _ := s.Repos.Get(ctx, orgID, renameOldSlug); got == nil || got.ID != renameOldSlug {
+		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef(renameOldSlug)); got == nil || got.Slug() != renameOldSlug {
 			t.Errorf("stored casing changed to %+v; it is sticky", got)
 		}
 	})
@@ -254,7 +254,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if out.Renamed {
 			t.Fatalf("outcome = %+v, want no rename: a new repository under a freed name is not the old one", out)
 		}
-		if got, _ := s.Repos.Get(ctx, orgID, renameOldSlug); got == nil || got.ExternalID != fx.externalID {
+		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef(renameOldSlug)); got == nil || got.ExternalID != fx.externalID {
 			t.Errorf("repository row = %+v, want the stored identity untouched", got)
 		}
 		if ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameOldSlug+"#18"); ent == nil {
@@ -297,7 +297,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if out.Renamed {
 			t.Errorf("outcome = %+v, want no rename against an id-less row", out)
 		}
-		if got, _ := s.Repos.Get(ctx, orgID, "octo/unidentified"); got == nil {
+		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef("octo/unidentified")); got == nil {
 			t.Errorf("the id-less row moved")
 		}
 	})
@@ -356,7 +356,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Fatalf("err = %v, want ErrRepoSlugOccupied", err)
 		}
 		// All tables or none: the refusal left every reference where it was.
-		if got, _ := s.Repos.Get(ctx, orgID, renameOldSlug); got == nil {
+		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef(renameOldSlug)); got == nil {
 			t.Errorf("the repository row moved despite the refusal")
 		}
 		if ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameOldSlug+"#18"); ent == nil {
@@ -422,7 +422,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		// All tables or none: the refusal rolled the whole rewrite back.
-		if got, _ := s.Repos.Get(ctx, orgID, "octo/legacy"); got == nil {
+		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef("octo/legacy")); got == nil {
 			t.Error("the repository row moved despite the refusal")
 		}
 		if got, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "octo/legacy#18"); got == nil {
@@ -486,7 +486,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		// All tables or none.
-		if got, _ := s.Repos.Get(ctx, orgID, "octo/legacy"); got == nil {
+		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef("octo/legacy")); got == nil {
 			t.Error("the repository row moved despite the refusal")
 		}
 		if got, _ := s.Artifacts.Get(ctx, orgID, live.ID); got == nil ||
@@ -592,7 +592,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if out.Renamed {
 			t.Errorf("outcome = %+v, want no rename", out)
 		}
-		if got, _ := s.Repos.Get(ctx, orgID, "ghost/repo"); got != nil {
+		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef("ghost/repo")); got != nil {
 			t.Errorf("a rename created a repository row: %+v — it moves rows, it never mints one", got)
 		}
 	})
@@ -655,7 +655,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	}); err != nil {
 		t.Fatalf("seed repository identity: %v", err)
 	}
-	if err := s.Repos.UpdateBaseBranch(ctx, orgID, renameOldSlug, "release"); err != nil {
+	if err := setBaseBranch(ctx, s.Repos, orgID, renameOldSlug, "release"); err != nil {
 		t.Fatalf("seed base branch: %v", err)
 	}
 

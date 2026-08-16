@@ -458,8 +458,8 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Repos.GetSystem(ctx, orgID, repoID); err != nil {
 			t.Errorf("Repos.GetSystem: %v", err)
 		}
-		if err := stores.Repos.UpdateCloneStatusSystem(ctx, orgID, "octo", "conformance-repo", "ok", "", ""); err != nil {
-			t.Errorf("Repos.UpdateCloneStatusSystem: %v", err)
+		if err := stores.Repos.UpdateCloneStatusByRefSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "conformance-repo"}, "ok", "", ""); err != nil {
+			t.Errorf("Repos.UpdateCloneStatusByRefSystem: %v", err)
 		}
 	})
 
@@ -598,13 +598,19 @@ func seedTrigger(t *testing.T, h *Harness, orgID, creatorID, teamID, blueprintID
 	return id
 }
 
+// seedRepository inserts one repository row and returns its registry id — the
+// handle the id-keyed store methods take.
 func seedRepository(t *testing.T, h *Harness, orgID string) string {
 	t.Helper()
-	MustExec(t, h.AdminDB, `
+	var id string
+	if err := h.AdminDB.QueryRow(`
 		INSERT INTO repositories (org_id, owner, repo)
 		VALUES ($1, 'octo', 'conformance-repo')
-	`, orgID)
-	return "octo/conformance-repo"
+		RETURNING id
+	`, orgID).Scan(&id); err != nil {
+		t.Fatalf("seed repository: %v", err)
+	}
+	return id
 }
 
 // assertPgCode is defined in baseline_test.go (same package); referenced

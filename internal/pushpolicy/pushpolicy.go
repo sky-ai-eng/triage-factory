@@ -44,17 +44,23 @@ import (
 //
 // A profile lookup error is returned (not swallowed): resolving the set
 // wrongly is worse than not resolving it, and the caller decides what an
-// unresolvable set means. A nil profile (configured-but-unprofiled repo) is
-// NOT an error — the universal set still applies.
-func ProtectedBranches(ctx context.Context, stores db.Stores, orgID, repoID string) (map[string]bool, error) {
+// unresolvable set means. A nil profile is NOT an error — a repo that is
+// configured but unprofiled, and a name no registry row answers to, both still
+// get the universal set. This is why the lookup is ref-keyed: both enforcement
+// points learn the repository from something outside the database (a push's
+// git remote, the proxy's request path), so "no row for that name" is a state
+// they must resolve to protection rather than to a failure. Turning it into an
+// error would swing the answer to whichever way the caller fails — denying
+// every push in multi, allowing a push to main in local.
+func ProtectedBranches(ctx context.Context, stores db.Stores, orgID string, ref domain.RepoRef) (map[string]bool, error) {
 	// Universal protected names, refused regardless of profile state.
 	out := map[string]bool{"main": true, "master": true}
 	if stores.Repos == nil {
-		return nil, fmt.Errorf("resolve protected branches for %s: no repo store", repoID)
+		return nil, fmt.Errorf("resolve protected branches for %s: no repo store", ref.Slug())
 	}
-	profile, err := stores.Repos.GetSystem(ctx, orgID, repoID)
+	profile, err := stores.Repos.GetByRefSystem(ctx, orgID, ref)
 	if err != nil {
-		return nil, fmt.Errorf("resolve protected branches for %s: %w", repoID, err)
+		return nil, fmt.Errorf("resolve protected branches for %s: %w", ref.Slug(), err)
 	}
 	if profile != nil {
 		if profile.DefaultBranch != "" {
@@ -103,8 +109,8 @@ func Allows(ctx context.Context, stores db.Stores, teamID string, eventTriggered
 // protected branch names, or an EMPTY set when the team's policy permits this
 // run to push them. An empty (non-nil) map means "nothing is protected here" —
 // the caller can range over it uniformly either way.
-func ProtectedFor(ctx context.Context, stores db.Stores, orgID, teamID, repoID string, eventTriggered bool) (map[string]bool, error) {
-	protected, err := ProtectedBranches(ctx, stores, orgID, repoID)
+func ProtectedFor(ctx context.Context, stores db.Stores, orgID, teamID string, ref domain.RepoRef, eventTriggered bool) (map[string]bool, error) {
+	protected, err := ProtectedBranches(ctx, stores, orgID, ref)
 	if err != nil {
 		return nil, err
 	}
