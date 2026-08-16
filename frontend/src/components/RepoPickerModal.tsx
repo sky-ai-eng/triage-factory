@@ -6,7 +6,7 @@ import { useActiveOrgId } from '../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID, getGitHubAppStatus, getGitHubAppInstallURL } from '../lib/githubApp'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import SearchField from './SearchField'
-import { apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiList, httpErrorMessage } from '../lib/apiClient'
 
 interface GitHubRepo {
   full_name: string
@@ -143,9 +143,22 @@ export default function RepoPickerModal({
     setLoading(true)
     setError('')
     try {
-      const data = await apiJSON<GitHubRepo[]>('/api/github/repos')
-      setRepos(data)
-      onReposFetched?.(data)
+      // Walk the proxy list to completion: the picker filters client-side
+      // over the whole reachable set, and a partial set would silently hide
+      // repos the user can genuinely select. The page bound keeps a
+      // pathological account from spinning forever.
+      const all: GitHubRepo[] = []
+      let token = ''
+      for (let i = 0; i < 20; i++) {
+        const body: Record<string, unknown> = { page_size: 100 }
+        if (token) body.page_token = token
+        const page = await apiList<GitHubRepo>('/api/github/repos/list', body)
+        all.push(...page.items)
+        token = page.next_page_token
+        if (!token) break
+      }
+      setRepos(all)
+      onReposFetched?.(all)
     } catch (err) {
       console.error('Failed to fetch repos:', err)
       // TFAC-324's distinct 400: an active App installed on zero accounts (and

@@ -153,15 +153,15 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 
 	t.Run("List_empty_returns_empty_slice", func(t *testing.T) {
 		s, orgID, _ := mk(t)
-		got, err := s.List(ctx, orgID)
+		got, total, err := s.List(ctx, orgID, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
 		if got == nil {
 			t.Errorf("List on empty org returned nil; want non-nil empty slice")
 		}
-		if len(got) != 0 {
-			t.Errorf("List on empty org = %v, want empty", got)
+		if len(got) != 0 || total != 0 {
+			t.Errorf("List on empty org = %v (total %d), want empty", got, total)
 		}
 	})
 
@@ -173,9 +173,28 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 				t.Fatalf("Create %q: %v", n, err)
 			}
 		}
-		got, err := s.List(ctx, orgID)
+		got, total, err := s.List(ctx, orgID, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("List: %v", err)
+		}
+		if total != len(names) {
+			t.Errorf("total = %d, want %d", total, len(names))
+		}
+		// The pages partition the name order: two windows over three rows
+		// cover each project exactly once, in the same order.
+		first, _, err := s.List(ctx, orgID, db.ListOpts{Limit: 2})
+		if err != nil {
+			t.Fatalf("List page 1: %v", err)
+		}
+		second, _, err := s.List(ctx, orgID, db.ListOpts{Limit: 2, Offset: 2})
+		if err != nil {
+			t.Fatalf("List page 2: %v", err)
+		}
+		if len(first) != 2 || len(second) != 1 {
+			t.Fatalf("pages = %d + %d, want 2 + 1", len(first), len(second))
+		}
+		if first[0].ID != got[0].ID || first[1].ID != got[1].ID || second[0].ID != got[2].ID {
+			t.Errorf("paged walk did not reproduce the unpaged order")
 		}
 		gotNames := make([]string, len(got))
 		for i, p := range got {

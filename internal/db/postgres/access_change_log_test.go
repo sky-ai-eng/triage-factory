@@ -187,10 +187,10 @@ func TestAccessChangeLogStore_Postgres_ListByOrg(t *testing.T) {
 	var all, limited []domain.AccessChange
 	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		if all, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{}); e != nil {
+		if all, _, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{}); e != nil {
 			return e
 		}
-		limited, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Limit: 2})
+		limited, _, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Limit: 2})
 		return e
 	}); err != nil {
 		t.Fatalf("ListByOrg via WithTx: %v", err)
@@ -239,16 +239,16 @@ func TestAccessChangeLogStore_Postgres_OffsetAndCategory(t *testing.T) {
 	var off, cred, mem, none []domain.AccessChange
 	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		if off, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Limit: 2, Offset: 1}); e != nil {
+		if off, _, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Limit: 2, Offset: 1}); e != nil {
 			return e
 		}
-		if cred, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Category: domain.AccessCategoryCredential}); e != nil {
+		if cred, _, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Category: domain.AccessCategoryCredential}); e != nil {
 			return e
 		}
-		if mem, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Category: domain.AccessCategoryMembership}); e != nil {
+		if mem, _, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Category: domain.AccessCategoryMembership}); e != nil {
 			return e
 		}
-		none, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Category: "bogus"})
+		none, _, e = tx.AccessChangeLog.ListByOrg(ctx, orgID, domain.AccessChangeListOpts{Category: "bogus"})
 		return e
 	}); err != nil {
 		t.Fatalf("ListByOrg via WithTx: %v", err)
@@ -312,7 +312,7 @@ func TestAccessChangeLogStore_Postgres_RLSIsolation(t *testing.T) {
 	var aRows []domain.AccessChange
 	if err := stores.Tx.WithTx(ctx, orgA, userA, func(tx db.TxStores) error {
 		var e error
-		aRows, e = tx.AccessChangeLog.ListByOrg(ctx, orgA, domain.AccessChangeListOpts{})
+		aRows, _, e = tx.AccessChangeLog.ListByOrg(ctx, orgA, domain.AccessChangeListOpts{})
 		return e
 	}); err != nil {
 		t.Fatalf("list A as A: %v", err)
@@ -326,10 +326,10 @@ func TestAccessChangeLogStore_Postgres_RLSIsolation(t *testing.T) {
 	var bSeesA, bSeesB []domain.AccessChange
 	if err := stores.Tx.WithTx(ctx, orgB, userB, func(tx db.TxStores) error {
 		var e error
-		if bSeesA, e = tx.AccessChangeLog.ListByOrg(ctx, orgA, domain.AccessChangeListOpts{}); e != nil {
+		if bSeesA, _, e = tx.AccessChangeLog.ListByOrg(ctx, orgA, domain.AccessChangeListOpts{}); e != nil {
 			return e
 		}
-		bSeesB, e = tx.AccessChangeLog.ListByOrg(ctx, orgB, domain.AccessChangeListOpts{})
+		bSeesB, _, e = tx.AccessChangeLog.ListByOrg(ctx, orgB, domain.AccessChangeListOpts{})
 		return e
 	}); err != nil {
 		t.Fatalf("list as B: %v", err)

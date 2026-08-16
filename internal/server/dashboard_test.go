@@ -46,19 +46,12 @@ func TestDashboardPRs_AppModeNoPAT_ReturnsPRs(t *testing.T) {
 		Title: "Not mine", URL: "https://github.com/acme/widget/pull/19",
 	})
 
-	rec := doJSON(t, s, "GET", "/api/dashboard/prs", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/dashboard/prs: got %d, want 200; body=%s", rec.Code, rec.Body.String())
+	out := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{}))
+	if len(out.Items) != 1 || out.Total() != 1 {
+		t.Fatalf("got %d PRs / total %d, want 1/1 (only octocat's)", len(out.Items), out.Total())
 	}
-	var prs []domain.PRSummaryRow
-	if err := json.Unmarshal(rec.Body.Bytes(), &prs); err != nil {
-		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
-	}
-	if len(prs) != 1 {
-		t.Fatalf("got %d PRs, want 1 (only octocat's); body=%s", len(prs), rec.Body.String())
-	}
-	if prs[0].Number != 18 || prs[0].Repo != "acme/widget" || prs[0].Author != "octocat" {
-		t.Errorf("returned PR = %+v; want #18 acme/widget by octocat", prs[0])
+	if out.Items[0].Number != 18 || out.Items[0].Repo != "acme/widget" || out.Items[0].Author != "octocat" {
+		t.Errorf("returned PR = %+v; want #18 acme/widget by octocat", out.Items[0])
 	}
 }
 
@@ -112,16 +105,9 @@ func TestDashboardPRs_NoBoundIdentity_ReturnsEmpty(t *testing.T) {
 		Title: "Orphan", URL: "https://github.com/acme/widget/pull/7",
 	})
 
-	rec := doJSON(t, s, "GET", "/api/dashboard/prs", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("got %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var prs []domain.PRSummaryRow
-	if err := json.Unmarshal(rec.Body.Bytes(), &prs); err != nil {
-		t.Fatalf("decode body %q: %v", rec.Body.String(), err)
-	}
-	if len(prs) != 0 {
-		t.Errorf("got %d PRs, want 0 (no bound identity); body=%s", len(prs), rec.Body.String())
+	out := decodeList[domain.PRSummaryRow](t, doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{}))
+	if len(out.Items) != 0 || out.Total() != 0 {
+		t.Errorf("got %d PRs / total %d, want 0/0 (no bound identity)", len(out.Items), out.Total())
 	}
 }
 
@@ -140,7 +126,7 @@ func TestDashboardPRs_LoginLookupError_Returns5xx(t *testing.T) {
 		t.Fatalf("drop user_github_identities: %v", err)
 	}
 
-	rec := doJSON(t, s, "GET", "/api/dashboard/prs", nil)
+	rec := doJSON(t, s, "POST", "/api/dashboard/prs/list", map[string]any{})
 	if rec.Code < 500 {
 		t.Fatalf("got %d, want 5xx (a DB error must not degrade to an empty dashboard); body=%s", rec.Code, rec.Body.String())
 	}

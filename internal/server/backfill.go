@@ -39,10 +39,17 @@ type backfillCandidate struct {
 	CurrentProjectName string `json:"current_project_name"`
 }
 
-// handleBackfillCandidates returns the list of non-terminal entities
-// that the create-flow popup should show for the given project.
+// backfillCandidateListRequest is the body of
+// POST /api/projects/{id}/backfill-candidates/list. The project is the path
+// id and its scope rules define the resource, so the body is paging alone.
+type backfillCandidateListRequest struct {
+	httpx.PageRequest
+}
+
+// handleBackfillCandidates returns the non-terminal entities the create-flow
+// popup can claim for this project.
 //
-// Scope rules:
+// Scope rules (applied in SQL — see EntityStore.ListBackfillCandidates):
 //   - pinned_repos non-empty → GitHub entities scoped to those repos.
 //   - pinned_repos empty → ALL GitHub entities (no filter on that source).
 //   - jira_project_key non-empty → Jira entities matching that key.
@@ -55,6 +62,8 @@ type backfillCandidate struct {
 //
 // Entities already assigned to this project are excluded — there's
 // nothing to backfill for them.
+//
+// POST /api/projects/{id}/backfill-candidates/list
 func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -65,8 +74,22 @@ func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
-	var project *domain.Project
-	var out []backfillCandidate
+
+	var req backfillCandidateListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		project *domain.Project
+		out     []backfillCandidate
+		total   int
+	)
 	if err := bf.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
@@ -77,39 +100,22 @@ func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *ht
 			return nil
 		}
 
-		var collected []domain.Entity
-
-		github, e := tx.Entities.ListActive(r.Context(), orgID, "github")
+		var candidates []domain.Entity
+		candidates, total, e = tx.Entities.ListBackfillCandidates(r.Context(), orgID, db.BackfillCandidateFilter{
+			ExcludeProjectID: projectID,
+			GitHubRepos:      project.PinnedRepos,
+			JiraProjectKey:   project.JiraProjectKey,
+		}, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		if e != nil {
 			return e
-		}
-		for _, ent := range github {
-			if !entityInProjectScope(&ent, project) {
-				continue
-			}
-			collected = append(collected, ent)
-		}
-
-		jira, e := tx.Entities.ListActive(r.Context(), orgID, "jira")
-		if e != nil {
-			return e
-		}
-		for _, ent := range jira {
-			if !entityInProjectScope(&ent, project) {
-				continue
-			}
-			collected = append(collected, ent)
 		}
 
 		// Resolve current_project_name once per distinct project_id rather
 		// than per row — the same other-project may sponsor many candidates.
+		// Bounded by the page now rather than by the org's entity count.
 		nameCache := map[string]string{}
-		out = make([]backfillCandidate, 0, len(collected))
-		for _, ent := range collected {
-			// Already in this project — no work to do; skip from candidates.
-			if ent.ProjectID != nil && *ent.ProjectID == projectID {
-				continue
-			}
+		out = make([]backfillCandidate, 0, len(candidates))
+		for _, ent := range candidates {
 			c := backfillCandidate{
 				ID:       ent.ID,
 				Source:   ent.Source,
@@ -121,8 +127,8 @@ func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *ht
 			}
 			if ent.ProjectID != nil && *ent.ProjectID != "" {
 				c.CurrentProjectID = *ent.ProjectID
-				name, ok := nameCache[*ent.ProjectID]
-				if !ok {
+				name, cached := nameCache[*ent.ProjectID]
+				if !cached {
 					if p, perr := tx.Projects.Get(r.Context(), orgID, *ent.ProjectID); perr == nil && p != nil {
 						name = p.Name
 					}
@@ -141,8 +147,7 @@ func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *ht
 		notFound(w, "project")
 		return
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"candidates": out})
+	httpx.WriteList(w, page, out, total)
 }
 
 // manualAssignmentMessage is the rationale text stamped on entities

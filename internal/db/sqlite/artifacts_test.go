@@ -360,7 +360,7 @@ func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {
 		t.Errorf("ListByRun len = %d, want 3", len(byRun))
 	}
 
-	byTeam, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
+	byTeam, _, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
 	if err != nil {
 		t.Fatalf("ListByTeam: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {
 		t.Errorf("ListByTeam len = %d, want 3", len(byTeam))
 	}
 
-	limited, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{Limit: 2})
+	limited, _, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{Limit: 2})
 	if err != nil {
 		t.Fatalf("ListByTeam limited: %v", err)
 	}
@@ -514,7 +514,7 @@ func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 		t.Fatalf("conversation_id should be NULL after run purge, got %q", nullRun.String)
 	}
 
-	rows, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
+	rows, _, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
 	if err != nil {
 		t.Fatalf("ListByTeam: %v", err)
 	}
@@ -651,7 +651,7 @@ func TestArtifactStore_SQLite_ListByOrgSystem(t *testing.T) {
 	}
 
 	// No opts: every row, terminal included, newest-first.
-	all, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{})
+	all, _, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem: %v", err)
 	}
@@ -679,21 +679,21 @@ func TestArtifactStore_SQLite_ListByOrgSystem(t *testing.T) {
 	}
 
 	// Filters.
-	gh, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{Provider: domain.ArtifactProviderGitHub})
+	gh, _, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{Provider: domain.ArtifactProviderGitHub})
 	if err != nil {
 		t.Fatalf("filter provider: %v", err)
 	}
 	if len(gh) != 3 {
 		t.Errorf("provider=github returned %d, want 3 (PR open + PR merged + review)", len(gh))
 	}
-	prs, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{Kind: domain.ArtifactKindPullRequest})
+	prs, _, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{Kind: domain.ArtifactKindPullRequest})
 	if err != nil {
 		t.Fatalf("filter kind: %v", err)
 	}
 	if len(prs) != 2 {
 		t.Errorf("kind=pull_request returned %d, want 2 (open + merged)", len(prs))
 	}
-	merged, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{State: domain.ArtifactStatePRMerged})
+	merged, _, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{State: domain.ArtifactStatePRMerged})
 	if err != nil {
 		t.Fatalf("filter state: %v", err)
 	}
@@ -703,7 +703,7 @@ func TestArtifactStore_SQLite_ListByOrgSystem(t *testing.T) {
 
 	// Time window [06-03, 06-05): merged (06-03) + review (06-04), excluding the
 	// open PR before it and the comment at the exclusive upper bound.
-	windowed, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{
+	windowed, _, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{
 		Since: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC),
 		Until: time.Date(2026, 6, 5, 0, 0, 0, 0, time.UTC),
 	})
@@ -718,11 +718,11 @@ func TestArtifactStore_SQLite_ListByOrgSystem(t *testing.T) {
 	}
 
 	// Paging: page 1 (limit 2) → comment + review; page 2 (offset 2) → merged + open.
-	page1, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{Limit: 2})
+	page1, _, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{Limit: 2})
 	if err != nil {
 		t.Fatalf("page 1: %v", err)
 	}
-	page2, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{Limit: 2, Offset: 2})
+	page2, _, err := stores.Artifacts.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, db.ArtifactListOpts{Limit: 2, Offset: 2})
 	if err != nil {
 		t.Fatalf("page 2: %v", err)
 	}
@@ -756,7 +756,7 @@ func TestArtifactStore_SQLite_ListByTeam_Filters(t *testing.T) {
 	seed(domain.ArtifactProviderGitHub, domain.ArtifactKindComment, "g2")
 	seed(domain.ArtifactProviderJira, domain.ArtifactKindComment, "j1")
 
-	gh, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{Provider: domain.ArtifactProviderGitHub})
+	gh, _, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{Provider: domain.ArtifactProviderGitHub})
 	if err != nil {
 		t.Fatalf("ListByTeam provider filter: %v", err)
 	}
@@ -765,7 +765,7 @@ func TestArtifactStore_SQLite_ListByTeam_Filters(t *testing.T) {
 	}
 
 	// limit 2 then offset 2 walks the 3-row team feed without overlap.
-	offset, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{Limit: 2, Offset: 2})
+	offset, _, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{Limit: 2, Offset: 2})
 	if err != nil {
 		t.Fatalf("ListByTeam offset: %v", err)
 	}

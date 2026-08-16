@@ -421,7 +421,8 @@ func TestChannelsHandler_FirstTrack_SeedsDefaultBlueprint(t *testing.T) {
 	var handlers []domain.EventHandler
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
-		handlers, e = tx.EventHandlers.List(t.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
+		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
+			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
@@ -498,7 +499,8 @@ func TestChannelsHandler_SecondPUT_NoDuplicateTrigger(t *testing.T) {
 	var handlers []domain.EventHandler
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
-		handlers, e = tx.EventHandlers.List(t.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
+		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
+			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
@@ -553,7 +555,8 @@ func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
 	var handlers []domain.EventHandler
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
-		handlers, e = tx.EventHandlers.List(t.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
+		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
+			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
@@ -582,7 +585,8 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 
 	var seeded *domain.EventHandler
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
-		handlers, e := tx.EventHandlers.List(t.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
+		handlers, _, e := tx.EventHandlers.List(t.Context(), orgID,
+			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
 		if e != nil {
 			return e
 		}
@@ -615,7 +619,8 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 	var handlers []domain.EventHandler
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
-		handlers, e = tx.EventHandlers.List(t.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
+		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
+			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)

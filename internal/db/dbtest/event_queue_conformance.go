@@ -764,12 +764,12 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		entityID := seed.Entity(t)
 		parked := parkOn(t, ctx, s, orgID, entityID, "route: store unavailable")
 
-		got, err := s.ListFailedEvents(ctx, orgID, 0)
+		got, total, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("ListFailedEvents: %v", err)
 		}
-		if len(got) != 1 {
-			t.Fatalf("expected 1 parked row, got %d (%+v)", len(got), got)
+		if len(got) != 1 || total != 1 {
+			t.Fatalf("expected 1 parked row (total 1), got %d (total %d): %+v", len(got), total, got)
 		}
 		fe := got[0]
 		if fe.ID != parked.ID {
@@ -819,24 +819,79 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		}
 		enqueueOn(t, ctx, s, orgID, entityID)
 
-		got, err := s.ListFailedEvents(ctx, orgID, 0)
+		got, total, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("ListFailedEvents: %v", err)
 		}
-		if len(got) != 2 {
-			t.Fatalf("expected exactly the 2 parked rows, got %d (%+v)", len(got), got)
+		if len(got) != 2 || total != 2 {
+			t.Fatalf("expected exactly the 2 parked rows (total 2), got %d (total %d): %+v", len(got), total, got)
 		}
 		if got[0].ID != second.ID || got[1].ID != first.ID {
 			t.Errorf("order = [%d %d], want newest-first [%d %d]", got[0].ID, got[1].ID, second.ID, first.ID)
 		}
 
-		// limit truncates from the newest end.
-		capped, err := s.ListFailedEvents(ctx, orgID, 1)
+		// The pages partition the parked rows: each window returns its own
+		// slice of the id-DESC order, and every page reports the filtered
+		// total rather than its own length.
+		first_page, total, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 1})
 		if err != nil {
 			t.Fatalf("ListFailedEvents(limit=1): %v", err)
 		}
-		if len(capped) != 1 || capped[0].ID != second.ID {
-			t.Errorf("limit=1 returned %+v, want just the newest row %d", capped, second.ID)
+		if len(first_page) != 1 || first_page[0].ID != second.ID || total != 2 {
+			t.Errorf("page 1 = %+v (total %d), want just the newest row %d and total 2", first_page, total, second.ID)
+		}
+		second_page, total, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 1, Offset: 1})
+		if err != nil {
+			t.Fatalf("ListFailedEvents(limit=1, offset=1): %v", err)
+		}
+		if len(second_page) != 1 || second_page[0].ID != first.ID || total != 2 {
+			t.Errorf("page 2 = %+v (total %d), want the older row %d and total 2", second_page, total, first.ID)
+		}
+		past, total, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 1, Offset: 2})
+		if err != nil {
+			t.Fatalf("ListFailedEvents(offset past the end): %v", err)
+		}
+		if len(past) != 0 || total != 2 {
+			t.Errorf("offset past the end = %+v (total %d), want empty with total 2", past, total)
+		}
+	})
+
+	// The single read answers with the same row the list does — a caller that
+	// opens a parked row from the table must not see a different projection
+	// than the table showed it.
+	t.Run("GetFailedEvent_matches_the_list_row", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		parked := parkOn(t, ctx, s, orgID, entityID, "route: store unavailable")
+
+		listed, _, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
+		if err != nil {
+			t.Fatalf("ListFailedEvents: %v", err)
+		}
+		got, err := s.GetFailedEvent(ctx, orgID, parked.ID)
+		if err != nil {
+			t.Fatalf("GetFailedEvent: %v", err)
+		}
+		if got == nil {
+			t.Fatalf("GetFailedEvent(%d) = nil, want the parked row", parked.ID)
+		}
+		if *got != listed[0] {
+			t.Errorf("single read = %+v, want the list's row %+v", *got, listed[0])
+		}
+
+		// A live row is not a parked row: the single read is scoped to the
+		// same 'failed' predicate the list is, so an id an operator cannot
+		// see in the table cannot be opened out of it either.
+		enqueueOn(t, ctx, s, orgID, entityID)
+		live, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		if err != nil {
+			t.Fatalf("claim the live row: %v", err)
+		}
+		if got, err := s.GetFailedEvent(ctx, orgID, live.ID); err != nil || got != nil {
+			t.Errorf("GetFailedEvent(live row) = %+v, %v; want nil, nil", got, err)
+		}
+		if got, err := s.GetFailedEvent(ctx, orgID, parked.ID+9999); err != nil || got != nil {
+			t.Errorf("GetFailedEvent(absent id) = %+v, %v; want nil, nil", got, err)
 		}
 	})
 
@@ -849,12 +904,12 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		parked := parkOn(t, ctx, s, orgID, entityID, "boom")
 		seed.ClearEntityRef(t, parked.ID)
 
-		got, err := s.ListFailedEvents(ctx, orgID, 0)
+		got, total, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("ListFailedEvents: %v", err)
 		}
-		if len(got) != 1 || got[0].ID != parked.ID {
-			t.Fatalf("expected the entity-less parked row, got %+v", got)
+		if len(got) != 1 || total != 1 || got[0].ID != parked.ID {
+			t.Fatalf("expected the entity-less parked row (total 1), got %+v (total %d)", got, total)
 		}
 		if got[0].EntitySource != "" || got[0].EntityTitle != "" {
 			t.Errorf("entity display fields = {%q %q}, want empty for a row with no entity",
@@ -876,7 +931,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 			t.Fatalf("PruneDone: %v", err)
 		}
 
-		got, err := s.ListFailedEvents(ctx, orgID, 0)
+		got, _, err := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("ListFailedEvents after prune: %v", err)
 		}
@@ -900,7 +955,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		if n != 1 {
 			t.Fatalf("RequeueFailedEvents moved %d rows, want 1", n)
 		}
-		if left, _ := s.ListFailedEvents(ctx, orgID, 0); len(left) != 0 {
+		if left, _, _ := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50}); len(left) != 0 {
 			t.Errorf("requeued row still lists as parked: %+v", left)
 		}
 
@@ -939,7 +994,7 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		if err := s.MarkFailed(ctx, orgID, again.ID, "route: still unavailable"); err != nil {
 			t.Fatalf("second MarkFailed: %v", err)
 		}
-		reparked, _ := s.ListFailedEvents(ctx, orgID, 0)
+		reparked, _, _ := s.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
 		if len(reparked) != 1 || reparked[0].LastError != "route: still unavailable" {
 			t.Errorf("re-parked row = %+v, want the second park's reason", reparked)
 		}

@@ -1,20 +1,28 @@
-import { useCallback, useEffect, useState } from 'react'
-import { apiFetch, apiJSON, httpErrorMessage, HttpError } from '../lib/apiClient'
+import { useCallback, useEffect } from 'react'
+import { apiFetch, apiJSON } from '../lib/apiClient'
+import { usePagedList } from './usePagedList'
 import type { CreateInviteResponse, PendingInvite } from '../types'
 
 // useInvites owns the org People tab's pending-invite list + the create /
 // revoke / resend mutations. Multi-mode org-admin surface only: the backend
-// 404s the list for non-admins (non-disclosure), so the hook is gated on
-// `enabled` (the caller's canManage) and stays inert — empty list, no fetch —
-// when the viewer can't manage the org.
+// 403s the list for a non-admin and 404s it in local mode, so the hook is
+// gated on `enabled` (the caller's canManage) and stays inert — empty list, no
+// fetch — when the viewer can't manage the org. Both statuses render as an
+// empty panel rather than an error, which keeps a role change mid-session from
+// surfacing a scary line.
 //
 // All calls hit the literal /api/invites paths WITHOUT apiClient's `org`
 // option: the routes are session-org-scoped (the backend reads the active org
 // from the session, like /api/teams), so an `org`-prefixed path would 404.
 export interface UseInvites {
   invites: PendingInvite[]
+  /** Outstanding invites across every page, for a count badge. */
+  total: number | null
   loading: boolean
   error: string | null
+  /** True when the server minted a token for a further page. */
+  hasMore: boolean
+  loadMore: () => Promise<void>
   /** Create a fresh invite. Resolves to the one-time accept link; throws
    *  HttpError (notably the 409 "already pending") for the caller to surface. */
   create: (email: string, role: string, targetTeamId: string) => Promise<CreateInviteResponse>
@@ -27,35 +35,24 @@ export interface UseInvites {
   reload: () => void
 }
 
+// Hoisted so the option object is referentially stable across renders.
+const INVITES_EMPTY_ON = { emptyOnStatus: [403, 404] }
+
 export function useInvites(enabled: boolean): UseInvites {
-  const [invites, setInvites] = useState<PendingInvite[]>([])
-  const [loading, setLoading] = useState(enabled)
-  const [error, setError] = useState<string | null>(null)
+  const page = usePagedList<PendingInvite>(
+    '/api/invites/list',
+    'Could not load invites.',
+    INVITES_EMPTY_ON,
+  )
+  const { load: loadPage, setItems } = page
 
   const load = useCallback(async () => {
     if (!enabled) {
-      setInvites([])
-      setLoading(false)
-      setError(null)
+      setItems(() => [])
       return
     }
-    setLoading(true)
-    setError(null)
-    try {
-      setInvites(await apiJSON<PendingInvite[]>('/api/invites'))
-    } catch (e) {
-      // A non-admin gets 404 (non-disclosure) — treat as "no invites" rather
-      // than an error. We shouldn't reach this branch (enabled gates admins),
-      // but it keeps a role change mid-session from surfacing a scary line.
-      if (e instanceof HttpError && e.status === 404) {
-        setInvites([])
-      } else {
-        setError(httpErrorMessage(e, 'Could not load invites.'))
-      }
-    } finally {
-      setLoading(false)
-    }
-  }, [enabled])
+    await loadPage({})
+  }, [enabled, loadPage, setItems])
 
   useEffect(() => {
     void load()
@@ -114,9 +111,12 @@ export function useInvites(enabled: boolean): UseInvites {
   )
 
   return {
-    invites,
-    loading,
-    error,
+    invites: page.items,
+    total: page.total,
+    loading: page.loading,
+    error: page.error === '' ? null : page.error,
+    hasMore: page.hasMore,
+    loadMore: page.loadMore,
     create,
     revoke,
     resend,

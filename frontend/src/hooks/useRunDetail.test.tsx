@@ -77,15 +77,21 @@ function mockFetch(transcript?: Promise<Message[]>) {
     if (sinceID !== null && failSinceReads) {
       return Promise.resolve({ ok: false, status: 500, ...jsonBody(null) })
     }
+    // The transcript answers the paged envelope; every fixture fits one page,
+    // so next_page_token is never minted here.
+    const transcriptPage = async (rows: Message[] | Promise<Message[]>) => ({
+      items: await rows,
+      next_page_token: '',
+    })
     const body: unknown = path.endsWith('/artifacts/refresh')
       ? { updated: 0 }
       : path.endsWith('/messages')
         ? sinceID !== null
-          ? (pendingSince ?? serverMessages.filter((m) => m.id > sinceID))
+          ? transcriptPage(pendingSince ?? serverMessages.filter((m) => m.id > sinceID))
           : // A copy, like a real response body: the hook holds what a read
             // returns, and a test that later appends to the server's rows must
             // not be mutating the transcript React is rendering.
-            (transcript ?? [...serverMessages])
+            transcriptPage(transcript ?? [...serverMessages])
         : path.endsWith('/artifacts') || path.endsWith('/actions')
           ? []
           : serverRun

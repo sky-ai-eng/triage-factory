@@ -53,21 +53,32 @@ var _ db.PromptStore = (*promptStore)(nil)
 
 // --- CRUD ----------------------------------------------------------
 
-func (s *promptStore) List(ctx context.Context, orgID string, teamID string) ([]domain.Prompt, error) {
+func (s *promptStore) List(ctx context.Context, orgID string, teamID string, opts db.ListOpts) ([]domain.Prompt, int, error) {
 	args := []any{orgID}
-	q := `SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
-		FROM prompts WHERE org_id = $1 AND hidden = FALSE AND deleted_at IS NULL`
+	where := ` WHERE org_id = $1 AND hidden = FALSE AND deleted_at IS NULL`
 	if teamID != "" {
 		// Prompts page narrowed to one team: that team's prompts. Every
 		// prompt is team-scoped (no org-visible tier), so this
 		// is a plain team filter. RLS still gates what the caller may see.
 		args = append(args, teamID)
-		q += fmt.Sprintf(" AND team_id = $%d", len(args))
+		where += fmt.Sprintf(" AND team_id = $%d", len(args))
 	}
-	q += ` ORDER BY updated_at DESC`
-	rows, err := s.app.QueryContext(ctx, q, args...)
+
+	var total int
+	if err := s.app.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompts`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	q := `SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		FROM prompts` + where + ` ORDER BY updated_at DESC, id`
+	pageArgs := args
+	if opts.Limit > 0 {
+		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.app.QueryContext(ctx, q, pageArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -75,11 +86,11 @@ func (s *promptStore) List(ctx context.Context, orgID string, teamID string) ([]
 	for rows.Next() {
 		p, err := scanPromptRowPG(rows.Scan)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		prompts = append(prompts, p)
 	}
-	return prompts, rows.Err()
+	return prompts, total, rows.Err()
 }
 
 // Get is request-facing: it filters deleted_at IS NULL. GetSystem (admin pool)

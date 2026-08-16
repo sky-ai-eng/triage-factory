@@ -97,6 +97,14 @@ func (p Park) ClaimOutcome() string {
 //
 // The transcript layer (Messages, InsertMessage, TokenTotalsSystem) sits on
 // the messages table.
+// MessageWindow bounds a transcript read — see
+// ConversationStore.MessagesWindow for the direction rules.
+type MessageWindow struct {
+	SinceID  int
+	BeforeID int
+	Limit    int
+}
+
 type ConversationStore interface {
 	// --- Lifecycle ---
 
@@ -247,15 +255,26 @@ type ConversationStore interface {
 	// started_at DESC. MemoryMissing + claim fields derived per Get.
 	ListForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error)
 
-	// ListForTasks is the batched form of ListForTask: every run for
-	// any of the given task IDs, each task's runs newest-first
-	// (started_at DESC). The Board's aggregated agent-run fetch groups
-	// the flat result by run.TaskID, so a board with N tasks costs one
-	// read instead of N. Only per-task order is guaranteed — order
-	// across distinct tasks is unspecified (the SQLite read chunks its
-	// IN-list to stay under the variable limit). Empty taskIDs returns
-	// nil. MemoryMissing + claim fields derived per Get.
-	ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.Conversation, error)
+	// ListForTasks is the batched form of ListForTask: one page of the runs
+	// for any of the given task IDs plus the unpaged total, ordered
+	// (task_id, started_at DESC, id). The Board's aggregated agent-run fetch
+	// groups the flat result by run.TaskID, so a board with N tasks costs one
+	// read instead of N.
+	//
+	// The order is total, so a windowed read's pages partition the result set
+	// and each task's runs stay contiguous within it. A zero ListOpts.Limit
+	// means "no window", which is what the internal callers that need every
+	// run pass.
+	//
+	// SQLite chunks its IN-list to stay under the variable limit, so an
+	// UNWINDOWED read's order across distinct tasks is chunk order rather
+	// than task order. A windowed read cannot chunk (a window is meaningless
+	// across statements), so the SQLite impl refuses an id set larger than
+	// one chunk; the HTTP route caps ids at exactly that bound, so a real
+	// caller never reaches the refusal.
+	//
+	// Empty taskIDs returns nil. MemoryMissing + claim fields derived per Get.
+	ListForTasks(ctx context.Context, orgID string, taskIDs []string, opts ListOpts) ([]domain.Conversation, int, error)
 
 	// HasActiveAutoRunForTask returns true if the task has a non-terminal
 	// run with trigger_type='event'. Manual delegations are intentionally
@@ -409,6 +428,28 @@ type ConversationStore interface {
 	// sort before a row the client already holds — merging it is the caller's
 	// problem, not this read's.
 	MessagesSince(ctx context.Context, orgID, runID string, sinceID int) ([]domain.Message, error)
+
+	// MessagesWindow is Messages with a window: the same display read, the
+	// same visibility filter, bounded.
+	//
+	// The transcript is a sync/tail read, not a browse — a client follows it
+	// forward from a watermark — so it keeps its own window type instead of
+	// the ListOpts offset the list contract uses. An offset into a growing
+	// append-only stream renumbers itself under the reader.
+	//
+	//   - w.SinceID > 0: rows strictly after that id, oldest-first. The
+	//     tail-follow direction; a full page means more have already landed.
+	//   - w.BeforeID > 0: the NEWEST rows strictly before that id, still
+	//     returned oldest-first. This is how history pages backward: a client
+	//     that opened on the tail walks toward the beginning.
+	//   - neither: the newest w.Limit rows, oldest-first — the page a client
+	//     opens on.
+	//   - w.Limit 0: no bound, for internal callers that assemble a whole
+	//     transcript. A route always passes one.
+	//
+	// SinceID and BeforeID are alternatives; setting both is a caller bug and
+	// the impls apply SinceID.
+	MessagesWindow(ctx context.Context, orgID, runID string, w MessageWindow) ([]domain.Message, error)
 
 	// MessagesForRuns is the batched form of Messages: every message
 	// for any of the given run IDs as one flat slice, with the same

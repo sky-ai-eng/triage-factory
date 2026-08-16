@@ -61,7 +61,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)
 		}
-		all, err := store.List(context.Background(), orgID, "", "")
+		all, _, err := store.List(context.Background(), orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -91,11 +91,11 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed #1: %v", err)
 		}
-		first, _ := store.List(context.Background(), orgID, "", "")
+		first, _, _ := store.List(context.Background(), orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed #2: %v", err)
 		}
-		second, _ := store.List(context.Background(), orgID, "", "")
+		second, _, _ := store.List(context.Background(), orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
 		if len(first) != len(second) {
 			t.Errorf("re-seed changed row count: first=%d second=%d", len(first), len(second))
 		}
@@ -368,7 +368,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			t.Fatalf("Create trig: %v", err)
 		}
 
-		rules, err := store.List(ctx, orgID, domain.EventHandlerKindRule, "")
+		rules, _, err := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule}, db.ListOpts{Limit: 200})
 		if err != nil {
 			t.Fatalf("List(rule): %v", err)
 		}
@@ -377,7 +377,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 				t.Errorf("List(kind=rule) returned a %q row", h.Kind)
 			}
 		}
-		triggers, err := store.List(ctx, orgID, domain.EventHandlerKindTrigger, "")
+		triggers, _, err := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger}, db.ListOpts{Limit: 200})
 		if err != nil {
 			t.Fatalf("List(trigger): %v", err)
 		}
@@ -386,7 +386,10 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 				t.Errorf("List(kind=trigger) returned a %q row", h.Kind)
 			}
 		}
-		all, _ := store.List(ctx, orgID, "", "")
+		all, allTotal, _ := store.List(ctx, orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
+		if allTotal != len(all) {
+			t.Errorf("total = %d but the page held %d rows", allTotal, len(all))
+		}
 		if len(all) < len(rules)+len(triggers) {
 			t.Errorf("List(\"\") returned %d rows; expected at least %d", len(all), len(rules)+len(triggers))
 		}
@@ -722,7 +725,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if got, err := store.GetBySystemSlug(ctx, orgID, teamID, slug); err != nil || got != nil {
 			t.Errorf("GetBySystemSlug after soft-delete = (%v, %v); want (nil, nil)", got, err)
 		}
-		all, err := store.List(ctx, orgID, "", "")
+		all, _, err := store.List(ctx, orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}

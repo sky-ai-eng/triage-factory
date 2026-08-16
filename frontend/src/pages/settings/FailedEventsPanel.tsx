@@ -38,7 +38,7 @@ function entityLabel(e: FailedEvent): string {
 }
 
 export default function FailedEventsPanel({ state }: { state: UseFailedEvents }) {
-  const { events, loading, error, reload, requeue } = state
+  const { events, total, loading, error, hasMore, loadMore, reload, requeue } = state
   // Selected ids, and the ids with a requeue in flight. Two sets rather than
   // one busy flag so a per-row requeue disables only its own button while a
   // select-all requeue disables every row it covers.
@@ -134,6 +134,9 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
             className="h-3.5 w-3.5 accent-[var(--color-accent)]"
           />
           Select all ({events.length})
+          {total !== null && total > events.length && (
+            <span className="text-text-tertiary"> of {total} parked</span>
+          )}
         </label>
         <button
           type="button"
@@ -230,6 +233,19 @@ export default function FailedEventsPanel({ state }: { state: UseFailedEvents })
           </tbody>
         </table>
       </div>
+
+      {hasMore && (
+        <button
+          type="button"
+          onClick={() => void loadMore()}
+          disabled={loading}
+          className="w-full rounded-xl border border-border-subtle py-2 text-[12px] text-text-tertiary transition-colors hover:text-text-secondary disabled:opacity-50"
+        >
+          {loading
+            ? 'Loading…'
+            : `Load more — showing ${events.length}${total === null ? '' : ` of ${total}`}`}
+        </button>
+      )}
     </div>
   )
 }

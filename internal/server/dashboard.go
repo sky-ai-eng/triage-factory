@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -40,10 +41,30 @@ func (dh *dashboardHandler) kickBackfill(orgID, userID, login, host string) {
 	}
 }
 
-// handleDashboardStats returns aggregated PR statistics from entity snapshots.
+// dashboardStatsWindowDays is the trailing window /api/dashboard/stats
+// aggregates over when the caller names none. It is the same 30 days the store
+// used to hardcode; the difference is that a caller can now say otherwise, and
+// the panel's label and the query it describes come from the same place.
+const dashboardStatsWindowDays = 30
+
+// handleDashboardStats returns aggregated PR statistics from entity snapshots
+// over the ?since window (RFC3339 or YYYY-MM-DD; default: the last 30 days).
 func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
+		return
+	}
+	var v httpx.Validation
+	since := time.Now().AddDate(0, 0, -dashboardStatsWindowDays)
+	if raw := strings.TrimSpace(r.URL.Query().Get("since")); raw != "" {
+		t, err := parseUsageTime(raw)
+		if err != nil {
+			v.Invalid("since", "must be RFC3339 or YYYY-MM-DD")
+		} else {
+			since = t
+		}
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
@@ -81,7 +102,7 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 			return nil
 		}
 		var e error
-		stats, e = tx.Dashboard.Stats(r.Context(), orgID, username, 30)
+		stats, e = tx.Dashboard.Stats(r.Context(), orgID, username, since)
 		return e
 	}); err != nil {
 		internalError(w, "dashboard", err)
@@ -96,10 +117,31 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, stats)
 }
 
-// handleDashboardPRs returns open PRs from entity snapshots.
+// handleDashboardPRs returns one page of the caller's PRs from entity
+// snapshots, newest polled first.
+//
+// The response is the standard list envelope even in the unbound-identity case
+// (no GitHub host configured, or no identity bound for it): an empty page with
+// total 0, not a bare `[]` and not a 404. The dashboard is a personal view, so
+// "you have no PRs here yet" and "your GitHub identity isn't bound" are the
+// same empty list to a client — the panel decides what to say about it from
+// /api/me, which is where identity state actually lives.
+//
+// POST /api/dashboard/prs/list
 func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
+		return
+	}
+	var req httpx.PageRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	// The only filter is the caller's own identity, which the body cannot
+	// name — so every request for this route fingerprints the same.
+	page := httpx.ResolvePage(&v, req, httpx.FilterFingerprint("dashboard-prs"), 0)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
@@ -107,6 +149,7 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 		host     string
 		username string
 		prs      []domain.PRSummaryRow
+		total    int
 	)
 	if err := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Host from org_settings, not a PAT credential — see handleDashboardStats
@@ -132,44 +175,40 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 			return nil
 		}
 		var e error
-		prs, e = tx.Dashboard.PRs(r.Context(), orgID, username)
+		prs, total, e = tx.Dashboard.PRs(r.Context(), orgID, username, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "dashboard", err)
 		return
 	}
 	if username == "" {
-		writeJSON(w, http.StatusOK, []domain.PRSummaryRow{})
+		httpx.WriteList(w, page, []domain.PRSummaryRow{}, 0)
 		return
 	}
 	dh.kickBackfill(orgID, userID, username, host)
-	if prs == nil {
-		prs = []domain.PRSummaryRow{}
-	}
-	writeJSON(w, http.StatusOK, prs)
+	httpx.WriteList(w, page, prs, total)
 }
 
-// dashboardPRRef strictly parses the (path {number}, ?repo=owner/repo) pair
-// the live per-PR routes share, reporting every fault at once: a
-// non-positive or non-numeric PR number, a missing repo param, or a repo
-// with an empty owner/name half (which "owner/" and "/repo" used to slip
-// past as a two-element split).
+// dashboardPRRef strictly parses the {owner}/{repo}/{number} triple the live
+// per-PR routes address a pull request by, reporting every fault at once.
+//
+// All three segments are path, not query. A pull request is identified by all
+// three — a bare number names nothing — so the address should carry all three,
+// and a caller that omits one should fail to route rather than reach a handler
+// that then has to invent the missing-parameter error itself. The ?repo= half
+// this replaced also let "owner/" and "/repo" through as a two-element split.
 func dashboardPRRef(w http.ResponseWriter, r *http.Request) (owner, repo string, number int, ok bool) {
 	var v httpx.Validation
+	owner, repo = r.PathValue("owner"), r.PathValue("repo")
+	if owner == "" || repo == "" {
+		// Unreachable through the mux (an empty segment doesn't match the
+		// pattern), but the handler is called directly in tests and the
+		// contract shouldn't depend on the router to hold.
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidID, Message: "owner and repo are required"})
+	}
 	number, err := strconv.Atoi(r.PathValue("number"))
 	if err != nil || number <= 0 {
 		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidID, Message: "PR number must be a positive integer"})
-	}
-	repoParam := r.URL.Query().Get("repo")
-	if repoParam == "" {
-		v.Param("repo", "repo query parameter required (owner/repo)")
-	} else {
-		parts := strings.SplitN(repoParam, "/", 2)
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			v.Param("repo", "repo must be owner/repo format")
-		} else {
-			owner, repo = parts[0], parts[1]
-		}
 	}
 	if v.Flush(w, http.StatusBadRequest) {
 		return "", "", 0, false

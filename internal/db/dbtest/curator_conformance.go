@@ -238,7 +238,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		// surfaced for the history synthesizer.
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -261,6 +261,44 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 	})
 
+	t.Run("Transcript_LimitKeepsTheNewestRowsOldestFirst", func(t *testing.T) {
+		// The history read is bounded so a months-old conversation isn't a
+		// whole-transcript scan per page load. The bound has to keep the NEWEST
+		// rows and still hand them back oldest-first — an ASC read with a LIMIT
+		// would return the oldest N and call it the transcript.
+		h := mk(t)
+		projectID := h.SeedProject(t, "tail-bound")
+		convID, _ := seedTurn(t, h, projectID, "turn 1")
+		for _, body := range []string{"turn 2", "turn 3", "turn 4"} {
+			withClaims(t, h, func(ts db.TxStores) error {
+				_, err := ts.Curator.EnqueueUserMessage(ctx, h.OrgID, convID, h.UserID, body)
+				return err
+			})
+		}
+
+		var all, tail []domain.Message
+		withClaims(t, h, func(ts db.TxStores) error {
+			a, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
+			if err != nil {
+				return err
+			}
+			all = a
+			tl, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 2)
+			tail = tl
+			return err
+		})
+		if len(all) != 4 {
+			t.Fatalf("unbounded read = %d rows, want 4", len(all))
+		}
+		if len(tail) != 2 {
+			t.Fatalf("limit=2 read = %d rows, want 2", len(tail))
+		}
+		if tail[0].Content != "turn 3" || tail[1].Content != "turn 4" {
+			t.Errorf("tail = %q/%q, want the last two turns oldest-first (turn 3, turn 4)",
+				tail[0].Content, tail[1].Content)
+		}
+	})
+
 	t.Run("Release_NothingStreamed_SettlesOnUserRow", func(t *testing.T) {
 		// A turn that delivered but streamed nothing still settles its lump:
 		// BeginTurn stamped the user row with the claim, so that row is the
@@ -278,7 +316,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -330,7 +368,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -361,7 +399,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -443,7 +481,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 				return err
 			}
 			claims = cs
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -558,7 +596,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -714,7 +752,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		// The audit row was deleted by the revert.
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -766,7 +804,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		// transcript keeps only delivered history.
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -1022,7 +1060,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 				return err
 			}
 			claims = cs
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, conv.ID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, conv.ID, 0)
 			gotMsgs = ms
 			return err
 		})

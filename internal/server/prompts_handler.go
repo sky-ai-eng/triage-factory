@@ -63,28 +63,51 @@ func (ph *promptsHandler) handleEventTypes(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, out)
 }
 
+// promptListRequest is the body of POST /api/prompts/list. TeamID narrows to
+// one team's prompts on the multi-team prompts page; empty returns everything
+// visible (solo/local, or an unfiltered view).
+type promptListRequest struct {
+	TeamID string `json:"team_id"`
+
+	httpx.PageRequest
+}
+
+type promptListFilterKey struct {
+	TeamID string `json:"team_id"`
+}
+
+// POST /api/prompts/list
 func (ph *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	// ?team_id= narrows to one team's prompts (+ org-visible) on the
-	// multi-team prompts page; absent/solo returns everything visible.
-	teamID := teamscope.SingleParam(r)
-	var list []domain.Prompt
+
+	var req promptListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	teamIDFilterField(&v, req.TeamID)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(promptListFilterKey{TeamID: req.TeamID}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		list  []domain.Prompt
+		total int
+	)
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		list, e = tx.Prompts.List(r.Context(), orgID, teamID)
+		list, total, e = tx.Prompts.List(r.Context(), orgID, req.TeamID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "prompts", err)
 		return
 	}
-	if list == nil {
-		list = []domain.Prompt{}
-	}
-	writeJSON(w, http.StatusOK, list)
+	httpx.WriteList(w, page, list, total)
 }
 
 func (ph *promptsHandler) handlePromptGet(w http.ResponseWriter, r *http.Request) {

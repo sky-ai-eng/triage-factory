@@ -46,9 +46,12 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		id := seedBlueprint(t, store, orgID, teamID, "Listed")
-		list, err := store.List(ctx, orgID, teamID)
+		list, total, err := store.List(ctx, orgID, db.BlueprintListFilter{TeamID: teamID}, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("list: %v", err)
+		}
+		if total != len(list) {
+			t.Errorf("total = %d but the unwindowed page held %d rows", total, len(list))
 		}
 		found := false
 		for _, b := range list {
@@ -147,7 +150,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		if got, err := store.Get(ctx, orgID, bp); err != nil || got != nil {
 			t.Fatalf("Get after soft-delete = (%v, %v); want (nil, nil)", got, err)
 		}
-		list, err := store.List(ctx, orgID, teamID)
+		list, total, err := store.List(ctx, orgID, db.BlueprintListFilter{TeamID: teamID}, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}
@@ -155,6 +158,9 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 			if b.ID == bp {
 				t.Fatalf("soft-deleted blueprint leaked into List")
 			}
+		}
+		if total != len(list) {
+			t.Errorf("total = %d but the page held %d rows; a hidden row must not be counted", total, len(list))
 		}
 		// ...System still resolves it (in-flight runs / past-run timelines).
 		if got, err := store.GetSystem(ctx, orgID, bp); err != nil || got == nil {
@@ -231,9 +237,12 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 			t.Fatalf("delete Del: %v", err)
 		}
 
-		all, err := store.ListAllSteps(ctx, orgID, teamID)
+		all, total, err := store.ListAllSteps(ctx, orgID, db.BlueprintStepListFilter{TeamID: teamID}, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("ListAllSteps: %v", err)
+		}
+		if total != len(all) {
+			t.Errorf("total = %d but the page held %d steps", total, len(all))
 		}
 		got := map[string][]string{}
 		for _, st := range all {
@@ -248,6 +257,36 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 		if _, present := got[bpDel]; present {
 			t.Errorf("soft-deleted blueprint's steps leaked into ListAllSteps: %v", got[bpDel])
+		}
+
+		// The same method narrowed to one blueprint IS the per-blueprint read
+		// — that is why there is no second route for it.
+		scoped, scopedTotal, err := store.ListAllSteps(ctx, orgID,
+			db.BlueprintStepListFilter{TeamID: teamID, BlueprintIDs: []string{bpB}}, db.ListOpts{Limit: 50})
+		if err != nil {
+			t.Fatalf("ListAllSteps(bpB): %v", err)
+		}
+		if len(scoped) != 1 || scopedTotal != 1 || scoped[0].StepPromptID != b1 {
+			t.Errorf("ListAllSteps(bpB) = %+v (total %d), want just %s", scoped, scopedTotal, b1)
+		}
+
+		// And the pages partition the bulk read.
+		firstStep, stepTotal, err := store.ListAllSteps(ctx, orgID,
+			db.BlueprintStepListFilter{TeamID: teamID}, db.ListOpts{Limit: 1})
+		if err != nil {
+			t.Fatalf("ListAllSteps page 1: %v", err)
+		}
+		secondStep, _, err := store.ListAllSteps(ctx, orgID,
+			db.BlueprintStepListFilter{TeamID: teamID}, db.ListOpts{Limit: 1, Offset: 1})
+		if err != nil {
+			t.Fatalf("ListAllSteps page 2: %v", err)
+		}
+		if len(firstStep) != 1 || len(secondStep) != 1 || stepTotal != total {
+			t.Fatalf("paged steps = %d + %d (total %d), want 1 + 1 with total %d",
+				len(firstStep), len(secondStep), stepTotal, total)
+		}
+		if firstStep[0] == secondStep[0] {
+			t.Errorf("both step pages returned %+v; pages must partition the set", firstStep[0])
 		}
 	})
 

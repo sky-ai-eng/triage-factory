@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -285,6 +286,60 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 	return scanEntityList(rows)
 }
 
+// ListBackfillCandidates — see the interface doc. The scope rules live in one
+// WHERE so the count and the page cannot disagree about what qualifies.
+//
+// The slug/key matches are LIKE patterns rather than a substring extraction
+// because both source_id shapes are prefix-delimited: a GitHub entity is
+// "owner/repo#NNN", a Jira one is "PROJ-123". The bare-equality arm keeps a
+// source_id with no delimiter matching the way the Go filter this replaced
+// did. Patterns are escaped — a repo named "my_repo" must not match
+// "myXrepo", since LIKE's `_` is a wildcard.
+func (s *entityStore) ListBackfillCandidates(ctx context.Context, orgID string, f db.BackfillCandidateFilter, opts db.ListOpts) ([]domain.Entity, int, error) {
+	args := []any{orgID}
+	where := ` WHERE org_id = $1 AND state = 'active'`
+	if f.ExcludeProjectID != "" {
+		args = append(args, f.ExcludeProjectID)
+		where += fmt.Sprintf(" AND (project_id IS NULL OR project_id <> $%d::uuid)", len(args))
+	}
+
+	githubArm := "source = 'github'"
+	if len(f.GitHubRepos) > 0 {
+		var arms []string
+		for _, repo := range f.GitHubRepos {
+			args = append(args, repo, db.LikeEscape(repo)+"#%")
+			arms = append(arms, fmt.Sprintf("source_id = $%d OR source_id LIKE $%d ESCAPE '\\'", len(args)-1, len(args)))
+		}
+		githubArm = "source = 'github' AND (" + strings.Join(arms, " OR ") + ")"
+	}
+	jiraArm := "source = 'jira'"
+	if f.JiraProjectKey != "" {
+		args = append(args, f.JiraProjectKey, db.LikeEscape(f.JiraProjectKey)+"-%")
+		jiraArm = fmt.Sprintf("source = 'jira' AND (source_id = $%d OR source_id LIKE $%d ESCAPE '\\')", len(args)-1, len(args))
+	}
+	where += " AND ((" + githubArm + ") OR (" + jiraArm + "))"
+
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := `SELECT ` + pgEntitySelectCols + ` FROM entities` + where +
+		` ORDER BY source ASC, last_polled_at ASC NULLS LAST, id`
+	pageArgs := args
+	if opts.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out, err := scanEntityList(rows)
+	return out, total, err
+}
+
 func listActiveEntities(ctx context.Context, q queryer, orgID, source string) ([]domain.Entity, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+pgEntitySelectCols+`
@@ -362,16 +417,27 @@ func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, teamI
 	return scanEntityList(rows)
 }
 
-func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID string) ([]domain.ProjectPanelEntity, error) {
-	rows, err := s.q.QueryContext(ctx, `
+func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID string, opts db.ListOpts) ([]domain.ProjectPanelEntity, int, error) {
+	var total int
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM entities WHERE org_id = $1 AND project_id = $2 AND state = 'active'
+	`, orgID, projectID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `
 		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
 		       state, COALESCE(classification_rationale, ''), created_at, last_polled_at
 		FROM entities
 		WHERE org_id = $1 AND project_id = $2 AND state = 'active'
-		ORDER BY last_polled_at DESC NULLS LAST
-	`, orgID, projectID)
+		ORDER BY last_polled_at DESC NULLS LAST, id`
+	args := []any{orgID, projectID}
+	if opts.Limit > 0 {
+		query += ` LIMIT $3 OFFSET $4`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -380,11 +446,11 @@ func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID str
 		var e domain.ProjectPanelEntity
 		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
 			&e.State, &e.ClassificationRationale, &e.CreatedAt, &e.LastPolledAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // --- Mutation ---

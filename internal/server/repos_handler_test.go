@@ -111,17 +111,28 @@ func seedApp(t *testing.T, s *Server, stub *httptest.Server, installs []domain.O
 	}
 }
 
+// fetchPickerRepos walks every page of the picker's proxy list and returns the
+// concatenation, so the assertions below read the whole enumeration whether it
+// arrived in one page or several.
 func fetchPickerRepos(t *testing.T, s *Server) []ghclient.UserRepo {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodGet, "/api/github/repos", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/github/repos = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	var all []ghclient.UserRepo
+	body := map[string]any{}
+	for range 10 { // a fixture never needs 10 pages; the bound stops a token loop
+		rec := doJSON(t, s, http.MethodPost, "/api/github/repos/list", body)
+		page := decodeList[ghclient.UserRepo](t, rec)
+		// A proxy list cannot count its upstream, so total_count is null.
+		if page.TotalCount != nil {
+			t.Errorf("total_count = %d, want null on a proxy list", *page.TotalCount)
+		}
+		all = append(all, page.Items...)
+		if page.NextPageToken == "" {
+			return all
+		}
+		body = map[string]any{"page_token": page.NextPageToken}
 	}
-	var repos []ghclient.UserRepo
-	if err := json.Unmarshal(rec.Body.Bytes(), &repos); err != nil {
-		t.Fatalf("decode repos: %v", err)
-	}
-	return repos
+	t.Fatalf("picker list did not terminate after 10 pages")
+	return nil
 }
 
 func fullNames(repos []ghclient.UserRepo) []string {
@@ -182,9 +193,9 @@ func TestHandleGitHubRepos_AppListFailureSurfacesError(t *testing.T) {
 		{InstallationID: "111", AccountType: "Organization", AccountLogin: "acme"},
 	})
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/github/repos", nil)
+	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
 	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("GET /api/github/repos = %d, want 502; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("picker list = %d, want 502; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -201,9 +212,9 @@ func TestHandleGitHubRepos_AppActiveZeroInstallations(t *testing.T) {
 	stub := newAppRepoStub(t, nil)
 	seedApp(t, srv, stub, nil) // active App, zero installations
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/github/repos", nil)
+	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("GET /api/github/repos = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("picker list = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 	if want := "the GitHub App is not installed on any account"; !strings.Contains(rec.Body.String(), want) {
@@ -224,9 +235,9 @@ func TestHandleGitHubRepos_AppListInstallationsErrorNotReportedAsUninstalled(t *
 		listErr: errors.New("transient store failure"),
 	}
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/github/repos", nil)
+	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("GET /api/github/repos = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("picker list = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 	if body := rec.Body.String(); strings.Contains(body, "not installed") {
@@ -234,8 +245,14 @@ func TestHandleGitHubRepos_AppListInstallationsErrorNotReportedAsUninstalled(t *
 	}
 }
 
-// App org with multiple installations: the picker returns the union of every
-// installation's repos, deduped by full name and sorted stably.
+// App org with multiple installations: the picker walks the installations in
+// order, so the concatenation of its pages is every installation's repos.
+//
+// The old union deduped by full name and sorted globally; a proxy list resumes
+// from an upstream position and cannot do either without re-fetching every
+// account per page. A repository belongs to exactly one account, so the
+// accounts partition the result and the dedup was defensive rather than
+// load-bearing.
 func TestHandleGitHubRepos_AppMultiInstallationDedup(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -249,8 +266,8 @@ func TestHandleGitHubRepos_AppMultiInstallationDedup(t *testing.T) {
 	})
 
 	got := fullNames(fetchPickerRepos(t, srv))
-	want := []string{"acme/api", "beta/web", "shared/lib"}
+	want := []string{"acme/api", "shared/lib", "beta/web", "shared/lib"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("repos = %v, want %v (union deduped + sorted)", got, want)
+		t.Errorf("repos = %v, want %v (each installation's repos, in installation order)", got, want)
 	}
 }

@@ -48,5 +48,5 @@ type AccessChangeLogStore interface {
 	// (≤ 0 → a default page size). For the future org-admin audit view; the
 	// Postgres impl reads under the app pool so the org-scoped RLS policy
 	// applies.
-	ListByOrg(ctx context.Context, orgID string, opts domain.AccessChangeListOpts) ([]domain.AccessChange, error)
+	ListByOrg(ctx context.Context, orgID string, opts domain.AccessChangeListOpts) ([]domain.AccessChange, int, error)
 }

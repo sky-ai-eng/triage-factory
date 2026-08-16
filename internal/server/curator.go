@@ -132,6 +132,18 @@ func (ch *curatorHandler) handleCuratorSend(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusAccepted, curatorSendResponse{RequestID: requestID})
 }
 
+// curatorHistoryRows bounds the curator transcript read to its most recent
+// rows. **This is a declared cap, not pagination**, and the difference is
+// deliberate: the response is not a list of messages, it is a list of
+// synthesized *turns* — a user row plus the agent rows that followed it —
+// so a page boundary in the middle of a turn would hand a client half a turn
+// and no way to ask for the other half. Bounding the tail instead truncates
+// only the oldest turn, which is what "the last N messages of a chat" already
+// means. Sized to match the delegated transcript's own bound
+// (transcriptPageSize) so the two chat surfaces hold the same amount of
+// history.
+const curatorHistoryRows = transcriptPageSize
+
 func (ch *curatorHandler) handleCuratorHistory(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -159,7 +171,7 @@ func (ch *curatorHandler) handleCuratorHistory(w http.ResponseWriter, r *http.Re
 		if e != nil || conv == nil {
 			return e
 		}
-		messages, e = tx.Curator.ListConversationMessages(r.Context(), orgID, conv.ID)
+		messages, e = tx.Curator.ListConversationMessages(r.Context(), orgID, conv.ID, curatorHistoryRows)
 		if e != nil {
 			return e
 		}

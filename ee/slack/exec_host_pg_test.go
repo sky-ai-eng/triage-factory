@@ -340,7 +340,7 @@ func (r *slackExecRig) artifactsForRun(orgID, runID string) []domain.Artifact {
 
 func (r *slackExecRig) actionsForRun(orgID, runID string) []domain.ExternalAction {
 	r.t.Helper()
-	all, err := r.stor.ExternalActions.ListByOrgSystem(r.t.Context(), orgID, domain.ExternalActionListOpts{})
+	all, _, err := r.stor.ExternalActions.ListByOrgSystem(r.t.Context(), orgID, domain.ExternalActionListOpts{})
 	if err != nil {
 		r.t.Fatalf("list external actions: %v", err)
 	}

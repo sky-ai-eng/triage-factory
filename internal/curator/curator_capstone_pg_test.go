@@ -174,7 +174,7 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 		if cl.DurationMs == nil || *cl.DurationMs != 5 || cl.NumTurns == nil || *cl.NumTurns != 1 {
 			t.Errorf("claim telemetry = (%v, %v), want (5, 1) — the stub result's reported duration/turns", cl.DurationMs, cl.NumTurns)
 		}
-		msgs, err := ts.Curator.ListConversationMessages(ctx, orgA, conv.ID)
+		msgs, err := ts.Curator.ListConversationMessages(ctx, orgA, conv.ID, 0)
 		if err != nil {
 			return err
 		}
@@ -214,7 +214,7 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 	// --- no cross-tenant leakage: bob (orgB) cannot read alice's turn ---
 	aliceConvID := conversationIDFor(t, h, reqID)
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgB, bob, func(ts db.TxStores) error {
-		msgs, err := ts.Curator.ListConversationMessages(ctx, orgB, aliceConvID)
+		msgs, err := ts.Curator.ListConversationMessages(ctx, orgB, aliceConvID, 0)
 		if err != nil {
 			return err
 		}

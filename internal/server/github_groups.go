@@ -209,7 +209,9 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string
 	var repos []domain.Repository
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		repos, e = tx.Repos.List(ctx, orgID)
+		// Unwindowed: the candidate set is derived from the whole registry,
+		// not browsed, so a page would silently narrow what can be imported.
+		repos, _, e = tx.Repos.List(ctx, orgID, db.Unwindowed)
 		return e
 	}); err != nil {
 		githubGroupsLog.Error("load configured repos failed", "error", err)

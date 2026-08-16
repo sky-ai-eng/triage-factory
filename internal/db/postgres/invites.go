@@ -64,33 +64,73 @@ func (s *invitesStore) Create(ctx context.Context, p domain.CreateInviteParams) 
 	return id, nil
 }
 
-func (s *invitesStore) ListActive(ctx context.Context, orgID string) ([]domain.OrgInvite, error) {
-	rows, err := s.app.QueryContext(ctx, `
+// pgActiveInviteWhere is the redeemable predicate, and pgActiveInviteSelect the
+// projection, shared by the list and the single read so the two can never
+// disagree about what "an active invite" is.
+const (
+	pgActiveInviteWhere = `
+		WHERE org_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
+		  AND expires_at > now()`
+	pgActiveInviteSelect = `
 		SELECT id::text, org_id::text, email, role::text,
 		       COALESCE(target_team_id::text, ''), COALESCE(invited_by::text, ''),
 		       expires_at, created_at
-		FROM org_invites
-		WHERE org_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL
-		  AND expires_at > now()
-		ORDER BY created_at DESC, id ASC
-	`, orgID)
+		FROM org_invites` + pgActiveInviteWhere
+)
+
+func (s *invitesStore) ListActive(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.OrgInvite, int, error) {
+	var total int
+	if err := s.app.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM org_invites`+pgActiveInviteWhere, orgID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count active org_invites: %w", err)
+	}
+
+	query := pgActiveInviteSelect + `
+		ORDER BY created_at DESC, id ASC`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.app.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list active org_invites: %w", err)
+		return nil, 0, fmt.Errorf("list active org_invites: %w", err)
 	}
 	defer rows.Close()
 
 	out := []domain.OrgInvite{}
 	for rows.Next() {
-		var iv domain.OrgInvite
-		if err := rows.Scan(
-			&iv.ID, &iv.OrgID, &iv.Email, &iv.Role,
-			&iv.TargetTeamID, &iv.InvitedBy, &iv.ExpiresAt, &iv.CreatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan org_invite: %w", err)
+		iv, err := scanActiveInvite(rows)
+		if err != nil {
+			return nil, 0, err
 		}
 		out = append(out, iv)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
+}
+
+func (s *invitesStore) GetActive(ctx context.Context, orgID, inviteID string) (*domain.OrgInvite, error) {
+	iv, err := scanActiveInvite(s.app.QueryRowContext(ctx, pgActiveInviteSelect+`
+		  AND id = $2`, orgID, inviteID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &iv, nil
+}
+
+func scanActiveInvite(row interface{ Scan(...any) error }) (domain.OrgInvite, error) {
+	var iv domain.OrgInvite
+	if err := row.Scan(
+		&iv.ID, &iv.OrgID, &iv.Email, &iv.Role,
+		&iv.TargetTeamID, &iv.InvitedBy, &iv.ExpiresAt, &iv.CreatedAt,
+	); err != nil {
+		return iv, err
+	}
+	return iv, nil
 }
 
 func (s *invitesStore) Revoke(ctx context.Context, orgID, inviteID string) (db.RevokeOutcome, error) {

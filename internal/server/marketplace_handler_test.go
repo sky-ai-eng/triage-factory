@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
@@ -226,7 +228,7 @@ func TestMarketplace_NoToggleGate(t *testing.T) {
 		t.Fatalf("publish with marketplace_enabled=false: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 
-	listReq := r.req(http.MethodGet, "/api/marketplace/listings", r.admin, nil)
+	listReq := r.req(http.MethodPost, "/api/marketplace/listings/list", r.admin, map[string]any{})
 	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, listReq); rec.Code != http.StatusOK {
 		t.Fatalf("list with marketplace_enabled=false: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -772,17 +774,25 @@ func (r *marketplaceRig) publishListing(t *testing.T, callerID string, body map[
 	return resp.ID
 }
 
+// list calls the browse list as callerID. query is the old query string
+// ("kind=prompt", "sort=votes", ""), parsed here into the body the route now
+// takes so the call sites stay readable.
 func (r *marketplaceRig) list(t *testing.T, callerID, query string) []domain.ListingSummary {
 	t.Helper()
-	rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodGet, "/api/marketplace/listings?"+query, callerID, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("list %q: status = %d, want 200; body=%s", query, rec.Code, rec.Body.String())
+	body := map[string]any{}
+	for _, kv := range strings.Split(query, "&") {
+		if kv == "" {
+			continue
+		}
+		k, val, _ := strings.Cut(kv, "=")
+		decoded, err := url.QueryUnescape(val)
+		if err != nil {
+			t.Fatalf("unescape %q: %v", val, err)
+		}
+		body[k] = decoded
 	}
-	var out []domain.ListingSummary
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode list response: %v", err)
-	}
-	return out
+	rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", callerID, body))
+	return decodeList[domain.ListingSummary](t, rec).Items
 }
 
 func listingIDs(summaries []domain.ListingSummary) []string {
@@ -865,10 +875,10 @@ func TestMarketplaceList_KindFilter(t *testing.T) {
 // sort value before ever reaching the store.
 func TestMarketplaceList_InvalidKindOrSortIs400(t *testing.T) {
 	r := newMarketplaceRig(t)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodGet, "/api/marketplace/listings?kind=widget", r.admin, nil)); rec.Code != http.StatusBadRequest {
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", r.admin, map[string]any{"kind": "widget"})); rec.Code != http.StatusBadRequest {
 		t.Errorf("bad kind: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodGet, "/api/marketplace/listings?sort=popularity", r.admin, nil)); rec.Code != http.StatusBadRequest {
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", r.admin, map[string]any{"sort": "popularity"})); rec.Code != http.StatusBadRequest {
 		t.Errorf("bad sort: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 }

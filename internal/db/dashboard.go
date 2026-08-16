@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -21,13 +22,19 @@ import (
 // before calling.
 type DashboardStore interface {
 	// Stats returns aggregate PR counts (merged/closed/awaiting/
-	// draft) for the user over the last `sinceDays` days, plus
-	// reviews-given / reviews-received totals and a 14-day
-	// merged-per-day timeline for the sparkline.
-	Stats(ctx context.Context, orgID, username string, sinceDays int) (*domain.DashboardStats, error)
+	// draft) for the user since `since`, plus reviews-given /
+	// reviews-received totals and a 14-day merged-per-day timeline
+	// for the sparkline. The window is the caller's — the store used
+	// to hardcode 30 days behind a `sinceDays` int nobody could see,
+	// so the panel's label and the query it described could drift.
+	// A zero `since` means unbounded.
+	Stats(ctx context.Context, orgID, username string, since time.Time) (*domain.DashboardStats, error)
 
-	// PRs returns the PR summary rows authored by username, newest
-	// last_polled_at first. Drives the dashboard's "your open PRs"
-	// list.
-	PRs(ctx context.Context, orgID, username string) ([]domain.PRSummaryRow, error)
+	// PRs returns one page of the PR summary rows authored by
+	// username, newest last_polled_at first, plus the filtered total.
+	// The author filter is applied in SQL: this read used to scan
+	// every GitHub entity in the org and drop the non-matches in Go,
+	// which is a whole-table read per dashboard load and cannot be
+	// paged (the window would be over the wrong set).
+	PRs(ctx context.Context, orgID, username string, opts ListOpts) ([]domain.PRSummaryRow, int, error)
 }

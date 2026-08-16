@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Team archive/restore lifecycle (TFAC-448). Archiving a team is a soft-delete
@@ -61,7 +62,7 @@ func (th *teamsHandler) resolveTeamForLifecycle(w http.ResponseWriter, r *http.R
 	}
 	userID = ClaimsFrom(r.Context()).Subject
 
-	teamID, ok = uuidPathOr404(w, r, "team_id", "team")
+	teamID, ok = th.az.TeamIDFromPath(w, r, "teams", orgID, userID)
 	if !ok {
 		return "", "", "", false
 	}
@@ -251,24 +252,34 @@ func (th *teamsHandler) handleTeamRestore(w http.ResponseWriter, r *http.Request
 	}
 
 	teamsLog.Info("team restored", "org", orgID, "team", teamID)
-	writeJSON(w, http.StatusOK, teamDetailJSON{
-		ID: team.ID, Name: team.Name, Slug: team.Slug, Description: team.Description,
-	})
+	// team was read before the restore, so its tombstone is stale by the time
+	// we serialize it. Clear it rather than echoing an archived_at the write
+	// just removed — a response must not assert a state the request undid.
+	team.DeletedAt = nil
+	writeJSON(w, http.StatusOK, teamToJSON(*team, ""))
 }
 
-// archivedTeamJSON is one row of the org-admin "Archived teams" restore surface.
-type archivedTeamJSON struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Slug       string `json:"slug"`
-	ArchivedAt string `json:"archived_at"`
+// archivedTeamListRequest is the body of POST /api/teams/archived/list. The
+// resource is "the org's archived teams", which has no filters of its own.
+type archivedTeamListRequest struct {
+	httpx.PageRequest
 }
 
 // handleTeamArchivedList returns the org's archived teams for the org-admin
 // restore surface (a toggle on the Teams management view). Org-admin only,
 // multi-mode only.
 //
-// GET /api/teams/archived
+// It is its own route rather than a flag on POST /api/teams/list because the
+// two reads are different resources wearing one word: the active list is
+// membership-scoped and answers "my teams", while this one is org-scoped and
+// admin-gated so a restore surface can reach a team its admin never joined.
+// Folding them together would mean one route whose scope, gate, and result set
+// all change with a boolean.
+//
+// Rows carry `role` empty for the same reason: an org admin restoring a team
+// they were never on has no membership to report.
+//
+// POST /api/teams/archived/list
 func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
 		notFound(w, "route")
@@ -292,20 +303,27 @@ func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	teams, err := th.allStores.Teams.ListArchivedForOrgSystem(r.Context(), orgID)
+	var req archivedTeamListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	teams, total, err := th.allStores.Teams.ListArchivedForOrgSystem(r.Context(), orgID,
+		db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 	if err != nil {
 		internalError(w, "teams", err)
 		return
 	}
-	out := make([]archivedTeamJSON, 0, len(teams))
+	out := make([]teamJSON, 0, len(teams))
 	for _, t := range teams {
-		archivedAt := ""
-		if t.DeletedAt != nil {
-			archivedAt = t.DeletedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
-		}
-		out = append(out, archivedTeamJSON{ID: t.ID, Name: t.Name, Slug: t.Slug, ArchivedAt: archivedAt})
+		out = append(out, teamToJSON(t, ""))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"teams": out})
+	httpx.WriteList(w, page, out, total)
 }
 
 // teamActiveWork returns the count of active runs + in-flight curator sessions

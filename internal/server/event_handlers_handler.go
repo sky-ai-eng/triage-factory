@@ -65,45 +65,107 @@ func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.
 //   POST   /api/event-handlers/{id}/promote           — rule → trigger
 //   PUT    /api/event-handlers/reorder                — rules-only sort_order
 
-// GET /api/event-handlers
+// eventHandlerListRequest is the body of POST /api/event-handlers/list. Kind
+// and TeamID are the old ?kind= / ?team_id= params, unchanged in meaning and
+// now validated strictly — a corrupt team filter used to be dropped, which
+// widened the read to every team.
+type eventHandlerListRequest struct {
+	// Kind is "rule", "trigger", or omitted (both).
+	Kind   string `json:"kind"`
+	TeamID string `json:"team_id"`
+
+	httpx.PageRequest
+}
+
+type eventHandlerListFilterKey struct {
+	Kind   string `json:"kind"`
+	TeamID string `json:"team_id"`
+}
+
+// POST /api/event-handlers/list
 func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
-	if kind != "" && kind != domain.EventHandlerKindRule && kind != domain.EventHandlerKindTrigger {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidParam, Message: "kind must be 'rule', 'trigger', or omitted (returns both)", Field: "kind"})
+
+	var req eventHandlerListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	// ?team_id= narrows to one team's handlers (+ org-visible) on the
-	// multi-team prompts page; absent/solo returns everything visible.
-	teamID := teamscope.SingleParam(r)
-	var handlers []domain.EventHandler
+	var v httpx.Validation
+	if req.Kind != "" && req.Kind != domain.EventHandlerKindRule && req.Kind != domain.EventHandlerKindTrigger {
+		v.Invalid("kind", "kind must be 'rule', 'trigger', or omitted (returns both)")
+	}
+	teamIDFilterField(&v, req.TeamID)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(eventHandlerListFilterKey{
+		Kind: req.Kind, TeamID: req.TeamID,
+	}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	// The entitlement gate (TFAC-524) hides a handler bound to an event type
+	// this org isn't licensed for. It rides into the query as a filter, not a
+	// post-read trim, so the page and total_count agree about what the caller
+	// can see.
+	filter := db.EventHandlerListFilter{Kind: req.Kind, TeamID: req.TeamID, GatedEventTypes: gatedEventTypes(orgID)}
+
+	var (
+		handlers []domain.EventHandler
+		total    int
+	)
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		handlers, e = tx.EventHandlers.List(r.Context(), orgID, kind, teamID)
+		handlers, total, e = tx.EventHandlers.List(r.Context(), orgID, filter, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "event_handlers", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, filterEventHandlersByGate(orgID, handlers))
+	httpx.WriteList(w, page, handlers, total)
 }
 
-// filterEventHandlersByGate drops handlers bound to a gated-off event type
-// (TFAC-524). Rows persist regardless of entitlement state — this is
-// visibility only. Always returns a non-nil slice so callers get a clean []
-// on the wire rather than null.
-func filterEventHandlersByGate(orgID string, handlers []domain.EventHandler) []domain.EventHandler {
-	visible := make([]domain.EventHandler, 0, len(handlers))
-	for _, h := range handlers {
-		if entitlements.EventTypeAllowed(orgID, h.EventType) {
-			visible = append(visible, h)
-		}
+// handleEventHandlerGet is the canonical single read, in the list's row shape.
+// Before it, five mutation routes each preloaded the row internally and no
+// route would hand it back — a client could edit a handler it had no way to
+// read.
+//
+// Like the blueprint single read, it is deliberately NOT entitlement-gated the
+// way the list is. The gate is a visibility rule for a BROWSE surface: it keeps
+// a handler bound to an unlicensed event type out of a list nobody asked for it
+// by name. A caller who already holds the id has it from a run, a trigger, or a
+// link, and the five mutation routes on that same id are ungated — so gating
+// only the read would make a handler editable but unreadable, which is the
+// exact asymmetry this route was added to close.
+//
+// GET /api/event-handlers/{id}
+func (eh *eventHandlersHandler) handleEventHandlerGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
 	}
-	return visible
+	userID := ClaimsFrom(r.Context()).Subject
+	id, ok := uuidPathOr404(w, r, "id", "event handler")
+	if !ok {
+		return
+	}
+
+	var handler *domain.EventHandler
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		handler, e = tx.EventHandlers.Get(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "event_handlers", err)
+		return
+	}
+	if handler == nil {
+		notFound(w, "event handler")
+		return
+	}
+	writeJSON(w, http.StatusOK, handler)
 }
 
 // POST /api/event-handlers

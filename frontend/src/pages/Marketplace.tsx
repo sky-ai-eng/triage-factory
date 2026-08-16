@@ -6,6 +6,7 @@ import { useOrgHref } from '../hooks/useOrgHref'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { useTeams, useWriteTeam, noteWrittenTeam } from '../hooks/useTeams'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { usePagedList } from '../hooks/usePagedList'
 import { toast } from '../components/Toast/toastStore'
 import SearchField from '../components/SearchField'
 import TeamPicker from '../components/TeamPicker'
@@ -106,7 +107,14 @@ export default function Marketplace() {
   const [kind, setKind] = useState<KindFilter>('')
   const [sort, setSort] = useState<SortOrder>('installs')
   const [catalog, setCatalog] = useState<EventType[]>([])
-  const [listings, setListings] = useState<ListingSummary[]>([])
+  // The catalog is a browsing surface with server-side filters, so it pages:
+  // a filter change reloads from page 1 (the token is only valid for the
+  // filters it was minted under) and "load more" appends.
+  const listingList = usePagedList<ListingSummary>(
+    '/api/marketplace/listings/list',
+    'Could not load the marketplace listings.',
+  )
+  const { items: listings, setItems: setListings } = listingList
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -135,25 +143,23 @@ export default function Marketplace() {
     return m
   }, [catalog])
 
+  const loadListings = listingList.load
   const refresh = useCallback(async () => {
     setLoading(true)
     setLoadError(null)
-    try {
-      const qs = [
-        debouncedQuery && `query=${encodeURIComponent(debouncedQuery)}`,
-        eventType && `event_type=${encodeURIComponent(eventType)}`,
-        kind && `kind=${kind}`,
-        `sort=${sort}`,
-      ]
-        .filter(Boolean)
-        .join('&')
-      setListings(await apiJSON<ListingSummary[]>(`/api/marketplace/listings?${qs}`))
-    } catch (err) {
-      setLoadError(httpErrorMessage(err, 'Could not load the marketplace listings.'))
-    } finally {
-      setLoading(false)
-    }
-  }, [debouncedQuery, eventType, kind, sort])
+    const page = await loadListings({
+      ...(debouncedQuery ? { query: debouncedQuery } : {}),
+      ...(eventType ? { event_type: eventType } : {}),
+      ...(kind ? { kind } : {}),
+      sort,
+    })
+    if (page === null) setLoadError(listingList.error || 'Could not load the marketplace listings.')
+    setLoading(false)
+    // listingList.error is read right after the awaited load resolves, which is
+    // the same tick that set it — reading the hook object here rather than
+    // depending on it keeps refresh stable across renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedQuery, eventType, kind, sort, loadListings])
 
   useEffect(() => {
     refresh()
@@ -207,21 +213,24 @@ export default function Marketplace() {
         refresh()
       }
     },
-    [refresh],
+    [refresh, setListings],
   )
 
   // Bumps the install count locally (grid row + open drawer) after a
   // successful "copy to my team" — mirrors toggleVote's optimistic-update
   // shape, but there's nothing to reconcile on failure since the count only
   // moves after the POST already succeeded.
-  const handleInstalled = useCallback((listingId: string) => {
-    setListings((prev) =>
-      prev.map((l) => (l.id === listingId ? { ...l, install_count: l.install_count + 1 } : l)),
-    )
-    setDetail((prev) =>
-      prev && prev.id === listingId ? { ...prev, install_count: prev.install_count + 1 } : prev,
-    )
-  }, [])
+  const handleInstalled = useCallback(
+    (listingId: string) => {
+      setListings((prev) =>
+        prev.map((l) => (l.id === listingId ? { ...l, install_count: l.install_count + 1 } : l)),
+      )
+      setDetail((prev) =>
+        prev && prev.id === listingId ? { ...prev, install_count: prev.install_count + 1 } : prev,
+      )
+    },
+    [setListings],
+  )
 
   const filtersActive = debouncedQuery !== '' || eventType !== '' || kind !== ''
   const clearFilters = () => {
@@ -249,17 +258,33 @@ export default function Marketplace() {
       </button>
     </div>
   ) : (
-    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-      {listings.map((l) => (
-        <ListingCard
-          key={l.id}
-          listing={l}
-          catalogById={catalogById}
-          onOpen={() => openDetail(l.id)}
-          onToggleVote={() => toggleVote(l)}
-        />
-      ))}
-    </div>
+    <>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+        {listings.map((l) => (
+          <ListingCard
+            key={l.id}
+            listing={l}
+            catalogById={catalogById}
+            onOpen={() => openDetail(l.id)}
+            onToggleVote={() => toggleVote(l)}
+          />
+        ))}
+      </div>
+      {listingList.hasMore && (
+        <div className="mt-6 flex justify-center">
+          <button
+            type="button"
+            onClick={listingList.loadMore}
+            disabled={listingList.loading}
+            className="text-[13px] font-medium text-accent transition-opacity hover:opacity-80 disabled:opacity-50"
+          >
+            {listingList.loading
+              ? 'Loading…'
+              : `Load more (${listings.length} of ${listingList.total ?? listings.length})`}
+          </button>
+        </div>
+      )}
+    </>
   )
 
   return (

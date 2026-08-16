@@ -238,7 +238,7 @@ func TestCancelProject_DrainsQueuedTurnAndStopsRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list claims: %v", err)
 	}
-	msgs, err := stores.Curator.ListConversationMessages(context.Background(), org, conv.ID)
+	msgs, err := stores.Curator.ListConversationMessages(context.Background(), org, conv.ID, 0)
 	if err != nil {
 		t.Fatalf("list messages: %v", err)
 	}

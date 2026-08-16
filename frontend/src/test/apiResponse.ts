@@ -49,3 +49,14 @@ export function jsonBody(body: unknown): {
     text: async () => (await serialize()) ?? '',
   }
 }
+
+/** listBody wraps rows in the list envelope every `POST /…/list` read answers
+ *  with, for a fetch stub: `{ ok: true, ...listBody(rows) }`.
+ *
+ *  `next` is the token for a following page — pass one when the test is walking
+ *  pages, leave it off for a single complete page. `total` defaults to the row
+ *  count, which is right for a one-page result and wrong (deliberately, pass it
+ *  explicitly) when the test is pretending there are more. */
+export function listBody<T>(rows: T[], next = '', total = rows.length) {
+  return jsonBody({ items: rows, next_page_token: next, total_count: total })
+}

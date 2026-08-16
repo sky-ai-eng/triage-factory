@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react'
-import { apiJSON, httpErrorMessage, HttpError } from '../lib/apiClient'
+import { useCallback, useEffect } from 'react'
+import { apiJSON } from '../lib/apiClient'
+import { usePagedList } from './usePagedList'
 
 // A parked event_queue row — routing work the queue gave up on. The event is
 // durably recorded but its obligations (task mint/bump, owner resolution,
@@ -20,8 +21,14 @@ export interface FailedEvent {
 
 export interface UseFailedEvents {
   events: FailedEvent[]
+  /** The org's whole parked population, which the badge shows — not the
+   *  length of the loaded page. */
+  total: number | null
   loading: boolean
   error: string | null
+  /** True when the server minted a token for a further page. */
+  hasMore: boolean
+  loadMore: () => Promise<void>
   reload: () => Promise<void>
   /** Put the named rows back on the queue. Resolves to the number of rows
    *  that actually moved — ids that are no longer parked are counted out by
@@ -31,7 +38,9 @@ export interface UseFailedEvents {
 
 // useFailedEvents owns the parked-row diagnostics list. Org-admin surface:
 // both endpoints 403 a plain member, so the hook is gated on `enabled` (the
-// caller's admin bit) and stays inert — empty list, no fetch — otherwise.
+// caller's admin bit) and stays inert — empty list, no fetch — otherwise. A
+// role that changes mid-session turns the gate to 403 on the wire, which the
+// shared hook renders as an empty panel rather than an alarming error line.
 //
 // Session-org-scoped paths (no apiClient `org` prefix), like /api/invites: the
 // backend reads the active org from the session.
@@ -40,39 +49,24 @@ export interface UseFailedEvents {
 // healthy deployment, so a live channel would be a subscription that never
 // fires; the list loads when the panel opens and refreshes after a requeue.
 export function useFailedEvents(enabled: boolean): UseFailedEvents {
-  const [events, setEvents] = useState<FailedEvent[]>([])
-  const [loading, setLoading] = useState(enabled)
-  const [error, setError] = useState<string | null>(null)
+  const page = usePagedList<FailedEvent>(
+    '/api/events/failed/list',
+    'Could not load parked events.',
+    FAILED_EVENTS_EMPTY_ON,
+  )
+  const { load, setItems } = page
 
-  const load = useCallback(async () => {
+  const reload = useCallback(async () => {
     if (!enabled) {
-      setEvents([])
-      setLoading(false)
-      setError(null)
+      setItems(() => [])
       return
     }
-    setLoading(true)
-    setError(null)
-    try {
-      const data = await apiJSON<{ events: FailedEvent[] | null }>('/api/events/failed')
-      setEvents(data.events ?? [])
-    } catch (e) {
-      // A role change mid-session turns the gate to 403. Render that as an
-      // empty panel rather than an alarming line about a surface the viewer
-      // is simply no longer entitled to.
-      if (e instanceof HttpError && e.status === 403) {
-        setEvents([])
-      } else {
-        setError(httpErrorMessage(e, 'Could not load parked events.'))
-      }
-    } finally {
-      setLoading(false)
-    }
-  }, [enabled])
+    await load({})
+  }, [enabled, load, setItems])
 
   useEffect(() => {
-    void load()
-  }, [load])
+    void reload()
+  }, [reload])
 
   const requeue = useCallback(
     async (ids: number[]): Promise<number> => {
@@ -81,11 +75,25 @@ export function useFailedEvents(enabled: boolean): UseFailedEvents {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids }),
       })
-      await load()
+      await reload()
       return res.requeued
     },
-    [load],
+    [reload],
   )
 
-  return { events, loading, error, reload: load, requeue }
+  return {
+    events: page.items,
+    total: page.total,
+    loading: page.loading,
+    error: page.error === '' ? null : page.error,
+    hasMore: page.hasMore,
+    loadMore: page.loadMore,
+    reload,
+    requeue,
+  }
 }
+
+// Hoisted so the option object is referentially stable across renders — the
+// hook's callbacks depend on it, and a fresh literal each render would rebuild
+// them and re-fire the load effect forever.
+const FAILED_EVENTS_EMPTY_ON = { emptyOnStatus: [403] }

@@ -23,21 +23,9 @@ func TestHandleRepoUpdate_LocalMode(t *testing.T) {
 		t.Fatalf("PATCH /api/repos/acme/api: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	rec = doJSON(t, s, http.MethodGet, "/api/repos", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/repos: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var rows []struct {
-		Owner      string `json:"owner"`
-		Repo       string `json:"repo"`
-		BaseBranch string `json:"base_branch"`
-		CanEdit    bool   `json:"can_edit"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
-		t.Fatalf("decode repo list: %v; body=%s", err, rec.Body.String())
-	}
+	page := decodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{}))
 	var found bool
-	for _, row := range rows {
+	for _, row := range page.Items {
 		if row.Owner != "acme" || row.Repo != "api" {
 			continue
 		}
@@ -50,6 +38,22 @@ func TestHandleRepoUpdate_LocalMode(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("acme/api missing from GET /api/repos; body=%s", rec.Body.String())
+		t.Fatalf("acme/api missing from the repo list; body=%s", rec.Body.String())
+	}
+
+	// The single read answers with the same row the list does.
+	single := doJSON(t, s, http.MethodGet, "/api/repos/acme/api", nil)
+	if single.Code != http.StatusOK {
+		t.Fatalf("GET /api/repos/acme/api: status = %d, want 200; body=%s", single.Code, single.Body.String())
+	}
+	var got repoJSON
+	if err := json.Unmarshal(single.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode single read: %v", err)
+	}
+	if got.Owner != "acme" || got.Repo != "api" || got.BaseBranch != "develop" || !got.CanEdit {
+		t.Errorf("single read = %+v, want the acme/api list row", got)
+	}
+	if miss := doJSON(t, s, http.MethodGet, "/api/repos/acme/nope", nil); miss.Code != http.StatusNotFound {
+		t.Errorf("GET an unconfigured repo = %d, want 404", miss.Code)
 	}
 }

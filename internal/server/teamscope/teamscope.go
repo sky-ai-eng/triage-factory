@@ -151,7 +151,10 @@ func ResolveActingNoStamp(ctx context.Context, teams db.TeamsStore, users db.Use
 //     projects) rather than have this function silently guess by picking an
 //     arbitrary team the caller has no relationship to.
 func resolveActingID(ctx context.Context, teams db.TeamsStore, users db.UsersStore, orgID, userID, picked string) (string, error) {
-	myTeams, err := teams.ListForUser(ctx, orgID)
+	// Unwindowed on purpose (ListOpts zero Limit): this is a membership set,
+	// not a page. A windowed read would make "is the caller on this team"
+	// depend on where the team sorted, which is how a write silently retargets.
+	myTeams, _, err := teams.ListForUser(ctx, orgID, db.Unwindowed)
 	if err != nil {
 		return "", fmt.Errorf("acting team: list teams: %w", err)
 	}
@@ -207,7 +210,8 @@ func resolveActingID(ctx context.Context, teams db.TeamsStore, users db.UsersSto
 // default) rather than erroring, since a stale filter value should never 4xx a
 // read.
 func ResolveRead(ctx context.Context, teams db.TeamsStore, users db.UsersStore, orgID, userID, picked string) (string, error) {
-	myTeams, err := teams.ListForUser(ctx, orgID)
+	// Unwindowed for the same reason as resolveActingID: a membership set.
+	myTeams, _, err := teams.ListForUser(ctx, orgID, db.Unwindowed)
 	if err != nil {
 		return "", fmt.Errorf("read team: list teams: %w", err)
 	}

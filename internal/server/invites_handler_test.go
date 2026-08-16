@@ -17,7 +17,8 @@ func TestInviteRoutes_LocalAreNotFound(t *testing.T) {
 		body         any
 	}{
 		{http.MethodPost, "/api/invites", map[string]string{"email": "x@y.com", "role": "member"}},
-		{http.MethodGet, "/api/invites", nil},
+		{http.MethodPost, "/api/invites/list", map[string]any{}},
+		{http.MethodGet, "/api/invites/" + "11111111-1111-1111-1111-111111111111", nil},
 		{http.MethodPost, "/api/invites/" + "11111111-1111-1111-1111-111111111111" + "/revoke", nil},
 		{http.MethodGet, "/api/invites/preview?token=abc", nil},
 		{http.MethodPost, "/api/invites/accept", map[string]string{"token": "abc"}},

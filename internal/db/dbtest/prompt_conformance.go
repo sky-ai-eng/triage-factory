@@ -132,7 +132,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if err := store.Hide(ctx, orgID, "u-hidden"); err != nil {
 			t.Fatalf("hide: %v", err)
 		}
-		list, err := store.List(ctx, orgID, "")
+		list, total, err := store.List(ctx, orgID, "", db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}
@@ -141,6 +141,35 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 		if containsPromptID(list, "u-hidden") {
 			t.Fatalf("hidden row leaked into List: %v", promptIDs(list))
+		}
+		// The total counts what the filters match, and the hidden row is not
+		// one of them — a total that counted it would render "1 of 2".
+		if total != 1 {
+			t.Fatalf("total = %d, want 1 (the hidden row is filtered out of the count too)", total)
+		}
+
+		// The pages partition the visible set. Two visible rows, a one-row
+		// window: each page returns one row and both report total 2.
+		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "u-second", Name: "S", Body: "x", Source: "user"}); err != nil {
+			t.Fatalf("create second visible: %v", err)
+		}
+		firstPage, total, err := store.List(ctx, orgID, "", db.ListOpts{Limit: 1})
+		if err != nil {
+			t.Fatalf("list page 1: %v", err)
+		}
+		secondPage, total2, err := store.List(ctx, orgID, "", db.ListOpts{Limit: 1, Offset: 1})
+		if err != nil {
+			t.Fatalf("list page 2: %v", err)
+		}
+		if len(firstPage) != 1 || len(secondPage) != 1 || total != 2 || total2 != 2 {
+			t.Fatalf("pages = %d + %d (totals %d, %d), want 1 + 1 with total 2 on both",
+				len(firstPage), len(secondPage), total, total2)
+		}
+		if firstPage[0].ID == secondPage[0].ID {
+			t.Errorf("both pages returned %s; pages must partition the result set", firstPage[0].ID)
+		}
+		if err := store.Delete(ctx, orgID, "u-second"); err != nil {
+			t.Fatalf("delete second visible: %v", err)
 		}
 		// Get still returns the hidden row by ID (handler logic
 		// decides what to do; the store doesn't filter by hidden on
@@ -153,7 +182,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if err := store.Unhide(ctx, orgID, "u-hidden"); err != nil {
 			t.Fatalf("unhide: %v", err)
 		}
-		list2, _ := store.List(ctx, orgID, "")
+		list2, _, _ := store.List(ctx, orgID, "", db.ListOpts{Limit: 50})
 		if !containsPromptID(list2, "u-hidden") {
 			t.Fatalf("after Unhide, row still missing from List: %v", promptIDs(list2))
 		}
@@ -224,7 +253,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if got, err := store.Get(ctx, orgID, "sd-1"); err != nil || got != nil {
 			t.Fatalf("Get after soft-delete = (%v, %v); want (nil, nil)", got, err)
 		}
-		if list, _ := store.List(ctx, orgID, ""); containsPromptID(list, "sd-1") {
+		if list, _, _ := store.List(ctx, orgID, "", db.ListOpts{Limit: 50}); containsPromptID(list, "sd-1") {
 			t.Fatalf("soft-deleted prompt leaked into List")
 		}
 		// ...System still resolves it so historical runs render the name/body.

@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ActivityAction } from '../types'
-import { apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { usePagedList } from '../hooks/usePagedList'
 import { ActionRow } from './ActionRow'
 
 // ActionList — every external write one run performed, newest first. The
@@ -14,9 +14,10 @@ import { ActionRow } from './ActionRow'
 // host the sandbox blocked. A run whose only external act was a reply produces
 // no artifact at all, and before this list that run's record read as empty.
 //
-// Same fetch shape as ArtifactList (own the fetch, so every consumer is a
-// one-liner) against GET /api/agent/conversations/{id}/actions, which is
-// team-scoped through the run.
+// Reads POST /api/agent/conversations/{id}/actions/list, which is team-scoped
+// through the run. It used to answer a hardcoded 200 newest rows and admit so
+// in a footnote; now it pages, and "older actions are in the activity feed"
+// becomes a "load more" that actually fetches them.
 interface Props {
   runId: string
   /** Soft-refetch trigger. Unlike a runId change this keeps the rows already on
@@ -24,59 +25,54 @@ interface Props {
   refreshKey?: string
 }
 
-// PAGE is the server's cap (runActionsLimit). A full page means the run wrote
-// more than this and the older rows live in the governance feed — said out loud
-// rather than silently truncated, since a list that claims to be the complete
-// answer must admit when it isn't.
-const PAGE = 200
-
 export default function ActionList({ runId, refreshKey }: Props) {
-  const [actions, setActions] = useState<ActivityAction[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  // Generation counter: a run change or a refetch invalidates in-flight loads
-  // so a stale response can't overwrite a newer one.
-  const generation = useRef(0)
-
-  const load = useCallback(async () => {
-    const gen = ++generation.current
-    try {
-      const data = await apiJSON<ActivityAction[]>(`/api/agent/conversations/${runId}/actions`)
-      if (generation.current === gen) {
-        setActions(data ?? [])
-        setError(null)
-      }
-    } catch (err) {
-      if (generation.current === gen) {
-        setError(httpErrorMessage(err, "Couldn't load this run's actions."))
-      }
-    }
-  }, [runId])
-
-  // A run change resets to the loading state. The reset is the point — it must
-  // land before the new run's rows do, so it is synchronous by design.
-  useEffect(() => {
-    generation.current++
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setActions(null)
-    setError(null)
-  }, [runId])
+  // The hook is keyed by path and the path carries the run id, so a run change
+  // swaps its target — which is also what keeps a page token minted for one
+  // run from ever being sent against another.
+  const list = usePagedList<ActivityAction>(
+    `/api/agent/conversations/${runId}/actions/list`,
+    "Couldn't load this run's actions.",
+  )
+  const { items: actions, total, hasMore, loading, error, load, loadMore, setItems } = list
+  const [loaded, setLoaded] = useState(false)
+  // Which run the rows on screen belong to. A run change clears them before the
+  // new run's land, so one run's actions never render under another's heading;
+  // a soft refetch (refreshKey) deliberately does not clear, because those rows
+  // were true a moment ago and this is an audit surface.
+  const shownRun = useRef('')
 
   useEffect(() => {
     if (!runId) return
-    // Fetch-on-runId-change: load owns its own setState calls; the effect just
-    // kicks it. Same safe pattern AuthContext uses.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load()
-  }, [runId, refreshKey, load])
+    let cancelled = false
+    if (shownRun.current !== runId) {
+      shownRun.current = runId
+      // The clear must land before the new run's rows do, so it is synchronous
+      // by design — the alternative renders one run's actions under another
+      // run's heading for a frame.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setLoaded(false)
+      setItems(() => [])
+    }
+    // Only a page that actually arrived flips `loaded` — a failed FIRST load
+    // must fall to the error branch, not to "no external actions yet", which
+    // would be a false statement about an audit surface. A failed refetch
+    // leaves `loaded` already true, which is what keeps the stale rows up.
+    load({}).then((page) => {
+      if (page && !cancelled) setLoaded(true)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [runId, refreshKey, load, setItems])
 
   // A failed load stands in for the rows only when there are none to show. A
   // failed soft refetch keeps what it has — those rows were true a moment ago,
   // and this is an audit surface, so blanking it on a transient error is worse
   // than showing a slightly stale copy.
-  if (error && actions === null) {
+  if (error && !loaded) {
     return <p className="text-[11.5px] leading-relaxed text-dismiss">{error}</p>
   }
-  if (actions === null) {
+  if (!loaded) {
     return <p className="text-[11.5px] text-text-tertiary/70">Loading actions…</p>
   }
   if (actions.length === 0) {
@@ -90,10 +86,15 @@ export default function ActionList({ runId, refreshKey }: Props) {
           <ActionRow key={a.id} action={a} />
         ))}
       </ul>
-      {actions.length >= PAGE && (
-        <p className="mt-1.5 text-[10px] text-text-tertiary/70">
-          Most recent {PAGE} — older actions are in the activity feed.
-        </p>
+      {hasMore && (
+        <button
+          type="button"
+          onClick={loadMore}
+          disabled={loading}
+          className="mt-1.5 text-[10px] text-accent transition-colors hover:text-accent/70 disabled:opacity-50"
+        >
+          {loading ? 'Loading…' : `Load more (${actions.length} of ${total ?? actions.length})`}
+        </button>
       )}
     </>
   )

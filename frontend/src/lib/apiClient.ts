@@ -124,7 +124,11 @@ export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): P
 export interface ListPage<T> {
   items: T[]
   next_page_token: string
-  total_count: number
+  /** The filtered total across every page, or `null` when the resource cannot
+   *  count itself — a proxy list over an upstream API that reports no total
+   *  (see `httpx.WriteProxyList`). `null` is never zero and never a truncation
+   *  signal: `next_page_token` is the only "there is more" on any list. */
+  total_count: number | null
 }
 
 /** Request shape for a `POST /api/<resource>/list` read: the route's filters
@@ -140,18 +144,66 @@ export type ListRequest = Record<string, unknown> & {
  *
  *  It is a POST because the filters are a body — the method is about how the
  *  request is framed, not about whether it mutates. The read itself has no
- *  side effects. */
-export async function apiList<T>(path: string, body: ListRequest): Promise<ListPage<T>> {
+ *  side effects.
+ *
+ *  `options` passes through to `apiFetch` for the few callers that need an
+ *  AbortSignal or an `allow` status; the method, content type, and body are
+ *  the hook's own and cannot be overridden. */
+export async function apiList<T>(
+  path: string,
+  body: ListRequest,
+  options: ApiFetchOptions = {},
+): Promise<ListPage<T>> {
   const page = await apiJSON<Partial<ListPage<T>>>(path, {
+    ...options,
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...options.headers },
     body: JSON.stringify(body),
   })
   return {
     items: page.items ?? [],
     next_page_token: page.next_page_token ?? '',
-    total_count: page.total_count ?? 0,
+    total_count: page.total_count ?? null,
   }
+}
+
+/** How many pages `apiListAll` will walk before it stops. A declared ceiling,
+ *  not a guess: at the server's 200-row maximum this is 2,000 rows, past which
+ *  a picker is the wrong affordance and a search box is the right one. */
+const MAX_PAGES_TO_WALK = 10
+
+/** apiListAll walks a `POST /…/list` read to completion and returns every row.
+ *
+ *  **Use it only where a surface genuinely needs the whole set**, which in
+ *  practice means one thing: a picker that filters its options CLIENT-side. A
+ *  partial load there is not a shorter list, it is a search that silently
+ *  misses — the user types a name that exists and is told nothing matches. Any
+ *  surface that renders rows for reading wants `usePagedList` instead, so the
+ *  reader sees a page and asks for the next one.
+ *
+ *  It walks with the server's own tokens (never a computed offset) and stops at
+ *  `MAX_PAGES_TO_WALK`, so a runaway result set costs a bounded number of
+ *  requests rather than an unbounded one. `truncated` says whether it stopped
+ *  early, so a caller can tell the user its options are incomplete rather than
+ *  quietly presenting a partial list as the whole. */
+export async function apiListAll<T>(
+  path: string,
+  body: ListRequest = {},
+  options: ApiFetchOptions = {},
+): Promise<{ items: T[]; truncated: boolean }> {
+  const items: T[] = []
+  let token = ''
+  for (let i = 0; i < MAX_PAGES_TO_WALK; i++) {
+    const page: ListPage<T> = await apiList<T>(
+      path,
+      { ...body, page_size: 200, ...(token ? { page_token: token } : {}) },
+      options,
+    )
+    items.push(...page.items)
+    token = page.next_page_token
+    if (!token) return { items, truncated: false }
+  }
+  return { items, truncated: true }
 }
 
 /** One fault in the server's error envelope: `{"errors": [{reason, message,

@@ -95,7 +95,13 @@ type CuratorStore interface {
 	// the user row itself when nothing streamed). Withdrawn-pending rows
 	// (delivered=false AND window_state='inactive') are excluded — withdrawn
 	// means "never happened".
-	ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.Message, error)
+	//
+	// limit > 0 returns the NEWEST limit rows, still oldest-first: a chat
+	// history is read from its tail, and an unbounded read of a
+	// months-old conversation is a whole-transcript scan on every page load.
+	// limit <= 0 is the whole conversation, for the callers that genuinely
+	// need it — the bundle exporter, which is serializing the transcript.
+	ListConversationMessages(ctx context.Context, orgID, conversationID string, limit int) ([]domain.Message, error)
 
 	// ListClaims returns the conversation's claims oldest-first. App pool —
 	// tf_app has SELECT on claims and the RLS policy composes through the

@@ -127,7 +127,7 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 	}, nil
 }
 
-func (s *teamsStore) ListForUser(ctx context.Context, orgID string) ([]domain.Team, error) {
+func (s *teamsStore) ListForUser(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Team, int, error) {
 	// teams_select RLS gates on org access, not team membership, so it
 	// returns every team in the org. The memberships join is what
 	// narrows to the caller's own teams — memberships_select lets a user
@@ -140,18 +140,66 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string) ([]domain.Te
 	// t.deleted_at IS NULL hides archived teams from the selectors (TFAC-448) —
 	// the request-facing read filter mirrored on the SQLite impl; the lifecycle
 	// paths read archived teams through the ...System variants instead.
-	rows, err := s.app.QueryContext(ctx, `
-		SELECT t.id::text, t.org_id::text, t.slug, t.name, t.created_at, m.role::text
+	var total int
+	if err := s.app.QueryRowContext(ctx, `
+		SELECT COUNT(*)
 		FROM teams t
 		JOIN memberships m ON m.team_id = t.id AND m.user_id = tf.current_user_id()
 		WHERE t.org_id = $1 AND t.deleted_at IS NULL
-		ORDER BY t.created_at ASC, t.id ASC
-	`, orgID)
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count teams for user: %w", err)
+	}
+
+	query := `
+		SELECT t.id::text, t.org_id::text, t.slug, t.name, COALESCE(t.description, ''), t.created_at, m.role::text
+		FROM teams t
+		JOIN memberships m ON m.team_id = t.id AND m.user_id = tf.current_user_id()
+		WHERE t.org_id = $1 AND t.deleted_at IS NULL
+		ORDER BY t.created_at ASC, t.id ASC`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.app.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list teams for user: %w", err)
+		return nil, 0, fmt.Errorf("list teams for user: %w", err)
 	}
 	defer rows.Close()
-	return scanTeams(rows)
+	teams, err := scanTeams(rows)
+	return teams, total, err
+}
+
+// Get reads under the caller's claims: teams_select gates on org access, so a
+// team in the caller's org resolves whether or not they are on it, and the
+// LEFT JOIN reports their role as empty when they are not. A cross-org id is
+// invisible to the policy and comes back nil — the not-found the disclosure
+// rule asks for, produced by the database rather than by a handler predicate.
+func (s *teamsStore) Get(ctx context.Context, orgID, teamID string) (*domain.Team, error) {
+	var (
+		t       domain.Team
+		deleted sql.NullTime
+		role    sql.NullString
+	)
+	err := s.app.QueryRowContext(ctx, `
+		SELECT t.id::text, t.org_id::text, t.slug, t.name, COALESCE(t.description, ''),
+		       t.created_at, t.deleted_at, m.role::text
+		FROM teams t
+		LEFT JOIN memberships m ON m.team_id = t.id AND m.user_id = tf.current_user_id()
+		WHERE t.id = $1 AND t.org_id = $2
+	`, teamID, orgID).Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt, &deleted, &role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get team: %w", err)
+	}
+	if deleted.Valid {
+		t.DeletedAt = &deleted.Time
+	}
+	t.Role = role.String
+	return &t, nil
 }
 
 func (s *teamsStore) Archive(ctx context.Context, teamID string) error {
@@ -218,16 +266,28 @@ func (s *teamsStore) GetSystem(ctx context.Context, orgID, teamID string) (*doma
 	return &t, nil
 }
 
-func (s *teamsStore) ListArchivedForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error) {
-	rows, err := s.admin.QueryContext(ctx, `
+func (s *teamsStore) ListArchivedForOrgSystem(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Team, int, error) {
+	var total int
+	if err := s.admin.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM teams WHERE org_id = $1 AND deleted_at IS NOT NULL
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count archived teams: %w", err)
+	}
+	query := `
 		SELECT id::text, org_id::text, slug, name, COALESCE(description, ''),
 		       created_at, deleted_at
 		FROM teams
 		WHERE org_id = $1 AND deleted_at IS NOT NULL
-		ORDER BY deleted_at DESC, id ASC
-	`, orgID)
+		ORDER BY deleted_at DESC, id ASC`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.admin.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list archived teams: %w", err)
+		return nil, 0, fmt.Errorf("list archived teams: %w", err)
 	}
 	defer rows.Close()
 	out := []domain.Team{}
@@ -237,14 +297,14 @@ func (s *teamsStore) ListArchivedForOrgSystem(ctx context.Context, orgID string)
 			deleted sql.NullTime
 		)
 		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt, &deleted); err != nil {
-			return nil, fmt.Errorf("scan archived team: %w", err)
+			return nil, 0, fmt.Errorf("scan archived team: %w", err)
 		}
 		if deleted.Valid {
 			t.DeletedAt = &deleted.Time
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 func (s *teamsStore) ListActiveForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error) {
@@ -267,6 +327,51 @@ func (s *teamsStore) ListActiveForOrgSystem(ctx context.Context, orgID string) (
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+func (s *teamsStore) ListActiveCapsForOrgSystem(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.TeamCap, int, error) {
+	var total int
+	if err := s.admin.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM teams WHERE org_id = $1 AND deleted_at IS NULL
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count active teams: %w", err)
+	}
+	// LEFT JOIN, not JOIN: a team with no settings row has no cap, and an
+	// inner join would silently drop it from the editor that exists to give
+	// it one.
+	query := `
+		SELECT t.id::text, t.name, ts.max_daily_cost_usd
+		FROM teams t
+		LEFT JOIN team_settings ts ON ts.team_id = t.id
+		WHERE t.org_id = $1 AND t.deleted_at IS NULL
+		ORDER BY t.name ASC, t.id ASC`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.admin.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list team caps: %w", err)
+	}
+	defer rows.Close()
+	out := []domain.TeamCap{}
+	for rows.Next() {
+		var (
+			c   domain.TeamCap
+			cap sql.NullFloat64
+		)
+		if err := rows.Scan(&c.TeamID, &c.TeamName, &cap); err != nil {
+			return nil, 0, fmt.Errorf("scan team cap: %w", err)
+		}
+		if cap.Valid && cap.Float64 > 0 {
+			v := cap.Float64
+			c.Cap = &v
+		}
+		out = append(out, c)
+	}
+	return out, total, rows.Err()
 }
 
 func (s *teamsStore) NamesForIDsSystem(ctx context.Context, orgID string, teamIDs []string) (map[string]string, error) {
@@ -397,7 +502,7 @@ func scanTeams(rows *sql.Rows) ([]domain.Team, error) {
 	out := []domain.Team{}
 	for rows.Next() {
 		var t domain.Team
-		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.CreatedAt, &t.Role); err != nil {
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt, &t.Role); err != nil {
 			return nil, fmt.Errorf("scan team: %w", err)
 		}
 		out = append(out, t)

@@ -55,10 +55,12 @@ var ErrNotOrgOwner = errors.New("db: only the current org owner can transfer own
 // handlers 404 in local mode. The SQLite impl exists so the local store
 // bundle satisfies the interface; its mutators return ErrNotApplicableInLocal.
 type OrgMembershipsStore interface {
-	// ListWithIdentity returns every member of orgID with their org role
-	// and host-scoped identity readiness, ordered by display name then
-	// user id for a stable roster. githubBaseURL / jiraBaseURL are the
-	// org's configured hosts (raw, read from org_settings by the caller) —
+	// ListWithIdentity returns one page of orgID's members with their org
+	// role and host-scoped identity readiness plus the unpaged total,
+	// ordered by display name then user id — a total order, so the pages
+	// partition the roster rather than repeating its head. githubBaseURL /
+	// jiraBaseURL are the org's configured hosts (raw, read from
+	// org_settings by the caller) —
 	// the impl resolves them to the host identities are actually keyed under
 	// (EffectiveGitHubHost: an unset github_base_url resolves to github.com,
 	// where most identities live; Jira has no default host, so an unset one
@@ -66,7 +68,15 @@ type OrgMembershipsStore interface {
 	// JiraAccountID is nil when they hold no binding on that host. The roster
 	// reads under the app pool (org_memberships_select RLS); the identity
 	// enrichment reads under the admin pool (see the type doc).
-	ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL string) ([]domain.OrgMember, error)
+	ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL string, opts ListOpts) ([]domain.OrgMember, int, error)
+
+	// RoleFor returns userID's org_role in orgID ("owner" | "admin" |
+	// "member"), or "" when they hold no membership row. App pool: the
+	// org_memberships_select policy already scopes the read to orgs the
+	// caller belongs to, so a non-member's probe of someone else's org
+	// answers "" rather than a role. The canonical org read reports it as
+	// the caller's own relationship to the org.
+	RoleFor(ctx context.Context, orgID, userID string) (string, error)
 
 	// UpdateRole sets userID's org role in orgID to role
 	// ("owner" | "admin" | "member") and returns the prior role (so the

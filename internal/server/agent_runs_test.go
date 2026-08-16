@@ -15,10 +15,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// TestHandleConversations_Batched pins the aggregated run-list path the Board uses
-// to collapse its per-refresh fan-out (TFAC-98): one
-// GET /api/agent/conversations?task_ids=a,b&include=messages returns runs grouped per
-// task (newest-first) plus each task's PRIMARY-run transcript keyed by run id.
+// TestHandleConversations_Batched pins the aggregated run-list path the Board
+// uses to collapse its per-refresh fan-out (TFAC-98): one
+// POST /api/agent/conversations/list {task_ids, include_messages} returns runs
+// grouped per task (newest-first) plus each task's PRIMARY-run transcript keyed
+// by run id.
 func TestHandleConversations_Batched(t *testing.T) {
 	s := newTestServer(t)
 
@@ -45,9 +46,11 @@ func TestHandleConversations_Batched(t *testing.T) {
 	seedMsg(olderA, "older-a") // must NOT appear — only the primary run's transcript is returned
 	seedMsg(primaryB, "primary-b")
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+taskA+","+taskB+"&include=messages", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{
+		"task_ids": []string{taskA, taskB}, "include_messages": true,
+	})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET batched = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("batched list = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
 		Runs     map[string][]map[string]any `json:"runs"`
@@ -83,17 +86,17 @@ func TestHandleConversations_Batched(t *testing.T) {
 	assertMsg(primaryA, "primary-a")
 	assertMsg(primaryB, "primary-b")
 
-	// Without include=messages, the messages key is omitted entirely.
-	rec2 := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+taskA, nil)
+	// Without include_messages, the messages key is omitted entirely.
+	rec2 := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{"task_ids": []string{taskA}})
 	if rec2.Code != http.StatusOK {
-		t.Fatalf("GET batched (no include) = %d, want 200", rec2.Code)
+		t.Fatalf("batched list (no messages) = %d, want 200", rec2.Code)
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(rec2.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if _, ok := raw["messages"]; ok {
-		t.Errorf("messages key present without include=messages; want omitted")
+		t.Errorf("messages key present without include_messages; want omitted")
 	}
 	if _, ok := raw["runs"]; !ok {
 		t.Errorf("runs key missing")
@@ -101,16 +104,17 @@ func TestHandleConversations_Batched(t *testing.T) {
 }
 
 // TestHandleConversations_MissingParams pins that the run-list endpoint still
-// requires a task selector — neither task_id nor task_ids is a 400, and an
-// all-empty task_ids (commas/whitespace only) is rejected too.
+// requires a task selector — an absent task_ids is a 400, and so is one whose
+// entries are all blank.
 func TestHandleConversations_MissingParams(t *testing.T) {
 	s := newTestServer(t)
 
-	if rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations", nil); rec.Code != http.StatusBadRequest {
-		t.Errorf("GET runs (no params) = %d, want 400", rec.Code)
+	if rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{}); rec.Code != http.StatusBadRequest {
+		t.Errorf("list (no task_ids) = %d, want 400", rec.Code)
 	}
-	if rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids=%20,%20", nil); rec.Code != http.StatusBadRequest {
-		t.Errorf("GET runs (empty task_ids) = %d, want 400", rec.Code)
+	if rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
+		map[string]any{"task_ids": []string{" ", " "}}); rec.Code != http.StatusBadRequest {
+		t.Errorf("list (blank task_ids) = %d, want 400", rec.Code)
 	}
 }
 
@@ -134,9 +138,9 @@ func TestHandleConversations_BatchedCap(t *testing.T) {
 
 	// At the cap: still served, in full.
 	within := append([]string{taskID}, pad(maxBatchTaskIDs-1)...)
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+strings.Join(within, ","), nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{"task_ids": within})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET batched at cap = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("batched list at cap = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
 		Runs map[string][]map[string]any `json:"runs"`
@@ -148,11 +152,11 @@ func TestHandleConversations_BatchedCap(t *testing.T) {
 		t.Errorf("at cap: task runs = %d, want 1", len(resp.Runs[taskID]))
 	}
 
-	// One past the cap: 400 OUT_OF_RANGE naming the param, nothing served.
+	// One past the cap: 400 OUT_OF_RANGE naming the field, nothing served.
 	over := append([]string{taskID}, pad(maxBatchTaskIDs)...)
-	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+strings.Join(over, ","), nil)
+	rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{"task_ids": over})
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("GET batched over cap = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("batched list over cap = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 	assertFirstError(t, rec, httpx.ReasonOutOfRange, "task_ids")
 }
@@ -162,23 +166,28 @@ func TestHandleConversations_BatchedCap(t *testing.T) {
 // Postgres uuid column as a 22P02.
 func TestHandleConversations_BatchedRejectsMalformedIDs(t *testing.T) {
 	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+uuid.New().String()+",not-an-id", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
+		map[string]any{"task_ids": []string{uuid.New().String(), "not-an-id"}})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonInvalidParam, "task_ids")
+	assertFirstError(t, rec, httpx.ReasonInvalidField, "task_ids")
 }
 
-// TestHandleConversations_RejectsUnknownInclude: include= is a closed
-// vocabulary — a typo must not silently return a payload without the section
-// the caller asked for.
-func TestHandleConversations_RejectsUnknownInclude(t *testing.T) {
+// TestHandleConversations_RejectsUnknownField: the old `include=` free-text
+// selector is gone — the body carries a typed include_messages bool, so a
+// mistyped selector is an unknown FIELD the strict decoder refuses rather than
+// a value the handler has to police. A typo can no longer return a payload
+// missing the section the caller asked for.
+func TestHandleConversations_RejectsUnknownField(t *testing.T) {
 	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+uuid.New().String()+"&include=messsages", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{
+		"task_ids": []string{uuid.New().String()}, "include": "messsages",
+	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	assertFirstError(t, rec, httpx.ReasonInvalidParam, "include")
+	assertFirstError(t, rec, httpx.ReasonUnknownField, "include")
 }
 
 // TestHandleMessages_SinceID pins the transcript read's optional watermark: the
@@ -209,12 +218,14 @@ func TestHandleMessages_SinceID(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET messages%s = %d; body=%s", query, rec.Code, rec.Body.String())
 		}
-		var msgs []map[string]any
-		if err := json.Unmarshal(rec.Body.Bytes(), &msgs); err != nil {
+		var page struct {
+			Items []map[string]any `json:"items"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
 			t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
 		}
-		out := make([]string, 0, len(msgs))
-		for _, m := range msgs {
+		out := make([]string, 0, len(page.Items))
+		for _, m := range page.Items {
 			out = append(out, fmt.Sprint(m["content"]))
 		}
 		return out
@@ -368,9 +379,10 @@ func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 
 	// The batched list path the board reads carries the same position, from
 	// one lookup over the deduped blueprint_run ids.
-	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+fixtureUUID("t_chainpos"), nil)
+	rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
+		map[string]any{"task_ids": []string{fixtureUUID("t_chainpos")}})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET run list = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("run list = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var list struct {
 		Runs map[string][]map[string]any `json:"runs"`
@@ -408,4 +420,23 @@ func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 	if n, isNum := got["blueprint_step_count"].(float64); !isNum || n != 1 {
 		t.Errorf("single-step blueprint_step_count = %v, want 1", got["blueprint_step_count"])
 	}
+}
+
+// listConversations reads one task's runs off the batched list route and
+// unwraps the task-keyed map, so a test asserting on run rows doesn't restate
+// the grouping every time.
+func listConversations(t *testing.T, s *Server, taskID string) []map[string]any {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
+		map[string]any{"task_ids": []string{taskID}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("conversations list = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Runs map[string][]map[string]any `json:"runs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode conversations list: %v; body=%s", err, rec.Body.String())
+	}
+	return resp.Runs[taskID]
 }

@@ -542,27 +542,42 @@ func marketplaceListingIDOr404(w http.ResponseWriter, r *http.Request) (string, 
 // additional filtering here; a non-publisher simply never sees another
 // team's delisted listing.
 //
-// GET /api/marketplace/listings?query=&event_type=&kind=&sort=
+// marketplaceListRequest is the body of POST /api/marketplace/listings/list —
+// the browse page's search + facets, unchanged in meaning from the query
+// params they replaced.
+type marketplaceListRequest struct {
+	Query     string `json:"query"`
+	EventType string `json:"event_type"`
+	Kind      string `json:"kind"`
+	Sort      string `json:"sort"`
+
+	httpx.PageRequest
+}
+
+// POST /api/marketplace/listings/list
 func (mh *marketplaceHandler) handleMarketplaceList(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := mh.gateMarketplace(w, r)
 	if !ok {
 		return
 	}
 
-	f := domain.ListingFilter{
-		Query:     strings.TrimSpace(r.URL.Query().Get("query")),
-		EventType: strings.TrimSpace(r.URL.Query().Get("event_type")),
-		Kind:      strings.TrimSpace(r.URL.Query().Get("kind")),
-		Sort:      strings.TrimSpace(r.URL.Query().Get("sort")),
-	}
-	if f.Kind != "" && f.Kind != domain.ListingKindPrompt && f.Kind != domain.ListingKindBlueprint {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidParam, Message: "kind must be 'prompt' or 'blueprint'", Field: "kind"})
+	var req marketplaceListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
+	}
+	f := domain.ListingFilter{
+		Query:     strings.TrimSpace(req.Query),
+		EventType: strings.TrimSpace(req.EventType),
+		Kind:      strings.TrimSpace(req.Kind),
+		Sort:      strings.TrimSpace(req.Sort),
+	}
+	var v httpx.Validation
+	if f.Kind != "" && f.Kind != domain.ListingKindPrompt && f.Kind != domain.ListingKindBlueprint {
+		v.Invalid("kind", "kind must be 'prompt' or 'blueprint'")
 	}
 	if f.Sort != "" && f.Sort != domain.ListingSortInstalls && f.Sort != domain.ListingSortVotes &&
 		f.Sort != domain.ListingSortRecent && f.Sort != domain.ListingSortMostUsed {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidParam, Message: "sort must be 'installs', 'votes', 'recent', or 'used'", Field: "sort"})
-		return
+		v.Invalid("sort", "sort must be 'installs', 'votes', 'recent', or 'used'")
 	}
 	if f.Sort == "" {
 		// The HTTP contract (this handler's doc comment, the API description
@@ -575,20 +590,27 @@ func (mh *marketplaceHandler) handleMarketplaceList(w http.ResponseWriter, r *ht
 		// product default.
 		f.Sort = domain.ListingSortInstalls
 	}
+	// The fingerprint is taken over the RESOLVED filter, so a caller that
+	// omits sort and one that sends "installs" share a page token — they are
+	// the same query.
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(f), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
 
-	var listings []domain.ListingSummary
+	var (
+		listings []domain.ListingSummary
+		total    int
+	)
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		listings, e = tx.Marketplace.List(r.Context(), orgID, userID, f)
+		listings, total, e = tx.Marketplace.List(r.Context(), orgID, userID, f, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "marketplace", err)
 		return
 	}
-	if listings == nil {
-		listings = []domain.ListingSummary{}
-	}
-	writeJSON(w, http.StatusOK, listings)
+	httpx.WriteList(w, page, listings, total)
 }
 
 // handleMarketplaceGet serves the listing detail view: header + counts, the

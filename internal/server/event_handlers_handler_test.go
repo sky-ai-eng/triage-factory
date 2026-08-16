@@ -3,12 +3,24 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// listEventHandlers reads one page of the handler list. kind is "", "rule", or
+// "trigger"; the page bound is the route's max, which every fixture fits in.
+func listEventHandlers(t *testing.T, s *Server, kind string) []map[string]any {
+	t.Helper()
+	body := map[string]any{"page_size": 200}
+	if kind != "" {
+		body["kind"] = kind
+	}
+	return decodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", body)).Items
+}
 
 // seedBlueprintForTrigger inserts a user-source blueprint that trigger
 // fixtures point at. event_handlers.blueprint_id has composite FKs to
@@ -249,9 +261,7 @@ func TestHandleEventHandlerToggle_FlipsEnabled(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 	// Re-read to confirm.
-	listRec := doJSON(t, s, http.MethodGet, "/api/event-handlers?kind=rule", nil)
-	var got []map[string]any
-	_ = json.Unmarshal(listRec.Body.Bytes(), &got)
+	got := listEventHandlers(t, s, "rule")
 	var found bool
 	for _, h := range got {
 		if h["id"] == id {
@@ -281,16 +291,10 @@ func TestHandleEventHandlerToggle_RequiresEnabled(t *testing.T) {
 	}
 	// The rule is untouched — a rule created through the API starts enabled.
 	// The list call is this assertion's instrument, so its own failures are
-	// fatal and named: an error body decoded as an empty list would otherwise
-	// read as "the rule vanished" and send a reader after the wrong bug.
-	listRec := doJSON(t, s, http.MethodGet, "/api/event-handlers?kind=rule", nil)
-	if listRec.Code != http.StatusOK {
-		t.Fatalf("list = %d, want 200; body=%s", listRec.Code, listRec.Body.String())
-	}
-	var got []map[string]any
-	if err := json.Unmarshal(listRec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode listing: %v; body=%s", err, listRec.Body.String())
-	}
+	// fatal and named (decodeList fatals on a non-200): an error body decoded
+	// as an empty list would otherwise read as "the rule vanished" and send a
+	// reader after the wrong bug.
+	got := listEventHandlers(t, s, "rule")
 	var found bool
 	for _, h := range got {
 		if h["id"] == id {
@@ -469,9 +473,7 @@ func TestHandleEventHandlerReorder_AppliesOrder(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 
-	listRec := doJSON(t, s, http.MethodGet, "/api/event-handlers?kind=rule", nil)
-	var rules []map[string]any
-	_ = json.Unmarshal(listRec.Body.Bytes(), &rules)
+	rules := listEventHandlers(t, s, "rule")
 	// First rule in the list should be the one we put at index 0 (idB).
 	if len(rules) == 0 || rules[0]["id"] != idB {
 		t.Errorf("reorder didn't take: rules[0]=%v, want id=%s", rules, idB)
@@ -486,7 +488,7 @@ func TestHandleEventHandlerReorder_RejectsEmpty(t *testing.T) {
 	}
 }
 
-// --- GET /api/event-handlers --------------------------------------------
+// --- POST /api/event-handlers/list ---------------------------------------
 
 func TestHandleEventHandlersList_KindFilter(t *testing.T) {
 	s := newTestServer(t)
@@ -508,12 +510,7 @@ func TestHandleEventHandlersList_KindFilter(t *testing.T) {
 		{"trigger", "trigger"},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
-			rec := doJSON(t, s, http.MethodGet, "/api/event-handlers?kind="+tc.kind, nil)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("expected 200, got %d", rec.Code)
-			}
-			var got []map[string]any
-			_ = json.Unmarshal(rec.Body.Bytes(), &got)
+			got := listEventHandlers(t, s, tc.kind)
 			if len(got) == 0 {
 				t.Fatalf("kind=%s returned 0 rows", tc.kind)
 			}
@@ -528,9 +525,9 @@ func TestHandleEventHandlersList_KindFilter(t *testing.T) {
 
 func TestHandleEventHandlersList_RejectsBadKind(t *testing.T) {
 	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers?kind=banana", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/list", map[string]any{"kind": "banana"})
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", rec.Code)
+		t.Fatalf("expected 400, got %d; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -559,4 +556,68 @@ func createUserRuleWithSort(t *testing.T, s *Server, name string, sortOrder int)
 		t.Fatalf("seed rule: missing id in response: %s", rec.Body.String())
 	}
 	return id
+}
+
+// --- GET /api/event-handlers/{id} ----------------------------------------
+
+// TestHandleEventHandlerGet_ShapeParityAndNotFound pins the single read the
+// five mutation routes needed and nobody had: it answers with the LIST's row,
+// field for field, and a well-formed-but-unknown id and a malformed one are
+// both 404 (a path id that names nothing must not disclose which it was, nor
+// reach the store as a bad cast).
+func TestHandleEventHandlerGet_ShapeParityAndNotFound(t *testing.T) {
+	s := newTestServer(t)
+	created := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
+		"kind":             "rule",
+		"event_type":       "github:pr:new_commits",
+		"name":             "Heads-up on new commits",
+		"default_priority": 0.6,
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("seed create = %d; body=%s", created.Code, created.Body.String())
+	}
+	var row map[string]any
+	if err := json.Unmarshal(created.Body.Bytes(), &row); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	id, _ := row["id"].(string)
+	if id == "" {
+		t.Fatalf("created handler has no id: %v", row)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+id, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode single read: %v", err)
+	}
+
+	// Shape parity with the list row — same keys, same values. A bespoke
+	// single-read projection is exactly what this asserts against.
+	var listed map[string]any
+	for _, h := range listEventHandlers(t, s, "") {
+		if h["id"] == id {
+			listed = h
+		}
+	}
+	if listed == nil {
+		t.Fatalf("seeded handler %s absent from the list", id)
+	}
+	if len(got) != len(listed) {
+		t.Errorf("single read has %d keys, list row has %d — the projections have diverged\nsingle=%v\nlist=%v",
+			len(got), len(listed), got, listed)
+	}
+	for k, want := range listed {
+		if fmt.Sprint(got[k]) != fmt.Sprint(want) {
+			t.Errorf("field %q: single read = %v, list row = %v", k, got[k], want)
+		}
+	}
+
+	for _, badID := range []string{"11111111-1111-1111-1111-111111111111", "not-a-uuid"} {
+		if rec := doJSON(t, s, http.MethodGet, "/api/event-handlers/"+badID, nil); rec.Code != http.StatusNotFound {
+			t.Errorf("GET /api/event-handlers/%s = %d, want 404; body=%s", badID, rec.Code, rec.Body.String())
+		}
+	}
 }

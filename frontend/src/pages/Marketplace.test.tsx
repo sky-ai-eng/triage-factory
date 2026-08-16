@@ -11,7 +11,7 @@ import type { EventType } from '../types'
 vi.mock('../hooks/useOrgHref', () => ({ useOrgHref: () => (path: string) => path }))
 
 import Marketplace from './Marketplace'
-import { jsonBody } from '../test/apiResponse'
+import { jsonBody, listBody } from '../test/apiResponse'
 
 const EVENT_TYPES: EventType[] = [
   {
@@ -87,8 +87,8 @@ function mockFetchRouter(opts: {
     if (path === '/api/event-types') {
       return Promise.resolve({ ok: true, ...jsonBody(EVENT_TYPES) })
     }
-    if (path === '/api/marketplace/listings') {
-      return Promise.resolve({ ok: true, ...jsonBody(opts.listings ?? []) })
+    if (path === '/api/marketplace/listings/list') {
+      return Promise.resolve({ ok: true, ...listBody(opts.listings ?? []) })
     }
     if (/^\/api\/marketplace\/listings\/[^/]+\/vote$/.test(path)) {
       return Promise.resolve({ ok: true, status: 204, ...jsonBody(null) })
@@ -100,6 +100,12 @@ function mockFetchRouter(opts: {
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
+}
+
+// calledBodies parses each recorded request's JSON body — the list route's
+// filters travel there now, not in a query string.
+function calledBodies(fetchMock: ReturnType<typeof vi.fn>): Record<string, unknown>[] {
+  return fetchMock.mock.calls.map((c) => JSON.parse(String((c[1] as RequestInit)?.body ?? '{}')))
 }
 
 function renderPage() {
@@ -214,8 +220,7 @@ describe('Marketplace', () => {
       fireEvent.change(screen.getByLabelText('Sort listings'), { target: { value: 'used' } })
 
       await waitFor(() => {
-        const calledUrls = fetchMock.mock.calls.map((c) => String(c[0]))
-        expect(calledUrls.some((u) => u.includes('sort=used'))).toBe(true)
+        expect(calledBodies(fetchMock).some((b) => b.sort === 'used')).toBe(true)
       })
     })
   })
@@ -244,10 +249,9 @@ describe('Marketplace', () => {
       fireEvent.click(ciChip)
 
       await waitFor(() => {
-        const calledUrls = fetchMock.mock.calls.map((c) => String(c[0]))
-        expect(calledUrls.some((u) => u.includes('event_type=github%3Apr%3Aci_check_failed'))).toBe(
-          true,
-        )
+        expect(
+          calledBodies(fetchMock).some((b) => b.event_type === 'github:pr:ci_check_failed'),
+        ).toBe(true)
       })
       expect(ciChip).toHaveAttribute('aria-pressed', 'true')
       expect(allChip).toHaveAttribute('aria-pressed', 'false')
@@ -262,8 +266,7 @@ describe('Marketplace', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Blueprints' }))
 
       await waitFor(() => {
-        const calledUrls = fetchMock.mock.calls.map((c) => String(c[0]))
-        expect(calledUrls.some((u) => u.includes('kind=blueprint'))).toBe(true)
+        expect(calledBodies(fetchMock).some((b) => b.kind === 'blueprint')).toBe(true)
       })
       expect(screen.getByRole('button', { name: 'Blueprints' })).toHaveAttribute(
         'aria-pressed',
@@ -334,10 +337,10 @@ describe('Marketplace', () => {
         if (path === '/api/event-types') {
           return Promise.resolve({ ok: true, ...jsonBody([]) })
         }
-        if (path === '/api/marketplace/listings' && !url.includes('/vote')) {
+        if (path === '/api/marketplace/listings/list') {
           return Promise.resolve({
             ok: true,
-            ...jsonBody([listing({ id: 'l1', vote_count: 1, viewer_voted: false })]),
+            ...listBody([listing({ id: 'l1', vote_count: 1, viewer_voted: false })]),
           })
         }
         if (path.endsWith('/vote')) {

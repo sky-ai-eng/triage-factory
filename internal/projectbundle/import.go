@@ -330,7 +330,10 @@ func readZipFileLimited(zf *zip.File, maxBytes int64) ([]byte, error) {
 
 func ensureUniqueProjectName(ctx context.Context, projects db.ProjectStore, orgID, incoming string) error {
 	incoming = strings.TrimSpace(incoming)
-	rows, err := projects.List(ctx, orgID)
+	// Unwindowed (ListOpts zero Limit): a uniqueness check must see every
+	// project, not a page of them — a duplicate on page two is still a
+	// duplicate.
+	rows, _, err := projects.List(ctx, orgID, db.ListOpts{})
 	if err != nil {
 		return fmt.Errorf("list projects: %w", err)
 	}

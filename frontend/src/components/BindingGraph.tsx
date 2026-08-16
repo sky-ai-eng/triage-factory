@@ -18,7 +18,7 @@ import '@xyflow/react/dist/style.css'
 import { Copy, FileText, Layers, MoreVertical, Trash2 } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import MarketplacePublishControl from './MarketplacePublishControl'
 import { type BindingScope, blueprintsBase, promptsBase, handlersBase } from '../lib/scope'
@@ -643,29 +643,30 @@ function BindingGraphInner({
     }
     // Narrows prompts + triggers to the active team (empty = unfiltered, the
     // solo/local case). event-types is a system registry — never scoped.
-    const teamQuery = teamId ? `team_id=${encodeURIComponent(teamId)}` : ''
+    const teamFilter = teamId ? { team_id: teamId } : {}
     // The canvas renders PROMPTS (a blueprint's steps) as nodes, with a
     // procedural box drawn around each multi-step blueprint. We need the
     // blueprint list + each blueprint's steps (the step→prompt mapping, the
     // entry prompt, and the order that draws the sequence edges), plus the
     // prompt list for titles + bodies.
-    const blueprintsURL = `${blueprintsBase()}${teamQuery ? `?${teamQuery}` : ''}`
-    const promptsURL = `${promptsBase()}${teamQuery ? `?${teamQuery}` : ''}`
-    const triggersURL = `${handlersBase()}?kind=trigger${teamQuery ? `&${teamQuery}` : ''}`
-    // One bulk steps read for the whole scope (grouped client-side) rather than
-    // a GET .../{id}/steps per blueprint — folded into the parallel fetch below
-    // so the canvas loads in a single round-trip.
-    const stepsURL = `/api/blueprint-steps${teamQuery ? `?${teamQuery}` : ''}`
+    //
+    // Every list read here walks its pages: the canvas draws EDGES, so a
+    // partial set is not a smaller graph, it is a graph with edges pointing at
+    // nodes that were never fetched. The one bulk steps read (grouped
+    // client-side) replaces a per-blueprint N+1.
     try {
       // The canvas is one view over five reads — a partial answer would draw a
       // graph with edges to nodes that aren't there, so any failure takes the
       // whole load down and the catch below leaves the prior canvas up.
       const [etRes, bpRes, promptRes, tRes, stepsRes] = await Promise.all([
         apiJSON<EventType[]>('/api/event-types'),
-        apiJSON<Blueprint[]>(blueprintsURL),
-        apiJSON<Prompt[]>(promptsURL),
-        apiJSON<TriggerHandler[]>(triggersURL),
-        apiJSON<BlueprintStep[]>(stepsURL),
+        apiListAll<Blueprint>(`${blueprintsBase()}/list`, teamFilter).then((p) => p.items),
+        apiListAll<Prompt>(`${promptsBase()}/list`, teamFilter).then((p) => p.items),
+        apiListAll<TriggerHandler>(`${handlersBase()}/list`, {
+          kind: 'trigger',
+          ...teamFilter,
+        }).then((p) => p.items),
+        apiListAll<BlueprintStep>('/api/blueprint-steps/list', teamFilter).then((p) => p.items),
       ])
       setEventTypes(etRes)
       setTriggers(tRes)

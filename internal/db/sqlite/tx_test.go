@@ -31,7 +31,7 @@ func TestSyntheticClaimsWithTx_SQLite_AcceptsLocalOrg(t *testing.T) {
 		func(tx db.TxStores) error {
 			called = true
 			// Sanity: the bound stores are usable inside the closure.
-			if _, err := tx.Repos.List(context.Background(), runmode.LocalDefaultOrgID); err != nil {
+			if _, _, err := tx.Repos.List(context.Background(), runmode.LocalDefaultOrgID, db.ListOpts{}); err != nil {
 				return err
 			}
 			return nil

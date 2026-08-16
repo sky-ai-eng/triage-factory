@@ -74,47 +74,62 @@ func (s *externalActionStore) RecordSystem(ctx context.Context, orgID string, e 
 
 // ListByOrgSystem is identical to a plain org read in SQLite (N=1, no RLS). It
 // returns the org's actions newest-first, filtered + paged by opts.
-func (s *externalActionStore) ListByOrgSystem(ctx context.Context, orgID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, error) {
+func (s *externalActionStore) ListByOrgSystem(ctx context.Context, orgID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	total, err := s.countExternalActions(ctx, `org_id = ?`, []any{orgID}, opts)
+	if err != nil {
+		return nil, 0, err
 	}
 	query := `SELECT ` + externalActionColumns + ` FROM external_actions WHERE org_id = ?`
 	query, args := appendExternalActionFilters(query, []any{orgID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanExternalActionRows(rows)
+	out, err := scanExternalActionRows(rows)
+	return out, total, err
 }
 
-func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, error) {
+func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	total, err := s.countExternalActions(ctx, `org_id = ? AND team_id = ?`, []any{orgID, teamID}, opts)
+	if err != nil {
+		return nil, 0, err
 	}
 	query := `SELECT ` + externalActionColumns + ` FROM external_actions WHERE org_id = ? AND team_id = ?`
 	query, args := appendExternalActionFilters(query, []any{orgID, teamID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanExternalActionRows(rows)
+	out, err := scanExternalActionRows(rows)
+	return out, total, err
 }
 
 // ListByRun returns one conversation's actions, newest first. A detached row
 // (conversation_id NULL after the run was purged) never matches, so a purged
 // run's actions survive in the org feed but no longer answer for a run that is
 // gone.
-func (s *externalActionStore) ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, error) {
+func (s *externalActionStore) ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	total, err := s.countExternalActions(ctx, `org_id = ? AND conversation_id = ?`, []any{orgID, conversationID}, opts)
+	if err != nil {
+		return nil, 0, err
 	}
 	query := `SELECT ` + externalActionColumns + ` FROM external_actions WHERE org_id = ? AND conversation_id = ?`
 	query, args := appendExternalActionFilters(query, []any{orgID, conversationID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanExternalActionRows(rows)
+	out, err := scanExternalActionRows(rows)
+	return out, total, err
 }
 
 // appendExternalActionFilters appends opts' optional provider/action/actor/time
@@ -124,6 +139,22 @@ func (s *externalActionStore) ListByRun(ctx context.Context, orgID, conversation
 // CURRENT_TIMESTAMP-formatted occurred_at regardless of the driver's bind
 // serialization.
 func appendExternalActionFilters(query string, args []any, opts domain.ExternalActionListOpts) (string, []any) {
+	query, args = appendExternalActionPredicates(query, args, opts)
+	query += ` ORDER BY occurred_at DESC, id DESC`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+		if opts.Offset > 0 {
+			query += ` OFFSET ?`
+			args = append(args, opts.Offset)
+		}
+	}
+	return query, args
+}
+
+// appendExternalActionPredicates is the filter half alone — no ordering, no
+// window — so the count and the page apply exactly the same predicate.
+func appendExternalActionPredicates(query string, args []any, opts domain.ExternalActionListOpts) (string, []any) {
 	if opts.Provider != "" {
 		query += ` AND provider = ?`
 		args = append(args, opts.Provider)
@@ -144,16 +175,16 @@ func appendExternalActionFilters(query string, args []any, opts domain.ExternalA
 		query += ` AND datetime(occurred_at) < datetime(?)`
 		args = append(args, opts.Until)
 	}
-	query += ` ORDER BY occurred_at DESC, id DESC`
-	if opts.Limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, opts.Limit)
-		if opts.Offset > 0 {
-			query += ` OFFSET ?`
-			args = append(args, opts.Offset)
-		}
-	}
 	return query, args
+}
+
+// countExternalActions runs the page's predicate as a COUNT on the same
+// connection, so "showing 50 of 213" cannot be assembled from two snapshots.
+func (s *externalActionStore) countExternalActions(ctx context.Context, where string, base []any, opts domain.ExternalActionListOpts) (int, error) {
+	query, args := appendExternalActionPredicates(`SELECT COUNT(*) FROM external_actions WHERE `+where, base, opts)
+	var n int
+	err := s.q.QueryRowContext(ctx, query, args...).Scan(&n)
+	return n, err
 }
 
 // --- Helpers ---

@@ -230,17 +230,27 @@ func insertRepositoryRow(ctx context.Context, q queryer, ref domain.RepoRef) err
 	return nil
 }
 
-func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.Repository, error) {
+func (s *repoStore) List(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Repository, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT `+repoProfileFullColumns+`
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM repositories`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `
+		SELECT ` + repoProfileFullColumns + `
 		FROM repositories
-		ORDER BY owner, repo
-	`)
+		ORDER BY owner, repo, id`
+	args := []any{}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT ? OFFSET ?`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -248,18 +258,18 @@ func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.Repository
 	for rows.Next() {
 		p, err := scanRepositoryFull(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // ListTeamScoped mirrors List in local mode — N=1, so there is no other
 // team to scope away (matches the ListActiveJiraTeamScoped /
 // FactoryReadStore.Entities local-mode asymmetry, TFAC-559).
-func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string) ([]domain.Repository, error) {
-	return s.List(ctx, orgID)
+func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Repository, int, error) {
+	return s.List(ctx, orgID, opts)
 }
 
 func (s *repoStore) ListWithContent(ctx context.Context, orgID string) ([]domain.Repository, error) {
@@ -460,7 +470,9 @@ func (s *repoStore) UpdateCloneStatus(ctx context.Context, orgID, owner, repo, s
 // delegates to its non-System counterpart.
 
 func (s *repoStore) ListSystem(ctx context.Context, orgID string) ([]domain.Repository, error) {
-	return s.List(ctx, orgID)
+	// Unwindowed: system callers resolve the whole registry.
+	rows, _, err := s.List(ctx, orgID, db.ListOpts{})
+	return rows, err
 }
 
 func (s *repoStore) ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error) {

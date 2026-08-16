@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -86,7 +88,7 @@ func TestMarketplaceRLS_CrossTeamRead(t *testing.T) {
 		if len(detail.Versions) != 1 || detail.CurrentSnapshot.Name != "Alice's Prompt" {
 			t.Errorf("bob's Get versions/snapshot = %+v / %+v, want v1 with the published snapshot", detail.Versions, detail.CurrentSnapshot)
 		}
-		listed, err := pgstore.NewForTx(tx, SecretKey).Marketplace.List(t.Context(), orgA, bob, domain.ListingFilter{})
+		listed, _, err := pgstore.NewForTx(tx, SecretKey).Marketplace.List(t.Context(), orgA, bob, domain.ListingFilter{}, db.ListOpts{Limit: 50})
 		if err != nil {
 			return err
 		}
@@ -178,7 +180,7 @@ func TestMarketplaceRLS_DelistedVisibility(t *testing.T) {
 		if !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("bob's Get(delisted) = %v, want sql.ErrNoRows", err)
 		}
-		listed, err := pgstore.NewForTx(tx, SecretKey).Marketplace.List(t.Context(), orgA, bob, domain.ListingFilter{})
+		listed, _, err := pgstore.NewForTx(tx, SecretKey).Marketplace.List(t.Context(), orgA, bob, domain.ListingFilter{}, db.ListOpts{Limit: 50})
 		if err != nil {
 			return err
 		}
@@ -282,7 +284,7 @@ func TestMarketplaceRLS_CrossOrgIsolation(t *testing.T) {
 		if _, err := m.Get(t.Context(), orgA, listingID, dave); !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("dave's cross-org Get = %v, want sql.ErrNoRows", err)
 		}
-		listed, err := m.List(t.Context(), orgA, dave, domain.ListingFilter{})
+		listed, _, err := m.List(t.Context(), orgA, dave, domain.ListingFilter{}, db.ListOpts{Limit: 50})
 		if err != nil {
 			return err
 		}

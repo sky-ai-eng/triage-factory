@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -24,6 +25,54 @@ type orgCreateResponse struct {
 	Name   string `json:"name"`
 	Slug   string `json:"slug"`
 	TeamID string `json:"team_id"`
+}
+
+// orgJSON is the org's canonical read shape, matching the rows /api/me carries
+// in its `orgs` list — the same three facts about the same object, so a client
+// reading one org and a client reading its own list parse one thing.
+//
+// Role is the CALLER's org role, named as the caller-relative annotation it is.
+type orgJSON struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
+// handleOrgGet is the canonical single read for an org. Member-visible: any
+// member of the org may read it, and a non-member (or a nonexistent org) gets
+// 404 from RequireOrgMember rather than a 403 that would confirm the org
+// exists.
+//
+// GET /api/orgs/{org_id}
+func (s *Server) handleOrgGet(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+
+	var (
+		org  *domain.Org
+		role string
+	)
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		org, e = tx.Orgs.GetOrg(r.Context(), orgID)
+		if e != nil || org == nil {
+			return e
+		}
+		role, e = tx.OrgMemberships.RoleFor(r.Context(), orgID, userID)
+		return e
+	}); err != nil {
+		internalError(w, "orgs", err)
+		return
+	}
+	if org == nil {
+		// RequireOrgMember already answered for a non-member, so this is the
+		// narrow race where the org vanished between the gate and the read.
+		notFound(w, "org")
+		return
+	}
+	writeJSON(w, http.StatusOK, orgJSON{ID: org.ID, Name: org.Name, Role: role})
 }
 
 // handleOrgCreate is the multi-mode "Start your Factory" create-org

@@ -84,24 +84,34 @@ func (s *externalActionStore) record(ctx context.Context, q queryer, orgID strin
 	return err
 }
 
-func (s *externalActionStore) ListByOrgSystem(ctx context.Context, orgID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, error) {
+func (s *externalActionStore) ListByOrgSystem(ctx context.Context, orgID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
+	total, err := countPgExternalActions(ctx, s.admin, `org_id = $1`, []any{orgID}, opts)
+	if err != nil {
+		return nil, 0, err
+	}
 	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions WHERE org_id = $1`
 	query, args := appendPgExternalActionFilters(query, []any{orgID}, opts)
 	rows, err := s.admin.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanExternalActionRows(rows)
+	out, err := scanExternalActionRows(rows)
+	return out, total, err
 }
 
-func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, error) {
+func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
+	total, err := countPgExternalActions(ctx, s.q, `org_id = $1 AND team_id = $2`, []any{orgID, teamID}, opts)
+	if err != nil {
+		return nil, 0, err
+	}
 	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions WHERE org_id = $1 AND team_id = $2`
 	query, args := appendPgExternalActionFilters(query, []any{orgID, teamID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanExternalActionRows(rows)
+	out, err := scanExternalActionRows(rows)
+	return out, total, err
 }
 
 // ListByRun reads one conversation's actions on the app pool, under the same
@@ -109,14 +119,19 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 // handler already made is what narrows it to a run the caller may see. The
 // conversation_id bind casts to uuid so a malformed path value is a query error
 // rather than a text comparison against a uuid column.
-func (s *externalActionStore) ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, error) {
+func (s *externalActionStore) ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
+	total, err := countPgExternalActions(ctx, s.q, `org_id = $1 AND conversation_id = $2::uuid`, []any{orgID, conversationID}, opts)
+	if err != nil {
+		return nil, 0, err
+	}
 	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions WHERE org_id = $1 AND conversation_id = $2::uuid`
 	query, args := appendPgExternalActionFilters(query, []any{orgID, conversationID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanExternalActionRows(rows)
+	out, err := scanExternalActionRows(rows)
+	return out, total, err
 }
 
 // appendPgExternalActionFilters appends opts' optional provider/action/actor/time
@@ -125,6 +140,22 @@ func (s *externalActionStore) ListByRun(ctx context.Context, orgID, conversation
 // (org_id[, team_id]) never collide — the same defensive numbering
 // appendPgArtifactFilters uses.
 func appendPgExternalActionFilters(query string, args []any, opts domain.ExternalActionListOpts) (string, []any) {
+	query, args = appendPgExternalActionPredicates(query, args, opts)
+	query += " ORDER BY occurred_at DESC, id DESC"
+	if opts.Limit > 0 {
+		args = append(args, opts.Limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
+		if opts.Offset > 0 {
+			args = append(args, opts.Offset)
+			query += fmt.Sprintf(" OFFSET $%d", len(args))
+		}
+	}
+	return query, args
+}
+
+// appendPgExternalActionPredicates is the filter half alone — no ordering, no
+// window — so the count and the page apply exactly the same predicate.
+func appendPgExternalActionPredicates(query string, args []any, opts domain.ExternalActionListOpts) (string, []any) {
 	if opts.Provider != "" {
 		args = append(args, opts.Provider)
 		query += fmt.Sprintf(" AND provider = $%d", len(args))
@@ -145,16 +176,16 @@ func appendPgExternalActionFilters(query string, args []any, opts domain.Externa
 		args = append(args, opts.Until)
 		query += fmt.Sprintf(" AND occurred_at < $%d", len(args))
 	}
-	query += " ORDER BY occurred_at DESC, id DESC"
-	if opts.Limit > 0 {
-		args = append(args, opts.Limit)
-		query += fmt.Sprintf(" LIMIT $%d", len(args))
-		if opts.Offset > 0 {
-			args = append(args, opts.Offset)
-			query += fmt.Sprintf(" OFFSET $%d", len(args))
-		}
-	}
 	return query, args
+}
+
+// countPgExternalActions runs the page's predicate as a COUNT on the pool the
+// page will read from, so the two can't come from different snapshots.
+func countPgExternalActions(ctx context.Context, q queryer, where string, base []any, opts domain.ExternalActionListOpts) (int, error) {
+	query, args := appendPgExternalActionPredicates(`SELECT COUNT(*) FROM external_actions WHERE `+where, base, opts)
+	var n int
+	err := q.QueryRowContext(ctx, query, args...).Scan(&n)
+	return n, err
 }
 
 // --- Helpers ---

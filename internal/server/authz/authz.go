@@ -71,13 +71,28 @@ func New(database *sql.DB, tx db.TxRunner) *Checker {
 	return &Checker{db: database, tx: tx}
 }
 
+// DefaultTeamAlias is the literal a {team_id} path segment may carry instead of
+// a uuid. It resolves to the org's only team, and only in local mode — see
+// ResolveTeamID.
+const DefaultTeamAlias = "default"
+
 // ResolveTeamID converts a raw {team_id} path value to a concrete team UUID.
-// The literal "default" resolves to the org's default team so the frontend can
-// call /api/settings/team/default before team pickers ship. Non-"default"
-// values are validated as UUIDs. A failed resolve returns a *resolveError;
-// render it with WriteResolveError.
+// It is the ONE grammar for that segment: every route with a {team_id} goes
+// through it, so a path that works on one team route works on all of them.
+//
+//   - Local mode additionally accepts the literal "default", which resolves to
+//     the org's only team. N=1 has no picker and no uuid a user could know, so
+//     without the alias the team routes would be unaddressable by hand.
+//   - Multi mode requires a uuid everywhere. There is no single "the" team to
+//     alias, and a magic value that silently retargets a write to whichever
+//     team happens to be oldest is the worst kind of default.
+//
+// A failed resolve returns a *resolveError; render it with WriteResolveError.
+// A malformed segment is not-found rather than a 400: a path id that cannot
+// name a row names nothing the caller may learn about (the disclosure rule),
+// and the answer is then identical across dialects.
 func (az *Checker) ResolveTeamID(ctx context.Context, orgID, userID, raw string) (string, error) {
-	if raw != "default" {
+	if raw != DefaultTeamAlias || runmode.Current() != runmode.ModeLocal {
 		if _, err := uuid.Parse(raw); err != nil {
 			return "", &resolveError{notFound: true, err: fmt.Errorf("invalid team_id")}
 		}
@@ -567,4 +582,24 @@ func WriteResolveError(w http.ResponseWriter, scope string, err error) {
 		return
 	}
 	httpx.InternalError(w, scope, err)
+}
+
+// TeamIDFromPath is ResolveTeamID plus its error rendering — the shape a
+// handler wants at the top of its body:
+//
+//	teamID, ok := az.TeamIDFromPath(w, r, "teams", orgID, userID)
+//	if !ok {
+//	    return
+//	}
+//
+// It exists so every {team_id} route spells the grammar the same way. A
+// handler that parsed the segment itself would be a second grammar, which is
+// exactly what the settings family and the teams family used to be.
+func (az *Checker) TeamIDFromPath(w http.ResponseWriter, r *http.Request, scope, orgID, userID string) (string, bool) {
+	teamID, err := az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
+	if err != nil {
+		WriteResolveError(w, scope, err)
+		return "", false
+	}
+	return teamID, true
 }

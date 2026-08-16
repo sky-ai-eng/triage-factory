@@ -2130,7 +2130,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 
-		if runs, err := store.ListForTasks(ctx, orgID, nil); err != nil || runs != nil {
+		if runs, _, err := store.ListForTasks(ctx, orgID, nil, db.ListOpts{Limit: 200}); err != nil || runs != nil {
 			t.Fatalf("ListForTasks(nil) = (%v, %v), want (nil, nil)", runs, err)
 		}
 
@@ -2148,7 +2148,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Mix in a valid-but-absent UUID and a non-UUID literal: both must be
 		// tolerated (no rows, no error). The non-UUID guards the Postgres path,
 		// where a uuid[] bind would otherwise 22P02 — filtered per uuid.go.
-		runs, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB, uuid.New().String(), "not-a-uuid"})
+		runs, total, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB, uuid.New().String(), "not-a-uuid"}, db.ListOpts{Limit: 200})
 		if err != nil {
 			t.Fatalf("ListForTasks: %v", err)
 		}
@@ -2172,6 +2172,26 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			if !seen[want] {
 				t.Errorf("run %s missing from batched result", want)
 			}
+		}
+		if total != 3 {
+			t.Errorf("total = %d, want 3", total)
+		}
+		// The pages partition the (task_id, started_at DESC, id) order, and a
+		// task's runs stay contiguous inside it.
+		page1, _, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB}, db.ListOpts{Limit: 2})
+		if err != nil {
+			t.Fatalf("ListForTasks page 1: %v", err)
+		}
+		page2, _, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB}, db.ListOpts{Limit: 2, Offset: 2})
+		if err != nil {
+			t.Fatalf("ListForTasks page 2: %v", err)
+		}
+		if len(page1) != 2 || len(page2) != 1 {
+			t.Fatalf("pages = %d + %d, want 2 + 1", len(page1), len(page2))
+		}
+		walked := map[string]bool{page1[0].ID: true, page1[1].ID: true, page2[0].ID: true}
+		if len(walked) != 3 {
+			t.Errorf("paged walk returned a repeat: %v", walked)
 		}
 	})
 

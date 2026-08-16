@@ -254,7 +254,7 @@ func TestHandleCuratorCancel_DeletesQueuedTurn(t *testing.T) {
 
 	var msgs []domain.Message
 	if err := srv.tx.SyntheticClaimsWithTx(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
-		ms, err := ts.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, convID)
+		ms, err := ts.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, convID, 0)
 		msgs = ms
 		return err
 	}); err != nil {

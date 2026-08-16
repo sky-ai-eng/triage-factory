@@ -72,20 +72,13 @@ func TestBlueprintReconnect_RepointsUpstreamAndOrphansDownstream(t *testing.T) {
 	if resp.OrphanBlueprintID == "" {
 		t.Fatal("expected an orphan_blueprint_id")
 	}
-	orphanSteps := doJSON(t, s, http.MethodGet, "/api/blueprints/"+resp.OrphanBlueprintID+"/steps", nil)
-	if orphanSteps.Code != http.StatusOK {
-		t.Fatalf("GET orphan steps: expected 200, got %d: %s", orphanSteps.Code, orphanSteps.Body.String())
-	}
-	var os composeSteps
-	if err := json.Unmarshal(orphanSteps.Body.Bytes(), &os); err != nil {
-		t.Fatalf("decode orphan steps: %v", err)
-	}
+	os := listBlueprintSteps(t, s, resp.OrphanBlueprintID)
 	if len(os) != 2 || os[0]["step_prompt_id"] != p[1] || os[1]["step_prompt_id"] != p[2] {
 		t.Fatalf("orphan steps = %+v, want [%s,%s]", os, p[1], p[2])
 	}
 	// Target is absorbed + retired.
-	if g := doJSON(t, s, http.MethodGet, "/api/blueprints/"+target+"/steps", nil); g.Code != http.StatusNotFound {
-		t.Fatalf("GET target steps after reconnect: expected 404, got %d", g.Code)
+	if blueprintExists(t, s, target) {
+		t.Fatal("GET target steps after reconnect: the blueprint is still readable")
 	}
 }
 
@@ -122,14 +115,7 @@ func TestBlueprintReconnect_TriggeredTargetRejected(t *testing.T) {
 		t.Fatalf("reconnect to triggered target: expected 422, got %d: %s", rec.Code, rec.Body.String())
 	}
 	// Host untouched — still its original 3 steps (single transaction).
-	steps := doJSON(t, s, http.MethodGet, "/api/blueprints/"+b+"/steps", nil)
-	if steps.Code != http.StatusOK {
-		t.Fatalf("GET host steps: expected 200, got %d: %s", steps.Code, steps.Body.String())
-	}
-	var hs composeSteps
-	if err := json.Unmarshal(steps.Body.Bytes(), &hs); err != nil {
-		t.Fatalf("decode host steps: %v", err)
-	}
+	hs := listBlueprintSteps(t, s, b)
 	if len(hs) != 3 {
 		t.Fatalf("host steps after rejected reconnect = %d, want 3 (untouched). p0=%s", len(hs), p[0])
 	}

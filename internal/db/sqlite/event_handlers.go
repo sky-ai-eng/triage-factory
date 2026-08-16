@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -146,24 +147,45 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 
 // List ignores teamID: local mode is single-team, so the multi-team
 // narrowing the param expresses is a no-op here.
-func (s *eventHandlerStore) List(ctx context.Context, orgID string, kind string, _ string) ([]domain.EventHandler, error) {
-	q := `SELECT ` + sqliteEventHandlerColumns + ` FROM event_handlers WHERE org_id = ? AND deleted_at IS NULL`
+func (s *eventHandlerStore) List(ctx context.Context, orgID string, f db.EventHandlerListFilter, opts db.ListOpts) ([]domain.EventHandler, int, error) {
+	// f.TeamID is ignored — local mode is single-team.
+	where := ` WHERE org_id = ? AND deleted_at IS NULL`
 	args := []any{orgID}
-	if kind != "" {
-		q += ` AND kind = ?`
-		args = append(args, kind)
+	if f.Kind != "" {
+		where += ` AND kind = ?`
+		args = append(args, f.Kind)
 	}
-	q += `
+	if len(f.GatedEventTypes) > 0 {
+		placeholders := make([]string, len(f.GatedEventTypes))
+		for i, et := range f.GatedEventTypes {
+			placeholders[i] = "?"
+			args = append(args, et)
+		}
+		where += ` AND event_type NOT IN (` + strings.Join(placeholders, ",") + `)`
+	}
+
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_handlers`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	q := `SELECT ` + sqliteEventHandlerColumns + ` FROM event_handlers` + where + `
 	      ORDER BY kind ASC,
 	               CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
 	               CASE WHEN kind = 'rule' THEN name ELSE '' END ASC,
-	               created_at DESC`
-	rows, err := s.q.QueryContext(ctx, q, args...)
+	               created_at DESC, id`
+	pageArgs := args
+	if opts.Limit > 0 {
+		q += ` LIMIT ? OFFSET ?`
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, q, pageArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
-	return collectEventHandlersSQLite(rows)
+	out, err := collectEventHandlersSQLite(rows)
+	return out, total, err
 }
 
 func (s *eventHandlerStore) Get(ctx context.Context, orgID, id string) (*domain.EventHandler, error) {

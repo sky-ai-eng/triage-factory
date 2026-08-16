@@ -23,7 +23,11 @@ func (s *invitesStore) Create(context.Context, domain.CreateInviteParams) (strin
 	return "", db.ErrNotApplicableInLocal
 }
 
-func (s *invitesStore) ListActive(context.Context, string) ([]domain.OrgInvite, error) {
+func (s *invitesStore) ListActive(context.Context, string, db.ListOpts) ([]domain.OrgInvite, int, error) {
+	return nil, 0, db.ErrNotApplicableInLocal
+}
+
+func (s *invitesStore) GetActive(context.Context, string, string) (*domain.OrgInvite, error) {
 	return nil, db.ErrNotApplicableInLocal
 }
 

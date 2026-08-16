@@ -456,13 +456,23 @@ export default function Board() {
         ...(doneRes?.items ?? []),
       ]
       if (withRuns.length === 0) return
-      const aggParams = new URLSearchParams()
-      aggParams.set('task_ids', withRuns.map((t) => t.id).join(','))
-      aggParams.set('include', 'messages')
+      // The window is over CONVERSATIONS, ordered so a task's runs stay
+      // contiguous — so a board page's worth of tasks needs a page large
+      // enough to hold all their runs. The board reads the first page and
+      // paints what it has; a card whose run fell past the window fills in on
+      // the next refresh rather than blocking first paint on a second call.
       const agg = await apiJSON<{
         runs?: Record<string, Conversation[]>
         messages?: Record<string, Message[]>
-      }>(`/api/agent/conversations?${aggParams.toString()}`)
+      }>('/api/agent/conversations/list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task_ids: withRuns.map((t) => t.id),
+          include_messages: true,
+          page_size: 200,
+        }),
+      })
       const runsByTask = agg.runs ?? {}
       const messagesByRun = agg.messages ?? {}
 
@@ -1781,10 +1791,13 @@ function ColumnMore({
   onLoadMore,
 }: {
   shown: number
-  total: number
+  total: number | null
   loading: boolean
   onLoadMore: () => void
 }) {
+  // A null total means the server did not count the result set (a proxy
+  // list). Say what we know — "showing 40" — rather than inventing an "of 0".
+  const label = total === null ? `showing ${shown}` : `showing ${shown} of ${total}`
   return (
     <button
       type="button"
@@ -1792,7 +1805,7 @@ function ColumnMore({
       disabled={loading}
       className="w-full py-2 text-[12px] text-text-tertiary hover:text-text-secondary disabled:opacity-50"
     >
-      {loading ? 'Loading…' : `Load more — showing ${shown} of ${total}`}
+      {loading ? 'Loading…' : `Load more — ${label}`}
     </button>
   )
 }

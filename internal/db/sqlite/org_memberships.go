@@ -21,8 +21,15 @@ func newOrgMembershipsStore() db.OrgMembershipsStore {
 
 var _ db.OrgMembershipsStore = (*orgMembershipsStore)(nil)
 
-func (*orgMembershipsStore) ListWithIdentity(_ context.Context, _, _, _ string) ([]domain.OrgMember, error) {
-	return nil, db.ErrNotApplicableInLocal
+func (*orgMembershipsStore) ListWithIdentity(_ context.Context, _, _, _ string, _ db.ListOpts) ([]domain.OrgMember, int, error) {
+	return nil, 0, db.ErrNotApplicableInLocal
+}
+
+// RoleFor is the one method on this store local mode answers rather than
+// refusing: N=1 has exactly one user, who owns the org. Every other method
+// backs a hosted-only surface whose handlers 404 before reaching the store.
+func (*orgMembershipsStore) RoleFor(_ context.Context, _, _ string) (string, error) {
+	return "owner", nil
 }
 
 func (*orgMembershipsStore) UpdateRole(_ context.Context, _, _, _ string) (string, error) {

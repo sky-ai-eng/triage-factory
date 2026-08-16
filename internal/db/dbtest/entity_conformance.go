@@ -920,7 +920,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Fatalf("assign other: %v", err)
 		}
 
-		got, err := s.ListProjectPanel(ctx, orgID, pid)
+		got, _, err := s.ListProjectPanel(ctx, orgID, pid, db.ListOpts{Limit: 200})
 		if err != nil {
 			t.Fatalf("ListProjectPanel: %v", err)
 		}

@@ -54,14 +54,14 @@ type ExternalActionStore interface {
 	// feed. Admin pool / org-wide in Postgres (the org-admin-gated cross-team
 	// read has no per-team RLS context), bounded + filtered by opts. org_id stays
 	// in the WHERE clause as defense in depth. Identical to a plain org read in
-	// SQLite.
-	ListByOrgSystem(ctx context.Context, orgID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, error)
+	// SQLite. The second return is the unpaged total under the same filters.
+	ListByOrgSystem(ctx context.Context, orgID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error)
 
 	// ListByTeam returns one team's actions, newest first — the team-scoped
 	// governance feed. App pool in Postgres: the org-scoped RLS policy gates the
 	// read, team_id is filtered in the WHERE clause, and the team-admin/org-admin
 	// authorization is enforced at the HTTP handler. Bounded + filtered by opts.
-	ListByTeam(ctx context.Context, orgID, teamID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, error)
+	ListByTeam(ctx context.Context, orgID, teamID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error)
 
 	// ListByRun returns one conversation's actions, newest first — what a single
 	// run did to the outside world, the sibling of Artifacts.ListByRun. App pool
@@ -73,5 +73,5 @@ type ExternalActionStore interface {
 	// answer different questions and are reached from different surfaces: this
 	// one needs no governance entitlement, since a member of the owning team is
 	// already reading that run's transcript and artifacts.
-	ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, error)
+	ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error)
 }

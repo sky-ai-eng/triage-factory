@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -284,6 +286,10 @@ func fetchEventTypesForListingsPG(ctx context.Context, q queryer, orgID string, 
 // there's no RLS-crossing read at browse/detail time). $1 is the viewer
 // user id (NULL when no viewer context — e.g. a background caller).
 // Callers append their own WHERE/ORDER BY.
+//
+// The viewer is $1 and the WHERE's own args start at $2. That offset is
+// load-bearing for List's count query, which reuses the WHERE without these
+// joins and so must NOT bind $1 — see listingCountWhereArgs.
 const listingSummaryQueryPG = `
 	SELECT ` + listingColumnsLPG + `,
 		COALESCE(v.vote_count, 0), COALESCE(i.install_count, 0),
@@ -298,34 +304,77 @@ const listingSummaryQueryPG = `
 	LEFT JOIN marketplace_listing_stats ms ON ms.listing_id = l.id
 `
 
-func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID string, f domain.ListingFilter) ([]domain.ListingSummary, error) {
+// shiftPlaceholdersDownOne rewrites $2, $3, … to $1, $2, … so a WHERE built
+// against listingSummaryQueryPG's numbering can be reused by a query that does
+// not bind the viewer at $1. Postgres rejects a statement supplied a parameter
+// it never references, so dropping the arg means renumbering the rest.
+//
+// It scans for `$` followed by digits rather than doing a blind string
+// replace: `$1` is a prefix of `$10`, and a naive replacement would corrupt
+// two-digit placeholders as the filter set grows.
+func shiftPlaceholdersDownOne(where string) string {
+	return placeholderPattern.ReplaceAllStringFunc(where, func(m string) string {
+		n, err := strconv.Atoi(m[1:])
+		if err != nil || n < 2 {
+			return m
+		}
+		return "$" + strconv.Itoa(n-1)
+	})
+}
+
+var placeholderPattern = regexp.MustCompile(`\$\d+`)
+
+func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID string, f domain.ListingFilter, opts db.ListOpts) ([]domain.ListingSummary, int, error) {
+	// $1 is the viewer, referenced only by listingSummaryQueryPG's own joins;
+	// the filters start at $2.
 	args := []any{nullIfEmpty(viewerUserID), orgID, domain.ListingStatusPublished}
-	q := listingSummaryQueryPG + ` WHERE l.org_id = $2 AND l.status = $3`
+	where := ` WHERE l.org_id = $2 AND l.status = $3`
 	if f.Kind != "" {
 		args = append(args, f.Kind)
-		q += fmt.Sprintf(" AND l.kind = $%d", len(args))
+		where += fmt.Sprintf(" AND l.kind = $%d", len(args))
 	}
 	if f.Query != "" {
 		args = append(args, "%"+f.Query+"%")
-		q += fmt.Sprintf(" AND (l.name ILIKE $%d OR l.description ILIKE $%d)", len(args), len(args))
+		where += fmt.Sprintf(" AND (l.name ILIKE $%d OR l.description ILIKE $%d)", len(args), len(args))
 	}
 	if f.EventType != "" {
 		args = append(args, f.EventType)
-		q += fmt.Sprintf(" AND EXISTS (SELECT 1 FROM marketplace_listing_events e WHERE e.listing_id = l.id AND e.event_type = $%d)", len(args))
+		where += fmt.Sprintf(" AND EXISTS (SELECT 1 FROM marketplace_listing_events e WHERE e.listing_id = l.id AND e.event_type = $%d)", len(args))
 	}
+
+	// The count runs the same WHERE on the same connection as the page, minus
+	// the summary query's viewer joins — so it must not bind $1. Shifting the
+	// placeholders down by one keeps one WHERE string as the single source of
+	// truth for what is being counted and what is being returned.
+	var total int
+	if err := s.q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM marketplace_listings l`+shiftPlaceholdersDownOne(where),
+		args[1:]...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	// Every sort ends in l.id so the order is total: installs, votes and
+	// total_runs all tie freely, and offset paging over a partial order drops
+	// and repeats rows.
+	q := listingSummaryQueryPG + where
 	switch f.Sort {
 	case domain.ListingSortInstalls:
-		q += ` ORDER BY COALESCE(i.install_count, 0) DESC, l.updated_at DESC`
+		q += ` ORDER BY COALESCE(i.install_count, 0) DESC, l.updated_at DESC, l.id`
 	case domain.ListingSortVotes:
-		q += ` ORDER BY COALESCE(v.vote_count, 0) DESC, l.updated_at DESC`
+		q += ` ORDER BY COALESCE(v.vote_count, 0) DESC, l.updated_at DESC, l.id`
 	case domain.ListingSortMostUsed:
-		q += ` ORDER BY COALESCE(ms.total_runs, 0) DESC, l.updated_at DESC`
+		q += ` ORDER BY COALESCE(ms.total_runs, 0) DESC, l.updated_at DESC, l.id`
 	default:
-		q += ` ORDER BY l.updated_at DESC`
+		q += ` ORDER BY l.updated_at DESC, l.id`
 	}
-	rows, err := s.q.QueryContext(ctx, q, args...)
+	pageArgs := args
+	if opts.Limit > 0 {
+		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, q, pageArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -333,12 +382,12 @@ func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID 
 	for rows.Next() {
 		sum, err := scanListingSummaryRowPG(rows.Scan)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, sum)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	ids := make([]string, len(out))
@@ -347,12 +396,12 @@ func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID 
 	}
 	eventTypes, err := fetchEventTypesForListingsPG(ctx, s.q, orgID, ids)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	for i := range out {
 		out[i].EventTypes = eventTypes[out[i].ID]
 	}
-	return out, nil
+	return out, total, nil
 }
 
 // Get returns the full detail for one listing, or propagates sql.ErrNoRows

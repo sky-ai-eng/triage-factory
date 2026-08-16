@@ -94,7 +94,7 @@ func TestCuratorStore_Postgres_PrivateVisibility_SelfOnly(t *testing.T) {
 		} else if conv != nil {
 			t.Errorf("bob read alice's conversation %s — private-visibility RLS leak", conv.ID)
 		}
-		if msgs, err := ts.Curator.ListConversationMessages(ctx, orgID, convID); err != nil {
+		if msgs, err := ts.Curator.ListConversationMessages(ctx, orgID, convID, 0); err != nil {
 			return err
 		} else if len(msgs) != 0 {
 			t.Errorf("bob read %d of alice's messages — private-visibility RLS leak", len(msgs))

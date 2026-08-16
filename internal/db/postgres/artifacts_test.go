@@ -244,7 +244,7 @@ func TestArtifactStore_Postgres_RLS_TeamScoped(t *testing.T) {
 		name, id string
 	}{{"alice", alice}, {"bob", bob}} {
 		err := h.WithUser(t, u.id, orgA, func(tx *sql.Tx) error {
-			rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByTeam(ctx, orgA, teamA, db.ArtifactListOpts{})
+			rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByTeam(ctx, orgA, teamA, db.ArtifactListOpts{})
 			if err != nil {
 				return err
 			}
@@ -261,7 +261,7 @@ func TestArtifactStore_Postgres_RLS_TeamScoped(t *testing.T) {
 	// Carol (teamB, same org, different team) sees zero — artifacts_select
 	// gates on user_in_team(team_id).
 	err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
-		rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByTeam(ctx, orgA, teamA, db.ArtifactListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByTeam(ctx, orgA, teamA, db.ArtifactListOpts{})
 		if err != nil {
 			return err
 		}
@@ -359,7 +359,7 @@ func TestArtifactStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
 		t.Fatalf("conversation_id should be NULL after run purge, got %q", nullRun.String)
 	}
 
-	rows, err := stores.Artifacts.ListByTeam(ctx, orgID, teamID, db.ArtifactListOpts{})
+	rows, _, err := stores.Artifacts.ListByTeam(ctx, orgID, teamID, db.ArtifactListOpts{})
 	if err != nil {
 		t.Fatalf("ListByTeam: %v", err)
 	}
@@ -853,7 +853,7 @@ func TestArtifactStore_Postgres_ListByOrgSystem(t *testing.T) {
 	seedArt(orgB, teamBOther, domain.ArtifactProviderGitHub, domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "other-org", "2026-06-06T00:00:00Z")
 
 	// No opts: every orgA row across both teams, terminal included, newest-first.
-	all, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{})
+	all, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem: %v", err)
 	}
@@ -885,21 +885,21 @@ func TestArtifactStore_Postgres_ListByOrgSystem(t *testing.T) {
 	}
 
 	// Filters.
-	gh, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Provider: domain.ArtifactProviderGitHub})
+	gh, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Provider: domain.ArtifactProviderGitHub})
 	if err != nil {
 		t.Fatalf("filter provider: %v", err)
 	}
 	if len(gh) != 3 {
 		t.Errorf("provider=github returned %d, want 3", len(gh))
 	}
-	prs, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Kind: domain.ArtifactKindPullRequest})
+	prs, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Kind: domain.ArtifactKindPullRequest})
 	if err != nil {
 		t.Fatalf("filter kind: %v", err)
 	}
 	if len(prs) != 2 {
 		t.Errorf("kind=pull_request returned %d, want 2", len(prs))
 	}
-	open, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{State: domain.ArtifactStatePROpen})
+	open, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{State: domain.ArtifactStatePROpen})
 	if err != nil {
 		t.Fatalf("filter state: %v", err)
 	}
@@ -908,7 +908,7 @@ func TestArtifactStore_Postgres_ListByOrgSystem(t *testing.T) {
 	}
 
 	// Time window [06-03, 06-05): merged (06-03) + review (06-04), newest-first.
-	windowed, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{
+	windowed, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{
 		Since: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC),
 		Until: time.Date(2026, 6, 5, 0, 0, 0, 0, time.UTC),
 	})
@@ -920,11 +920,11 @@ func TestArtifactStore_Postgres_ListByOrgSystem(t *testing.T) {
 	}
 
 	// Paging: page 1 (limit 2) → comment + review; page 2 (offset 2) → merged + open.
-	page1, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Limit: 2})
+	page1, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Limit: 2})
 	if err != nil {
 		t.Fatalf("page 1: %v", err)
 	}
-	page2, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Limit: 2, Offset: 2})
+	page2, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Limit: 2, Offset: 2})
 	if err != nil {
 		t.Fatalf("page 2: %v", err)
 	}

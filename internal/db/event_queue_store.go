@@ -30,31 +30,11 @@ import (
 // and an operator reading the column sees one string for one cause.
 const StaleProcessingReclaimReason = "stale processing reclaim"
 
-// Bounds on ListFailedEvents' page size, shared so the two impls can't
-// drift. The list is a diagnostics table an operator scans, not a feed:
-// a healthy deployment parks nothing, and a deployment parking more than
-// the ceiling has a systemic fault the first page already tells the
-// operator about.
-const (
-	DefaultFailedEventsLimit = 100
-	MaxFailedEventsLimit     = 500
-)
-
-// NormalizeFailedEventsLimit resolves a caller's requested page size to the
-// one both backends must apply: non-positive (the "unspecified" spelling)
-// means the default, and anything past the ceiling is clamped rather than
-// rejected — a limit is a display convenience, not an assertion worth
-// failing a diagnostics read over.
-func NormalizeFailedEventsLimit(limit int) int {
-	switch {
-	case limit <= 0:
-		return DefaultFailedEventsLimit
-	case limit > MaxFailedEventsLimit:
-		return MaxFailedEventsLimit
-	default:
-		return limit
-	}
-}
+// MaxFailedEventsRequeueIDs bounds how many queue ids one requeue call may
+// name. A selection is made from a page, and a page is bounded by the list
+// contract, so this only rejects a hand-rolled request — and rejecting it
+// keeps the statement's bind list bounded.
+const MaxFailedEventsRequeueIDs = 500
 
 // TraceparentAt reads the i-th entry of a batch's parallel traceparent
 // slice, returning "" (stored as NULL) when the slice doesn't cover i.
@@ -212,10 +192,10 @@ type EventQueueStore interface {
 	// failed rows would delete the evidence and the recovery path together.
 	PruneDone(ctx context.Context, before time.Time) (int, error)
 
-	// ListFailedEvents returns the org's parked 'failed' rows — the operator
-	// surface over routing work the queue dropped — newest first, capped at
-	// limit (resolved through NormalizeFailedEventsLimit, so a non-positive
-	// value means the default and an oversized one is clamped).
+	// ListFailedEvents returns one page of the org's parked 'failed' rows —
+	// the operator surface over routing work the queue dropped — newest
+	// first, plus the unpaged total of parked rows. id DESC is a total order
+	// (id is monotonic per insert), so the pages partition the result set.
 	//
 	// The entity fields are outer-joined for display and read empty when the
 	// row carries no entity or the entity row is gone. That is deliberate: a
@@ -225,7 +205,13 @@ type EventQueueStore interface {
 	// Org-scoped by argument on the admin pool, like every other method here
 	// — the store is system-service wired, so the org-admin predicate in the
 	// handler is the authorization, not RLS.
-	ListFailedEvents(ctx context.Context, orgID string, limit int) ([]domain.FailedEvent, error)
+	ListFailedEvents(ctx context.Context, orgID string, opts ListOpts) ([]domain.FailedEvent, int, error)
+
+	// GetFailedEvent returns one parked row by queue id, or (nil, nil) when
+	// the org has no 'failed' row with that id. Same projection as
+	// ListFailedEvents — a single read answers with the list's row shape, not
+	// a bespoke one.
+	GetFailedEvent(ctx context.Context, orgID string, id int64) (*domain.FailedEvent, error)
 
 	// RequeueFailedEvents returns the named parked rows to 'pending' and
 	// grants each a fresh attempt budget (attempts = 0). The fresh budget is

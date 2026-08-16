@@ -312,17 +312,12 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, out)
 }
 
-// runActionsLimit caps the run-scoped action read. A run's artifacts are
-// bounded by the objects it creates, but its actions are bounded by nothing —
-// an agent in a retry loop can append hundreds of rows — so the run view reads
-// the most recent page rather than the whole history. The governance feed is
-// where an unbounded history is paged properly.
-//
-// The run view says so when it receives a full page, which means it holds its
-// own copy of this number (ActionList.tsx's PAGE). A cap raised here and not
-// there would silently truncate a list that claims to be the complete answer,
-// so the two are pinned together by TestFrontendMirrorsRunActionsLimit.
-const runActionsLimit = 200
+// runActionListRequest is the body of
+// POST /api/agent/conversations/{conversationID}/actions/list. The run is the
+// path id and the read has no filters of its own, so the body is paging alone.
+type runActionListRequest struct {
+	httpx.PageRequest
+}
 
 // handleAgentActions returns the external actions this run performed — the
 // audit log of record, filtered to one conversation and newest first. The
@@ -330,12 +325,21 @@ const runActionsLimit = 200
 // under request claims, so a run the caller's team can't see is a 404 rather
 // than an empty list.
 //
+// A run's actions are bounded by nothing — an agent in a retry loop can append
+// hundreds of rows — which is why this used to read a hardcoded 200 and the
+// frontend held a copy of that number to know whether it had the whole answer.
+// Both are gone: the page is the caller's to ask for and total_count says how
+// many there are, so a truncated view is now impossible to mistake for a
+// complete one.
+//
 // Deliberately NOT behind the governance entitlement the /usage feeds sit
 // behind. That gate is about reading across teams; this read is scoped to a
 // single run whose transcript and artifacts the caller can already see, and the
 // actions are the part of that run's record which has no artifact to appear as
 // — a review-thread reply, a refused merge, a denied push. Withholding them
 // here would leave the incomplete answer the run view has today.
+//
+// POST /api/agent/conversations/{conversationID}/actions/list
 func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -347,8 +351,21 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var run *domain.Conversation
-	var actions []domain.ExternalAction
+	var req runActionListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		run     *domain.Conversation
+		actions []domain.ExternalAction
+		total   int
+	)
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
@@ -358,8 +375,8 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		if run == nil {
 			return nil
 		}
-		actions, e = tx.ExternalActions.ListByRun(r.Context(), orgID, conversationID,
-			domain.ExternalActionListOpts{Limit: runActionsLimit})
+		actions, total, e = tx.ExternalActions.ListByRun(r.Context(), orgID, conversationID,
+			domain.ExternalActionListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -374,7 +391,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 	for i, a := range actions {
 		out[i] = toActionJSON(a)
 	}
-	writeJSON(w, http.StatusOK, out)
+	httpx.WriteList(w, page, out, total)
 }
 
 // runResponse projects a Conversation into the wire shape the frontend consumes,
@@ -475,6 +492,40 @@ func runResponse(run *domain.Conversation, artifactCount int, arts []domain.Arti
 	return out
 }
 
+// transcriptPageSize bounds one GET …/messages read. It is the route's
+// declared page size, not a clamp of a caller-supplied one: the transcript
+// takes no page_size, because it is a sync/tail read whose page is always
+// "as much recent history as is worth one request".
+//
+// 500 rows is far past any transcript a person scrolls in one sitting and far
+// short of a run that streamed for hours.
+const transcriptPageSize = 500
+
+// transcriptResponse is the transcript's wire shape: the rows plus the token
+// for the page BEFORE them.
+//
+// It is a GET, and deliberately not a POST /list. The transcript is followed,
+// not browsed: a client holds a watermark and asks for what came after it,
+// which is a cache-revalidating read of an append-only stream, and turning it
+// into a body-carrying POST would buy nothing but a second spelling. It does
+// take the list envelope's two paging keys so a client's loop looks the same.
+//
+// The two directions are separate on purpose:
+//
+//   - since_id walks FORWARD from a watermark the client already holds. It is
+//     the tail-follow, used to repair a transcript assembled from websocket
+//     frames.
+//   - next_page_token walks BACKWARD through history from the oldest row this
+//     response carries. It is how a client that opened on the tail reaches the
+//     beginning.
+//
+// A response never carries a total: counting a stream that is still being
+// appended to would be a number that is wrong by the time it renders.
+type transcriptResponse struct {
+	Items         []domain.MessageDTO `json:"items"`
+	NextPageToken string              `json:"next_page_token,omitempty"`
+}
+
 func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -489,38 +540,66 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// to it and wants only what came after. A client repairing a transcript it
 	// built from websocket frames polls with it.
 	//
-	// Absent means no watermark — the whole transcript, which is what every
-	// other caller asks for. Anything else must be a usable watermark: an
-	// unparseable or negative value is a 400 rather than a silent fall-back to
-	// the full read, because "give me what I'm missing" answered with "here is
-	// everything" is the widening a corrupt param must never buy. A negative
+	// Absent means no watermark — the newest page. Anything else must be a
+	// usable watermark: an unparseable or negative value is a 400 rather than a
+	// silent fall-back, because "give me what I'm missing" answered with
+	// something else is the widening a corrupt param must never buy. A negative
 	// one would also reach the store as `id > -N`, which selects the whole
 	// transcript today only because ids start at 1 — a coincidence, not a
 	// contract. Surrounding whitespace is trimmed first (the convention for
 	// query params here).
-	sinceID := 0
-	if raw := strings.TrimSpace(r.URL.Query().Get("since_id")); raw != "" {
-		v, err := strconv.Atoi(raw)
-		if err != nil || v < 0 {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-				Reason:  httpx.ReasonInvalidParam,
-				Message: "since_id must be a non-negative integer",
-				Field:   "since_id",
-			})
-			return
-		}
-		sinceID = v
+	var v httpx.Validation
+	sinceID := nonNegativeIntParam(&v, r, "since_id")
+	// page_token addresses older history. It is the opaque token the previous
+	// response minted; a client never constructs one.
+	beforeID := nonNegativeIntParam(&v, r, "page_token")
+	if sinceID > 0 && beforeID > 0 {
+		v.Param("page_token", "page_token walks history backward and since_id follows the tail; send one, not both")
 	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
 	var messages []domain.Message
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		messages, e = tx.Conversations.MessagesSince(r.Context(), orgID, conversationID, sinceID)
+		messages, e = tx.Conversations.MessagesWindow(r.Context(), orgID, conversationID, db.MessageWindow{
+			SinceID: sinceID, BeforeID: beforeID, Limit: transcriptPageSize,
+		})
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, domain.MessageDTOs(messages))
+
+	resp := transcriptResponse{Items: domain.MessageDTOs(messages)}
+	if resp.Items == nil {
+		resp.Items = []domain.MessageDTO{}
+	}
+	// A backward page exists only when this one is full AND we are not
+	// tail-following: a short page reached the beginning, and a caller walking
+	// forward from a watermark is not walking history at all. The token is the
+	// oldest row's id — the ceiling the next page reads below.
+	if sinceID == 0 && len(messages) == transcriptPageSize {
+		resp.NextPageToken = strconv.Itoa(messages[0].ID)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// nonNegativeIntParam reads an optional non-negative integer query param,
+// recording a fault on v rather than falling back to the default — a corrupt
+// paging param must never widen the read it bounds. Absent yields 0.
+func nonNegativeIntParam(v *httpx.Validation, r *http.Request, name string) int {
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		v.Param(name, name+" must be a non-negative integer")
+		return 0
+	}
+	return n
 }
 
 // handleAgentStop is the conversation-level stop verb: the agent stops, the
@@ -919,22 +998,60 @@ func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain
 	return out, nil
 }
 
-// splitCommaList splits a comma-separated query value into trimmed,
-// de-duplicated, non-empty ids, preserving first-seen order.
-func splitCommaList(raw string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, p := range strings.Split(raw, ",") {
-		p = strings.TrimSpace(p)
-		if p == "" || seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, p)
-	}
-	return out
+// maxBatchTaskIDs caps how many task ids one conversation-list request
+// names, bounding the DB work and response size a single call can trigger.
+// 500 matches the store's IN-list chunk size, so the id set is always one
+// chunk; a larger set is rejected rather than truncated.
+const maxBatchTaskIDs = 500
+
+// conversationListRequest is the body of POST /api/agent/conversations/list.
+//
+// It replaces both of the query-param forms this route used to carry — one
+// task id and a comma-separated batch — because they were the same read with
+// different arities and different response shapes. One route, one shape: rows
+// keyed by task id, which is what the batched form already answered and what
+// every caller (the board, the task drawer) groups by anyway.
+type conversationListRequest struct {
+	// TaskIDs selects the tasks whose conversations to return. At least one,
+	// at most maxBatchTaskIDs.
+	TaskIDs []string `json:"task_ids"`
+	// IncludeMessages adds each task's PRIMARY (newest-started) run's
+	// transcript, keyed by that run's id — what the Board seeds onto a card.
+	IncludeMessages bool `json:"include_messages"`
+
+	httpx.PageRequest
 }
 
+type conversationListFilterKey struct {
+	TaskIDs         []string `json:"task_ids"`
+	IncludeMessages bool     `json:"include_messages"`
+}
+
+// conversationListResponse is the list envelope with the run rows grouped by
+// task id rather than as a flat `items` array.
+//
+// The grouping is the shape callers actually consume, and it is why this route
+// spells its own envelope instead of using httpx.WriteList: a map cannot be a
+// slice. The paging keys mean exactly what they mean everywhere else — the
+// window is over the CONVERSATIONS, ordered (task_id, started_at DESC, id), so
+// a task's runs stay contiguous and total_count counts conversations, not
+// tasks.
+//
+// Runs carry the frozen run projection byte-for-byte, PascalCase legacy keys
+// and all. Renaming them is its own change, not a side effect of this one.
+type conversationListResponse struct {
+	Runs          map[string][]map[string]any    `json:"runs"`
+	Messages      map[string][]domain.MessageDTO `json:"messages,omitempty"`
+	NextPageToken string                         `json:"next_page_token,omitempty"`
+	TotalCount    int                            `json:"total_count"`
+}
+
+// handleConversations serves POST /api/agent/conversations/list.
+//
+// Reading every task in one WithTx makes the snapshot internally consistent:
+// a per-task serial loop read each task at a different transaction boundary,
+// so a status change mid-refresh could return some tasks in the old state and
+// some in the new. One tx removes that flicker class.
 func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -942,130 +1059,46 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	// Batched path: ?task_ids=a,b,c[&include=messages] returns runs keyed by
-	// task id (and, when requested, each task's primary-run transcript keyed by
-	// run id) in one payload — the Board's per-refresh fan-out collapsed from
-	// O(tasks) serial round-trips to one. The single ?task_id path below is
-	// unchanged for back-compat.
-	if raw := r.URL.Query().Get("task_ids"); raw != "" {
-		ag.handleConversationsBatched(w, r, orgID, userID, raw)
+	var req conversationListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-
-	taskID := r.URL.Query().Get("task_id")
-	if taskID == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonInvalidParam,
-			Message: "task_id or task_ids query parameter required",
-			Field:   "task_id",
-		})
-		return
-	}
-	if _, err := uuid.Parse(taskID); err != nil {
-		// tasks.id is a uuid column on Postgres, so a malformed selector would
-		// otherwise reach the store as a 22P02 → 500. It's a query param, not
-		// a path id, so it fails as a bad param rather than a 404.
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonInvalidParam,
-			Message: "task_id must be a valid task id",
-			Field:   "task_id",
-		})
-		return
-	}
-	var out []map[string]any
-	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		runs, e := tx.Conversations.ListForTask(r.Context(), orgID, taskID)
-		if e != nil {
-			return e
-		}
-		if runs == nil {
-			runs = []domain.Conversation{}
-		}
-		out, e = enrichRuns(r.Context(), tx, orgID, runs)
-		return e
-	}); err != nil {
-		internalError(w, "agent", err)
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-// maxBatchTaskIDs caps how many task ids one batched run-list request
-// processes, bounding the DB work and response size a single call can trigger.
-// 500 matches the store's IN-list chunk size, so the common board (well under
-// it) is one chunk per read; a larger board is truncated (see the handler) and
-// logged rather than allowed to fan out unbounded.
-const maxBatchTaskIDs = 500
-
-// handleConversationsBatched serves GET /api/agent/conversations?task_ids=a,b,c. The
-// response is { "runs": { <taskID>: []run }, "messages": { <conversationID>: []message } }:
-// runs grouped per task (newest-first, same per-run projection as the single
-// path), and — when include=messages — the transcript of each task's PRIMARY
-// (newest-started) run, keyed by that run's id. The primary run is runs[0] per
-// task, matching the single-task path's latestRun; this is exactly the data the
-// Board seeds onto each card, now in one round-trip instead of 2–3 per task.
-// `messages` is omitted unless include=messages.
-//
-// Reading every task in one WithTx also makes the snapshot internally
-// consistent: the old per-task serial loop read each task at a different
-// transaction boundary, so a status change mid-refresh could return some tasks
-// in the old state and some in the new. One tx removes that flicker class.
-func (ag *agentHandler) handleConversationsBatched(w http.ResponseWriter, r *http.Request, orgID, userID, raw string) {
-	taskIDs := splitCommaList(raw)
-	if len(taskIDs) == 0 {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidParam, Message: "task_ids must contain at least one id", Field: "task_ids",
-		})
-		return
-	}
-	if len(taskIDs) > maxBatchTaskIDs {
-		// Bound the DB work / payload one request can trigger. This used to
-		// truncate the tail and log it, which answered a 500-task board with a
-		// 500-task-shaped payload the caller had no way to know was partial —
-		// the silent-truncation class the contract forbids. The caller pages
-		// instead.
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonOutOfRange,
-			Message: fmt.Sprintf("task_ids accepts at most %d ids per request; got %d", maxBatchTaskIDs, len(taskIDs)),
-			Field:   "task_ids",
-		})
-		return
+	var v httpx.Validation
+	taskIDs := canonicalStrings(req.TaskIDs)
+	switch {
+	case len(taskIDs) == 0:
+		v.Missing("task_ids")
+	case len(taskIDs) > maxBatchTaskIDs:
+		v.OutOfRange("task_ids", fmt.Sprintf("task_ids accepts at most %d ids per request; got %d", maxBatchTaskIDs, len(taskIDs)))
 	}
 	for _, id := range taskIDs {
+		// tasks.id is a uuid column on Postgres, so a malformed selector would
+		// otherwise reach the store as a 22P02 → 500.
 		if _, err := uuid.Parse(id); err != nil {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-				Reason:  httpx.ReasonInvalidParam,
-				Message: fmt.Sprintf("task_ids contains %q, which is not a valid task id", id),
-				Field:   "task_ids",
-			})
-			return
+			v.Invalid("task_ids", fmt.Sprintf("task_ids contains %q, which is not a valid task id", id))
 		}
 	}
-	// include= is a closed vocabulary: an unknown value is a client fault, not
-	// a silently dropped request for data it will then not find in the reply.
-	includeMessages := false
-	for _, inc := range splitCommaList(r.URL.Query().Get("include")) {
-		if inc != "messages" {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-				Reason:  httpx.ReasonInvalidParam,
-				Message: fmt.Sprintf("include %q is not supported; the only value is: messages", inc),
-				Field:   "include",
-			})
-			return
-		}
-		includeMessages = true
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(conversationListFilterKey{
+		TaskIDs: taskIDs, IncludeMessages: req.IncludeMessages,
+	}), maxBatchTaskIDs)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
 	}
 
-	runsByTask := map[string][]map[string]any{}
-	messagesByRun := map[string][]domain.MessageDTO{}
+	resp := conversationListResponse{Runs: map[string][]map[string]any{}}
+	if req.IncludeMessages {
+		resp.Messages = map[string][]domain.MessageDTO{}
+	}
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		runs, e := tx.Conversations.ListForTasks(r.Context(), orgID, taskIDs)
+		runs, total, e := tx.Conversations.ListForTasks(r.Context(), orgID, taskIDs,
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		if e != nil {
 			return e
 		}
-		// One enrichRuns over the whole flat slice keeps the artifact reads
-		// O(1) regardless of task/run count; the index alignment lets us group
-		// the projected responses by task without re-projecting.
+		resp.TotalCount = total
+		// One enrichRuns over the whole page keeps the artifact reads O(1)
+		// regardless of task/run count; the index alignment lets us group the
+		// projected responses by task without re-projecting.
 		enriched, e := enrichRuns(r.Context(), tx, orgID, runs)
 		if e != nil {
 			return e
@@ -1074,21 +1107,24 @@ func (ag *agentHandler) handleConversationsBatched(w http.ResponseWriter, r *htt
 		seenTask := map[string]bool{}
 		for i := range runs {
 			tid := runs[i].TaskID
-			runsByTask[tid] = append(runsByTask[tid], enriched[i])
-			// runs come back started_at DESC, so the first seen per task is its
-			// primary (newest) run — the one whose transcript the card shows.
+			resp.Runs[tid] = append(resp.Runs[tid], enriched[i])
+			// Runs come back started_at DESC within a task, so the first seen
+			// per task is its primary (newest) run — the one whose transcript
+			// the card shows. "First seen in this page": a task whose runs
+			// began on an earlier page has no primary here, which is the same
+			// thing as having no rows here.
 			if !seenTask[tid] {
 				seenTask[tid] = true
 				primaryRunIDs = append(primaryRunIDs, runs[i].ID)
 			}
 		}
-		if includeMessages && len(primaryRunIDs) > 0 {
+		if req.IncludeMessages && len(primaryRunIDs) > 0 {
 			msgs, e := tx.Conversations.MessagesForRuns(r.Context(), orgID, primaryRunIDs)
 			if e != nil {
 				return e
 			}
 			for _, m := range msgs {
-				messagesByRun[m.ConversationID] = append(messagesByRun[m.ConversationID], m.ToDTO())
+				resp.Messages[m.ConversationID] = append(resp.Messages[m.ConversationID], m.ToDTO())
 			}
 		}
 		return nil
@@ -1096,12 +1132,18 @@ func (ag *agentHandler) handleConversationsBatched(w http.ResponseWriter, r *htt
 		internalError(w, "agent", err)
 		return
 	}
-
-	resp := map[string]any{"runs": runsByTask}
-	if includeMessages {
-		resp["messages"] = messagesByRun
-	}
+	resp.NextPageToken = httpx.NextPageToken(page, len(flattenRunGroups(resp.Runs)), resp.TotalCount)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// flattenRunGroups counts the rows a grouped page carries, so the next-token
+// arithmetic sees the same number a flat `items` array would have.
+func flattenRunGroups(groups map[string][]map[string]any) []map[string]any {
+	var out []map[string]any
+	for _, rows := range groups {
+		out = append(out, rows...)
+	}
+	return out
 }
 
 // WSHub returns the websocket hub for use by the delegation spawner.

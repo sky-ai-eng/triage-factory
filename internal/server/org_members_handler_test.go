@@ -203,20 +203,13 @@ func TestOrgMembersList_AnyMemberReads(t *testing.T) {
 		 VALUES ($1, 'https://github.com', 'admin-gh', 'pat', now())`, r.admin)
 
 	rec := httptest.NewRecorder()
-	r.omh.handleOrgMembersList(rec, r.req(http.MethodGet, r.memb, "", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-
-	var resp orgMembersResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(resp.Members) != 3 {
-		t.Fatalf("members = %d, want 3 (owner, admin, member)", len(resp.Members))
+	r.omh.handleOrgMembersList(rec, r.req(http.MethodPost, r.memb, "", map[string]any{}))
+	page := decodeList[orgMemberRow](t, rec)
+	if len(page.Items) != 3 || page.Total() != 3 {
+		t.Fatalf("members = %d (total %d), want 3 (owner, admin, member)", len(page.Items), page.Total())
 	}
 	byID := map[string]orgMemberRow{}
-	for _, m := range resp.Members {
+	for _, m := range page.Items {
 		byID[m.UserID] = m
 	}
 	if got := byID[r.owner].Role; got != "owner" {

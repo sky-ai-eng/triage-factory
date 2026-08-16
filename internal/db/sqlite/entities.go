@@ -146,6 +146,63 @@ func (s *entityStore) ListUnclassified(ctx context.Context, orgID string) ([]dom
 	return out, rows.Err()
 }
 
+// ListBackfillCandidates — see the interface doc, and the Postgres impl for
+// why the slug/key matches are escaped LIKE patterns.
+func (s *entityStore) ListBackfillCandidates(ctx context.Context, orgID string, f db.BackfillCandidateFilter, opts db.ListOpts) ([]domain.Entity, int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, 0, err
+	}
+	args := []any{}
+	where := ` WHERE state = 'active'`
+	if f.ExcludeProjectID != "" {
+		args = append(args, f.ExcludeProjectID)
+		where += " AND (project_id IS NULL OR project_id <> ?)"
+	}
+
+	githubArm := "source = 'github'"
+	if len(f.GitHubRepos) > 0 {
+		var arms []string
+		for _, repo := range f.GitHubRepos {
+			args = append(args, repo, db.LikeEscape(repo)+"#%")
+			arms = append(arms, `source_id = ? OR source_id LIKE ? ESCAPE '\'`)
+		}
+		githubArm = "source = 'github' AND (" + strings.Join(arms, " OR ") + ")"
+	}
+	jiraArm := "source = 'jira'"
+	if f.JiraProjectKey != "" {
+		args = append(args, f.JiraProjectKey, db.LikeEscape(f.JiraProjectKey)+"-%")
+		jiraArm = `source = 'jira' AND (source_id = ? OR source_id LIKE ? ESCAPE '\')`
+	}
+	where += " AND ((" + githubArm + ") OR (" + jiraArm + "))"
+
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := `SELECT ` + entitySelectCols + ` FROM entities` + where +
+		` ORDER BY source ASC, last_polled_at ASC NULLS LAST, id`
+	pageArgs := args
+	if opts.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []domain.Entity{}
+	for rows.Next() {
+		e, err := scanEntityFromRows(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, *e)
+	}
+	return out, total, rows.Err()
+}
+
 func (s *entityStore) ListActive(ctx context.Context, orgID, source string) ([]domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -184,19 +241,30 @@ func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, _ str
 	return s.ListActive(ctx, orgID, "jira")
 }
 
-func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID string) ([]domain.ProjectPanelEntity, error) {
+func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID string, opts db.ListOpts) ([]domain.ProjectPanelEntity, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	rows, err := s.q.QueryContext(ctx, `
+	var total int
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM entities WHERE project_id = ? AND state = 'active'
+	`, projectID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `
 		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
 		       state, COALESCE(classification_rationale, ''), created_at, last_polled_at
 		FROM entities
 		WHERE project_id = ? AND state = 'active'
-		ORDER BY last_polled_at DESC NULLS LAST
-	`, projectID)
+		ORDER BY last_polled_at DESC NULLS LAST, id`
+	args := []any{projectID}
+	if opts.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -205,11 +273,11 @@ func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID str
 		var e domain.ProjectPanelEntity
 		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
 			&e.State, &e.ClassificationRationale, &e.CreatedAt, &e.LastPolledAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // --- Mutation ---

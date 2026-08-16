@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -822,32 +823,43 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 	return runs, rows.Err()
 }
 
-func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.Conversation, error) {
+func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string, opts db.ListOpts) ([]domain.Conversation, int, error) {
 	// task_id is a uuid column: a non-UUID id (these are client-supplied on the
 	// batched run-list path) would fail Postgres parsing with 22P02 → 500
 	// before the row filter runs, so drop invalid ids up front and treat them
 	// as "no rows" — the read-method convention in uuid.go.
 	taskIDs = filterValidUUIDs(taskIDs)
 	if len(taskIDs) == 0 {
-		return nil, nil
+		return nil, 0, nil
+	}
+	var total int
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM conversations WHERE org_id = $1 AND task_id = ANY($2)
+	`, orgID, pgUUIDArray(taskIDs)).Scan(&total); err != nil {
+		return nil, 0, err
 	}
 	// App pool (RLS-active): rows are team-scoped exactly like ListForTask.
 	// task_id is a uuid column, so the slice binds as a uuid[] literal
 	// through one $N (pgUUIDArray), like artifactStore.ListByRuns — not a
 	// raw []string. Same projection as ListForTask; the caller groups the
 	// flat result by run.TaskID.
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT `+pgRunColumns+`
+	query := `
+		SELECT ` + pgRunColumns + `
 		FROM conversations r
 		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
-		`+runClaimLateral+`
-		`+runLedgerLateral+`
+		` + runClaimLateral + `
+		` + runLedgerLateral + `
 		WHERE r.org_id = $1 AND r.task_id = ANY($2)
-		ORDER BY r.started_at DESC
-	`, orgID, pgUUIDArray(taskIDs))
+		ORDER BY r.task_id, r.started_at DESC, r.id`
+	args := []any{orgID, pgUUIDArray(taskIDs)}
+	if opts.Limit > 0 {
+		query += ` LIMIT $3 OFFSET $4`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -855,11 +867,11 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 	for rows.Next() {
 		var r domain.Conversation
 		if err := scanConversationRows(rows, &r); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		runs = append(runs, r)
 	}
-	return runs, rows.Err()
+	return runs, total, rows.Err()
 }
 
 // HasActiveAutoRunForTask: any non-terminal trigger_type='event' run on the
@@ -1326,6 +1338,51 @@ func (s *agentRunStore) MessagesSince(ctx context.Context, orgID, runID string, 
 	}
 	defer rows.Close()
 	return scanMessageRows(rows)
+}
+
+func (s *agentRunStore) MessagesWindow(ctx context.Context, orgID, runID string, w db.MessageWindow) ([]domain.Message, error) {
+	// Same visibility filter and same placement ordering as MessagesSince —
+	// see its comment. What differs is the window: a backward page selects
+	// the NEWEST rows below a ceiling, which means ordering DESC to pick them
+	// and reversing afterwards so the caller always receives oldest-first.
+	const orderKey = `COALESCE(seq, (id)::double precision)`
+	where := `org_id = $1 AND conversation_id = $2 AND NOT (delivered = false AND window_state = 'inactive')`
+	args := []any{orgID, runID}
+	order := ` ORDER BY ` + orderKey + ` ASC`
+	reverse := false
+	switch {
+	case w.SinceID > 0:
+		args = append(args, w.SinceID)
+		where += fmt.Sprintf(" AND id > $%d", len(args))
+	case w.BeforeID > 0:
+		args = append(args, w.BeforeID)
+		where += fmt.Sprintf(" AND id < $%d", len(args))
+		order = ` ORDER BY ` + orderKey + ` DESC`
+		reverse = true
+	default:
+		if w.Limit > 0 {
+			order = ` ORDER BY ` + orderKey + ` DESC`
+			reverse = true
+		}
+	}
+	query := `SELECT ` + pgMessageColumns + ` FROM messages WHERE ` + where + order
+	if w.Limit > 0 {
+		args = append(args, w.Limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out, err := scanMessageRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	if reverse {
+		slices.Reverse(out)
+	}
+	return out, nil
 }
 
 func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Message, error) {

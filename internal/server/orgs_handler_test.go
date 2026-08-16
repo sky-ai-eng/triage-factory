@@ -348,6 +348,55 @@ func TestOrgCreate_RLS_NonMemberCannotAccess(t *testing.T) {
 	}
 }
 
+// TestOrgGet_MemberVisibleAndNonDisclosing pins the org single read: a member
+// gets the org's identity plus their OWN role (which is what makes it useful
+// to a client that has to decide whether to render an admin surface), and a
+// non-member gets 404 rather than a 403 — a 403 would confirm the org exists
+// to somebody with no relationship to it.
+func TestOrgGet_MemberVisibleAndNonDisclosing(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	runmode.SetOrgCreationEnabledForTest(t, true)
+
+	r := newAuthRig(t)
+	founder := r.seedUser()
+	resp, _ := r.driveCallback(founder)
+	sid := r.sidFromResp(resp)
+
+	created := r.postJSONWithSid("POST", "/api/orgs", sid, map[string]string{"name": "Acme Industries"})
+	if created.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d, want 201", created.StatusCode)
+	}
+	var out orgCreateResponse
+	if err := json.NewDecoder(created.Body).Decode(&out); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+
+	got := r.postJSONWithSid("GET", "/api/orgs/"+out.ID, sid, nil)
+	if got.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/orgs/%s = %d, want 200", out.ID, got.StatusCode)
+	}
+	var org orgJSON
+	if err := json.NewDecoder(got.Body).Decode(&org); err != nil {
+		t.Fatalf("decode org: %v", err)
+	}
+	if org.ID != out.ID || org.Name != "Acme Industries" {
+		t.Errorf("org = %+v, want id=%s name=Acme Industries", org, out.ID)
+	}
+	// The founder owns the org they just created, so the read reports the
+	// role the client would gate an admin surface on.
+	if org.Role != "owner" && org.Role != "admin" {
+		t.Errorf("role = %q, want the founder's own role (owner/admin)", org.Role)
+	}
+
+	// A different signed-in user with no membership: 404, not 403.
+	outsider := r.seedUser()
+	outResp, _ := r.driveCallback(outsider)
+	outSid := r.sidFromResp(outResp)
+	if miss := r.postJSONWithSid("GET", "/api/orgs/"+out.ID, outSid, nil); miss.StatusCode != http.StatusNotFound {
+		t.Errorf("non-member GET = %d, want 404 (non-disclosure)", miss.StatusCode)
+	}
+}
+
 // assertRowExists fails the test if the single-column existence query
 // returns no row.
 func assertRowExists(t *testing.T, r *authRig, query string, arg any, label string) {

@@ -366,9 +366,13 @@ func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []s
 	return arts, nil
 }
 
-func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {
+func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	total, err := s.countArtifacts(ctx, `org_id = ? AND team_id = ?`, []any{orgID, teamID}, opts)
+	if err != nil {
+		return nil, 0, err
 	}
 	// Base WHERE only — the filter helper appends the optional predicates, the
 	// ORDER BY, and LIMIT/OFFSET so this and ListByOrgSystem share one builder.
@@ -376,9 +380,10 @@ func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, op
 	query, args := appendArtifactFilters(query, []any{orgID, teamID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanArtifactRows(rows)
+	out, err := scanArtifactRows(rows)
+	return out, total, err
 }
 
 // appendArtifactFilters appends opts' optional provider/kind/state/time
@@ -388,6 +393,23 @@ func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, op
 // against the CURRENT_TIMESTAMP-formatted created_at regardless of the driver's
 // bind serialization.
 func appendArtifactFilters(query string, args []any, opts db.ArtifactListOpts) (string, []any) {
+	query, args = appendArtifactPredicates(query, args, opts)
+	query += ` ORDER BY created_at DESC, id DESC`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+		// OFFSET only with a LIMIT — paging the newest-first feed.
+		if opts.Offset > 0 {
+			query += ` OFFSET ?`
+			args = append(args, opts.Offset)
+		}
+	}
+	return query, args
+}
+
+// appendArtifactPredicates is the filter half alone — no ordering, no window —
+// so the count and the page apply exactly the same predicate.
+func appendArtifactPredicates(query string, args []any, opts db.ArtifactListOpts) (string, []any) {
 	if opts.Provider != "" {
 		query += ` AND provider = ?`
 		args = append(args, opts.Provider)
@@ -408,34 +430,36 @@ func appendArtifactFilters(query string, args []any, opts db.ArtifactListOpts) (
 		query += ` AND datetime(created_at) < datetime(?)`
 		args = append(args, opts.Until)
 	}
-	query += ` ORDER BY created_at DESC, id DESC`
-	if opts.Limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, opts.Limit)
-		// OFFSET only with a LIMIT — paging the newest-first feed.
-		if opts.Offset > 0 {
-			query += ` OFFSET ?`
-			args = append(args, opts.Offset)
-		}
-	}
 	return query, args
+}
+
+func (s *artifactStore) countArtifacts(ctx context.Context, where string, base []any, opts db.ArtifactListOpts) (int, error) {
+	query, args := appendArtifactPredicates(`SELECT COUNT(*) FROM artifacts WHERE `+where, base, opts)
+	var n int
+	err := s.q.QueryRowContext(ctx, query, args...).Scan(&n)
+	return n, err
 }
 
 // ListByOrgSystem is identical to a plain org read in SQLite: local mode is
 // single-tenant (N=1) with no RLS, so there is no admin/app pool split. It
 // returns ALL states (terminal included) for the bot-activity audit feed
 // (TFAC-483), in contrast to ListNonTerminalBySystem's reconciler working set.
-func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {
+func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts db.ArtifactListOpts) ([]domain.Artifact, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	total, err := s.countArtifacts(ctx, `org_id = ?`, []any{orgID}, opts)
+	if err != nil {
+		return nil, 0, err
 	}
 	query := `SELECT ` + artifactColumns + ` FROM artifacts WHERE org_id = ?`
 	query, args := appendArtifactFilters(query, []any{orgID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanArtifactRows(rows)
+	out, err := scanArtifactRows(rows)
+	return out, total, err
 }
 
 // ListNonTerminalBySystem is identical to a plain org read in SQLite: local

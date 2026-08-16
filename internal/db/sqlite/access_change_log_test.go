@@ -172,7 +172,7 @@ func TestAccessChangeLogStore_SQLite_ListByOrg(t *testing.T) {
 	seed("b", domain.AccessActionOrgRoleChanged, base.Add(time.Minute))
 	seed("c", domain.AccessActionOrgMemberRevoked, base.Add(2*time.Minute))
 
-	all, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{})
+	all, _, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{})
 	if err != nil {
 		t.Fatalf("ListByOrg: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestAccessChangeLogStore_SQLite_ListByOrg(t *testing.T) {
 		t.Errorf("newest action = %q, want %q", all[0].Action, domain.AccessActionOrgMemberRevoked)
 	}
 
-	limited, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Limit: 2})
+	limited, _, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Limit: 2})
 	if err != nil {
 		t.Fatalf("ListByOrg limited: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestAccessChangeLogStore_SQLite_OffsetAndCategory(t *testing.T) {
 	seed("m3", domain.AccessActionOrgMemberRevoked, base.Add(3*time.Minute))
 
 	// Offset skips the newest row(s): newest-first is m3, c1, m2, m1.
-	off, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Limit: 2, Offset: 1})
+	off, _, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Limit: 2, Offset: 1})
 	if err != nil {
 		t.Fatalf("ListByOrg offset: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestAccessChangeLogStore_SQLite_OffsetAndCategory(t *testing.T) {
 	}
 
 	// Category=credential → only the credential_set row.
-	cred, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Category: domain.AccessCategoryCredential})
+	cred, _, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Category: domain.AccessCategoryCredential})
 	if err != nil {
 		t.Fatalf("ListByOrg credential: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestAccessChangeLogStore_SQLite_OffsetAndCategory(t *testing.T) {
 	}
 
 	// Category=membership → the three membership rows, no credential_set.
-	mem, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Category: domain.AccessCategoryMembership})
+	mem, _, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Category: domain.AccessCategoryMembership})
 	if err != nil {
 		t.Fatalf("ListByOrg membership: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestAccessChangeLogStore_SQLite_OffsetAndCategory(t *testing.T) {
 	}
 
 	// An unrecognized category is no filter — every row comes back.
-	none, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Category: "bogus"})
+	none, _, err := stores.AccessChangeLog.ListByOrg(ctx, runmode.LocalDefaultOrgID, domain.AccessChangeListOpts{Category: "bogus"})
 	if err != nil {
 		t.Fatalf("ListByOrg unknown category: %v", err)
 	}

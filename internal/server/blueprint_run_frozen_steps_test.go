@@ -70,9 +70,7 @@ func TestBlueprintRunGet_ProjectsFrozenStepsNotLive(t *testing.T) {
 	}
 
 	// Precondition: the live blueprint now reports 2 steps.
-	live := doJSON(t, s, http.MethodGet, "/api/blueprints/"+bpID+"/steps", nil)
-	var liveSteps []map[string]any
-	_ = json.Unmarshal(live.Body.Bytes(), &liveSteps)
+	liveSteps := listBlueprintSteps(t, s, bpID)
 	if len(liveSteps) != 2 {
 		t.Fatalf("live blueprint steps = %d, want 2 (precondition for the regression)", len(liveSteps))
 	}

@@ -68,8 +68,10 @@ type orgMemberRow struct {
 	IsCurrentUser  bool    `json:"is_current_user"`
 }
 
-type orgMembersResponse struct {
-	Members []orgMemberRow `json:"members"`
+// orgMemberListRequest is the body of POST /api/orgs/{org_id}/members/list.
+// The resource is the org's roster, which has no filters of its own.
+type orgMemberListRequest struct {
+	httpx.PageRequest
 }
 
 // orgRoles is the closed set of org_role enum values the PATCH handler
@@ -78,11 +80,11 @@ type orgMembersResponse struct {
 // vocabulary the frontend adapter mirrors.
 var orgRoles = map[string]bool{"owner": true, "admin": true, "member": true}
 
-// handleOrgMembersList returns every member of the org with their role and
-// identity readiness. Any org member may read (org_memberships_select RLS),
-// so it gates on membership, not admin.
+// handleOrgMembersList returns the org's members with their role and identity
+// readiness. Any org member may read (org_memberships_select RLS), so it gates
+// on membership, not admin.
 //
-// GET /api/orgs/{org_id}/members
+// POST /api/orgs/{org_id}/members/list
 func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
 		// The org-membership surface is multi-mode only; a route absent in
@@ -95,7 +97,20 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 		return
 	}
 
-	var members []domain.OrgMember
+	var req orgMemberListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		members []domain.OrgMember
+		total   int
+	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Identity is host-scoped: resolve the org's GitHub/Jira hosts from
 		// org_settings, then look up each member's login on those hosts —
@@ -104,7 +119,8 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 		if e != nil {
 			return e
 		}
-		members, e = tx.OrgMemberships.ListWithIdentity(r.Context(), orgID, orgSet.GitHubBaseURL, orgSet.JiraBaseURL)
+		members, total, e = tx.OrgMemberships.ListWithIdentity(r.Context(), orgID,
+			orgSet.GitHubBaseURL, orgSet.JiraBaseURL, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "org-members", err)
@@ -122,7 +138,7 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 			IsCurrentUser:  m.UserID == userID,
 		}
 	}
-	writeJSON(w, http.StatusOK, orgMembersResponse{Members: out})
+	httpx.WriteList(w, page, out, total)
 }
 
 // handleOrgMemberRoleChange changes a member's org role. Org-admin only

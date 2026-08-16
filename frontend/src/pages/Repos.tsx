@@ -6,7 +6,7 @@ import RepoPickerModal from '../components/RepoPickerModal'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
 
 // Repo tracking is per-team; writes go to the team's repos
 // endpoint. This page is pre-team-context, so it targets the org's
@@ -117,11 +117,14 @@ function BranchPicker({
 
       setLoading(true)
       try {
-        const list = await apiJSON<string[]>(
-          `/api/repos/${profile.owner}/${profile.repo}/branches?q=${encodeURIComponent(q)}`,
+        // One page is what the picker shows: it is a type-to-filter box, and
+        // the filter is what narrows the list, not scrolling it.
+        const page = await apiList<{ name: string }>(
+          `/api/repos/${profile.owner}/${profile.repo}/branches/list`,
+          { q, page_size: 30 },
           { signal: controller.signal },
         )
-        if (mountedRef.current) setBranches(list)
+        if (mountedRef.current) setBranches(page.items.map((b) => b.name))
       } catch (err) {
         // AbortError is expected when a newer request supersedes this one;
         // the superseding call already set loading=true and will handle
@@ -682,14 +685,16 @@ export default function Repos() {
   const fetchData = async () => {
     try {
       // Two distinct lists: the cards show the org-wide repositories union
-      // (GET /api/repos), but the *selection* — what Save/Re-profile writes
+      // (the registry list), but the *selection* — what Save/Re-profile writes
       // back to the default team — must come from the default team's own
       // tracked set, never the union (see TEAM_REPOS_PATH).
       // Each settles on its own: the cards are worth painting even when the
       // team read fails, and a failed team read must not be mistaken for an
       // empty tracked set (see setTeamLoadFailed below).
       const [profiles, team] = await Promise.all([
-        apiJSON<Repository[]>('/api/repos').catch(() => null),
+        apiList<Repository>('/api/repos/list', { page_size: 200 })
+          .then((page) => page.items)
+          .catch(() => null),
         apiJSON<{ repos?: string[] }>(TEAM_REPOS_PATH).catch(() => null),
       ])
       if (profiles) setProfiles(profiles)

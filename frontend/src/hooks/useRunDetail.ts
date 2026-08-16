@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Message, Conversation, Artifact, Task, WSEvent } from '../types'
+import type { Message, Conversation, Artifact, Task, TranscriptPage, WSEvent } from '../types'
 import { apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
 import { isActiveRun, isPermissionTerminalStatus } from '../lib/runStatus'
 import { useWebSocket } from './useWebSocket'
@@ -313,8 +313,8 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
         // than throwing it, because the two are independent — a run whose task
         // row has gone still has a transcript worth rendering, and letting the
         // task 404 reject the pair would blank it.
-        const [msgs, taskRow] = await Promise.all([
-          apiJSON<Message[]>(`/api/agent/conversations/${runID}/messages`),
+        const [transcript, taskRow] = await Promise.all([
+          apiJSON<TranscriptPage>(`/api/agent/conversations/${runID}/messages`),
           runData.TaskID
             ? apiJSON<Task>(`/api/tasks/${runData.TaskID}`).catch((err: unknown) => ({
                 taskError: httpErrorMessage(err, 'Could not load the task.'),
@@ -322,6 +322,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
             : null,
         ])
         if (cancelled) return
+        const msgs = transcript.items
 
         // The fetched transcript's stamped rows become the baselines the
         // fold counts from: a websocket replay of any of them can't be
@@ -409,8 +410,9 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
       const settled = !isActiveRun(current)
       if (settled && !sawActiveRef.current) return
       const sinceID = completeThroughRef.current
-      apiJSON<Message[]>(`/api/agent/conversations/${runID}/messages?since_id=${sinceID}`)
-        .then((rows) => {
+      apiJSON<TranscriptPage>(`/api/agent/conversations/${runID}/messages?since_id=${sinceID}`)
+        .then((page) => {
+          const rows = page.items
           if (cancelled || runID !== lastRunIDRef.current) return
           // The closing read landed, so stop asking. Only a real response
           // counts — a failed one leaves the flag up so the next tick retries,

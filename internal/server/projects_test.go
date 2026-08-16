@@ -175,16 +175,16 @@ func TestProjectGet_404OnMissing(t *testing.T) {
 }
 
 func TestProjectList_EmptyReturnsArray(t *testing.T) {
-	// The handler must return `[]`, not `null` — a frontend that
-	// .map()s the response would crash on null.
+	// The envelope's items must be `[]`, not `null` — a frontend that .map()s
+	// the field would crash on null.
 	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodGet, "/api/projects", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	rec := doJSON(t, s, http.MethodPost, "/api/projects/list", map[string]any{})
+	page := decodeList[map[string]any](t, rec)
+	if len(page.Items) != 0 || page.Total() != 0 {
+		t.Errorf("page = %+v (total %d), want empty", page.Items, page.Total())
 	}
-	body := strings.TrimSpace(rec.Body.String())
-	if body != "[]" {
-		t.Errorf("body = %q, want []", body)
+	if !strings.Contains(rec.Body.String(), `"items":[]`) {
+		t.Errorf("body = %s, want an empty array (never null)", rec.Body.String())
 	}
 }
 
@@ -743,7 +743,7 @@ func TestValidateTrackerKeys_TrimsWhitespace(t *testing.T) {
 // "exists but no knowledge yet" empty-array path.
 func TestProjectKnowledge_404OnMissing(t *testing.T) {
 	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/no-such-id/knowledge", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/projects/no-such-id/knowledge/list", map[string]any{})
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
 	}
@@ -758,13 +758,13 @@ func TestProjectKnowledge_EmptyForFreshProject(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s := newTestServer(t)
 	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "fresh"})
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	rec := doJSON(t, s, http.MethodPost, "/api/projects/"+id+"/knowledge/list", map[string]any{})
+	page := decodeList[knowledgeFile](t, rec)
+	if len(page.Items) != 0 || page.Total() != 0 {
+		t.Errorf("page = %+v (total %d), want empty", page.Items, page.Total())
 	}
-	body := strings.TrimSpace(rec.Body.String())
-	if body != "[]" {
-		t.Errorf("body = %q, want []", body)
+	if !strings.Contains(rec.Body.String(), `"items":[]`) {
+		t.Errorf("body = %s, want an empty array (never null)", rec.Body.String())
 	}
 }
 
@@ -799,14 +799,7 @@ func TestProjectKnowledge_ReturnsAllFileTypes(t *testing.T) {
 		}
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var got []knowledgeFile
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	got := listKnowledge(t, s, id)
 	if len(got) != 4 {
 		t.Fatalf("got %d files, want 4 (one per extension)", len(got))
 	}
@@ -859,12 +852,7 @@ func TestProjectKnowledge_LargeTextNotInlined(t *testing.T) {
 		t.Fatalf("write big.md: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	var got []knowledgeFile
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	got := listKnowledge(t, s, id)
 	if len(got) != 1 {
 		t.Fatalf("got %d files", len(got))
 	}
@@ -951,12 +939,7 @@ func TestProjectKnowledge_HidesUnsanitizableNames(t *testing.T) {
 		t.Fatalf("write .cache.json: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	var got []knowledgeFile
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	got := listKnowledge(t, s, id)
 	if len(got) != 1 || got[0].Path != "ok.md" {
 		t.Errorf("expected only [ok.md], got %d entries: %v", len(got), got)
 	}
@@ -989,12 +972,7 @@ func TestProjectKnowledge_SkipsSymlinks(t *testing.T) {
 		t.Skipf("symlink unsupported on this platform: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	var got []knowledgeFile
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	got := listKnowledge(t, s, id)
 	if len(got) != 1 || got[0].Path != "real.md" {
 		t.Errorf("expected only [real.md], got %d entries", len(got))
 	}
@@ -1354,4 +1332,13 @@ func TestProjectPatch_PartialTrackerUpdateValidatesOnlyChangedSide(t *testing.T)
 	if got.JiraProjectKey != "STALE" {
 		t.Errorf("jira preserved = %q, want STALE", got.JiraProjectKey)
 	}
+}
+
+// listKnowledge reads a project's whole knowledge listing off the list route,
+// unwrapping the envelope. The knowledge base is small by construction (a
+// curator's working files), so one page holds it.
+func listKnowledge(t *testing.T, s *Server, projectID string) []knowledgeFile {
+	t.Helper()
+	return decodeList[knowledgeFile](t, doJSON(t, s, http.MethodPost,
+		"/api/projects/"+projectID+"/knowledge/list", map[string]any{})).Items
 }

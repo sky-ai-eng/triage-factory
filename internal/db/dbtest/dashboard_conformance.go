@@ -40,10 +40,14 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 	t.Helper()
 
 	const username = "aidan"
+	// The window the dashboard handler passes by default. Every seeded PR
+	// below is inside it, so a count that moves is a counting bug, not a
+	// clock one.
+	statsSince := time.Now().AddDate(0, 0, -30)
 
 	t.Run("Stats_NoSnapshots_ReturnsZerosWithTimelineSkeleton", func(t *testing.T) {
 		store, orgID, _ := factory(t)
-		stats, err := store.Stats(context.Background(), orgID, username, 30)
+		stats, err := store.Stats(context.Background(), orgID, username, statsSince)
 		if err != nil {
 			t.Fatalf("Stats: %v", err)
 		}
@@ -72,7 +76,7 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 		// Someone else's open PR — should NOT count toward the user's totals.
 		seed(t, domain.PRSnapshot{Number: 5, Author: "someone-else", State: "OPEN"})
 
-		stats, err := store.Stats(context.Background(), orgID, username, 30)
+		stats, err := store.Stats(context.Background(), orgID, username, statsSince)
 		if err != nil {
 			t.Fatalf("Stats: %v", err)
 		}
@@ -130,7 +134,7 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 				{Author: "another-reviewer"},
 			},
 		})
-		stats, err := store.Stats(context.Background(), orgID, username, 30)
+		stats, err := store.Stats(context.Background(), orgID, username, statsSince)
 		if err != nil {
 			t.Fatalf("Stats: %v", err)
 		}
@@ -149,12 +153,12 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 		seed(t, domain.PRSnapshot{Number: 21, Author: username, State: "OPEN", Repo: "owner/repo"})
 		seed(t, domain.PRSnapshot{Number: 22, Author: "stranger", State: "OPEN", Repo: "owner/repo"})
 
-		prs, err := store.PRs(context.Background(), orgID, username)
+		prs, total, err := store.PRs(context.Background(), orgID, username, db.ListOpts{})
 		if err != nil {
 			t.Fatalf("PRs: %v", err)
 		}
-		if len(prs) != 2 {
-			t.Fatalf("len(prs)=%d want 2 (stranger's PR should be excluded)", len(prs))
+		if len(prs) != 2 || total != 2 {
+			t.Fatalf("len(prs)=%d total=%d, want 2/2 (stranger's PR should be excluded)", len(prs), total)
 		}
 		seenStates := map[string]bool{}
 		for _, p := range prs {
@@ -162,6 +166,48 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 		}
 		if !seenStates["merged"] || !seenStates["open"] {
 			t.Fatalf("expected both 'merged' and 'open' in states, got %+v", seenStates)
+		}
+	})
+
+	t.Run("PRs_PagesWithinTheAuthorFilter", func(t *testing.T) {
+		// The window has to apply to the author's PRs, not to the entity table:
+		// the Go-side filter this replaced would have made page 2 of a 3-row
+		// author set come back empty whenever a stranger's PR sorted into the
+		// first window.
+		store, orgID, seed := factory(t)
+		for i := range 3 {
+			seed(t, domain.PRSnapshot{Number: 30 + i, Author: username, State: "OPEN", Repo: "owner/repo"})
+			seed(t, domain.PRSnapshot{Number: 40 + i, Author: "stranger", State: "OPEN", Repo: "owner/repo"})
+		}
+
+		seen := map[int]bool{}
+		for offset := 0; offset < 4; offset += 2 {
+			page, total, err := store.PRs(context.Background(), orgID, username, db.ListOpts{Limit: 2, Offset: offset})
+			if err != nil {
+				t.Fatalf("PRs(offset=%d): %v", offset, err)
+			}
+			if total != 3 {
+				t.Fatalf("PRs(offset=%d) total=%d, want 3 (the author's, not the table's)", offset, total)
+			}
+			want := 2
+			if offset == 2 {
+				want = 1
+			}
+			if len(page) != want {
+				t.Fatalf("PRs(offset=%d) len=%d, want %d", offset, len(page), want)
+			}
+			for _, p := range page {
+				if p.Author != username {
+					t.Errorf("page carried a stranger's PR: %+v", p)
+				}
+				if seen[p.Number] {
+					t.Errorf("PR #%d served on two pages — the ORDER BY has no total order", p.Number)
+				}
+				seen[p.Number] = true
+			}
+		}
+		if len(seen) != 3 {
+			t.Fatalf("paging walked %d distinct PRs, want 3", len(seen))
 		}
 	})
 }

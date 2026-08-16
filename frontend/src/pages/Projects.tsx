@@ -4,6 +4,7 @@ import { Plus, Trash2, Upload } from 'lucide-react'
 import { useOrgHref } from '../hooks/useOrgHref'
 import type { Project, ProjectImportResult } from '../types'
 import { apiErrors, apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { usePagedList } from '../hooks/usePagedList'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import ProjectCreateModal from '../components/ProjectCreateModal'
@@ -21,7 +22,10 @@ import ProjectBackfillModal from '../components/ProjectBackfillModal'
 export default function Projects() {
   const navigate = useNavigate()
   const orgHref = useOrgHref()
-  const [projects, setProjects] = useState<Project[]>([])
+  // The grid pages: a project list grows with the org, and the cards below
+  // append rather than replace so "load more" reads as more of the same grid.
+  const projectList = usePagedList<Project>('/api/projects/list', 'Could not load your projects.')
+  const { items: projects, setItems: setProjects } = projectList
   const [loading, setLoading] = useState(true)
   const [createOpen, setCreateOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
@@ -41,22 +45,23 @@ export default function Projects() {
   // empty state — that would silently lie about the user's data.
   const [loadError, setLoadError] = useState<string | null>(null)
 
+  const loadProjects = projectList.load
   const refresh = useCallback(async () => {
-    try {
-      setLoadError(null)
-      const data = await apiJSON<Project[]>('/api/projects')
-      setProjects(data)
-    } catch (err) {
-      const msg = httpErrorMessage(err, 'Could not load your projects.')
+    setLoadError(null)
+    const page = await loadProjects({})
+    if (page === null) {
+      const msg = 'Could not load your projects.'
       setLoadError(msg)
       toast.error(msg)
-    } finally {
-      setLoading(false)
     }
-  }, [])
+    setLoading(false)
+  }, [loadProjects])
 
   useEffect(() => {
-    refresh()
+    // refresh owns its own setState calls; the effect just kicks it. Same safe
+    // pattern AuthContext uses.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refresh()
   }, [refresh])
 
   const handleCreated = useCallback(
@@ -71,19 +76,22 @@ export default function Projects() {
       setBackfillTarget(created)
       setBackfillThenNavigate(false)
     },
-    [refresh],
+    [refresh, setProjects],
   )
 
-  const handleImported = useCallback((created: Project) => {
-    setImportOpen(false)
-    setImportSeedFile(null)
-    setProjects((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)))
-    // Defer the /projects/:id navigation until the backfill popup
-    // closes — the user expects to land on the imported project,
-    // but the popup is the chance to claim existing entities first.
-    setBackfillTarget(created)
-    setBackfillThenNavigate(true)
-  }, [])
+  const handleImported = useCallback(
+    (created: Project) => {
+      setImportOpen(false)
+      setImportSeedFile(null)
+      setProjects((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)))
+      // Defer the /projects/:id navigation until the backfill popup
+      // closes — the user expects to land on the imported project,
+      // but the popup is the chance to claim existing entities first.
+      setBackfillTarget(created)
+      setBackfillThenNavigate(true)
+    },
+    [setProjects],
+  )
 
   const handleBackfillClose = useCallback(() => {
     const target = backfillTarget
@@ -144,23 +152,26 @@ export default function Projects() {
   // state on success rather than re-fetching the list — `refresh`'s
   // round-trip would also be fine, but the optimistic path keeps the
   // grid from briefly showing a stale entry.
-  const handleDelete = useCallback(async (project: Project) => {
-    if (!confirm(`Delete project "${project.name}"? This can't be undone.`)) return
-    try {
-      const res = await apiFetch(`/api/projects/${encodeURIComponent(project.id)}`, {
-        method: 'DELETE',
-      })
-      const cleanupWarning = res.headers.get('X-Cleanup-Warning')
-      if (cleanupWarning) {
-        toast.warning(cleanupWarning)
-      } else {
-        toast.success(`Deleted project "${project.name}"`)
+  const handleDelete = useCallback(
+    async (project: Project) => {
+      if (!confirm(`Delete project "${project.name}"? This can't be undone.`)) return
+      try {
+        const res = await apiFetch(`/api/projects/${encodeURIComponent(project.id)}`, {
+          method: 'DELETE',
+        })
+        const cleanupWarning = res.headers.get('X-Cleanup-Warning')
+        if (cleanupWarning) {
+          toast.warning(cleanupWarning)
+        } else {
+          toast.success(`Deleted project "${project.name}"`)
+        }
+        setProjects((prev) => prev.filter((p) => p.id !== project.id))
+      } catch (err) {
+        toast.error(httpErrorMessage(err, 'Could not delete the project.'))
       }
-      setProjects((prev) => prev.filter((p) => p.id !== project.id))
-    } catch (err) {
-      toast.error(httpErrorMessage(err, 'Could not delete the project.'))
-    }
-  }, [])
+    },
+    [setProjects],
+  )
 
   const content = loading ? (
     <div className="text-text-tertiary text-[13px]">Loading projects…</div>
@@ -169,11 +180,27 @@ export default function Projects() {
   ) : projects.length === 0 ? (
     <EmptyState onCreate={() => setCreateOpen(true)} />
   ) : (
-    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-      {projects.map((p) => (
-        <ProjectCard key={p.id} project={p} onDelete={() => handleDelete(p)} />
-      ))}
-    </div>
+    <>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+        {projects.map((p) => (
+          <ProjectCard key={p.id} project={p} onDelete={() => handleDelete(p)} />
+        ))}
+      </div>
+      {projectList.hasMore && (
+        <div className="mt-6 flex justify-center">
+          <button
+            type="button"
+            onClick={projectList.loadMore}
+            disabled={projectList.loading}
+            className="text-[13px] font-medium text-accent transition-opacity hover:opacity-80 disabled:opacity-50"
+          >
+            {projectList.loading
+              ? 'Loading…'
+              : `Load more (${projects.length} of ${projectList.total ?? projects.length})`}
+          </button>
+        </div>
+      )}
+    </>
   )
 
   return (

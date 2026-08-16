@@ -347,7 +347,7 @@ func (h *teamMembersHandler) resolve(w http.ResponseWriter, r *http.Request) (or
 		return "", "", "", false
 	}
 	userID = claims.Subject
-	teamID, ok = uuidPathOr404(w, r, "team_id", "team")
+	teamID, ok = h.az.TeamIDFromPath(w, r, "team-members", orgID, userID)
 	if !ok {
 		return "", "", "", false
 	}

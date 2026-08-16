@@ -2,8 +2,6 @@ package server
 
 import (
 	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -244,57 +242,50 @@ func TestAccessChangeLabel(t *testing.T) {
 	}
 }
 
-// TestParseAccessLogParams pins the strict-params contract on the access log:
-// absent means the default, anything present must parse and sit in range, and
-// an unknown category is a rejected request rather than a filter that matches
-// nothing. Previously every one of the rejected rows silently defaulted.
-func TestParseAccessLogParams(t *testing.T) {
-	ok := []struct {
-		name          string
-		q             url.Values
-		limit, offset int
-		category      string
-	}{
-		{"defaults", url.Values{}, accessLogDefaultLimit, 0, ""},
-		{"explicit", url.Values{"limit": {"10"}, "offset": {"5"}}, 10, 5, ""},
-		{"category", url.Values{"category": {domain.AccessCategoryPolicy}}, accessLogDefaultLimit, 0, domain.AccessCategoryPolicy},
-	}
-	for _, tc := range ok {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			limit, offset, category, good := parseAccessLogParams(rec, tc.q)
-			if !good {
-				t.Fatalf("parse rejected %v: %s", tc.q, rec.Body.String())
-			}
-			if limit != tc.limit || offset != tc.offset || category != tc.category {
-				t.Errorf("= (%d, %d, %q), want (%d, %d, %q)", limit, offset, category, tc.limit, tc.offset, tc.category)
-			}
-		})
-	}
-	bad := []struct {
+// TestAccessLogList_StrictBody pins the strict-body contract on the access
+// log: an unknown category is a rejected request rather than a filter that
+// matches nothing, and the paging fields go through the shared resolver (so an
+// out-of-range page_size is a 400, never a clamp). Every one of these used to
+// default silently.
+func TestAccessLogList_StrictBody(t *testing.T) {
+	s := newLicensedAccessLogServer(t)
+	for _, tc := range []struct {
 		name string
-		q    url.Values
+		body map[string]any
 	}{
-		{"limit zero", url.Values{"limit": {"0"}}},
-		{"limit negative", url.Values{"limit": {"-5"}}},
-		{"limit unparseable", url.Values{"limit": {"abc"}}},
-		{"limit over cap", url.Values{"limit": {"9999"}}},
-		{"offset negative", url.Values{"offset": {"-1"}}},
-		{"offset unparseable", url.Values{"offset": {"abc"}}},
-		{"unknown category", url.Values{"category": {"membershipp"}}},
-	}
-	for _, tc := range bad {
+		{"page_size zero is the default, not a rejection — skip", nil},
+		{"page_size negative", map[string]any{"page_size": -5}},
+		{"page_size over cap", map[string]any{"page_size": 9999}},
+		{"unknown category", map[string]any{"category": "membershipp"}},
+		{"retired limit param", map[string]any{"limit": 10}},
+		{"retired offset param", map[string]any{"offset": 10}},
+	} {
+		if tc.body == nil {
+			continue
+		}
 		t.Run(tc.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			if _, _, _, good := parseAccessLogParams(rec, tc.q); good {
-				t.Fatalf("parse accepted %v, want a rejection", tc.q)
-			}
+			rec := doJSON(t, s, http.MethodPost, "/api/usage/org/access-log/list", tc.body)
 			if rec.Code != http.StatusBadRequest {
-				t.Errorf("status = %d, want 400", rec.Code)
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 			}
-			assertFirstError(t, rec, httpx.ReasonInvalidParam, "")
 		})
 	}
+}
+
+// postAccessLog calls the access-log list and decodes the shared envelope.
+func postAccessLog(t *testing.T, s *Server, body map[string]any) listEnvelope[accessChangeJSON] {
+	t.Helper()
+	return decodeList[accessChangeJSON](t, doJSON(t, s, http.MethodPost, "/api/usage/org/access-log/list", body))
+}
+
+// newLicensedAccessLogServer is a local-mode server with the governance
+// entitlement granted, so the route is reachable.
+func newLicensedAccessLogServer(t *testing.T) *Server {
+	t.Helper()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
+	t.Cleanup(entitlements.Reset)
+	return newUsageTestServer(t)
 }
 
 // --- local-mode end-to-end (SQLite, no Docker) ---
@@ -314,13 +305,15 @@ func TestUsageAccessLog_Local(t *testing.T) {
 	seedAccessLogLocal(t, s)
 
 	t.Run("all_categories_newest_first_with_names_and_labels", func(t *testing.T) {
-		var resp accessLogResponse
-		doUsage(t, s, "/api/usage/org/access-log", &resp)
+		resp := postAccessLog(t, s, map[string]any{})
 		if len(resp.Items) != 4 {
 			t.Fatalf("items = %d, want 4: %+v", len(resp.Items), resp.Items)
 		}
-		if resp.HasMore {
-			t.Errorf("has_more = true, want false (4 rows < default page)")
+		if resp.NextPageToken != "" {
+			t.Errorf("next_page_token = %q, want empty (4 rows < default page)", resp.NextPageToken)
+		}
+		if resp.Total() != 4 {
+			t.Errorf("total_count = %d, want 4", resp.Total())
 		}
 		// Newest-first: the revoke (13:00) leads.
 		first := resp.Items[0]
@@ -367,8 +360,7 @@ func TestUsageAccessLog_Local(t *testing.T) {
 	})
 
 	t.Run("category_credential_filters_to_credential_set", func(t *testing.T) {
-		var resp accessLogResponse
-		doUsage(t, s, "/api/usage/org/access-log?category=credential", &resp)
+		resp := postAccessLog(t, s, map[string]any{"category": "credential"})
 		if len(resp.Items) != 1 || resp.Items[0].Action != domain.AccessActionCredentialSet {
 			t.Fatalf("category=credential items = %+v, want one credential_set", resp.Items)
 		}
@@ -378,8 +370,7 @@ func TestUsageAccessLog_Local(t *testing.T) {
 	})
 
 	t.Run("category_membership_excludes_credentials", func(t *testing.T) {
-		var resp accessLogResponse
-		doUsage(t, s, "/api/usage/org/access-log?category=membership", &resp)
+		resp := postAccessLog(t, s, map[string]any{"category": "membership"})
 		if len(resp.Items) != 3 {
 			t.Fatalf("category=membership items = %d, want 3: %+v", len(resp.Items), resp.Items)
 		}
@@ -394,27 +385,24 @@ func TestUsageAccessLog_Local(t *testing.T) {
 		// An unknown category used to fall through as "no filter", so a typo
 		// answered with every row and looked like a working filter. It is a
 		// closed vocabulary now: reject rather than guess which reading the
-		// caller meant.
-		rec := doJSON(t, s, http.MethodGet, "/api/usage/org/access-log?category=bogus", nil)
+		// caller meant. The fault names the body field — category is a payload
+		// field on this route, not a query param, so the envelope carries it.
+		rec := doJSON(t, s, http.MethodPost, "/api/usage/org/access-log/list", map[string]any{"category": "bogus"})
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("category=bogus = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
-		assertFirstError(t, rec, httpx.ReasonInvalidParam, "")
+		assertFirstError(t, rec, httpx.ReasonInvalidField, "category")
 	})
 
-	t.Run("paging_with_limit_offset_and_has_more", func(t *testing.T) {
-		var page1 accessLogResponse
-		doUsage(t, s, "/api/usage/org/access-log?limit=2&offset=0", &page1)
-		if len(page1.Items) != 2 || !page1.HasMore {
-			t.Fatalf("page1 = %d items has_more=%v, want 2 + true", len(page1.Items), page1.HasMore)
+	t.Run("pages_partition_the_log", func(t *testing.T) {
+		page1 := postAccessLog(t, s, map[string]any{"page_size": 2})
+		if len(page1.Items) != 2 || page1.NextPageToken == "" || page1.Total() != 4 {
+			t.Fatalf("page1 = %d items (total %d, token %q), want 2 rows, total 4, a next token",
+				len(page1.Items), page1.Total(), page1.NextPageToken)
 		}
-		if page1.Limit != 2 || page1.Offset != 0 {
-			t.Errorf("page1 echo = limit %d offset %d, want 2/0", page1.Limit, page1.Offset)
-		}
-		var page2 accessLogResponse
-		doUsage(t, s, "/api/usage/org/access-log?limit=2&offset=2", &page2)
-		if len(page2.Items) != 2 || page2.HasMore {
-			t.Fatalf("page2 = %d items has_more=%v, want 2 + false", len(page2.Items), page2.HasMore)
+		page2 := postAccessLog(t, s, map[string]any{"page_size": 2, "page_token": page1.NextPageToken})
+		if len(page2.Items) != 2 || page2.NextPageToken != "" {
+			t.Fatalf("page2 = %d items (token %q), want 2 rows and no next token", len(page2.Items), page2.NextPageToken)
 		}
 		// No overlap between the pages (distinct ids across the four rows).
 		seen := map[string]bool{}
@@ -438,7 +426,7 @@ func TestUsageAccessLog_Unlicensed404(t *testing.T) {
 	s := newUsageTestServer(t)
 	seedAccessLogLocal(t, s)
 
-	rec := doJSON(t, s, "GET", "/api/usage/org/access-log", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/usage/org/access-log/list", map[string]any{})
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("unlicensed access-log = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
@@ -468,8 +456,7 @@ func TestUsageAccessLog_MalformedDetailDoesNotBreakResponse(t *testing.T) {
 	// doUsage fails the test if the status isn't 200 or the body isn't valid JSON —
 	// which is exactly the pre-fix failure mode (200 + empty body), so a green
 	// decode here is the regression guard.
-	var resp accessLogResponse
-	doUsage(t, s, "/api/usage/org/access-log", &resp)
+	resp := postAccessLog(t, s, map[string]any{})
 	if len(resp.Items) != 1 {
 		t.Fatalf("items = %d, want 1: %+v", len(resp.Items), resp.Items)
 	}
@@ -541,8 +528,7 @@ func TestUsageAccessLog_PolicyCategory_Local(t *testing.T) {
 	row("pol-3", domain.AccessActionSSODomainVerified, "", domain.AccessDetailSSODomain("corp.example"), "2026-06-20 12:00:00")
 	row("pol-4", domain.AccessActionSSOBreakGlassAdded, "u-alice", "", "2026-06-20 13:00:00")
 
-	var resp accessLogResponse
-	doUsage(t, s, "/api/usage/org/access-log?category=policy", &resp)
+	resp := postAccessLog(t, s, map[string]any{"category": "policy"})
 	if len(resp.Items) != 3 {
 		t.Fatalf("category=policy items = %d, want 3 (the SSO rows only): %+v", len(resp.Items), resp.Items)
 	}

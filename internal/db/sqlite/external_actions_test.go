@@ -43,7 +43,7 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 		t.Fatalf("Record: %v", err)
 	}
 
-	got, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{})
+	got, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
 		}
 	}
 
-	all, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{})
+	all, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem: %v", err)
 	}
@@ -235,21 +235,21 @@ func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
 		t.Errorf("not newest-first: first=%q last=%q", all[0].Action, all[4].Action)
 	}
 
-	gh, _ := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Provider: domain.ArtifactProviderGitHub})
+	gh, _, _ := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Provider: domain.ArtifactProviderGitHub})
 	if len(gh) != 3 {
 		t.Errorf("provider=github returned %d, want 3", len(gh))
 	}
-	act, _ := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionPRMarkedReady})
+	act, _, _ := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionPRMarkedReady})
 	if len(act) != 1 || act[0].Action != domain.ActionPRMarkedReady {
 		t.Errorf("action filter returned %+v, want exactly pr_marked_ready", act)
 	}
-	byActor, _ := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{ActorUserID: runmode.LocalDefaultUserID})
+	byActor, _, _ := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{ActorUserID: runmode.LocalDefaultUserID})
 	if len(byActor) != 1 || byActor[0].ActorUserID != runmode.LocalDefaultUserID {
 		t.Errorf("actor filter returned %+v, want the one human-authorized row", byActor)
 	}
 
 	// Time window [06-03, 06-05): the Jira transition (06-03) + the comment (06-04).
-	windowed, _ := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{
+	windowed, _, _ := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{
 		Since: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC),
 		Until: time.Date(2026, 6, 5, 0, 0, 0, 0, time.UTC),
 	})
@@ -261,14 +261,14 @@ func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
 	}
 
 	// Paging over ListByTeam (same shared helper): limit 2, offset 2 → one row left.
-	page2, err := stores.ExternalActions.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.ExternalActionListOpts{Limit: 2, Offset: 2})
+	page2, _, err := stores.ExternalActions.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.ExternalActionListOpts{Limit: 2, Offset: 2})
 	if err != nil {
 		t.Fatalf("ListByTeam paging: %v", err)
 	}
 	if len(page2) != 2 {
 		t.Errorf("limit 2 offset 2 over 5 rows returned %d, want 2", len(page2))
 	}
-	last, err := stores.ExternalActions.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.ExternalActionListOpts{Limit: 2, Offset: 4})
+	last, _, err := stores.ExternalActions.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.ExternalActionListOpts{Limit: 2, Offset: 4})
 	if err != nil {
 		t.Fatalf("ListByTeam last page: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
 		t.Fatalf("detach: %v", err)
 	}
 
-	got, err := stores.ExternalActions.ListByRun(ctx, runmode.LocalDefaultOrgID, runA, domain.ExternalActionListOpts{})
+	got, _, err := stores.ExternalActions.ListByRun(ctx, runmode.LocalDefaultOrgID, runA, domain.ExternalActionListOpts{})
 	if err != nil {
 		t.Fatalf("ListByRun: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
 
 	// The same opts the handler binds: a cap on how much of a runaway run's
 	// history the run view pulls.
-	capped, err := stores.ExternalActions.ListByRun(ctx, runmode.LocalDefaultOrgID, runA, domain.ExternalActionListOpts{Limit: 1})
+	capped, _, err := stores.ExternalActions.ListByRun(ctx, runmode.LocalDefaultOrgID, runA, domain.ExternalActionListOpts{Limit: 1})
 	if err != nil {
 		t.Fatalf("ListByRun(limit): %v", err)
 	}

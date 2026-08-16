@@ -17,11 +17,11 @@ import { useOptionalAuth } from '../contexts/AuthContext'
 import { useEntitlements, FeatureGovernance } from '../hooks/useEntitlements'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
+import { usePagedList } from '../hooks/usePagedList'
 import { avatarProxyUrl } from '../lib/api'
 import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import type {
   AccessChangeRow,
-  AccessLogResponse,
   TeamSummary,
   UsageCategoryBucket,
   UsageMeResponse,
@@ -30,7 +30,6 @@ import type {
   UsageRuleBucket,
   UsageTeamBucket,
   UsageTeamCap,
-  UsageTeamCapsResponse,
   UsageTeamResponse,
   UsageUserBucket,
   UsageOrgLevelBucket,
@@ -1130,7 +1129,7 @@ function TeamSection({
         </div>
       </Band>
       {/* EE activity feed (Actions / Objects lenses) — team-scoped, behind FeatureGovernance. */}
-      {gov && teamId && <ActivityFeed baseUrl={`/api/usage/teams/${teamId}/activity`} />}
+      {gov && teamId && <ActivityFeed basePath={`/api/usage/teams/${teamId}`} />}
     </>
   )
 }
@@ -1289,8 +1288,8 @@ function CapRow({ team, spend }: { team: UsageTeamCap; spend: number }) {
 }
 
 // TeamCaps is the EE per-team daily-cap editor body: one CapRow per ACTIVE team
-// in the org — from /api/usage/org/team-caps, NOT the spend rollup's by_team, so
-// a team that hasn't run any agents yet (absent from by_team) can still be
+// in the org — from the team-caps list, NOT the spend rollup's by_team, so a
+// team that hasn't run any agents yet (absent from by_team) can still be
 // pre-capped before any runaway happens. Each row's window spend is looked up
 // from by_team (0 for an idle team) purely for context. The list arrives sorted
 // by name; the parent gates rendering on governance + org admin, and the backend
@@ -1299,13 +1298,26 @@ function CapRow({ team, spend }: { team: UsageTeamCap; spend: number }) {
 function TeamCaps({
   teams,
   spendByTeam,
+  hasMore,
+  onMore,
 }: {
   teams: UsageTeamCap[]
   spendByTeam: Map<string, number>
+  hasMore: boolean
+  onMore: () => void
 }) {
   if (teams.length === 0) return <ZeroMini label="no teams" />
   return (
     <div className="space-y-2.5">
+      {hasMore && (
+        <button
+          type="button"
+          onClick={onMore}
+          className="font-mono text-[10px] uppercase tracking-[0.12em] text-text-tertiary/70 transition-colors hover:text-text-secondary"
+        >
+          load more teams
+        </button>
+      )}
       {teams.map((t) => (
         <CapRow key={t.team_id} team={t} spend={spendByTeam.get(t.team_id) ?? 0} />
       ))}
@@ -1424,15 +1436,27 @@ function OrgSection({ since, days, gov }: { since: string; days: number; gov: bo
   // Per-team caps are an EE/governance surface; render the editor only when the
   // active org is licensed (the OrgSection itself is already org-admin-gated). The
   // backend enforces both gates, so this is purely affordance-level. The editor
-  // lists EVERY active team (TFAC-482) via a separate governance read — fetched
-  // only when licensed — so an idle team (absent from the spend rollup's by_team)
-  // can still be pre-capped; each row's window spend is looked up from by_team.
+  // lists EVERY active team via a separate governance read — fetched only when
+  // licensed — so an idle team (absent from the spend rollup's by_team) can
+  // still be pre-capped; each row's window spend is looked up from by_team.
   // gov (the FeatureGovernance entitlement, threaded from the parent) gates both
-  // EE org surfaces here: the per-team daily-cap editor (TFAC-482) and the
-  // activity feed (TFAC-483). The caps list is fetched only when licensed.
-  const { data: caps } = useUsageFetch<UsageTeamCapsResponse>(
-    gov ? '/api/usage/org/team-caps' : null,
+  // EE org surfaces here: the per-team daily-cap editor and the activity feed.
+  // The caps list is fetched only when licensed.
+  //
+  // One page is the whole editor: an org with more teams than a page holds
+  // pages through the same "load more" every other list surface uses.
+  const capsList = usePagedList<UsageTeamCap>(
+    '/api/usage/org/team-caps/list',
+    'Could not load the per-team caps.',
   )
+  const loadCaps = capsList.load
+  const [capsLoaded, setCapsLoaded] = useState(false)
+  useEffect(() => {
+    if (!gov) return
+    loadCaps({}).then((page) => {
+      if (page) setCapsLoaded(true)
+    })
+  }, [gov, loadCaps])
   const spendByTeam = new Map<string, number>(
     (data?.by_team ?? []).map((t) => [t.team_id, t.cost] as [string, number]),
   )
@@ -1467,9 +1491,14 @@ function OrgSection({ since, days, gov }: { since: string; days: number; gov: bo
           >
             <UserRoster data={data?.by_user ?? []} emptyLabel="no user spend" />
           </Instrument>
-          {gov && caps && (
+          {gov && capsLoaded && (
             <Instrument label="Daily caps" className="md:col-span-2">
-              <TeamCaps teams={caps.teams} spendByTeam={spendByTeam} />
+              <TeamCaps
+                teams={capsList.items}
+                spendByTeam={spendByTeam}
+                hasMore={capsList.hasMore}
+                onMore={capsList.loadMore}
+              />
             </Instrument>
           )}
           <ThroughputInstrument
@@ -1484,7 +1513,7 @@ function OrgSection({ since, days, gov }: { since: string; days: number; gov: bo
           governance-gated); the org-facing complement to the fleet console. */}
       <OrgOpsBand since={since} />
       {/* EE activity feed (Actions / Objects lenses) — org-wide (cross-team), behind FeatureGovernance. */}
-      {gov && <ActivityFeed baseUrl="/api/usage/org/activity" showTeam />}
+      {gov && <ActivityFeed basePath="/api/usage/org" showTeam />}
     </>
   )
 }
@@ -1605,45 +1634,41 @@ function AccessLogRow({ row }: { row: AccessChangeRow }) {
   )
 }
 
-// AccessLogPager is the offset pager: a "start–end" readout with Newer/Older
-// steps. Newer is disabled on the first page; Older when the server reports no
-// more rows.
-function AccessLogPager({
-  offset,
+// AccessLogMore is the forward pager: a running count and a "load more" step.
+// It is forward-only because the page token is opaque — the server mints it for
+// the page after this one and nothing addresses the page before, so a "Newer"
+// button would have nothing to send. The rows accumulate instead, which is what
+// the reader of an audit log wants anyway: scrolling back through what they
+// already read, not re-fetching it.
+function AccessLogMore({
   count,
+  total,
   hasMore,
-  onChange,
+  loading,
+  onMore,
 }: {
-  offset: number
   count: number
+  total: number | null
   hasMore: boolean
-  onChange: (offset: number) => void
+  loading: boolean
+  onMore: () => void
 }) {
-  const start = count === 0 ? 0 : offset + 1
-  const end = offset + count
   return (
     <div className="mt-5 flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.12em] text-text-tertiary/70">
       <span className="tabular-nums">
-        {start}–{end}
+        {count}
+        {total !== null ? ` of ${total}` : ''}
       </span>
-      <div className="flex items-center gap-4">
+      {hasMore && (
         <button
           type="button"
-          disabled={offset === 0}
-          onClick={() => onChange(Math.max(0, offset - ACCESS_LOG_PAGE))}
+          disabled={loading}
+          onClick={onMore}
           className="tracking-[0.12em] transition-colors enabled:hover:text-text-secondary disabled:opacity-30"
         >
-          Newer
+          {loading ? 'Loading…' : 'Older'}
         </button>
-        <button
-          type="button"
-          disabled={!hasMore}
-          onClick={() => onChange(offset + ACCESS_LOG_PAGE)}
-          className="tracking-[0.12em] transition-colors enabled:hover:text-text-secondary disabled:opacity-30"
-        >
-          Older
-        </button>
-      </div>
+      )}
     </div>
   )
 }
@@ -1654,20 +1679,17 @@ function AccessLogPager({
 // so it's a sibling of Band rather than a use of it.
 function AccessLogSection() {
   const [category, setCategory] = useState<AccessCategory>('')
-  const [offset, setOffset] = useState(0)
-  const url = `/api/usage/org/access-log?limit=${ACCESS_LOG_PAGE}&offset=${offset}${
-    category ? `&category=${encodeURIComponent(category)}` : ''
-  }`
-  const { data, error } = useUsageFetch<AccessLogResponse>(url)
-  // Changing the filter resets to the first page (an offset into the old filter's
-  // result set is meaningless against the new one).
-  const pickCategory = (c: AccessCategory) => {
-    setCategory(c)
-    setOffset(0)
-  }
+  const log = usePagedList<AccessChangeRow>(
+    '/api/usage/org/access-log/list',
+    'Could not load the access log.',
+  )
+  const { items: rows, total, hasMore, loading, error, load, loadMore } = log
+  const [loadedOnce, setLoadedOnce] = useState(false)
 
-  const hasData = data !== null
-  const rows = data?.items ?? []
+  useEffect(() => {
+    load({ category, page_size: ACCESS_LOG_PAGE }).then(() => setLoadedOnce(true))
+  }, [category, load])
+
   return (
     <section className="mb-12 last:mb-0">
       <div className="flex items-end gap-4">
@@ -1676,11 +1698,14 @@ function AccessLogSection() {
         </span>
         <span className="mb-[9px] h-px flex-1 bg-border-subtle" />
         <div className="pb-1">
-          <AccessCategoryFilter value={category} onChange={pickCategory} />
+          {/* Changing the filter reloads from the first page — a token minted
+              for one filter set is not valid for another, which the server
+              enforces and usePagedList's load() honors by starting over. */}
+          <AccessCategoryFilter value={category} onChange={setCategory} />
         </div>
       </div>
       <div className="mt-6">
-        {!hasData ? (
+        {!loadedOnce ? (
           error ? (
             <EtchedNote msg={error} tone="error" />
           ) : (
@@ -1697,12 +1722,14 @@ function AccessLogSection() {
                 <AccessLogRow key={row.id} row={row} />
               ))}
             </ul>
-            <AccessLogPager
-              offset={offset}
+            <AccessLogMore
               count={rows.length}
-              hasMore={data?.has_more ?? false}
-              onChange={setOffset}
+              total={total}
+              hasMore={hasMore}
+              loading={loading}
+              onMore={loadMore}
             />
+            {error && <EtchedNote msg={error} tone="error" />}
           </>
         )}
       </div>

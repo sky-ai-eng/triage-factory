@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,9 +29,36 @@ import (
 //     installed on.
 //   - PAT-only org (no App / no installations): the authenticated user's repos
 //     (GET /user/repos) — identical to the pre-App behavior.
+//
+// githubRepoListRequest is the body of POST /api/github/repos/list. The
+// picker read has no filters — it is "everything this org's credentials can
+// see" — so the body is the paging pair alone.
+type githubRepoListRequest struct {
+	httpx.PageRequest
+}
+
+// maxGitHubRepoPageSize is the picker's declared page ceiling, set to GitHub's
+// own per_page maximum: every page is one upstream call, and asking for more
+// than the upstream will return in one response would mean walking pages
+// behind the caller's back.
+const maxGitHubRepoPageSize = 100
+
 func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
+
+	var req githubRepoListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	// pageCursorFaults collects the cursor's own faults; the PAT arm below
+	// decodes it (the App arm decodes its two-part form itself).
+	var pageCursorFaults httpx.Validation
+	page := httpx.ResolvePage(&pageCursorFaults, req.PageRequest,
+		httpx.FilterFingerprint(struct{}{}), maxGitHubRepoPageSize)
+	if pageCursorFaults.Flush(w, http.StatusBadRequest) {
+		return
+	}
 
 	// Decide App-vs-PAT here rather than widening the resolver (which
 	// deliberately hides which tier resolved): this handler is the one consumer
@@ -88,14 +115,23 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var repos []ghclient.UserRepo
+	var (
+		repos      []ghclient.UserRepo
+		nextCursor string
+	)
 	if app != nil && app.Active && len(insts) > 0 {
 		var err error
-		repos, err = s.installationReposUnion(r.Context(), orgID, insts)
+		repos, nextCursor, err = s.installationReposPage(r.Context(), orgID, insts, page.Limit, page.Cursor)
 		if err != nil {
 			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 				reposLog.Warn("app installed but resolver produced no credentials for any installation", "org", orgID, "error", err)
 				writeNotConfigured(w, "GitHub is not connected for this workspace")
+				return
+			}
+			if errors.Is(err, errInvalidPageCursor) {
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+					Reason: httpx.ReasonInvalidParam, Message: err.Error(), Field: "page_token",
+				})
 				return
 			}
 			reposLog.Warn("fetch installation repos failed", "org", orgID, "error", err)
@@ -160,109 +196,146 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		}
 
 		client := ghclient.NewClient(baseURL, creds.GitHubPAT)
+		var cursorFaults httpx.Validation
+		upstreamPage, _ := upstreamPageFromCursor(&cursorFaults, page.Cursor)
+		if cursorFaults.Flush(w, http.StatusBadRequest) {
+			return
+		}
 		var err error
-		repos, err = client.ListUserRepos(r.Context())
+		repos, err = client.ListUserReposPage(r.Context(), page.Limit, upstreamPage)
 		if err != nil {
 			reposLog.Warn("fetch user repos failed", "org", orgID, "error", err)
 			writeUpstreamGitHub(w, "failed to fetch repos from GitHub", err)
 			return
 		}
-	}
-
-	// Warm the reachable-repo enumeration cache so the
-	// immediate-next team-repos PUT validates the selection against this
-	// in-memory set in ~µs instead of re-enumerating the org. We just paid
-	// for the enumeration; the gate shouldn't pay for it again. Only the
-	// lowercased slug set is needed for the membership check, so we keep
-	// that rather than the full UserRepo slice. TTL-bounded and evicted on
-	// SetOnGitHubChanged.
-	//
-	// NB: warmed from whatever source produced `repos` — the App
-	// installation-repos union for App orgs, ListUserRepos for PAT-only orgs.
-	// Either way the cached set is exactly what the picker just showed, so the
-	// hot-path gate can't reject a repo the user could actually have selected.
-	slugs := make(map[string]struct{}, len(repos))
-	for _, repo := range repos {
-		if repo.FullName != "" {
-			slugs[strings.ToLower(repo.FullName)] = struct{}{}
+		// A full page means GitHub has more; a short one is the end.
+		if len(repos) == page.Limit {
+			nextCursor = strconv.Itoa(upstreamPage + 1)
 		}
 	}
-	s.reachableRepoCachePut(orgID, userID, slugs)
 
-	writeJSON(w, http.StatusOK, repos)
-}
-
-// installationReposUnion lists each installation's repositories through the
-// credential resolver (one tier-1 App-token client per installation account)
-// and returns their union, deduped by lowercased full name and sorted stably
-// by full name. This is the App-org replacement for ListUserRepos: an
-// installation token can't call GET /user/repos, and the union is exactly the
-// set of repos the org's App can act on.
-//
-// Per-installation failures are isolated — a bad mint or list on one account
-// must not blank the whole picker, so they're logged and skipped while the
-// rest still contribute. ErrNoGitHubCredentials is only surfaced when the
-// resolver produced no client for any installation (genuine "not configured").
-// But if clients resolved yet *every* list attempt failed and the union is
-// empty, the failure is surfaced rather than returned as an empty list — an
-// empty result there is a fetch error masquerading as "no repos" (and would
-// also warm the reachable-repo cache with an empty set).
-func (s *Server) installationReposUnion(ctx context.Context, orgID string, insts []domain.OrgGitHubAppInstallation) ([]ghclient.UserRepo, error) {
-	if s.ghResolver == nil {
-		return nil, ghclient.ErrNoGitHubCredentials
+	// Warm the reachable-repo enumeration cache so the immediate-next
+	// team-repos PUT validates the selection against this in-memory set in ~µs
+	// instead of re-enumerating the org. We just paid for the enumeration; the
+	// gate shouldn't pay for it again. Only the lowercased slug set is needed
+	// for the membership check, so we keep that rather than the full UserRepo
+	// slice. TTL-bounded and evicted on SetOnGitHubChanged.
+	//
+	// **Only a COMPLETE enumeration may be cached** — the first page with no
+	// next page. rejectUnreachableRepo treats a cache hit as authoritative for
+	// membership, so a partial set would make it reject repos the user
+	// genuinely can select and genuinely saw, just on a later page. When the
+	// listing pages, we warm nothing and the write gate falls to its cold path,
+	// which probes only the selected slugs and is correct by construction.
+	if page.Cursor == "" && nextCursor == "" {
+		slugs := make(map[string]struct{}, len(repos))
+		for _, repo := range repos {
+			if repo.FullName != "" {
+				slugs[strings.ToLower(repo.FullName)] = struct{}{}
+			}
+		}
+		s.reachableRepoCachePut(orgID, userID, slugs)
 	}
 
-	byName := make(map[string]ghclient.UserRepo)
-	resolvedAny := false
-	var lastListErr error
-	for _, inst := range insts {
+	httpx.WriteProxyList(w, page, repos, nextCursor)
+}
+
+// installationReposPage serves ONE page of the App-org picker: it walks the
+// installations in order and pages each in turn, so the cursor is
+// "<installation index>:<upstream page>". It is the App-org replacement for
+// ListUserRepos, which an installation token cannot call — the repos an
+// installation can reach are exactly what the org's App can act on.
+//
+// The union's global sort is deliberately gone. A proxy list resumes from an
+// upstream position, and no upstream position can express "the next slice of a
+// set sorted across N independent accounts" — producing that would mean
+// re-fetching every installation on every page, which is the fetch-the-world
+// read pagination exists to retire. The order is instead: each account's repos
+// in GitHub's own order, accounts in installation order. A repo belongs to
+// exactly one account, so the accounts partition the union and no row is
+// served twice.
+//
+// A per-installation failure is fatal here, unlike the whole-union walk that
+// skipped past one: a page is a position, and silently skipping an account
+// would renumber every later page.
+func (s *Server) installationReposPage(ctx context.Context, orgID string, insts []domain.OrgGitHubAppInstallation, perPage int, cursor string) ([]ghclient.UserRepo, string, error) {
+	if s.ghResolver == nil {
+		return nil, "", ghclient.ErrNoGitHubCredentials
+	}
+	instIdx, upstreamPage, err := parseInstallationCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Walk forward from the cursor's installation: an account whose token
+	// cannot be resolved contributes nothing, so rather than serving an empty
+	// page we move on to the next one. Every other outcome returns from inside
+	// the loop, so falling out the bottom means exactly one thing — every
+	// account from the cursor onward was credential-less.
+	startIdx := instIdx
+	for ; instIdx < len(insts); instIdx, upstreamPage = instIdx+1, 1 {
+		inst := insts[instIdx]
 		client, err := s.ghResolver.ClientFor(ctx, orgID, inst.AccountLogin)
 		if err != nil {
 			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 				continue
 			}
 			// Real DB/vault/RLS failure — propagate so the handler can 502
-			// rather than silently returning a partial union.
-			return nil, err
+			// rather than silently skipping an account mid-walk.
+			return nil, "", err
 		}
-		resolvedAny = true
 
-		repos, err := client.ListInstallationRepos(ctx)
+		repos, _, err := client.ListInstallationReposPage(ctx, perPage, upstreamPage)
 		if err != nil {
-			reposLog.Warn("list installation repos failed, skipping installation", "org", orgID, "account", inst.AccountLogin, "error", err)
-			lastListErr = err
-			continue
+			return nil, "", fmt.Errorf("list installation repositories for org %s: %w", orgID, err)
 		}
-		for _, repo := range repos {
-			if repo.FullName == "" {
-				continue
-			}
-			key := strings.ToLower(repo.FullName)
-			if _, ok := byName[key]; !ok {
-				byName[key] = repo
-			}
+		if len(repos) == perPage {
+			// A full page: stay on this installation.
+			return repos, fmt.Sprintf("%d:%d", instIdx, upstreamPage+1), nil
 		}
+		if instIdx+1 < len(insts) {
+			// Short page: this account is exhausted, the next one starts fresh.
+			return repos, fmt.Sprintf("%d:1", instIdx+1), nil
+		}
+		return repos, "", nil
 	}
-	if !resolvedAny {
-		return nil, ghclient.ErrNoGitHubCredentials
+	// Where the walk started decides what falling out means. From the first
+	// installation, nothing the App reaches has a usable token — the App is not
+	// configured, and saying so is what tells the user to fix a credential.
+	// From a later one, earlier pages were served fine, so this is just the
+	// last page of the union: empty, with no next cursor.
+	if startIdx == 0 {
+		return nil, "", ghclient.ErrNoGitHubCredentials
 	}
-	// Clients resolved but produced nothing, and at least one list errored:
-	// surface the fetch failure instead of an empty (and misleading) picker.
-	// A genuinely empty union with no errors (App installed on zero repos) is
-	// a legitimate empty result and falls through.
-	if len(byName) == 0 && lastListErr != nil {
-		return nil, fmt.Errorf("list installation repositories for org %s: %w", orgID, lastListErr)
-	}
-
-	out := make([]ghclient.UserRepo, 0, len(byName))
-	for _, repo := range byName {
-		out = append(out, repo)
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return strings.ToLower(out[i].FullName) < strings.ToLower(out[j].FullName)
-	})
-	return out, nil
+	return nil, "", nil
 }
+
+// parseInstallationCursor decodes "<installation index>:<upstream page>". An
+// empty cursor is the first page of the first installation. The token is
+// opaque and only this server mints one, so anything else is a tampered or
+// stale token.
+func parseInstallationCursor(cursor string) (instIdx, page int, err error) {
+	if cursor == "" {
+		return 0, 1, nil
+	}
+	idxRaw, pageRaw, found := strings.Cut(cursor, ":")
+	if !found {
+		return 0, 0, errInvalidPageCursor
+	}
+	instIdx, err = strconv.Atoi(idxRaw)
+	if err != nil || instIdx < 0 {
+		return 0, 0, errInvalidPageCursor
+	}
+	page, err = strconv.Atoi(pageRaw)
+	if err != nil || page < 1 {
+		return 0, 0, errInvalidPageCursor
+	}
+	return instIdx, page, nil
+}
+
+// errInvalidPageCursor marks a page_token whose payload this server did not
+// mint. It is a client fault (400), not an upstream one.
+var errInvalidPageCursor = errors.New("page_token is not a valid page token")
 
 // isOrgAdmin reports whether userID is an org admin of orgID, short-circuiting
 // to true under local mode (N=1 has a single implicit owner and no team
@@ -366,11 +439,68 @@ func (s *Server) repoMutationAccess(ctx context.Context, orgID, userID, owner, r
 	}
 }
 
+// repoJSON is the registry's row shape — the list rows and the single read
+// alike. CanEdit mirrors the PATCH gate (repoMutationAccess) per row, so the
+// page can render a read-only base branch instead of a control that 403s on
+// use. The client must not re-derive it from role: org admin and team admin
+// are orthogonal, and only the server knows which teams tracking a given repo
+// the caller administers.
+type repoJSON struct {
+	ID             string  `json:"id"`
+	Owner          string  `json:"owner"`
+	Repo           string  `json:"repo"`
+	Description    string  `json:"description,omitempty"`
+	HasReadme      bool    `json:"has_readme"`
+	HasClaudeMd    bool    `json:"has_claude_md"`
+	HasAgentsMd    bool    `json:"has_agents_md"`
+	ProfileText    string  `json:"profile_text,omitempty"`
+	DefaultBranch  string  `json:"default_branch,omitempty"`
+	BaseBranch     string  `json:"base_branch,omitempty"`
+	ProfiledAt     *string `json:"profiled_at,omitempty"`
+	CloneStatus    string  `json:"clone_status,omitempty"`
+	CloneError     string  `json:"clone_error,omitempty"`
+	CloneErrorKind string  `json:"clone_error_kind,omitempty"`
+	CanEdit        bool    `json:"can_edit"`
+}
+
+func repoToJSON(row domain.Repository, canEdit bool) repoJSON {
+	out := repoJSON{
+		ID:             row.ID,
+		Owner:          row.Owner,
+		Repo:           row.Repo,
+		Description:    row.Description,
+		HasReadme:      row.HasReadme,
+		HasClaudeMd:    row.HasClaudeMd,
+		HasAgentsMd:    row.HasAgentsMd,
+		ProfileText:    row.ProfileText,
+		DefaultBranch:  row.DefaultBranch,
+		BaseBranch:     row.BaseBranch,
+		CloneStatus:    row.CloneStatus,
+		CloneError:     row.CloneError,
+		CloneErrorKind: row.CloneErrorKind,
+		CanEdit:        canEdit,
+	}
+	if row.ProfiledAt != nil {
+		t := row.ProfiledAt.UTC().Format(time.RFC3339)
+		out.ProfiledAt = &t
+	}
+	return out
+}
+
+// repoListRequest is the body of POST /api/repos/list. The registry read has
+// no filters of its own — which rows a caller sees is decided by their role,
+// not by the body.
+type repoListRequest struct {
+	httpx.PageRequest
+}
+
 // handleRepositories returns the configured repository rows from the DB. Org
 // admins get the org-wide union; non-admin members get only the repos
 // tracked by their own teams (TFAC-559) — the table is org-wide, so an
 // unscoped read would leak every team's repos to a teammate on none of them.
 // Local mode (N=1) has no team boundary and stays unscoped.
+//
+// POST /api/repos/list
 func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -378,27 +508,34 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
+	var req repoListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
 	isAdmin, err := s.isOrgAdmin(r.Context(), orgID, userID)
 	if err != nil {
 		internalError(w, "repos", err)
 		return
 	}
 
-	// canEdit mirrors the PATCH gate (repoMutationAccess) per row, so the
-	// page can render a read-only base branch instead of a control that
-	// 403s on use. The client must not re-derive this from role — org admin
-	// and team admin are orthogonal, and only the server knows which teams
-	// tracking a given repo the caller administers.
 	var (
 		repos   []domain.Repository
+		total   int
 		canEdit []bool
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
+		opts := db.ListOpts{Limit: page.Limit, Offset: page.Offset}
 		if isAdmin {
-			repos, e = tx.Repos.List(r.Context(), orgID)
+			repos, total, e = tx.Repos.List(r.Context(), orgID, opts)
 		} else {
-			repos, e = tx.Repos.ListTeamScoped(r.Context(), orgID)
+			repos, total, e = tx.Repos.ListTeamScoped(r.Context(), orgID, opts)
 		}
 		if e != nil {
 			return e
@@ -410,9 +547,9 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 			}
 			return nil
 		}
-		// One EXISTS per row. The list is already narrowed to the caller's
-		// own teams' tracked repos, so this is bounded by their tracked set
-		// and runs inside the single transaction the list read used.
+		// One EXISTS per row of THIS page — bounded by the page size now
+		// rather than by the caller's whole tracked set, and still inside the
+		// single transaction the list read used.
 		for i, row := range repos {
 			canEdit[i], e = tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(r.Context(), orgID, row.Owner, row.Repo)
 			if e != nil {
@@ -425,49 +562,82 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type repoJSON struct {
-		ID             string  `json:"id"`
-		Owner          string  `json:"owner"`
-		Repo           string  `json:"repo"`
-		Description    string  `json:"description,omitempty"`
-		HasReadme      bool    `json:"has_readme"`
-		HasClaudeMd    bool    `json:"has_claude_md"`
-		HasAgentsMd    bool    `json:"has_agents_md"`
-		ProfileText    string  `json:"profile_text,omitempty"`
-		DefaultBranch  string  `json:"default_branch,omitempty"`
-		BaseBranch     string  `json:"base_branch,omitempty"`
-		ProfiledAt     *string `json:"profiled_at,omitempty"`
-		CloneStatus    string  `json:"clone_status,omitempty"`
-		CloneError     string  `json:"clone_error,omitempty"`
-		CloneErrorKind string  `json:"clone_error_kind,omitempty"`
-		CanEdit        bool    `json:"can_edit"`
-	}
-
 	result := make([]repoJSON, len(repos))
 	for i, row := range repos {
-		result[i] = repoJSON{
-			ID:             row.ID,
-			Owner:          row.Owner,
-			Repo:           row.Repo,
-			Description:    row.Description,
-			HasReadme:      row.HasReadme,
-			HasClaudeMd:    row.HasClaudeMd,
-			HasAgentsMd:    row.HasAgentsMd,
-			ProfileText:    row.ProfileText,
-			DefaultBranch:  row.DefaultBranch,
-			BaseBranch:     row.BaseBranch,
-			CloneStatus:    row.CloneStatus,
-			CloneError:     row.CloneError,
-			CloneErrorKind: row.CloneErrorKind,
-			CanEdit:        canEdit[i],
-		}
-		if row.ProfiledAt != nil {
-			t := row.ProfiledAt.UTC().Format(time.RFC3339)
-			result[i].ProfiledAt = &t
-		}
+		result[i] = repoToJSON(row, canEdit[i])
+	}
+	httpx.WriteList(w, page, result, total)
+}
+
+// handleRepoGet is the canonical single read for a registry row, in the list's
+// row shape. Gated exactly like the list: a repo outside the caller's tracked
+// set is 404 (it isn't in their list either, so disclose nothing), and the
+// can_edit annotation is resolved the same way the list resolves it.
+//
+// GET /api/repos/{owner}/{repo}
+func (s *Server) handleRepoGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	owner, repo, ok := repoSlugPath(w, r)
+	if !ok {
+		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	if allowed, err := s.repoAccessAllowed(r.Context(), orgID, userID, owner, repo); err != nil {
+		internalError(w, "repos", err)
+		return
+	} else if !allowed {
+		notFound(w, "repo")
+		return
+	}
+
+	var (
+		row     *domain.Repository
+		canEdit bool
+	)
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		row, e = tx.Repos.Get(r.Context(), orgID, owner+"/"+repo)
+		if e != nil || row == nil {
+			return e
+		}
+		isAdmin, e := s.isOrgAdmin(r.Context(), orgID, userID)
+		if e != nil {
+			return e
+		}
+		if isAdmin {
+			canEdit = true
+			return nil
+		}
+		canEdit, e = tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(r.Context(), orgID, row.Owner, row.Repo)
+		return e
+	}); err != nil {
+		internalError(w, "repos", err)
+		return
+	}
+	if row == nil {
+		// Reachable by the tracked set (or org-admin) but absent from the
+		// registry — a repo a team tracks that has never been profiled.
+		notFound(w, "repo")
+		return
+	}
+	writeJSON(w, http.StatusOK, repoToJSON(*row, canEdit))
+}
+
+// repoSlugPath reads the two-segment {owner}/{repo} path id. Empty halves are
+// an invalid id rather than a lookup that would match nothing in particular.
+func repoSlugPath(w http.ResponseWriter, r *http.Request) (owner, repo string, ok bool) {
+	owner, repo = r.PathValue("owner"), r.PathValue("repo")
+	if owner == "" || repo == "" {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidID, Message: "owner and repo are required",
+		})
+		return "", "", false
+	}
+	return owner, repo, true
 }
 
 // handleRepoUpdate updates per-repo settings like base_branch. The write
@@ -559,17 +729,47 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
+// maxBranchPageSize is the branch list's declared page ceiling. It replaces
+// the hardcoded 30 the route used to apply silently: a caller now asks for the
+// window it wants and learns when it asked for too much, instead of receiving
+// a truncated answer that looks complete. It is lower than the shared
+// MaxPageSize because every page is an upstream GitHub call, and the picker
+// this feeds is a type-to-filter box, not a browse.
+const maxBranchPageSize = 100
+
+// branchListRequest is the body of POST /api/repos/{owner}/{repo}/branches/list.
+// Q is the same substring filter the old ?q= carried, moved to a body field
+// with its semantics unchanged.
+type branchListRequest struct {
+	Q string `json:"q"`
+
+	httpx.PageRequest
+}
+
+type branchListFilterKey struct {
+	Q string `json:"q"`
+}
+
+// branchJSON is one row. It is an object rather than a bare string so the
+// shape can gain a field (protected, default, last commit) without becoming a
+// second list contract.
+type branchJSON struct {
+	Name string `json:"name"`
+}
+
 // handleRepoBranches returns branches for a repo, with optional search
 // filtering. Gated the same as handleRepositories/handleRepoUpdate
 // (TFAC-559): a non-admin member can only list branches for a repo their own
 // team tracks.
+//
+// It is a proxy list: the rows come from GitHub, which reports no total for
+// this read, so total_count is null and next_page_token wraps the upstream
+// page cursor. See httpx.WriteProxyList.
+//
+// POST /api/repos/{owner}/{repo}/branches/list
 func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
-	owner := r.PathValue("owner")
-	repo := r.PathValue("repo")
-	if owner == "" || repo == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidID, Message: "owner and repo are required",
-		})
+	owner, repo, ok := repoSlugPath(w, r)
+	if !ok {
 		return
 	}
 
@@ -578,6 +778,19 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
+
+	var req branchListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest,
+		httpx.FilterFingerprint(branchListFilterKey{Q: req.Q}), maxBranchPageSize)
+	upstreamPage, ok := upstreamPageFromCursor(&v, page.Cursor)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	_ = ok // the fault, if any, is already recorded on v
 
 	if allowed, err := s.repoAccessAllowed(r.Context(), orgID, userID, owner, repo); err != nil {
 		internalError(w, "repos", err)
@@ -602,20 +815,46 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := r.URL.Query().Get("q")
-	branches, err := client.ListBranches(r.Context(), owner, repo, query, 30)
+	branches, rawCount, err := client.ListBranchesPage(r.Context(), owner, repo, req.Q, page.Limit, upstreamPage)
 	if err != nil {
 		reposLog.Warn("fetch branches failed", "org", orgID, "owner", owner, "repo", repo, "error", err)
 		writeUpstreamGitHub(w, "failed to fetch branches from GitHub", err)
 		return
 	}
 
-	// Return just the names for simplicity
-	names := make([]string, len(branches))
+	out := make([]branchJSON, len(branches))
 	for i, b := range branches {
-		names[i] = b.Name
+		out[i] = branchJSON{Name: b.Name}
 	}
-	writeJSON(w, http.StatusOK, names)
+	// "Is there more" is decided by the RAW upstream page, not by how many
+	// rows survived the filter: a full upstream page means GitHub has more to
+	// give even when none of it matched `q`, and stopping on a short filtered
+	// page would end the walk at the first unlucky page.
+	next := ""
+	if rawCount == page.Limit {
+		next = strconv.Itoa(upstreamPage + 1)
+	}
+	httpx.WriteProxyList(w, page, out, next)
+}
+
+// upstreamPageFromCursor decodes the page-number cursor the proxy lists carry.
+// An empty cursor is the first page. Anything else must be a positive integer
+// — the token is opaque and only this server mints one, so a value that isn't
+// is a tampered or stale token, not a page.
+func upstreamPageFromCursor(v *httpx.Validation, cursor string) (int, bool) {
+	if cursor == "" {
+		return 1, true
+	}
+	n, err := strconv.Atoi(cursor)
+	if err != nil || n < 1 {
+		v.Add(httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidParam,
+			Message: "page_token is not a valid page token",
+			Field:   "page_token",
+		})
+		return 1, false
+	}
+	return n, true
 }
 
 // Repo *tracking* selection is per-team: writes go through

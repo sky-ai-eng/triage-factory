@@ -75,7 +75,9 @@ func collectExportState(ctx context.Context, txr db.TxRunner, kb *kbstore.Store,
 		if e != nil {
 			return fmt.Errorf("list curator claims: %w", e)
 		}
-		messages, e = tx.Curator.ListConversationMessages(ctx, orgID, conversation.ID)
+		// Unbounded: the export serializes the whole transcript, so a tail
+		// would silently truncate what the bundle claims to carry.
+		messages, e = tx.Curator.ListConversationMessages(ctx, orgID, conversation.ID, 0)
 		if e != nil {
 			return fmt.Errorf("list curator messages: %w", e)
 		}
