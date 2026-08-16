@@ -84,11 +84,11 @@ func TestHandleFleetQueue_RequiresOrgParam(t *testing.T) {
 	}
 }
 
-func TestHandleFleetQueue_UnwiredReader503(t *testing.T) {
+func TestHandleFleetQueue_UnwiredReaderNotConfigured(t *testing.T) {
 	s := &Server{az: &authz.Checker{}} // fleetQueue nil
 	rec := httptest.NewRecorder()
 	s.handleFleetQueue(rec, localModeReq("/api/fleet/queue?org=org1"))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("nil reader should 503, got %d", rec.Code)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("nil reader should 409 NOT_CONFIGURED, got %d", rec.Code)
 	}
 }

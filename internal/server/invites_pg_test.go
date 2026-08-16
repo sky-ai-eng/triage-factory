@@ -17,6 +17,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // ---------- grantOrgMembership (the TFAC-416 primitive) ----------
@@ -256,21 +257,26 @@ func TestInviteAccept_EmailMismatch_409(t *testing.T) {
 		t.Fatalf("status = %d; want 409 (body=%s)", resp.StatusCode, raw)
 	}
 	var body struct {
-		Error        string `json:"error"`
-		InvitedEmail string `json:"invited_email"`
+		Errors []struct {
+			Reason  string `json:"reason"`
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
 	_ = json.Unmarshal([]byte(raw), &body)
-	if body.InvitedEmail != "someone-else@test" {
-		t.Errorf("invited_email = %q; want someone-else@test", body.InvitedEmail)
+	if len(body.Errors) != 1 || body.Errors[0].Reason != httpx.ReasonInviteEmailMismatch {
+		t.Fatalf("errors = %+v; want one INVITE_EMAIL_MISMATCH item", body.Errors)
+	}
+	if !strings.Contains(body.Errors[0].Message, "someone-else@test") {
+		t.Errorf("message %q; want it to name the invited address", body.Errors[0].Message)
 	}
 	// The actionable message must steer toward the INVITED address, not the
 	// caller's — re-inviting the account they're wrongly signed in as is the
 	// misleading direction.
-	if !strings.Contains(body.Error, "re-invite someone-else@test") {
-		t.Errorf("error message %q; want it to re-invite the invited address", body.Error)
+	if !strings.Contains(body.Errors[0].Message, "re-invite someone-else@test") {
+		t.Errorf("error message %q; want it to re-invite the invited address", body.Errors[0].Message)
 	}
-	if strings.Contains(body.Error, "re-invite "+invitee.String()+"@test") {
-		t.Errorf("error message re-invites the caller's address (misleading): %q", body.Error)
+	if strings.Contains(body.Errors[0].Message, "re-invite "+invitee.String()+"@test") {
+		t.Errorf("error message re-invites the caller's address (misleading): %q", body.Errors[0].Message)
 	}
 	if n := countOrgMemberships(t, r.h, invitee.String(), orgID.String()); n != 0 {
 		t.Errorf("org_memberships = %d; want 0 on mismatch", n)
@@ -560,9 +566,10 @@ func TestInviteCreate_PendingDup_409(t *testing.T) {
 	}
 }
 
-// TestInviteCreate_NonAdmin_404: a plain member can't create invites — 404
-// (non-disclosure), no row.
-func TestInviteCreate_NonAdmin_404(t *testing.T) {
+// TestInviteCreate_NonAdminIsForbidden: a plain member can't create invites —
+// 403 naming the missing role (they can see their own org) rather than 404,
+// and no row.
+func TestInviteCreate_NonAdminIsForbidden(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 	owner := r.seedUser()
@@ -573,8 +580,8 @@ func TestInviteCreate_NonAdmin_404(t *testing.T) {
 
 	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
 		map[string]string{"email": "x@example.com", "role": "member"})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d; want 404 (non-admin); body=%s", resp.StatusCode, readBody(resp))
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d; want 403 (non-admin); body=%s", resp.StatusCode, readBody(resp))
 	}
 }
 

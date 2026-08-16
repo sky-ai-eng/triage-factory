@@ -48,17 +48,19 @@ func TestParseArtifactListOpts(t *testing.T) {
 		t.Errorf("paging = limit %d offset %d, want 10/20", opts.Limit, opts.Offset)
 	}
 
-	// Limit clamps to the max.
-	if opts, _ = parseArtifactListOpts(url.Values{"limit": {"100000"}}); opts.Limit != activityPageMax {
-		t.Errorf("over-max limit = %d, want clamp to %d", opts.Limit, activityPageMax)
-	}
-
-	// Malformed values are rejected.
+	// Malformed values are rejected — including an over-max limit, which used
+	// to clamp: a silently shortened page reads as the end of the feed. So do
+	// filter values outside their closed vocabularies, which used to reach the
+	// store as literals and answer 200 with nothing.
 	for name, q := range map[string]url.Values{
-		"bad_since":       {"since": {"yesterday"}},
-		"inverted_window": {"since": {"2026-06-30"}, "until": {"2026-06-01"}},
-		"zero_limit":      {"limit": {"0"}},
-		"negative_offset": {"offset": {"-1"}},
+		"bad_since":        {"since": {"yesterday"}},
+		"inverted_window":  {"since": {"2026-06-30"}, "until": {"2026-06-01"}},
+		"zero_limit":       {"limit": {"0"}},
+		"over_max_limit":   {"limit": {"100000"}},
+		"negative_offset":  {"offset": {"-1"}},
+		"unknown_provider": {"provider": {"gitlab"}},
+		"unknown_kind":     {"kind": {"pull_requests"}},
+		"unknown_state":    {"state": {"opened"}},
 	} {
 		if _, errMsg := parseArtifactListOpts(q); errMsg == "" {
 			t.Errorf("%s: expected a validation error, got none", name)
@@ -81,23 +83,24 @@ func TestParseExternalActionListOpts(t *testing.T) {
 	}
 
 	opts, errMsg = parseExternalActionListOpts(url.Values{
-		"provider": {"github"}, "action": {"pr_marked_ready"}, "actor": {"u-123"},
+		"provider": {"github"}, "action": {"pr_marked_ready"},
+		"actor": {"9f1d1c2e-0000-4000-8000-00000000abcd"},
 		"since": {"2026-06-01"}, "until": {"2026-06-30"}, "limit": {"10"}, "offset": {"20"},
 	})
 	if errMsg != "" {
 		t.Fatalf("valid query errored: %q", errMsg)
 	}
-	if opts.Provider != "github" || opts.Action != "pr_marked_ready" || opts.ActorUserID != "u-123" {
+	if opts.Provider != "github" || opts.Action != "pr_marked_ready" || opts.ActorUserID != "9f1d1c2e-0000-4000-8000-00000000abcd" {
 		t.Errorf("filters not parsed: %+v", opts)
 	}
 	if !opts.Since.Equal(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)) || opts.Limit != 10 || opts.Offset != 20 {
 		t.Errorf("window/paging not parsed: %+v", opts)
 	}
 
-	if opts, _ = parseExternalActionListOpts(url.Values{"limit": {"100000"}}); opts.Limit != activityPageMax {
-		t.Errorf("over-max limit = %d, want clamp to %d", opts.Limit, activityPageMax)
-	}
 	for name, q := range map[string]url.Values{
+		"over_max_limit":  {"limit": {"100000"}},
+		"unknown_action":  {"action": {"pr_marked_readyy"}},
+		"bad_actor":       {"actor": {"u-123"}},
 		"bad_since":       {"since": {"never"}},
 		"inverted_window": {"since": {"2026-06-30"}, "until": {"2026-06-01"}},
 		"zero_limit":      {"limit": {"0"}},

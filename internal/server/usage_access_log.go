@@ -3,8 +3,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -83,14 +87,15 @@ func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
-		http.NotFound(w, r)
+		notFound(w, "route")
 		return
 	}
 
 	q := r.URL.Query()
-	limit := parseAccessLogLimit(q.Get("limit"))
-	offset := parseAccessLogOffset(q.Get("offset"))
-	category := q.Get("category")
+	limit, offset, category, ok := parseAccessLogParams(w, q)
+	if !ok {
+		return
+	}
 
 	var (
 		rows  []domain.AccessChange
@@ -142,27 +147,49 @@ func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Reque
 
 // --- paging param parsing ---
 
-// parseAccessLogLimit resolves the page size: a missing / malformed / non-positive
-// value falls back to the default, and anything over the cap is clamped down.
-func parseAccessLogLimit(s string) int {
-	n, err := strconv.Atoi(s)
-	if err != nil || n <= 0 {
-		return accessLogDefaultLimit
+// parseAccessLogParams parses the access log's three query parameters under the
+// strict-params contract, writing the error and returning ok=false on the first
+// fault. Absent means the default; present must parse, sit in range, and — for
+// category — name a bucket the store knows. It used to default a malformed
+// limit/offset silently and pass an unknown category straight through to a
+// filter that matched nothing, so a typo returned an authoritative-looking
+// empty log while the sibling activity feed 400'd the same input.
+func parseAccessLogParams(w http.ResponseWriter, q url.Values) (limit, offset int, category string, ok bool) {
+	limit = accessLogDefaultLimit
+	if s := strings.TrimSpace(q.Get("limit")); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 {
+			writeBadActivityParam(w, "invalid 'limit': want a positive integer")
+			return 0, 0, "", false
+		}
+		if n > accessLogMaxLimit {
+			writeBadActivityParam(w, fmt.Sprintf("'limit' must be at most %d", accessLogMaxLimit))
+			return 0, 0, "", false
+		}
+		limit = n
 	}
-	if n > accessLogMaxLimit {
-		return accessLogMaxLimit
+	if s := strings.TrimSpace(q.Get("offset")); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			writeBadActivityParam(w, "invalid 'offset': want a non-negative integer")
+			return 0, 0, "", false
+		}
+		offset = n
 	}
-	return n
+	category = strings.TrimSpace(q.Get("category"))
+	if category != "" && !slices.Contains(accessLogCategories, category) {
+		writeBadActivityParam(w, "invalid 'category': want one of "+strings.Join(accessLogCategories, ", "))
+		return 0, 0, "", false
+	}
+	return limit, offset, category, true
 }
 
-// parseAccessLogOffset resolves the row offset: a missing / malformed / negative
-// value is the first page (0).
-func parseAccessLogOffset(s string) int {
-	n, err := strconv.Atoi(s)
-	if err != nil || n < 0 {
-		return 0
-	}
-	return n
+// accessLogCategories is the closed ?category= vocabulary — the buckets
+// domain.AccessChangeListOpts knows how to narrow to.
+var accessLogCategories = []string{
+	domain.AccessCategoryMembership,
+	domain.AccessCategoryCredential,
+	domain.AccessCategoryPolicy,
 }
 
 // --- name resolution (N+1 over the small distinct-id sets; the page is bounded) ---

@@ -791,15 +791,6 @@ export interface AcceptInviteResponse {
   org_id: string
 }
 
-/** The body the accept endpoint returns on the 409 wrong-identity case: the
- *  recipient is signed in as someone other than the invited address. Carries
- *  the actionable message plus the address the invite was sent to so the page
- *  can offer "log out and sign in as {invited_email}". */
-export interface AcceptInviteMismatch {
-  error: string
-  invited_email: string
-}
-
 /* ── SSO (multi-org SAML via GoTrue, epic TFAC-422) ──────────────────────────
  *  Wire shapes for the per-org "Configure SSO" admin surface (TFAC-429), which
  *  consumes the connection (TFAC-424) and domain (TFAC-428) endpoints. Multi-

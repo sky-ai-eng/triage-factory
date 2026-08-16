@@ -32,6 +32,12 @@ const (
 	ReasonNotConfigured   = "NOT_CONFIGURED" // a required integration isn't set up
 	ReasonVersionConflict = "VERSION_CONFLICT"
 
+	// The invite the caller holds was addressed to a different email than the
+	// one they are signed in as. Its own code because the client's response is
+	// not "try again" but "sign in as someone else" — the address itself is in
+	// the message, which names both sides.
+	ReasonInviteEmailMismatch = "INVITE_EMAIL_MISMATCH"
+
 	// 422-class: well-formed but semantically invalid for this data.
 	ReasonOutOfRange   = "OUT_OF_RANGE"
 	ReasonCrossTeamRef = "CROSS_TEAM_REF"

@@ -8,13 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // usageHandler serves the core Usage page's spend layer (TFAC-478): three
@@ -208,11 +207,10 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	teamID := r.PathValue("team_id")
-	if _, err := uuid.Parse(teamID); err != nil {
-		// A malformed id is "not found" (parity with the team handlers), not a
-		// role failure — don't let it surface as a 500 from a uuid cast.
-		http.NotFound(w, r)
+	// A malformed id is "not found" (parity with the team handlers), not a
+	// role failure — don't let it surface as a 500 from a uuid cast.
+	teamID, ok := uuidPathOr404(w, r, "team_id", "team")
+	if !ok {
 		return
 	}
 	// Confirm the team is in the caller's org first so a cross-org id 404s
@@ -384,16 +382,15 @@ func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request
 	// any role-based disclosure. Mode-agnostic — local is unlicensed, so the
 	// route 404s there too (per-team caps are a multi-tenant EE concept).
 	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
-		http.NotFound(w, r)
+		notFound(w, "route")
 		return
 	}
 	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
-	teamID := r.PathValue("team_id")
-	if _, err := uuid.Parse(teamID); err != nil {
-		// A malformed id is "not found" (parity with handleUsageTeam), not a 500.
-		http.NotFound(w, r)
+	// A malformed id is "not found" (parity with handleUsageTeam), not a 500.
+	teamID, ok := uuidPathOr404(w, r, "team_id", "team")
+	if !ok {
 		return
 	}
 	// Confirm the team is in the caller's org so a cross-org id 404s (non-
@@ -409,7 +406,7 @@ func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request
 	}
 
 	var req teamCapUpdate
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	capUSD := 0.0
@@ -478,7 +475,7 @@ func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Reques
 	}
 	// EE gate first (404 unlicensed), then org admin (403) — mirrors the PUT.
 	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
-		http.NotFound(w, r)
+		notFound(w, "route")
 		return
 	}
 	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {

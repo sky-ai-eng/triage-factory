@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // The /usage activity feed (TFAC-483) is the EE governance surface, behind
@@ -42,6 +45,15 @@ import (
 // Unlicensed builds (local mode included) 404, agreeing with the FE
 // useEntitlements gate that hides the surface entirely.
 
+// writeBadActivityParam answers a rejected activity-feed query parameter. The
+// parsers already name the offending param in their message; this attaches the
+// param reason so the client can tell a filter fault from a body fault.
+func writeBadActivityParam(w http.ResponseWriter, msg string) {
+	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		Reason: httpx.ReasonInvalidParam, Message: msg,
+	})
+}
+
 // activity feed lens selector. ?view=actions selects the external-action log;
 // anything else (the default) selects the artifacts head.
 const (
@@ -49,11 +61,28 @@ const (
 	viewActions = "actions"
 )
 
-func activityView(r *http.Request) string {
-	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("view")), viewActions) {
-		return viewActions
+// activityView resolves ?view=, rejecting anything outside the vocabulary. It
+// used to fall through to the objects lens for every unrecognized value, so a
+// typo silently answered with a different resource than the caller asked for.
+// Absent means the default; present must be exact (no case folding — a value
+// the API doesn't publish is not a value it accepts).
+func activityView(w http.ResponseWriter, r *http.Request) (string, bool) {
+	raw, present := r.URL.Query()["view"]
+	if !present {
+		return viewObjects, true
 	}
-	return viewObjects
+	if len(raw) == 1 {
+		switch raw[0] {
+		case viewObjects, viewActions:
+			return raw[0], true
+		}
+	}
+	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		Reason:  httpx.ReasonInvalidParam,
+		Message: "view must be one of: " + viewObjects + ", " + viewActions,
+		Field:   "view",
+	})
+	return "", false
 }
 
 // activity feed page sizing. Limit defaults to activityPageDefault and is
@@ -90,11 +119,10 @@ func (h *usageHandler) handleUsageTeamActivity(w http.ResponseWriter, r *http.Re
 	if !requireGovernance(w, r, orgID) {
 		return
 	}
-	teamID := r.PathValue("team_id")
-	if _, err := uuid.Parse(teamID); err != nil {
-		// A malformed id is "not found" (parity with handleUsageTeam), not a role
-		// failure — don't surface it as a 500 from a uuid cast downstream.
-		http.NotFound(w, r)
+	// A malformed id is "not found" (parity with handleUsageTeam), not a role
+	// failure — don't surface it as a 500 from a uuid cast downstream.
+	teamID, ok := uuidPathOr404(w, r, "team_id", "team")
+	if !ok {
 		return
 	}
 	// Confirm the team is in the caller's org first so a cross-org id 404s cleanly
@@ -108,14 +136,18 @@ func (h *usageHandler) handleUsageTeamActivity(w http.ResponseWriter, r *http.Re
 
 	// Actions lens (the append-only external-action log) vs Objects lens (the
 	// artifacts head, below). Same gates; different source + row shape.
-	if activityView(r) == viewActions {
+	view, ok := activityView(w, r)
+	if !ok {
+		return
+	}
+	if view == viewActions {
 		h.handleTeamActionsActivity(w, r, orgID, userID, teamID)
 		return
 	}
 
 	opts, errMsg := parseArtifactListOpts(r.URL.Query())
 	if errMsg != "" {
-		badRequest(w, errMsg)
+		writeBadActivityParam(w, errMsg)
 		return
 	}
 
@@ -158,14 +190,18 @@ func (h *usageHandler) handleUsageOrgActivity(w http.ResponseWriter, r *http.Req
 
 	// Actions lens (the append-only external-action log) vs Objects lens (the
 	// artifacts head, below). Same org-admin gate; different source + row shape.
-	if activityView(r) == viewActions {
+	view, ok := activityView(w, r)
+	if !ok {
+		return
+	}
+	if view == viewActions {
 		h.handleOrgActionsActivity(w, r, orgID, userID)
 		return
 	}
 
 	opts, errMsg := parseArtifactListOpts(r.URL.Query())
 	if errMsg != "" {
-		badRequest(w, errMsg)
+		writeBadActivityParam(w, errMsg)
 		return
 	}
 
@@ -207,7 +243,7 @@ func (h *usageHandler) handleUsageOrgActivity(w http.ResponseWriter, r *http.Req
 // reached in a licensed multi deploy.
 func requireGovernance(w http.ResponseWriter, r *http.Request, orgID string) bool {
 	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
-		http.NotFound(w, r)
+		notFound(w, "route")
 		return false
 	}
 	return true
@@ -240,7 +276,7 @@ func (h *usageHandler) requireTeamOrOrgAdmin(w http.ResponseWriter, r *http.Requ
 	if isOrgAdmin {
 		return true
 	}
-	writeJSON(w, http.StatusForbidden, map[string]string{"error": "team admin or org admin role required"})
+	forbidden(w, "team admin or org admin role required")
 	return false
 }
 
@@ -286,6 +322,21 @@ func parseArtifactListOpts(q url.Values) (db.ArtifactListOpts, string) {
 		Kind:     strings.TrimSpace(q.Get("kind")),
 		State:    strings.TrimSpace(q.Get("state")),
 	}
+	// Closed vocabularies: an unrecognized filter used to reach the store as a
+	// literal, matching nothing, and answer 200 with an empty page — a typo
+	// that reads exactly like "your bot did nothing".
+	for _, f := range []struct {
+		name, value string
+		vocab       []string
+	}{
+		{"provider", opts.Provider, domain.ArtifactProviders()},
+		{"kind", opts.Kind, domain.ArtifactKinds()},
+		{"state", opts.State, domain.ArtifactStates()},
+	} {
+		if f.value != "" && !slices.Contains(f.vocab, f.value) {
+			return db.ArtifactListOpts{}, "invalid '" + f.name + "': want one of " + strings.Join(f.vocab, ", ")
+		}
+	}
 	if s := strings.TrimSpace(q.Get("since")); s != "" {
 		t, err := parseUsageTime(s)
 		if err != nil {
@@ -311,7 +362,9 @@ func parseArtifactListOpts(q url.Values) (db.ArtifactListOpts, string) {
 			return db.ArtifactListOpts{}, "invalid 'limit': want a positive integer"
 		}
 		if n > activityPageMax {
-			n = activityPageMax
+			// Rejected, not clamped: a silently shortened page reads as the
+			// end of the feed.
+			return db.ArtifactListOpts{}, fmt.Sprintf("'limit' must be at most %d", activityPageMax)
 		}
 		opts.Limit = n
 	}
@@ -385,7 +438,7 @@ func toActionJSON(a domain.ExternalAction) actionJSON {
 func (h *usageHandler) handleTeamActionsActivity(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) {
 	opts, errMsg := parseExternalActionListOpts(r.URL.Query())
 	if errMsg != "" {
-		badRequest(w, errMsg)
+		writeBadActivityParam(w, errMsg)
 		return
 	}
 	var (
@@ -422,7 +475,7 @@ func (h *usageHandler) handleTeamActionsActivity(w http.ResponseWriter, r *http.
 func (h *usageHandler) handleOrgActionsActivity(w http.ResponseWriter, r *http.Request, orgID, userID string) {
 	opts, errMsg := parseExternalActionListOpts(r.URL.Query())
 	if errMsg != "" {
-		badRequest(w, errMsg)
+		writeBadActivityParam(w, errMsg)
 		return
 	}
 	var (
@@ -519,6 +572,18 @@ func parseExternalActionListOpts(q url.Values) (domain.ExternalActionListOpts, s
 		Action:      strings.TrimSpace(q.Get("action")),
 		ActorUserID: strings.TrimSpace(q.Get("actor")),
 	}
+	// Same closed-vocabulary rule as the objects lens.
+	if opts.Provider != "" && !slices.Contains(domain.ArtifactProviders(), opts.Provider) {
+		return domain.ExternalActionListOpts{}, "invalid 'provider': want one of " + strings.Join(domain.ArtifactProviders(), ", ")
+	}
+	if opts.Action != "" && !slices.Contains(domain.ExternalActionTypes(), opts.Action) {
+		return domain.ExternalActionListOpts{}, "invalid 'action': not a known action type"
+	}
+	if opts.ActorUserID != "" {
+		if _, err := uuid.Parse(opts.ActorUserID); err != nil {
+			return domain.ExternalActionListOpts{}, "invalid 'actor': want a user id"
+		}
+	}
 	if s := strings.TrimSpace(q.Get("since")); s != "" {
 		t, err := parseUsageTime(s)
 		if err != nil {
@@ -542,7 +607,7 @@ func parseExternalActionListOpts(q url.Values) (domain.ExternalActionListOpts, s
 			return domain.ExternalActionListOpts{}, "invalid 'limit': want a positive integer"
 		}
 		if n > activityPageMax {
-			n = activityPageMax
+			return domain.ExternalActionListOpts{}, fmt.Sprintf("'limit' must be at most %d", activityPageMax)
 		}
 		opts.Limit = n
 	}

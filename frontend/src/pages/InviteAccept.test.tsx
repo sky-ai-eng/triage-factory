@@ -114,9 +114,13 @@ describe('InviteAccept', () => {
         throw new HttpError(
           409,
           JSON.stringify({
-            error:
-              'This invitation was sent to bob@example.com, but you are signed in as me@example.com.',
-            invited_email: 'bob@example.com',
+            errors: [
+              {
+                reason: 'INVITE_EMAIL_MISMATCH',
+                message:
+                  'This invitation was sent to bob@example.com, but you are signed in as me@example.com.',
+              },
+            ],
           }),
         )
       throw new Error('unexpected path: ' + path)
@@ -128,7 +132,9 @@ describe('InviteAccept', () => {
     expect(
       await screen.findByText(/this invitation was sent to bob@example.com/i),
     ).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /log out and sign in as bob@example.com/i }))
+    fireEvent.click(
+      screen.getByRole('button', { name: /log out and sign in with the invited account/i }),
+    )
 
     await waitFor(() => expect(logout).toHaveBeenCalled())
     expect(window.location.href).toContain('/api/auth/oauth/github')

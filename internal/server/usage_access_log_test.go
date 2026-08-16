@@ -1,7 +1,10 @@
 package server
 
 import (
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -241,36 +244,56 @@ func TestAccessChangeLabel(t *testing.T) {
 	}
 }
 
-func TestParseAccessLogPaging(t *testing.T) {
-	limits := []struct {
-		in   string
-		want int
+// TestParseAccessLogParams pins the strict-params contract on the access log:
+// absent means the default, anything present must parse and sit in range, and
+// an unknown category is a rejected request rather than a filter that matches
+// nothing. Previously every one of the rejected rows silently defaulted.
+func TestParseAccessLogParams(t *testing.T) {
+	ok := []struct {
+		name          string
+		q             url.Values
+		limit, offset int
+		category      string
 	}{
-		{"", accessLogDefaultLimit},
-		{"0", accessLogDefaultLimit},
-		{"-5", accessLogDefaultLimit},
-		{"abc", accessLogDefaultLimit},
-		{"10", 10},
-		{"9999", accessLogMaxLimit},
+		{"defaults", url.Values{}, accessLogDefaultLimit, 0, ""},
+		{"explicit", url.Values{"limit": {"10"}, "offset": {"5"}}, 10, 5, ""},
+		{"category", url.Values{"category": {domain.AccessCategoryPolicy}}, accessLogDefaultLimit, 0, domain.AccessCategoryPolicy},
 	}
-	for _, tc := range limits {
-		if got := parseAccessLogLimit(tc.in); got != tc.want {
-			t.Errorf("parseAccessLogLimit(%q) = %d, want %d", tc.in, got, tc.want)
-		}
+	for _, tc := range ok {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			limit, offset, category, good := parseAccessLogParams(rec, tc.q)
+			if !good {
+				t.Fatalf("parse rejected %v: %s", tc.q, rec.Body.String())
+			}
+			if limit != tc.limit || offset != tc.offset || category != tc.category {
+				t.Errorf("= (%d, %d, %q), want (%d, %d, %q)", limit, offset, category, tc.limit, tc.offset, tc.category)
+			}
+		})
 	}
-	offsets := []struct {
-		in   string
-		want int
+	bad := []struct {
+		name string
+		q    url.Values
 	}{
-		{"", 0},
-		{"-1", 0},
-		{"abc", 0},
-		{"5", 5},
+		{"limit zero", url.Values{"limit": {"0"}}},
+		{"limit negative", url.Values{"limit": {"-5"}}},
+		{"limit unparseable", url.Values{"limit": {"abc"}}},
+		{"limit over cap", url.Values{"limit": {"9999"}}},
+		{"offset negative", url.Values{"offset": {"-1"}}},
+		{"offset unparseable", url.Values{"offset": {"abc"}}},
+		{"unknown category", url.Values{"category": {"membershipp"}}},
 	}
-	for _, tc := range offsets {
-		if got := parseAccessLogOffset(tc.in); got != tc.want {
-			t.Errorf("parseAccessLogOffset(%q) = %d, want %d", tc.in, got, tc.want)
-		}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			if _, _, _, good := parseAccessLogParams(rec, tc.q); good {
+				t.Fatalf("parse accepted %v, want a rejection", tc.q)
+			}
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rec.Code)
+			}
+			assertFirstError(t, rec, httpx.ReasonInvalidParam, "")
+		})
 	}
 }
 
@@ -367,14 +390,16 @@ func TestUsageAccessLog_Local(t *testing.T) {
 		}
 	})
 
-	t.Run("unrecognized_category_is_no_filter", func(t *testing.T) {
-		// The handler passes q.Get("category") straight through; an unknown value
-		// must fall back to "no filter" (every row), not an empty page.
-		var resp accessLogResponse
-		doUsage(t, s, "/api/usage/org/access-log?category=bogus", &resp)
-		if len(resp.Items) != 4 {
-			t.Fatalf("category=bogus items = %d, want all 4 (no filter): %+v", len(resp.Items), resp.Items)
+	t.Run("unrecognized_category_is_rejected", func(t *testing.T) {
+		// An unknown category used to fall through as "no filter", so a typo
+		// answered with every row and looked like a working filter. It is a
+		// closed vocabulary now: reject rather than guess which reading the
+		// caller meant.
+		rec := doJSON(t, s, http.MethodGet, "/api/usage/org/access-log?category=bogus", nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("category=bogus = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
+		assertFirstError(t, rec, httpx.ReasonInvalidParam, "")
 	})
 
 	t.Run("paging_with_limit_offset_and_has_more", func(t *testing.T) {
