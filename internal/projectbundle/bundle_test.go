@@ -361,14 +361,15 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	}
 
 	// The imported pin must be tracked for the importing team, not just
-	// upserted into repositories. repositories is a derived cache of
-	// team_github_repos, and the router team↔repo gate keys off the
-	// tracking table — without this row the team's handlers are dropped
-	// for the repo and polled events create no tasks until the user
+	// brought into the repository registry. The router team↔repo gate keys
+	// off the tracking table — without this row the team's handlers are
+	// dropped for the repo and polled events create no tasks until the user
 	// re-saves the selection.
 	var tracked int
-	if err := targetDB.QueryRow(
-		`SELECT count(*) FROM team_github_repos WHERE team_id = ? AND owner = ? AND repo = ?`,
+	if err := targetDB.QueryRow(`
+		SELECT count(*) FROM team_github_repos g
+		JOIN repositories r ON r.id = g.repository_id
+		WHERE g.team_id = ? AND r.owner = ? AND r.repo = ?`,
 		runmode.LocalDefaultTeamID, "sky-ai-eng", "triage-factory",
 	).Scan(&tracked); err != nil {
 		t.Fatalf("team_github_repos lookup: %v", err)

@@ -22,10 +22,9 @@ import (
 // if one repo's bare clone is busted or its branch was renamed. The
 // agent will see whichever subset of repos materialized successfully.
 //
-// pinned_repos is validated at the API layer to require a row in
-// repositories (validatePinnedRepos), so a missing profile here
-// indicates a race: the user removed the repo from configured-repos
-// AFTER pinning. Same handling — log + skip.
+// A pin is validated at the API layer to name a repo the team tracks
+// (validatePinnedRepos), so a missing profile here indicates a race: the user
+// untracked the repo AFTER pinning it. Same handling — log + skip.
 //
 // authFor resolves the host-side fetch credential for a pinned repo, given its
 // owner and clone URL. On the executor path it routes through the turn

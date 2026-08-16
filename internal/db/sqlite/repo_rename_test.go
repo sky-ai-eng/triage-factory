@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"database/sql"
+	"sort"
 	"testing"
 
 	"github.com/google/uuid"
@@ -41,6 +42,10 @@ func TestRepoRename_SQLite(t *testing.T) {
 				}
 				return n
 			},
+			ReferenceRows: func(t *testing.T) []string {
+				t.Helper()
+				return sqliteCategoryAReferences(t, conn)
+			},
 		}
 		return stores, runmode.LocalDefaultOrgID, seed
 	})
@@ -66,4 +71,39 @@ func seedSQLiteTaskForRename(t *testing.T, conn *sql.DB, entityID, suffix string
 		t.Fatalf("seed task: %v", err)
 	}
 	return taskID
+}
+
+// sqliteCategoryAReferences reads the raw stored repository reference out of
+// each table that carries one, so the rename suite can assert none of them
+// moved. Raw SQL on purpose: a store read would resolve the id back to a slug,
+// which is exactly the layer that would hide a rewrite.
+func sqliteCategoryAReferences(t *testing.T, conn *sql.DB) []string {
+	t.Helper()
+	queries := []struct{ label, query string }{
+		{"team_github_repos", `SELECT team_id || '|' || repository_id FROM team_github_repos`},
+		{"conversation_worktrees", `SELECT conversation_id || '|' || repository_id || '|' || ref FROM conversation_worktrees`},
+		{"project_pinned_repos", `SELECT project_id || '|' || repository_id || '|' || position FROM project_pinned_repos`},
+	}
+	var out []string
+	for _, q := range queries {
+		rows, err := conn.Query(q.query)
+		if err != nil {
+			t.Fatalf("read %s references: %v", q.label, err)
+		}
+		for rows.Next() {
+			var row string
+			if err := rows.Scan(&row); err != nil {
+				rows.Close()
+				t.Fatalf("scan %s reference: %v", q.label, err)
+			}
+			out = append(out, q.label+":"+row)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			t.Fatalf("read %s references: %v", q.label, err)
+		}
+		rows.Close()
+	}
+	sort.Strings(out)
+	return out
 }

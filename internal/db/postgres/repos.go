@@ -119,6 +119,46 @@ func (s *repoStore) GetOrCreateSystem(ctx context.Context, orgID string, ref dom
 	return getOrCreateRepository(ctx, s.admin, orgID, ref)
 }
 
+// getOrCreateRepositoryID returns the surrogate id of one repository's registry
+// row, minting the row if it does not exist yet. It is the resolver every
+// reference site uses: a caller holding a slug — a tracked-set save, a worktree
+// reservation, a pinned project — needs the id the FK points at, and the store
+// contract keeps the surrogate out of domain.Repository.
+func getOrCreateRepositoryID(ctx context.Context, q queryer, orgID string, ref domain.RepoRef) (string, error) {
+	if _, err := getOrCreateRepository(ctx, q, orgID, ref); err != nil {
+		return "", err
+	}
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return "", err
+	}
+	id, err := findRepositoryID(ctx, q, orgID, source, ref.Owner, ref.Repo)
+	if err != nil {
+		return "", err
+	}
+	if id == "" {
+		return "", fmt.Errorf("repositories row for %s vanished immediately after create", ref.Slug())
+	}
+	return id, nil
+}
+
+// findRepositoryID resolves a slug to the registry row's surrogate id, or "" if
+// no row holds that slug. Case-INSENSITIVE, like every other slug lookup here.
+func findRepositoryID(ctx context.Context, q queryer, orgID, source, owner, repo string) (string, error) {
+	var id string
+	err := q.QueryRowContext(ctx, `
+		SELECT id FROM repositories
+		 WHERE org_id = $1 AND source = $2 AND lower(owner) = lower($3) AND lower(repo) = lower($4)
+	`, orgID, source, owner, repo).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // getOrCreateRepository is the store method's body, taking a queryer so it
 // composes inside a caller's transaction. Its create half is
 // insertRepositoryRow, which the tracked-set reconcile in
@@ -269,12 +309,15 @@ func listRepositories(ctx context.Context, q queryer, orgID string) ([]domain.Re
 // caller's memberships, so the EXISTS auto-scopes with no explicit team_id.
 // The teams join binds org (rp.org_id) as defense-in-depth for the admin
 // pool, where team_github_repos carries no org_id column of its own.
+//
+// The match is on the row id rather than a folded slug comparison, so it is an
+// index lookup on team_github_repos_repository_idx and cannot disagree with
+// the registry about what "the same repository" means.
 const repoProfileTrackedByViewerTeams = `EXISTS (
 	SELECT 1 FROM team_github_repos g
 	JOIN teams tm ON tm.id = g.team_id
 	WHERE tm.org_id = rp.org_id
-	  AND lower(g.owner) = lower(rp.owner)
-	  AND lower(g.repo) = lower(rp.repo)
+	  AND g.repository_id = rp.id
 )`
 
 func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string) ([]domain.Repository, error) {
@@ -408,8 +451,29 @@ func (s *repoStore) ListConfiguredNames(ctx context.Context, orgID string) ([]st
 	return listConfiguredRepoNames(ctx, s.q, orgID)
 }
 
-func (s *repoStore) ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error) {
-	return listConfiguredRepoNames(ctx, s.admin, orgID)
+func (s *repoStore) ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT DISTINCT rp.owner || '/' || rp.repo
+		  FROM repositories rp
+		  JOIN team_github_repos g ON g.repository_id = rp.id
+		  JOIN teams tm ON tm.id = g.team_id AND tm.org_id = rp.org_id
+		 WHERE rp.org_id = $1
+		 ORDER BY 1
+	`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }
 
 func listConfiguredRepoNames(ctx context.Context, q queryer, orgID string) ([]string, error) {

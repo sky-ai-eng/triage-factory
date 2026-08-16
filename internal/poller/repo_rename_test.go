@@ -110,7 +110,7 @@ func (s *renamePollStore) RenameSystem(_ context.Context, _ string, observed dom
 	return domain.RepoRenameOutcome{Renamed: true, From: "octo/api", To: observed.Slug()}, nil
 }
 
-func (s *renamePollStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
+func (s *renamePollStore) ListTrackedNamesSystem(context.Context, string) ([]string, error) {
 	if s.configuredErr != nil {
 		return nil, s.configuredErr
 	}

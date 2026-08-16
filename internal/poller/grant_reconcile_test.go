@@ -80,9 +80,7 @@ func TestRunGitHubCycleForOrg_GrantReconcileFailureDoesNotSkipThePoll(t *testing
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, []string{"octo/repo"})
 
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)

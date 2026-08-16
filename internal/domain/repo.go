@@ -45,6 +45,15 @@ type RepoRef struct {
 // column and store method uses.
 func (r RepoRef) Slug() string { return r.Owner + "/" + r.Repo }
 
+// RepoRefFromSlug is Slug's inverse: it splits "owner/repo" at the first
+// slash. A string with no slash yields an empty Repo, which every caller reads
+// as "not a repository reference" rather than as a repository named by half a
+// slug.
+func RepoRefFromSlug(slug string) RepoRef {
+	owner, repo, _ := strings.Cut(slug, "/")
+	return RepoRef{Owner: owner, Repo: repo}
+}
+
 // Repository is one row of the repository registry: the repositories TF works
 // with, each carrying the provider identity that survives a rename, the
 // tracked-set membership the reconcile writes, the clone state, the poller's

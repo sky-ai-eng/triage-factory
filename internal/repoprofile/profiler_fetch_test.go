@@ -122,7 +122,7 @@ type fetchRepositoryStore struct {
 	upserts []domain.Repository
 }
 
-func (s *fetchRepositoryStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
+func (s *fetchRepositoryStore) ListTrackedNamesSystem(context.Context, string) ([]string, error) {
 	return s.names, nil
 }
 

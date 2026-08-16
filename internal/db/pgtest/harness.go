@@ -451,7 +451,7 @@ var orgScopedTables = []string{
 	"task_events", "tasks",
 	"event_handlers",
 	"events", "entity_links", "entities",
-	"project_knowledge", "projects",
+	"project_knowledge", "project_pinned_repos", "projects",
 	"repositories", "poller_state",
 	"prompts",
 	// marketplace_listings cascades into its version/event/vote/install

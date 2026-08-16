@@ -195,8 +195,8 @@ func TestAuthorCentric_ProjectOwned_OwnerIsProjectTeam(t *testing.T) {
 	st := sqlitestore.New(database)
 	projectID := "proj-" + teamProject[:8]
 	if _, err := database.Exec(`
-		INSERT INTO projects (id, name, pinned_repos, org_id, team_id, creator_user_id, visibility, created_at, updated_at)
-		VALUES (?, 'Proj', '[]', ?, ?, ?, 'team', datetime('now'), datetime('now'))
+		INSERT INTO projects (id, name, org_id, team_id, creator_user_id, visibility, created_at, updated_at)
+		VALUES (?, 'Proj', ?, ?, ?, 'team', datetime('now'), datetime('now'))
 	`, projectID, runmode.LocalDefaultOrgID, teamProject, runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("create project: %v", err)
 	}

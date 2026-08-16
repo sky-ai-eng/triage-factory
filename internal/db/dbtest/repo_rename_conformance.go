@@ -39,6 +39,15 @@ type RepoRenameSeeder struct {
 	// CountTasks returns how many task rows the org has. The rename must not
 	// move this number in either direction.
 	CountTasks func(t *testing.T) int
+
+	// ReferenceRows returns every category-A repository reference the org
+	// holds, as the rows actually store them: the registry row id each of
+	// team_github_repos, conversation_worktrees and project_pinned_repos
+	// points at, tagged by table and sorted. It is deliberately raw — the
+	// point is to observe the stored value rather than the slug a store read
+	// would resolve it back to, because a rename that rewrote one of these
+	// would still read back correctly and only this snapshot would notice.
+	ReferenceRows func(t *testing.T) []string
 }
 
 // oldSlug/newSlug are the rename under test throughout. neighbourSlug shares
@@ -490,39 +499,26 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 	})
 
-	t.Run("Rename_absorbs_an_orphaned_reference_to_the_target_slug", func(t *testing.T) {
-		// A reference can outlive the repository row it named — a placement
-		// pin is a bare string an admin typed, and dropping a repository from
-		// the tracked set deletes its row without reaping what pointed at it.
-		// Such a reference collides with the move on a primary key, and the
+	t.Run("Rename_absorbs_an_orphaned_placement_pin_on_the_target_slug", func(t *testing.T) {
+		// A placement pin is a bare string an admin typed into a polymorphic
+		// column, so it can name a repository nothing else has a row for. Such
+		// a pin collides with the move on the override's own key, and the
 		// repository-row guard above has already proved it is an orphan, so
 		// the move absorbs it. The alternative is a rename that fails forever
 		// over a row nothing points at.
+		//
+		// This case is down to placement pins alone. The tracked set, the
+		// worktree ledger and a project's pinned repos reference the registry
+		// row by id now, so "a reference to a repository with no row" is not a
+		// state any of them can reach — the foreign key is what refuses it,
+		// rather than a rewrite having to clean up after it.
 		s, orgID, seed := mk(t)
 		fx := seedRenameFixture(t, s, orgID, seed, "orphan")
 
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, []domain.TeamGitHubRepo{
-			{Owner: "octo", Repo: "api"},
-			{Owner: "octo", Repo: "api-gateway"},
-			{Owner: "octo", Repo: "platform-api"},
-		}); err != nil {
-			t.Fatalf("seed target tracking: %v", err)
-		}
-		if _, _, err := s.RunWorktrees.Insert(ctx, orgID, domain.RunWorktree{
-			RunID: fx.conversationID, RepoID: renameNewSlug, Ref: "pr-18",
-			Path: "/tmp/wt/" + fx.conversationID + "/octo/platform-api/pr-18",
-		}); err != nil {
-			t.Fatalf("seed target worktree: %v", err)
-		}
 		if err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
 			OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: renameNewSlug, Replicas: 9,
 		}); err != nil {
 			t.Fatalf("seed target placement override: %v", err)
-		}
-		// Orphan them: drop the target's repository row, leaving every
-		// reference to it behind.
-		if err := s.Repos.SetConfigured(ctx, orgID, []string{renameOldSlug, renameNeighbourSlug}); err != nil {
-			t.Fatalf("orphan the target references: %v", err)
 		}
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
@@ -535,26 +531,53 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Fatalf("outcome = %+v, want the rename to go through", out)
 		}
 
-		tracked, err := s.TeamGitHubRepos.ListForTeamSystem(ctx, seed.TeamID)
-		if err != nil {
-			t.Fatalf("ListForTeamSystem: %v", err)
-		}
-		if got := trackedSlugs(tracked); !sameSet(got, []string{renameNewSlug, renameNeighbourSlug}) {
-			t.Errorf("tracked set = %v, want the orphan absorbed into the moved row", got)
-		}
-		worktrees, err := s.RunWorktrees.ListSystem(ctx, orgID, fx.conversationID)
-		if err != nil {
-			t.Fatalf("worktrees ListSystem: %v", err)
-		}
-		if len(worktrees) != 1 || worktrees[0].RepoID != renameNewSlug {
-			t.Errorf("worktree ledger = %+v, want one row at %s", worktrees, renameNewSlug)
-		}
 		ov, err := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, renameNewSlug)
 		if err != nil || ov == nil {
 			t.Fatalf("PlacementOverrides.Get(new) = %v, %v; want the moved pin", ov, err)
 		}
 		if ov.Replicas != 3 {
 			t.Errorf("placement replicas = %d, want 3 — the LIVE repository's pin wins, not the orphan's", ov.Replicas)
+		}
+	})
+
+	t.Run("Rename_rewrites_no_row_that_references_the_repository_by_id", func(t *testing.T) {
+		// The inverse of the rewrite case above, and the proof the conversion
+		// did its job. Every reference in category A — the tracked set, the
+		// worktree ledger, a project's pinned repos — points at the registry
+		// row's id, so a rename must move the slug on that one row and leave
+		// all three byte-identical. If any of them still stored a slug, the
+		// snapshot would differ and this would fail.
+		s, orgID, seed := mk(t)
+		fx := seedRenameFixture(t, s, orgID, seed, "byid")
+
+		before := seed.ReferenceRows(t)
+		if len(before) == 0 {
+			t.Fatal("the fixture produced no repository references to snapshot")
+		}
+
+		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
+		})
+		if err != nil {
+			t.Fatalf("RenameSystem: %v", err)
+		}
+		if !out.Renamed {
+			t.Fatalf("outcome = %+v, want the rename to go through", out)
+		}
+
+		after := seed.ReferenceRows(t)
+		if !equalStringSlice(before, after) {
+			t.Errorf("references changed across the rename:\n before = %v\n after  = %v\nnothing that references a repository by id may move", before, after)
+		}
+
+		// And the references still resolve — to the new name, without having
+		// been touched.
+		tracked, err := s.TeamGitHubRepos.ListForTeamSystem(ctx, seed.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if got := trackedSlugs(tracked); !sameSet(got, []string{renameNewSlug, renameNeighbourSlug}) {
+			t.Errorf("tracked set = %v, want it resolving to the new slug unrewritten", got)
 		}
 	})
 

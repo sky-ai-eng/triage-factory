@@ -42,8 +42,16 @@ var (
 	ErrRepoIdentityAmbiguous = errors.New("more than one repository row carries this provider id")
 )
 
-// RepositoryStore owns the repositories table — the user-configured GitHub
-// repos plus their AI-generated profile cache and clone-attempt state.
+// RepositoryStore owns the repositories table — the registry of repositories
+// TF works with, each carrying the provider identity a rename does not move,
+// the AI-generated profile cache, the clone-attempt state and the poller's
+// conditional-request cursor.
+//
+// The registry is not the tracked set. A row is created when a repository is
+// first tracked and survives the last team untracking it, because
+// team_github_repos, conversation_worktrees and project_pinned_repos all
+// reference this row by id and a reference must not outlive what it names.
+// ListTrackedNamesSystem is the read that means "what does TF poll".
 //
 // All methods take orgID; local mode passes runmode.LocalDefaultOrgID.
 // Postgres impl filters on org_id alongside the
@@ -55,13 +63,12 @@ var (
 //
 // The store API surfaces every repo by its natural "owner/repo"
 // string as repoID — that's what callers pass and what
-// domain.Repository.ID returns. SQLite stores that string directly
-// in the id column. Postgres uses a synthetic uuid id internally
-// plus a UNIQUE(org_id, source, owner, repo) natural key; the
-// Postgres impl splits the passed-in "owner/repo" and queries by
-// (org_id, owner, repo) so callers never see the synthetic uuid. The
-// synthetic id exists because the PG style is "every table has a uuid
-// PK" — not because callers need it.
+// domain.Repository.ID returns. Both dialects key the row on a surrogate
+// uuid plus a folded UNIQUE(org_id, source, owner, repo) natural key, and
+// both impls split the passed-in "owner/repo" and query that natural key, so
+// the surrogate never crosses this boundary. It exists because every table
+// that references a repository stores it — that is what makes a rename a
+// one-row update — not because a caller needs it.
 //
 // source is absent from the slug-keyed methods deliberately: they
 // match a repo without naming one, which is unambiguous while GitHub
@@ -212,7 +219,19 @@ type RepositoryStore interface {
 	// to the non-System variants — same SQL, same return shape.
 
 	ListSystem(ctx context.Context, orgID string) ([]domain.Repository, error)
-	ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error)
+
+	// ListTrackedNamesSystem returns the "owner/repo" of every repository at
+	// least one team in the org tracks, ordered and deduplicated — the set the
+	// GitHub poller enumerates, the profiler profiles, and the dashboard
+	// backfill scopes a search to.
+	//
+	// It reads through team_github_repos rather than listing the registry,
+	// because the two are no longer the same set. A registry row is durable: it
+	// outlives the tracking decision that created it, so a worktree ledger
+	// entry or a task can go on naming the repository after a team untracks it.
+	// "Which repositories does TF work on" is a question about tracking, and
+	// this is the read that asks tracking.
+	ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error)
 	UpdateCloneStatusSystem(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error
 	CountConfiguredSystem(ctx context.Context, orgID string) (int, error)
 	GetSystem(ctx context.Context, orgID, repoID string) (*domain.Repository, error)
@@ -223,7 +242,7 @@ type RepositoryStore interface {
 	// successful poll time. Both are zero values ("" / nil)
 	// when the repo has never been listed. System (claims-free) variant
 	// — the poller goroutine has no JWT claims, same convention as
-	// ListConfiguredNamesSystem. No-ops to ("", nil, nil) when the repo
+	// ListTrackedNamesSystem. No-ops to ("", nil, nil) when the repo
 	// isn't in repositories.
 	// FillMissingExternalIDsSystem records the provider's repository id for
 	// tracked repos that do not have one yet, and returns how many rows it

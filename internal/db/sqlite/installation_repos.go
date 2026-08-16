@@ -131,8 +131,9 @@ func (s *installationReposStore) ListReachWithoutPurposeSystem(ctx context.Conte
 		   AND i.removed_at IS NULL
 		   AND NOT EXISTS (
 		       SELECT 1 FROM team_github_repos g
-		        WHERE LOWER(g.owner) = LOWER(r.owner)
-		          AND LOWER(g.repo) = LOWER(r.repo))
+		        JOIN repositories reg ON reg.id = g.repository_id
+		        WHERE LOWER(reg.owner) = LOWER(r.owner)
+		          AND LOWER(reg.repo) = LOWER(r.repo))
 		 ORDER BY r.installation_id, LOWER(r.owner), LOWER(r.repo)
 	`, orgID))
 }
@@ -153,8 +154,9 @@ func (s *installationReposStore) ListScopeDriftSystem(ctx context.Context, orgID
 	// repository, and listing it twice would double-count the finding. MIN picks
 	// a stable spelling from the group, whose members differ only in case.
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT MIN(g.owner), MIN(g.repo)
+		SELECT MIN(reg.owner), MIN(reg.repo)
 		  FROM team_github_repos g
+		  JOIN repositories reg ON reg.id = g.repository_id
 		 WHERE EXISTS (
 		       SELECT 1
 		         FROM installation_repositories m
@@ -168,10 +170,10 @@ func (s *installationReposStore) ListScopeDriftSystem(ctx context.Context, orgID
 		           ON i.org_id = m.org_id AND i.installation_id = m.installation_id
 		        WHERE m.org_id = ?
 		          AND i.removed_at IS NULL
-		          AND LOWER(m.owner) = LOWER(g.owner)
-		          AND LOWER(m.repo) = LOWER(g.repo))
-		 GROUP BY LOWER(g.owner), LOWER(g.repo)
-		 ORDER BY LOWER(g.owner), LOWER(g.repo)
+		          AND LOWER(m.owner) = LOWER(reg.owner)
+		          AND LOWER(m.repo) = LOWER(reg.repo))
+		 GROUP BY LOWER(reg.owner), LOWER(reg.repo)
+		 ORDER BY LOWER(reg.owner), LOWER(reg.repo)
 	`, orgID, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("read scope drift: %w", err)

@@ -88,28 +88,37 @@ func doJSON(t *testing.T, s *Server, method, path string, body any) *httptest.Re
 }
 
 // seedConfiguredRepo tracks owner/repo on the default team so tests that
-// pin repos pass the validatePinnedRepos existence check (which now reads
+// pin repos pass the validatePinnedRepos existence check (which reads
 // team_github_repos), and upserts the matching repositories row the
 // Curator's repo-materialization eventually wants more of (clone_url,
-// default_branch). The team's tracked set is the source of
-// truth; the team_github_repos insert is accumulative so multiple seed
-// calls don't clobber each other the way ReplaceForTeam would.
+// default_branch). The team's tracked set is the source of truth; the
+// team_github_repos insert is accumulative so multiple seed calls don't
+// clobber each other the way ReplaceForTeam would.
+//
+// The registry row comes first: tracking references it by id.
 func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) {
 	t.Helper()
-	if _, err := s.db.ExecContext(context.Background(), `
-		INSERT INTO team_github_repos (team_id, owner, repo)
-		VALUES (?, ?, ?)
-		ON CONFLICT(team_id, owner, repo) DO NOTHING
-	`, runmode.LocalDefaultTeamID, owner, repo); err != nil {
-		t.Fatalf("track repo %s/%s on default team: %v", owner, repo, err)
-	}
-	if err := sqlitestore.New(s.db).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
+	ctx := context.Background()
+	if err := sqlitestore.New(s.db).Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		ID:            owner + "/" + repo,
 		Owner:         owner,
 		Repo:          repo,
 		DefaultBranch: "main",
 	}); err != nil {
 		t.Fatalf("seed configured repo %s/%s: %v", owner, repo, err)
+	}
+	var repositoryID string
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT id FROM repositories WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, owner, repo).Scan(&repositoryID); err != nil {
+		t.Fatalf("resolve repository id for %s/%s: %v", owner, repo, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO team_github_repos (team_id, repository_id)
+		VALUES (?, ?)
+		ON CONFLICT(team_id, repository_id) DO NOTHING
+	`, runmode.LocalDefaultTeamID, repositoryID); err != nil {
+		t.Fatalf("track repo %s/%s on default team: %v", owner, repo, err)
 	}
 }
 

@@ -9,12 +9,20 @@ import (
 //go:generate go run github.com/vektra/mockery/v2 --name=RunWorktreeStore --output=./mocks --case=underscore --with-expecter
 
 // RunWorktreeStore owns the conversation_worktrees table — one row per
-// (run_id, repo_id, ref) reservation tracking the lazy worktree
+// (run_id, repository, ref) reservation tracking the lazy worktree
 // materializations a run accumulates as the agent calls
 // `triagefactory exec workspace add` against each repo it needs. The
 // ref discriminator (TFAC-502) lets a single run hold several worktrees
 // in one repo (e.g. two PRs reviewed in one interactive run): "@default",
 // "pr-<N>", or a slugified branch name.
+//
+// The row references the repository by its registry row id, so a rename moves
+// nothing here. Every method still takes and returns repoID as "owner/repo" —
+// the caller is an agent's argv — and the impls resolve it. Resolution is a
+// LOOKUP, never a create: in multi mode this runs on the executor, whose
+// Postgres role holds no INSERT on repositories at all. A worktree is reserved
+// for a repository the run was already authorized to clone, so the registry
+// row exists; Insert reports an error rather than minting one if it does not.
 //
 // Lifted out of the pre-D2 package-level functions in
 // internal/db/conversation_worktrees.go so multi-mode Postgres callers route

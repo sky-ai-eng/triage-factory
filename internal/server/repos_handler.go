@@ -600,11 +600,16 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 
 // Repo *tracking* selection is per-team: writes go through
 // PUT /api/settings/team/{id}/repos (handleTeamReposPut), which writes
-// team_github_repos and reconciles the org-wide repositories union. The
-// old org-global POST /api/repos was removed in favor of that single,
-// team-admin-gated entry point; GET /api/repos (the org-wide union),
+// team_github_repos and brings any newly-tracked repository into the registry.
+// The old org-global POST /api/repos was removed in favor of that single,
+// team-admin-gated entry point; GET /api/repos (the org-wide registry),
 // PATCH /api/repos/{owner}/{repo} (base_branch), and GET
 // /api/repos/{owner}/{repo}/branches remain, scoped per-caller.
+//
+// GET /api/repos lists the registry, which is a superset of the tracked set:
+// a repository the last team untracked keeps its row (a run's worktree ledger
+// or a pinned project may still name it), so an org admin can still see it and
+// re-track it. Non-admins see only what their own teams track.
 //
 // Reads (isOrgAdmin / repoAccessAllowed) go by membership: an org admin
 // sees every repo, a member only the repos their own team(s) track. The

@@ -3,9 +3,9 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -46,27 +46,22 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 	if id == "" {
 		id = uuid.New().String()
 	}
-	pinned := p.PinnedRepos
-	if pinned == nil {
-		pinned = []string{}
-	}
-	pinnedJSON, err := json.Marshal(pinned)
-	if err != nil {
-		return "", fmt.Errorf("marshal pinned_repos: %w", err)
-	}
 	now := time.Now().UTC()
-	_, err = s.q.ExecContext(ctx, `
-		INSERT INTO projects (id, name, description, pinned_repos, jira_project_key, linear_project_key, spec_authorship_blueprint_id, team_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		id, p.Name, p.Description,
-		string(pinnedJSON),
-		nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
-		nullIfEmpty(p.SpecAuthorshipBlueprintID),
-		runmode.LocalDefaultTeamID,
-		now, now,
-	)
-	if err != nil {
+	if err := inTx(ctx, s.q, func(tx queryer) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO projects (id, name, description, jira_project_key, linear_project_key, spec_authorship_blueprint_id, team_id, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			id, p.Name, p.Description,
+			nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
+			nullIfEmpty(p.SpecAuthorshipBlueprintID),
+			runmode.LocalDefaultTeamID,
+			now, now,
+		); err != nil {
+			return err
+		}
+		return replacePinnedRepos(ctx, tx, id, p.PinnedRepos)
+	}); err != nil {
 		return "", err
 	}
 	return id, nil
@@ -77,12 +72,19 @@ func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Proje
 		return nil, err
 	}
 	row := s.q.QueryRowContext(ctx, `
-		SELECT id, name, description, pinned_repos,
+		SELECT id, name, description,
 		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
 		       team_id, visibility, creator_user_id, created_at, updated_at
 		FROM projects WHERE id = ?
 	`, id)
-	return scanSqliteProjectRow(row)
+	p, err := scanSqliteProjectRow(row)
+	if err != nil || p == nil {
+		return p, err
+	}
+	if err := attachPinnedRepos(ctx, s.q, []*domain.Project{p}); err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 // GetSystem is N=1-unscoped in SQLite — it collapses to Get (there is no
@@ -96,7 +98,7 @@ func (s *projectStore) List(ctx context.Context, orgID string) ([]domain.Project
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, name, description, pinned_repos,
+		SELECT id, name, description,
 		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
 		       team_id, visibility, creator_user_id, created_at, updated_at
 		FROM projects ORDER BY LOWER(name) ASC
@@ -115,48 +117,50 @@ func (s *projectStore) List(ctx context.Context, orgID string) ([]domain.Project
 			out = append(out, *p)
 		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	refs := make([]*domain.Project, len(out))
+	for i := range out {
+		refs[i] = &out[i]
+	}
+	if err := attachPinnedRepos(ctx, s.q, refs); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Project) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	pinned := p.PinnedRepos
-	if pinned == nil {
-		pinned = []string{}
-	}
-	pinnedJSON, err := json.Marshal(pinned)
-	if err != nil {
-		return fmt.Errorf("marshal pinned_repos: %w", err)
-	}
 	now := time.Now().UTC()
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE projects
-		SET name = ?, description = ?,
-		    pinned_repos = ?,
-		    jira_project_key = ?, linear_project_key = ?,
-		    spec_authorship_blueprint_id = ?,
-		    updated_at = ?
-		WHERE id = ?
-	`,
-		p.Name, p.Description,
-		string(pinnedJSON),
-		nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
-		nullIfEmpty(p.SpecAuthorshipBlueprintID),
-		now, p.ID,
-	)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
+	return inTx(ctx, s.q, func(tx queryer) error {
+		res, err := tx.ExecContext(ctx, `
+			UPDATE projects
+			SET name = ?, description = ?,
+			    jira_project_key = ?, linear_project_key = ?,
+			    spec_authorship_blueprint_id = ?,
+			    updated_at = ?
+			WHERE id = ?
+		`,
+			p.Name, p.Description,
+			nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
+			nullIfEmpty(p.SpecAuthorshipBlueprintID),
+			now, p.ID,
+		)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return sql.ErrNoRows
+		}
+		return replacePinnedRepos(ctx, tx, p.ID, p.PinnedRepos)
+	})
 }
 
 // ListSystem mirrors List. The project classifier consumes
@@ -225,12 +229,11 @@ func scanSqliteProjectRow(row interface {
 		linearKey       sql.NullString
 		specBlueprintID sql.NullString
 		teamID          sql.NullString
-		pinnedJSON      string
 		createdAt       time.Time
 		updatedAt       time.Time
 	)
 	err := row.Scan(
-		&p.ID, &p.Name, &p.Description, &pinnedJSON,
+		&p.ID, &p.Name, &p.Description,
 		&jiraKey, &linearKey, &specBlueprintID,
 		&teamID, &p.Visibility, &p.CreatorUserID, &createdAt, &updatedAt,
 	)
@@ -246,13 +249,83 @@ func scanSqliteProjectRow(row interface {
 	p.TeamID = teamID.String
 	p.CreatedAt = createdAt
 	p.UpdatedAt = updatedAt
-	if pinnedJSON == "" {
-		p.PinnedRepos = []string{}
-	} else if err := json.Unmarshal([]byte(pinnedJSON), &p.PinnedRepos); err != nil {
-		return nil, fmt.Errorf("unmarshal pinned_repos: %w", err)
-	}
-	if p.PinnedRepos == nil {
-		p.PinnedRepos = []string{}
-	}
+	p.PinnedRepos = []string{}
 	return &p, nil
+}
+
+// replacePinnedRepos makes project_pinned_repos match slugs exactly, in the
+// order given. position preserves that order: the API surfaces pinned_repos as
+// an ordered list and a project round-trips through bundle export/import, so
+// re-deriving the order from the slug would silently reshuffle a list somebody
+// arranged.
+//
+// The registry row is get-or-created rather than looked up, because a pin can
+// legitimately arrive before the repository is tracked — the bundle import
+// creates the project with its pinned list and tracks the repos in the next
+// statement of the same transaction. Whether a pin names a repo the team is
+// allowed to pin stays the handler's check (validatePinnedRepos); this is the
+// reference, and the FK is what keeps it from dangling.
+func replacePinnedRepos(ctx context.Context, q queryer, projectID string, slugs []string) error {
+	if _, err := q.ExecContext(ctx,
+		`DELETE FROM project_pinned_repos WHERE project_id = ?`, projectID,
+	); err != nil {
+		return fmt.Errorf("clear pinned repos for project %s: %w", projectID, err)
+	}
+	for i, slug := range slugs {
+		owner, repo := splitRepoSlug(slug)
+		if owner == "" || repo == "" {
+			continue // malformed entry, skipped like every other slug parse here
+		}
+		repositoryID, err := getOrCreateRepositoryID(ctx, q, domain.RepoRef{Owner: owner, Repo: repo})
+		if err != nil {
+			return fmt.Errorf("resolve pinned repo %s: %w", slug, err)
+		}
+		if _, err := q.ExecContext(ctx, `
+			INSERT INTO project_pinned_repos (project_id, repository_id, position)
+			VALUES (?, ?, ?)
+			ON CONFLICT(project_id, repository_id) DO NOTHING
+		`, projectID, repositoryID, i); err != nil {
+			return fmt.Errorf("pin repo %s to project %s: %w", slug, projectID, err)
+		}
+	}
+	return nil
+}
+
+// attachPinnedRepos fills PinnedRepos on each project from the join table. One
+// query for the whole page rather than one per project — the list read is the
+// hot one, and the alternative is an aggregate subquery whose element order
+// SQLite does not promise.
+func attachPinnedRepos(ctx context.Context, q queryer, projects []*domain.Project) error {
+	if len(projects) == 0 {
+		return nil
+	}
+	byID := make(map[string]*domain.Project, len(projects))
+	placeholders := make([]string, 0, len(projects))
+	args := make([]any, 0, len(projects))
+	for _, p := range projects {
+		byID[p.ID] = p
+		placeholders = append(placeholders, "?")
+		args = append(args, p.ID)
+	}
+	rows, err := q.QueryContext(ctx, `
+		SELECT pr.project_id, r.owner || '/' || r.repo
+		  FROM project_pinned_repos pr
+		  JOIN repositories r ON r.id = pr.repository_id
+		 WHERE pr.project_id IN (`+strings.Join(placeholders, ", ")+`)
+		 ORDER BY pr.project_id, pr.position
+	`, args...)
+	if err != nil {
+		return fmt.Errorf("read pinned repos: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var projectID, slug string
+		if err := rows.Scan(&projectID, &slug); err != nil {
+			return err
+		}
+		if p := byID[projectID]; p != nil {
+			p.PinnedRepos = append(p.PinnedRepos, slug)
+		}
+	}
+	return rows.Err()
 }

@@ -226,11 +226,10 @@ type Stores struct {
 	// GitHub repo *tracking* selection and source of truth for which
 	// repos a team cares about (the tracking-scope twin of
 	// jira_project_status_rules, distinct from TeamGitHubGroups which is
-	// review routing). App pool in Postgres for the request-handler
-	// reads/writes (RLS gates by team membership / team admin); admin
-	// pool for the `...System` router-gate reads + the repositories
-	// reconcile that ReplaceForTeam runs (repositories is now the
-	// org-wide UNION of every team's rows, a derived cache).
+	// review routing). Each row references a repository by the registry
+	// row's id, so a rename moves nothing here. App pool in Postgres for
+	// the request-handler reads/writes (RLS gates by team membership /
+	// team admin); admin pool for the `...System` router-gate reads.
 	TeamGitHubRepos TeamGitHubReposStore
 
 	// Curator owns the curator's view of the shared conversations /

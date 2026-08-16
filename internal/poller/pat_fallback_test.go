@@ -120,9 +120,7 @@ func TestRunGitHubCycleForOrg_StagedAppPollsViaPAT(t *testing.T) {
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, []string{"octo/repo"})
 	// Staged still means the org is in the BYO-App system — the class is
 	// written at registration, and only the Active bit waits for cutover.
 	seedBYOAppCredentialClass(t, stores, org)
@@ -174,9 +172,7 @@ func TestRunGitHubCycleForOrg_ActiveAppNoFunctionalInstallationDegrades(t *testi
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, []string{"octo/repo"})
 	seedBYOAppCredentialClass(t, stores, org)
 
 	bus := eventbus.New()
@@ -253,5 +249,23 @@ func seedBYOAppCredentialClass(t *testing.T, stores db.Stores, orgID string) {
 	t.Helper()
 	if err := stores.Orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
 		t.Fatalf("SetGitHubCredentialClass: %v", err)
+	}
+}
+
+// trackRepos records the org's tracked repo set on the local default team —
+// the seed every poll fixture needs now that "which repos does TF poll" is a
+// question about tracking rather than a listing of the repository registry.
+func trackRepos(t *testing.T, stores db.Stores, orgID string, names []string) {
+	t.Helper()
+	repos := make([]domain.TeamGitHubRepo, 0, len(names))
+	for _, name := range names {
+		owner, repo, ok := strings.Cut(name, "/")
+		if !ok {
+			t.Fatalf("trackRepos: %q is not an owner/repo slug", name)
+		}
+		repos = append(repos, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
+	}
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, runmode.LocalDefaultTeamID, repos); err != nil {
+		t.Fatalf("track repos %v: %v", names, err)
 	}
 }

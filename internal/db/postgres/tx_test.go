@@ -173,15 +173,29 @@ func TestSyntheticClaimsWithTx_Postgres_RollsBackOnError(t *testing.T) {
 		t.Fatalf("expected sentinel error, got %v", err)
 	}
 
-	names, err := stores.Repos.ListConfiguredNamesSystem(context.Background(), orgID)
-	if err != nil {
-		t.Fatalf("ListConfiguredNamesSystem: %v", err)
-	}
+	names := registryNames(t, stores, orgID)
 	for _, name := range names {
 		if name == "rolled/back" {
 			t.Errorf("rolled/back row landed after fn returned error; full list=%v", names)
 		}
 	}
+}
+
+// registryNames reads back what SetConfigured wrote. It lists the registry
+// rather than the tracked set on purpose: SetConfigured writes repositories
+// and touches no team's tracking, so a tracked read would answer a different
+// question than the one these tests ask.
+func registryNames(t *testing.T, stores db.Stores, orgID string) []string {
+	t.Helper()
+	repos, err := stores.Repos.ListSystem(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("ListSystem: %v", err)
+	}
+	out := make([]string, 0, len(repos))
+	for _, r := range repos {
+		out = append(out, r.ID)
+	}
+	return out
 }
 
 // TestWithTx_Postgres_SurvivesCancelledOriginCtx pins the
@@ -228,10 +242,7 @@ func TestWithTx_Postgres_SurvivesCancelledOriginCtx(t *testing.T) {
 		t.Fatalf("WithTx on detached ctx: %v", err)
 	}
 
-	names, err := stores.Repos.ListConfiguredNamesSystem(context.Background(), orgID)
-	if err != nil {
-		t.Fatalf("ListConfiguredNamesSystem: %v", err)
-	}
+	names := registryNames(t, stores, orgID)
 	if len(names) != 1 || names[0] != "survives/cancel" {
 		t.Errorf("after WithTx on detached ctx: got %v, want [survives/cancel]", names)
 	}

@@ -16,19 +16,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// corruptProject breaks the project row so BeginTurn fails permanently (the
-// pinned_repos JSON no longer parses) — the poisoned-input shape the
-// dead-letter cap exists for.
+// corruptProject breaks the project row so BeginTurn fails permanently (its
+// stored timestamp no longer scans into a time.Time) — the poisoned-input
+// shape the dead-letter cap exists for. Any unparseable column on the row the
+// turn has to read would do; this is the one left after pinned_repos moved to
+// its own table.
 func corruptProject(t *testing.T, database *sql.DB, projectID string) {
 	t.Helper()
-	if _, err := database.Exec(`UPDATE projects SET pinned_repos = 'not-json' WHERE id = ?`, projectID); err != nil {
+	if _, err := database.Exec(`UPDATE projects SET created_at = 'not-a-timestamp' WHERE id = ?`, projectID); err != nil {
 		t.Fatalf("corrupt project: %v", err)
 	}
 }
 
 func healProject(t *testing.T, database *sql.DB, projectID string) {
 	t.Helper()
-	if _, err := database.Exec(`UPDATE projects SET pinned_repos = '[]' WHERE id = ?`, projectID); err != nil {
+	if _, err := database.Exec(`UPDATE projects SET created_at = CURRENT_TIMESTAMP WHERE id = ?`, projectID); err != nil {
 		t.Fatalf("heal project: %v", err)
 	}
 }

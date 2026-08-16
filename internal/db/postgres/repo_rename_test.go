@@ -1,6 +1,7 @@
 package postgres_test
 
 import (
+	"sort"
 	"testing"
 
 	"github.com/google/uuid"
@@ -57,7 +58,56 @@ func TestRepoRename_Postgres(t *testing.T) {
 				}
 				return n
 			},
+			ReferenceRows: func(t *testing.T) []string {
+				t.Helper()
+				return pgCategoryAReferences(t, h, orgID)
+			},
 		}
 		return stores, orgID, seed
 	})
+}
+
+// pgCategoryAReferences reads the raw stored repository reference out of each
+// table that carries one, so the rename suite can assert none of them moved.
+// Raw SQL on purpose: a store read would resolve the id back to a slug, which
+// is exactly the layer that would hide a rewrite.
+func pgCategoryAReferences(t *testing.T, h *pgtest.Harness, orgID string) []string {
+	t.Helper()
+	queries := []struct{ label, query string }{
+		{"team_github_repos", `
+			SELECT g.team_id::text || '|' || g.repository_id::text
+			  FROM team_github_repos g
+			  JOIN teams tm ON tm.id = g.team_id
+			 WHERE tm.org_id = $1`},
+		{"conversation_worktrees", `
+			SELECT conversation_id::text || '|' || repository_id::text || '|' || ref
+			  FROM conversation_worktrees WHERE org_id = $1`},
+		{"project_pinned_repos", `
+			SELECT pr.project_id::text || '|' || pr.repository_id::text || '|' || pr."position"::text
+			  FROM project_pinned_repos pr
+			  JOIN projects p ON p.id = pr.project_id
+			 WHERE p.org_id = $1`},
+	}
+	var out []string
+	for _, q := range queries {
+		rows, err := h.AdminDB.Query(q.query, orgID)
+		if err != nil {
+			t.Fatalf("read %s references: %v", q.label, err)
+		}
+		for rows.Next() {
+			var row string
+			if err := rows.Scan(&row); err != nil {
+				rows.Close()
+				t.Fatalf("scan %s reference: %v", q.label, err)
+			}
+			out = append(out, q.label+":"+row)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			t.Fatalf("read %s references: %v", q.label, err)
+		}
+		rows.Close()
+	}
+	sort.Strings(out)
+	return out
 }

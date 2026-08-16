@@ -119,9 +119,17 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("seed entity %s: %v", suffix, err)
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO team_github_repos (team_id, owner, repo)
-				VALUES ((SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $2, $3)
-				ON CONFLICT (team_id, owner, repo) DO NOTHING
+				INSERT INTO repositories (org_id, source, owner, repo) VALUES ($1, 'github', $2, $3)
+				ON CONFLICT DO NOTHING
+			`, orgID, owner, repo); err != nil {
+				t.Fatalf("seed entity repository %s/%s: %v", owner, repo, err)
+			}
+			if _, err := conn.Exec(`
+				INSERT INTO team_github_repos (team_id, repository_id)
+				VALUES ((SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1),
+				        (SELECT id FROM repositories
+				          WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)))
+				ON CONFLICT (team_id, repository_id) DO NOTHING
 			`, orgID, owner, repo); err != nil {
 				t.Fatalf("track entity repo %s/%s: %v", owner, repo, err)
 			}
@@ -243,18 +251,12 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 	}
 }
 
-// trackPgRepo registers (owner, repo) as a tracked repo for teamID via a
-// raw team_github_repos insert — the multi-mode factory belt's GitHub
-// visibility gate (TFAC-516). Idempotent on the (team, owner, repo) PK.
-func trackPgRepo(t *testing.T, h *pgtest.Harness, teamID, owner, repo string) {
+// trackPgRepo registers (owner, repo) as a tracked repo for teamID — the
+// multi-mode factory belt's GitHub visibility gate (TFAC-516). The registry
+// row comes first, because that is what the tracking row references.
+func trackPgRepo(t *testing.T, h *pgtest.Harness, orgID, teamID, owner, repo string) {
 	t.Helper()
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO team_github_repos (team_id, owner, repo)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (team_id, owner, repo) DO NOTHING
-	`, teamID, owner, repo); err != nil {
-		t.Fatalf("track repo %s/%s for team %s: %v", owner, repo, teamID, err)
-	}
+	pgtest.SeedTrackedRepo(t, h, orgID, teamID, owner, repo)
 }
 
 // seedPgGitHubEntityRaw / seedPgJiraEntityRaw insert an active entity with
@@ -319,12 +321,12 @@ func TestFactoryReadStore_Postgres_ExcludesUntrackedEntity(t *testing.T) {
 
 	// onTracked: repo in the tracked set, NO task — under the old
 	// task-existence gate it would have been hidden; now it rides the belt.
-	trackPgRepo(t, h, teamID, "acme", "tracked")
+	trackPgRepo(t, h, orgID, teamID, "acme", "tracked")
 	onTracked := seedPgGitHubEntityRaw(t, h, orgID, "acme", "tracked", 1)
 
 	// mixedCase: tracked repo casing differs from the entity's source_id
 	// casing — the lower()/lower() match must still surface it.
-	trackPgRepo(t, h, teamID, "acme", "casefold")
+	trackPgRepo(t, h, orgID, teamID, "acme", "casefold")
 	mixedCase := seedPgGitHubEntityRaw(t, h, orgID, "ACME", "CaseFold", 7)
 
 	// onUntracked: no team tracks its repo. It has a station and, like the
@@ -404,8 +406,8 @@ func TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS(t *testing.T) {
 
 	// teamA tracks acme/a-repo (GitHub) + SKY (Jira); teamB tracks
 	// acme/b-repo + BOB. Same org, disjoint tracked sets.
-	trackPgRepo(t, h, teamA, "acme", "a-repo")
-	trackPgRepo(t, h, teamB, "acme", "b-repo")
+	trackPgRepo(t, h, orgID, teamA, "acme", "a-repo")
+	trackPgRepo(t, h, orgID, teamB, "acme", "b-repo")
 	seedPgJiraRule(t, h, teamA, "SKY")
 	seedPgJiraRule(t, h, teamB, "BOB")
 

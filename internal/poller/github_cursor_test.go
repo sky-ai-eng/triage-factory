@@ -176,9 +176,7 @@ func TestPollGitHubOnce_RateLimitCursorResumesAcrossCycles(t *testing.T) {
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, repos); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, repos)
 
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)
@@ -290,9 +288,7 @@ func TestRunGitHubCycleForOrg_CursorSurvivesRepoRemoval(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	initial := []string{"octo/a", "octo/b", "octo/c", "octo/d", "octo/e"}
-	if err := stores.Repos.SetConfigured(ctx, org, initial); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, initial)
 
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)
@@ -314,9 +310,7 @@ func TestRunGitHubCycleForOrg_CursorSurvivesRepoRemoval(t *testing.T) {
 
 	// Config save between cycles: d is removed from the tracked set entirely.
 	remaining := []string{"octo/a", "octo/b", "octo/c", "octo/e"}
-	if err := stores.Repos.SetConfigured(ctx, org, remaining); err != nil {
-		t.Fatalf("SetConfigured (removal): %v", err)
-	}
+	trackRepos(t, stores, org, remaining)
 
 	// Cycle 2 must not panic and must not skip the whole list just because
 	// its cursor's anchor repo is gone.
@@ -402,9 +396,7 @@ func TestRunGitHubCycleForOrg_UnresolvedInstallationDoesNotFalselyResetCursor(t 
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	repos := []string{"acme/r1", "beta/r1"}
-	if err := stores.Repos.SetConfigured(ctx, org, repos); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, repos)
 	seedBYOAppCredentialClass(t, stores, org)
 
 	bus := eventbus.New()

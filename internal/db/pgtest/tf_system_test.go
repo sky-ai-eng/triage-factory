@@ -215,6 +215,12 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 	t.Run("conversation_worktrees", func(t *testing.T) {
 		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
+		// The registry row is seeded on the admin pool, not minted by the
+		// store: the executor's role holds SELECT and UPDATE on repositories
+		// and deliberately no INSERT, so a worktree reservation resolves the
+		// slug and never creates one. That IS part of this conformance —
+		// InsertSystem below has to reach the row through a SELECT alone.
+		SeedRepository(t, h, orgID, "octo", "repo")
 		if inserted, _, err := stores.RunWorktrees.InsertSystem(ctx, orgID, domain.RunWorktree{
 			RunID: runID, RepoID: "octo/repo", Path: "/tmp/conformance-wt", Ref: "main",
 		}); err != nil || !inserted {

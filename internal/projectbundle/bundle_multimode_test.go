@@ -265,7 +265,9 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	// the destination org's repositories.
 	var tracked int
 	if err := h.AdminDB.QueryRow(`
-		SELECT COUNT(*) FROM team_github_repos WHERE team_id = $1 AND owner = 'sky-ai-eng' AND repo = 'triage-factory'
+		SELECT COUNT(*) FROM team_github_repos g
+		JOIN repositories r ON r.id = g.repository_id
+		WHERE g.team_id = $1 AND r.owner = 'sky-ai-eng' AND r.repo = 'triage-factory'
 	`, dstTeam).Scan(&tracked); err != nil {
 		t.Fatalf("count tracked: %v", err)
 	}

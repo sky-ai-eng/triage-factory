@@ -60,6 +60,14 @@ func TestGitAuthorizeDecision(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
 	}
+	// acme/materialized-only has a registry row but no team tracks it — the
+	// durable-registry state a repository lands in once its last team untracks
+	// it. The worktree ledger references the registry row, so the row has to
+	// exist; the point of the case is that tracking does not.
+	if _, err := stores.Repos.GetOrCreateSystem(ctx, runmode.LocalDefaultOrgID,
+		domain.RepoRef{Owner: "acme", Repo: "materialized-only"}); err != nil {
+		t.Fatalf("seed untracked repository: %v", err)
+	}
 	// Ref on the rows is informational only — the gate reads the live branch,
 	// stubbed below by worktree path.
 	for _, w := range []domain.RunWorktree{

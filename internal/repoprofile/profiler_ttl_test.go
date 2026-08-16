@@ -67,7 +67,7 @@ type ttlRepositoryStore struct {
 	upserts atomic.Int64
 }
 
-func (s *ttlRepositoryStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
+func (s *ttlRepositoryStore) ListTrackedNamesSystem(context.Context, string) ([]string, error) {
 	return s.names, nil
 }
 

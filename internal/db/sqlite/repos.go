@@ -8,18 +8,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// repoStore is the SQLite impl of db.RepositoryStore. SQL bodies are
-// ported from the pre-D2 internal/db/repos.go; the only behavioral
-// change is the orgID assertion at each method entry. SQLite's
+// repoStore is the SQLite impl of db.RepositoryStore. SQLite's
 // repositories table has an org_id column with a default pointing
 // at the local sentinel, so writes don't need to set it explicitly.
 //
-// SQLite uses the natural "owner/repo" string as the id column
-// directly — no synthetic uuid to translate.
+// # Surrogate id vs natural "owner/repo" id
+//
+// The row is keyed on a surrogate uuid, with the slug an ordinary column under
+// a folded UNIQUE(org_id, source, owner, repo) — the same shape Postgres has
+// always had, so the two dialects hold the same reference in the tables that
+// point here. The store interface still surfaces every repository by its
+// "owner/repo" string: that is what callers pass and what
+// domain.Repository.ID returns. So this impl accepts `repoID`
+// ("owner/repo") on every method, splits it, and queries the natural key —
+// the surrogate never leaks across the boundary.
 //
 // The constructor takes two queryers for signature parity with the
 // Postgres impl, but SQLite has one connection — both
@@ -44,13 +51,13 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 	// writer actually has one — COALESCE over the NULLIF keeps an empty
 	// write from clearing an id already learned.
 	//
-	// The conflict target is the folded identity index, not the slug primary
-	// key, so an upsert spelling the repository differently than the stored row
-	// updates that row instead of creating a second one. Upsert creates as well
-	// as updates, which makes it a create path too; keying it on the
-	// case-sensitive id would leave it as the one create path that could still
-	// duplicate. id/owner/repo are absent from the SET list, so the stored
-	// casing stays sticky.
+	// The conflict target is the folded identity index, so an upsert spelling
+	// the repository differently than the stored row updates that row instead of
+	// creating a second one. Upsert creates as well as updates, which makes it a
+	// create path too; inferring the case-sensitive columns here would leave it
+	// as the one create path that could still duplicate. owner/repo are absent
+	// from the SET list, so the stored casing stays sticky, and the id minted
+	// for a conflicting INSERT is discarded along with the rest of it.
 	_, err = s.q.ExecContext(ctx, `
 		INSERT INTO repositories (id, owner, repo, source, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, profiled_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -66,7 +73,7 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 			profiled_at    = excluded.profiled_at,
 			updated_at     = datetime('now')
 	`,
-		p.ID, p.Owner, p.Repo, source,
+		uuid.New().String(), p.Owner, p.Repo, source,
 		nullIfEmpty(p.ExternalID),
 		nullIfEmpty(p.Description),
 		p.HasReadme, p.HasClaudeMd, p.HasAgentsMd,
@@ -120,15 +127,56 @@ func getOrCreateRepository(ctx context.Context, q queryer, ref domain.RepoRef) (
 	}
 	// The row stands as it is, except for an id the caller just learned.
 	if ref.ExternalID != "" && existing.ExternalID != ref.ExternalID {
-		if _, err := q.ExecContext(ctx,
-			`UPDATE repositories SET external_id = ?, updated_at = datetime('now') WHERE id = ?`,
-			ref.ExternalID, existing.ID,
-		); err != nil {
+		if _, err := q.ExecContext(ctx, `
+			UPDATE repositories
+			   SET external_id = ?, updated_at = datetime('now')
+			 WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+		`, ref.ExternalID, source, existing.Owner, existing.Repo); err != nil {
 			return nil, fmt.Errorf("record external id for %s: %w", ref.Slug(), err)
 		}
 		existing.ExternalID = ref.ExternalID
 	}
 	return existing, nil
+}
+
+// getOrCreateRepositoryID returns the surrogate id of one repository's registry
+// row, minting the row if it does not exist yet. It is the resolver every
+// reference site uses: a caller holding a slug — a tracked-set save, a
+// worktree reservation, a pinned project — needs the id the FK points at, and
+// the store contract keeps the surrogate out of domain.Repository.
+func getOrCreateRepositoryID(ctx context.Context, q queryer, ref domain.RepoRef) (string, error) {
+	if _, err := getOrCreateRepository(ctx, q, ref); err != nil {
+		return "", err
+	}
+	source, err := domain.NormalizeRepoSource(ref.Source)
+	if err != nil {
+		return "", err
+	}
+	id, err := findRepositoryID(ctx, q, source, ref.Owner, ref.Repo)
+	if err != nil {
+		return "", err
+	}
+	if id == "" {
+		return "", fmt.Errorf("repositories row for %s vanished immediately after create", ref.Slug())
+	}
+	return id, nil
+}
+
+// findRepositoryID resolves a slug to the registry row's surrogate id, or "" if
+// no row holds that slug. Case-INSENSITIVE, like every other slug lookup here.
+func findRepositoryID(ctx context.Context, q queryer, source, owner, repo string) (string, error) {
+	var id string
+	err := q.QueryRowContext(ctx, `
+		SELECT id FROM repositories
+		 WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, source, owner, repo).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // findRepositoryByRef looks a repository up by provider identity, matching
@@ -162,10 +210,11 @@ func findRepositoryByRef(ctx context.Context, q queryer, source string, ref doma
 // branch, clone state, ETag — rather than gaining a second one, and the index
 // is what refuses rather than a guard any writer has to remember.
 //
-// DO NOTHING carries no conflict target on purpose. This row can violate two
-// uniqueness constraints — the identity index and the slug primary key — and
-// both mean the same thing, that the repository is already here. A targeted
-// clause would raise on whichever one it did not name.
+// DO NOTHING carries no conflict target on purpose: every uniqueness
+// constraint this row can violate means the same thing, that the repository is
+// already here, and a targeted clause would raise on the one it did not name.
+// The id is minted here rather than defaulted in the schema because SQLite has
+// no uuid generator to put in a DEFAULT; a losing INSERT throws its id away.
 func insertRepositoryRow(ctx context.Context, q queryer, ref domain.RepoRef) error {
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {
@@ -175,7 +224,7 @@ func insertRepositoryRow(ctx context.Context, q queryer, ref domain.RepoRef) err
 		INSERT INTO repositories (id, owner, repo, source, external_id, updated_at)
 		VALUES (?, ?, ?, ?, ?, datetime('now'))
 		ON CONFLICT DO NOTHING
-	`, ref.Slug(), ref.Owner, ref.Repo, source, nullIfEmpty(ref.ExternalID)); err != nil {
+	`, uuid.New().String(), ref.Owner, ref.Repo, source, nullIfEmpty(ref.ExternalID)); err != nil {
 		return fmt.Errorf("insert repositories[%s]: %w", ref.Slug(), err)
 	}
 	return nil
@@ -188,7 +237,7 @@ func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.Repository
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+repoProfileFullColumns+`
 		FROM repositories
-		ORDER BY id
+		ORDER BY owner, repo
 	`)
 	if err != nil {
 		return nil, err
@@ -218,10 +267,10 @@ func (s *repoStore) ListWithContent(ctx context.Context, orgID string) ([]domain
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch
+		SELECT owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch
 		FROM repositories
 		WHERE profile_text IS NOT NULL AND profile_text != ''
-		ORDER BY id
+		ORDER BY owner, repo
 	`)
 	if err != nil {
 		return nil, err
@@ -232,9 +281,10 @@ func (s *repoStore) ListWithContent(ctx context.Context, orgID string) ([]domain
 	for rows.Next() {
 		var p domain.Repository
 		var description, profileText, cloneURL, defaultBranch, baseBranch sql.NullString
-		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch); err != nil {
+		if err := rows.Scan(&p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch); err != nil {
 			return nil, err
 		}
+		p.ID = p.Owner + "/" + p.Repo
 		p.Description = description.String
 		p.ProfileText = profileText.String
 		p.CloneURL = cloneURL.String
@@ -265,13 +315,13 @@ func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames [
 		}
 
 		// Delete repos no longer selected.
-		existing, err := listRepoIDsInTx(ctx, tx)
+		existing, err := listRepoRowsInTx(ctx, tx)
 		if err != nil {
 			return err
 		}
-		for _, id := range existing {
-			if !desired[strings.ToLower(id)] {
-				if _, err := tx.ExecContext(ctx, `DELETE FROM repositories WHERE id = ?`, id); err != nil {
+		for _, row := range existing {
+			if !desired[strings.ToLower(row.slug)] {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM repositories WHERE id = ?`, row.id); err != nil {
 					return err
 				}
 			}
@@ -300,7 +350,7 @@ func (s *repoStore) ListConfiguredNames(ctx context.Context, orgID string) ([]st
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	rows, err := s.q.QueryContext(ctx, `SELECT id FROM repositories ORDER BY id`)
+	rows, err := s.q.QueryContext(ctx, `SELECT owner || '/' || repo FROM repositories ORDER BY owner, repo`)
 	if err != nil {
 		return nil, err
 	}
@@ -334,10 +384,15 @@ func (s *repoStore) UpdateBaseBranch(ctx context.Context, orgID, repoID, baseBra
 	// TFAC-559's repoAccessAllowed gate matches case-insensitively, so a
 	// caller reaching this with different casing than what's stored must
 	// still find the row rather than silently affecting 0.
-	_, err := s.q.ExecContext(ctx,
-		`UPDATE repositories SET base_branch = ?, updated_at = datetime('now') WHERE LOWER(id) = LOWER(?)`,
-		nullIfEmpty(baseBranch), repoID,
-	)
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" {
+		return nil
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE repositories
+		   SET base_branch = ?, updated_at = datetime('now')
+		 WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, nullIfEmpty(baseBranch), owner, repo)
 	return err
 }
 
@@ -345,15 +400,16 @@ func (s *repoStore) SeedCloneURL(ctx context.Context, orgID, repoID, cloneURL st
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	if strings.TrimSpace(cloneURL) == "" {
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" || strings.TrimSpace(cloneURL) == "" {
 		return nil
 	}
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE repositories
 		   SET clone_url = ?, updated_at = datetime('now')
-		 WHERE LOWER(id) = LOWER(?)
+		 WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
 		   AND (clone_url IS NULL OR clone_url = '')
-	`, cloneURL, repoID)
+	`, cloneURL, owner, repo)
 	return err
 }
 
@@ -368,10 +424,14 @@ func (s *repoStore) Get(ctx context.Context, orgID, repoID string) (*domain.Repo
 	// not configured in Triage Factory" — while the team-tracking gate on the
 	// next line of that same function matches case-insensitively and would
 	// have said yes.
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" {
+		return nil, nil
+	}
 	row := s.q.QueryRowContext(ctx, `
 		SELECT `+repoProfileFullColumns+`
-		FROM repositories WHERE LOWER(id) = LOWER(?)
-	`, repoID)
+		FROM repositories WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, owner, repo)
 	p, err := scanRepositoryFull(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -403,8 +463,30 @@ func (s *repoStore) ListSystem(ctx context.Context, orgID string) ([]domain.Repo
 	return s.List(ctx, orgID)
 }
 
-func (s *repoStore) ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error) {
-	return s.ListConfiguredNames(ctx, orgID)
+func (s *repoStore) ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT DISTINCT r.owner || '/' || r.repo
+		  FROM repositories r
+		  JOIN team_github_repos g ON g.repository_id = r.id
+		 ORDER BY r.owner, r.repo
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }
 
 func (s *repoStore) UpdateCloneStatusSystem(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error {
@@ -470,11 +552,17 @@ func (s *repoStore) GetPullsPollStateSystem(ctx context.Context, orgID, repoID s
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", nil, err
 	}
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" {
+		return "", nil, nil
+	}
 	var etag sql.NullString
 	var polledAt sql.NullTime
-	err := s.q.QueryRowContext(ctx,
-		`SELECT pulls_etag, pulls_polled_at FROM repositories WHERE LOWER(id) = LOWER(?)`, repoID,
-	).Scan(&etag, &polledAt)
+	err := s.q.QueryRowContext(ctx, `
+		SELECT pulls_etag, pulls_polled_at
+		  FROM repositories
+		 WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, owner, repo).Scan(&etag, &polledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, nil
 	}
@@ -492,10 +580,15 @@ func (s *repoStore) SetPullsPollStateSystem(ctx context.Context, orgID, repoID, 
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx,
-		`UPDATE repositories SET pulls_etag = ?, pulls_polled_at = ? WHERE LOWER(id) = LOWER(?)`,
-		nullIfEmpty(etag), polledAt, repoID,
-	)
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" {
+		return nil
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE repositories
+		   SET pulls_etag = ?, pulls_polled_at = ?
+		 WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, nullIfEmpty(etag), polledAt, owner, repo)
 	return err
 }
 
@@ -508,18 +601,21 @@ type rowScanner interface {
 
 // repoProfileFullColumns is the projection scanRepositoryFull reads, named
 // once so the three queries that share it cannot drift out of column order.
-const repoProfileFullColumns = `id, owner, repo, source, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind`
+const repoProfileFullColumns = `owner, repo, source, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind`
 
 // scanRepositoryFull reads the repositories row shape shared by Get, List,
-// and the get-or-create lookup. Distinct from ListWithContent's narrower
-// projection — that one skips the identity and clone_* columns.
+// and the get-or-create lookup. No id column: the surrogate stays inside this
+// package and the "owner/repo" the store contract surfaces is rebuilt from the
+// slug columns. Distinct from ListWithContent's narrower projection — that one
+// skips the identity and clone_* columns.
 func scanRepositoryFull(row rowScanner) (domain.Repository, error) {
 	var p domain.Repository
 	var externalID, description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind sql.NullString
 	var profiledAt sql.NullTime
-	if err := row.Scan(&p.ID, &p.Owner, &p.Repo, &p.Source, &externalID, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind); err != nil {
+	if err := row.Scan(&p.Owner, &p.Repo, &p.Source, &externalID, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind); err != nil {
 		return p, err
 	}
+	p.ID = p.Owner + "/" + p.Repo
 	p.ExternalID = externalID.String
 	p.Description = description.String
 	p.ProfileText = profileText.String
@@ -534,26 +630,28 @@ func scanRepositoryFull(row rowScanner) (domain.Repository, error) {
 	return p, nil
 }
 
-// listRepoIDsInTx is the SetConfigured helper that lists every id
-// inside the tx so we know which to delete. Inlined into the
-// closure body would obscure the diff-vs-pre-D2; pulled out for
-// readability.
-func listRepoIDsInTx(ctx context.Context, tx queryer) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM repositories`)
+// repoRow pairs a registry row's surrogate id with its slug: the slug is what
+// a caller's desired set is expressed in, the id is what a DELETE keys on.
+type repoRow struct{ id, slug string }
+
+// listRepoRowsInTx is the SetConfigured helper that lists every registry row
+// inside the tx so we know which to delete.
+func listRepoRowsInTx(ctx context.Context, tx queryer) ([]repoRow, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id, owner || '/' || repo FROM repositories`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var ids []string
+	var out []repoRow
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var r repoRow
+		if err := rows.Scan(&r.id, &r.slug); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		out = append(out, r)
 	}
-	return ids, rows.Err()
+	return out, rows.Err()
 }
 
 // splitRepoSlug splits "owner/repo" at the first slash. Returns

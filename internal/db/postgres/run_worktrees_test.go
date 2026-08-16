@@ -113,6 +113,12 @@ func TestRunWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T) {
 	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
+	// The worktree store resolves the slug to a registry row and never creates
+	// one (the executor holds no INSERT on repositories), so the fixture brings
+	// each repository into existence the way tracking would.
+	pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "other-repo")
+	pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "third-repo")
+
 	msgs, ready := credDoorbells(t, h)
 	ready()
 
@@ -167,6 +173,8 @@ func TestRunWorktreeStore_Postgres_RolledBackInsertRingsNoDoorbell(t *testing.T)
 	ctx := context.Background()
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
 	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+
+	pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "other-repo")
 
 	msgs, ready := credDoorbells(t, h)
 	ready()

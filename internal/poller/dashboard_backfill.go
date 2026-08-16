@@ -60,7 +60,7 @@ func (m *Manager) BackfillUserDashboard(ctx context.Context, orgID, userID, logi
 		return nil
 	}
 
-	repos, err := m.repos.ListConfiguredNamesSystem(ctx, orgID)
+	repos, err := m.repos.ListTrackedNamesSystem(ctx, orgID)
 	if err != nil {
 		return err
 	}
