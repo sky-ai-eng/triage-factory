@@ -10,11 +10,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestTeamGitHubRepos_SQLite_ReconcilesRepositories is the local-backend
-// proof of the derived-cache contract: adding a repo to a team creates
-// the repositories row; removing it from the *last* team that tracked it
-// GCs the row; a repo still tracked by another team survives.
-func TestTeamGitHubRepos_SQLite_ReconcilesRepositories(t *testing.T) {
+// TestTeamGitHubRepos_SQLite_TrackedSetIsTheUnion is the local-backend proof
+// that the tracked set — what the poller and the profiler work through — is
+// the union of every team's rows, and that untracking is a delete on THIS
+// table only. The registry row a repository got when it was first tracked
+// stays, because a worktree ledger entry, a pinned project or a task may still
+// name it; the tracked set is what shrinks.
+func TestTeamGitHubRepos_SQLite_TrackedSetIsTheUnion(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -23,7 +25,16 @@ func TestTeamGitHubRepos_SQLite_ReconcilesRepositories(t *testing.T) {
 	teamB := "team-b-0000-0000-0000-000000000001"
 	seedExtraTeam(t, conn, teamB, "team-b")
 
-	profiles := func() []string {
+	tracked := func() []string {
+		t.Helper()
+		names, err := stores.Repos.ListTrackedNamesSystem(ctx, runmode.LocalDefaultOrgID)
+		if err != nil {
+			t.Fatalf("ListTrackedNamesSystem: %v", err)
+		}
+		sort.Strings(names)
+		return names
+	}
+	registry := func() []string {
 		t.Helper()
 		names, err := stores.Repos.ListConfiguredNames(ctx, runmode.LocalDefaultOrgID)
 		if err != nil {
@@ -40,8 +51,8 @@ func TestTeamGitHubRepos_SQLite_ReconcilesRepositories(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("teamA replace: %v", err)
 	}
-	if got, want := profiles(), []string{"acme/api", "acme/web"}; !equalSlugs(got, want) {
-		t.Fatalf("after teamA: repositories = %v, want %v", got, want)
+	if got, want := tracked(), []string{"acme/api", "acme/web"}; !equalSlugs(got, want) {
+		t.Fatalf("after teamA: tracked = %v, want %v", got, want)
 	}
 
 	// Team B also tracks acme/web (shared) plus acme/infra.
@@ -51,28 +62,30 @@ func TestTeamGitHubRepos_SQLite_ReconcilesRepositories(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("teamB replace: %v", err)
 	}
-	if got, want := profiles(), []string{"acme/api", "acme/infra", "acme/web"}; !equalSlugs(got, want) {
-		t.Fatalf("after teamB: repositories = %v, want %v", got, want)
+	if got, want := tracked(), []string{"acme/api", "acme/infra", "acme/web"}; !equalSlugs(got, want) {
+		t.Fatalf("after teamB: tracked = %v, want %v", got, want)
 	}
 
-	// Team A drops acme/api (no other team tracks it → GC'd) and keeps
-	// acme/web (team B still tracks it → survives).
+	// Team A drops acme/api. No other team tracks it, so it leaves the tracked
+	// set — and its registry row stays exactly where it was.
 	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "web"},
 	}); err != nil {
 		t.Fatalf("teamA shrink: %v", err)
 	}
-	if got, want := profiles(), []string{"acme/infra", "acme/web"}; !equalSlugs(got, want) {
-		t.Fatalf("after teamA shrink: repositories = %v, want %v (acme/api should be GC'd, acme/web survives via teamB)", got, want)
+	if got, want := tracked(), []string{"acme/infra", "acme/web"}; !equalSlugs(got, want) {
+		t.Fatalf("after teamA shrink: tracked = %v, want %v (acme/api untracked, acme/web survives via teamB)", got, want)
+	}
+	if got, want := registry(), []string{"acme/api", "acme/infra", "acme/web"}; !equalSlugs(got, want) {
+		t.Fatalf("after teamA shrink: registry = %v, want %v — untracking is not a delete", got, want)
 	}
 
-	// Team B clears everything → only acme/web (still on team A) survives;
-	// acme/infra was last-tracked by B and is GC'd.
+	// Team B clears everything → only acme/web (still on team A) is tracked.
 	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, nil); err != nil {
 		t.Fatalf("teamB clear: %v", err)
 	}
-	if got, want := profiles(), []string{"acme/web"}; !equalSlugs(got, want) {
-		t.Fatalf("after teamB clear: repositories = %v, want %v", got, want)
+	if got, want := tracked(), []string{"acme/web"}; !equalSlugs(got, want) {
+		t.Fatalf("after teamB clear: tracked = %v, want %v", got, want)
 	}
 
 	// ListForOrgSystem reports the same union.
@@ -85,11 +98,11 @@ func TestTeamGitHubRepos_SQLite_ReconcilesRepositories(t *testing.T) {
 	}
 }
 
-// TestTeamGitHubRepos_SQLite_CasingChangePreservesCache pins the
-// derived-cache contract under a casing-only change: re-tracking the same
-// GitHub repo with different casing must NOT delete + reinsert the
-// repositories row (which would drop cached profile_text / base_branch /
-// clone status / etag). The row is matched case-insensitively and kept.
+// TestTeamGitHubRepos_SQLite_CasingChangePreservesCache pins the registry
+// contract under a casing-only change: re-tracking the same GitHub repo with
+// different casing must NOT delete + reinsert the repositories row (which would
+// drop cached profile_text / base_branch / clone status / etag). The row is
+// matched case-insensitively and kept.
 func TestTeamGitHubRepos_SQLite_CasingChangePreservesCache(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -102,7 +115,7 @@ func TestTeamGitHubRepos_SQLite_CasingChangePreservesCache(t *testing.T) {
 		t.Fatalf("initial track: %v", err)
 	}
 	if _, err := conn.ExecContext(ctx,
-		`UPDATE repositories SET base_branch = 'main', profile_text = 'cached' WHERE id = 'acme/API'`); err != nil {
+		`UPDATE repositories SET base_branch = 'main', profile_text = 'cached' WHERE owner = 'acme' AND repo = 'API'`); err != nil {
 		t.Fatalf("seed cache: %v", err)
 	}
 
@@ -114,9 +127,9 @@ func TestTeamGitHubRepos_SQLite_CasingChangePreservesCache(t *testing.T) {
 
 	// Exactly one repository row, casing sticky to the original, cache intact.
 	var (
-		n          int
-		id, branch string
-		text       string
+		n            int
+		slug, branch string
+		text         string
 	)
 	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM repositories`).Scan(&n); err != nil {
 		t.Fatalf("count: %v", err)
@@ -125,11 +138,11 @@ func TestTeamGitHubRepos_SQLite_CasingChangePreservesCache(t *testing.T) {
 		t.Fatalf("repositories row count = %d, want 1 (casing change must not duplicate)", n)
 	}
 	if err := conn.QueryRowContext(ctx,
-		`SELECT id, base_branch, profile_text FROM repositories`).Scan(&id, &branch, &text); err != nil {
+		`SELECT owner || '/' || repo, base_branch, profile_text FROM repositories`).Scan(&slug, &branch, &text); err != nil {
 		t.Fatalf("read repository row: %v", err)
 	}
-	if id != "acme/API" {
-		t.Errorf("id = %q, want sticky original casing acme/API", id)
+	if slug != "acme/API" {
+		t.Errorf("slug = %q, want sticky original casing acme/API", slug)
 	}
 	if branch != "main" || text != "cached" {
 		t.Errorf("cached columns lost on casing change: base_branch=%q profile_text=%q (want main/cached)", branch, text)
@@ -288,10 +301,9 @@ func equalSlugs(a, b []string) bool {
 }
 
 // Tracking is what brings a repository into the repositories table — not
-// profiling — so the row the reconcile mints has to be a complete identity
-// row from the moment it exists. The store's own get-or-create and this path
-// share one INSERT precisely so a row cannot differ by which of them created
-// it.
+// profiling — so the row tracking mints has to be a complete identity row from
+// the moment it exists. The store's own get-or-create and this path share one
+// INSERT precisely so a row cannot differ by which of them created it.
 func TestTeamGitHubRepos_SQLite_TrackedRowCarriesIdentity(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)

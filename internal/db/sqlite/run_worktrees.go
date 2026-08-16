@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -14,6 +15,12 @@ import (
 // Postgres impl; SQLite has one connection so the second arg is
 // discarded. ...System variants are thin wrappers around their
 // non-System counterparts.
+//
+// A ledger row points at a repository by the registry row's id. The store's
+// surface stays the slug, because the caller is an agent's argv
+// (`tfac exec workspace add owner/repo`), so every method resolves the slug
+// here: a write get-or-creates the registry row, a read or a delete resolves
+// it and matches nothing when there is none.
 type runWorktreeStore struct{ q queryer }
 
 func newRunWorktreeStore(q, _ queryer) db.RunWorktreeStore {
@@ -26,10 +33,28 @@ func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.Ru
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, "", err
 	}
+	// A lookup, never a create. In multi mode this runs on the executor, whose
+	// Postgres role holds SELECT and UPDATE on repositories and deliberately not
+	// INSERT — a repository is brought into the registry by the side that polls
+	// and tracks, never by a running agent's pod — and the two dialects agree on
+	// the contract rather than diverging where only one of them is enforced. A
+	// worktree is reserved for a repository the run was already authorized to
+	// clone, so the row exists; an absent one is a broken caller.
+	owner, repo := splitRepoSlug(w.RepoID)
+	if owner == "" || repo == "" {
+		return false, "", fmt.Errorf("run_worktree repo id %q is not an owner/repo slug", w.RepoID)
+	}
+	repositoryID, err := findRepositoryID(ctx, s.q, domain.RepoSourceGitHub, owner, repo)
+	if err != nil {
+		return false, "", fmt.Errorf("resolve repository %s: %w", w.RepoID, err)
+	}
+	if repositoryID == "" {
+		return false, "", fmt.Errorf("no repository row for %s", w.RepoID)
+	}
 	res, err := s.q.ExecContext(ctx, `
-		INSERT OR IGNORE INTO conversation_worktrees (conversation_id, repo_id, path, ref)
+		INSERT OR IGNORE INTO conversation_worktrees (conversation_id, repository_id, path, ref)
 		VALUES (?, ?, ?, ?)
-	`, w.RunID, w.RepoID, w.Path, w.Ref)
+	`, w.RunID, repositoryID, w.Path, w.Ref)
 	if err != nil {
 		return false, "", fmt.Errorf("insert run_worktree: %w", err)
 	}
@@ -54,14 +79,19 @@ func (s *runWorktreeStore) GetByRepoRef(ctx context.Context, orgID, runID, repoI
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" {
+		return nil, nil
+	}
 	row := s.q.QueryRowContext(ctx, `
-		SELECT conversation_id, repo_id, path, ref, created_at
-		FROM conversation_worktrees
-		WHERE conversation_id = ? AND repo_id = ? AND ref = ?
-	`, runID, repoID, ref)
+		SELECT w.conversation_id, r.owner || '/' || r.repo, w.path, w.ref, w.created_at
+		FROM conversation_worktrees w
+		JOIN repositories r ON r.id = w.repository_id
+		WHERE w.conversation_id = ? AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?) AND w.ref = ?
+	`, runID, owner, repo, ref)
 	var w domain.RunWorktree
 	if err := row.Scan(&w.RunID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
@@ -74,10 +104,11 @@ func (s *runWorktreeStore) List(ctx context.Context, orgID, runID string) ([]dom
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT conversation_id, repo_id, path, ref, created_at
-		FROM conversation_worktrees
-		WHERE conversation_id = ?
-		ORDER BY created_at ASC, repo_id ASC, ref ASC
+		SELECT w.conversation_id, r.owner || '/' || r.repo, w.path, w.ref, w.created_at
+		FROM conversation_worktrees w
+		JOIN repositories r ON r.id = w.repository_id
+		WHERE w.conversation_id = ?
+		ORDER BY w.created_at ASC, r.owner ASC, r.repo ASC, w.ref ASC
 	`, runID)
 	if err != nil {
 		return nil, err
@@ -102,9 +133,17 @@ func (s *runWorktreeStore) DeleteByRepoRef(ctx context.Context, orgID, runID, re
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" {
+		return nil
+	}
 	_, err := s.q.ExecContext(ctx, `
-		DELETE FROM conversation_worktrees WHERE conversation_id = ? AND repo_id = ? AND ref = ?
-	`, runID, repoID, ref)
+		DELETE FROM conversation_worktrees
+		 WHERE conversation_id = ? AND ref = ?
+		   AND repository_id IN (
+		       SELECT id FROM repositories
+		        WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?))
+	`, runID, ref, owner, repo)
 	return err
 }
 

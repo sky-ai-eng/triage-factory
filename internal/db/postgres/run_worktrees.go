@@ -29,6 +29,12 @@ import (
 //   - admin: admin pool (supabase_admin, BYPASSRLS). The delegate
 //     spawner's runAgent + chain orchestrator cleanup defers route
 //     here. org_id stays bound as defense in depth.
+//
+// A ledger row points at a repository by the registry row's id. The store's
+// surface stays the slug, because the caller is an agent's argv
+// (`tfac exec workspace add owner/repo`), so every method resolves the slug
+// here: a write get-or-creates the registry row, a read or a delete resolves it
+// and matches nothing when there is none.
 type runWorktreeStore struct {
 	q     queryer
 	admin queryer
@@ -46,6 +52,28 @@ func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.Ru
 
 func (s *runWorktreeStore) InsertSystem(ctx context.Context, orgID string, w domain.RunWorktree) (bool, string, error) {
 	return insertRunWorktree(ctx, s.admin, orgID, w, s.GetByRepoRefSystem)
+}
+
+// resolveWorktreeRepositoryID maps the slug a caller passes to the registry
+// row's id. A lookup, never a create: this runs on the executor, whose Postgres
+// role holds SELECT and UPDATE on repositories and deliberately not INSERT — a
+// repository is brought into the registry by the side that polls and tracks,
+// never by a running agent's pod. A worktree is reserved for a repository the
+// run was already authorized to clone, so the row exists; an absent one is a
+// broken caller and says so rather than minting a repository nobody tracks.
+func resolveWorktreeRepositoryID(ctx context.Context, q queryer, orgID, repoID string) (string, error) {
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" {
+		return "", fmt.Errorf("run_worktree repo id %q is not an owner/repo slug", repoID)
+	}
+	id, err := findRepositoryID(ctx, q, orgID, domain.RepoSourceGitHub, owner, repo)
+	if err != nil {
+		return "", err
+	}
+	if id == "" {
+		return "", fmt.Errorf("no repository row for %s", repoID)
+	}
+	return id, nil
 }
 
 func insertRunWorktree(
@@ -71,20 +99,24 @@ func insertRunWorktree(
 	// statement is inserting. It decides the credential doorbell below:
 	// credentials are minted per repo, not per (repo, ref), so a second
 	// checkout in a repo the run already holds widens nothing.
+	repositoryID, err := resolveWorktreeRepositoryID(ctx, q, orgID, w.RepoID)
+	if err != nil {
+		return false, "", fmt.Errorf("resolve repository %s: %w", w.RepoID, err)
+	}
 	var inserted, priorRows int
-	err := q.QueryRowContext(ctx, `
+	err = q.QueryRowContext(ctx, `
 		WITH prior AS (
 			SELECT 1 FROM conversation_worktrees
-			WHERE org_id = $2 AND conversation_id = $1 AND lower(repo_id) = lower($3)
+			WHERE org_id = $2 AND conversation_id = $1 AND repository_id = $3
 			LIMIT 1
 		), ins AS (
-			INSERT INTO conversation_worktrees (conversation_id, org_id, repo_id, path, ref)
+			INSERT INTO conversation_worktrees (conversation_id, org_id, repository_id, path, ref)
 			VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT (conversation_id, repo_id, ref) DO NOTHING
+			ON CONFLICT (conversation_id, repository_id, ref) DO NOTHING
 			RETURNING 1
 		)
 		SELECT (SELECT count(*) FROM ins), (SELECT count(*) FROM prior)
-	`, w.RunID, orgID, w.RepoID, w.Path, w.Ref).Scan(&inserted, &priorRows)
+	`, w.RunID, orgID, repositoryID, w.Path, w.Ref).Scan(&inserted, &priorRows)
 	if err != nil {
 		return false, "", fmt.Errorf("insert run_worktree: %w", err)
 	}
@@ -141,11 +173,17 @@ func (s *runWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgID, runID,
 }
 
 func getRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, runID, repoID, ref string) (*domain.RunWorktree, error) {
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" {
+		return nil, nil
+	}
 	row := q.QueryRowContext(ctx, `
-		SELECT conversation_id, repo_id, path, ref, created_at
-		FROM conversation_worktrees
-		WHERE org_id = $1 AND conversation_id = $2 AND repo_id = $3 AND ref = $4
-	`, orgID, runID, repoID, ref)
+		SELECT w.conversation_id, r.owner || '/' || r.repo, w.path, w.ref, w.created_at
+		FROM conversation_worktrees w
+		JOIN repositories r ON r.id = w.repository_id
+		WHERE w.org_id = $1 AND w.conversation_id = $2
+		  AND lower(r.owner) = lower($3) AND lower(r.repo) = lower($4) AND w.ref = $5
+	`, orgID, runID, owner, repo, ref)
 	var w domain.RunWorktree
 	if err := row.Scan(&w.RunID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -166,10 +204,11 @@ func (s *runWorktreeStore) ListSystem(ctx context.Context, orgID, runID string) 
 
 func listRunWorktrees(ctx context.Context, q queryer, orgID, runID string) ([]domain.RunWorktree, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT conversation_id, repo_id, path, ref, created_at
-		FROM conversation_worktrees
-		WHERE org_id = $1 AND conversation_id = $2
-		ORDER BY created_at ASC, repo_id ASC, ref ASC
+		SELECT w.conversation_id, r.owner || '/' || r.repo, w.path, w.ref, w.created_at
+		FROM conversation_worktrees w
+		JOIN repositories r ON r.id = w.repository_id
+		WHERE w.org_id = $1 AND w.conversation_id = $2
+		ORDER BY w.created_at ASC, r.owner ASC, r.repo ASC, w.ref ASC
 	`, orgID, runID)
 	if err != nil {
 		return nil, err
@@ -195,10 +234,18 @@ func (s *runWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, run
 }
 
 func deleteRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, runID, repoID, ref string) error {
+	owner, repo := splitRepoSlug(repoID)
+	if owner == "" || repo == "" {
+		return nil
+	}
 	_, err := q.ExecContext(ctx, `
-		DELETE FROM conversation_worktrees
-		WHERE org_id = $1 AND conversation_id = $2 AND repo_id = $3 AND ref = $4
-	`, orgID, runID, repoID, ref)
+		DELETE FROM conversation_worktrees w
+		WHERE w.org_id = $1 AND w.conversation_id = $2 AND w.ref = $3
+		  AND EXISTS (
+		      SELECT 1 FROM repositories r
+		       WHERE r.id = w.repository_id
+		         AND lower(r.owner) = lower($4) AND lower(r.repo) = lower($5))
+	`, orgID, runID, ref, owner, repo)
 	return err
 }
 

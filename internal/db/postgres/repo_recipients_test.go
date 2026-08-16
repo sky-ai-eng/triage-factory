@@ -55,9 +55,27 @@ func TestRepoRecipients_Postgres(t *testing.T) {
 			},
 			TrackRepo: func(t *testing.T, teamID, owner, repo string) {
 				t.Helper()
-				pgtest.MustExec(t, h.AdminDB,
-					`INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, $2, $3)`,
-					teamID, owner, repo)
+				// A tracking row references the registry row, so the registry
+				// row has to exist first. The org is the team's — a tracking
+				// row whose repository lived in another org would be a
+				// cross-tenant row, which is the thing the FK plus
+				// ReplaceForTeam's team-in-org check exist to make
+				// unrepresentable.
+				pgtest.MustExec(t, h.AdminDB, `
+					INSERT INTO repositories (org_id, owner, repo, source)
+					SELECT t.org_id, $2, $3, 'github' FROM teams t WHERE t.id = $1
+					ON CONFLICT DO NOTHING
+				`, teamID, owner, repo)
+				pgtest.MustExec(t, h.AdminDB, `
+					INSERT INTO team_github_repos (team_id, repository_id, org_id)
+					SELECT t.id, r.id, t.org_id
+					  FROM teams t
+					  JOIN repositories r
+					    ON r.org_id = t.org_id AND r.source = 'github'
+					   AND lower(r.owner) = lower($2) AND lower(r.repo) = lower($3)
+					 WHERE t.id = $1
+					ON CONFLICT DO NOTHING
+				`, teamID, owner, repo)
 			},
 			ArchiveTeam: func(t *testing.T, teamID string) {
 				t.Helper()

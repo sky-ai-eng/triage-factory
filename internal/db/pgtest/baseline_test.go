@@ -1636,8 +1636,8 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 		orgA, runID, entityA)
 	MustExec(t, h.AdminDB, `INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role) VALUES ($1, $2, $3, 'primary')`,
 		orgA, runID, entityA)
-	MustExec(t, h.AdminDB, `INSERT INTO conversation_worktrees (org_id, conversation_id, repo_id, path, ref) VALUES ($1, $2, 'octo/repo', '/tmp/x', 'pr-1')`,
-		orgA, runID)
+	MustExec(t, h.AdminDB, `INSERT INTO conversation_worktrees (org_id, conversation_id, repository_id, path, ref) VALUES ($1, $2, $3, '/tmp/x', 'pr-1')`,
+		orgA, runID, SeedRepository(t, h, orgA, "octo", "repo"))
 
 	// Alice sees all her child rows.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
@@ -3077,9 +3077,15 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 	carol := SeedUser(t, h, "carol")
 	AddOrgMember(t, h, carol, orgA, teamB, "member", "admin")
 
+	// The registry rows the tracking rows reference. Minted on the admin pool
+	// because this test is about the team_github_repos policies, not about who
+	// may create a repository.
+	repoA := SeedRepository(t, h, orgA, "acme", "a-repo")
+	repoB := SeedRepository(t, h, orgA, "acme", "b-repo")
+
 	// carol (admin of teamB) tracks a repo for teamB.
 	if err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
-		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'b-repo')`, teamB)
+		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`, teamB, repoB, orgA)
 		return e
 	}); err != nil {
 		t.Fatalf("carol INSERT teamB repo: %v", err)
@@ -3088,7 +3094,7 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 	// alice (admin of teamA — owner is implicitly team admin) tracks a
 	// repo for teamA.
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'a-repo')`, teamA)
+		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`, teamA, repoA, orgA)
 		return e
 	}); err != nil {
 		t.Fatalf("alice INSERT teamA repo: %v", err)
@@ -3097,7 +3103,10 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 	// bob (member of teamA only) sees exactly teamA's row — teamB's row
 	// is filtered out by the membership semi-join in the SELECT policy.
 	if err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		rows, e := tx.Query(`SELECT repo FROM team_github_repos ORDER BY repo`)
+		rows, e := tx.Query(`
+			SELECT r.repo FROM team_github_repos g
+			JOIN repositories r ON r.id = g.repository_id
+			ORDER BY r.repo`)
 		if e != nil {
 			return e
 		}
@@ -3121,7 +3130,7 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 	// bob (non-admin) cannot INSERT into teamA — INSERT WITH CHECK is
 	// admin-gated → SQLSTATE 42501.
 	err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'sneaky')`, teamA)
+		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`, teamA, repoA, orgA)
 		return e
 	})
 	assertPgCode(t, err, "42501", "bob INSERT teamA repo (non-admin)")
@@ -3156,65 +3165,107 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 	}
 }
 
-// TestOrgTrackedRepos_OrgBoundaryAndTeamBypass pins the security contract
-// of the tf.org_tracked_repos() SECURITY DEFINER helper: it
-// bypasses the per-team SELECT RLS (a within-org, non-security boundary)
-// so the repositories reconcile can read the full org union, but it
-// holds the ORG boundary — a caller's claims org must match the requested
-// org, so it can never read another org's tracked repos.
-func TestOrgTrackedRepos_OrgBoundaryAndTeamBypass(t *testing.T) {
+// TestTeamGitHubRepos_TrackingSurvivesUntrackingTheRegistryRow pins the
+// negative space of the tracked-set foreign key: untracking is a delete on
+// team_github_repos and leaves the registry row standing, while deleting the
+// registry row cascades the tracking rows away with it.
+//
+// It replaces the old tf.org_tracked_repos() bypass test. That SECURITY
+// DEFINER helper existed so a team admin's app-pool transaction could read
+// every team's tracked repos while reconciling the repositories table from
+// their union; the reconcile is gone (the foreign key keeps the two in step),
+// and so is the helper.
+func TestTeamGitHubRepos_TrackingSurvivesUntrackingTheRegistryRow(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
-	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
-	teamA2 := SeedTeam(t, h, orgA, "team-a2") // alice is NOT a member
+	orgA, _, teamA := SeedOrgWithUser(t, h, "alice")
+	teamA2 := SeedTeam(t, h, orgA, "team-a2")
+
+	repoID := SeedTrackedRepo(t, h, orgA, teamA, "acme", "a1")
+	SeedTrackedRepo(t, h, orgA, teamA2, "acme", "a1") // shared by both teams
+
+	// Untracking on one team leaves the registry row and the other team's
+	// tracking row alone.
+	MustExec(t, h.AdminDB, `DELETE FROM team_github_repos WHERE team_id = $1`, teamA)
+	var registryRows, trackingRows int
+	if err := h.AdminDB.QueryRow(`SELECT count(*) FROM repositories WHERE id = $1`, repoID).Scan(&registryRows); err != nil {
+		t.Fatalf("count registry rows: %v", err)
+	}
+	if registryRows != 1 {
+		t.Errorf("registry rows after untracking = %d; want 1 — untracking must not delete the repository", registryRows)
+	}
+	if err := h.AdminDB.QueryRow(
+		`SELECT count(*) FROM team_github_repos WHERE repository_id = $1`, repoID,
+	).Scan(&trackingRows); err != nil {
+		t.Fatalf("count tracking rows: %v", err)
+	}
+	if trackingRows != 1 {
+		t.Errorf("tracking rows after one team untracked = %d; want 1 (the other team)", trackingRows)
+	}
+
+	// The other direction cascades: a tracking row is a statement about a
+	// repository and cannot outlive it.
+	MustExec(t, h.AdminDB, `DELETE FROM repositories WHERE id = $1`, repoID)
+	if err := h.AdminDB.QueryRow(
+		`SELECT count(*) FROM team_github_repos WHERE repository_id = $1`, repoID,
+	).Scan(&trackingRows); err != nil {
+		t.Fatalf("count tracking rows after registry delete: %v", err)
+	}
+	if trackingRows != 0 {
+		t.Errorf("tracking rows after the registry row went = %d; want 0 (ON DELETE CASCADE)", trackingRows)
+	}
+}
+
+// TestTeamGitHubRepos_CrossTenantRowIsUnrepresentable pins the composite
+// foreign keys. A tracking row joins a team to a repository and both belong to
+// an org, so the row carries org_id and references (team_id, org_id) and
+// (repository_id, org_id) rather than the two ids alone.
+//
+// This is asserted on the ADMIN pool on purpose: RLS refuses a cross-org write
+// on the app pool, and the store refuses one before it reaches the database at
+// all. Both of those are checks somebody has to remember to keep. The
+// constraint is the one that holds when they are bypassed, and the admin pool
+// is where "bypassed" is testable.
+//
+// The failure this prevents is quiet rather than loud. A row pairing org A's
+// team with org B's repository satisfies both single-column keys, and every
+// org-scoped read filters it out — so the save reports success and the repo is
+// never tracked, never polled, never profiled.
+func TestTeamGitHubRepos_CrossTenantRowIsUnrepresentable(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, _, teamA := SeedOrgWithUser(t, h, "alice")
 	orgB, _, teamB := SeedOrgWithUser(t, h, "bob")
+	repoA := SeedRepository(t, h, orgA, "acme", "shared")
+	repoB := SeedRepository(t, h, orgB, "acme", "shared")
 
-	// Tracked repos: two teams in orgA (alice belongs to only one), one in orgB.
-	MustExec(t, h.AdminDB, `INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'a1')`, teamA)
-	MustExec(t, h.AdminDB, `INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'a2')`, teamA2)
-	MustExec(t, h.AdminDB, `INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'beta', 'b1')`, teamB)
-
-	// Under alice's claims, the helper returns the WHOLE org-A union — both
-	// teamA and teamA2 — even though alice isn't a member of teamA2 (the
-	// intentional team-RLS bypass).
-	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		var n int
-		if e := tx.QueryRow(`SELECT count(*) FROM tf.org_tracked_repos($1)`, orgA).Scan(&n); e != nil {
-			return e
-		}
-		if n != 2 {
-			t.Errorf("org_tracked_repos(orgA) returned %d repos; want 2 (both teams, team RLS bypassed)", n)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("alice org_tracked_repos(orgA): %v", err)
+	// org A's team pointed at org B's repository, stamped with either org.
+	// Whichever org_id is written, one of the two composite keys has no parent.
+	for _, tc := range []struct{ name, org string }{
+		{"stamped with the team's org", orgA},
+		{"stamped with the repository's org", orgB},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := h.AdminDB.Exec(
+				`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`,
+				teamA, repoB, tc.org)
+			if err == nil {
+				t.Fatal("a cross-tenant tracking row was accepted; the composite foreign keys are not doing their job")
+			}
+			if !strings.Contains(err.Error(), "foreign key") && !strings.Contains(err.Error(), "23503") {
+				t.Errorf("refused for the wrong reason: %v", err)
+			}
+		})
 	}
 
-	// But a DIRECT table read under alice still honors the per-team SELECT
-	// RLS — she sees only teamA's row, not teamA2's. The boundary is intact
-	// at the table level; only the definer helper bridges it.
-	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		var n int
-		if e := tx.QueryRow(`SELECT count(*) FROM team_github_repos`).Scan(&n); e != nil {
-			return e
-		}
-		if n != 1 {
-			t.Errorf("direct team_github_repos read saw %d rows; want 1 (team RLS still enforced)", n)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("alice direct read: %v", err)
-	}
-
-	// The ORG boundary holds: alice (claims org A) asking for org B's union
-	// is rejected by the helper's guard — no cross-org read.
-	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		var n int
-		return tx.QueryRow(`SELECT count(*) FROM tf.org_tracked_repos($1)`, orgB).Scan(&n)
-	})
-	if err == nil {
-		t.Fatal("org_tracked_repos(orgB) under org-A claims should be rejected, got nil error")
-	}
-	assertPgCode(t, err, "P0001", "cross-org org_tracked_repos (raise_exception)")
+	// The same-tenant pairs still insert, so the constraint is discriminating
+	// rather than just strict.
+	MustExec(t, h.AdminDB,
+		`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`,
+		teamA, repoA, orgA)
+	MustExec(t, h.AdminDB,
+		`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`,
+		teamB, repoB, orgB)
 }

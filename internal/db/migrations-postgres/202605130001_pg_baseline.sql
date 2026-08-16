@@ -329,41 +329,6 @@ $$;
 
 
 --
--- Name: org_tracked_repos(uuid); Type: FUNCTION; Schema: tf; Owner: -
---
-
--- The cross-team union read behind team_github_repos -> repositories
--- reconciliation. repositories is the org-wide UNION of every
--- team's tracked repos, but the team_github_repos SELECT policy is
--- team-membership-scoped, so a team admin's app-pool tx can't see sibling
--- teams' rows. This SECURITY DEFINER helper bypasses that per-team SELECT
--- RLS — a within-org, non-security boundary — to return the full org
--- union, while preserving the ORG boundary: with request claims it
--- requires p_org_id to equal the caller's org; with no claims
--- (admin-pool / system / test) the guard is skipped — the same
--- claims-present-vs-trusted-args split every *System store method uses.
--- The pinned search_path blocks definer hijacking.
--- +goose StatementBegin
-CREATE FUNCTION tf.org_tracked_repos(p_org_id uuid) RETURNS TABLE(owner text, repo text)
-    LANGUAGE plpgsql STABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-BEGIN
-  IF tf.current_org_id() IS NOT NULL AND p_org_id <> tf.current_org_id() THEN
-    RAISE EXCEPTION 'org_tracked_repos: requested org % does not match caller org %', p_org_id, tf.current_org_id();
-  END IF;
-  RETURN QUERY
-    SELECT DISTINCT g.owner, g.repo
-    FROM team_github_repos g
-    JOIN teams t ON t.id = g.team_id
-    WHERE t.org_id = p_org_id
-    ORDER BY g.owner, g.repo;
-END;
-$$;
--- +goose StatementEnd
-
-
---
 -- Name: blueprint_run_is_running(uuid, uuid); Type: FUNCTION; Schema: tf; Owner: -
 --
 
@@ -379,7 +344,7 @@ $$;
 -- correlated subquery would find nothing for that teammate and the guard would
 -- fail OPEN — the one direction that reopens the failure. So this reads one
 -- blueprint's running-ness past the creator scope — a within-org, non-security
--- boundary, the same trade org_tracked_repos above makes — while preserving
+-- boundary — while preserving
 -- the ORG boundary: with request claims it requires p_org_id to equal the
 -- caller's org; with no claims (admin-pool / system / test) the guard is
 -- skipped. The pinned search_path blocks definer hijacking.
@@ -871,23 +836,39 @@ CREATE TABLE public.team_github_groups (
 -- Name: team_github_repos; Type: TABLE; Schema: public; Owner: -
 --
 
--- One row per (team, owner, repo): a team declaring "I track this repo."
+-- One row per (team, repository): a team declaring "I track this repo."
 -- The GitHub *tracking-scope* twin of jira_project_status_rules and the
 -- source of truth for which repos a team cares about. NOT the same as
 -- team_github_groups above (CODEOWNERS review-routing teams) — this is
--- the tracking selection. repositories is the org-shared UNION of every
--- team's rows here, a derived poll/profile/ETag cache reconciled on every
--- write and never user-written directly anymore. No org_id column: org
--- scope rides the teams FK, mirroring jira_project_status_rules. Local
--- mode (N=1) tracks every configured repo on the single default team, so
--- the router's team↔repo gate never drops anything there.
+-- the tracking selection. No org_id column: org scope rides the teams FK,
+-- mirroring jira_project_status_rules. Local mode (N=1) tracks every
+-- configured repo on the single default team, so the router's team↔repo gate
+-- never drops anything there.
+--
+-- The repository is referenced by the registry row's id, not by its slug. A
+-- rename therefore moves one column on one row in `repositories` and every
+-- tracking row here still resolves, untouched — which is the property the
+-- previous (team_id, owner, repo) key could not have, since the slug is a
+-- display handle GitHub lets you change.
+--
+-- The direction of the two lifetimes is the reason for the ON DELETE below.
+-- A tracking row is a statement ABOUT a repository, so it cannot outlive the
+-- registry row (CASCADE). The converse does not hold: untracking deletes a row
+-- HERE and leaves the registry row standing, because a worktree ledger entry,
+-- a pinned project or a task may still name that repository. Tracking is
+-- forward-only in both directions.
+--
+-- org_id is denormalized from the team so both references can be COMPOSITE
+-- foreign keys — see the constraints below. It is not a scoping convenience:
+-- it is what makes "the team and the repository belong to the same org" a
+-- thing the database checks rather than a thing each writer remembers. A
+-- cross-tenant row is invisible to every org-scoped read, so the failure it
+-- produces is a save that reports success and tracks nothing.
 CREATE TABLE public.team_github_repos (
     team_id uuid NOT NULL,
-    owner text NOT NULL,
-    repo text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT tgr_owner_populated CHECK (owner <> ''),
-    CONSTRAINT tgr_repo_populated CHECK (repo <> '')
+    repository_id uuid NOT NULL,
+    org_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -1094,7 +1075,6 @@ CREATE TABLE public.projects (
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,
     curator_session_id text,
-    pinned_repos jsonb DEFAULT '[]'::jsonb NOT NULL,
     jira_project_key text,
     linear_project_key text,
     spec_authorship_blueprint_id text,
@@ -1102,6 +1082,38 @@ CREATE TABLE public.projects (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT projects_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT projects_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text])))
+);
+
+
+--
+-- Name: project_pinned_repos; Type: TABLE; Schema: public; Owner: -
+--
+
+-- The repositories a project pins, one row per (project, repository).
+--
+-- This was a jsonb array of "owner/repo" strings on projects. An array of
+-- strings cannot carry a foreign key at all, which made it the one repository
+-- reference in this schema that nothing could check: a pin naming a repository
+-- no row exists for was indistinguishable from a live one, and a rename had to
+-- rewrite the array element by element. A join table is what makes it
+-- checkable.
+--
+-- position preserves the order the pins were saved in. The API surfaces
+-- pinned_repos as an ordered list and a project round-trips through bundle
+-- export/import, so ordering by slug instead would silently reshuffle a list
+-- somebody arranged.
+--
+-- CASCADE on both sides: a pin is project configuration, not durable work, so
+-- it follows whichever end goes away. That is the opposite of
+-- conversation_worktrees, and deliberately so — a ledger entry is a record of
+-- something that happened, a pin is a preference.
+--
+-- No org_id column: org scope rides the projects FK, mirroring
+-- team_github_repos' teams FK.
+CREATE TABLE public.project_pinned_repos (
+    project_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    "position" integer NOT NULL
 );
 
 
@@ -1143,13 +1155,22 @@ CREATE TABLE public.prompts (
 -- Name: repositories; Type: TABLE; Schema: public; Owner: -
 --
 
--- Every repository reference elsewhere in this schema is case-normalized
--- (owner, repo) text — team_github_repos' PK, conversation_worktrees.repo_id,
--- entities.source_id, teams.pinned_repos. A rename or a transfer moves all of
--- them at once and TF cannot even detect that it happened: under polling, a
--- renamed repository is indistinguishable from a 404 plus a brand-new one.
+-- The registry of the repositories TF works with, and the target every
+-- repository reference in this schema now points at: team_github_repos,
+-- conversation_worktrees and project_pinned_repos all carry this row's id. The
+-- slug survives only where it is genuinely something else's natural key
+-- (entities.source_id is a pull request's, "owner/repo#18") or where a human
+-- reads it (an API payload, a CLI argument, a directory name).
+--
 -- source + external_id are the half of a repository's identity a rename does
--- not move.
+-- not move. Without them a renamed repository is indistinguishable, under
+-- polling, from a 404 plus a brand-new one.
+--
+-- The row is durable. It is created when a repository is first tracked and it
+-- is NOT deleted when the last team untracks it, because a worktree ledger
+-- entry, a pinned project or a task may still name the repository. "Which
+-- repositories does TF poll and profile" is a question about tracking, and
+-- team_github_repos is what answers it.
 --
 -- source is app-validated, not CHECK-constrained — the convention this
 -- baseline states for the other source columns (prompts.source above), so a
@@ -1375,10 +1396,22 @@ ALTER SEQUENCE public.messages_id_seq OWNED BY public.messages.id;
 -- Name: conversation_worktrees; Type: TABLE; Schema: public; Owner: -
 --
 
+-- One row per (conversation, repository, ref): a worktree a run materialized.
+--
+-- repository_id was a slug despite the column's old name. It references the
+-- registry row now, so a rename moves nothing here. The agent-facing surface is
+-- unchanged — `tfac exec workspace add owner/repo` still takes a slug from
+-- argv, and the store resolves it.
+--
+-- No ON DELETE action on the repository FK, so deleting a registry row a run
+-- still names is refused rather than followed. A ledger entry records that a
+-- checkout happened and outlives the tracking decision that created it;
+-- cascading would leave the ledger with a hole in it, which is exactly the rot
+-- the reference was made checkable to prevent.
 CREATE TABLE public.conversation_worktrees (
     conversation_id uuid NOT NULL,
     org_id uuid NOT NULL,
-    repo_id text NOT NULL,
+    repository_id uuid NOT NULL,
     path text NOT NULL,
     ref text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
@@ -2033,7 +2066,7 @@ ALTER TABLE ONLY public.team_github_groups
 --
 
 ALTER TABLE ONLY public.team_github_repos
-    ADD CONSTRAINT team_github_repos_pkey PRIMARY KEY (team_id, owner, repo);
+    ADD CONSTRAINT team_github_repos_pkey PRIMARY KEY (team_id, repository_id);
 
 
 --
@@ -2162,11 +2195,31 @@ ALTER TABLE ONLY public.prompts
 
 
 --
+-- Name: project_pinned_repos project_pinned_repos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.project_pinned_repos
+    ADD CONSTRAINT project_pinned_repos_pkey PRIMARY KEY (project_id, repository_id);
+
+
+--
 -- Name: repositories repositories_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.repositories
     ADD CONSTRAINT repositories_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: repositories repositories_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+-- Redundant on its own — id alone is already unique — and present so that
+-- team_github_repos can reference (repository_id, org_id) as a composite
+-- foreign key. Postgres requires a unique constraint over exactly the
+-- referenced columns; this is that requirement, not a second identity.
+ALTER TABLE ONLY public.repositories
+    ADD CONSTRAINT repositories_id_org_id_key UNIQUE (id, org_id);
 
 
 --
@@ -2238,7 +2291,7 @@ ALTER TABLE ONLY public.messages
 --
 
 ALTER TABLE ONLY public.conversation_worktrees
-    ADD CONSTRAINT conversation_worktrees_pkey PRIMARY KEY (conversation_id, repo_id, ref);
+    ADD CONSTRAINT conversation_worktrees_pkey PRIMARY KEY (conversation_id, repository_id, ref);
 
 
 --
@@ -2335,6 +2388,22 @@ ALTER TABLE ONLY public.teams
 
 ALTER TABLE ONLY public.teams
     ADD CONSTRAINT teams_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: teams teams_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+-- Same rationale as repositories_id_org_id_key: a composite-FK target, not a
+-- second identity for a team. Two tables reference it — team_github_repos for
+-- the tracking row's team half, org_invites for an invite's target team — and
+-- it is declared here so it precedes both.
+--
+-- This is the schema's established shape for "these two rows must belong to
+-- the same tenant": agents, entities, runs, tasks and blueprint_runs all pair
+-- an (id, org_id) unique constraint with a composite foreign key.
+ALTER TABLE ONLY public.teams
+    ADD CONSTRAINT teams_id_org_id_key UNIQUE (id, org_id);
 
 
 --
@@ -2542,6 +2611,16 @@ CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (or
 -- Kept alongside the folded key: it serves the ordered org-wide list
 -- (WHERE org_id ORDER BY owner, repo), which the folded index cannot.
 CREATE INDEX idx_repositories_org_owner_repo ON public.repositories USING btree (org_id, owner, repo);
+
+
+--
+-- Name: project_pinned_repos_repository_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+-- The reverse lookup, "which projects pin this repository". The primary key
+-- leads with project_id and cannot serve it; the FK's own delete-time check
+-- reads it, as does any future "what would untracking break" report.
+CREATE INDEX project_pinned_repos_repository_idx ON public.project_pinned_repos USING btree (repository_id);
 
 
 --
@@ -2871,20 +2950,20 @@ CREATE INDEX team_agents_team_idx ON public.team_agents USING btree (team_id);
 
 
 --
--- Name: team_github_repos_lower_owner_repo_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: team_github_repos_repository_idx; Type: INDEX; Schema: public; Owner: -
 --
 
--- Functional index backing the factory belt's tracked-repo semi-join
--- (TFAC-516, factoryGitHubRepoTrackedExists). The belt matches a GitHub
--- entity's repo against the tracked set by lower(owner)/lower(repo) across
--- *all* of the viewer's teams, not a single team_id, so the (team_id, owner,
--- repo) primary key can't serve the lookup (team_id isn't pinned). Without
--- this index that EXISTS scans the org's tracked repos per entity row — fine
--- for the old ever-tasked population, but the belt is intentionally larger
--- now. owner/repo lead (equality-filtered); team_id trails so the teams
--- join + RLS membership check read it straight from the index. lower() on
--- both axes mirrors TracksRepoSystem's case-insensitive match.
-CREATE INDEX team_github_repos_lower_owner_repo_idx ON public.team_github_repos USING btree (lower(owner), lower(repo), team_id);
+-- The reverse lookup, "which teams track this repository", which is the
+-- direction every tracked-set semi-join reads: the factory belt
+-- (factoryGitHubRepoTrackedExists), the repo list's team scoping
+-- (repoProfileTrackedByViewerTeams), and the per-repo gates
+-- (TracksRepoViewerScoped / TracksRepoViewerAdminScoped). The primary key
+-- leads with team_id and cannot serve them — none of them pins a team. Those
+-- semi-joins reach a repository by id now, so this replaces the functional
+-- (lower(owner), lower(repo), team_id) index the slug columns needed: the
+-- case-folding moved to the registry's own identity index, where one
+-- repository is one row however it is spelled.
+CREATE INDEX team_github_repos_repository_idx ON public.team_github_repos USING btree (repository_id, team_id);
 
 
 --
@@ -3192,8 +3271,24 @@ ALTER TABLE ONLY public.team_github_groups
 -- Name: team_github_repos team_github_repos_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
+-- Both references carry org_id, so a tracking row cannot straddle two tenants:
+-- the team half and the repository half must agree on the org, or neither
+-- parent row exists to reference. This replaces a pair of single-column keys
+-- that checked existence and said nothing about tenancy.
+--
+-- No ON UPDATE clause on either: moving a team or a repository between orgs
+-- would drag its tracking rows across the tenant boundary, so refusing (the
+-- default) is the wanted behaviour. Nothing writes those columns.
 ALTER TABLE ONLY public.team_github_repos
-    ADD CONSTRAINT team_github_repos_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
+    ADD CONSTRAINT team_github_repos_team_id_fkey FOREIGN KEY (team_id, org_id) REFERENCES public.teams(id, org_id) ON DELETE CASCADE;
+
+
+--
+-- Name: team_github_repos team_github_repos_repository_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.team_github_repos
+    ADD CONSTRAINT team_github_repos_repository_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3387,6 +3482,22 @@ ALTER TABLE ONLY public.prompts
 
 
 --
+-- Name: project_pinned_repos project_pinned_repos_project_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.project_pinned_repos
+    ADD CONSTRAINT project_pinned_repos_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE CASCADE;
+
+
+--
+-- Name: project_pinned_repos project_pinned_repos_repository_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.project_pinned_repos
+    ADD CONSTRAINT project_pinned_repos_repository_id_fkey FOREIGN KEY (repository_id) REFERENCES public.repositories(id) ON DELETE CASCADE;
+
+
+--
 -- Name: repositories repositories_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3536,6 +3647,14 @@ ALTER TABLE ONLY public.messages
 
 ALTER TABLE ONLY public.conversation_worktrees
     ADD CONSTRAINT conversation_worktrees_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: conversation_worktrees conversation_worktrees_repository_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.conversation_worktrees
+    ADD CONSTRAINT conversation_worktrees_repository_id_fkey FOREIGN KEY (repository_id) REFERENCES public.repositories(id);
 
 
 --
@@ -4334,6 +4453,28 @@ CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.c
 
 
 --
+-- Name: project_pinned_repos; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.project_pinned_repos ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: project_pinned_repos project_pinned_repos_all; Type: POLICY; Schema: public; Owner: -
+--
+
+-- Visibility rides the parent project, the same EXISTS shape
+-- conversation_worktrees_all uses for its parent conversation: the projects
+-- policies already encode private/team/org visibility per operation, so
+-- restating them here would be a second copy to keep in step. A pin is
+-- readable and writable exactly when the project it belongs to is.
+CREATE POLICY project_pinned_repos_all ON public.project_pinned_repos USING ((EXISTS ( SELECT 1
+   FROM public.projects p
+  WHERE (p.id = project_pinned_repos.project_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM public.projects p
+  WHERE (p.id = project_pinned_repos.project_id))));
+
+
+--
 -- Name: repositories; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -4918,14 +5059,6 @@ GRANT ALL ON FUNCTION tf.user_has_org_access(target_org uuid) TO tf_app;
 
 
 --
--- Name: FUNCTION org_tracked_repos(p_org_id uuid); Type: ACL; Schema: tf; Owner: -
---
-
-REVOKE ALL ON FUNCTION tf.org_tracked_repos(p_org_id uuid) FROM PUBLIC;
-GRANT ALL ON FUNCTION tf.org_tracked_repos(p_org_id uuid) TO tf_app;
-
-
---
 -- Name: FUNCTION blueprint_run_is_running(p_id uuid, p_org_id uuid); Type: ACL; Schema: tf; Owner: -
 --
 
@@ -5198,6 +5331,17 @@ GRANT ALL ON TABLE public.prompts TO anon;
 GRANT ALL ON TABLE public.prompts TO authenticated;
 GRANT ALL ON TABLE public.prompts TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.prompts TO tf_app;
+
+
+--
+-- Name: TABLE project_pinned_repos; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.project_pinned_repos TO postgres;
+GRANT ALL ON TABLE public.project_pinned_repos TO anon;
+GRANT ALL ON TABLE public.project_pinned_repos TO authenticated;
+GRANT ALL ON TABLE public.project_pinned_repos TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.project_pinned_repos TO tf_app;
 
 
 --
@@ -6583,13 +6727,9 @@ ALTER TABLE public.team_settings ADD COLUMN permission_absent_autodeny_enabled b
 -- sha256(token) in token_hash. Redeem hashes the presented token and looks
 -- it up by that hash.
 
--- Tenant-scoped FK target for target_team_id below. teams.id is already the
--- PK, so (id, org_id) is trivially unique; declaring it lets org_invites FK
--- the *pair* and pin a target team to the invite's own org at the schema
--- level — the same (id, org_id)-unique + composite-FK pattern the rest of the
--- schema uses (agents, entities, runs, tasks, blueprint_runs, …). teams is
--- just the one parent that never needed it until now.
-ALTER TABLE public.teams ADD CONSTRAINT teams_id_org_id_key UNIQUE (id, org_id);
+-- The tenant-scoped FK target for target_team_id below is teams_id_org_id_key,
+-- declared with the teams table's other constraints because team_github_repos
+-- references it too and does so earlier in this file.
 
 CREATE TABLE public.org_invites (
     id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),

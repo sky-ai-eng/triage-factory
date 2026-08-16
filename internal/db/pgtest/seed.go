@@ -55,6 +55,43 @@ func SeedTeam(t *testing.T, h *Harness, orgID, slug string) string {
 	return id
 }
 
+// SeedRepository mints a registry row for owner/repo in orgID and returns its
+// id — the value every repository reference in the schema stores.
+// team_github_repos, conversation_worktrees and project_pinned_repos all
+// point at it, and none of the stores behind them will create it (the
+// executor's role holds no INSERT on repositories at all), so a fixture that
+// tracks a repository or checks one out has to bring the row into existence
+// first, exactly as production tracking does. Idempotent on the folded
+// identity key, so repeated calls for one repository return its single row.
+func SeedRepository(t *testing.T, h *Harness, orgID, owner, repo string) string {
+	t.Helper()
+	MustExec(t, h.AdminDB, `
+		INSERT INTO repositories (org_id, source, owner, repo) VALUES ($1, 'github', $2, $3)
+		ON CONFLICT DO NOTHING
+	`, orgID, owner, repo)
+	var id string
+	if err := h.AdminDB.QueryRow(`
+		SELECT id::text FROM repositories
+		 WHERE org_id = $1 AND source = 'github'
+		   AND lower(owner) = lower($2) AND lower(repo) = lower($3)
+	`, orgID, owner, repo).Scan(&id); err != nil {
+		t.Fatalf("seed repository %s/%s: %v", owner, repo, err)
+	}
+	return id
+}
+
+// SeedTrackedRepo records that teamID tracks owner/repo, minting the registry
+// row the tracking row references. Returns the repository id.
+func SeedTrackedRepo(t *testing.T, h *Harness, orgID, teamID, owner, repo string) string {
+	t.Helper()
+	repositoryID := SeedRepository(t, h, orgID, owner, repo)
+	MustExec(t, h.AdminDB, `
+		INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)
+		ON CONFLICT DO NOTHING
+	`, teamID, repositoryID, orgID)
+	return repositoryID
+}
+
 // SeedOrgWithUser bootstraps a new org with a single founder: a fresh
 // user, an org owned by them, a default team, and the two-axis
 // memberships (org_memberships role=owner, memberships role=admin).

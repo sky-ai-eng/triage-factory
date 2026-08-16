@@ -296,7 +296,7 @@ func (s *curatorStore) BeginTurn(ctx context.Context, orgID, projectID, conversa
 		}
 
 		p, err := scanPgCuratorProject(q.QueryRowContext(ctx, `
-			SELECT id, name, description, pinned_repos::text,
+			SELECT id, name, description,
 			       jira_project_key, linear_project_key,
 			       COALESCE(spec_authorship_blueprint_id::text, ''),
 			       COALESCE(team_id::text, ''), created_at, updated_at
@@ -304,6 +304,11 @@ func (s *curatorStore) BeginTurn(ctx context.Context, orgID, projectID, conversa
 		`, orgID, projectID))
 		if err != nil {
 			return fmt.Errorf("read project: %w", err)
+		}
+		if p != nil {
+			if err := attachPinnedRepos(ctx, q, []*domain.Project{p}); err != nil {
+				return fmt.Errorf("read project pinned repos: %w", err)
+			}
 		}
 		start.Project = p
 		return nil
@@ -784,10 +789,9 @@ func scanPgCuratorProject(row interface {
 		linearKey       sql.NullString
 		specBlueprintID string
 		teamID          string
-		pinnedJSON      sql.NullString
 	)
 	err := row.Scan(
-		&p.ID, &p.Name, &p.Description, &pinnedJSON,
+		&p.ID, &p.Name, &p.Description,
 		&jiraKey, &linearKey, &specBlueprintID, &teamID,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
@@ -801,13 +805,6 @@ func scanPgCuratorProject(row interface {
 	p.JiraProjectKey = jiraKey.String
 	p.LinearProjectKey = linearKey.String
 	p.SpecAuthorshipBlueprintID = specBlueprintID
-	if pinnedJSON.Valid && pinnedJSON.String != "" {
-		if err := json.Unmarshal([]byte(pinnedJSON.String), &p.PinnedRepos); err != nil {
-			return nil, fmt.Errorf("unmarshal pinned_repos: %w", err)
-		}
-	}
-	if p.PinnedRepos == nil {
-		p.PinnedRepos = []string{}
-	}
+	p.PinnedRepos = []string{}
 	return &p, nil
 }

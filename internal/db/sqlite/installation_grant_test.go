@@ -16,8 +16,9 @@ import (
 // The org is the local sentinel rather than a fresh uuid: local mode is N=1 and
 // every store method here asserts it, which is the same discipline the rest of
 // this package's `...System` methods hold. Tracked repositories are inserted by
-// raw SQL — ReplaceForTeam would also reconcile repositories, and the drift
-// queries deliberately read team_github_repos rather than that derived cache.
+// raw SQL rather than through ReplaceForTeam, which is a full-set replace and
+// would drop the previous repository each time the suite tracks another one.
+// The registry row is minted first because the tracking row references it.
 func TestInstallationGrant_SQLite(t *testing.T) {
 	dbtest.RunInstallationGrantConformance(t, func(t *testing.T) dbtest.InstallationGrantBackend {
 		t.Helper()
@@ -49,8 +50,21 @@ func TestInstallationGrant_SQLite(t *testing.T) {
 			TrackRepo: func(t *testing.T, owner, repo string) {
 				t.Helper()
 				if _, err := conn.Exec(
-					`INSERT INTO team_github_repos (team_id, owner, repo) VALUES (?, ?, ?)`,
-					teamID, owner, repo,
+					`INSERT INTO repositories (id, owner, repo, source) VALUES (?, ?, ?, 'github') ON CONFLICT DO NOTHING`,
+					uuid.NewString(), owner, repo,
+				); err != nil {
+					t.Fatalf("seed repositories: %v", err)
+				}
+				var repositoryID string
+				if err := conn.QueryRow(
+					`SELECT id FROM repositories WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)`,
+					owner, repo,
+				).Scan(&repositoryID); err != nil {
+					t.Fatalf("resolve repository id: %v", err)
+				}
+				if _, err := conn.Exec(
+					`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+					teamID, repositoryID, runmode.LocalDefaultOrgID,
 				); err != nil {
 					t.Fatalf("seed team_github_repos: %v", err)
 				}

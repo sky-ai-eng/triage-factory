@@ -2,23 +2,39 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
+// ErrTeamNotInOrg reports a write whose orgID and teamID name different
+// tenants. It is returned rather than tolerated because the row such a write
+// produces is invisible: the tracking row would live under one org's team and
+// point at another org's repository, so every org-scoped read filters it out
+// and the caller sees a save that succeeded and tracked nothing.
+var ErrTeamNotInOrg = errors.New("db: team does not belong to that org")
+
 // TeamGitHubReposStore owns the team_github_repos table — the per-team
-// GitHub repo selection (one row per (team_id, owner, repo)) and the
+// GitHub repo selection (one row per (team_id, repository_id)) and the
 // source of truth for which repos a team tracks. The GitHub
 // tracking-scope twin of jira_project_status_rules.
 //
-// # repositories is derived from this table
+// # This table IS the tracked set; repositories is the registry
 //
-// repositories stays org-shared and stays the polled set, but it is now
-// a *derived cache*: the org-wide UNION of every team's rows here. It is
-// never user-written directly anymore — ReplaceForTeam mutates the team's
-// rows AND reconciles repositories to the new union atomically, in one
-// transaction. The poller keeps reading repositories via
-// RepositoryStore.ListConfiguredNamesSystem, unchanged.
+// A row here references a repository by the registry row's id, so a rename
+// moves one column on one row in `repositories` and every tracking row still
+// resolves without being rewritten. The store's own surface stays (owner,
+// repo) — that is what a request body carries and what the router gate asks
+// about — so reads join the registry and writes resolve the slug first.
+//
+// The two tables have different lifetimes, and the direction matters.
+// ReplaceForTeam creates a registry row for a newly-tracked repository (it has
+// to: the tracking row references it) but untracking deletes only the row
+// here. A registry row outlives the tracking decision that created it, because
+// a worktree ledger entry, a pinned project or a task may still name the
+// repository. So "which repositories does TF poll and profile" is a question
+// about tracking, and RepositoryStore.ListTrackedNamesSystem — which reads
+// through this table — is what answers it.
 //
 // # Pool split (Postgres)
 //
@@ -55,9 +71,9 @@ type TeamGitHubReposStore interface {
 	ListForTeamSystem(ctx context.Context, teamID string) ([]domain.TeamGitHubRepo, error)
 
 	// ListForOrgSystem returns the DISTINCT (owner, repo) union across
-	// every team in the org, ordered by (owner, repo) — the polled set
-	// without going through repositories. Admin pool in Postgres: the
-	// union spans teams the caller may not belong to.
+	// every team in the org, ordered by (owner, repo) — the tracked set as
+	// slugs. Admin pool in Postgres: the union spans teams the caller may not
+	// belong to.
 	ListForOrgSystem(ctx context.Context, orgID string) ([]domain.TeamGitHubRepo, error)
 
 	// ListOrgReposWithTeamsSystem returns each tracked (owner, repo) in the
@@ -71,22 +87,23 @@ type TeamGitHubReposStore interface {
 	ListOrgReposWithTeamsSystem(ctx context.Context, orgID string) ([]domain.TrackedRepoTeams, error)
 
 	// ReplaceForTeam upserts one row per entry in repos and deletes rows
-	// whose (owner, repo) is no longer in the input — bulk-replace
-	// semantics mirroring JiraStatusRulesStore.ReplaceForTeam. Passing an
-	// empty slice clears every row for the team.
+	// whose repository is no longer in the input — bulk-replace semantics
+	// mirroring JiraStatusRulesStore.ReplaceForTeam. Passing an empty slice
+	// clears every row for the team.
 	//
-	// In the same transaction it reconciles the org-shared repositories
-	// cache to the new org-wide union: newly-tracked repos get a skeleton
-	// row, a repo no team tracks anymore is GC'd, and a repo still tracked
-	// by another team survives with its cached profile intact. Atomic — if
-	// the tx rolls back, neither team_github_repos nor repositories moves.
-	// Postgres serializes concurrent same-org calls with a per-org
-	// transaction advisory lock so the union recompute can't race; the
-	// cross-team union read goes through the tf.org_tracked_repos(org)
-	// SECURITY DEFINER helper, which enforces org == the caller's claims
-	// when present (so the org boundary holds at the DB layer). Composed
-	// in the caller's WithTx so RLS gates the team-row write by team admin.
-	// orgID must be the team's org (the request's authorized org).
+	// In the same transaction it get-or-creates the registry row each entry
+	// references, so a repository gets its row when it is first tracked
+	// rather than when profiling first succeeds. Atomic — if the tx rolls
+	// back, neither table moves. Postgres serializes concurrent same-org
+	// calls with a per-org transaction advisory lock. Composed in the
+	// caller's WithTx so RLS gates the team-row write by team admin. orgID
+	// must be the team's org (the request's authorized org).
+	//
+	// Untracking is a delete HERE and nowhere else: the registry row for a
+	// repository no team tracks anymore survives, with its profile, base
+	// branch, clone state and poll cursor intact, because a worktree ledger
+	// entry, a pinned project or a task may still name it. It simply stops
+	// being in the tracked set, so it stops being polled and profiled.
 	ReplaceForTeam(ctx context.Context, orgID, teamID string, repos []domain.TeamGitHubRepo) error
 
 	// TracksRepoSystem reports whether the team tracks (owner, repo),

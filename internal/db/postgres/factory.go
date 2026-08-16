@@ -306,12 +306,19 @@ const pgFactoryEntitySelectColumns = `
 
 // factoryGitHubRepoTrackedExists scopes a github entities row (alias e)
 // to the tracked repos of the viewer's teams.
+//
+// entities.source_id stays the pull request's natural key ("owner/repo#18") —
+// it is not a repository reference and never becomes one — so the slug it
+// carries is matched against the registry, and the registry row is what the
+// tracking row points at. The extra join is what keeps the two ends agreeing
+// on identity: the fold lives in the registry, once.
 const factoryGitHubRepoTrackedExists = `EXISTS (
 	SELECT 1 FROM team_github_repos g
 	JOIN teams tm ON tm.id = g.team_id
+	JOIN repositories r ON r.id = g.repository_id
 	WHERE tm.org_id = e.org_id
-	  AND lower(g.owner) = lower(split_part(e.source_id, '/', 1))
-	  AND lower(g.repo) = lower(split_part(split_part(e.source_id, '/', 2), '#', 1))
+	  AND lower(r.owner) = lower(split_part(e.source_id, '/', 1))
+	  AND lower(r.repo) = lower(split_part(split_part(e.source_id, '/', 2), '#', 1))
 )`
 
 // factoryJiraProjectTrackedExists scopes a jira entities row (alias e) to
@@ -346,10 +353,11 @@ func factoryGitHubRepoTrackedForTeams(placeholders string) string {
 	return `EXISTS (
 		SELECT 1 FROM team_github_repos g
 		JOIN teams tm ON tm.id = g.team_id
+		JOIN repositories r ON r.id = g.repository_id
 		WHERE tm.org_id = e.org_id
 		  AND g.team_id IN (` + placeholders + `)
-		  AND lower(g.owner) = lower(split_part(e.source_id, '/', 1))
-		  AND lower(g.repo) = lower(split_part(split_part(e.source_id, '/', 2), '#', 1))
+		  AND lower(r.owner) = lower(split_part(e.source_id, '/', 1))
+		  AND lower(r.repo) = lower(split_part(split_part(e.source_id, '/', 2), '#', 1))
 	)`
 }
 

@@ -326,11 +326,16 @@ func (s *curatorStore) BeginTurn(ctx context.Context, orgID, projectID, conversa
 		}
 
 		p, err := scanCuratorProject(q.QueryRowContext(ctx, `
-			SELECT id, name, description, pinned_repos, jira_project_key, linear_project_key, spec_authorship_blueprint_id, team_id, created_at, updated_at
+			SELECT id, name, description, jira_project_key, linear_project_key, spec_authorship_blueprint_id, team_id, created_at, updated_at
 			FROM projects WHERE id = ?
 		`, projectID))
 		if err != nil {
 			return fmt.Errorf("read project: %w", err)
+		}
+		if p != nil {
+			if err := attachPinnedRepos(ctx, q, []*domain.Project{p}); err != nil {
+				return fmt.Errorf("read project pinned repos: %w", err)
+			}
 		}
 		start.Project = p
 		return nil
@@ -906,12 +911,11 @@ func scanCuratorProject(row interface {
 		linearKey       sql.NullString
 		specBlueprintID sql.NullString
 		teamID          sql.NullString
-		pinnedJSON      string
 		createdAt       time.Time
 		updatedAt       time.Time
 	)
 	err := row.Scan(
-		&p.ID, &p.Name, &p.Description, &pinnedJSON,
+		&p.ID, &p.Name, &p.Description,
 		&jiraKey, &linearKey, &specBlueprintID, &teamID,
 		&createdAt, &updatedAt,
 	)
@@ -927,13 +931,6 @@ func scanCuratorProject(row interface {
 	p.SpecAuthorshipBlueprintID = specBlueprintID.String
 	p.CreatedAt = createdAt
 	p.UpdatedAt = updatedAt
-	if pinnedJSON == "" {
-		p.PinnedRepos = []string{}
-	} else if err := json.Unmarshal([]byte(pinnedJSON), &p.PinnedRepos); err != nil {
-		return nil, fmt.Errorf("unmarshal pinned_repos: %w", err)
-	}
-	if p.PinnedRepos == nil {
-		p.PinnedRepos = []string{}
-	}
+	p.PinnedRepos = []string{}
 	return &p, nil
 }

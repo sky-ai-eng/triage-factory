@@ -187,10 +187,10 @@ func seedProjectInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, name st
 	t.Helper()
 	projectID := uuid.NewString()
 	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO projects (id, org_id, creator_user_id, team_id, name, description, pinned_repos)
+		INSERT INTO projects (id, org_id, creator_user_id, team_id, name, description)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        $4, '', '[]'::jsonb)
+		        $4, '')
 	`, projectID, orgID, userID, name); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}

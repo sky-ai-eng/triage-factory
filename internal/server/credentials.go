@@ -365,12 +365,15 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	// Setup is complete once GitHub access is configured (PAT or registered
-	// App; the env overlay folds into creds.GitHubPAT) AND the org tracks at
-	// least one repo. ReplaceForTeam writes a repositories skeleton row in
-	// the same tx it records the team's tracked repos, so repoCount is a
+	// App; the env overlay folds into creds.GitHubPAT) AND the org has brought
+	// at least one repo into the registry. ReplaceForTeam writes the registry
+	// row in the same tx it records the team's tracked repos, so repoCount is a
 	// durable signal here — it doesn't lag behind the (async) profiling pass.
-	// Jira stays optional. setup_step tells the gate which configure screen
-	// an incomplete founder resumes on.
+	// It counts the registry rather than the tracked set on purpose: a founder
+	// who has finished setup and later untracks everything has still finished
+	// setup, and bouncing them back through it would be a regression, not a
+	// reminder. Jira stays optional. setup_step tells the gate which configure
+	// screen an incomplete founder resumes on.
 	githubReady := creds.GitHubPAT != "" || appRegistered
 	setupComplete := githubReady && repoCount >= 1
 	setupStep := "done"

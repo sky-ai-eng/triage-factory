@@ -35,7 +35,7 @@ func TestManager_RunGitHubCycle_IteratesActiveOrgs(t *testing.T) {
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
 	if len(repos.visited) != len(orgs.ids) {
-		t.Fatalf("ListConfiguredNamesSystem visited %d orgs (%v); want %d (%v)", len(repos.visited), repos.visited, len(orgs.ids), orgs.ids)
+		t.Fatalf("ListTrackedNamesSystem visited %d orgs (%v); want %d (%v)", len(repos.visited), repos.visited, len(orgs.ids), orgs.ids)
 	}
 	for i, got := range repos.visited {
 		if got != orgs.ids[i] {
@@ -103,7 +103,7 @@ func TestManager_RunGitHubCycle_OrgsStoreErrorAbortsCycle(t *testing.T) {
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
 	if len(repos.visited) != 0 {
-		t.Errorf("ListConfiguredNamesSystem called %d times despite ListActiveSystem error; want 0", len(repos.visited))
+		t.Errorf("ListTrackedNamesSystem called %d times despite ListActiveSystem error; want 0", len(repos.visited))
 	}
 }
 
@@ -339,7 +339,7 @@ type recordingRepositoryStore struct {
 	visited []string
 }
 
-func (r *recordingRepositoryStore) ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error) {
+func (r *recordingRepositoryStore) ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.visited = append(r.visited, orgID)

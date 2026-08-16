@@ -36,6 +36,13 @@ func TestRunWorktreeStore_SQLite(t *testing.T) {
 					t.Fatalf("delete run: %v", err)
 				}
 			},
+			Repo: func(t *testing.T, slug string) {
+				t.Helper()
+				if _, err := stores.Repos.GetOrCreateSystem(context.Background(),
+					runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(slug)); err != nil {
+					t.Fatalf("seed repository %s: %v", slug, err)
+				}
+			},
 		}
 		return stores.RunWorktrees, runmode.LocalDefaultOrgID, seed
 	})

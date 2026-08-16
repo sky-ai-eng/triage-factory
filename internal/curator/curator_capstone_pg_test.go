@@ -36,7 +36,6 @@ package curator
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -657,20 +656,27 @@ func seedRepository(t *testing.T, h *pgtest.Harness, orgID, owner, repo, cloneUR
 	`, orgID, owner, repo, cloneURL, defaultBranch)
 }
 
-// seedPgProjectPinned inserts a project with pinned_repos set (admin pool —
+// seedPgProjectPinned inserts a project with its pinned repos (admin pool —
 // no JWT claims in a bare test context). Mirrors seedPgProject in
-// curator_pg_test.go but threads the pins through.
+// curator_pg_test.go but threads the pins through: each one resolves to the
+// registry row it references, which the capstone fixture has already seeded.
 func seedPgProjectPinned(t *testing.T, h *pgtest.Harness, orgID, userID, teamID, name string, pins []string) string {
 	t.Helper()
 	id := uuid.New().String()
-	pinsJSON, err := json.Marshal(pins)
-	if err != nil {
-		t.Fatalf("marshal pins: %v", err)
-	}
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO projects (id, org_id, creator_user_id, team_id, name, pinned_repos, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6::jsonb, now(), now())
-	`, id, orgID, userID, teamID, name, string(pinsJSON))
+		INSERT INTO projects (id, org_id, creator_user_id, team_id, name, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, now(), now())
+	`, id, orgID, userID, teamID, name)
+	for i, pin := range pins {
+		owner, repo, ok := strings.Cut(pin, "/")
+		if !ok {
+			t.Fatalf("pinned repo %q is not an owner/repo slug", pin)
+		}
+		pgtest.MustExec(t, h.AdminDB, `
+			INSERT INTO project_pinned_repos (project_id, repository_id, "position")
+			VALUES ($1, $2, $3)
+		`, id, pgtest.SeedRepository(t, h, orgID, owner, repo), i)
+	}
 	return id
 }
 

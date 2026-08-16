@@ -187,7 +187,7 @@ type batchRepositoryStore struct {
 	last       map[string]domain.Repository // last upsert per id (nil-safe via lazy init)
 }
 
-func (s *batchRepositoryStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
+func (s *batchRepositoryStore) ListTrackedNamesSystem(context.Context, string) ([]string, error) {
 	return s.names, nil
 }
 
@@ -256,7 +256,7 @@ type changeRepositoryStore struct {
 	upserts   atomic.Int64
 }
 
-func (s *changeRepositoryStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
+func (s *changeRepositoryStore) ListTrackedNamesSystem(context.Context, string) ([]string, error) {
 	return s.names, nil
 }
 

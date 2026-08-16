@@ -494,7 +494,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 	}
 
-	repos, err := m.repos.ListConfiguredNamesSystem(ctx, orgID)
+	repos, err := m.repos.ListTrackedNamesSystem(ctx, orgID)
 	if err != nil {
 		span.SetStatus(codes.Error, "load configured repos")
 		githubLog.ErrorContext(ctx, "load configured repos failed", "org", orgID, "error", err)
@@ -965,7 +965,7 @@ func (m *Manager) applyRepoRenames(ctx context.Context, orgID string, grant []gh
 // name instead of skipping it until the next one. Re-rotated to the same
 // cursor the first read was, so the round-robin position survives.
 func (m *Manager) reloadConfiguredRepos(ctx context.Context, orgID string, current []string) []string {
-	refreshed, err := m.repos.ListConfiguredNamesSystem(ctx, orgID)
+	refreshed, err := m.repos.ListTrackedNamesSystem(ctx, orgID)
 	if err != nil {
 		githubLog.WarnContext(ctx, "re-read configured repos after a rename failed", "org", orgID, "error", err)
 		return current

@@ -30,7 +30,7 @@ func TestProfiler_Run_IteratesActiveOrgs(t *testing.T) {
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
 	if len(repos.visited) != len(orgs.ids) {
-		t.Fatalf("ListConfiguredNamesSystem visited %d orgs (%v); want %d (%v)", len(repos.visited), repos.visited, len(orgs.ids), orgs.ids)
+		t.Fatalf("ListTrackedNamesSystem visited %d orgs (%v); want %d (%v)", len(repos.visited), repos.visited, len(orgs.ids), orgs.ids)
 	}
 	for i, got := range repos.visited {
 		if got != orgs.ids[i] {
@@ -56,7 +56,7 @@ func TestProfiler_Run_OrgsStoreErrorBubbles(t *testing.T) {
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
 	if len(repos.visited) != 0 {
-		t.Errorf("ListConfiguredNamesSystem called %d times despite ListActiveSystem error; want 0", len(repos.visited))
+		t.Errorf("ListTrackedNamesSystem called %d times despite ListActiveSystem error; want 0", len(repos.visited))
 	}
 }
 
@@ -78,7 +78,7 @@ func (f *fakeOrgsStore) ListActiveSystem(ctx context.Context) ([]string, error) 
 }
 
 // recordingRepositoryStore embeds db.RepositoryStore as nil and overrides only
-// ListConfiguredNamesSystem. Returning empty short-circuits Run
+// ListTrackedNamesSystem. Returning empty short-circuits Run
 // before any GitHub API call, so the test isolates the per-org loop
 // behavior from the inner profiling body.
 type recordingRepositoryStore struct {
@@ -87,7 +87,7 @@ type recordingRepositoryStore struct {
 	visited []string
 }
 
-func (r *recordingRepositoryStore) ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error) {
+func (r *recordingRepositoryStore) ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.visited = append(r.visited, orgID)

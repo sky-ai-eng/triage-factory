@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -15,13 +14,16 @@ import (
 // Holds both pools — see the TeamGitHubReposStore interface comment for
 // the pool-split rationale.
 //
-//   - app: ListForTeam + the whole of ReplaceForTeam (team-row write +
-//     repositories reconcile, atomic in the caller's claims tx, org-
-//     serialized by an advisory lock). RLS gates the team-row write by
-//     team admin; the cross-team union read inside it goes through the
-//     tf.org_tracked_repos() SECURITY DEFINER helper.
+//   - app: ListForTeam + the whole of ReplaceForTeam (registry get-or-create +
+//     team-row write, atomic in the caller's claims tx, org-serialized by an
+//     advisory lock). RLS gates the team-row write by team admin.
 //   - admin: ListForTeamSystem, ListForOrgSystem, TracksRepoSystem —
 //     claims-free reads for the router gate / poll callers.
+//
+// A row points at a repository by the registry row's id. The store's own
+// surface is still (owner, repo) — that is what a request body carries and
+// what the router gate is asked about — so every read joins the registry to
+// project the slug and every write resolves the slug to a row first.
 type teamGitHubReposStore struct {
 	app   queryer
 	admin queryer
@@ -43,10 +45,11 @@ func (s *teamGitHubReposStore) ListForTeamSystem(ctx context.Context, teamID str
 
 func listTeamGitHubRepos(ctx context.Context, q queryer, teamID string) ([]domain.TeamGitHubRepo, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT owner, repo
-		FROM team_github_repos
-		WHERE team_id = $1
-		ORDER BY owner ASC, repo ASC
+		SELECT r.owner, r.repo
+		FROM team_github_repos g
+		JOIN repositories r ON r.id = g.repository_id
+		WHERE g.team_id = $1
+		ORDER BY r.owner ASC, r.repo ASC
 	`, teamID)
 	if err != nil {
 		return nil, fmt.Errorf("read team_github_repos: %w", err)
@@ -73,11 +76,12 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 	// team-membership-scoped). Org scope rides the teams join + the org_id
 	// filter, mirroring listTeamGitHubReposForOrg.
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT g.owner, g.repo, t.name
+		SELECT r.owner, r.repo, t.name
 		FROM team_github_repos g
 		JOIN teams t ON t.id = g.team_id
+		JOIN repositories r ON r.id = g.repository_id
 		WHERE t.org_id = $1
-		ORDER BY g.owner ASC, g.repo ASC, t.name ASC
+		ORDER BY r.owner ASC, r.repo ASC, t.name ASC
 	`, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("read team_github_repos with teams: %w", err)
@@ -121,57 +125,75 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 	}
 
 	// Everything runs in the caller's app-pool tx (RLS gates the team-row
-	// write by team admin) so the team-row mutation and the repositories
-	// reconcile are atomic. A per-org transaction advisory lock serializes
-	// concurrent same-org saves so the union recompute can't race a
-	// sibling team's write into an inconsistent repositories table. The key
-	// is hashtextextended (64-bit) so distinct orgs don't collide onto the
-	// same lock and serialize against each other.
+	// write by team admin) so the registry creates and the team-row mutation
+	// are atomic. A per-org transaction advisory lock serializes concurrent
+	// same-org saves: two teams adding the same new repository would otherwise
+	// race in the registry, and while the folded identity index makes that
+	// resolve to one row, the lock keeps the ordering legible rather than
+	// leaving one writer to discover the conflict. The key is hashtextextended
+	// (64-bit) so distinct orgs don't collide onto the same lock and serialize
+	// against each other.
 	return inTx(ctx, s.app, func(tx queryer) error {
 		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, orgID); err != nil {
-			return fmt.Errorf("lock org for repo reconcile: %w", err)
+			return fmt.Errorf("lock org for repo tracking write: %w", err)
+		}
+		// The two arguments have to describe one tenant. The composite foreign
+		// keys on team_github_repos are what enforce that — a mismatched pair
+		// has no (team_id, org_id) or (repository_id, org_id) parent row to
+		// reference — so this check is not the enforcement. It is here to fail
+		// with a name instead of an integrity-violation string, and to fail
+		// BEFORE the registry mint below, so a refused save leaves no bare
+		// repository row behind for a tenant that was never going to track it.
+		if err := assertTeamInOrg(ctx, tx, orgID, teamID); err != nil {
+			return err
 		}
 
+		// The registry row comes first: a tracking row references it, so it has
+		// to exist before the insert that points at it. This is also the whole
+		// of what used to be a reconcile — the org-wide union recompute existed
+		// to keep a derived cache in step, and the foreign key has taken that
+		// job over. With it goes the cross-team union read (and the
+		// tf.org_tracked_repos SECURITY DEFINER helper it needed to see past
+		// the per-team SELECT policy): this transaction now touches only the
+		// caller's own team rows plus the org's registry, both of which the app
+		// pool can see for itself.
+		ids := make([]string, 0, len(norm))
 		for _, r := range norm {
+			id, err := getOrCreateRepositoryID(ctx, tx, orgID, domain.RepoRef{Owner: r.Owner, Repo: r.Repo})
+			if err != nil {
+				return fmt.Errorf("resolve repository %s/%s: %w", r.Owner, r.Repo, err)
+			}
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO team_github_repos (team_id, owner, repo)
+				INSERT INTO team_github_repos (team_id, repository_id, org_id)
 				VALUES ($1, $2, $3)
-				ON CONFLICT (team_id, owner, repo) DO NOTHING
-			`, teamID, r.Owner, r.Repo); err != nil {
+				ON CONFLICT (team_id, repository_id) DO NOTHING
+			`, teamID, id, orgID); err != nil {
 				return fmt.Errorf("insert team_github_repos[%s/%s]: %w", r.Owner, r.Repo, err)
 			}
+			ids = append(ids, id)
 		}
 		// Prune rows no longer desired. NOT IN against an empty list keeps
 		// every row, so an empty desired set takes the unconditional clear.
-		if len(norm) == 0 {
+		//
+		// Untracking stops here. The registry row survives — a worktree ledger
+		// entry, a pinned project or a task may still name the repository, and
+		// tracking is forward-only in both directions.
+		if len(ids) == 0 {
 			if _, err := tx.ExecContext(ctx,
 				`DELETE FROM team_github_repos WHERE team_id = $1`, teamID,
 			); err != nil {
 				return fmt.Errorf("clear team_github_repos: %w", err)
 			}
-		} else {
-			owners, names := splitRepoColumns(norm)
-			if _, err := tx.ExecContext(ctx, `
-				DELETE FROM team_github_repos
-				WHERE team_id = $1
-				  AND (owner, repo) NOT IN (
-				      SELECT * FROM unnest($2::text[], $3::text[])
-				  )
-			`, teamID, owners, names); err != nil {
-				return fmt.Errorf("prune team_github_repos: %w", err)
-			}
+			return nil
 		}
-
-		// Read the org-wide union via the SECURITY DEFINER helper so it sees
-		// every team's rows (RLS on the app pool would hide siblings) plus
-		// this tx's just-written rows. The helper is org-scoped to the
-		// caller's claims when present, so the org boundary holds.
-		union, err := scanRepoRows(tx.QueryContext(ctx,
-			`SELECT owner, repo FROM tf.org_tracked_repos($1)`, orgID))
-		if err != nil {
-			return fmt.Errorf("read org %s tracked-repo union: %w", orgID, err)
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM team_github_repos
+			WHERE team_id = $1
+			  AND repository_id <> ALL ($2::uuid[])
+		`, teamID, pgUUIDArray(ids)); err != nil {
+			return fmt.Errorf("prune team_github_repos: %w", err)
 		}
-		return reconcileRepositoriesFromUnion(ctx, tx, orgID, union)
+		return nil
 	})
 }
 
@@ -180,71 +202,21 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 // scope rides the teams join — team_github_repos carries no org_id.
 func listTeamGitHubReposForOrg(ctx context.Context, q queryer, orgID string) ([]domain.TeamGitHubRepo, error) {
 	return scanRepoRows(q.QueryContext(ctx, `
-		SELECT DISTINCT g.owner, g.repo
+		SELECT DISTINCT r.owner, r.repo
 		FROM team_github_repos g
 		JOIN teams t ON t.id = g.team_id
+		JOIN repositories r ON r.id = g.repository_id
 		WHERE t.org_id = $1
-		ORDER BY g.owner ASC, g.repo ASC
+		ORDER BY r.owner ASC, r.repo ASC
 	`, orgID))
-}
-
-// reconcileRepositoriesFromUnion makes repositories (for orgID) match
-// the union of tracked repos: deletes rows for repos no team tracks
-// anymore and inserts skeleton rows for newly-tracked repos. Mirrors
-// RepositoryStore.SetConfigured's delete-removed / insert-skeleton logic —
-// the repositories table is now a derived cache of team_github_repos. The
-// union is case-folded to one canonical row per logical repo
-// (NormalizeTeamGitHubRepos).
-//
-// Matching is case-INSENSITIVE on both axes (GitHub identifiers are): a
-// repo still tracked under different casing keeps its existing row rather
-// than being deleted + reinserted, so the cached profile_text /
-// base_branch / clone status / etag survive a mere casing change. Casing
-// is therefore sticky — repositories keeps the first casing it was
-// created with (case-equivalent to whatever team_github_repos now holds).
-func reconcileRepositoriesFromUnion(ctx context.Context, q queryer, orgID string, rawUnion []domain.TeamGitHubRepo) error {
-	desired, err := domain.NormalizeTeamGitHubRepos(rawUnion)
-	if err != nil {
-		return fmt.Errorf("normalize repo union: %w", err)
-	}
-	// Case-folded keys for the GC match. An empty union deletes every
-	// repositories row for the org (unnest of empty arrays is empty, so
-	// NOT IN (empty) keeps nothing).
-	lowOwners := make([]string, len(desired))
-	lowNames := make([]string, len(desired))
-	for i, r := range desired {
-		lowOwners[i] = strings.ToLower(r.Owner)
-		lowNames[i] = strings.ToLower(r.Repo)
-	}
-	if _, err := q.ExecContext(ctx, `
-		DELETE FROM repositories
-		WHERE org_id = $1
-		  AND (lower(owner), lower(repo)) NOT IN (
-		      SELECT * FROM unnest($2::text[], $3::text[])
-		  )
-	`, orgID, lowOwners, lowNames); err != nil {
-		return fmt.Errorf("gc repositories: %w", err)
-	}
-	// Create a row only for repos not already present case-insensitively;
-	// existing rows keep their casing + cached columns (sticky casing). This
-	// is the tracking half of the get-or-create invariant — a repository gets
-	// its row here, when it is first tracked, not when profiling first
-	// succeeds — and it goes through the same insert the store method does so
-	// the identity columns cannot differ by which path created the row. The
-	// tracked set is GitHub's by construction, so source is the default.
-	for _, r := range desired {
-		if err := insertRepositoryRow(ctx, q, orgID, domain.RepoRef{Owner: r.Owner, Repo: r.Repo}); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, owner, repo string) (bool, error) {
 	var n int
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT 1 FROM team_github_repos
-		WHERE team_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)
+		SELECT 1 FROM team_github_repos g
+		JOIN repositories r ON r.id = g.repository_id
+		WHERE g.team_id = $1 AND lower(r.owner) = lower($2) AND lower(r.repo) = lower($3)
 		LIMIT 1
 	`, teamID, owner, repo).Scan(&n)
 	if err != nil {
@@ -281,9 +253,10 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			SELECT m.user_id
 			FROM team_github_repos g
 			JOIN teams t ON t.id = g.team_id
+			JOIN repositories r ON r.id = g.repository_id
 			JOIN memberships m ON m.team_id = g.team_id
 			WHERE t.org_id = $1
-			  AND lower(g.owner) = lower($2) AND lower(g.repo) = lower($3)
+			  AND lower(r.owner) = lower($2) AND lower(r.repo) = lower($3)
 		) u
 		ORDER BY user_id ASC
 	`, orgID, owner, repo)
@@ -313,9 +286,10 @@ func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID
 		SELECT EXISTS (
 			SELECT 1 FROM team_github_repos g
 			JOIN teams tm ON tm.id = g.team_id
+			JOIN repositories r ON r.id = g.repository_id
 			WHERE tm.org_id = $1
-			  AND lower(g.owner) = lower($2)
-			  AND lower(g.repo) = lower($3)
+			  AND lower(r.owner) = lower($2)
+			  AND lower(r.repo) = lower($3)
 		)
 	`, orgID, owner, repo).Scan(&ok)
 	if err != nil {
@@ -335,9 +309,10 @@ func (s *teamGitHubReposStore) TracksRepoViewerAdminScoped(ctx context.Context, 
 		SELECT EXISTS (
 			SELECT 1 FROM team_github_repos g
 			JOIN teams tm ON tm.id = g.team_id
+			JOIN repositories r ON r.id = g.repository_id
 			WHERE tm.org_id = $1
-			  AND lower(g.owner) = lower($2)
-			  AND lower(g.repo) = lower($3)
+			  AND lower(r.owner) = lower($2)
+			  AND lower(r.repo) = lower($3)
 			  AND tf.user_is_team_admin(g.team_id)
 		)
 	`, orgID, owner, repo).Scan(&ok)
@@ -347,15 +322,19 @@ func (s *teamGitHubReposStore) TracksRepoViewerAdminScoped(ctx context.Context, 
 	return ok, nil
 }
 
-// splitRepoColumns transposes a repo slice into parallel owner + repo
-// slices for unnest()-based array binding. Returns empty (non-nil)
-// slices for an empty input so unnest yields zero rows.
-func splitRepoColumns(repos []domain.TeamGitHubRepo) (owners, names []string) {
-	owners = make([]string, 0, len(repos))
-	names = make([]string, 0, len(repos))
-	for _, r := range repos {
-		owners = append(owners, r.Owner)
-		names = append(names, r.Repo)
+// assertTeamInOrg refuses a write whose orgID and teamID name different
+// tenants. Under RLS the teams row is invisible outside the caller's org, so
+// the same query answers for both pools: the admin pool is filtered by the
+// org_id predicate, the app pool by the policy on top of it.
+func assertTeamInOrg(ctx context.Context, q queryer, orgID, teamID string) error {
+	var ok bool
+	if err := q.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM teams WHERE id = $1 AND org_id = $2)
+	`, teamID, orgID).Scan(&ok); err != nil {
+		return fmt.Errorf("verify team %s belongs to org %s: %w", teamID, orgID, err)
 	}
-	return owners, names
+	if !ok {
+		return fmt.Errorf("%w: team %s, org %s", db.ErrTeamNotInOrg, teamID, orgID)
+	}
+	return nil
 }

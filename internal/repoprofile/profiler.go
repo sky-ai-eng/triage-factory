@@ -176,7 +176,7 @@ func (p *Profiler) Run(ctx context.Context, force bool) error {
 // this cycle (see runOrg) — the Runner uses it to skip the bare-clone
 // bootstrap on a no-op TTL-skip cycle.
 func (p *Profiler) RunOrg(ctx context.Context, orgID string, force bool) (bool, error) {
-	repos, err := p.repos.ListConfiguredNamesSystem(ctx, orgID)
+	repos, err := p.repos.ListTrackedNamesSystem(ctx, orgID)
 	if err != nil {
 		return false, fmt.Errorf("load configured repos: %w", err)
 	}

@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,27 +11,29 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// The slug rewrite a repository rename performs, split into the three groups
-// the schema has. The split is the design: the middle group is what becomes a
-// foreign key once repositories are referenced by row id, so that day is a
-// deletion rather than a re-derivation of which statements were which.
+// The slug rewrite a repository rename performs, now down to two groups:
 //
 //	renameRepositoryRow    — the repository's own row. The rename itself.
-//	rewriteRepoSlugRefs    — columns holding the bare slug and nothing else.
-//	rewriteSlugDerivedKeys — text keys with a slug embedded in them. They stay
-//	                         text under any FK conversion, so this group lives on.
+//	rewriteSlugDerivedKeys — text keys with a slug embedded in them.
 //
-// What moves: a slug TF minted, naming something that lives inside the
-// database. What stays: a value observed from the provider (entities.url,
+// The middle group this file used to carry — columns holding a bare
+// "owner/repo" and nothing else — is gone, and its deletion was the point of
+// the split. The tracked set, the worktree ledger and a project's pinned repos
+// reference the repository by the registry row's id now, so a rename moves the
+// slug on one row and every one of them still resolves without being touched.
+//
+// What is left cannot become a foreign key. A pull request is identified by its
+// repository AND its number, so entities.source_id stays the composite string
+// "owner/repo#18"; an artifact's dedup_key is a contract between two writers
+// that would re-mint every artifact if its shape moved; placement_overrides'
+// key_value is polymorphic (a slug under one key_kind, a project id under
+// another) and could only carry an FK by splitting the table.
+//
+// What stays put entirely: a value observed from the provider (entities.url,
 // artifacts.url — GitHub redirects those), history (events.payload_json;
 // external_actions.target and detail_json record an act under the name in
 // force at the time), or a name for something outside the database that did
-// not itself move (a worktree's path, as against its repo_id).
-//
-// Membership came from grepping the migrated schema for the shape rather than
-// from a list, which is how placement_overrides got here — its (key_kind,
-// key_value) pair holds "owner/repo" when key_kind is 'repo'. That column is
-// polymorphic, so it can never become an FK and stays with the last group.
+// not itself move (a worktree's path, as against the repository it holds).
 //
 // TODO(TFAC-831): entities.url and external_actions.url keep the old slug, so
 // a re-claimed name leaves them linking to a stranger's object.
@@ -115,9 +116,6 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 		if err := renameRepositoryRow(ctx, tx, source, from, observed); err != nil {
 			return err
 		}
-		if err := rewriteRepoSlugRefs(ctx, tx, from, to); err != nil {
-			return err
-		}
 		if err := rewriteSlugDerivedKeys(ctx, tx, source, from, to); err != nil {
 			return err
 		}
@@ -136,9 +134,9 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 // instead of silently picking a row.
 func storedSlugsForIdentity(ctx context.Context, q queryer, source, externalID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id FROM repositories
+		SELECT owner, repo FROM repositories
 		 WHERE source = ? AND external_id = ?
-		 ORDER BY id
+		 ORDER BY owner, repo
 	`, source, externalID)
 	if err != nil {
 		return nil, err
@@ -146,11 +144,11 @@ func storedSlugsForIdentity(ctx context.Context, q queryer, source, externalID s
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
-		var slug string
-		if err := rows.Scan(&slug); err != nil {
+		var owner, repo string
+		if err := rows.Scan(&owner, &repo); err != nil {
 			return nil, err
 		}
-		out = append(out, slug)
+		out = append(out, owner+"/"+repo)
 	}
 	return out, rows.Err()
 }
@@ -175,131 +173,25 @@ func slugHeldByAnotherRepository(ctx context.Context, q queryer, source string, 
 	return true, nil
 }
 
-// renameRepositoryRow moves the repository's own row. SQLite keys the row on
-// the slug itself, so this rewrites the primary key alongside the columns.
+// renameRepositoryRow moves the repository's own row. The row is keyed on a
+// surrogate id, so only the natural-key columns move — and because every
+// reference elsewhere points at that id, this UPDATE is the entire rename as
+// far as the tracked set, the worktree ledger and the pinned lists are
+// concerned.
 func renameRepositoryRow(ctx context.Context, q queryer, source, from string, to domain.RepoRef) error {
+	fromOwner, fromRepo := splitRepoSlug(from)
 	if _, err := q.ExecContext(ctx, `
 		UPDATE repositories
-		   SET id = ?, owner = ?, repo = ?, updated_at = datetime('now')
-		 WHERE source = ? AND LOWER(id) = LOWER(?)
-	`, to.Slug(), to.Owner, to.Repo, source, from); err != nil {
+		   SET owner = ?, repo = ?, updated_at = datetime('now')
+		 WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, to.Owner, to.Repo, source, fromOwner, fromRepo); err != nil {
 		return fmt.Errorf("rename repositories %s -> %s: %w", from, to.Slug(), err)
 	}
 	return nil
 }
 
-// rewriteRepoSlugRefs moves the columns that hold a bare "owner/repo" and
-// nothing else. This is the group that disappears when repositories are
-// referenced by row id.
-//
-// Each move absorbs a row already spelling the target: the caller has proved
-// no repository row holds that slug, so a reference to it is an orphan, and
-// the alternative to absorbing it is a primary-key collision that fails the
-// whole rename over a row nothing points at.
-func rewriteRepoSlugRefs(ctx context.Context, q queryer, from, to string) error {
-	fromOwner, fromRepo := splitRepoSlug(from)
-	toOwner, toRepo := splitRepoSlug(to)
-
-	// team_github_repos — the tracked set, per team.
-	if _, err := q.ExecContext(ctx, `
-		DELETE FROM team_github_repos
-		 WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-		   AND EXISTS (
-		       SELECT 1 FROM team_github_repos o
-		        WHERE o.team_id = team_github_repos.team_id
-		          AND LOWER(o.owner) = LOWER(?) AND LOWER(o.repo) = LOWER(?))
-	`, toOwner, toRepo, fromOwner, fromRepo); err != nil {
-		return fmt.Errorf("absorb tracked-repo duplicate for %s: %w", to, err)
-	}
-	if _, err := q.ExecContext(ctx, `
-		UPDATE team_github_repos SET owner = ?, repo = ?
-		 WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, toOwner, toRepo, fromOwner, fromRepo); err != nil {
-		return fmt.Errorf("rewrite tracked repos %s -> %s: %w", from, to, err)
-	}
-
-	// conversation_worktrees — the per-conversation worktree ledger.
-	if _, err := q.ExecContext(ctx, `
-		DELETE FROM conversation_worktrees
-		 WHERE LOWER(repo_id) = LOWER(?)
-		   AND EXISTS (
-		       SELECT 1 FROM conversation_worktrees o
-		        WHERE o.conversation_id = conversation_worktrees.conversation_id
-		          AND o.ref = conversation_worktrees.ref
-		          AND LOWER(o.repo_id) = LOWER(?))
-	`, to, from); err != nil {
-		return fmt.Errorf("absorb worktree duplicate for %s: %w", to, err)
-	}
-	if _, err := q.ExecContext(ctx, `
-		UPDATE conversation_worktrees SET repo_id = ? WHERE LOWER(repo_id) = LOWER(?)
-	`, to, from); err != nil {
-		return fmt.Errorf("rewrite worktree ledger %s -> %s: %w", from, to, err)
-	}
-
-	// projects.pinned_repos — a JSON array of slugs, so the rewrite is done in
-	// Go rather than in SQL: the element is a string in an ordered list, and
-	// the two dialects store the column as different types.
-	return rewritePinnedRepos(ctx, q, from, to)
-}
-
-func rewritePinnedRepos(ctx context.Context, q queryer, from, to string) error {
-	rows, err := q.QueryContext(ctx, `SELECT id, pinned_repos FROM projects`)
-	if err != nil {
-		return err
-	}
-	type pending struct {
-		id     string
-		pinned []byte
-	}
-	var updates []pending
-	for rows.Next() {
-		var id string
-		var raw sql.NullString
-		if err := rows.Scan(&id, &raw); err != nil {
-			rows.Close()
-			return err
-		}
-		var pinned []string
-		if raw.Valid && raw.String != "" {
-			if err := json.Unmarshal([]byte(raw.String), &pinned); err != nil {
-				// A project whose column is not a JSON array is already broken
-				// in a way this rename did not cause and cannot fix. Skipping
-				// it keeps the rename from failing on unrelated damage.
-				continue
-			}
-		}
-		rewritten, changed := domain.RewritePinnedRepos(pinned, from, to)
-		if !changed {
-			continue
-		}
-		encoded, err := json.Marshal(rewritten)
-		if err != nil {
-			rows.Close()
-			return fmt.Errorf("marshal pinned_repos for project %s: %w", id, err)
-		}
-		updates = append(updates, pending{id: id, pinned: encoded})
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	for _, u := range updates {
-		if _, err := q.ExecContext(ctx,
-			`UPDATE projects SET pinned_repos = ?, updated_at = datetime('now') WHERE id = ?`,
-			string(u.pinned), u.id,
-		); err != nil {
-			return fmt.Errorf("rewrite pinned repos for project %s: %w", u.id, err)
-		}
-	}
-	return nil
-}
-
-// rewriteSlugDerivedKeys moves the text keys that embed a slug. Referencing a
-// repository by row id cannot remove these: a PR is identified by its
-// repository AND its number, so the composite stays a string whatever the
-// repository column becomes.
+// rewriteSlugDerivedKeys moves the text keys that embed a slug — the group
+// referencing a repository by row id cannot remove.
 func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, from, to string) error {
 	// entities.source_id — "owner/repo#18". Matched positionally rather than
 	// with LIKE: a repository name may contain '_', which LIKE reads as a

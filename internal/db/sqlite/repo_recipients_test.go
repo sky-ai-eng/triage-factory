@@ -54,7 +54,32 @@ func TestRepoRecipients_SQLite(t *testing.T) {
 				exec(t, `INSERT INTO org_memberships (user_id, org_id, role) VALUES (?, ?, ?)`, userID, orgID, role)
 			},
 			TrackRepo: func(t *testing.T, teamID, owner, repo string) {
-				exec(t, `INSERT INTO team_github_repos (team_id, owner, repo) VALUES (?, ?, ?)`, teamID, owner, repo)
+				// A tracking row references the registry row, so the registry
+				// row has to exist first. The org is the team's — a tracking
+				// row whose repository lived in another org would be a
+				// cross-tenant row, which is the thing the FK plus
+				// ReplaceForTeam's team-in-org check exist to make
+				// unrepresentable.
+				exec(t, `
+					INSERT INTO repositories (id, org_id, owner, repo, source)
+					SELECT ?, t.org_id, ?, ?, 'github'
+					  FROM teams t
+					 WHERE t.id = ?
+					   AND NOT EXISTS (
+					       SELECT 1 FROM repositories r
+					        WHERE r.org_id = t.org_id AND r.source = 'github'
+					          AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?))
+				`, uuid.NewString(), owner, repo, teamID, owner, repo)
+				exec(t, `
+					INSERT INTO team_github_repos (team_id, repository_id, org_id)
+					SELECT t.id, r.id, t.org_id
+					  FROM teams t
+					  JOIN repositories r
+					    ON r.org_id = t.org_id AND r.source = 'github'
+					   AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?)
+					 WHERE t.id = ?
+					ON CONFLICT(team_id, repository_id) DO NOTHING
+				`, owner, repo, teamID)
 			},
 			ArchiveTeam: func(t *testing.T, teamID string) {
 				exec(t, `UPDATE teams SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, teamID)
