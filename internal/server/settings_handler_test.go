@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // TestDefaultedCloneProtocolView_ModeAware pins the API GET view:
@@ -1096,27 +1097,26 @@ func TestTeamSettingsGet_GraceBoundsAdvertised(t *testing.T) {
 	}
 }
 
-// TestTeamSettingsPost_GraceClampedToBand pins the POST-side clamp: an
-// over-ceiling value snaps to the max, an under-floor value to the min, and an
-// in-band value round-trips verbatim — so the persisted ms always matches the
-// honored band (and what the slider can express).
-func TestTeamSettingsPost_GraceClampedToBand(t *testing.T) {
+// TestTeamSettingsPost_GraceOutOfBandRejected pins the POST-side band check: a
+// value outside [min, max] is REJECTED, and an in-band one round-trips
+// verbatim. It used to clamp, which answered "saved" for a grace the caller
+// never asked for — invisible to an API client, since the UI slider can only
+// express in-band values in the first place.
+func TestTeamSettingsPost_GraceOutOfBandRejected(t *testing.T) {
 	s := newTestServer(t)
 
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{
-		"permission_absent_grace_seconds": 99999,
-	})
-	if ms, _, _ := teamGrace(t, s); ms != delegate.AbsentGraceMaxSeconds*1000 {
-		t.Errorf("after POST 99999s, stored grace = %dms, want %dms (clamped to max)",
-			ms, delegate.AbsentGraceMaxSeconds*1000)
-	}
-
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{
-		"permission_absent_grace_seconds": 0,
-	})
-	if ms, _, _ := teamGrace(t, s); ms != delegate.AbsentGraceMinSeconds*1000 {
-		t.Errorf("after POST 0s, stored grace = %dms, want %dms (clamped to min)",
-			ms, delegate.AbsentGraceMinSeconds*1000)
+	before, _, _ := teamGrace(t, s)
+	for _, secs := range []int{99999, 0, -1} {
+		rec := doJSON(t, s, "POST", "/api/settings/team/default", map[string]any{
+			"permission_absent_grace_seconds": secs,
+		})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("POST grace %ds = %d, want 400; body=%s", secs, rec.Code, rec.Body.String())
+		}
+		assertFirstError(t, rec, httpx.ReasonOutOfRange, "permission_absent_grace_seconds")
+		if ms, _, _ := teamGrace(t, s); ms != before {
+			t.Errorf("rejected grace %ds still moved the stored value to %dms", secs, ms)
+		}
 	}
 
 	postJSONResp(t, s, "/api/settings/team/default", map[string]any{

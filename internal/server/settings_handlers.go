@@ -321,18 +321,25 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 			teamSet.PermissionAbsentAutodenyEnabled = *req.PermissionAbsentAutodenyEnabled
 		}
 		if req.PermissionAbsentGraceSeconds != nil {
-			// Accept seconds from the UI; store ms. Clamp into the honored band
-			// [AbsentGraceMinSeconds, AbsentGraceMaxSeconds] so a 0/negative input
-			// can't disable the grace by collapsing it and an over-large one can't
-			// pretend to exceed permTimeout(). The spawner re-clamps against the
-			// live permTimeout() at run time, but a sane band here keeps the
-			// persisted value honest and matches the UI slider's range.
+			// Accept seconds from the UI; store ms. Outside the honored band
+			// [AbsentGraceMinSeconds, AbsentGraceMaxSeconds] is REJECTED, not
+			// clamped: a 0 would disable the grace by collapsing it and an
+			// over-large one would pretend to exceed permTimeout(), and a clamp
+			// answers "saved" for a value the caller never asked for. The UI
+			// slider is bound to the band this endpoint advertises
+			// (permission_absent_grace_{min,max}_seconds on the settings GET),
+			// so this is the same rule the form already enforces — it just also
+			// holds for an API caller with no slider. The spawner still
+			// re-clamps against the live permTimeout() at run time.
 			secs := *req.PermissionAbsentGraceSeconds
-			if secs < delegate.AbsentGraceMinSeconds {
-				secs = delegate.AbsentGraceMinSeconds
-			}
-			if secs > delegate.AbsentGraceMaxSeconds {
-				secs = delegate.AbsentGraceMaxSeconds
+			if secs < delegate.AbsentGraceMinSeconds || secs > delegate.AbsentGraceMaxSeconds {
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+					Reason: httpx.ReasonOutOfRange,
+					Message: fmt.Sprintf("permission_absent_grace_seconds must be between %d and %d",
+						delegate.AbsentGraceMinSeconds, delegate.AbsentGraceMaxSeconds),
+					Field: "permission_absent_grace_seconds",
+				})
+				return errAbortHandler
 			}
 			teamSet.PermissionAbsentGraceMS = secs * 1000
 		}
@@ -689,10 +696,34 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		orgSet.GitHubBaseURL = *req.GitHubBaseURL
+		// Non-empty hosts go through the same validator + canonicalizer the
+		// reachability probe uses, so what the column holds is what the probe
+		// accepted. Persisting verbatim let a value the probe merely tolerated
+		// ("  https://ghes.example.com/ ") through, and the App/PAT host
+		// derivation reads the column, not the probe's answer. Empty is a
+		// deliberate clear, gated above, and skips the check.
+		if *req.GitHubBaseURL != "" {
+			base, ok := normalizeBaseURL(*req.GitHubBaseURL)
+			if !ok {
+				invalidBaseURLField(w, "github_base_url")
+				return
+			}
+			orgSet.GitHubBaseURL = base
+		} else {
+			orgSet.GitHubBaseURL = ""
+		}
 	}
 	if req.JiraBaseURL != nil {
-		orgSet.JiraBaseURL = *req.JiraBaseURL
+		if *req.JiraBaseURL != "" {
+			base, ok := normalizeBaseURL(*req.JiraBaseURL)
+			if !ok {
+				invalidBaseURLField(w, "jira_base_url")
+				return
+			}
+			orgSet.JiraBaseURL = base
+		} else {
+			orgSet.JiraBaseURL = ""
+		}
 	}
 	// A malformed duration is rejected rather than silently ignored — the old
 	// parse-and-drop behavior meant a typo'd interval reported "saved" while

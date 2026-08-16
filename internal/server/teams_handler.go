@@ -108,16 +108,35 @@ func (th *teamsHandler) handleTeamsList(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, teamsResponse{Teams: out, LastActingTeamID: validLastActing})
 }
 
-// maxTeamNameLen caps a team name's length (in runes) on rename. A generous
-// bound that keeps a pasted blob out of the column without constraining any
-// real team name; Create doesn't enforce it today, but rename is the explicit
-// "edit this field" affordance so it validates.
+// maxTeamNameLen caps a team name's length (in runes). A generous bound that
+// keeps a pasted blob out of the column without constraining any real team
+// name. Enforced at every door that writes the column — see validateTeamName.
 const maxTeamNameLen = 100
 
 // maxTeamDescriptionLen caps the description blurb (in runes). The column is
 // unbounded TEXT, so this keeps a pasted document out of it — a blurb, not a
 // wiki. Generous enough for a sentence or two of "what this team owns."
 const maxTeamDescriptionLen = 500
+
+// validateTeamName is the single team-name rule, so create and rename accept
+// exactly the same names and refuse the rest with the same reason and field —
+// a cap enforced at one door and not its sibling is a name that can be created
+// and then never renamed. Takes an already-trimmed name, records every fault on
+// v, and returns the derived slug (empty when the name yields none).
+func validateTeamName(v *httpx.Validation, name string) string {
+	if name == "" {
+		v.Missing("name")
+		return ""
+	}
+	if len([]rune(name)) > maxTeamNameLen {
+		v.OutOfRange("name", fmt.Sprintf("name must be at most %d characters", maxTeamNameLen))
+	}
+	slug := slugify(name)
+	if slug == "" {
+		v.Invalid("name", "name must contain letters or numbers")
+	}
+	return slug
+}
 
 // teamDetailJSON is the PATCH /api/teams/{team_id} response — the updated
 // identity row plus its description (the field this endpoint manages). Role is
@@ -185,33 +204,26 @@ func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request)
 	}
 
 	var namePtr, slugPtr, descPtr *string
+	var v httpx.Validation
 	if body.Name != nil {
 		name := strings.TrimSpace(*body.Name)
-		if name == "" {
-			badRequest(w, "name cannot be empty")
-			return
-		}
-		if len([]rune(name)) > maxTeamNameLen {
-			badRequest(w, "name is too long")
-			return
-		}
-		slug := slugify(name)
-		if slug == "" {
-			badRequest(w, "name must contain letters or numbers")
-			return
-		}
+		slug := validateTeamName(&v, name)
 		namePtr, slugPtr = &name, &slug
 	}
 	if body.Description != nil {
 		desc := strings.TrimSpace(*body.Description)
 		if len([]rune(desc)) > maxTeamDescriptionLen {
-			badRequest(w, "description is too long")
-			return
+			v.OutOfRange("description", fmt.Sprintf("description must be at most %d characters", maxTeamDescriptionLen))
 		}
 		descPtr = &desc
 	}
 	if namePtr == nil && descPtr == nil {
-		badRequest(w, "nothing to update: provide name and/or description")
+		v.Add(httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidBody,
+			Message: "nothing to update: provide name and/or description",
+		})
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -307,25 +319,17 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 	}
 	name := strings.TrimSpace(body.Name)
 	var v httpx.Validation
-	if name == "" {
-		v.Missing("name")
-	}
-	if len([]rune(name)) > maxTeamNameLen {
-		// The same cap PATCH enforces. Create used to accept any length,
-		// so a name could be created that its own rename would reject.
-		v.OutOfRange("name", fmt.Sprintf("name must be at most %d characters", maxTeamNameLen))
+	derived := validateTeamName(&v, name)
+	// An explicit slug overrides the derived one; it goes through the same
+	// slugify, so a value that survives it is a value the column can hold.
+	slug := derived
+	if raw := strings.TrimSpace(body.Slug); raw != "" {
+		slug = slugify(raw)
+		if slug == "" {
+			v.Invalid("slug", "slug must contain letters or numbers")
+		}
 	}
 	if v.Flush(w, http.StatusBadRequest) {
-		return
-	}
-	slug := strings.TrimSpace(body.Slug)
-	if slug == "" {
-		slug = slugify(name)
-	} else {
-		slug = slugify(slug)
-	}
-	if slug == "" {
-		badRequest(w, "name must contain letters or numbers")
 		return
 	}
 
