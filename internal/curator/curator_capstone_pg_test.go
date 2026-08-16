@@ -105,7 +105,7 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 	// --- TFAC-62: the pinned bare seeded on demand; auth path resolved ---
 	bareDir := paths.BareCacheDir(runmode.LocalDefaultOrgID, owner, repo)
 	if !dirExists(bareDir) {
-		t.Errorf("pinned-repo bare was not seeded at %s — the GetSystem profile read or on-demand seed failed", bareDir)
+		t.Errorf("pinned-repo bare was not seeded at %s — the GetSystem repository read or on-demand seed failed", bareDir)
 	}
 	if !resolver.calledWith(orgA, owner) {
 		t.Errorf("clone-token resolver was not invoked for (%s, %s); the multi-mode auth path did not run (calls=%v)", orgA, owner, resolver.snapshot())

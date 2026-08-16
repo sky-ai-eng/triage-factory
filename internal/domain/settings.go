@@ -61,7 +61,7 @@ var ValidReviewPostures = []string{
 func ValidReviewPosture(s string) bool { return slices.Contains(ValidReviewPostures, s) }
 
 // Base-branch push policies — whether a delegated agent may push to a repo's
-// base / default branch (main, master, the profile's default, the configured
+// base / default branch (main, master, the repository row's default, the configured
 // base). The default refuses, which is right for a team that reviews through
 // pull requests and wrong for trunk-based teams, docs repos, config repos and
 // generated-file bots — hence a setting rather than a hard-coded rule.

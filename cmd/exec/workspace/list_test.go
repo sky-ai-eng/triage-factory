@@ -135,7 +135,7 @@ func TestListWorkspaces_ScopedToRun(t *testing.T) {
 }
 
 func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
-	// Repo profiles carry a one-line description from upstream metadata
+	// Repository rows carry a one-line description from upstream metadata
 	// (GitHub's repo description). The agent uses it to disambiguate
 	// between configured repos when the ticket text doesn't make the
 	// target obvious. profile_text (the LLM-generated full profile) is

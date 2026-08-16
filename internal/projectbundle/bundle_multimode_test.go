@@ -276,7 +276,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	if err := h.AdminDB.QueryRow(`
 		SELECT COALESCE(clone_url, '') FROM repositories WHERE org_id = $1 AND owner = 'sky-ai-eng' AND repo = 'triage-factory'
 	`, dstOrg).Scan(&cloneURL); err != nil {
-		t.Fatalf("read repo profile: %v", err)
+		t.Fatalf("read repository: %v", err)
 	}
 	if cloneURL != "https://github.com/sky-ai-eng/triage-factory.git" {
 		t.Fatalf("clone_url = %q, not seeded from preflight", cloneURL)

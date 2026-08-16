@@ -126,7 +126,7 @@ func TestTeamGitHubRepos_SQLite_CasingChangePreservesCache(t *testing.T) {
 	}
 	if err := conn.QueryRowContext(ctx,
 		`SELECT id, base_branch, profile_text FROM repositories`).Scan(&id, &branch, &text); err != nil {
-		t.Fatalf("read profile: %v", err)
+		t.Fatalf("read repository row: %v", err)
 	}
 	if id != "acme/API" {
 		t.Errorf("id = %q, want sticky original casing acme/API", id)

@@ -113,11 +113,11 @@ func TestCheckPush_ProfiledDefaultBranchIsProtected(t *testing.T) {
 		ID: "octo/repo", Owner: "octo", Repo: "repo",
 		DefaultBranch: "trunk", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
-		t.Fatalf("seed profile: %v", err)
+		t.Fatalf("seed repository: %v", err)
 	}
 	if got := runCheckPush(policyHost(stores, false), stores,
 		[]string{"--remote", "https://github.com/octo/repo.git"}, prePushStdin("refs/heads/trunk")); got != ExitRefused {
-		t.Errorf("exit = %d, want %d (the profile's default branch is protected)", got, ExitRefused)
+		t.Errorf("exit = %d, want %d (the repository's default branch is protected)", got, ExitRefused)
 	}
 }
 

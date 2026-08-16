@@ -616,7 +616,7 @@ export default function TeamSettings({
           <p className="text-[13px] text-text-primary">Pushes to the base branch</p>
           <p className="mt-0.5 text-[11px] text-text-tertiary">
             Whether a delegated agent may push straight to a repo&rsquo;s base or default branch
-            (main, master, or whatever the repo profile records). A safety guard against an agent
+            (main, master, or whatever the repository records). A safety guard against an agent
             pushing there by mistake &mdash; not a substitute for branch protection on the host.
           </p>
           <select

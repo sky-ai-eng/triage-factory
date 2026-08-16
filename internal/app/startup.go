@@ -349,7 +349,7 @@ func (a *App) startKnowledgeWatcher() {
 func bootstrapBareClones(repos db.RepositoryStore, secrets db.SecretStore) {
 	profiles, err := repos.ListSystem(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
-		worktreeLog.Warn("bootstrap: load profiles failed", "error", err)
+		worktreeLog.Warn("bootstrap: load repositories failed", "error", err)
 		return
 	}
 	// Load the org bot PAT once so HTTPS clones of private repos authenticate.

@@ -80,7 +80,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 		ProfiledAt:  ptrTime(time.Now().UTC()),
 		Description: "fixture",
 	}); err != nil {
-		t.Fatalf("seed repo profile: %v", err)
+		t.Fatalf("seed repository: %v", err)
 	}
 
 	sessionID := "11111111-2222-3333-4444-555555555555"

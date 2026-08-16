@@ -274,7 +274,7 @@ func (s *Spawner) gitSeedFor(ctx context.Context, orgID, owner, repo string, sid
 	}
 	if s.repos != nil {
 		if profile, err := s.repos.GetSystem(ctx, orgID, owner+"/"+repo); err != nil {
-			delegateLog.Warn("load repo profile for workspace rehydrate failed; a missing bare cannot be seeded", "org", orgID, "repo", owner+"/"+repo, "error", err)
+			delegateLog.Warn("load repository for workspace rehydrate failed; a missing bare cannot be seeded", "org", orgID, "repo", owner+"/"+repo, "error", err)
 		} else if profile != nil {
 			seed.cloneURL = profile.CloneURL
 		}

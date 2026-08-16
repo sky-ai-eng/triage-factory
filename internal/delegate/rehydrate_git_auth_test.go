@@ -79,10 +79,10 @@ func TestGitSeedFor_MultiRoutesRebuildThroughRunGitProxy(t *testing.T) {
 		t.Errorf("seed repo = %s/%s, want acme/widgets", seed.owner, seed.repo)
 	}
 	if seed.cloneURL != cloneURL {
-		t.Errorf("seed clone URL = %q, want the profile's %q — a missing bare cannot be seeded without it", seed.cloneURL, cloneURL)
+		t.Errorf("seed clone URL = %q, want the repository row's %q — a missing bare cannot be seeded without it", seed.cloneURL, cloneURL)
 	}
 	if len(repos.gotIDs) != 1 || repos.gotIDs[0] != "acme/widgets" {
-		t.Errorf("repo profile lookups = %v, want one for %q", repos.gotIDs, "acme/widgets")
+		t.Errorf("repository lookups = %v, want one for %q", repos.gotIDs, "acme/widgets")
 	}
 	assertEntries(t, seed.auth.GitConfigEntries(),
 		wantProxyEntries("http://10.42.0.1:4100", "https://github.com", "per-run-placeholder"))
@@ -96,7 +96,7 @@ func TestGitSeedFor_MultiRoutesRebuildThroughRunGitProxy(t *testing.T) {
 
 // TestGitSeedFor_NoProfileURLStillAuthenticatesViaOrgGitHost: the promisor fetch
 // needs auth whether or not a clone URL is on file (the bare it fetches from is
-// already here). With no profile row the insteadOf falls back to the org's git
+// already here). With no repository row the insteadOf falls back to the org's git
 // host base — the upstream the sidecar's proxy relays to — so the rebuild is
 // still authenticated; only the seed-a-missing-bare half degrades.
 func TestGitSeedFor_NoProfileURLStillAuthenticatesViaOrgGitHost(t *testing.T) {
@@ -106,7 +106,7 @@ func TestGitSeedFor_NoProfileURLStillAuthenticatesViaOrgGitHost(t *testing.T) {
 	seed := s.gitSeedFor(context.Background(), "org-1", "acme", "widgets", proxySandbox("http://10.42.0.1:4100", "ph"))
 
 	if seed.cloneURL != "" {
-		t.Errorf("seed clone URL = %q, want empty (no profile row to read one from)", seed.cloneURL)
+		t.Errorf("seed clone URL = %q, want empty (no repository row to read one from)", seed.cloneURL)
 	}
 	assertEntries(t, seed.auth.GitConfigEntries(),
 		wantProxyEntries("http://10.42.0.1:4100", "https://ghe.acme.dev", "ph"))
@@ -122,10 +122,10 @@ func TestGitSeedFor_ProfileReadFailureDoesNotStrandTheRebuild(t *testing.T) {
 	seed := s.gitSeedFor(context.Background(), "org-1", "acme", "widgets", proxySandbox("http://10.42.0.1:4100", "ph"))
 
 	if seed.cloneURL != "" {
-		t.Errorf("seed clone URL = %q, want empty after a failed profile read", seed.cloneURL)
+		t.Errorf("seed clone URL = %q, want empty after a failed repository read", seed.cloneURL)
 	}
 	if len(seed.auth.GitConfigEntries()) == 0 {
-		t.Error("a failed profile read left the rebuild unauthenticated; the org git host base is the fallback insteadOf")
+		t.Error("a failed repository read left the rebuild unauthenticated; the org git host base is the fallback insteadOf")
 	}
 }
 
@@ -157,7 +157,7 @@ func TestGitSeedFor_NonGitRunRootIsZero(t *testing.T) {
 		t.Errorf("seed for a non-git run root = %+v, want the zero value", seed)
 	}
 	if len(repos.gotIDs) != 0 {
-		t.Errorf("repo profile was read for a non-git run root: %v", repos.gotIDs)
+		t.Errorf("repository was read for a non-git run root: %v", repos.gotIDs)
 	}
 }
 

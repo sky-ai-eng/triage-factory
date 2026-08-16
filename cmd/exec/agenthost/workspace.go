@@ -148,7 +148,7 @@ func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, o
 	repoID := owner + "/" + repo
 	profile, err := c.GetRepo(ctx, repoID)
 	if err != nil {
-		return "", fmt.Errorf("create workspace checkout: load repo profile: %w", err)
+		return "", fmt.Errorf("create workspace checkout: load repository: %w", err)
 	}
 	if profile == nil {
 		return "", fmt.Errorf("create workspace checkout: repo %s is not configured in Triage Factory", repoID)
@@ -159,7 +159,7 @@ func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, o
 		return "", fmt.Errorf("create workspace checkout: repo %s is not tracked by this run's team", repoID)
 	}
 	if profile.CloneURL == "" {
-		return "", fmt.Errorf("create workspace checkout: repo %s has no clone URL on its profile", repoID)
+		return "", fmt.Errorf("create workspace checkout: repo %s has no clone URL on its repository row", repoID)
 	}
 
 	if prNumber > 0 {

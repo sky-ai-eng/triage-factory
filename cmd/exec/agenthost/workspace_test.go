@@ -38,7 +38,7 @@ func seedWorkspaceRepo(t *testing.T, stores db.Stores, owner, repo, cloneURL str
 		ID: owner + "/" + repo, Owner: owner, Repo: repo,
 		CloneURL: cloneURL, DefaultBranch: "main", ProfileText: "test profile",
 	}); err != nil {
-		t.Fatalf("upsert profile: %v", err)
+		t.Fatalf("upsert repository: %v", err)
 	}
 	tracked, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
 	if err != nil {
@@ -196,7 +196,7 @@ func TestLocalClient_CreateWorkspaceCheckout_Gates(t *testing.T) {
 		ID: "sky/untracked", Owner: "sky", Repo: "untracked",
 		CloneURL: "https://x", DefaultBranch: "main", ProfileText: "t",
 	}); err != nil {
-		t.Fatalf("upsert profile: %v", err)
+		t.Fatalf("upsert repository: %v", err)
 	}
 	if _, err := client.CreateWorkspaceCheckout(ctx, "sky", "untracked", "", 0); err == nil || !strings.Contains(err.Error(), "not tracked") {
 		t.Errorf("untracked repo: err = %v, want 'not tracked'", err)
@@ -243,10 +243,10 @@ func TestLocalClient_CreateWorkspaceCheckout_DefaultPath(t *testing.T) {
 		t.Fatalf("calls = %d/%d, want 1 checkout / 0 pr", rec.checkoutCalls, rec.prCalls)
 	}
 	if rec.coOwner != "sky" || rec.coRepo != "core" {
-		t.Errorf("owner/repo = %s/%s, want sky/core (canonical, from the profile)", rec.coOwner, rec.coRepo)
+		t.Errorf("owner/repo = %s/%s, want sky/core (canonical, from the repository row)", rec.coOwner, rec.coRepo)
 	}
 	if rec.coCloneURL != "https://github.com/sky/core.git" {
-		t.Errorf("cloneURL = %q, want the stored profile's — never the wire's", rec.coCloneURL)
+		t.Errorf("cloneURL = %q, want the stored repository row's — never the wire's", rec.coCloneURL)
 	}
 	if rec.coRef != "feature-x" {
 		t.Errorf("ref = %q, want the raw branch", rec.coRef)
@@ -313,7 +313,7 @@ func TestLocalClient_CreateWorkspaceCheckout_PRPath(t *testing.T) {
 		t.Errorf("pr/head = %d/%q, want 42/contrib-branch", rec.prNumber, rec.prHeadBranch)
 	}
 	if rec.prUpstream != "https://github.com/sky/core.git" {
-		t.Errorf("upstream = %q, want the profile clone URL", rec.prUpstream)
+		t.Errorf("upstream = %q, want the repository row's clone URL", rec.prUpstream)
 	}
 	if rec.prHead != "https://github.com/fork/core.git" {
 		t.Errorf("head = %q, want the fork URL in the upstream's (HTTPS) protocol", rec.prHead)

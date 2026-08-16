@@ -222,7 +222,7 @@ func seedRepository(t *testing.T, database *db.DB, owner, repo, cloneURL, defaul
 		CloneURL: cloneURL, DefaultBranch: defaultBranch,
 		ProfileText: "test profile",
 	}); err != nil {
-		t.Fatalf("upsert profile: %v", err)
+		t.Fatalf("upsert repository: %v", err)
 	}
 	// Track the repo for the run's team too — materializeWorkspace gates
 	// `workspace add` on team-tracking (org-configured ≠ team-tracked), so an
@@ -467,7 +467,7 @@ func TestMaterializeWorkspace_RepoMissingCloneURL(t *testing.T) {
 		t.Errorf("err = %v, want errRepoMissingCloneURL", err)
 	}
 	if stub.createCalls != 0 {
-		t.Errorf("checkout called for profile with empty clone URL")
+		t.Errorf("checkout called for a repository with empty clone URL")
 	}
 }
 
@@ -611,7 +611,7 @@ func TestMaterializeWorkspace_RejectsUntrackedRepo(t *testing.T) {
 		ID: "sky/untracked", Owner: "sky", Repo: "untracked",
 		CloneURL: "https://x", DefaultBranch: "main", ProfileText: "test",
 	}); err != nil {
-		t.Fatalf("upsert profile: %v", err)
+		t.Fatalf("upsert repository: %v", err)
 	}
 	stub := &stubCalls{}
 

@@ -58,7 +58,7 @@ func TestGitAuthorizeDecision(t *testing.T) {
 	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		ID: "acme/api", Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
-		t.Fatalf("seed profile: %v", err)
+		t.Fatalf("seed repository: %v", err)
 	}
 	// Ref on the rows is informational only — the gate reads the live branch,
 	// stubbed below by worktree path.
@@ -144,7 +144,7 @@ func TestGitAuthorizeDecision_TaskOwnRepoReadableBeforeLedger(t *testing.T) {
 	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		ID: "owner/repo", Owner: "owner", Repo: "repo", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
-		t.Fatalf("seed profile: %v", err)
+		t.Fatalf("seed repository: %v", err)
 	}
 
 	// No conversation_worktrees row exists yet (the clone that writes it hasn't run). The
@@ -184,7 +184,7 @@ func TestGitAuthorizeDecision_ProtectedAndDetached(t *testing.T) {
 	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		ID: "acme/api", Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
-		t.Fatalf("seed profile: %v", err)
+		t.Fatalf("seed repository: %v", err)
 	}
 	// base_branch is user-configured (Upsert preserves it), so set it explicitly.
 	if err := stores.Repos.UpdateBaseBranch(ctx, runmode.LocalDefaultOrgID, "acme/api", "develop"); err != nil {
@@ -245,7 +245,7 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping(t *testing.T) {
 	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		ID: "acme/api", Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
-		t.Fatalf("seed profile: %v", err)
+		t.Fatalf("seed repository: %v", err)
 	}
 
 	// A real repo shaped like the multi-mode PR run clone.
@@ -319,7 +319,7 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping_DubiousOwnership(t *testi
 	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		ID: "acme/api", Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
-		t.Fatalf("seed profile: %v", err)
+		t.Fatalf("seed repository: %v", err)
 	}
 
 	// A real repo shaped like the multi-mode PR run clone.
@@ -390,14 +390,14 @@ func TestGitAuthorizeDecision_UniversalProtectionWithoutProfile(t *testing.T) {
 	for _, base := range []string{"main", "master"} {
 		stubLiveBranch(t, map[string]string{"/tmp/np": base})
 		if d, err := gitAuthorizeDecision(ctx, stores, info, "acme", "noprofile"); err != nil || !d.Allowed || len(d.AllowedRefs) != 0 {
-			t.Errorf("on %q without a profile: decision=%+v err=%v; want Allowed=true, no refs", base, d, err)
+			t.Errorf("on %q without a repository row: decision=%+v err=%v; want Allowed=true, no refs", base, d, err)
 		}
 	}
 
 	// A feature branch is still authorized.
 	stubLiveBranch(t, map[string]string{"/tmp/np": "fix/thing"})
 	if d, err := gitAuthorizeDecision(ctx, stores, info, "acme", "noprofile"); err != nil || !equalRefs(d.AllowedRefs, []string{"refs/heads/fix/thing"}) {
-		t.Errorf("on feature branch without a profile: decision=%+v err=%v; want refs/heads/fix/thing", d, err)
+		t.Errorf("on feature branch without a repository row: decision=%+v err=%v; want refs/heads/fix/thing", d, err)
 	}
 }
 
@@ -463,7 +463,7 @@ func TestGitAuthorizeDecision_BaseBranchPushPolicy(t *testing.T) {
 	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		ID: "acme/api", Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
-		t.Fatalf("seed profile: %v", err)
+		t.Fatalf("seed repository: %v", err)
 	}
 	if _, _, err := stores.RunWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "run-bb", RepoID: "acme/api", Path: "/tmp/bb", Ref: "@default",

@@ -32,7 +32,7 @@ import (
 // sidecar's git proxy (the orchestrator holds no token); on all/
 // local it injects the App token resolved from the live store. It may be nil
 // (tests) or return a zero CloneAuth — the refresh then runs credential-free
-// exactly as before. The auth is scoped to the profile's clone URL host and
+// exactly as before. The auth is scoped to the repository row's clone URL host and
 // only injects for an https:// origin, so a local-mode SSH origin is untouched.
 func materializePinnedRepos(ctx context.Context, repos db.RepositoryStore, authFor func(ctx context.Context, owner, cloneURL string) worktree.CloneAuth, orgID, projectID, projectDir string, pinnedRepos []string) {
 	for _, slug := range pinnedRepos {
@@ -51,11 +51,11 @@ func materializePinnedRepos(ctx context.Context, repos db.RepositoryStore, authF
 		// like the spawner's *System reads from its detached goroutines. TFAC-65.
 		profile, err := repos.GetSystem(ctx, orgID, slug)
 		if err != nil {
-			curatorLog.Warn("load pinned repo profile failed, skipping", "project", projectID, "repo", slug, "error", err)
+			curatorLog.Warn("load pinned repository failed, skipping", "project", projectID, "repo", slug, "error", err)
 			continue
 		}
 		if profile == nil {
-			curatorLog.Warn("no profile for pinned repo, removed from config after pinning, skipping", "project", projectID, "repo", slug)
+			curatorLog.Warn("no repository row for pinned repo, removed from config after pinning, skipping", "project", projectID, "repo", slug)
 			continue
 		}
 		branch := profile.BaseBranch
@@ -63,7 +63,7 @@ func materializePinnedRepos(ctx context.Context, repos db.RepositoryStore, authF
 			branch = profile.DefaultBranch
 		}
 		if branch == "" {
-			curatorLog.Warn("pinned repo has no branch in profile, skipping", "project", projectID, "repo", slug)
+			curatorLog.Warn("pinned repo has no branch on its repository row, skipping", "project", projectID, "repo", slug)
 			continue
 		}
 		var auth worktree.CloneAuth
@@ -132,11 +132,11 @@ func materializeSharedPinnedRepos(ctx context.Context, repos db.RepositoryStore,
 		// like the spawner's *System reads from its detached goroutines. TFAC-65.
 		profile, err := repos.GetSystem(ctx, orgID, slug)
 		if err != nil {
-			curatorLog.Warn("load pinned repo profile failed, skipping", "project", projectID, "repo", slug, "error", err)
+			curatorLog.Warn("load pinned repository failed, skipping", "project", projectID, "repo", slug, "error", err)
 			continue
 		}
 		if profile == nil {
-			curatorLog.Warn("no profile for pinned repo, removed from config after pinning, skipping", "project", projectID, "repo", slug)
+			curatorLog.Warn("no repository row for pinned repo, removed from config after pinning, skipping", "project", projectID, "repo", slug)
 			continue
 		}
 		branch := profile.BaseBranch
@@ -144,7 +144,7 @@ func materializeSharedPinnedRepos(ctx context.Context, repos db.RepositoryStore,
 			branch = profile.DefaultBranch
 		}
 		if branch == "" {
-			curatorLog.Warn("pinned repo has no branch in profile, skipping", "project", projectID, "repo", slug)
+			curatorLog.Warn("pinned repo has no branch on its repository row, skipping", "project", projectID, "repo", slug)
 			continue
 		}
 		var auth worktree.CloneAuth
