@@ -30,9 +30,10 @@ import (
 // # It is a cache, not a registry
 //
 // Every row here is rebuilt from GitHub's answer on each successful reconcile
-// and survives nothing. That is the opposite of repo_profiles, which is a
-// registry of TF entities that worktrees, entities, clone state and a hand-set
-// base_branch hang off — and it is why grant membership is not a column there.
+// and survives nothing. That is the opposite of the repositories table, which
+// is a registry of TF entities that worktrees, entities, clone state and a
+// hand-set base_branch hang off — and it is why grant membership is not a
+// column there.
 // A grant deliberately contains repositories nobody tracks; a repository row
 // means TF works with the repository.
 //
@@ -102,7 +103,7 @@ type InstallationReposStore interface {
 	// tracks — repositories the App can reach for no reason TF can name.
 	//
 	// Tracking is read from team_github_repos (the union across every team),
-	// never from repo_profiles: that table is a superset, since get-or-create
+	// never from repositories: that table is a superset, since get-or-create
 	// mints a row for any repository an agent adds to a workspace, and counting
 	// those as "tracked" would under-report the finding.
 	ListReachWithoutPurposeSystem(ctx context.Context, orgID string) ([]domain.InstallationRepository, error)

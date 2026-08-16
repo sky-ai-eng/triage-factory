@@ -252,7 +252,7 @@ type gitSeed struct {
 }
 
 // gitSeedFor resolves the seed for a GitHub-backed run's rehydrate. The clone
-// URL comes from the repo profile (written in the org's configured protocol) —
+// URL comes from the repository row (written in the org's configured protocol) —
 // no PR is fetched on a later step or a resume, so there is no per-run URL to
 // inherit.
 //
@@ -274,7 +274,7 @@ func (s *Spawner) gitSeedFor(ctx context.Context, orgID, owner, repo string, sid
 	}
 	if s.repos != nil {
 		if profile, err := s.repos.GetSystem(ctx, orgID, owner+"/"+repo); err != nil {
-			delegateLog.Warn("load repo profile for workspace rehydrate failed; a missing bare cannot be seeded", "org", orgID, "repo", owner+"/"+repo, "error", err)
+			delegateLog.Warn("load repository for workspace rehydrate failed; a missing bare cannot be seeded", "org", orgID, "repo", owner+"/"+repo, "error", err)
 		} else if profile != nil {
 			seed.cloneURL = profile.CloneURL
 		}

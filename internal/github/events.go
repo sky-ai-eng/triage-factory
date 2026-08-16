@@ -26,7 +26,7 @@ type UserRepo struct {
 	Private     bool   `json:"private"`
 }
 
-// ExternalID renders UserRepo.ID the way repo_profiles.external_id stores it:
+// ExternalID renders UserRepo.ID the way repositories.external_id stores it:
 // decimal text, empty when GitHub sent no id (which is never expected, and is
 // still not something to persist as the string "0").
 func (r UserRepo) ExternalID() string {
@@ -205,7 +205,7 @@ type RepoMeta struct {
 	SSHURL        string `json:"ssh_url"`
 }
 
-// ExternalID renders RepoMeta.ID the way repo_profiles.external_id stores it:
+// ExternalID renders RepoMeta.ID the way repositories.external_id stores it:
 // decimal text, empty when GitHub sent no id (a response shape we never expect
 // but also never want to persist as the string "0", which is not a repository).
 func (m RepoMeta) ExternalID() string {

@@ -747,11 +747,11 @@ func (c *LocalClient) GetTask(ctx context.Context, taskID string) (*domain.Task,
 	return c.rt.GetTask(ctx, taskID)
 }
 
-func (c *LocalClient) ListRepos(ctx context.Context) ([]domain.RepoProfile, error) {
+func (c *LocalClient) ListRepos(ctx context.Context) ([]domain.Repository, error) {
 	return c.rt.ListRepos(ctx)
 }
 
-func (c *LocalClient) GetRepo(ctx context.Context, repoID string) (*domain.RepoProfile, error) {
+func (c *LocalClient) GetRepo(ctx context.Context, repoID string) (*domain.Repository, error) {
 	return c.rt.GetRepo(ctx, repoID)
 }
 

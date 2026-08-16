@@ -198,7 +198,7 @@ type taskResult struct {
 }
 
 type reposResult struct {
-	Repos []domain.RepoProfile `json:"repos"`
+	Repos []domain.Repository `json:"repos"`
 }
 
 type getRepoArgs struct {
@@ -206,7 +206,7 @@ type getRepoArgs struct {
 }
 
 type repoResult struct {
-	Repo *domain.RepoProfile `json:"repo,omitempty"`
+	Repo *domain.Repository `json:"repo,omitempty"`
 }
 
 type teamTracksRepoArgs struct {
@@ -255,7 +255,7 @@ type workspaceRootsResult struct {
 }
 
 // createWorkspaceCheckoutArgs deliberately carries NO clone URLs — the daemon
-// re-derives them from the stored repo profile / its own PR fetch so a
+// re-derives them from the stored repository row / its own PR fetch so a
 // sandboxed caller can't steer the host's credential at an arbitrary repo.
 type createWorkspaceCheckoutArgs struct {
 	Owner string `json:"owner"`

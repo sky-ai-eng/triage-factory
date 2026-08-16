@@ -30,7 +30,7 @@ func NormalizeRepoSource(source string) (string, error) {
 }
 
 // RepoRef names one repository by provider identity — the argument shape of
-// RepoStore's get-or-create. Owner/Repo is the slug the rest of the product
+// RepositoryStore's get-or-create. Owner/Repo is the slug the rest of the product
 // carries; ExternalID is the provider's own id for that repository, which is
 // what survives a rename, and is empty whenever the caller has no id to hand
 // (nothing fetches one just to fill it in).
@@ -45,8 +45,12 @@ type RepoRef struct {
 // column and store method uses.
 func (r RepoRef) Slug() string { return r.Owner + "/" + r.Repo }
 
-// RepoProfile is a cached AI-generated profile for a GitHub repository.
-type RepoProfile struct {
+// Repository is one row of the repository registry: the repositories TF works
+// with, each carrying the provider identity that survives a rename, the
+// tracked-set membership the reconcile writes, the clone state, the poller's
+// conditional-request cursor, and the cached AI-generated profile the name
+// used to promise on its own.
+type Repository struct {
 	ID    string // "owner/repo"
 	Owner string
 	Repo  string

@@ -17,7 +17,7 @@ import (
 // needing a real github client.
 func TestProfiler_Run_IteratesActiveOrgs(t *testing.T) {
 	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b", "org-c"}}
-	repos := &recordingRepoStore{}
+	repos := &recordingRepositoryStore{}
 
 	p := NewProfiler(nil, nil, nil, repos, orgs, nil, nil, nil)
 	if err := p.Run(context.Background(), false); err != nil {
@@ -47,7 +47,7 @@ func TestProfiler_Run_IteratesActiveOrgs(t *testing.T) {
 // the run is fundamentally unable to proceed.
 func TestProfiler_Run_OrgsStoreErrorBubbles(t *testing.T) {
 	orgs := &fakeOrgsStore{err: errOrgsDown}
-	repos := &recordingRepoStore{}
+	repos := &recordingRepositoryStore{}
 
 	p := NewProfiler(nil, nil, nil, repos, orgs, nil, nil, nil)
 	if err := p.Run(context.Background(), false); err == nil {
@@ -77,17 +77,17 @@ func (f *fakeOrgsStore) ListActiveSystem(ctx context.Context) ([]string, error) 
 	return append([]string(nil), f.ids...), nil
 }
 
-// recordingRepoStore embeds db.RepoStore as nil and overrides only
+// recordingRepositoryStore embeds db.RepositoryStore as nil and overrides only
 // ListConfiguredNamesSystem. Returning empty short-circuits Run
 // before any GitHub API call, so the test isolates the per-org loop
 // behavior from the inner profiling body.
-type recordingRepoStore struct {
-	db.RepoStore
+type recordingRepositoryStore struct {
+	db.RepositoryStore
 	mu      sync.Mutex
 	visited []string
 }
 
-func (r *recordingRepoStore) ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error) {
+func (r *recordingRepositoryStore) ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.visited = append(r.visited, orgID)
@@ -102,6 +102,6 @@ var errOrgsDown = stubErr("simulated orgs-store outage")
 
 var (
 	_ db.OrgsStore       = (*fakeOrgsStore)(nil)
-	_ db.RepoStore       = (*recordingRepoStore)(nil)
-	_ domain.RepoProfile // keep domain import live for parity with siblings
+	_ db.RepositoryStore = (*recordingRepositoryStore)(nil)
+	_ domain.Repository  // keep domain import live for parity with siblings
 )

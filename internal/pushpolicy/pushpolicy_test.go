@@ -58,17 +58,17 @@ func TestProtectedBranches_UnprofiledRepoStillRefusesMainAndMaster(t *testing.T)
 	}
 }
 
-// TestProtectedBranches_ProfileAddsDefaultAndBase: the profile's recorded
+// TestProtectedBranches_ProfileAddsDefaultAndBase: the repository row's recorded
 // default branch and the user-configured base branch join the universal set.
 func TestProtectedBranches_ProfileAddsDefaultAndBase(t *testing.T) {
 	stores := newStores(t)
 	ctx := context.Background()
-	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.RepoProfile{
+	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		ID: "acme/api", Owner: "acme", Repo: "api",
 		DefaultBranch: "trunk",
 		CloneURL:      "https://x", ProfileText: "t",
 	}); err != nil {
-		t.Fatalf("seed profile: %v", err)
+		t.Fatalf("seed repository: %v", err)
 	}
 	// The configured base branch has its own write path (it's a user choice, not
 	// a profiling output), so set it the way the settings surface does.

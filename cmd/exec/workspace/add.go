@@ -76,7 +76,7 @@ var (
 	errRunNotFound         = errors.New("workspace add: run not found")
 	errRepoNotConfigured   = errors.New("workspace add: repo is not configured in Triage Factory; add it on the Settings page first")
 	errRepoNotTracked      = errors.New("workspace add: repo is not tracked by this team; add it to the team on the Settings page first")
-	errRepoMissingCloneURL = errors.New("workspace add: repo has no clone URL on its profile; try re-profiling from the Settings page")
+	errRepoMissingCloneURL = errors.New("workspace add: repo has no clone URL on its repository row; try re-profiling from the Settings page")
 	errInvalidRef          = errors.New("workspace add: --ref contains characters disallowed for git refs")
 	errRefAndPR            = errors.New("workspace add: --ref and --pr are mutually exclusive")
 	errInvalidPR           = errors.New("workspace add: --pr requires a positive integer PR number")
@@ -183,7 +183,7 @@ func parseAddArgs(args []string) (ownerRepo string, spec checkoutSpec, err error
 //     live directory, return it. If the row exists but the path is
 //     missing/not-a-dir (e.g. wiped by startup orphan sweep), drop
 //     the stale row so the reservation step below can re-reserve.
-//  3. Repo profile lookup (clone URL required) + team-tracking gate.
+//  3. Repository row lookup (clone URL required) + team-tracking gate.
 //  4. Reserve the conversation_worktrees row with the deterministic path
 //     {runRoot}/{owner}/{repo}. PK conflict picks the winner.
 //  5. Loser path: return winner's path immediately.
@@ -291,7 +291,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 
 	profile, err := host.GetRepo(ctx, repoID)
 	if err != nil {
-		return "", fmt.Errorf("workspace add: load repo profile: %w", err)
+		return "", fmt.Errorf("workspace add: load repository: %w", err)
 	}
 	if profile == nil {
 		return "", fmt.Errorf("%w: %s", errRepoNotConfigured, repoID)

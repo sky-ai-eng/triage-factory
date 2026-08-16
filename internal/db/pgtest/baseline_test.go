@@ -28,7 +28,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"prompts", "projects", "events_catalog", "entities", "entity_links", "events",
 		"event_handlers", "tasks", "task_events", "conversations", "claims", "artifacts",
 		"messages", "claim_credentials", "conversation_memory", "conversation_memory_entities", "pending_firings", "conversation_worktrees",
-		"swipe_events", "poller_state", "repo_profiles",
+		"swipe_events", "poller_state", "repositories",
 		// org_secrets replaces the Supabase Vault secret path (TFAC-402):
 		// app-encrypted ciphertext in a normal RLS table.
 		"org_secrets",
@@ -3159,7 +3159,7 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 // TestOrgTrackedRepos_OrgBoundaryAndTeamBypass pins the security contract
 // of the tf.org_tracked_repos() SECURITY DEFINER helper: it
 // bypasses the per-team SELECT RLS (a within-org, non-security boundary)
-// so the repo_profiles reconcile can read the full org union, but it
+// so the repositories reconcile can read the full org union, but it
 // holds the ORG boundary — a caller's claims org must match the requested
 // org, so it can never read another org's tracked repos.
 func TestOrgTrackedRepos_OrgBoundaryAndTeamBypass(t *testing.T) {

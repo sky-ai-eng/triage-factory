@@ -37,7 +37,7 @@ type Profiler struct {
 	resolver   github.Resolver         // per-(org, owner) GitHub client source — App-installation token in multi, keychain PAT in local.
 	secrets    agentproc.SecretsReader // per-org LLM-credential reader for the profiling Haiku calls (nil in local → ambient subscription; system-door reader in multi).
 	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests).
-	repos      db.RepoStore            // profile reads + upserts go through the store
+	repos      db.RepositoryStore      // profile reads + upserts go through the store
 	orgs       db.OrgsStore            // iterate active orgs at the top of each profile run
 	recorder   *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	ws         *websocket.Hub
@@ -57,7 +57,7 @@ type Profiler struct {
 // token). The limiter (nil → unlimited) bounds concurrent profiling sandboxes
 // against the other background jobs; it is captured by batchFn alongside the
 // recorder.
-func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, repos db.RepoStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Profiler {
+func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, repos db.RepositoryStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Profiler {
 	p := &Profiler{resolver: resolver, secrets: secrets, llmResolve: llmResolve, repos: repos, orgs: orgs, recorder: recorder, ws: ws}
 	p.batchFn = func(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return profileBatch(ctx, orgID, batch, secrets, llmResolve, recorder, limiter)
@@ -65,9 +65,9 @@ func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, llmR
 	return p
 }
 
-// repoWithDocs groups a repo profile with the documentation text to send to the LLM.
+// repoWithDocs groups a repository row with the documentation text to send to the LLM.
 type repoWithDocs struct {
-	profile domain.RepoProfile
+	profile domain.Repository
 	docs    string
 }
 
@@ -166,7 +166,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 	}
 
 	var withDocs []repoWithDocs
-	var withoutDocs []domain.RepoProfile
+	var withoutDocs []domain.Repository
 
 	for _, name := range repos {
 		if err := ctx.Err(); err != nil {
@@ -252,7 +252,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			cloneURL = meta.SSHURL
 		}
 
-		prof := domain.RepoProfile{
+		prof := domain.Repository{
 			ID:     name,
 			Owner:  owner,
 			Repo:   repo,

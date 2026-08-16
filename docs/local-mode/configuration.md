@@ -31,7 +31,7 @@ covered in [Secret storage](secret-storage.md).
 
 Team Settings → **Team defaults** → *Pushes to the base branch* controls whether
 a delegated agent may push straight to a repository's base or default branch —
-`main`, `master`, or whatever the repo profile records, plus any base branch you
+`main`, `master`, or whatever the repository records, plus any base branch you
 configured for the repo. The default is **Never**: agents push their own branch
 and open a pull request. **Only runs a human started** allows it for a run you
 dispatched yourself while still refusing it on runs a trigger fired, and

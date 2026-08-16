@@ -2,7 +2,7 @@ package domain
 
 import "testing"
 
-// repo_profiles.source carries no CHECK constraint in either dialect —
+// repositories.source carries no CHECK constraint in either dialect —
 // widening a SQLite CHECK costs a full-table rebuild, so the value set is the
 // app's to enforce and NormalizeRepoSource is where it is enforced. If this
 // function accepts anything, the column does.

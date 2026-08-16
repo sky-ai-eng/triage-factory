@@ -172,7 +172,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// autonomously, the same shape Conversations / RunWorktrees use.
 		Artifacts:      newArtifactStore(tx, s.admin),
 		Entities:       newEntityStore(tx, tx),
-		Repos:          newRepoStore(tx, tx),
+		Repos:          newRepositoryStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
 		// Projects: ListSystem routes around RLS the same way
 		// Conversations' event-triggered Create does. Keeping the admin
@@ -229,7 +229,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// TeamGitHubRepos: app-side write (the team-row replace inside
 		// ReplaceForTeam) routes through the tx so it composes with the
 		// surrounding claims tx; admin half stays pinned to s.admin so
-		// the org-wide union read + repo_profiles reconcile (which must
+		// the org-wide union read + repositories reconcile (which must
 		// see sibling teams' rows past RLS) route outside the tx, the
 		// same autonomous-commit shape Events / TaskMemory use.
 		TeamGitHubRepos: newTeamGitHubReposStore(tx, s.admin),

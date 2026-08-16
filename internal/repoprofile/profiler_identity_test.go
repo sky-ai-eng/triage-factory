@@ -36,7 +36,7 @@ func TestProfiler_CarriesRepositoryIdentityOntoTheRow(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	repos := &fetchRepoStore{names: []string{"octo/with-id", "octo/no-id"}}
+	repos := &fetchRepositoryStore{names: []string{"octo/with-id", "octo/no-id"}}
 	p := NewProfiler(
 		fixedResolver{client: github.NewClient(srv.URL, "tok")},
 		nil, nil, repos, oneOrgStore{}, nil, nil, nil,

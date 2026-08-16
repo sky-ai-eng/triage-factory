@@ -47,7 +47,7 @@ import (
 func (s *repoStore) ListIdentitiesSystem(ctx context.Context, orgID string) ([]domain.RepoRef, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT source, owner, repo, external_id
-		  FROM repo_profiles
+		  FROM repositories
 		 WHERE org_id = $1 AND external_id IS NOT NULL AND external_id <> ''
 		 ORDER BY owner, repo
 	`, orgID)
@@ -136,7 +136,7 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 // return exists to let the caller SAY that instead of silently picking a row.
 func storedSlugsForIdentity(ctx context.Context, q queryer, orgID, source, externalID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT owner, repo FROM repo_profiles
+		SELECT owner, repo FROM repositories
 		 WHERE org_id = $1 AND source = $2 AND external_id = $3
 		 ORDER BY owner, repo
 		 FOR UPDATE
@@ -161,7 +161,7 @@ func storedSlugsForIdentity(ctx context.Context, q queryer, orgID, source, exter
 func slugHeldByAnotherRepository(ctx context.Context, q queryer, orgID, source string, observed domain.RepoRef) (bool, error) {
 	var found int
 	err := q.QueryRowContext(ctx, `
-		SELECT 1 FROM repo_profiles
+		SELECT 1 FROM repositories
 		 WHERE org_id = $1 AND source = $2
 		   AND lower(owner) = lower($3) AND lower(repo) = lower($4)
 		   AND (external_id IS NULL OR external_id <> $5)
@@ -181,12 +181,12 @@ func slugHeldByAnotherRepository(ctx context.Context, q queryer, orgID, source s
 func renameRepositoryRow(ctx context.Context, q queryer, orgID, source, from string, to domain.RepoRef) error {
 	fromOwner, fromRepo := splitRepoSlug(from)
 	if _, err := q.ExecContext(ctx, `
-		UPDATE repo_profiles
+		UPDATE repositories
 		   SET owner = $1, repo = $2, updated_at = now()
 		 WHERE org_id = $3 AND source = $4
 		   AND lower(owner) = lower($5) AND lower(repo) = lower($6)
 	`, to.Owner, to.Repo, orgID, source, fromOwner, fromRepo); err != nil {
-		return fmt.Errorf("rename repo_profiles %s -> %s: %w", from, to.Slug(), err)
+		return fmt.Errorf("rename repositories %s -> %s: %w", from, to.Slug(), err)
 	}
 	return nil
 }
@@ -315,7 +315,7 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, orgID, source, from,
 	// against a character-indexed substr, which agree because GitHub restricts
 	// a slug to ASCII.
 	//
-	// entities.source and repo_profiles.source are different vocabularies that
+	// entities.source and repositories.source are different vocabularies that
 	// happen to coincide while GitHub is the only provider issuing either. The
 	// repository's source is threaded through rather than hardcoded so a second
 	// provider's entities move with its repositories — but whoever adds one
@@ -418,7 +418,7 @@ func rewriteArtifactSlugs(ctx context.Context, q queryer, orgID, from, to string
 // It exists for the two composite keys a rename can collide on: entities'
 // (org_id, source, source_id) and artifacts' (org_id, dedup_key). Both are
 // reachable without any corruption, because untracking a repository keeps its
-// entities and artifacts while dropping the repo_profiles row that
+// entities and artifacts while dropping the repositories row that
 // slugHeldByAnotherRepository looks at — so a freed name can be spoken for by
 // records alone. Mapping the violation is what makes that a documented
 // terminal state rather than a raw driver string the caller retries forever.

@@ -13,12 +13,12 @@ import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 // default team — a future change will thread the selected team here.
 // The default team's repo *tracking* set — read to seed the selection and
 // written on Save/Re-profile. This must NOT be sourced from GET /api/repos
-// (the org-wide repo_profiles union): in a multi-team org that union
+// (the org-wide repositories union): in a multi-team org that union
 // includes sibling teams' repos, and writing it back here would pull them
 // into the default team's tracked set and past the router gate.
 const TEAM_REPOS_PATH = '/api/settings/team/default/repos'
 
-interface RepoProfile {
+interface Repository {
   id: string
   owner: string
   repo: string
@@ -42,7 +42,7 @@ interface RepoProfile {
   // no settings shortcut).
   clone_error_kind?: 'ssh' | 'other'
   // Whether this caller may change the repo's settings. The server
-  // decides — a repo profile is org-wide, so writing it takes an org
+  // decides — a repository row is org-wide, so writing it takes an org
   // admin or a team admin of a team tracking it, and only the server
   // knows which of the tracking teams the caller administers. Never
   // re-derive this from the viewer's role. Absent (older server) reads
@@ -54,7 +54,7 @@ interface RepoProfile {
 // The branch a run actually targets: an explicit base_branch override,
 // else the profiler-derived default, else GitHub's own fallback. Shared
 // by the editable picker and the read-only label so the two can't drift.
-function effectiveBranch(profile: RepoProfile): string {
+function effectiveBranch(profile: Repository): string {
   return profile.base_branch || profile.default_branch || 'main'
 }
 
@@ -68,7 +68,7 @@ function BranchPicker({
   profile,
   onSave,
 }: {
-  profile: RepoProfile
+  profile: Repository
   onSave: (branch: string) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -253,7 +253,7 @@ function BranchPicker({
 // Deliberately not a disabled <button>: there's no action to offer, and a
 // dead button invites the click that would 403.
 
-function BranchLabel({ profile }: { profile: RepoProfile }) {
+function BranchLabel({ profile }: { profile: Repository }) {
   return (
     <span
       title="Only an org admin, or a team admin of a team tracking this repo, can change the base branch"
@@ -353,7 +353,7 @@ function StatusDot({ state }: { state: DotState }) {
 // text is short enough to display verbatim and the user is the right
 // audience to interpret git/curl/connection errors.
 
-function CloneFailedBadge({ profile }: { profile: RepoProfile }) {
+function CloneFailedBadge({ profile }: { profile: Repository }) {
   const [open, setOpen] = useState(false)
   const orgHref = useOrgHref()
   const isSSH = profile.clone_error_kind === 'ssh'
@@ -438,7 +438,7 @@ function RepoCard({
   onBranchChange,
   webBaseURL,
 }: {
-  profile: RepoProfile
+  profile: Repository
   onBranchChange: (branch: string) => void
   webBaseURL: string | undefined
 }) {
@@ -619,7 +619,7 @@ function DocChip({ label, present, href }: { label: string; present: boolean; hr
 // user to a wrong destination.
 function docURL(
   webBaseURL: string | undefined,
-  profile: RepoProfile,
+  profile: Repository,
   filename: string,
 ): string | undefined {
   if (!webBaseURL) return undefined
@@ -663,14 +663,14 @@ function formatAge(iso: string): string {
 // --- Page ------------------------------------------------------------------
 
 export default function Repos() {
-  const [profiles, setProfiles] = useState<RepoProfile[]>([])
+  const [profiles, setProfiles] = useState<Repository[]>([])
   const [loading, setLoading] = useState(true)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [selectedRepos, setSelectedRepos] = useState<string[]>([])
   // True when the default team's tracked-set fetch failed. selectedRepos
   // stays [] on failure, which is indistinguishable from "genuinely tracks
   // nothing" — without this flag a transient failure would let Re-profile
-  // PUT an empty array and wipe the team's repos (+ GC repo_profiles).
+  // PUT an empty array and wipe the team's repos (+ GC `repositories`).
   const [teamLoadFailed, setTeamLoadFailed] = useState(false)
   const [saving, setSaving] = useState(false)
   // Starts unset — we don't know the right host until settings load. Doc
@@ -681,7 +681,7 @@ export default function Repos() {
 
   const fetchData = async () => {
     try {
-      // Two distinct lists: the cards show the org-wide repo_profiles union
+      // Two distinct lists: the cards show the org-wide repositories union
       // (GET /api/repos), but the *selection* — what Save/Re-profile writes
       // back to the default team — must come from the default team's own
       // tracked set, never the union (see TEAM_REPOS_PATH).
@@ -689,7 +689,7 @@ export default function Repos() {
       // team read fails, and a failed team read must not be mistaken for an
       // empty tracked set (see setTeamLoadFailed below).
       const [profiles, team] = await Promise.all([
-        apiJSON<RepoProfile[]>('/api/repos').catch(() => null),
+        apiJSON<Repository[]>('/api/repos').catch(() => null),
         apiJSON<{ repos?: string[] }>(TEAM_REPOS_PATH).catch(() => null),
       ])
       if (profiles) setProfiles(profiles)
@@ -762,7 +762,7 @@ export default function Repos() {
       setProfiles((prev) =>
         prev.map((p) => {
           if (p.id !== d.id) return p
-          const next: RepoProfile = { ...p }
+          const next: Repository = { ...p }
           if (d.profile_text !== undefined) next.profile_text = d.profile_text
           if (d.clone_status !== undefined) next.clone_status = d.clone_status
           if (d.clone_error !== undefined) next.clone_error = d.clone_error
@@ -816,7 +816,7 @@ export default function Repos() {
     }
   }
 
-  const handleBranchChange = (profile: RepoProfile) => async (branch: string) => {
+  const handleBranchChange = (profile: Repository) => async (branch: string) => {
     try {
       await apiFetch(`/api/repos/${profile.owner}/${profile.repo}`, {
         method: 'PATCH',

@@ -144,7 +144,7 @@ func (i OrgGitHubAppInstallation) GrantsEveryRepository() bool {
 // a repository the App can reach through that installation, whether or not any
 // team tracks it.
 //
-// It is deliberately NOT a RepoProfile: the grant is a cache of an external
+// It is deliberately NOT a Repository: the grant is a cache of an external
 // fact, rebuilt in full on every reconcile, while a repository row is a registry
 // of a TF entity that worktrees, entities and clone state hang off. A grant
 // entry with no registry row behind it is the normal case — it is exactly what

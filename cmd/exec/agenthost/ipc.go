@@ -214,7 +214,7 @@ func (c *IPCClient) GetTask(ctx context.Context, taskID string) (*domain.Task, e
 	return res.Task, nil
 }
 
-func (c *IPCClient) ListRepos(ctx context.Context) ([]domain.RepoProfile, error) {
+func (c *IPCClient) ListRepos(ctx context.Context) ([]domain.Repository, error) {
 	var res reposResult
 	if err := c.call(ctx, methodListRepos, emptyArgs{}, &res); err != nil {
 		return nil, err
@@ -222,7 +222,7 @@ func (c *IPCClient) ListRepos(ctx context.Context) ([]domain.RepoProfile, error)
 	return res.Repos, nil
 }
 
-func (c *IPCClient) GetRepo(ctx context.Context, repoID string) (*domain.RepoProfile, error) {
+func (c *IPCClient) GetRepo(ctx context.Context, repoID string) (*domain.Repository, error) {
 	var res repoResult
 	if err := c.call(ctx, methodGetRepo, getRepoArgs{RepoID: repoID}, &res); err != nil {
 		return nil, err

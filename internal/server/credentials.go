@@ -372,7 +372,7 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 
 	// Setup is complete once GitHub access is configured (PAT or registered
 	// App; the env overlay folds into creds.GitHubPAT) AND the org tracks at
-	// least one repo. ReplaceForTeam writes a repo_profiles skeleton row in
+	// least one repo. ReplaceForTeam writes a repositories skeleton row in
 	// the same tx it records the team's tracked repos, so repoCount is a
 	// durable signal here — it doesn't lag behind the (async) profiling pass.
 	// Jira stays optional. setup_step tells the gate which configure screen

@@ -447,8 +447,8 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 	})
 
-	t.Run("repo_profiles", func(t *testing.T) {
-		repoID := seedRepoProfile(t, h, orgID)
+	t.Run("repositories", func(t *testing.T) {
+		repoID := seedRepository(t, h, orgID)
 		if _, err := stores.Repos.GetSystem(ctx, orgID, repoID); err != nil {
 			t.Errorf("Repos.GetSystem: %v", err)
 		}
@@ -592,10 +592,10 @@ func seedTrigger(t *testing.T, h *Harness, orgID, creatorID, teamID, blueprintID
 	return id
 }
 
-func seedRepoProfile(t *testing.T, h *Harness, orgID string) string {
+func seedRepository(t *testing.T, h *Harness, orgID string) string {
 	t.Helper()
 	MustExec(t, h.AdminDB, `
-		INSERT INTO repo_profiles (org_id, owner, repo)
+		INSERT INTO repositories (org_id, owner, repo)
 		VALUES ($1, 'octo', 'conformance-repo')
 	`, orgID)
 	return "octo/conformance-repo"

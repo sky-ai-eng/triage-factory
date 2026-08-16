@@ -19,9 +19,9 @@ import (
 // TTL and resolves the client (proving it would re-fetch).
 func TestRunOrg_TTLSkipsFreshUnlessForced(t *testing.T) {
 	fresh := time.Now()
-	repos := &ttlRepoStore{
+	repos := &ttlRepositoryStore{
 		names:   []string{"own/fresh"},
-		profile: &domain.RepoProfile{ID: "own/fresh", Owner: "own", Repo: "fresh", ProfiledAt: &fresh},
+		profile: &domain.Repository{ID: "own/fresh", Owner: "own", Repo: "fresh", ProfiledAt: &fresh},
 	}
 
 	t.Run("force=false skips a fresh repo", func(t *testing.T) {
@@ -57,25 +57,25 @@ func TestRunOrg_TTLSkipsFreshUnlessForced(t *testing.T) {
 	})
 }
 
-// ttlRepoStore returns a single configured repo whose GetSystem reports a
+// ttlRepositoryStore returns a single configured repo whose GetSystem reports a
 // recently-profiled row, so the TTL branch is exercised. UpsertSystem and
 // the GetSystem consult are counted.
-type ttlRepoStore struct {
-	db.RepoStore
+type ttlRepositoryStore struct {
+	db.RepositoryStore
 	names   []string
-	profile *domain.RepoProfile
+	profile *domain.Repository
 	upserts atomic.Int64
 }
 
-func (s *ttlRepoStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
+func (s *ttlRepositoryStore) ListConfiguredNamesSystem(context.Context, string) ([]string, error) {
 	return s.names, nil
 }
 
-func (s *ttlRepoStore) GetSystem(context.Context, string, string) (*domain.RepoProfile, error) {
+func (s *ttlRepositoryStore) GetSystem(context.Context, string, string) (*domain.Repository, error) {
 	return s.profile, nil
 }
 
-func (s *ttlRepoStore) UpsertSystem(context.Context, string, domain.RepoProfile) error {
+func (s *ttlRepositoryStore) UpsertSystem(context.Context, string, domain.Repository) error {
 	s.upserts.Add(1)
 	return nil
 }
@@ -94,7 +94,7 @@ func (r *countingResolver) ClientFor(context.Context, string, string) (*github.C
 }
 
 var (
-	errResolverDown                 = stubErr("resolver unavailable in ttl test")
-	_               db.RepoStore    = (*ttlRepoStore)(nil)
-	_               github.Resolver = (*countingResolver)(nil)
+	errResolverDown                    = stubErr("resolver unavailable in ttl test")
+	_               db.RepositoryStore = (*ttlRepositoryStore)(nil)
+	_               github.Resolver    = (*countingResolver)(nil)
 )

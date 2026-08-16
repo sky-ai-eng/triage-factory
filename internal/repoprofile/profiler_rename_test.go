@@ -43,7 +43,7 @@ func TestProfiler_AppliesARenameTheMetaResponseRevealed(t *testing.T) {
 	defer srv.Close()
 
 	repos := &renameProfileStore{
-		fetchRepoStore: fetchRepoStore{names: []string{"octo/api", "octo/web"}},
+		fetchRepositoryStore: fetchRepositoryStore{names: []string{"octo/api", "octo/web"}},
 	}
 	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, nil)
 	if err := p.Run(context.Background(), true /* force: skip the TTL read */); err != nil {
@@ -88,7 +88,7 @@ func TestProfiler_MatchingNameIsNotARename(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	repos := &renameProfileStore{fetchRepoStore: fetchRepoStore{names: []string{"octo/api"}}}
+	repos := &renameProfileStore{fetchRepositoryStore: fetchRepositoryStore{names: []string{"octo/api"}}}
 	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, nil)
 	if err := p.Run(context.Background(), true); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -113,7 +113,7 @@ func TestProfiler_AbsentFullNameIsNotARename(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	repos := &renameProfileStore{fetchRepoStore: fetchRepoStore{names: []string{"octo/api"}}}
+	repos := &renameProfileStore{fetchRepositoryStore: fetchRepositoryStore{names: []string{"octo/api"}}}
 	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, nil)
 	if err := p.Run(context.Background(), true); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -126,10 +126,10 @@ func TestProfiler_AbsentFullNameIsNotARename(t *testing.T) {
 	}
 }
 
-// renameProfileStore is fetchRepoStore plus the two rename methods, recording
+// renameProfileStore is fetchRepositoryStore plus the two rename methods, recording
 // what the profiler asked the store to move.
 type renameProfileStore struct {
-	fetchRepoStore
+	fetchRepositoryStore
 	mu      sync.Mutex
 	renames []domain.RepoRef
 }
@@ -151,7 +151,7 @@ func (s *renameProfileStore) RenameSystem(_ context.Context, _ string, observed 
 	return domain.RepoRenameOutcome{Renamed: true, From: "octo/api", To: observed.Slug()}, nil
 }
 
-func keysOf(m map[string]domain.RepoProfile) []string {
+func keysOf(m map[string]domain.Repository) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -159,4 +159,4 @@ func keysOf(m map[string]domain.RepoProfile) []string {
 	return out
 }
 
-var _ db.RepoStore = (*renameProfileStore)(nil)
+var _ db.RepositoryStore = (*renameProfileStore)(nil)

@@ -109,15 +109,15 @@ func TestCheckPush_UnprofiledRepoStillRefusesMain(t *testing.T) {
 // repo, not just the two universal names.
 func TestCheckPush_ProfiledDefaultBranchIsProtected(t *testing.T) {
 	stores := newPolicyStores(t)
-	if err := stores.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
+	if err := stores.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		ID: "octo/repo", Owner: "octo", Repo: "repo",
 		DefaultBranch: "trunk", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
-		t.Fatalf("seed profile: %v", err)
+		t.Fatalf("seed repository: %v", err)
 	}
 	if got := runCheckPush(policyHost(stores, false), stores,
 		[]string{"--remote", "https://github.com/octo/repo.git"}, prePushStdin("refs/heads/trunk")); got != ExitRefused {
-		t.Errorf("exit = %d, want %d (the profile's default branch is protected)", got, ExitRefused)
+		t.Errorf("exit = %d, want %d (the repository's default branch is protected)", got, ExitRefused)
 	}
 }
 

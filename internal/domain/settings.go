@@ -61,7 +61,7 @@ var ValidReviewPostures = []string{
 func ValidReviewPosture(s string) bool { return slices.Contains(ValidReviewPostures, s) }
 
 // Base-branch push policies — whether a delegated agent may push to a repo's
-// base / default branch (main, master, the profile's default, the configured
+// base / default branch (main, master, the repository row's default, the configured
 // base). The default refuses, which is right for a team that reviews through
 // pull requests and wrong for trunk-based teams, docs repos, config repos and
 // generated-file bots — hence a setting rather than a hard-coded rule.
@@ -465,7 +465,7 @@ func NormalizeTeamGitHubGroups(groups []TeamGitHubGroup) ([]TeamGitHubGroup, err
 // TeamGitHubRepo is one row of team_github_repos — a single GitHub repo
 // (owner + name) a TF team has declared it tracks. The GitHub
 // tracking-scope twin of JiraProjectStatusRules: the per-team selection
-// that the router's team↔repo gate consults and that repo_profiles is
+// that the router's team↔repo gate consults and that repositories is
 // the org-wide UNION of. Distinct from TeamGitHubGroup, which maps
 // CODEOWNERS review-routing teams — this is tracking scope. The Owner is
 // stored as-typed for display fidelity (GitHub logins are
@@ -476,7 +476,7 @@ type TeamGitHubRepo struct {
 	Repo  string
 }
 
-// Slug returns the canonical "owner/repo" form used as the repo_profiles
+// Slug returns the canonical "owner/repo" form used as the repositories
 // id and the shape every repo-list caller passes around.
 func (r TeamGitHubRepo) Slug() string { return r.Owner + "/" + r.Repo }
 
@@ -500,7 +500,7 @@ func (r TrackedRepoTeams) Slug() string { return r.Owner + "/" + r.Repo }
 // with an empty field, and de-duplicates on (owner, repo) — the
 // canonical form persisted by ReplaceForTeam. Unlike the github-team
 // normalizer this keeps the original case (a repo slug round-trips into
-// repo_profiles.id and the GitHub clone URL verbatim), so dedup is
+// repositories.id and the GitHub clone URL verbatim), so dedup is
 // case-sensitive on the full slug. Returns an error only for a
 // half-specified entry (one field populated, the other empty) — a caller
 // bug rather than a value to silently drop. Splitting "owner/repo" slugs
@@ -511,7 +511,7 @@ func NormalizeTeamGitHubRepos(repos []TeamGitHubRepo) ([]TeamGitHubRepo, error) 
 	// Key on the case-folded "owner/repo" — GitHub owners and repo names
 	// are case-insensitive, so Acme/API and acme/api are the same repo.
 	// Storing both would double the row in team_github_repos and, via the
-	// reconcile, in repo_profiles (a double-polled repo). First-seen
+	// reconcile, in repositories (a double-polled repo). First-seen
 	// casing is kept for display.
 	seen := map[string]bool{}
 	for i, r := range repos {

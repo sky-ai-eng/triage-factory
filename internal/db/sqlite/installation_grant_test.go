@@ -16,7 +16,7 @@ import (
 // The org is the local sentinel rather than a fresh uuid: local mode is N=1 and
 // every store method here asserts it, which is the same discipline the rest of
 // this package's `...System` methods hold. Tracked repositories are inserted by
-// raw SQL — ReplaceForTeam would also reconcile repo_profiles, and the drift
+// raw SQL — ReplaceForTeam would also reconcile repositories, and the drift
 // queries deliberately read team_github_repos rather than that derived cache.
 func TestInstallationGrant_SQLite(t *testing.T) {
 	dbtest.RunInstallationGrantConformance(t, func(t *testing.T) dbtest.InstallationGrantBackend {

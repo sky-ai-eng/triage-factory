@@ -87,11 +87,11 @@ func TestMigrate_RepoIdentityRebuildPreservesRows(t *testing.T) {
 	}
 
 	var after int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM repo_profiles`).Scan(&after); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM repositories`).Scan(&after); err != nil {
 		t.Fatalf("count after: %v", err)
 	}
 	if after != before {
-		t.Errorf("repo_profiles rows = %d, want %d — the rebuild neither drops nor splits a row", after, before)
+		t.Errorf("repositories rows = %d, want %d — the rebuild neither drops nor splits a row", after, before)
 	}
 
 	scalar := func(query string, args ...any) string {
@@ -115,14 +115,14 @@ func TestMigrate_RepoIdentityRebuildPreservesRows(t *testing.T) {
 	// learned. NULL is the honest answer, not a placeholder to be filled by
 	// the migration — nothing here has a payload to read one from.
 	var nonGitHub int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM repo_profiles WHERE source <> 'github'`).Scan(&nonGitHub); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM repositories WHERE source <> 'github'`).Scan(&nonGitHub); err != nil {
 		t.Fatalf("count non-github: %v", err)
 	}
 	if nonGitHub != 0 {
 		t.Errorf("rows with source <> 'github' = %d, want 0", nonGitHub)
 	}
 	var withExternalID int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM repo_profiles WHERE external_id IS NOT NULL`).Scan(&withExternalID); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM repositories WHERE external_id IS NOT NULL`).Scan(&withExternalID); err != nil {
 		t.Fatalf("count external ids: %v", err)
 	}
 	if withExternalID != 0 {
@@ -132,53 +132,53 @@ func TestMigrate_RepoIdentityRebuildPreservesRows(t *testing.T) {
 	// The profiled row came across whole. A rebuild that silently dropped a
 	// column would show up here as an empty profile or a lost base branch —
 	// the repo would re-profile and lose the user's branch setting.
-	if got := scalar(`SELECT profile_text FROM repo_profiles WHERE id = 'octo/widget'`); got != "Service profile body" {
+	if got := scalar(`SELECT profile_text FROM repositories WHERE id = 'octo/widget'`); got != "Service profile body" {
 		t.Errorf("profile_text = %q, want the seeded body", got)
 	}
-	if got := scalar(`SELECT base_branch FROM repo_profiles WHERE id = 'octo/widget'`); got != "develop" {
+	if got := scalar(`SELECT base_branch FROM repositories WHERE id = 'octo/widget'`); got != "develop" {
 		t.Errorf("base_branch = %q, want develop — a user setting a rebuild must not drop", got)
 	}
-	if got := scalar(`SELECT clone_url FROM repo_profiles WHERE id = 'octo/widget'`); got != "git@github.com:octo/widget.git" {
+	if got := scalar(`SELECT clone_url FROM repositories WHERE id = 'octo/widget'`); got != "git@github.com:octo/widget.git" {
 		t.Errorf("clone_url = %q, want the seeded URL", got)
 	}
-	if got := scalar(`SELECT default_branch FROM repo_profiles WHERE id = 'octo/widget'`); got != "main" {
+	if got := scalar(`SELECT default_branch FROM repositories WHERE id = 'octo/widget'`); got != "main" {
 		t.Errorf("default_branch = %q, want main", got)
 	}
-	if got := scalar(`SELECT profiled_at FROM repo_profiles WHERE id = 'octo/widget'`); got == "" {
+	if got := scalar(`SELECT profiled_at FROM repositories WHERE id = 'octo/widget'`); got == "" {
 		t.Error("profiled_at is NULL — the repo would re-profile immediately, ignoring the TTL")
 	}
-	if got := scalar(`SELECT has_readme || '/' || has_claude_md || '/' || has_agents_md FROM repo_profiles WHERE id = 'octo/widget'`); got != "1/1/0" {
+	if got := scalar(`SELECT has_readme || '/' || has_claude_md || '/' || has_agents_md FROM repositories WHERE id = 'octo/widget'`); got != "1/1/0" {
 		t.Errorf("doc flags = %q, want 1/1/0", got)
 	}
-	if got := scalar(`SELECT pulls_etag FROM repo_profiles WHERE id = 'octo/widget'`); got != `"etag-v1"` {
+	if got := scalar(`SELECT pulls_etag FROM repositories WHERE id = 'octo/widget'`); got != `"etag-v1"` {
 		t.Errorf("pulls_etag = %q, want the seeded ETag — losing it re-lists every open PR", got)
 	}
-	if got := scalar(`SELECT pulls_polled_at FROM repo_profiles WHERE id = 'octo/widget'`); got == "" {
+	if got := scalar(`SELECT pulls_polled_at FROM repositories WHERE id = 'octo/widget'`); got == "" {
 		t.Error("pulls_polled_at is NULL — the conditional-request state is half-copied")
 	}
-	if got := scalar(`SELECT clone_status FROM repo_profiles WHERE id = 'octo/broken'`); got != "failed" {
+	if got := scalar(`SELECT clone_status FROM repositories WHERE id = 'octo/broken'`); got != "failed" {
 		t.Errorf("clone_status = %q, want failed", got)
 	}
-	if got := scalar(`SELECT clone_error_kind FROM repo_profiles WHERE id = 'octo/broken'`); got != "ssh" {
+	if got := scalar(`SELECT clone_error_kind FROM repositories WHERE id = 'octo/broken'`); got != "ssh" {
 		t.Errorf("clone_error_kind = %q, want ssh", got)
 	}
 
 	// The bare row stays bare: NULLs copied as NULLs, and clone_status still
 	// on its table default rather than something the copy invented.
-	if !isNull(`SELECT profile_text FROM repo_profiles WHERE id = 'octo/bare'`) {
+	if !isNull(`SELECT profile_text FROM repositories WHERE id = 'octo/bare'`) {
 		t.Error("profile_text on the never-profiled row is non-NULL after the rebuild")
 	}
-	if !isNull(`SELECT profiled_at FROM repo_profiles WHERE id = 'octo/bare'`) {
+	if !isNull(`SELECT profiled_at FROM repositories WHERE id = 'octo/bare'`) {
 		t.Error("profiled_at on the never-profiled row is non-NULL after the rebuild")
 	}
-	if got := scalar(`SELECT clone_status FROM repo_profiles WHERE id = 'octo/bare'`); got != "pending" {
+	if got := scalar(`SELECT clone_status FROM repositories WHERE id = 'octo/bare'`); got != "pending" {
 		t.Errorf("clone_status on the bare row = %q, want pending", got)
 	}
 
 	// Two distinct repositories under one owner are two rows, still.
 	for _, id := range []string{"Acme/Api", "Acme/Web"} {
 		var n int
-		if err := database.QueryRow(`SELECT COUNT(*) FROM repo_profiles WHERE id = ?`, id).Scan(&n); err != nil {
+		if err := database.QueryRow(`SELECT COUNT(*) FROM repositories WHERE id = ?`, id).Scan(&n); err != nil {
 			t.Fatalf("count %s: %v", id, err)
 		}
 		if n != 1 {
@@ -190,12 +190,12 @@ func TestMigrate_RepoIdentityRebuildPreservesRows(t *testing.T) {
 	// refused, in the same casing and in another. Without this the assertions
 	// above would also pass on a migration that dropped the key entirely.
 	if _, err := database.Exec(
-		`INSERT INTO repo_profiles (id, owner, repo) VALUES ('octo/widget-2', 'octo', 'widget')`,
+		`INSERT INTO repositories (id, owner, repo) VALUES ('octo/widget-2', 'octo', 'widget')`,
 	); err == nil {
 		t.Error("a duplicate repository was accepted; want the identity index to refuse it")
 	}
 	if _, err := database.Exec(
-		`INSERT INTO repo_profiles (id, owner, repo) VALUES ('OCTO/WIDGET', 'OCTO', 'WIDGET')`,
+		`INSERT INTO repositories (id, owner, repo) VALUES ('OCTO/WIDGET', 'OCTO', 'WIDGET')`,
 	); err == nil {
 		t.Error("a case-variant duplicate was accepted; want the folded key to refuse it — " +
 			"that is the row pair the old case-sensitive unique let through")
@@ -205,7 +205,7 @@ func TestMigrate_RepoIdentityRebuildPreservesRows(t *testing.T) {
 	// would have refused. (The slug PK still forces a distinct id here — see
 	// the migration's note on why that stays local mode's business.)
 	if _, err := database.Exec(
-		`INSERT INTO repo_profiles (id, owner, repo, source) VALUES ('gitlab:octo/widget', 'octo', 'widget', 'gitlab')`,
+		`INSERT INTO repositories (id, owner, repo, source) VALUES ('gitlab:octo/widget', 'octo', 'widget', 'gitlab')`,
 	); err != nil {
 		t.Errorf("same slug under a different source was refused: %v", err)
 	}
@@ -214,12 +214,12 @@ func TestMigrate_RepoIdentityRebuildPreservesRows(t *testing.T) {
 	// table, not lost with the DROP.
 	var idx int
 	if err := database.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_repo_profiles_owner_repo'`,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_repositories_owner_repo'`,
 	).Scan(&idx); err != nil {
 		t.Fatalf("probe index: %v", err)
 	}
 	if idx != 1 {
-		t.Error("idx_repo_profiles_owner_repo is missing after the rebuild")
+		t.Error("idx_repositories_owner_repo is missing after the rebuild")
 	}
 
 	// Nothing is left behind for the app to trip over.
@@ -288,7 +288,7 @@ func TestMigrate_RepoIdentityFoldsCaseVariantRows(t *testing.T) {
 	}
 
 	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM repo_profiles`).Scan(&n); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM repositories`).Scan(&n); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if n != 3 {
@@ -306,24 +306,24 @@ func TestMigrate_RepoIdentityFoldsCaseVariantRows(t *testing.T) {
 
 	// The profiled row is the survivor — discarding it would throw away an LLM
 	// pass and re-fetch every doc — and it keeps its own casing.
-	if got := scalar(`SELECT id FROM repo_profiles WHERE LOWER(id) = 'acme/api'`); got != "Acme/Api" {
+	if got := scalar(`SELECT id FROM repositories WHERE LOWER(id) = 'acme/api'`); got != "Acme/Api" {
 		t.Errorf("survivor of the api pair = %q, want Acme/Api (the profiled row)", got)
 	}
-	if got := scalar(`SELECT profile_text FROM repo_profiles WHERE LOWER(id) = 'acme/api'`); got != "cached profile" {
+	if got := scalar(`SELECT profile_text FROM repositories WHERE LOWER(id) = 'acme/api'`); got != "cached profile" {
 		t.Errorf("survivor profile_text = %q, want the profiled row's body", got)
 	}
 	// The discarded twin's base branch came across. It is the only column on
 	// this table a person set by hand; losing it silently is the one outcome
 	// the fold must not have.
-	if got := scalar(`SELECT base_branch FROM repo_profiles WHERE LOWER(id) = 'acme/api'`); got != "develop" {
+	if got := scalar(`SELECT base_branch FROM repositories WHERE LOWER(id) = 'acme/api'`); got != "develop" {
 		t.Errorf("survivor base_branch = %q, want develop carried from the discarded twin", got)
 	}
 	// Neither profiled → lowest id wins, deterministically.
-	if got := scalar(`SELECT id FROM repo_profiles WHERE LOWER(id) = 'acme/web'`); got != "Acme/Web" {
+	if got := scalar(`SELECT id FROM repositories WHERE LOWER(id) = 'acme/web'`); got != "Acme/Web" {
 		t.Errorf("survivor of the web pair = %q, want Acme/Web (lowest id)", got)
 	}
 	// The untwinned row is untouched.
-	if got := scalar(`SELECT profile_text FROM repo_profiles WHERE id = 'octo/solo'`); got != "solo body" {
+	if got := scalar(`SELECT profile_text FROM repositories WHERE id = 'octo/solo'`); got != "solo body" {
 		t.Errorf("untwinned row profile_text = %q, want it untouched", got)
 	}
 }

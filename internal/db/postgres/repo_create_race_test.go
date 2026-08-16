@@ -25,14 +25,14 @@ import (
 // "acme/api". Against a key that did not fold, tx2 would return immediately and
 // the row count would be 2.
 //
-// Package-internal so it can reach insertRepoProfileRow with transactions it
+// Package-internal so it can reach insertRepositoryRow with transactions it
 // controls — the exported entry point opens (and closes) its own.
-func TestInsertRepoProfileRow_CaseDifferingCreatorsResolveToOneRow(t *testing.T) {
+func TestInsertRepositoryRow_CaseDifferingCreatorsResolveToOneRow(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
 
-	// repo_profiles FKs org_id, so the rows need an org to hang off.
+	// repositories FKs org_id, so the rows need an org to hang off.
 	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "race")
 
 	tx1, err := h.AdminDB.BeginTx(ctx, nil)
@@ -41,7 +41,7 @@ func TestInsertRepoProfileRow_CaseDifferingCreatorsResolveToOneRow(t *testing.T)
 	}
 	defer func() { _ = tx1.Rollback() }()
 
-	if err := insertRepoProfileRow(ctx, tx1, orgID, domain.RepoRef{Owner: "Acme", Repo: "Api"}); err != nil {
+	if err := insertRepositoryRow(ctx, tx1, orgID, domain.RepoRef{Owner: "Acme", Repo: "Api"}); err != nil {
 		t.Fatalf("tx1 create: %v", err)
 	}
 
@@ -55,7 +55,7 @@ func TestInsertRepoProfileRow_CaseDifferingCreatorsResolveToOneRow(t *testing.T)
 			done <- result{err}
 			return
 		}
-		if err := insertRepoProfileRow(ctx, tx2, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}); err != nil {
+		if err := insertRepositoryRow(ctx, tx2, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}); err != nil {
 			_ = tx2.Rollback()
 			done <- result{err}
 			return
@@ -87,16 +87,16 @@ func TestInsertRepoProfileRow_CaseDifferingCreatorsResolveToOneRow(t *testing.T)
 
 	var rows int
 	if err := h.AdminDB.QueryRow(
-		`SELECT count(*) FROM repo_profiles WHERE org_id = $1`, orgID,
+		`SELECT count(*) FROM repositories WHERE org_id = $1`, orgID,
 	).Scan(&rows); err != nil {
 		t.Fatalf("count rows: %v", err)
 	}
 	if rows != 1 {
-		t.Errorf("repo_profiles rows = %d, want 1 — a casing difference is not a second repository", rows)
+		t.Errorf("repositories rows = %d, want 1 — a casing difference is not a second repository", rows)
 	}
 	var owner, repo string
 	if err := h.AdminDB.QueryRow(
-		`SELECT owner, repo FROM repo_profiles WHERE org_id = $1`, orgID,
+		`SELECT owner, repo FROM repositories WHERE org_id = $1`, orgID,
 	).Scan(&owner, &repo); err != nil {
 		t.Fatalf("read surviving row: %v", err)
 	}

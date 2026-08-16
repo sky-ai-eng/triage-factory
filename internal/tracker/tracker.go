@@ -65,9 +65,9 @@ const (
 type Tracker struct {
 	database *sql.DB
 	pub      Publisher
-	tasks    db.TaskStore   // tracker creates review_requested tasks during discovery + reconciles stale ones
-	entities db.EntityStore // entity lifecycle (find/create, snapshot, title/description, close/reactivate)
-	repos    db.RepoStore   // per-repo conditional-request (ETag) state for GitHub open-PR discovery
+	tasks    db.TaskStore       // tracker creates review_requested tasks during discovery + reconciles stale ones
+	entities db.EntityStore     // entity lifecycle (find/create, snapshot, title/description, close/reactivate)
+	repos    db.RepositoryStore // per-repo conditional-request (ETag) state for GitHub open-PR discovery
 	// queue is the durable outbox, held directly rather than reached
 	// through pub because the diff arms need the ONE write that carries
 	// both halves of a cycle's result: the snapshot advance and the
@@ -92,7 +92,7 @@ type Tracker struct {
 // loop calls this once per active org per cycle; the resulting
 // Tracker handles all event-emission for that org and stamps every
 // published event with the tenant via publish() below.
-func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, queue db.EventQueueStore, orgID string) *Tracker {
+func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, queue db.EventQueueStore, orgID string) *Tracker {
 	return &Tracker{database: database, pub: pub, tasks: tasks, entities: entities, repos: repos, queue: queue, orgID: orgID}
 }
 

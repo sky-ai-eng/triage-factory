@@ -14,19 +14,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// anyRepoProfile is a minimal fixture for orgID-guard tests where the
+// anyRepository is a minimal fixture for orgID-guard tests where the
 // row's fields don't matter — assertLocalOrg fires before the INSERT.
-func anyRepoProfile() domain.RepoProfile {
+func anyRepository() domain.Repository {
 	id := uuid.New().String()
-	return domain.RepoProfile{
+	return domain.Repository{
 		ID: id + "/" + id, Owner: id, Repo: id,
 	}
 }
 
-// TestRepoStore_SQLite runs the shared conformance suite against the
-// SQLite RepoStore impl. Each subtest gets a fresh in-memory DB.
-func TestRepoStore_SQLite(t *testing.T) {
-	dbtest.RunRepoStoreConformance(t, func(t *testing.T) (db.RepoStore, string) {
+// TestRepositoryStore_SQLite runs the shared conformance suite against the
+// SQLite RepositoryStore impl. Each subtest gets a fresh in-memory DB.
+func TestRepositoryStore_SQLite(t *testing.T) {
+	dbtest.RunRepositoryStoreConformance(t, func(t *testing.T) (db.RepositoryStore, string) {
 		t.Helper()
 		conn := newSQLiteForRepoTest(t)
 		stores := sqlitestore.New(conn)
@@ -34,14 +34,14 @@ func TestRepoStore_SQLite(t *testing.T) {
 	})
 }
 
-// TestRepoStore_SQLite_RejectsNonLocalOrg pins the assertLocalOrg
+// TestRepositoryStore_SQLite_RejectsNonLocalOrg pins the assertLocalOrg
 // guard — every method must refuse a non-local orgID.
-func TestRepoStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
+func TestRepositoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	conn := newSQLiteForRepoTest(t)
 	stores := sqlitestore.New(conn)
 
 	const bogusOrg = "11111111-1111-1111-1111-111111111111"
-	if err := stores.Repos.Upsert(t.Context(), bogusOrg, anyRepoProfile()); err == nil {
+	if err := stores.Repos.Upsert(t.Context(), bogusOrg, anyRepository()); err == nil {
 		t.Errorf("Upsert with non-local orgID should error")
 	}
 	if _, err := stores.Repos.Get(t.Context(), bogusOrg, "any/repo"); err == nil {
@@ -52,11 +52,11 @@ func TestRepoStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	}
 }
 
-// TestRepoStore_SQLite_ListTeamScoped_MirrorsList pins the local-mode
+// TestRepositoryStore_SQLite_ListTeamScoped_MirrorsList pins the local-mode
 // asymmetry (TFAC-559): N=1 has no other team to scope away, so
 // ListTeamScoped returns the identical set List does — unlike the
 // Postgres impl, which semi-joins through team_github_repos under RLS.
-func TestRepoStore_SQLite_ListTeamScoped_MirrorsList(t *testing.T) {
+func TestRepositoryStore_SQLite_ListTeamScoped_MirrorsList(t *testing.T) {
 	conn := newSQLiteForRepoTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()

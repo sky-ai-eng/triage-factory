@@ -15,7 +15,7 @@ import (
 // The constructor accepts two queryers for signature parity with the
 // Postgres impl; SQLite has one connection so both collapse. The
 // `...System` variants delegate to their non-System counterparts, and
-// because there is a single connection the repo_profiles reconcile runs
+// because there is a single connection the repositories reconcile runs
 // inside the same transaction as the team-row write — no cross-pool
 // visibility concern like the Postgres impl has.
 type teamGitHubReposStore struct{ q queryer }
@@ -174,7 +174,7 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 			}
 		}
 
-		// Reconcile repo_profiles to the new org-wide union, in the same tx
+		// Reconcile repositories to the new org-wide union, in the same tx
 		// (atomic with the team-row write). SQLite is single-connection and
 		// serializes writers, so the union read sees the rows just written
 		// above and no advisory lock is needed — the Postgres impl's per-org
@@ -183,26 +183,26 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 		if err != nil {
 			return err
 		}
-		return reconcileRepoProfilesFromUnion(ctx, tx, union)
+		return reconcileRepositoriesFromUnion(ctx, tx, union)
 	})
 }
 
-// reconcileRepoProfilesFromUnion makes repo_profiles match the union of
+// reconcileRepositoriesFromUnion makes repositories match the union of
 // tracked repos: it deletes rows for repos no team tracks anymore and
 // inserts skeleton rows for newly-tracked repos. Mirrors
-// RepoStore.SetConfigured's delete-removed / insert-skeleton logic —
-// repo_profiles is now a derived cache of team_github_repos.
+// RepositoryStore.SetConfigured's delete-removed / insert-skeleton logic —
+// the repositories table is now a derived cache of team_github_repos.
 //
 // Matching is case-INSENSITIVE on both axes (GitHub identifiers are): a
 // repo still tracked under different casing keeps its existing row rather
 // than being deleted + reinserted, so the cached profile_text /
 // base_branch / clone status / etag survive a mere casing change. Casing
-// is therefore sticky — repo_profiles keeps the first casing it was
+// is therefore sticky — repositories keeps the first casing it was
 // created with (case-equivalent to whatever team_github_repos now holds).
-func reconcileRepoProfilesFromUnion(ctx context.Context, tx queryer, union []domain.TeamGitHubRepo) error {
+func reconcileRepositoriesFromUnion(ctx context.Context, tx queryer, union []domain.TeamGitHubRepo) error {
 	// Case-fold the union to one canonical row per logical repo so two
 	// teams tracking the same repo with different casing don't produce
-	// two repo_profiles rows. The union arrives owner/repo-ASC, so
+	// two repositories rows. The union arrives owner/repo-ASC, so
 	// NormalizeTeamGitHubRepos's first-seen pick is deterministic.
 	desired, err := domain.NormalizeTeamGitHubRepos(union)
 	if err != nil {
@@ -221,8 +221,8 @@ func reconcileRepoProfilesFromUnion(ctx context.Context, tx queryer, union []dom
 	for _, id := range existing {
 		existingLower[strings.ToLower(id)] = true
 		if !wantedLower[strings.ToLower(id)] {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM repo_profiles WHERE id = ?`, id); err != nil {
-				return fmt.Errorf("gc repo_profiles[%s]: %w", id, err)
+			if _, err := tx.ExecContext(ctx, `DELETE FROM repositories WHERE id = ?`, id); err != nil {
+				return fmt.Errorf("gc repositories[%s]: %w", id, err)
 			}
 		}
 	}
@@ -237,7 +237,7 @@ func reconcileRepoProfilesFromUnion(ctx context.Context, tx queryer, union []dom
 		if existingLower[strings.ToLower(r.Slug())] {
 			continue
 		}
-		if err := insertRepoProfileRow(ctx, tx, domain.RepoRef{Owner: r.Owner, Repo: r.Repo}); err != nil {
+		if err := insertRepositoryRow(ctx, tx, domain.RepoRef{Owner: r.Owner, Repo: r.Repo}); err != nil {
 			return err
 		}
 	}

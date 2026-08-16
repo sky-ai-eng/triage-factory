@@ -89,7 +89,7 @@ func doJSON(t *testing.T, s *Server, method, path string, body any) *httptest.Re
 
 // seedConfiguredRepo tracks owner/repo on the default team so tests that
 // pin repos pass the validatePinnedRepos existence check (which now reads
-// team_github_repos), and upserts the matching repo_profiles row the
+// team_github_repos), and upserts the matching repositories row the
 // Curator's repo-materialization eventually wants more of (clone_url,
 // default_branch). The team's tracked set is the source of
 // truth; the team_github_repos insert is accumulative so multiple seed
@@ -103,7 +103,7 @@ func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) {
 	`, runmode.LocalDefaultTeamID, owner, repo); err != nil {
 		t.Fatalf("track repo %s/%s on default team: %v", owner, repo, err)
 	}
-	if err := sqlitestore.New(s.db).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
+	if err := sqlitestore.New(s.db).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		ID:            owner + "/" + repo,
 		Owner:         owner,
 		Repo:          repo,

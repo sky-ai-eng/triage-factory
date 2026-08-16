@@ -30,7 +30,7 @@ var (
 
 // onCloneResult is invoked by EnsureBareClone after every clone attempt
 // (success or failure) for the per-repo callback wired in main.go. The
-// callback writes to repo_profiles.clone_status / clone_error /
+// callback writes to repositories.clone_status / clone_error /
 // clone_error_kind and broadcasts a websocket event so the Repos page
 // updates live, and logs the failure to stderr so it's visible in
 // `journalctl` / launch-agent logs even if the user isn't on the page.
@@ -466,7 +466,7 @@ func RemoveRunCwd(runID string) {
 // latency disappears.
 //
 // The cloneURL must be the upstream repository's URL (the URL stored
-// in repo_profiles.clone_url, populated during repo profiling). Passing
+// in repositories.clone_url, populated during repo profiling). Passing
 // a fork's URL would clobber the bare's origin and is the historical
 // bug this function exists to prevent — see repairOriginURL.
 func EnsureBareClone(ctx context.Context, owner, repo, cloneURL string, opts ...CloneOption) (string, error) {
@@ -495,7 +495,7 @@ func EnsureBareClone(ctx context.Context, owner, repo, cloneURL string, opts ...
 // internal benefit.
 func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string, auth CloneAuth) (bareDir string, err error) {
 	// Fire the post-clone callback exactly once per call so consumers
-	// (main.go's hook → repo_profiles + websocket) see one event per
+	// (main.go's hook → repositories + websocket) see one event per
 	// attempt regardless of whether we hit the fresh-clone branch or
 	// the existing-bare repair branch. Logging the failure here
 	// synchronously guarantees stderr coverage even if no callback is

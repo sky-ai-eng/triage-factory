@@ -135,7 +135,7 @@ func (a *App) buildAI() {
 	// to poll sentinels independently; scoring does NOT gate on profiling.
 	a.profiler = repoprofile.NewManager(a.ghResolver, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-profiler"), a.stores.Repos, a.stores.Orgs, llmRecorder, sysLimiter, a.wsHub)
 	// Chain bare-clone warming off profile-cycle completion: profiling
-	// populates repo_profiles.clone_url, which bootstrapBareClones reads.
+	// populates repositories.clone_url, which bootstrapBareClones reads.
 	// Local-only — the warm on-disk bare cache is an N=1 affordance; multi
 	// clones per-run inside the sandbox, so there's nothing to warm here.
 	if a.local() {

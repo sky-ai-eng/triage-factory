@@ -10,14 +10,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// RepoStoreFactory is what a per-backend test file hands to
-// RunRepoStoreConformance. Returns the wired RepoStore impl and the
-// orgID to pass to every call. repo_profiles has no FK to other
+// RepositoryStoreFactory is what a per-backend test file hands to
+// RunRepositoryStoreConformance. Returns the wired RepositoryStore impl and the
+// orgID to pass to every call. repositories has no FK to other
 // tables (it's a configured-list table, not part of the entity
 // graph), so no seeder bag is needed.
-type RepoStoreFactory func(t *testing.T) (store db.RepoStore, orgID string)
+type RepositoryStoreFactory func(t *testing.T) (store db.RepositoryStore, orgID string)
 
-// RunRepoStoreConformance covers the repo-store contract every
+// RunRepositoryStoreConformance covers the repo-store contract every
 // backend impl must hold:
 //
 //   - Upsert + Get round-trip across the full field surface.
@@ -37,14 +37,14 @@ type RepoStoreFactory func(t *testing.T) (store db.RepoStore, orgID string)
 //   - GetOrCreateSystem mints a row for an untracked repository, is
 //     idempotent, never duplicates or rewrites an existing (profiled)
 //     one, matches case-insensitively, and records an external id.
-func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
+func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
 
 	t.Run("Upsert_then_Get_round_trips", func(t *testing.T) {
 		s, orgID := mk(t)
 		now := time.Now().UTC().Truncate(time.Second)
-		p := domain.RepoProfile{
+		p := domain.Repository{
 			ID: "octo/widget", Owner: "octo", Repo: "widget",
 			Description:   "Widget service",
 			HasReadme:     true,
@@ -97,7 +97,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		// so a re-profile that re-runs Upsert can't clobber the
 		// setting. Same goes for clone-status fields.
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "o/r", Owner: "o", Repo: "r",
 			Description: "v1", ProfileText: "v1",
 			DefaultBranch: "main",
@@ -112,7 +112,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		}
 
 		// Re-profile: same id, refreshed description + profile text.
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "o/r", Owner: "o", Repo: "r",
 			Description: "v2", ProfileText: "v2",
 			DefaultBranch: "main",
@@ -139,7 +139,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		s, orgID := mk(t)
 		for _, id := range []string{"z/last", "a/first", "m/middle"} {
 			owner, repo := id[:1], id[2:]
-			if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+			if err := s.Upsert(ctx, orgID, domain.Repository{
 				ID: id, Owner: owner, Repo: repo,
 				DefaultBranch: "main",
 			}); err != nil {
@@ -162,13 +162,13 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 
 	t.Run("ListWithContent_filters_empty_profile_text", func(t *testing.T) {
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "o/with", Owner: "o", Repo: "with",
 			ProfileText: "real content", DefaultBranch: "main",
 		}); err != nil {
 			t.Fatalf("Upsert with: %v", err)
 		}
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "o/empty", Owner: "o", Repo: "empty",
 			ProfileText: "", DefaultBranch: "main",
 		}); err != nil {
@@ -188,7 +188,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		s, orgID := mk(t)
 		// Pre-seed an existing row with profile data + user-configured
 		// state so we can assert SetConfigured doesn't clobber it.
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "keep/me", Owner: "keep", Repo: "me",
 			Description: "kept", ProfileText: "kept body",
 			DefaultBranch: "main",
@@ -199,7 +199,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 			t.Fatalf("UpdateBaseBranch on kept: %v", err)
 		}
 		// A row that's going to be dropped.
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "drop/me", Owner: "drop", Repo: "me",
 			DefaultBranch: "main",
 		}); err != nil {
@@ -256,7 +256,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		// case-insensitive; the two spellings were never two repositories.
 		s, orgID := mk(t)
 		profiled := time.Now().UTC().Truncate(time.Second)
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "Acme/Api", Owner: "Acme", Repo: "Api",
 			Description: "Api service", ProfileText: "accumulated profile",
 			CloneURL: "git@github.com:Acme/Api.git", DefaultBranch: "main",
@@ -355,7 +355,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		// use site. The pre-D2 impl used nullIfEmpty(); the new
 		// store does the same via NULLIF / nullIfEmpty.
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "o/r", Owner: "o", Repo: "r",
 			DefaultBranch: "main",
 		}); err != nil {
@@ -385,7 +385,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		// the update is issued with different casing ("acme/API") and must
 		// still find the row.
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "Acme/Api", Owner: "Acme", Repo: "Api",
 			DefaultBranch: "main",
 		}); err != nil {
@@ -405,7 +405,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 
 	t.Run("UpdateCloneStatus_records_outcome", func(t *testing.T) {
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "o/r", Owner: "o", Repo: "r",
 			DefaultBranch: "main",
 		}); err != nil {
@@ -538,7 +538,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		// as it stands — one row, same id, every cached column intact.
 		s, orgID := mk(t)
 		profiled := time.Now().UTC().Truncate(time.Second)
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "octo/widget", Owner: "octo", Repo: "widget",
 			Description: "Widget service", ProfileText: "Service profile body",
 			CloneURL: "git@github.com:octo/widget.git", DefaultBranch: "main",
@@ -651,7 +651,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		if err := s.SetConfigured(ctx, orgID, []string{"Acme/Api", "octo/known", "octo/bare"}); err != nil {
 			t.Fatalf("SetConfigured: %v", err)
 		}
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "octo/known", Owner: "octo", Repo: "known",
 			ExternalID: "111", DefaultBranch: "main",
 		}); err != nil {
@@ -735,7 +735,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		// re-profile carrying an id refreshes it while one carrying none
 		// leaves the stored id alone.
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "octo/widget", Owner: "octo", Repo: "widget",
 			Source: domain.RepoSourceGitHub, ExternalID: "1296269",
 			ProfileText: "v1", DefaultBranch: "main",
@@ -748,7 +748,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		}
 
 		// A re-profile that carries no id keeps the one on the row.
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "octo/widget", Owner: "octo", Repo: "widget",
 			ProfileText: "v2", DefaultBranch: "main",
 		}); err != nil {
@@ -764,7 +764,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 
 		// One that carries a different id takes it: GitHub is authoritative
 		// for what the slug resolves to now.
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "octo/widget", Owner: "octo", Repo: "widget",
 			ExternalID: "77", ProfileText: "v3", DefaultBranch: "main",
 		}); err != nil {
@@ -782,7 +782,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 		// case-sensitive key rather than the folded identity. The stored
 		// casing wins, matching what the tracked-set reconcile does.
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "Acme/Api", Owner: "Acme", Repo: "Api",
 			ProfileText: "v1", DefaultBranch: "main",
 		}); err != nil {
@@ -792,7 +792,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 			t.Fatalf("UpdateBaseBranch: %v", err)
 		}
 
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "acme/api", Owner: "acme", Repo: "api",
 			ProfileText: "v2", DefaultBranch: "main", ExternalID: "1296269",
 		}); err != nil {
@@ -819,7 +819,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 
 	t.Run("Upsert_refuses_an_unknown_source", func(t *testing.T) {
 		s, orgID := mk(t)
-		if err := s.Upsert(ctx, orgID, domain.RepoProfile{
+		if err := s.Upsert(ctx, orgID, domain.Repository{
 			ID: "octo/widget", Owner: "octo", Repo: "widget", Source: "gitlob",
 		}); err == nil {
 			t.Error("Upsert accepted an unknown source; want an error")
@@ -907,7 +907,7 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 	})
 }
 
-func projectIDs(profiles []domain.RepoProfile) []string {
+func projectIDs(profiles []domain.Repository) []string {
 	out := make([]string, len(profiles))
 	for i, p := range profiles {
 		out[i] = p.ID

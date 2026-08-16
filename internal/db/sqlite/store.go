@@ -28,7 +28,7 @@ type Store struct {
 func New(conn *sql.DB) db.Stores {
 	s := &Store{conn: conn}
 	// Two-pool constructors exist on EntityStore /
-	// RepoStore / UsersStore / AgentStore so the Postgres impl can
+	// RepositoryStore / UsersStore / AgentStore so the Postgres impl can
 	// route `...System` admin-pool variants distinctly. SQLite has
 	// one connection — both args collapse to conn here.
 	users := newUsersStore(conn, conn)
@@ -53,7 +53,7 @@ func New(conn *sql.DB) db.Stores {
 		Conversations:  newConversationStore(conn),
 		Artifacts:      newArtifactStore(conn),
 		Entities:       newEntityStore(conn, conn),
-		Repos:          newRepoStore(conn, conn),
+		Repos:          newRepositoryStore(conn, conn),
 		PendingFirings: newPendingFiringsStore(conn),
 		Projects:       newProjectStore(conn, conn),
 		// Events wires both args to conn — SQLite has one connection
@@ -95,7 +95,7 @@ func New(conn *sql.DB) db.Stores {
 		// the `...System` variants forward to the non-System bodies.
 		TeamGitHubGroups: newTeamGitHubGroupsStore(conn, conn),
 		// TeamGitHubRepos is dual-pool in Postgres; SQLite collapses to
-		// the one connection. ReplaceForTeam's repo_profiles reconcile
+		// the one connection. ReplaceForTeam's repositories reconcile
 		// runs in the same tx as the team-row write here.
 		TeamGitHubRepos: newTeamGitHubReposStore(conn, conn),
 		// Curator: the session goroutine wraps each turn's message writes in

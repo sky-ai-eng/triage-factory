@@ -232,7 +232,7 @@ func (a *App) importLocalSkills(ctx context.Context) {
 }
 
 // wireCloneStatusCallback registers the worktree clone-result callback,
-// which stamps repo_profiles with the clone outcome and broadcasts a
+// which stamps repositories with the clone outcome and broadcasts a
 // websocket event so the Repos page updates live. A clone failure gets an
 // SSH preflight to classify whether SSH is the cause (driving the per-row
 // CTA). Local-only: the body hardcodes the sentinel org for the row-stamp +
@@ -343,13 +343,13 @@ func (a *App) startKnowledgeWatcher() {
 // bootstrapBareClones reads the configured repos and asks the worktree
 // package to ensure each is materialized on disk as a bare clone with the
 // right origin URL. Called after profiling completes (profiling populates
-// repo_profiles.clone_url; targets without a CloneURL are skipped). DB read
+// repositories.clone_url; targets without a CloneURL are skipped). DB read
 // errors are logged and skipped — the lazy clone inside CreateForPR /
 // CreateForBranch recovers affected delegations on the next run.
-func bootstrapBareClones(repos db.RepoStore, secrets db.SecretStore) {
+func bootstrapBareClones(repos db.RepositoryStore, secrets db.SecretStore) {
 	profiles, err := repos.ListSystem(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
-		worktreeLog.Warn("bootstrap: load profiles failed", "error", err)
+		worktreeLog.Warn("bootstrap: load repositories failed", "error", err)
 		return
 	}
 	// Load the org bot PAT once so HTTPS clones of private repos authenticate.

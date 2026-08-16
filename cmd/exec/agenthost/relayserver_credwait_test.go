@@ -251,8 +251,8 @@ func TestAwaitCredentialsForRepo_RelayFailureFailsTheOp(t *testing.T) {
 }
 
 // TestRepoReservedAt_MatchesCaseInsensitively pins the spelling seam: the
-// reservation records the agent's casing while the checkout op carries the repo
-// profile's, so a case difference must not read as "no reservation" and skip
+// reservation records the agent's casing while the checkout op carries the
+// repository row's, so a case difference must not read as "no reservation" and skip
 // the wait entirely.
 func TestRepoReservedAt_MatchesCaseInsensitively(t *testing.T) {
 	reserved := time.Now()

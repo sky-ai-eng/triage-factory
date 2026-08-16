@@ -150,7 +150,7 @@ func TestApply_ResolverWithoutTheExtensionIsFine(t *testing.T) {
 // renameStore embeds the interface (nil) so any method this path does not use
 // panics loudly rather than silently returning a zero value.
 type renameStore struct {
-	db.RepoStore
+	db.RepositoryStore
 	stored    []domain.RepoRef
 	outcomes  map[string]domain.RepoRenameOutcome
 	failure   error

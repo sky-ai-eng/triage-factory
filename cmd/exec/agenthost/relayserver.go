@@ -563,7 +563,7 @@ func (s *RelayServer) awaitCredentialsForRepo(ctx context.Context, owner, repo s
 // re-seal that changes nothing.
 //
 // Repo ids are compared case-insensitively because the reservation records the
-// agent's spelling while the checkout op carries the repo profile's — the same
+// agent's spelling while the checkout op carries the repository row's — the same
 // rule the insert's doorbell gate uses, so the two halves agree on what counts
 // as the same repo.
 func (s *RelayServer) repoReservedAt(ctx context.Context, repoID string) (time.Time, bool, error) {

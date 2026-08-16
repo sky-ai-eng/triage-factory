@@ -37,7 +37,7 @@ func TestGetRepoMeta_ParsesRepositoryID(t *testing.T) {
 		t.Errorf("ID = %d, want 1296269", meta.ID)
 	}
 	if got := meta.ExternalID(); got != "1296269" {
-		t.Errorf("ExternalID() = %q, want the decimal text repo_profiles stores", got)
+		t.Errorf("ExternalID() = %q, want the decimal text repositories stores", got)
 	}
 	if meta.DefaultBranch != "main" || meta.CloneURL != "https://github.com/octo/widget.git" {
 		t.Errorf("the fields the id rides along with regressed: %+v", meta)

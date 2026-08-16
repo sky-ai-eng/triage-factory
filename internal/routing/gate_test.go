@@ -451,7 +451,7 @@ func TestGate_MultiTeamAuthor_BothTrack_StaysAmbiguous(t *testing.T) {
 }
 
 // TestGate_LocalN1_NoOp is acceptance #7: in local N=1 the single default
-// team tracks every configured repo (because repo_profiles is its union),
+// team tracks every configured repo (because repositories is its union),
 // so the gate never drops anything — identical behavior to pre-ticket.
 func TestGate_LocalN1_NoOp(t *testing.T) {
 	dbh := newGateDB(t)
