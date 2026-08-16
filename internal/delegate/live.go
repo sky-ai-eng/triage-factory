@@ -418,7 +418,7 @@ func (s *Spawner) markRunOpen(ctx context.Context, park liveParkContext) (fenced
 		// An idle park has no such outside actor, so a refusal there means a
 		// successor really did take the conversation out from under a live
 		// engagement. That keeps ERROR.
-		if park.reason.Deliberate() {
+		if park.reason.Deliberate {
 			delegateLog.Info("claim fence refused the park after a deliberate stop — the stopping actor already parked this conversation; recording nothing further",
 				"run", park.runID, "claim_id", park.claimID, "org_id", park.orgID)
 			return true
@@ -491,7 +491,7 @@ func (s *Spawner) parkRunOpen(ctx context.Context, park liveParkContext, session
 		// from under a live engagement — leaves it running under someone else,
 		// and repeating a parked status there would be this teardown reporting
 		// a state that isn't the row's.
-		if snapshotted && park.reason.Deliberate() {
+		if snapshotted && park.reason.Deliberate {
 			s.broadcastRunResumable(park.orgID, park.runID)
 		}
 		return true
@@ -500,7 +500,7 @@ func (s *Spawner) parkRunOpen(ctx context.Context, park liveParkContext, session
 	// behind it, so "resumes on the next message" would be a promise this
 	// build cannot keep — the claim gate refuses a parked step under a
 	// finished blueprint until the resume work lands.
-	if !park.reason.Deliberate() {
+	if !park.reason.Deliberate {
 		toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortRunID(park.runID)))
 	}
 	return false

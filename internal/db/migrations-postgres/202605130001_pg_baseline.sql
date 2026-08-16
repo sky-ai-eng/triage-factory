@@ -1327,6 +1327,13 @@ CREATE TABLE public.messages (
     -- window. messages is the money/token ledger; conversations and claims
     -- carry no dollar or token caches.
     cost_usd real,
+    -- stop_reason is why the provider stopped generating THIS turn, in its
+    -- own spelling ('end_turn' / 'max_tokens' / 'tool_use' / 'refusal' / …).
+    -- Assistant rows only; NULL = not an assistant row, or a stream that
+    -- reported none. Both runtimes populate it — the SDK parser from the
+    -- assistant event, the native loop from the completion's finish reason.
+    -- Observability, never an assembly input.
+    stop_reason text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     -- reasoning is an array of reasoning-detail objects mirroring bifrost's
     -- ChatReasoningDetails shape ({index, type, text?, signature?, data?}) —
@@ -1505,7 +1512,12 @@ CREATE TABLE public.conversations (
     -- reached 'failed' (domain.RunFailureKind: memory_limit / crash /
     -- no_result / agent_error). App-validated; NULL = no classification.
     failure_kind text,
-    stop_reason text,
+    -- park_reason is WHY the conversation was parked `open`
+    -- (domain.ParkReason: idle / user_cancelled / system_cancelled /
+    -- blueprint_cancelled / launch_failed / drained). App-validated; NULL =
+    -- never parked, or resumed since. The MODEL's stop reason is a per-turn
+    -- fact and lives on messages.stop_reason, not here.
+    park_reason text,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
     -- parked_at is stamped when a delegation conversation enters the `open`

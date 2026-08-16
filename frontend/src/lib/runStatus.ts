@@ -157,21 +157,34 @@ export function completionGloss(run: Conversation): string {
   return 'work complete'
 }
 
-// stopReasonLabel glosses the stored stop_reason for display. The stored
-// values are claim-layer machine vocabulary — `user_cancelled` is what the
-// claim releases as, and it stays that way — but printing them raw tells a
-// viewer their run was cancelled, when a stop cancels nothing: the
-// conversation parks, keeps its workspace, and can be picked back up. An
-// unrecognized code prints as stored rather than being hidden.
-export function stopReasonLabel(reason: string): string {
-  switch (reason) {
-    case 'user_cancelled':
-      return 'stopped by user'
-    case 'system_cancelled':
-      return 'stopped by system'
-    default:
-      return reason
-  }
+// PARK_REASON_LABELS glosses conversations.park_reason for display: WHY a
+// conversation stopped without concluding. The stored values are machine
+// vocabulary and printing one raw tells a viewer their run was `user_cancelled`
+// — which reads as "cancelled", when a park cancels nothing: the conversation
+// keeps its workspace and can be picked back up. Every phrase below is written
+// to say that.
+//
+// This is the frontend mirror of domain.AllParkReasons() (internal/domain/
+// run_status.go), hand-maintained under the same rule as the status arrays in
+// types.ts and pinned in both directions by
+// TestFrontendMirrorsParkReasonVocabulary — a reason the backend can write with
+// no entry here is printed to a person as a raw identifier, and an entry the
+// backend never writes is a gloss nobody will ever see.
+export const PARK_REASON_LABELS: Record<string, string> = {
+  idle: 'paused — nothing further came',
+  user_cancelled: 'stopped by user',
+  system_cancelled: 'stopped by system',
+  blueprint_cancelled: 'workflow cancelled',
+  blueprint_terminal: 'workflow ended first',
+  launch_failed: 'the runtime could not start',
+  drained: 'the executor was drained',
+}
+
+// parkReasonLabel is the gloss for one park reason. An unrecognized code
+// prints as stored rather than being hidden: a value this build has never
+// heard of is still the only account of why the run stopped.
+export function parkReasonLabel(reason: string): string {
+  return PARK_REASON_LABELS[reason] ?? reason
 }
 
 // isResumableRun mirrors the backend resumableState gate — the STATUS half of

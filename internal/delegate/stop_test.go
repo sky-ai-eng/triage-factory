@@ -180,7 +180,7 @@ func TestStop_OpenStep_FreezesBlueprintRun(t *testing.T) {
 
 	var runStatus, bpStatus, stopReason string
 	var cancelRequested bool
-	if err := database.QueryRow(`SELECT status, COALESCE(stop_reason, '') FROM conversations WHERE id = 'r-step'`).Scan(&runStatus, &stopReason); err != nil {
+	if err := database.QueryRow(`SELECT status, COALESCE(park_reason, '') FROM conversations WHERE id = 'r-step'`).Scan(&runStatus, &stopReason); err != nil {
 		t.Fatalf("read run status: %v", err)
 	}
 	if runStatus != "open" || stopReason != "user_cancelled" {
@@ -266,12 +266,15 @@ func TestCancelBlueprint_FinalizesRunAndParksSteps(t *testing.T) {
 	if bpStatus != "cancelled" {
 		t.Errorf("blueprint_run status = %q, want cancelled", bpStatus)
 	}
-	var stepStatus, stopReason string
-	if err := database.QueryRow(`SELECT status, COALESCE(stop_reason, '') FROM conversations WHERE id = ?`, runID).Scan(&stepStatus, &stopReason); err != nil {
+	// The step's park reason names what actually happened to it: the plan
+	// behind it was cancelled. `user_cancelled` would be a step nobody
+	// cancelled claiming somebody did — the person cancelled the blueprint.
+	var stepStatus, parkReason string
+	if err := database.QueryRow(`SELECT status, COALESCE(park_reason, '') FROM conversations WHERE id = ?`, runID).Scan(&stepStatus, &parkReason); err != nil {
 		t.Fatalf("read step conversation: %v", err)
 	}
-	if stepStatus != "open" || stopReason != "user_cancelled" {
-		t.Errorf("step = (%q, %q), want (open, user_cancelled) — cancelling the plan parks its steps, it does not write terminals on them", stepStatus, stopReason)
+	if stepStatus != "open" || parkReason != string(domain.ParkReasonBlueprintCancelled) {
+		t.Errorf("step = (%q, %q), want (open, blueprint_cancelled) — cancelling the plan parks its steps, it does not write terminals on them", stepStatus, parkReason)
 	}
 }
 
@@ -477,7 +480,7 @@ func TestParkRunOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	var status, stopReason string
 	var parked bool
 	if err := database.QueryRow(
-		`SELECT status, COALESCE(stop_reason, ''), parked_at IS NOT NULL FROM conversations WHERE id = ?`, runID,
+		`SELECT status, COALESCE(park_reason, ''), parked_at IS NOT NULL FROM conversations WHERE id = ?`, runID,
 	).Scan(&status, &stopReason, &parked); err != nil {
 		t.Fatalf("read run: %v", err)
 	}

@@ -70,7 +70,7 @@ type factoryRunSummaryJSON struct {
 	TotalCostUSD   *float64   `json:"TotalCostUSD"`
 	DurationMs     *int       `json:"DurationMs"`
 	NumTurns       *int       `json:"NumTurns"`
-	StopReason     string     `json:"StopReason"`
+	ParkReason     string     `json:"ParkReason"`
 	ResultSummary  string     `json:"ResultSummary"`
 	SessionID      string     `json:"SessionID"`
 	MemoryMissing  bool       `json:"MemoryMissing"`
@@ -93,7 +93,7 @@ func toFactoryRunSummary(r domain.Conversation) factoryRunSummaryJSON {
 		TotalCostUSD:   r.TotalCostUSD,
 		DurationMs:     r.DurationMs,
 		NumTurns:       r.NumTurns,
-		StopReason:     r.StopReason,
+		ParkReason:     string(r.ParkReason),
 		ResultSummary:  r.ResultSummary,
 		SessionID:      r.SessionID,
 		MemoryMissing:  r.MemoryMissing,

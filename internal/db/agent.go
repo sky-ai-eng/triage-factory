@@ -18,10 +18,22 @@ import (
 // having two nearly-identical store methods, which is exactly how their
 // predicates drifted apart.
 type Park struct {
-	// StopReason is recorded on the conversation. Empty for an idle park:
-	// "the turn ended and nothing more arrived" is not a reason worth a word,
-	// and blanking a reason an earlier stop recorded would lose it.
-	StopReason string
+	// Deliberate says whether this park was ASKED FOR rather than arrived at.
+	// It is a field because it is a fact about the park, and the three things
+	// that hang off it (see ParkOpen) are too load-bearing to infer.
+	//
+	// It used to be inferred, from Reason being non-empty. That made "someone
+	// deliberately stopped this" and "there is a string to display" the same
+	// bit: a park that wanted to record why it happened without being a
+	// cancellation would have released its claim 'cancelled', and nothing
+	// would have failed. `idle` is exactly such a reason, and it is why this
+	// is now stated.
+	Deliberate bool
+	// Reason is recorded on conversations.park_reason — the closed
+	// domain.ParkReason vocabulary, never free text and never the model's
+	// stop reason (that one is per-turn and lives on messages.stop_reason).
+	// Empty leaves whatever the row already carries.
+	Reason domain.ParkReason
 	// ResultSummary is the human-facing note for a deliberate stop. Empty
 	// leaves whatever is already on the row.
 	//
@@ -35,28 +47,29 @@ type Park struct {
 }
 
 // ParkIdle is the turn simply ending — the live driver's no-conclusion turn or
-// its idle close. No reason, claim released 'parked', an already-parked row
-// left alone.
-func ParkIdle() Park { return Park{} }
-
-// ParkStopped is a deliberate stop: someone ended this run. Records the
-// reason, releases the claim 'cancelled', and re-parks an already-parked row
-// so the caller knows the stop landed and can finalize the blueprint behind
-// it. stopReason must be non-empty — an empty one is an idle park by
-// definition, and silently becoming one would drop the claim outcome that is
-// the only remaining record of the cancellation.
-func ParkStopped(stopReason, summary string) Park {
-	return Park{StopReason: stopReason, ResultSummary: summary}
+// its idle close. Claim released 'parked', an already-parked row left alone.
+//
+// It carries a reason like any other park. "The turn ended and nothing more
+// arrived" IS what happened to this conversation, and saying so is what makes
+// the column readable at a glance; it is not a deliberate stop, and the field
+// above is what says so.
+func ParkIdle() Park {
+	return Park{Reason: domain.ParkReasonIdle}
 }
 
-// Deliberate reports whether this park was asked for rather than arrived at.
-func (p Park) Deliberate() bool { return p.StopReason != "" }
+// ParkStopped is a deliberate stop: someone or something ended this run.
+// Records the reason, releases the claim 'cancelled', and re-parks an
+// already-parked row so the caller knows the stop landed and can finalize the
+// blueprint behind it.
+func ParkStopped(reason domain.ParkReason, summary string) Park {
+	return Park{Deliberate: true, Reason: reason, ResultSummary: summary}
+}
 
 // ClaimOutcome is what the engagement's claim releases with. A deliberate stop
 // is the one place an engagement's cancellation is still recorded, now that
 // the conversation status no longer spells it.
 func (p Park) ClaimOutcome() string {
-	if p.Deliberate() {
+	if p.Deliberate {
 		return "cancelled"
 	}
 	return "parked"
@@ -136,7 +149,13 @@ type ConversationStore interface {
 	// failureKind is the machine-readable failure discriminator
 	// (domain.RunFailureKind vocabulary) — non-empty only when status
 	// is 'failed' and the caller classified the cause; "" → NULL.
-	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
+	//
+	// The model's own stop reason is deliberately absent. It is a per-turn
+	// fact (`end_turn` / `max_tokens` describe ONE assistant turn) and the
+	// runtimes stamp it on the turn that ended, messages.stop_reason; a
+	// terminal write recording it at conversation scope was last-write-wins
+	// over N turns.
+	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error
 
 	// ParkOpen flips a run to `open`: it stopped without concluding. This is
 	// the ONLY writer of that state, and there is deliberately only one —
@@ -151,7 +170,7 @@ type ConversationStore interface {
 	// and "someone stopped this" is stated once rather than forked into two
 	// methods that drifted:
 	//
-	//   - the stop_reason / result_summary recorded on the row (a Park with no
+	//   - the park_reason / result_summary recorded on the row (a Park with no
 	//     reason leaves both untouched rather than blanking them),
 	//   - the outcome the claim releases with — 'parked' for an idle turn-end,
 	//     'cancelled' for a deliberate stop, which is now the ONLY place the
@@ -169,7 +188,10 @@ type ConversationStore interface {
 	// ordinary claimable work instead of spawning an in-process goroutine.
 	// Releases any still-active claim with outcome 'requeued' (ownership is
 	// re-established by ClaimNextRun minting a fresh claim at the actual
-	// claim, exactly like a fresh EnqueueRun'd row). Clears parked_at.
+	// claim, exactly like a fresh EnqueueRun'd row). Clears parked_at and
+	// park_reason together — both describe a park this call is undoing, and a
+	// resumed conversation that went on to conclude must not still name the
+	// stop it was picked back up from.
 	// ok=false means the run is no longer resumable (a concurrent
 	// resume/cancel/claim already moved it, or it failed) — the caller maps
 	// the miss to 409.
@@ -517,7 +539,7 @@ type ConversationStore interface {
 	// pool the statement runs on; SQLite has one connection and the
 	// two variants collapse.
 	GetSystem(ctx context.Context, orgID, runID string) (*domain.Conversation, error)
-	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
+	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error
 	// LookupOrgForRunSystem returns the owning orgID for the given
 	// runID, or the empty string with a nil error if no such run
 	// exists. Used by the cmd/exec runident helper to discover the
@@ -721,7 +743,7 @@ type ConversationStore interface {
 	// refused outright when claimID is already released. The claim it
 	// releases is its own by construction — a fenced call can only reach the
 	// release with the claim it validated.
-	CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
+	CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error
 
 	// MarkFailedIfActiveForClaimSystem is MarkFailedIfActive driven by the
 	// engagement: the infra-failure terminal, refused once the engagement

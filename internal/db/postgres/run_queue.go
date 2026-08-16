@@ -756,7 +756,7 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 				UPDATE conversations
 				SET status = 'open',
 				    parked_at = COALESCE(parked_at, now()),
-				    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
+				    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
 				    result_summary = COALESCE(NULLIF(result_summary, ''), $1)
 				WHERE status IS NULL
 				  AND blueprint_run_id IN (

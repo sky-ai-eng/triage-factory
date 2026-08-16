@@ -199,7 +199,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
 			claimID:       cfg.claimID,
-			reason:        db.ParkStopped("user_cancelled", ""),
+			reason:        db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 		}, sessionID)
 		parked = true
 		return fenced
@@ -915,13 +915,13 @@ func (s *Spawner) processCompletion(
 	var completeErr error
 	switch {
 	case claimID != "":
-		completeErr = s.agentRuns.CompleteForClaimSystem(bgCtx, orgID, runID, claimID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind))
+		completeErr = s.agentRuns.CompleteForClaimSystem(bgCtx, orgID, runID, claimID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
 	case triggerType == "manual":
 		completeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.Conversations.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind))
+			return ts.Conversations.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
 		})
 	default:
-		completeErr = s.agentRuns.CompleteSystem(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind))
+		completeErr = s.agentRuns.CompleteSystem(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
 	}
 	if errors.Is(completeErr, db.ErrClaimReleased) {
 		// A successor owns the conversation, so this result is not the run's

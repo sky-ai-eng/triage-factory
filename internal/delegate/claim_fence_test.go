@@ -50,7 +50,7 @@ func (f *fencedConversationStore) InsertMessageForClaimSystem(context.Context, s
 	return 0, db.ErrClaimReleased
 }
 
-func (f *fencedConversationStore) CompleteForClaimSystem(context.Context, string, string, string, string, float64, int, int, string, string, string, string, string) error {
+func (f *fencedConversationStore) CompleteForClaimSystem(context.Context, string, string, string, string, float64, int, int, string, string, string, string) error {
 	f.completes++
 	return db.ErrClaimReleased
 }
