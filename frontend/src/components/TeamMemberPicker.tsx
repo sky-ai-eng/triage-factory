@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Plus, UserPlus } from 'lucide-react'
 import { apiFetch, apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
+import { TEAM_ROLE_LABELS } from '../lib/teamRoles'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
 // TeamMemberPicker is the team roster's "add member" affordance (TFAC-444): a
@@ -25,13 +26,10 @@ interface TeamRosterApiRow {
   user_id: string
 }
 
-// 'member' leads — the common add. 'viewer' is assignable now but read-only
-// enforcement is a later slice (TFAC-447), so it's labelled as such.
-const ADD_ROLES: { value: string; label: string }[] = [
-  { value: 'member', label: 'member' },
-  { value: 'admin', label: 'admin' },
-  { value: 'viewer', label: 'viewer (read-only soon)' },
-]
+// 'member' leads — the common add. The roster's own <select> orders these
+// admin-first; the picker's order is its own, but the labels come from the
+// shared map so the two surfaces can't describe the same role differently.
+const ADD_ROLES = ['member', 'admin', 'viewer']
 
 export default function TeamMemberPicker({ orgId, teamId, onAdded }: TeamMemberPickerProps) {
   const [open, setOpen] = useState(false)
@@ -206,8 +204,8 @@ function PickerModal({
                   className="w-full rounded-lg border border-border-glass bg-surface px-2.5 py-2 text-[13px] text-text-secondary focus:border-accent/40 focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-50"
                 >
                   {ADD_ROLES.map((r) => (
-                    <option key={r.value} value={r.value}>
-                      {r.label}
+                    <option key={r} value={r}>
+                      {TEAM_ROLE_LABELS[r] ?? r}
                     </option>
                   ))}
                 </select>
