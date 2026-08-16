@@ -46,9 +46,10 @@ type RepoRecipientsFactory func(t *testing.T) (db.TeamGitHubReposStore, RepoReci
 // TeamGitHubReposStore.RepoUpdateRecipientsSystem — the websocket
 // delivery scope for repository_updated events. It pins the visibility
 // contract the method mirrors from the REST read (handleRepositories):
-// org admins/owners always receive; members receive only through a live
-// team that tracks the repo; nobody else does. Both backends run the
-// identical subtests so SQLite and Postgres pin to one result.
+// org admins/owners always receive; members receive only through a team
+// that tracks the repo (archived or not — archive hides nothing);
+// nobody else does. Both backends run the identical subtests so SQLite
+// and Postgres pin to one result.
 func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -125,10 +126,16 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		}
 	})
 
-	t.Run("RepoRecipients_ArchivedTeamExcluded", func(t *testing.T) {
-		// Archiving force-stops a team; its members must not keep
-		// receiving repo events through it — parity with
-		// TeamIDsForUserInOrgSystem's deleted_at filter.
+	t.Run("RepoRecipients_ArchivedTeamStillIncluded", func(t *testing.T) {
+		// Archiving a team force-stops its work but hides nothing: it
+		// tombstones the teams row without touching memberships or
+		// tracking rows, the repo keeps being polled/profiled, and the
+		// REST read's scoping (repoProfileTrackedByViewerTeams / the
+		// team_github_repos_select RLS policy) carries no deleted_at
+		// filter — so the member still sees the repo on GET /api/repos.
+		// The WS audience must match, or their Repos page goes silently
+		// stale. (Contrast TeamIDsForUserInOrgSystem, a ROUTING read,
+		// which does exclude archived teams so they receive no new work.)
 		s, seed := mk(t)
 		founder := seed.User(t)
 		org := seed.Org(t, founder)
@@ -140,9 +147,7 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 
 		assertSameSet(t, "recipients(live team)", recipients(t, s, org, "acme", "api"), []string{member})
 		seed.ArchiveTeam(t, team)
-		if got := recipients(t, s, org, "acme", "api"); len(got) != 0 {
-			t.Errorf("recipients(archived team) = %v; want empty slice", got)
-		}
+		assertSameSet(t, "recipients(archived team)", recipients(t, s, org, "acme", "api"), []string{member})
 	})
 
 	t.Run("RepoRecipients_OrgScoped", func(t *testing.T) {

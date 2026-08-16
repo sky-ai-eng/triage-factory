@@ -268,10 +268,9 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, own
 // exercises it, so N=1 must not be assumed here.
 func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, owner, repo string) ([]string, error) {
 	// UNION (not UNION ALL) dedups a user who is both an org admin and a
-	// tracking-team member. t.deleted_at IS NULL excludes archived teams,
-	// matching TeamIDsForUserInOrgSystem — an archived team is
-	// force-stopped and its members must not keep receiving repo events
-	// through it.
+	// tracking-team member. No teams.deleted_at filter, deliberately —
+	// see the Postgres impl's comment: the tracking arm mirrors the REST
+	// read's visibility scoping, and archiving hides nothing.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT user_id FROM (
 			SELECT om.user_id
@@ -282,7 +281,7 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			FROM team_github_repos g
 			JOIN teams t ON t.id = g.team_id
 			JOIN memberships m ON m.team_id = g.team_id
-			WHERE t.org_id = ? AND t.deleted_at IS NULL
+			WHERE t.org_id = ?
 			  AND LOWER(g.owner) = LOWER(?) AND LOWER(g.repo) = LOWER(?)
 		)
 		ORDER BY user_id ASC

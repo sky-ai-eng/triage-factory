@@ -262,10 +262,16 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, own
 // boundaries the membership RLS policies would hide.
 func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, owner, repo string) ([]string, error) {
 	// UNION (not UNION ALL) dedups a user who is both an org admin and a
-	// tracking-team member. t.deleted_at IS NULL excludes archived teams,
-	// matching TeamIDsForUserInOrgSystem — an archived team is
-	// force-stopped and its members must not keep receiving repo events
-	// through it.
+	// tracking-team member. The tracking arm mirrors
+	// repoProfileTrackedByViewerTeams (the REST read's scoping) join for
+	// join — including its deliberate LACK of a teams.deleted_at filter:
+	// archiving force-stops a team's work but hides nothing (Archive
+	// touches no memberships/tracking rows, and the repo keeps being
+	// polled), so its members still see the repo on GET /api/repos and
+	// must keep receiving its events. Excluding them here would be
+	// routing semantics (TeamIDsForUserInOrgSystem — no NEW work for an
+	// archived team) misapplied to a visibility read, leaving their
+	// Repos page silently stale.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT user_id::text FROM (
 			SELECT om.user_id
@@ -276,7 +282,7 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			FROM team_github_repos g
 			JOIN teams t ON t.id = g.team_id
 			JOIN memberships m ON m.team_id = g.team_id
-			WHERE t.org_id = $1 AND t.deleted_at IS NULL
+			WHERE t.org_id = $1
 			  AND lower(g.owner) = lower($2) AND lower(g.repo) = lower($3)
 		) u
 		ORDER BY user_id ASC
