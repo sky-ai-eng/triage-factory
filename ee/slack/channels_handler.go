@@ -36,7 +36,7 @@ import (
 // handler families can't drift.
 func slackEntitlementGate(w http.ResponseWriter, r *http.Request) (orgID string, ok bool) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "route")
 		return "", false
 	}
 	orgID, ok = httpx.RequireOrg(w, r)
@@ -44,7 +44,7 @@ func slackEntitlementGate(w http.ResponseWriter, r *http.Request) (orgID string,
 		return "", false
 	}
 	if !entitlements.For(orgID).Has(entitlements.FeatureSlack) {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "route")
 		return "", false
 	}
 	return orgID, true
@@ -131,7 +131,7 @@ func (h *channelsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	// channel roster is member-visible, not org-visible (same non-disclosure
 	// posture as VerifyTeamInOrg above).
 	if role == "" {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "team")
 		return
 	}
 
@@ -171,7 +171,7 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req putChannelsRequest
-	if !httpx.DecodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	desired := normalizeChannelIDs(req.ChannelIDs)
@@ -252,12 +252,12 @@ func (h *channelsHandler) handlePrimary(w http.ResponseWriter, r *http.Request) 
 
 	channelID := r.PathValue("channel_id")
 	if channelID == "" {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "channel")
 		return
 	}
 
 	var req primaryRequest
-	if !httpx.DecodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.TeamID == "" {

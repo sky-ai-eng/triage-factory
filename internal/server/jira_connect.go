@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Per-user Jira access — the Jira sibling of the GitHub per-user identity flow
@@ -243,7 +244,7 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req jiraIdentityPATRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -271,10 +272,7 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	}
 	host, okHost := resolveJiraHost(orgSet.JiraBaseURL)
 	if !okHost {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "Your workspace's Jira URL isn't set up yet. Ask your admin to connect Jira in Workspace Settings first.",
-			"field": "jira_pat",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your workspace's Jira URL isn't set up yet. Ask your admin to connect Jira in Workspace Settings first.", Field: "jira_pat"})
 		return
 	}
 	cloud := jira.DeploymentForMarker(jira.AuthMethod(authMethod), host) == jira.DeploymentCloud
@@ -336,23 +334,14 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 		// Keep the two failure shapes distinct, like the GitHub flow: a host we
 		// couldn't reach (infra) vs. a credential the host rejected (your action).
 		if errors.Is(err, auth.ErrJiraHostUnreachable) {
-			writeJSON(w, http.StatusBadGateway, map[string]string{
-				"error": fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your Jira server, not the credential — try again.", host),
-				"field": field,
-			})
+			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your Jira server, not the credential — try again.", host), Field: field})
 			return
 		}
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "That credential didn't validate against " + host + ". Double-check it and try again.",
-			"field": field,
-		})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That credential didn't validate against " + host + ". Double-check it and try again.", Field: field})
 		return
 	}
 	if jiraUser.StableID() == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "Jira didn't return an account for that credential.",
-			"field": field,
-		})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "Jira didn't return an account for that credential.", Field: field})
 		return
 	}
 

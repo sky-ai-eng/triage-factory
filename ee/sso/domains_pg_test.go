@@ -361,9 +361,9 @@ func TestSSODomainDelete_AndList(t *testing.T) {
 	}
 }
 
-// TestSSODomainRoutes_NonAdmin404: a plain org member gets 404 on every route
-// (non-disclosure), and their attempted claim mints nothing.
-func TestSSODomainRoutes_NonAdmin404(t *testing.T) {
+// TestSSODomainRoutes_NonAdminForbidden: a plain org member gets 403 on every route
+// (they can see the org; the denial names the role), and their attempted claim mints nothing.
+func TestSSODomainRoutes_NonAdminForbidden(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 	owner := r.seedUser()
@@ -387,8 +387,8 @@ func TestSSODomainRoutes_NonAdmin404(t *testing.T) {
 	}
 	for _, tc := range cases {
 		resp := doReq(r, tc.method, tc.path, sid, tc.body)
-		if resp.StatusCode != http.StatusNotFound {
-			t.Errorf("%s %s as member: status = %d; want 404 (non-disclosure); body=%s",
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s %s as member: status = %d; want 403 (visible org, missing role); body=%s",
 				tc.method, tc.path, resp.StatusCode, readBody(resp))
 		}
 	}

@@ -47,44 +47,13 @@ type ratchetEntry struct {
 	pattern string // key into ratchetPatterns
 }
 
-// ratchetAllowlist is the SHRINKING section: files not yet converted to the
-// httpx envelope/strict decoding. Delete an entry when you convert its file —
-// the staleness check forces it. Never add one.
-var ratchetAllowlist = []ratchetEntry{
-	// http.Error — plain-text bodies on JSON surfaces.
-	{"internal/server/github_app_register.go", "http.Error"},
-	{"internal/server/middleware.go", "http.Error"},
-	{"internal/server/ratelimit.go", "http.Error"},
-
-	// http.NotFound — Go's text-body 404 on JSON surfaces.
-	{"internal/server/github_app_register.go", "http.NotFound"},
-	{"internal/server/middleware.go", "http.NotFound"},
-	{"ee/slack/channels_handler.go", "http.NotFound"},
-	{"ee/slack/workspaces.go", "http.NotFound"},
-	{"ee/sso/connection.go", "http.NotFound"},
-	{"ee/sso/domains.go", "http.NotFound"},
-
-	// request-decode — raw json.NewDecoder on a request body.
-	{"ee/fleet/handlers.go", "request-decode"},
-
-	// error-map — ad-hoc {"error": "..."} bodies.
-	{"internal/server/bedrock_connect.go", "error-map"},
-	{"internal/server/bedrock_role.go", "error-map"},
-	{"internal/server/credentials.go", "error-map"},
-	{"internal/server/github_access.go", "error-map"},
-	{"internal/server/github_app_handlers.go", "error-map"},
-	{"internal/server/github_app_import.go", "error-map"},
-	{"internal/server/github_app_register.go", "error-map"},
-	{"internal/server/github_connect.go", "error-map"},
-	{"internal/server/github_webhook_health.go", "error-map"},
-	{"internal/server/jira_app_handlers.go", "error-map"},
-	{"internal/server/jira_connect.go", "error-map"},
-	{"internal/server/org_credentials.go", "error-map"},
-	{"ee/slack/workspaces.go", "error-map"},
-	{"ee/sso/breakglass.go", "error-map"},
-	{"ee/sso/connection.go", "error-map"},
-	{"ee/sso/domains.go", "error-map"},
-}
+// ratchetAllowlist was the SHRINKING section: files not yet converted to the
+// httpx envelope/strict decoding. It is EMPTY — the mechanical sweep converted
+// the last handler family, so every non-permanent surface speaks the envelope.
+// It stays here, empty, as the place a regression would have to argue for
+// itself: an entry added back is a reviewer's red flag, and the staleness check
+// means a stale one fails the build rather than lingering.
+var ratchetAllowlist = []ratchetEntry{}
 
 // ratchetPermanent documents surfaces deliberately outside the JSON error
 // contract. These are not debt; each entry says why the shape is dictated by

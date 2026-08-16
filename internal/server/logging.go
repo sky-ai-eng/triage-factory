@@ -13,7 +13,6 @@ var (
 	backfillLog        = logging.Component("backfill")
 	dashboardLog       = logging.Component("dashboard")
 	delegateSpawnLog   = logging.Component("delegate-spawn")
-	entitiesLog        = logging.Component("entities")
 	eventHandlersLog   = logging.Component("event_handlers")
 	externalActionLog  = logging.Component("external-action")
 	failedEventsLog    = logging.Component("failed-events")

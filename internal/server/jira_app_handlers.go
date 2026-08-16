@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Per-org Atlassian OAuth (3LO) app config — the credential layer the per-user
@@ -208,21 +209,17 @@ func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req jiraAppImportRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	clientID := strings.TrimSpace(req.ClientID)
 	clientSecret := strings.TrimSpace(req.ClientSecret)
 	if clientID == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "An Atlassian OAuth app client ID is required.", "field": "client_id",
-		})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An Atlassian OAuth app client ID is required.", Field: "client_id"})
 		return
 	}
 	if clientSecret == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "An Atlassian OAuth app client secret is required.", "field": "client_secret",
-		})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An Atlassian OAuth app client secret is required.", Field: "client_secret"})
 		return
 	}
 

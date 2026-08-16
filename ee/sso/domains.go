@@ -61,7 +61,7 @@ type ssoDomainJSON struct {
 
 func (h *ssoDomainsHandler) gate(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "route")
 		return "", "", false
 	}
 	orgID, ok = httpx.RequireOrg(w, r)
@@ -69,7 +69,7 @@ func (h *ssoDomainsHandler) gate(w http.ResponseWriter, r *http.Request) (orgID,
 		return "", "", false
 	}
 	if !entitlements.For(orgID).Has(entitlements.FeatureSSO) {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "route")
 		return "", "", false
 	}
 	userID = httpx.ClaimsFrom(r.Context()).Subject
@@ -80,7 +80,10 @@ func (h *ssoDomainsHandler) gate(w http.ResponseWriter, r *http.Request) (orgID,
 		return "", "", false
 	}
 	if !isAdmin {
-		http.NotFound(w, r)
+		// Visible org, missing role: 403, matching the core admin gates.
+		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+			Reason: httpx.ReasonForbidden, Message: "org admin role required",
+		})
 		return "", "", false
 	}
 	return orgID, userID, true
@@ -96,7 +99,7 @@ func (h *ssoDomainsHandler) handleDomainClaim(w http.ResponseWriter, r *http.Req
 	var body struct {
 		Domain string `json:"domain"`
 	}
-	if !httpx.DecodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	domainName, valid := normalizeSSODomain(body.Domain)
@@ -188,9 +191,7 @@ func (h *ssoDomainsHandler) handleDomainClaim(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if noConn {
-		httpx.WriteJSON(w, http.StatusConflict, map[string]string{
-			"error": "register an SSO connection before claiming a domain",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "register an SSO connection before claiming a domain"})
 		return
 	}
 
@@ -233,7 +234,7 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 	}
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "sso connection")
 		return
 	}
 
@@ -247,7 +248,7 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if claim == nil {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "sso connection")
 		return
 	}
 	if claim.VerifiedAt != nil {
@@ -279,9 +280,7 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 			ssoLog.Debug("sso domain verify: TXT lookup did not match",
 				"org", orgID, "domain", claim.Domain, "host", host, "error", lookupErr)
 		}
-		httpx.WriteJSON(w, http.StatusConflict, map[string]string{
-			"error": "DNS record not found yet — propagation can take time, retry.",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "DNS record not found yet — propagation can take time, retry."})
 		return
 	}
 
@@ -307,16 +306,14 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 		return e
 	}); err != nil {
 		if httpx.IsUniqueViolation(err) {
-			httpx.WriteJSON(w, http.StatusConflict, map[string]string{
-				"error": "this domain is already verified by another organization",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this domain is already verified by another organization"})
 			return
 		}
 		httpx.InternalError(w, "sso", err)
 		return
 	}
 	if verified == nil {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "sso connection")
 		return
 	}
 	ssoLog.Info("sso domain verified", "org", orgID, "domain", verified.Domain, "id", verified.ID)
@@ -331,7 +328,7 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 	}
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "sso connection")
 		return
 	}
 
@@ -362,7 +359,7 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !existed {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "sso connection")
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

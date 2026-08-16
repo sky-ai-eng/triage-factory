@@ -322,8 +322,10 @@ func TestGitHubAppImport_BadPEM(t *testing.T) {
 
 	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("1", "not-a-pem", nil))
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("import = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	// A PEM that isn't a PEM is a shape fault, not a semantic one: 400, in
+	// line with the epic's 400-vs-422 rule.
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("import = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/reachability"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // reachabilityRequest is the URL-only body both reachability endpoints accept.
@@ -33,7 +34,7 @@ type reachabilityRequest struct {
 // POST /api/github/reachability   body: {"url": "https://github.com"}
 func handleGitHubReachability(w http.ResponseWriter, r *http.Request) {
 	var req reachabilityRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	base, ok := normalizeReachabilityURL(req.URL)
@@ -52,7 +53,7 @@ func handleGitHubReachability(w http.ResponseWriter, r *http.Request) {
 // POST /api/jira/reachability   body: {"url": "https://jira.example.com"}
 func handleJiraReachability(w http.ResponseWriter, r *http.Request) {
 	var req reachabilityRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	base, ok := normalizeReachabilityURL(req.URL)

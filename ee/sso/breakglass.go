@@ -84,7 +84,7 @@ func (h *ssoBreakGlassHandler) handleBreakGlassAdd(w http.ResponseWriter, r *htt
 	var body struct {
 		Email string `json:"email"`
 	}
-	if !httpx.DecodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	email := strings.ToLower(strings.TrimSpace(body.Email))
@@ -126,9 +126,7 @@ func (h *ssoBreakGlassHandler) handleBreakGlassAdd(w http.ResponseWriter, r *htt
 		return
 	}
 	if resolved == "" {
-		httpx.WriteJSON(w, http.StatusNotFound, map[string]string{
-			"error": "no member of this organization has that verified email",
-		})
+		httpx.WriteErrors(w, http.StatusNotFound, httpx.ErrorItem{Reason: httpx.ReasonNotFound, Message: "no member of this organization has that verified email"})
 		return
 	}
 	out, err := h.listViews(r.Context(), orgID, userID)
@@ -174,9 +172,7 @@ func (h *ssoBreakGlassHandler) handleBreakGlassRemove(w http.ResponseWriter, r *
 		return
 	}
 	if lastWhileEnforced {
-		httpx.WriteJSON(w, http.StatusConflict, map[string]string{
-			"error": "can't remove the last break-glass principal while SSO is required — stop requiring SSO first",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "can't remove the last break-glass principal while SSO is required — stop requiring SSO first"})
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -329,12 +329,8 @@ func TestChannelsHandler_ArchivedTeamPUT_Refused(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (archived team); body=%s", rec.Code, rec.Body.String())
 	}
-	var body struct {
-		Archived bool `json:"archived"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if !body.Archived {
-		t.Errorf("403 body missing archived:true marker; body=%s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), httpx.ReasonTeamArchived) {
+		t.Errorf("403 body missing the TEAM_ARCHIVED reason; body=%s", rec.Body.String())
 	}
 }
 
@@ -395,12 +391,8 @@ func TestChannelsHandler_Primary_ArchivedDestinationTeam_Refused(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (archived destination team); body=%s", rec.Code, rec.Body.String())
 	}
-	var body struct {
-		Archived bool `json:"archived"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if !body.Archived {
-		t.Errorf("403 body missing archived:true marker; body=%s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), httpx.ReasonTeamArchived) {
+		t.Errorf("403 body missing the TEAM_ARCHIVED reason; body=%s", rec.Body.String())
 	}
 
 	// The primary must still be team2 — the refused reassignment must not

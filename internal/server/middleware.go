@@ -138,8 +138,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 		}
 		lookupSpan.End()
 		if err != nil {
-			authLog.ErrorContext(r.Context(), "session lookup failed", "error", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			httpx.InternalError(w, "auth", fmt.Errorf("session lookup: %w", err))
 			return
 		}
 		if sess == nil {
@@ -240,7 +239,7 @@ func (s *Server) withOrg(next http.Handler) http.Handler {
 		// Cheap validation before the DB hit — malformed UUID in the
 		// path is a 404 (same response as "no such org").
 		if _, err := uuid.Parse(orgID); err != nil {
-			http.NotFound(w, r)
+			httpx.NotFound(w, "org")
 			return
 		}
 		claims := ClaimsFrom(r.Context())
@@ -248,17 +247,16 @@ func (s *Server) withOrg(next http.Handler) http.Handler {
 			// Programmer error: withOrg mounted without withSession.
 			// Don't reveal the misconfiguration to the caller.
 			authLog.Error("withorg saw no claims, route missing withsession wrapper", "path", r.URL.Path)
-			http.NotFound(w, r)
+			httpx.NotFound(w, "org")
 			return
 		}
 		ok, err := s.az.UserHasOrgAccess(r.Context(), claims.Subject, orgID)
 		if err != nil {
-			authLog.Error("membership check failed", "user", claims.Subject, "org", orgID, "error", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			httpx.InternalError(w, "auth", fmt.Errorf("membership check %s/%s: %w", claims.Subject, orgID, err))
 			return
 		}
 		if !ok {
-			http.NotFound(w, r)
+			httpx.NotFound(w, "org")
 			return
 		}
 		ctx := httpx.WithOrgID(r.Context(), orgID)
@@ -426,7 +424,9 @@ func (s *Server) withCSRFOriginCheck(next http.Handler) http.Handler {
 		}
 		if origin != s.deployCfg.publicURL {
 			if !s.deployCfg.trustDevFrontendOrigin || origin != devFrontendOrigin {
-				http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+				httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+					Reason: httpx.ReasonForbidden, Message: "cross-origin request rejected",
+				})
 				return
 			}
 		}

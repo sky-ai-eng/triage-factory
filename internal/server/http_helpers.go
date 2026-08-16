@@ -28,10 +28,6 @@ func badRequest(w http.ResponseWriter, msg string) { httpx.BadRequest(w, msg) }
 
 func writeUnauth(w http.ResponseWriter) { httpx.WriteUnauth(w) }
 
-func decodeJSON(w http.ResponseWriter, r *http.Request, v any, msg string) bool {
-	return httpx.DecodeJSON(w, r, v, msg)
-}
-
 func isUniqueViolation(err error) bool { return httpx.IsUniqueViolation(err) }
 
 func localDetail(err error) string { return httpx.LocalDetail(err) }

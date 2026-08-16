@@ -376,12 +376,8 @@ func TestGitHubAppInstallationsRefresh_BackfillError(t *testing.T) {
 	if fake.backfillCalls != 1 {
 		t.Errorf("backfill called %d times, want exactly 1", fake.backfillCalls)
 	}
-	var out map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !strings.Contains(out["error"], "github unreachable") {
-		t.Errorf("error=%q, want it to contain the backfill error", out["error"])
+	if !strings.Contains(rec.Body.String(), "github unreachable") {
+		t.Errorf("body=%s, want it to contain the backfill error", rec.Body.String())
 	}
 }
 

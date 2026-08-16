@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -42,12 +43,12 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req setupRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
 	if req.GitHubURL == "" || req.GitHubPAT == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub URL and token are required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidBody, Message: "GitHub URL and token are required"})
 		return
 	}
 
@@ -56,10 +57,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 	// the hosted runtime has no machinery to provision, and PreflightSSH
 	// (below) must never run in a container — it writes ~/.ssh/known_hosts.
 	if req.CloneProtocol == "ssh" && runmode.Current() != runmode.ModeLocal {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "ssh clone protocol is not available in this deployment; use https",
-			"field": "clone_protocol",
-		})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "ssh clone protocol is not available in this deployment; use https", Field: "clone_protocol"})
 		return
 	}
 
@@ -78,11 +76,14 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		err := worktree.PreflightSSH(ctx, sshHost)
 		cancel()
 		if err != nil {
+			// The probe's stderr is already the tail of the message and the
+			// whole of the log line above; it used to ride along in a
+			// private third key only this route spoke.
 			authLog.Warn("blocked ssh setup, preflight failed", "ssh_host", sshHost, "error", err)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error":  fmt.Sprintf("SSH preflight against %s failed — set up your SSH key or pick HTTPS. %s", sshHost, err.Error()),
-				"field":  "clone_protocol",
-				"stderr": err.Error(),
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: fmt.Sprintf("SSH preflight against %s failed — set up your SSH key or pick HTTPS. %s", sshHost, err.Error()),
+				Field:   "clone_protocol",
 			})
 			return
 		}
@@ -94,10 +95,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 	if req.GitHubURL != "" && req.GitHubPAT != "" {
 		ghUser, err := auth.ValidateGitHub(r.Context(), req.GitHubURL, req.GitHubPAT)
 		if err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": "GitHub: " + err.Error(),
-				"field": "github",
-			})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub: " + err.Error(), Field: "github"})
 			return
 		}
 		resp.GitHub = ghUser
@@ -107,10 +105,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 	if req.JiraURL != "" && req.JiraPAT != "" {
 		jiraUser, err := auth.ValidateJira(r.Context(), jira.DataCenterPAT(req.JiraURL, req.JiraPAT))
 		if err != nil {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": "Jira: " + err.Error(),
-				"field": "jira",
-			})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "Jira: " + err.Error(), Field: "jira"})
 			return
 		}
 		resp.Jira = jiraUser
@@ -200,8 +195,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		// operator debugging, but return a stable user-facing message
 		// so we don't leak Postgres internals to API clients. Mirrors
 		// the pattern handleJiraConnect now uses.
-		setupLog.Error("integrations setup persist failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store credentials"})
+		internalError(w, "setup", fmt.Errorf("persist integration credentials: %w", err))
 		return
 	}
 
@@ -443,18 +437,13 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 // auth_provision.go and has no synthetic tenant to create.
 func (s *Server) handleSetupStart(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() != runmode.ModeLocal {
-		writeJSON(w, http.StatusNotFound, map[string]string{
-			"error": "setup/start is local-mode only; multi-mode provisions tenants on org creation",
-		})
+		httpx.WriteErrors(w, http.StatusNotFound, httpx.ErrorItem{Reason: httpx.ReasonNotFound, Message: "setup/start is local-mode only; multi-mode provisions tenants on org creation"})
 		return
 	}
 
 	alreadyProvisioned, err := s.ensureLocalOrgProvisioned(r.Context())
 	if err != nil {
-		setupLog.Error("setup/start provision failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to provision local workspace",
-		})
+		internalError(w, "setup", fmt.Errorf("provision local workspace: %w", err))
 		return
 	}
 

@@ -103,9 +103,7 @@ export default function InviteAccept() {
           // the caller is signed in as — so the card renders it verbatim.
           setMismatch({ message: item.message })
         } else {
-          setAcceptError(
-            httpErrorMessage(e, 'This invitation can no longer be accepted.'),
-          )
+          setAcceptError(httpErrorMessage(e, 'This invitation can no longer be accepted.'))
         }
       } else if (e instanceof HttpError && (e.status === 404 || e.status === 400)) {
         setAcceptError('This invitation could not be found.')

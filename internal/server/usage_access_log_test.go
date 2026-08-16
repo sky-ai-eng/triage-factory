@@ -1,7 +1,6 @@
 package server
 
 import (
-	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // --- pure: label rendering ---

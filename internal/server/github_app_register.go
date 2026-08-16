@@ -23,6 +23,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Sentinel errors returned by buildManifestAndState so callers can map
@@ -316,7 +317,9 @@ button:hover{background:#2ea043}
 // GET /api/orgs/{org_id}/github/app/register/launch?owner_type=&owner_login=
 func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Request) {
 	if s.deployCfg == nil {
-		http.NotFound(w, r)
+		// No deploy config means the App-registration surface isn't wired on
+		// this deployment: a route that doesn't exist here is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
@@ -458,7 +461,9 @@ func (s *Server) renderLaunchError(w http.ResponseWriter, status int, orgID, ret
 // GET /api/orgs/{org_id}/github/app/register/callback?code=...&state=...
 func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.Request) {
 	if s.deployCfg == nil {
-		http.NotFound(w, r)
+		// No deploy config means the App-registration surface isn't wired on
+		// this deployment: a route that doesn't exist here is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
@@ -476,11 +481,15 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	state, err := parseAppRegisterState(stateRaw, s.deployCfg.hmacKey)
 	if err != nil {
 		githubAppLog.Warn("invalid state", "error", err)
-		http.Error(w, "invalid or expired state token", http.StatusUnauthorized)
+		httpx.WriteErrors(w, http.StatusUnauthorized, httpx.ErrorItem{
+			Reason: httpx.ReasonUnauthenticated, Message: "invalid or expired state token",
+		})
 		return
 	}
 	if state.OrgID != orgID {
-		http.Error(w, "state org mismatch", http.StatusUnauthorized)
+		httpx.WriteErrors(w, http.StatusUnauthorized, httpx.ErrorItem{
+			Reason: httpx.ReasonUnauthenticated, Message: "state org mismatch",
+		})
 		return
 	}
 
@@ -506,9 +515,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		return
 	}
 	if existing != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "org already has a GitHub App registered; remove it first",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "org already has a GitHub App registered; remove it first"})
 		return
 	}
 
@@ -642,9 +649,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		}
 		var exists *db.ErrGitHubAppExists
 		if errors.As(err, &exists) {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "org already has a GitHub App registered; remove it first",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "org already has a GitHub App registered; remove it first"})
 			return
 		}
 		internalError(w, "github-app", err)

@@ -209,7 +209,7 @@ func (le *loginExt) handleDiscover(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, ssoDiscoverMaxBody)
 
 	var body ssoDiscoverRequest
-	if !httpx.DecodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 

@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // An org can hold a registered, active GitHub App that receives no webhook
@@ -425,9 +426,7 @@ func (s *Server) handleGitHubAppWebhookReplay(w http.ResponseWriter, r *http.Req
 	minter, err := s.appMinter(ctx, orgID, app)
 	if err != nil {
 		githubAppLog.Error("webhook replay: build app minter failed", "org", orgID, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error": "Could not authenticate as the GitHub App." + localDetail(err),
-		})
+		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "Could not authenticate as the GitHub App." + localDetail(err)})
 		return
 	}
 
@@ -438,16 +437,12 @@ func (s *Server) handleGitHubAppWebhookReplay(w http.ResponseWriter, r *http.Req
 		// A capability gap, not an outage: GitHub Enterprise Server below 3.2
 		// has no delivery history to replay from. Named plainly so an operator
 		// stops looking for the button that does not exist here.
-		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error": "This GitHub host doesn't expose App webhook deliveries, so they can't be replayed.",
-		})
+		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "This GitHub host doesn't expose App webhook deliveries, so they can't be replayed."})
 		return
 	}
 	if err != nil {
 		githubAppLog.Error("webhook replay: list deliveries failed", "org", orgID, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error": "Could not read the App's webhook deliveries from GitHub." + localDetail(err),
-		})
+		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "Could not read the App's webhook deliveries from GitHub." + localDetail(err)})
 		return
 	}
 

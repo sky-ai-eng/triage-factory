@@ -889,7 +889,10 @@ func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter,
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var ids []string
-	if !decodeJSON(w, r, &ids, "expected array of handler IDs") {
+	// A bare JSON array body — strict decoding still applies (single value,
+	// no trailing junk, capped size); DisallowUnknownFields has nothing to
+	// reject on a slice.
+	if !httpx.DecodeJSONStrict(w, r, &ids) {
 		return
 	}
 	if len(ids) == 0 {
