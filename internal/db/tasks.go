@@ -47,6 +47,56 @@ type AgentClaimStamp struct {
 	ActingTeamID string
 }
 
+// TaskListStatusClaimed is the one member of the list vocabulary that is not
+// a lifecycle status: it names the claim axis instead — a task at
+// status='queued' that someone (a user or the bot) has taken. The board's
+// Claimed column is exactly that set, and it can't be spelled with a
+// lifecycle status because a claim doesn't change one. It stays scoped to
+// status='queued' so a claimed task that advanced to in_progress/in_review
+// renders in its own column rather than twice.
+const TaskListStatusClaimed = "claimed"
+
+// TaskListStatuses is the full vocabulary TaskListFilter.Statuses accepts:
+// the six lifecycle statuses the tasks CHECK constraint enforces, plus the
+// derived "claimed". A value outside it is a caller fault, not an empty
+// result — the HTTP layer rejects it before the store is reached.
+var TaskListStatuses = []string{
+	"queued", "in_progress", "in_review", "done", "dismissed", "snoozed",
+	TaskListStatusClaimed,
+}
+
+// TaskListFilter is the filter set for TaskStore.List. Every field is
+// optional; the zero value matches every task the caller can see.
+//
+// The fields are independent predicates, ANDed together — Statuses selects
+// which lane, the rest narrow within it:
+//
+//   - Statuses: match any of these (see TaskListStatuses). Empty = all.
+//   - TeamIDs: the per-page *multi-team* view scope. Empty = the union of the
+//     viewer's teams (the RLS-scoped default). Non-empty narrows to tasks any
+//     of those teams owns (team_id) or can see (a task_teams visibility row) —
+//     the "show A and B together, hide the rest" board contract. Membership is
+//     still RLS-enforced underneath, so teams the caller isn't in contribute
+//     nothing rather than leaking.
+//   - OnlyUnclaimed: both claim columns NULL. This is the queue's "pickable by
+//     anyone" half.
+//   - IncludeSnoozed: when false, a task still inside its snooze window
+//     (snooze_until in the future) is excluded. It is a *wake-window* filter,
+//     not a status filter: whether status='snoozed' rows are candidates at all
+//     is Statuses' business.
+//   - ClosedSince: when set, a done/dismissed task is included only if its
+//     closed_at is at or after it. Non-terminal rows are unaffected, so a
+//     mixed query windows its terminal tail without touching the rest. Nil
+//     means no window — the board asks for the one it wants, and there is no
+//     hidden default.
+type TaskListFilter struct {
+	Statuses       []string
+	TeamIDs        []string
+	OnlyUnclaimed  bool
+	IncludeSnoozed bool
+	ClosedSince    *time.Time
+}
+
 // TaskStore owns the tasks table — lifecycle, claims, dedup,
 // swipe-triggered transitions, plus the run-history queries that
 // power the auto-delegate breaker.
@@ -82,36 +132,18 @@ type TaskStore interface {
 	// display fields. Returns (nil, nil) when no row matches.
 	Get(ctx context.Context, orgID, taskID string) (*domain.Task, error)
 
-	// Queued returns active queue tasks ordered by the matching
-	// event_handler rule's sort_order then priority_score DESC.
-	// Queue membership is the derived filter:
-	// status='queued' AND both claim cols NULL AND not future-snoozed.
+	// List is the paginated task read every task-list surface goes
+	// through — the queue deck, each board column, any future filter.
+	// It returns the page named by opts and the *filtered* total (the
+	// count the same filters match, not the page length), both computed
+	// on the same connection so a caller's page and total agree.
 	//
-	// teamIDs is the optional per-page read filter — a *multi-team* view
-	// scope. Empty/nil = the union of the viewer's teams (the RLS-scoped
-	// default). When non-empty, the result narrows to tasks any of those
-	// teams owns (team_id) or can see (a task_teams visibility row) — the
-	// "show A and B together, hide the rest" board contract. The viewer's
-	// membership is still RLS-enforced underneath, so teams the caller
-	// isn't in contribute nothing rather than leaking.
-	Queued(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error)
-
-	// QueuedIncludingSnoozed mirrors Queued but drops the snooze-
-	// window filter so future-snoozed rows surface too. The
-	// Board Queued column uses this when the user toggles "show
-	// snoozed"; the default Queued() stays the canonical "what's
-	// actually pickable right now" projection. teamIDs is the same
-	// optional multi-team read filter as Queued.
-	QueuedIncludingSnoozed(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error)
-
-	// ByStatus returns tasks with the given lifecycle status,
-	// ordered by priority. Two pseudo-values are mapped to claim-
-	// axis queries for API back-compat:
-	//   "claimed"   → claimed_by_user_id IS NOT NULL + active
-	//   "delegated" → claimed_by_agent_id IS NOT NULL + active
-	// Other status values are passed through literally. teamIDs is the
-	// same optional multi-team read filter as Queued.
-	ByStatus(ctx context.Context, orgID, status string, teamIDs []string) ([]domain.Task, error)
+	// See TaskListFilter for what the filters mean. Ordering is fixed and
+	// total (TaskListOrder): live before snoozed, open before closed,
+	// newest-closed first among closed, then the matching event_handler
+	// rule's sort_order, then priority_score DESC, then id — the id
+	// tiebreaker is what makes offset paging return each row exactly once.
+	List(ctx context.Context, orgID string, filter TaskListFilter, opts ListOpts) ([]domain.Task, int, error)
 
 	// FindActiveByEntityAndType returns non-terminal tasks for an
 	// entity matching the given event type. Used by inline close

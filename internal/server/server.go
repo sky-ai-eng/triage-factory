@@ -1030,8 +1030,14 @@ func (s *Server) routes() {
 	// and registers the LoginExtension that drives SAML start + the callback's
 	// enforcement/JIT/test forks. Core holds no SSO symbols.
 
-	s.api("GET /api/queue", s.handleQueue)
-	s.api("GET /api/tasks", s.handleTasks)
+	// The tasks list read. It replaces the former GET /api/queue and
+	// GET /api/tasks outright rather than aliasing them: the two spellings
+	// answered the same nominal filter with different hidden ones
+	// (?status=queued returned claimed and future-snoozed rows the queue
+	// view hides), and one address per read is what keeps that from
+	// happening again. apiMutating is deliberate for a body-carrying read —
+	// see handleTaskList.
+	s.apiMutating("POST /api/tasks/list", s.handleTaskList)
 	s.api("GET /api/tasks/{id}", s.handleTaskGet)
 	s.apiMutating("POST /api/tasks/{id}/swipe", s.handleSwipe)
 	s.apiMutating("POST /api/tasks/{id}/snooze", s.handleSnooze)
