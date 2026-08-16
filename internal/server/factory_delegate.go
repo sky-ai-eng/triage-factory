@@ -362,11 +362,9 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		factoryLog.Warn("failed to record delegate swipe", "task", task.ID, "error", err)
 	}
 
-	// Now attempt the spawn. Delegate's failure modes (prompt not
+	// Now attempt the spawn. Delegate's failure modes (blueprint not
 	// found, DB error creating the run row) DON'T unstamp the claim
 	// — the user's commitment is real, the run just didn't fire.
-	// The response carries delegate_error so the FE can render the
-	// "delegate failed — retry" affordance on the now-bot-claimed card.
 	// task.ClaimedByAgentID mirrors the just-stamped claim for the shared
 	// task object; the actor is passed explicitly so the run's frozen
 	// blueprint_run actor matches it.
@@ -383,9 +381,10 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		// recorded — the commitment is real, the run just didn't fire. That
 		// partial state is reported as the error it is (422 for a bad
 		// blueprint reference, 500 for a spawn/DB fault — the same mapping
-		// the swipe delegate arm uses), never a 200: the FE refetches on
-		// error and renders the "delegate didn't fire, retry" affordance on
-		// the now-bot-claimed card.
+		// the swipe delegate arm uses), never a 200. Reason SPAWN_FAILED is
+		// what tells the FE the claim survived, so it refetches and renders
+		// the "delegate didn't fire, retry" affordance on the bot-claimed
+		// card instead of the plain failure toast.
 		writeDelegateSpawnError(w, err)
 		return
 	}

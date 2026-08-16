@@ -189,8 +189,10 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if len(resp.Errors) != 1 || resp.Errors[0].Field != "blueprint_id" {
-		t.Errorf("errors = %+v; want one item attributing blueprint_id", resp.Errors)
+	// SPAWN_FAILED is the claim-survived marker the FE keys the retry
+	// affordance on — a plain INTERNAL here would read as "nothing landed".
+	if len(resp.Errors) != 1 || resp.Errors[0].Reason != "SPAWN_FAILED" || resp.Errors[0].Field != "blueprint_id" {
+		t.Errorf("errors = %+v; want one SPAWN_FAILED item attributing blueprint_id", resp.Errors)
 	}
 
 	// Verify the claim survives in the DB despite the error status — the FE

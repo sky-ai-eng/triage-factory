@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -977,6 +978,19 @@ func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 	})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422 (spawn failed on a bad blueprint; transfer still landed); body=%s", rec.Code, rec.Body.String())
+	}
+	// The claim-survived marker: without SPAWN_FAILED the FE would read this
+	// as a nothing-landed failure and skip the refetch + retry affordance.
+	var errBody struct {
+		Errors []struct {
+			Reason string `json:"reason"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if len(errBody.Errors) != 1 || errBody.Errors[0].Reason != "SPAWN_FAILED" {
+		t.Errorf("errors = %+v; want one SPAWN_FAILED item", errBody.Errors)
 	}
 
 	var claimedAgent, claimedUser sql.NullString

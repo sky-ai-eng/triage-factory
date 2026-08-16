@@ -730,10 +730,10 @@ func (s *Server) swipeJiraClaimSync(r *http.Request, orgID, userID, id string, j
 // records the conversation_id on the response map. The caller has already
 // verified s.spawner != nil. Failures are real statuses, not a 200 with a
 // delegate_error field: a bad blueprint reference is a 422, everything else a
-// 500. Either way the claim swipeDelegate stamped stays stamped — the user's
-// gesture committed at the claim axis — so the client refetches on error and
-// finds the task in the bot's lane without a run. Returns false once an error
-// response is written.
+// 500, and both carry reason SPAWN_FAILED because the claim swipeDelegate
+// stamped stays stamped — the user's gesture committed at the claim axis —
+// so the client refetches on that reason and finds the task in the bot's
+// lane without a run. Returns false once an error response is written.
 func (s *Server) swipeTriggerDelegation(w http.ResponseWriter, r *http.Request, orgID, userID, id string, req swipeRequest, response map[string]any) bool {
 	var task *domain.Task
 	err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -744,12 +744,13 @@ func (s *Server) swipeTriggerDelegation(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		// The claim landed but the post-dispatch re-read failed, so no run can
 		// be spawned this attempt. Failing honestly beats the former silent
-		// 200 with neither conversation_id nor delegate_error.
-		internalError(w, "swipe", err)
+		// 200 with neither conversation_id nor delegate_error — and because
+		// the claim survives, it's a SPAWN_FAILED, not a bare INTERNAL.
+		writeDelegateSpawnInternal(w, err)
 		return false
 	}
 	if task == nil {
-		internalError(w, "swipe", fmt.Errorf("task %s vanished between delegate claim and spawn", id))
+		writeDelegateSpawnInternal(w, fmt.Errorf("task %s vanished between delegate claim and spawn", id))
 		return false
 	}
 	// The actor is the agent this swipe just claimed the task with (swipeDelegate
@@ -773,18 +774,34 @@ func (s *Server) swipeTriggerDelegation(w http.ResponseWriter, r *http.Request, 
 // writeDelegateSpawnError maps a spawner.Delegate failure to its status: a
 // bad or missing blueprint reference is the caller's fault (422 — the body
 // was well-formed, the object it names can't back a run), anything else is a
-// spawn/DB fault (500, logged + redacted by internalError). Shared by the
-// swipe delegate arm and the factory drag-to-delegate so the two gestures
-// fail identically.
+// spawn/DB fault (500, logged + redacted). Shared by the swipe delegate arm
+// and the factory drag-to-delegate so the two gestures fail identically.
+//
+// Both arms carry reason SPAWN_FAILED: every caller reaches here only after
+// the agent claim stamped, and the reason — not the status — is what tells
+// a client the claim survived. The pre-claim failure paths in these handlers
+// answer plain INTERNAL 500s, so without the distinct reason a client could
+// not tell "bot-claimed, retry the run" from "nothing landed".
 func writeDelegateSpawnError(w http.ResponseWriter, err error) {
 	if errors.Is(err, delegate.ErrBlueprintNotFound) || errors.Is(err, delegate.ErrBlueprintUnspecified) ||
 		errors.Is(err, delegate.ErrPromptNotFound) || errors.Is(err, delegate.ErrPromptUnspecified) {
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
-			Reason:  httpx.ReasonInvalidField,
+			Reason:  httpx.ReasonSpawnFailed,
 			Message: err.Error(),
 			Field:   "blueprint_id",
 		})
 		return
 	}
-	internalError(w, "delegate", err)
+	writeDelegateSpawnInternal(w, err)
+}
+
+// writeDelegateSpawnInternal is the 500 arm of the post-claim spawn failure:
+// same logging and multi-mode redaction posture as httpx.InternalError, but
+// under the SPAWN_FAILED reason a plain internal error must never carry.
+func writeDelegateSpawnInternal(w http.ResponseWriter, err error) {
+	delegateSpawnLog.Error("delegate spawn failed after claim stamp", "error", err)
+	httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
+		Reason:  httpx.ReasonSpawnFailed,
+		Message: "delegate spawn failed" + localDetail(err),
+	})
 }

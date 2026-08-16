@@ -27,7 +27,7 @@ import {
 } from '../hooks/useTeams'
 import type { Conversation, FactoryEntity, FactorySnapshot, RunStatusValue, Task } from '../types'
 import { isActiveStatus } from '../lib/runStatus'
-import { apiErrors, apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
+import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 // Production factory page — Babylon scene driven by /api/factory/snapshot.
 // The page itself does almost nothing visual: it fetches the snapshot,
@@ -344,11 +344,12 @@ export default function Factory() {
       //   - Pre-claim rejection — input/state validation failures (entity
       //     not found, no matching event, spawner missing) as
       //     400/404/409/422/503. Nothing landed; toast and stop.
-      //   - Post-claim spawn failure — a 422 (bad blueprint reference) or
-      //     500 (spawn/DB fault) AFTER the claim stamped. The task is
-      //     bot-claimed with no run, so refetch (the bot-claimed card must
-      //     surface immediately) and tell the user to retry. Distinguished
-      //     from the pre-claim 422 by the blueprint_id field attribution.
+      //   - Post-claim spawn failure — reason SPAWN_FAILED (422 bad
+      //     blueprint reference, 500 spawn/DB fault) AFTER the claim
+      //     stamped. The task is bot-claimed with no run, so refetch (the
+      //     bot-claimed card must surface immediately) and tell the user to
+      //     retry. The reason is the discriminator — pre-claim faults also
+      //     answer 500, so status alone can't tell the two apart.
       const label = entityLabel(pd.entity)
       try {
         await apiJSON<{ conversation_id: string }>('/api/factory/delegate', {
@@ -363,10 +364,7 @@ export default function Factory() {
           }),
         })
       } catch (err) {
-        const spawnFailed =
-          err instanceof HttpError &&
-          (err.status === 500 ||
-            (err.status === 422 && apiErrors(err).some((it) => it.field === 'blueprint_id')))
+        const spawnFailed = apiErrors(err).some((it) => it.reason === 'SPAWN_FAILED')
         if (spawnFailed) {
           if (delegateTeam) noteWrittenTeam(delegateTeam)
           const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch

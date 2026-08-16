@@ -36,6 +36,13 @@ const (
 	ReasonOutOfRange   = "OUT_OF_RANGE"
 	ReasonCrossTeamRef = "CROSS_TEAM_REF"
 
+	// Partial success reported as an error: the delegation's claim stamped
+	// but the agent run could not be spawned (bad blueprint reference at
+	// 422, spawn/DB fault at 500). Clients key the claim-survived retry
+	// affordance on this reason, never on a bare status — a 500 without it
+	// means the claim may not have landed at all.
+	ReasonSpawnFailed = "SPAWN_FAILED"
+
 	// Upstream and transport.
 	ReasonUpstreamRejected    = "UPSTREAM_REJECTED"
 	ReasonUpstreamUnavailable = "UPSTREAM_UNAVAILABLE"

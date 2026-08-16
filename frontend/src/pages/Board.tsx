@@ -33,7 +33,7 @@ import PendingPROverlay from '../components/PendingPROverlay'
 import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import AssigneePicker from '../components/board/AssigneePicker'
 import { toast } from '../components/Toast/toastStore'
-import { apiFetch, apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
+import { apiErrors, apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import BoardColumn, { CollapsedColumn } from '../components/board/BoardColumn'
 import {
   applyColumnFilter,
@@ -1224,12 +1224,13 @@ export default function Board() {
           })
         }
       } catch (err) {
-        // A 422 (bad blueprint reference) or 500 (spawn fault) arrives AFTER
-        // the claim stamped — the task is in the bot's lane with no run, so
-        // record the inline per-card failure the retry affordance renders.
-        // Anything else (409 claim conflict, 404) means nothing landed; a
-        // toast is the right surface. fetchTasks below reconciles either way.
-        if (err instanceof HttpError && (err.status === 422 || err.status === 500)) {
+        // Reason SPAWN_FAILED is the backend's "the claim stamped, only the
+        // run didn't fire" marker — the task is in the bot's lane with no
+        // run, so record the inline per-card failure the retry affordance
+        // renders. Status alone can't be used here: pre-claim faults also
+        // answer 500. Anything else means nothing landed; a toast is the
+        // right surface. fetchTasks below reconciles either way.
+        if (apiErrors(err).some((it) => it.reason === 'SPAWN_FAILED')) {
           setDelegateFailures((prev) => ({
             ...prev,
             [task.id]: httpErrorMessage(err, 'spawn failed'),
