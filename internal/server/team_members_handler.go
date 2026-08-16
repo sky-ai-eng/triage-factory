@@ -34,9 +34,9 @@ type teamMembersHandler struct {
 // teamRoles is the closed set of membership_role enum values the add/role
 // handlers accept. Validating here keeps an invalid value from reaching the
 // column (where it would surface as a driver error, not a clean 400) and pins
-// the vocabulary the frontend adapter mirrors. 'viewer' is assignable now;
-// read-only enforcement is a separate slice (TFAC-447) — until it lands a
-// viewer behaves like a member.
+// the vocabulary the frontend adapter mirrors. 'viewer' is a read-only role:
+// team-scoped writes reject it at the handler gate and again in RLS, so it is
+// not a weaker member.
 var teamRoles = map[string]bool{"admin": true, "member": true, "viewer": true}
 
 // teamRosterRow is one roster row. github_username / jira_account_id are null
