@@ -358,9 +358,9 @@ func (s *Server) repoMutationAccess(ctx context.Context, orgID, userID, owner, r
 	}
 }
 
-// handleRepositories returns configured repo profiles from the DB. Org
+// handleRepositories returns the configured repository rows from the DB. Org
 // admins get the org-wide union; non-admin members get only the repos
-// tracked by their own teams (TFAC-559) — repositories is org-wide, so an
+// tracked by their own teams (TFAC-559) — the table is org-wide, so an
 // unscoped read would leak every team's repos to a teammate on none of them.
 // Local mode (N=1) has no team boundary and stays unscoped.
 func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
