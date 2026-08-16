@@ -724,45 +724,21 @@ export default function Repos() {
       })
   }, [])
 
-  // Live updates from profiling pipeline
+  // Live updates from the profiling pipeline + clone-result hook. All
+  // three producers (doc scan, AI profiler, clone status) share one
+  // sparse-diff event: merge whichever fields are present rather than
+  // overwriting — a clone-status diff must not blank the AI profile_text
+  // and vice versa.
   useWebSocket((event) => {
-    if (event.type === 'repo_docs_updated') {
-      const d = event.data as {
-        id: string
-        has_readme: boolean
-        has_claude_md: boolean
-        has_agents_md: boolean
-      }
-      setProfiles((prev) =>
-        prev.map((p) =>
-          p.id === d.id
-            ? {
-                ...p,
-                has_readme: d.has_readme,
-                has_claude_md: d.has_claude_md,
-                has_agents_md: d.has_agents_md,
-              }
-            : p,
-        ),
-      )
-    }
-    if (event.type === 'repo_profile_updated') {
-      // Two producers share this event type: the AI profiler (sends
-      // profile_text) and main.go's clone-result hook (sends
-      // clone_status / clone_error / clone_error_kind). Merge whichever
-      // fields are present rather than overwriting — a clone-status
-      // event must not blank the AI profile_text and vice versa.
-      const d = event.data as {
-        id: string
-        profile_text?: string
-        clone_status?: 'ok' | 'failed' | 'pending'
-        clone_error?: string
-        clone_error_kind?: 'ssh' | 'other'
-      }
+    if (event.type === 'repository_updated') {
+      const d = event.data
       setProfiles((prev) =>
         prev.map((p) => {
           if (p.id !== d.id) return p
           const next: Repository = { ...p }
+          if (d.has_readme !== undefined) next.has_readme = d.has_readme
+          if (d.has_claude_md !== undefined) next.has_claude_md = d.has_claude_md
+          if (d.has_agents_md !== undefined) next.has_agents_md = d.has_agents_md
           if (d.profile_text !== undefined) next.profile_text = d.profile_text
           if (d.clone_status !== undefined) next.clone_status = d.clone_status
           if (d.clone_error !== undefined) next.clone_error = d.clone_error
