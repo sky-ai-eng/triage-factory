@@ -7,10 +7,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// The reachable-repo cache migration lands on an existing laptop install: it
-// replaces the App-only grant mirror with a table both credential tiers write,
-// beside a column on a table that already has rows. Five things it must get
-// right, none of which announce themselves if they go wrong —
+// The reachable-repo cache migration lands on an existing laptop install: two
+// new tables both credential tiers write, beside a column on a table that
+// already has rows. Five things it must get right, none of which announce
+// themselves if they go wrong —
 //
 //   - The existing installation rows survive and read as "grant width not
 //     established" rather than picking up a value nobody reported. NULL there is
