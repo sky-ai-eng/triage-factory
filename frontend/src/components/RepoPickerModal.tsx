@@ -160,17 +160,39 @@ export default function RepoPickerModal({
   // across a keystroke.
   const loadedQuery = useRef('')
 
+  // The query the user is asking RIGHT NOW, which is not the same thing. The
+  // refetches that fire on their own schedule — the discovery poll, the
+  // websocket ping — must re-ask this rather than the last-loaded one: while a
+  // search is still in flight those differ, and re-asking the older question
+  // would let it win on arrival and leave the list disagreeing with the search
+  // box. Written during render, like the selection callback above.
+  const activeQuery = useRef('')
+  activeQuery.current = search.trim()
+
+  // Which first-page request the held state belongs to. Searches are typed
+  // faster than they resolve and the discovery poll fires on its own schedule,
+  // so several are legitimately in flight at once and they do NOT come back in
+  // order — a slow request for "ac" landing after a fast one for "acme" would
+  // otherwise overwrite the newer answer with the older one, and its `finally`
+  // would clear `loading` while the newer request was still running. Every
+  // request takes a sequence number and only the latest one is allowed to touch
+  // state; the rest resolve and are dropped.
+  const requestSeq = useRef(0)
+
   const fetchPage = useCallback(async (q: string) => {
+    const seq = ++requestSeq.current
     setLoading(true)
     setError('')
     try {
       const page = await listReachableRepos(q)
+      if (seq !== requestSeq.current) return
       setRepos(page.items)
       setTotal(page.total_count)
       setNextToken(page.next_page_token)
       setListStatus(page.status)
       loadedQuery.current = q
     } catch (err) {
+      if (seq !== requestSeq.current) return
       console.error('Failed to fetch repos:', err)
       // TFAC-324's distinct fault: an active App installed on zero accounts (and
       // no PAT to borrow) dead-ends the picker here. Point the user at the
@@ -182,33 +204,54 @@ export default function RepoPickerModal({
           : 'Failed to fetch repositories',
       )
     } finally {
-      setLoading(false)
+      // Superseded requests leave `loading` alone too: the request that
+      // superseded them set it and is still running.
+      if (seq === requestSeq.current) setLoading(false)
     }
   }, [])
 
   const loadMore = useCallback(async () => {
     if (!nextToken || loading) return
+    // A further page takes a sequence number from the same counter as a first
+    // page: appending page 2 of the previous search onto the results of a new
+    // one would produce a list that matches neither.
+    const seq = ++requestSeq.current
     setLoading(true)
     try {
       const page = await listReachableRepos(loadedQuery.current, nextToken)
+      if (seq !== requestSeq.current) return
       setRepos((prev) => [...prev, ...page.items])
       setTotal(page.total_count)
       setNextToken(page.next_page_token)
     } catch (err) {
+      if (seq !== requestSeq.current) return
       // Keep what is on screen: blanking the list because one further page
       // failed is worse than showing a short one with a retry still offered.
       setError(httpErrorMessage(err, 'Failed to fetch more repositories'))
     } finally {
-      setLoading(false)
+      if (seq === requestSeq.current) setLoading(false)
     }
   }, [nextToken, loading])
 
   // Debounced search → first page. Also the mount fetch (the initial search is
   // empty), which is why there is no separate on-mount effect.
   useEffect(() => {
-    const id = setTimeout(() => fetchPage(search.trim()), SEARCH_DEBOUNCE_MS)
+    const id = setTimeout(() => fetchPage(activeQuery.current), SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(id)
   }, [search, fetchPage])
+
+  // The one live spinner deadline. Held in a ref and always cleared before a new
+  // one is armed, because two of them are two ways to be wrong: an earlier
+  // timeout would stop the spinner for a LATER refresh that is still running,
+  // and one surviving unmount would set state on a component that is gone.
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const clearRefreshTimer = useCallback(() => {
+    if (refreshTimer.current !== null) {
+      clearTimeout(refreshTimer.current)
+      refreshTimer.current = null
+    }
+  }, [])
+  useEffect(() => clearRefreshTimer, [clearRefreshTimer])
 
   // The server refreshes the reachable set out of band — on a first-ever open,
   // on the refresh control, and whenever GitHub credentials change — and says
@@ -218,10 +261,12 @@ export default function RepoPickerModal({
     useCallback(
       (event) => {
         if (event.type !== 'github_repos_updated') return
+        // The ping is the spinner's real end, so retire its deadline with it.
+        clearRefreshTimer()
         setRefreshing(false)
-        fetchPage(loadedQuery.current)
+        fetchPage(activeQuery.current)
       },
-      [fetchPage],
+      [fetchPage, clearRefreshTimer],
     ),
   )
 
@@ -232,25 +277,29 @@ export default function RepoPickerModal({
   // in the discovering state, so a loaded picker costs nothing.
   useEffect(() => {
     if (!discovering) return
-    const id = setInterval(() => fetchPage(loadedQuery.current), DISCOVERY_POLL_MS)
+    const id = setInterval(() => fetchPage(activeQuery.current), DISCOVERY_POLL_MS)
     return () => clearInterval(id)
   }, [discovering, fetchPage])
 
   const onRefresh = useCallback(async () => {
+    clearRefreshTimer()
     setRefreshing(true)
     setError('')
     try {
       await refreshReachableRepos()
-      // The refresh runs out of band, so the ping below is what normally ends
-      // this spinner. Time it out anyway: a refresh that fails server-side (an
+      // The refresh runs out of band, so the ping is what normally ends this
+      // spinner. Time it out anyway: a refresh that fails server-side (an
       // expired credential, a GitHub outage) never pings, and a control stuck on
       // "Refreshing…" forever is a worse lie than one that just stops.
-      setTimeout(() => setRefreshing(false), REFRESH_SPINNER_TIMEOUT_MS)
+      refreshTimer.current = setTimeout(() => {
+        refreshTimer.current = null
+        setRefreshing(false)
+      }, REFRESH_SPINNER_TIMEOUT_MS)
     } catch (err) {
       setRefreshing(false)
       setError(httpErrorMessage(err, 'Could not refresh the repository list.'))
     }
-  }, [])
+  }, [clearRefreshTimer])
 
   const toggle = (name: string) => {
     setChecked((prev) => {

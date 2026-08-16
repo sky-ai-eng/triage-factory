@@ -120,10 +120,13 @@ func newCountingAppGitHub(t *testing.T, reposByInstall map[string][]string) *cou
 	mux := http.NewServeMux()
 	// Existence first: the grant refresh reconciles the installation set before
 	// it reads any grant, so a stub that answered nothing here would soft-remove
-	// the installation the fixture just seeded.
+	// the installation the fixture just seeded. Rendered up front so a bad
+	// fixture fails the test on the test's own goroutine rather than the
+	// server's, where t.Fatalf cannot fail anything.
+	installations := stubInstallations(t, reposByInstall)
 	mux.HandleFunc("GET /api/v3/app/installations", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(stubInstallations(reposByInstall))
+		_ = json.NewEncoder(w).Encode(installations)
 	})
 	mux.HandleFunc("/api/v3/app/installations/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

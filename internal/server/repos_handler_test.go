@@ -37,9 +37,13 @@ func newAppRepoStub(t *testing.T, reposByInstall map[string][]string) *httptest.
 	// installations its repo map has entries for, so a refresh neither
 	// soft-removes a seeded installation nor discovers one the fixture never
 	// staged.
+	// Rendered once, up front, rather than per request: t.Fatalf on a bad fixture
+	// only fails the test from the test's own goroutine, and this handler runs on
+	// the server's.
+	installations := stubInstallations(t, reposByInstall)
 	mux.HandleFunc("GET /api/v3/app/installations", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(stubInstallations(reposByInstall))
+		_ = json.NewEncoder(w).Encode(installations)
 	})
 	mux.HandleFunc("/api/v3/app/installations/", func(w http.ResponseWriter, r *http.Request) {
 		// The real endpoint is POST /app/installations/{id}/access_tokens —
@@ -91,7 +95,15 @@ func newAppRepoStub(t *testing.T, reposByInstall map[string][]string) *httptest.
 // first slug's owner so the fixture does not have to state it twice — a grant
 // map and an account list that disagreed would send the refresh looking for a
 // token it cannot mint.
-func stubInstallations(reposByInstall map[string][]string) []map[string]any {
+//
+// It takes t and FAILS on a key it cannot render, rather than skipping it. A
+// skip would answer with fewer installations than the fixture staged — possibly
+// none — and the refresh reconciles existence against this answer, so it would
+// soft-remove the very installations the test seeded and then pass with an empty
+// mirror. A typo'd fixture must break the test that holds it, not quietly change
+// what that test is about.
+func stubInstallations(t *testing.T, reposByInstall map[string][]string) []map[string]any {
+	t.Helper()
 	out := make([]map[string]any, 0, len(reposByInstall))
 	for id, slugs := range reposByInstall {
 		login := "acme"
@@ -105,7 +117,7 @@ func stubInstallations(reposByInstall map[string][]string) []map[string]any {
 		// rather than making every caller write the id twice.
 		numericID, err := strconv.ParseInt(id, 10, 64)
 		if err != nil {
-			continue
+			t.Fatalf("fixture installation id %q is not numeric; GitHub reports installation ids as numbers", id)
 		}
 		out = append(out, map[string]any{
 			"id":         numericID,
