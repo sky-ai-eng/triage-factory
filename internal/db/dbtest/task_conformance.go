@@ -2,6 +2,8 @@ package dbtest
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -88,47 +90,54 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	t.Run("Queued_returns_unclaimed_queued_tasks", func(t *testing.T) {
+	t.Run("List_queue_projection_returns_unclaimed_queued_tasks", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		seed(t, "q1")
 		seed(t, "q2")
-		out, err := s.Queued(ctx, orgID, nil)
+		out, total, err := s.List(ctx, orgID, queueFilter(), db.ListOpts{Limit: 50})
 		if err != nil {
-			t.Fatalf("Queued: %v", err)
+			t.Fatalf("List: %v", err)
 		}
 		if len(out) < 2 {
-			t.Errorf("Queued returned %d, want >= 2", len(out))
+			t.Errorf("queue projection returned %d, want >= 2", len(out))
+		}
+		if total != len(out) {
+			t.Errorf("total = %d, want %d (the page holds every match)", total, len(out))
 		}
 		for _, task := range out {
 			if task.Status != "queued" {
 				t.Errorf("task %s status=%q, want queued", task.ID, task.Status)
 			}
 			if task.ClaimedByAgentID != "" || task.ClaimedByUserID != "" {
-				t.Errorf("task %s shouldn't appear in queued (has claim)", task.ID)
+				t.Errorf("task %s shouldn't appear in the queue projection (has claim)", task.ID)
 			}
 		}
 	})
 
-	t.Run("ByStatus_with_done_excludes_active", func(t *testing.T) {
+	t.Run("List_done_excludes_active", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "bs-done")
-		// Active task should not appear in done list.
-		done, err := s.ByStatus(ctx, orgID, "done", nil)
+		doneFilter := db.TaskListFilter{Statuses: []string{"done"}, IncludeSnoozed: true}
+		// Active task should not appear in the done lane.
+		done, _, err := s.List(ctx, orgID, doneFilter, db.ListOpts{Limit: 50})
 		if err != nil {
-			t.Fatalf("ByStatus done: %v", err)
+			t.Fatalf("List done: %v", err)
 		}
 		for _, task := range done {
 			if task.ID == taskID {
-				t.Errorf("active task %s appeared under ByStatus(done)", taskID)
+				t.Errorf("active task %s appeared under the done filter", taskID)
 			}
 		}
 		// Now close it; should appear under done.
 		if err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		done, err = s.ByStatus(ctx, orgID, "done", nil)
+		done, total, err := s.List(ctx, orgID, doneFilter, db.ListOpts{Limit: 50})
 		if err != nil {
-			t.Fatalf("ByStatus done (post-close): %v", err)
+			t.Fatalf("List done (post-close): %v", err)
+		}
+		if total != len(done) {
+			t.Errorf("total = %d, want %d", total, len(done))
 		}
 		found := false
 		for _, task := range done {
@@ -138,16 +147,15 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			}
 		}
 		if !found {
-			t.Errorf("closed task %s missing from ByStatus(done)", taskID)
+			t.Errorf("closed task %s missing from the done filter", taskID)
 		}
 	})
 
-	// The "claimed" derived branch in ByStatus filters
-	// status='queued' so the Board's Claimed column doesn't
-	// double-render a user-claimed task that's also in In Progress
-	// or In Review. Distinct from the broader "any non-terminal
-	// user-claimed task" set the prior derivation produced.
-	t.Run("ByStatus_claimed_excludes_in_progress_and_in_review", func(t *testing.T) {
+	// The derived "claimed" member of the list vocabulary is scoped to
+	// status='queued' so the Board's Claimed column doesn't double-render a
+	// user-claimed task that's also in In Progress or In Review. Distinct
+	// from the broader "any non-terminal user-claimed task" set.
+	t.Run("List_claimed_excludes_in_progress_and_in_review", func(t *testing.T) {
 		s, orgID, _, _, userID, seed, _ := mk(t)
 		_, _, queuedID := seed(t, "bs-claimed-q")
 		_, _, ipID := seed(t, "bs-claimed-ip")
@@ -167,9 +175,9 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Fatalf("advance ir: ok=%v err=%v", ok, err)
 		}
 
-		claimed, err := s.ByStatus(ctx, orgID, "claimed", nil)
+		claimed, _, err := s.List(ctx, orgID, claimedFilter(), db.ListOpts{Limit: 50})
 		if err != nil {
-			t.Fatalf("ByStatus claimed: %v", err)
+			t.Fatalf("List claimed: %v", err)
 		}
 		seen := map[string]bool{}
 		for _, x := range claimed {
@@ -192,16 +200,16 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	// failure retry UI can render. Without this they'd disappear
 	// between the delegate stamp and the first non-initializing
 	// run-status transition.
-	t.Run("ByStatus_claimed_includes_bot_claimed_queued", func(t *testing.T) {
+	t.Run("List_claimed_includes_bot_claimed_queued", func(t *testing.T) {
 		s, orgID, _, agentID, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "bs-claimed-bot")
 		if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, ""); err != nil {
 			t.Fatalf("stamp agent: %v", err)
 		}
 
-		claimed, err := s.ByStatus(ctx, orgID, "claimed", nil)
+		claimed, _, err := s.List(ctx, orgID, claimedFilter(), db.ListOpts{Limit: 50})
 		if err != nil {
-			t.Fatalf("ByStatus claimed: %v", err)
+			t.Fatalf("List claimed: %v", err)
 		}
 		var seen bool
 		for _, x := range claimed {
@@ -744,11 +752,11 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	// QueuedIncludingSnoozed — surfaces future-snoozed entries
-	// for the board's "show snoozed" toggle while keeping the canonical
-	// Queued() projection unchanged.
+	// The snoozed lane — the board's "show snoozed" toggle asks for it by
+	// widening the status set, and the canonical queue projection stays
+	// unchanged underneath.
 
-	t.Run("QueuedIncludingSnoozed_includes_snoozed_while_Queued_excludes", func(t *testing.T) {
+	t.Run("List_snoozed_lane_surfaces_what_the_queue_projection_excludes", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, liveID := seed(t, "qsnz-live")
 		_, _, snoozedID := seed(t, "qsnz-snoozed")
@@ -756,9 +764,9 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Fatalf("SetStatus snoozed: %v", err)
 		}
 
-		live, err := s.Queued(ctx, orgID, nil)
+		live, _, err := s.List(ctx, orgID, queueFilter(), db.ListOpts{Limit: 50})
 		if err != nil {
-			t.Fatalf("Queued: %v", err)
+			t.Fatalf("List queue: %v", err)
 		}
 		var sawLive, sawSnoozedInLive bool
 		for _, x := range live {
@@ -770,15 +778,15 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			}
 		}
 		if !sawLive {
-			t.Error("Queued() missing the unsnoozed task")
+			t.Error("queue projection missing the unsnoozed task")
 		}
 		if sawSnoozedInLive {
-			t.Error("Queued() returned a snoozed task; should exclude")
+			t.Error("queue projection returned a snoozed task; should exclude")
 		}
 
-		all, err := s.QueuedIncludingSnoozed(ctx, orgID, nil)
+		all, _, err := s.List(ctx, orgID, queueWithSnoozedFilter(), db.ListOpts{Limit: 50})
 		if err != nil {
-			t.Fatalf("QueuedIncludingSnoozed: %v", err)
+			t.Fatalf("List queue+snoozed: %v", err)
 		}
 		var sawLiveAll, sawSnoozedAll bool
 		for _, x := range all {
@@ -790,29 +798,31 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			}
 		}
 		if !sawLiveAll {
-			t.Error("QueuedIncludingSnoozed() missing the live task")
+			t.Error("queue+snoozed projection missing the live task")
 		}
 		if !sawSnoozedAll {
-			t.Error("QueuedIncludingSnoozed() missing the snoozed task")
+			t.Error("queue+snoozed projection missing the snoozed task")
 		}
 	})
 
-	t.Run("QueuedIncludingSnoozed_excludes_claimed", func(t *testing.T) {
+	t.Run("List_only_unclaimed_excludes_claimed", func(t *testing.T) {
 		s, orgID, _, _, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "qsnz-claimed")
 		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
 			t.Fatalf("claim: ok=%v err=%v", ok, err)
 		}
-		out, err := s.QueuedIncludingSnoozed(ctx, orgID, nil)
+		out, _, err := s.List(ctx, orgID, queueWithSnoozedFilter(), db.ListOpts{Limit: 50})
 		if err != nil {
-			t.Fatalf("QueuedIncludingSnoozed: %v", err)
+			t.Fatalf("List queue+snoozed: %v", err)
 		}
 		for _, x := range out {
 			if x.ID == taskID {
-				t.Error("QueuedIncludingSnoozed surfaced a user-claimed task; only unclaimed rows belong in the queue projection")
+				t.Error("only_unclaimed surfaced a user-claimed task; only unclaimed rows belong in the queue projection")
 			}
 		}
 	})
+
+	runTaskListConformance(ctx, t, mk)
 
 	// --- Author-centric owner routing ---
 
@@ -909,8 +919,8 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, _, _, _, _ := mk(t)
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
-		if _, err := s.Queued(cancelled, orgID, nil); err == nil {
-			t.Errorf("Queued with cancelled ctx: want error, got nil")
+		if _, _, err := s.List(cancelled, orgID, queueFilter(), db.ListOpts{Limit: 50}); err == nil {
+			t.Errorf("List with cancelled ctx: want error, got nil")
 		}
 	})
 
@@ -922,6 +932,217 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		if len(refs) != 0 {
 			t.Errorf("got %d refs, want 0", len(refs))
+		}
+	})
+}
+
+// --- List: filters × paging × totals ---
+//
+// The projections below are the ones the product actually asks for, named
+// once so a subtest reads as "the queue deck" rather than as a filter literal.
+// They are constructed per call rather than shared as package vars because a
+// TaskListFilter holds slices, and a subtest that appended to a shared one
+// would rewrite every other subtest's query.
+
+// queueFilter is the pickable-right-now projection: the triage deck and the
+// board's Queued column. It is the exact filter set the former GET /api/queue
+// hardcoded.
+func queueFilter() db.TaskListFilter {
+	return db.TaskListFilter{Statuses: []string{"queued"}, OnlyUnclaimed: true}
+}
+
+// queueWithSnoozedFilter widens queueFilter to the board's "show snoozed"
+// toggle: the snoozed lane joins the queued one, and rows still inside their
+// snooze window stay in.
+func queueWithSnoozedFilter() db.TaskListFilter {
+	return db.TaskListFilter{
+		Statuses:       []string{"queued", "snoozed"},
+		OnlyUnclaimed:  true,
+		IncludeSnoozed: true,
+	}
+}
+
+// claimedFilter is the board's Claimed column — the claim axis, not a
+// lifecycle status.
+func claimedFilter() db.TaskListFilter {
+	return db.TaskListFilter{Statuses: []string{db.TaskListStatusClaimed}, IncludeSnoozed: true}
+}
+
+// runTaskListConformance covers what pagination adds on top of the filter
+// semantics the subtests above pin: that a page is a *window* on a stable
+// total order, so walking every page yields each matching row exactly once,
+// and that total_count counts matches rather than the page.
+func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFactory) {
+	t.Helper()
+
+	// listIDs runs List and returns the ids in the order the store produced
+	// them, plus the filtered total.
+	listIDs := func(t *testing.T, s db.TaskStore, orgID string, f db.TaskListFilter, opts db.ListOpts) ([]string, int) {
+		t.Helper()
+		tasks, total, err := s.List(ctx, orgID, f, opts)
+		if err != nil {
+			t.Fatalf("List(%+v, %+v): %v", f, opts, err)
+		}
+		ids := make([]string, len(tasks))
+		for i, task := range tasks {
+			ids[i] = task.ID
+		}
+		return ids, total
+	}
+
+	t.Run("List_empty_result_has_zero_total", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		seed(t, "empty-a")
+		// A lane nothing has reached yet: the seeder mints queued rows.
+		ids, total := listIDs(t, s, orgID, db.TaskListFilter{Statuses: []string{"in_review"}}, db.ListOpts{Limit: 50})
+		if len(ids) != 0 || total != 0 {
+			t.Errorf("empty lane returned %d ids / total %d, want 0 / 0", len(ids), total)
+		}
+	})
+
+	t.Run("List_pages_partition_the_result_set", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		const n = 5
+		for i := range n {
+			seed(t, fmt.Sprintf("page-%d", i))
+		}
+		want, wantTotal := listIDs(t, s, orgID, queueFilter(), db.ListOpts{Limit: 50})
+		if wantTotal != n || len(want) != n {
+			t.Fatalf("unpaged read returned %d ids / total %d, want %d / %d", len(want), wantTotal, n, n)
+		}
+
+		// Walk it two at a time: the concatenation must reproduce the
+		// unpaged order exactly — no row dropped between pages, none
+		// repeated across them — and every page must report the same total.
+		var walked []string
+		for offset := 0; offset < n; offset += 2 {
+			ids, total := listIDs(t, s, orgID, queueFilter(), db.ListOpts{Limit: 2, Offset: offset})
+			if total != n {
+				t.Errorf("offset %d: total = %d, want %d (the filtered total, not the page length)", offset, total, n)
+			}
+			walked = append(walked, ids...)
+		}
+		if !slices.Equal(walked, want) {
+			t.Errorf("paged walk = %v, want %v (pages must partition the total order)", walked, want)
+		}
+
+		// The page-size boundary: a window exactly the size of the result
+		// set returns all of it, and the page after the last one is empty
+		// while the total stays truthful.
+		if ids, total := listIDs(t, s, orgID, queueFilter(), db.ListOpts{Limit: n}); len(ids) != n || total != n {
+			t.Errorf("limit == result size returned %d ids / total %d, want %d / %d", len(ids), total, n, n)
+		}
+		if ids, total := listIDs(t, s, orgID, queueFilter(), db.ListOpts{Limit: 2, Offset: n}); len(ids) != 0 || total != n {
+			t.Errorf("offset past the end returned %d ids / total %d, want 0 / %d", len(ids), total, n)
+		}
+	})
+
+	t.Run("List_order_is_total_and_dialect_agnostic", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		// The seeder mints rows that tie on every ordering key except the
+		// id, which is exactly the case offset paging breaks on without a
+		// tiebreaker: the ids must come back ascending in both dialects
+		// (Postgres compares uuid bytes, SQLite the canonical lowercase
+		// text — the same order for a canonical uuid).
+		for i := range 6 {
+			seed(t, fmt.Sprintf("order-%d", i))
+		}
+		ids, _ := listIDs(t, s, orgID, queueFilter(), db.ListOpts{Limit: 50})
+		if !slices.IsSorted(ids) {
+			t.Errorf("ids = %v, want ascending (the id tiebreaker is what makes offset paging stable)", ids)
+		}
+	})
+
+	t.Run("List_snoozed_sorts_behind_live_and_closed_behind_both", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		_, _, liveID := seed(t, "tail-live")
+		_, _, snoozedID := seed(t, "tail-snoozed")
+		_, _, doneID := seed(t, "tail-done")
+		if err := s.SetStatus(ctx, orgID, snoozedID, "snoozed"); err != nil {
+			t.Fatalf("SetStatus snoozed: %v", err)
+		}
+		if err := s.Close(ctx, orgID, doneID, "test", ""); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		ids, total := listIDs(t, s, orgID, db.TaskListFilter{IncludeSnoozed: true}, db.ListOpts{Limit: 50})
+		if total != 3 {
+			t.Fatalf("total = %d, want 3 (an empty status set means every lane)", total)
+		}
+		if want := []string{liveID, doneID, snoozedID}; !slices.Equal(ids, want) {
+			// live first, then the closed row, then the snoozed tail: a
+			// deferred entry never outranks pickable work, and a closed one
+			// never outranks either.
+			t.Errorf("order = %v, want %v", ids, want)
+		}
+	})
+
+	t.Run("List_closed_since_windows_terminal_rows_only", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		_, _, liveID := seed(t, "cs-live")
+		_, _, doneID := seed(t, "cs-done")
+		if err := s.Close(ctx, orgID, doneID, "test", ""); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		// A window that starts after the close hides the closed row and
+		// leaves the open one alone — the filter is about closed_at, and an
+		// open task has none.
+		future := time.Now().UTC().Add(time.Hour)
+		f := db.TaskListFilter{IncludeSnoozed: true, ClosedSince: &future}
+		ids, total := listIDs(t, s, orgID, f, db.ListOpts{Limit: 50})
+		if want := []string{liveID}; !slices.Equal(ids, want) || total != 1 {
+			t.Errorf("future window = %v (total %d), want %v (total 1)", ids, total, want)
+		}
+
+		// A window that starts before it keeps both.
+		past := time.Now().UTC().Add(-time.Hour)
+		f.ClosedSince = &past
+		ids, total = listIDs(t, s, orgID, f, db.ListOpts{Limit: 50})
+		if len(ids) != 2 || total != 2 {
+			t.Errorf("past window = %v (total %d), want both rows", ids, total)
+		}
+	})
+
+	t.Run("List_filters_compose", func(t *testing.T) {
+		s, orgID, _, _, userID, seed, _ := mk(t)
+		_, _, freeID := seed(t, "compose-free")
+		_, _, takenID := seed(t, "compose-taken")
+		if ok, err := s.ClaimQueuedForUser(ctx, orgID, takenID, userID); err != nil || !ok {
+			t.Fatalf("claim: ok=%v err=%v", ok, err)
+		}
+
+		// queued + only_unclaimed keeps the free one; the claimed lane keeps
+		// the taken one; asking for both lanes at once keeps both, because
+		// the status set is an OR and only_unclaimed is off.
+		if ids, total := listIDs(t, s, orgID, queueFilter(), db.ListOpts{Limit: 50}); !slices.Equal(ids, []string{freeID}) || total != 1 {
+			t.Errorf("queue projection = %v (total %d), want just the unclaimed task", ids, total)
+		}
+		if ids, total := listIDs(t, s, orgID, claimedFilter(), db.ListOpts{Limit: 50}); !slices.Equal(ids, []string{takenID}) || total != 1 {
+			t.Errorf("claimed projection = %v (total %d), want just the claimed task", ids, total)
+		}
+		both := db.TaskListFilter{Statuses: []string{"queued", db.TaskListStatusClaimed}, IncludeSnoozed: true}
+		if _, total := listIDs(t, s, orgID, both, db.ListOpts{Limit: 50}); total != 2 {
+			t.Errorf("queued+claimed total = %d, want 2", total)
+		}
+		// Contradictory but well-formed: the claimed lane under
+		// only_unclaimed is empty rather than an error.
+		contradiction := claimedFilter()
+		contradiction.OnlyUnclaimed = true
+		if ids, total := listIDs(t, s, orgID, contradiction, db.ListOpts{Limit: 50}); len(ids) != 0 || total != 0 {
+			t.Errorf("claimed+only_unclaimed = %v (total %d), want empty", ids, total)
+		}
+	})
+
+	t.Run("List_unknown_status_matches_nothing", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		seed(t, "bogus-status")
+		// The HTTP layer rejects a status outside the vocabulary; the store
+		// is not the validator, and must answer an honest empty rather than
+		// widening to everything.
+		ids, total := listIDs(t, s, orgID, db.TaskListFilter{Statuses: []string{"not_a_status"}}, db.ListOpts{Limit: 50})
+		if len(ids) != 0 || total != 0 {
+			t.Errorf("unknown status returned %d ids / total %d, want 0 / 0", len(ids), total)
 		}
 	})
 }

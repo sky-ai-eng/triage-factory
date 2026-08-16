@@ -127,116 +127,104 @@ func pgTaskTeamFilter(teamIDs []string, args []any) (string, []any) {
 	), args
 }
 
-func (s *taskStore) Queued(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error) {
-	// Derived filter mirrors SQLite. The event_handlers
-	// derived table is org-scoped so rules in another org can't
-	// influence ordering — load-bearing in multi mode.
-	args := []any{orgID}
-	teamClause, args := pgTaskTeamFilter(teamIDs, args)
-	return queryTasksCtx(ctx, s.q, `
-		SELECT `+pgTaskColumnsWithEntity+`
-		FROM tasks t
-		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-		LEFT JOIN (
-			SELECT org_id, event_type, MIN(sort_order) AS sort_order
-			FROM event_handlers
-			WHERE enabled = true AND kind = 'rule'
-			GROUP BY org_id, event_type
-		) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id
-		WHERE t.org_id = $1
-			AND t.status = 'queued'
-			AND t.claimed_by_agent_id IS NULL
-			AND t.claimed_by_user_id  IS NULL
-			AND (t.snooze_until IS NULL OR t.snooze_until <= NOW())`+teamClause+`
-		ORDER BY COALESCE(tr.sort_order, 999) ASC, COALESCE(t.priority_score, 0.5) DESC
-	`, args...)
-}
+// pgTaskRuleOrderJoin mirrors the SQLite join of the same name: each task's
+// matching event_handler rule sort_order (the lowest, when several rules cover
+// the event type), so the list ordering can put "CI is broken" above "someone
+// asked for a review". The derived table is org-scoped so another org's rules
+// can't influence ordering — load-bearing in multi mode.
+const pgTaskRuleOrderJoin = `
+	LEFT JOIN (
+		SELECT org_id, event_type, MIN(sort_order) AS sort_order
+		FROM event_handlers
+		WHERE enabled = true AND kind = 'rule'
+		GROUP BY org_id, event_type
+	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 
-func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error) {
-	// Snoozed rows render at the tail regardless of
-	// priority so deferred entries don't jump above live queued
-	// work. Postgres sorts false before true on the boolean
-	// expression (matches the SQLite mirror's 0/1 ordering).
-	args := []any{orgID}
-	teamClause, args := pgTaskTeamFilter(teamIDs, args)
-	return queryTasksCtx(ctx, s.q, `
-		SELECT `+pgTaskColumnsWithEntity+`
-		FROM tasks t
-		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-		LEFT JOIN (
-			SELECT org_id, event_type, MIN(sort_order) AS sort_order
-			FROM event_handlers
-			WHERE enabled = true AND kind = 'rule'
-			GROUP BY org_id, event_type
-		) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id
-		WHERE t.org_id = $1
-			AND t.status IN ('queued', 'snoozed')
-			AND t.claimed_by_agent_id IS NULL
-			AND t.claimed_by_user_id  IS NULL`+teamClause+`
-		ORDER BY (t.status = 'snoozed') ASC,
-		         COALESCE(tr.sort_order, 999) ASC,
-		         COALESCE(t.priority_score, 0.5) DESC
-	`, args...)
-}
+// pgTaskListOrder is List's ordering. It must stay byte-for-byte equivalent to
+// sqliteTaskListOrder in meaning — the dbtest conformance suite asserts the
+// two dialects agree on the order, not just the set. See that constant for why
+// each term is there.
+const pgTaskListOrder = `
+	ORDER BY (t.status = 'snoozed') ASC,
+	         (t.closed_at IS NOT NULL) ASC,
+	         t.closed_at DESC,
+	         COALESCE(tr.sort_order, 999) ASC,
+	         COALESCE(t.priority_score, 0.5) DESC,
+	         t.id ASC`
 
-func (s *taskStore) ByStatus(ctx context.Context, orgID, status string, teamIDs []string) ([]domain.Task, error) {
-	switch status {
-	case "claimed":
-		// "claimed" = any claim (user or bot) at
-		// status='queued'. Mirrors the SQLite branch — see that
-		// file's comment for the full rationale around the
-		// status='queued' filter and including bot claims to
-		// surface the delegate-spawn-failure retry case.
-		args := []any{orgID}
-		teamClause, args := pgTaskTeamFilter(teamIDs, args)
-		return queryTasksCtx(ctx, s.q, `
-			SELECT `+pgTaskColumnsWithEntity+`
-			FROM tasks t
-			JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-			WHERE t.org_id = $1
-				AND (t.claimed_by_user_id IS NOT NULL OR t.claimed_by_agent_id IS NOT NULL)
-				AND t.status = 'queued'`+teamClause+`
-			ORDER BY COALESCE(t.priority_score, 0.5) DESC
-		`, args...)
-	case "delegated":
-		args := []any{orgID}
-		teamClause, args := pgTaskTeamFilter(teamIDs, args)
-		return queryTasksCtx(ctx, s.q, `
-			SELECT `+pgTaskColumnsWithEntity+`
-			FROM tasks t
-			JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-			WHERE t.org_id = $1
-				AND t.claimed_by_agent_id IS NOT NULL
-				AND t.status NOT IN ('done', 'dismissed')`+teamClause+`
-			ORDER BY COALESCE(t.priority_score, 0.5) DESC
-		`, args...)
-	case "done", "dismissed":
-		// Cap the Done column at the last 7 days. Mirrors
-		// the SQLite branch — every close path now populates
-		// closed_at, so the NOT NULL guard turns missing values into
-		// surfacable bugs rather than letting them accumulate.
-		args := []any{orgID, status}
-		teamClause, args := pgTaskTeamFilter(teamIDs, args)
-		return queryTasksCtx(ctx, s.q, `
-			SELECT `+pgTaskColumnsWithEntity+`
-			FROM tasks t
-			JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-			WHERE t.org_id = $1
-				AND t.status = $2
-				AND t.closed_at IS NOT NULL
-				AND t.closed_at >= NOW() - INTERVAL '7 days'`+teamClause+`
-			ORDER BY t.closed_at DESC, COALESCE(t.priority_score, 0.5) DESC
-		`, args...)
+// pgTaskListWhere renders db.TaskListFilter as a WHERE body (no leading WHERE)
+// plus its args, numbering placeholders from $1. org_id is always $1 — in the
+// WHERE clause as defense in depth alongside RLS, like every other read here.
+func pgTaskListWhere(orgID string, f db.TaskListFilter) (string, []any) {
+	args := []any{orgID}
+	clauses := []string{"t.org_id = $1"}
+
+	if len(f.Statuses) > 0 {
+		var arms []string
+		var lifecycle []string
+		for _, s := range f.Statuses {
+			if s == db.TaskListStatusClaimed {
+				// The claim axis, not a lifecycle status — see
+				// db.TaskListStatusClaimed and the SQLite mirror.
+				arms = append(arms, "(t.status = 'queued' AND (t.claimed_by_user_id IS NOT NULL OR t.claimed_by_agent_id IS NOT NULL))")
+				continue
+			}
+			lifecycle = append(lifecycle, s)
+		}
+		if len(lifecycle) > 0 {
+			args = append(args, lifecycle)
+			arms = append(arms, fmt.Sprintf("t.status = ANY($%d)", len(args)))
+		}
+		clauses = append(clauses, "("+strings.Join(arms, " OR ")+")")
 	}
-	args := []any{orgID, status}
-	teamClause, args := pgTaskTeamFilter(teamIDs, args)
-	return queryTasksCtx(ctx, s.q, `
-		SELECT `+pgTaskColumnsWithEntity+`
+	if f.OnlyUnclaimed {
+		clauses = append(clauses, "t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL")
+	}
+	if !f.IncludeSnoozed {
+		clauses = append(clauses, "(t.snooze_until IS NULL OR t.snooze_until <= NOW())")
+	}
+	if f.ClosedSince != nil {
+		// Terminal rows only — see the SQLite mirror.
+		args = append(args, f.ClosedSince.UTC())
+		clauses = append(clauses, fmt.Sprintf(
+			"(t.status NOT IN ('done', 'dismissed') OR (t.closed_at IS NOT NULL AND t.closed_at >= $%d))", len(args)))
+	}
+	teamClause, args := pgTaskTeamFilter(f.TeamIDs, args)
+	// pgTaskTeamFilter renders as " AND (...)" and numbers its placeholders
+	// off len(args), so it must stay last.
+	return strings.Join(clauses, " AND ") + teamClause, args
+}
+
+func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter, opts db.ListOpts) ([]domain.Task, int, error) {
+	where, args := pgTaskListWhere(orgID, f)
+
+	// Same filters, same connection as the page below — see the SQLite
+	// mirror for why the rule-order join is left out of the count.
+	var total int
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*)
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-		WHERE t.org_id = $1 AND t.status = $2`+teamClause+`
-		ORDER BY COALESCE(t.priority_score, 0.5) DESC
-	`, args...)
+		WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := `
+		SELECT ` + pgTaskColumnsWithEntity + `
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id` + pgTaskRuleOrderJoin + `
+		WHERE ` + where + pgTaskListOrder
+	pageArgs := args
+	if opts.Limit > 0 {
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+		query += fmt.Sprintf(`
+		LIMIT $%d OFFSET $%d`, len(pageArgs)-1, len(pageArgs))
+	}
+	tasks, err := queryTasksCtx(ctx, s.q, query, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	return tasks, total, nil
 }
 
 func (s *taskStore) FindActiveByEntityAndType(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error) {

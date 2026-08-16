@@ -22,6 +22,9 @@ import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
 import { appendToFeed, feedFromMessages, EMPTY_FEED, type RunCardFeed } from '../lib/runFeed'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
+import { usePagedList } from '../hooks/usePagedList'
+import type { PagedList } from '../hooks/usePagedList'
+import { TASK_LIST_PATH, doneListBody, queueListBody, statusListBody } from '../lib/taskList'
 import { useOrgRole } from '../hooks/useOrgRole'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import ZeroTeamState from '../components/ZeroTeamState'
@@ -152,13 +155,29 @@ function loadCollapsed(userID: string): CollapseMap {
 }
 
 export default function Board() {
-  // One bucket per column. Bot/user auto-routing keeps these
-  // disjoint at the backend, so a task only appears in one list.
-  const [queued, setQueued] = useState<Task[]>([])
-  const [claimed, setClaimed] = useState<Task[]>([])
-  const [inProgress, setInProgress] = useState<Task[]>([])
-  const [inReview, setInReview] = useState<Task[]>([])
-  const [done, setDone] = useState<Task[]>([])
+  // One paged list per column — five filter sets over the one tasks list
+  // route. Bot/user auto-routing keeps them disjoint at the backend, so a task
+  // only appears in one column. Each holds its own page token, so a deep
+  // column pages independently of the others.
+  const queuedList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the queue.')
+  const claimedList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the claimed tasks.')
+  const inProgressList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the in-progress tasks.')
+  const inReviewList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the in-review tasks.')
+  const doneList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the finished tasks.')
+  const queued = queuedList.items
+  const claimed = claimedList.items
+  const inProgress = inProgressList.items
+  const inReview = inReviewList.items
+  const done = doneList.items
+  // The loaders are stable across renders; the list objects around them are
+  // not. fetchTasks closes over these rather than the lists so its own
+  // identity stays stable — the WS refresh and the mount effect both key off
+  // it, and a per-render identity would refetch the board on every render.
+  const loadQueued = queuedList.load
+  const loadClaimed = claimedList.load
+  const loadInProgress = inProgressList.load
+  const loadInReview = inReviewList.load
+  const loadDone = doneList.load
   const [loading, setLoading] = useState(true)
 
   // Presence (TFAC-392): the board is an answer-capable surface for permission
@@ -393,42 +412,31 @@ export default function Board() {
     })()
   }, [])
 
-  // Derive the five column lists from a single /api/tasks
-  // multi-status fetch. /api/queue is still the canonical Queued
-  // source (it handles the snooze-window filter); the others fetch
-  // by status. The done query is backend-capped at 7 days.
+  // Derive the five column lists from five filter sets over the tasks list
+  // route. The Queued column is the queue projection (unclaimed, awake); the
+  // others are their own lane. Done carries its seven-day window explicitly —
+  // the server applies none of its own.
   const fetchTasks = useCallback(async () => {
     try {
       // Thread the per-page team filter into every column
       // fetch. Empty = the union of the viewer's teams (the default).
       const tf = teamFilterRef.current
-      const queueParams = new URLSearchParams()
-      if (showSnoozed) queueParams.set('include_snoozed', 'true')
-      for (const id of tf) queueParams.append('team_id', id)
-      const queueURL = '/api/queue' + (queueParams.toString() ? `?${queueParams.toString()}` : '')
-      const tasksURL = (status: string) => {
-        const p = new URLSearchParams({ status })
-        for (const id of tf) p.append('team_id', id)
-        return `/api/tasks?${p.toString()}`
-      }
-      // A column that fails paints empty rather than taking the other four
-      // down with it — the board is five independent reads, not one.
-      const column = (url: string) => apiJSON<Task[]>(url).catch(() => [] as Task[])
-      const [queuedRes, claimedRes, inProgressRes, inReviewRes, doneRes] = await Promise.all([
-        column(queueURL),
-        // "claimed" stays a derived pseudo-status (status=queued + a
-        // claim col set) — the backend's ByStatus(claimed) branch
-        // already handles this for back-compat.
-        column(tasksURL('claimed')),
-        column(tasksURL('in_progress')),
-        column(tasksURL('in_review')),
-        column(tasksURL('done')),
+      // A column that fails keeps whatever it was showing rather than taking
+      // the other four down with it — the board is five independent reads,
+      // not one. The hook holds each column's items, so a failed refresh
+      // paints the previous page instead of blanking the lane.
+      //
+      // The queued page is loaded but not read here: an unclaimed task has no
+      // run, so it skips the enrichment pass below.
+      const [, claimedRes, inProgressRes, inReviewRes, doneRes] = await Promise.all([
+        loadQueued(queueListBody(tf, showSnoozed)),
+        // "claimed" is the claim axis, not a lifecycle status: a queued task
+        // someone (or the bot) has taken.
+        loadClaimed(statusListBody('claimed', tf)),
+        loadInProgress(statusListBody('in_progress', tf)),
+        loadInReview(statusListBody('in_review', tf)),
+        loadDone(doneListBody(tf)),
       ])
-      setQueued(queuedRes)
-      setClaimed(claimedRes)
-      setInProgress(inProgressRes)
-      setInReview(inReviewRes)
-      setDone(doneRes)
 
       // Paint the board as soon as the five columns are in state. The agent-run
       // enrichment below fills cards progressively and must not hold the
@@ -441,7 +449,12 @@ export default function Board() {
       // cleared = no active run). ONE aggregated call returns every task's runs
       // plus each task's primary-run transcript, replacing the old per-task
       // serial loop of 2–3 round-trips each (TFAC-98).
-      const withRuns: Task[] = [...claimedRes, ...inProgressRes, ...inReviewRes, ...doneRes]
+      const withRuns: Task[] = [
+        ...(claimedRes?.items ?? []),
+        ...(inProgressRes?.items ?? []),
+        ...(inReviewRes?.items ?? []),
+        ...(doneRes?.items ?? []),
+      ]
       if (withRuns.length === 0) return
       const aggParams = new URLSearchParams()
       aggParams.set('task_ids', withRuns.map((t) => t.id).join(','))
@@ -518,7 +531,15 @@ export default function Board() {
     } finally {
       setLoading(false)
     }
-  }, [fetchChainStepRuns, showSnoozed])
+  }, [
+    fetchChainStepRuns,
+    showSnoozed,
+    loadQueued,
+    loadClaimed,
+    loadInProgress,
+    loadInReview,
+    loadDone,
+  ])
 
   useEffect(() => {
     fetchTasks()
@@ -805,6 +826,17 @@ export default function Board() {
       done: applyColumnFilter(done, filters.done, opts),
     }
   }, [queued, claimed, inProgress, inReview, done, filters, sortByRunAttention, resolveClaimee])
+
+  // Each column's paging state, so a lane deeper than one page can say so and
+  // fetch the rest. Rebuilt per render (the lists change every load) and read
+  // only at the column tail.
+  const paging: Record<ColumnId, PagedList<Task>> = {
+    queued: queuedList,
+    claimed: claimedList,
+    in_progress: inProgressList,
+    in_review: inReviewList,
+    done: doneList,
+  }
 
   const rawByColumn = useMemo<Record<ColumnId, Task[]>>(
     () => ({
@@ -1370,6 +1402,14 @@ export default function Board() {
                     onArtifactResolved={fetchTasks}
                     onRetry={handlePickerDelegate}
                   />
+                  {paging[colId].hasMore && (
+                    <ColumnMore
+                      shown={rawByColumn[colId].length}
+                      total={paging[colId].total}
+                      loading={paging[colId].loading}
+                      onLoadMore={paging[colId].loadMore}
+                    />
+                  )}
                 </BoardColumn>
               ),
             )}
@@ -1728,4 +1768,31 @@ const SortableAgentCard = memo(function SortableAgentCard({
 
 function EmptyColumn({ children }: { children: React.ReactNode }) {
   return <p className="text-[12px] text-text-tertiary text-center py-12">{children}</p>
+}
+
+// ColumnMore is the tail of a column that holds more than one page. A lane
+// that silently stopped at its page size would read as "that's all there is",
+// which is the failure the list contract exists to prevent — so the count is
+// stated and the next page is one click away.
+function ColumnMore({
+  shown,
+  total,
+  loading,
+  onLoadMore,
+}: {
+  shown: number
+  total: number
+  loading: boolean
+  onLoadMore: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onLoadMore}
+      disabled={loading}
+      className="w-full py-2 text-[12px] text-text-tertiary hover:text-text-secondary disabled:opacity-50"
+    >
+      {loading ? 'Loading…' : `Load more — showing ${shown} of ${total}`}
+    </button>
+  )
 }

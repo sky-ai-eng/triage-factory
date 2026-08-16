@@ -3,6 +3,7 @@ import {
   apiErrors,
   apiFetch,
   apiJSON,
+  apiList,
   httpErrorMessage,
   HttpError,
   setUnauthHandler,
@@ -204,6 +205,51 @@ describe('apiFetch allow', () => {
     stubFetch(409, JSON.stringify({ error: 'already pending' }))
     await expect(apiJSON<{ error: string }>('/api/invites', { allow: [409] })).resolves.toEqual({
       error: 'already pending',
+    })
+  })
+})
+
+describe('apiList', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('POSTs the filters and returns the envelope', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () =>
+        Promise.resolve(
+          JSON.stringify({ items: [{ id: 'a' }], next_page_token: 'tok', total_count: 7 }),
+        ),
+    } as unknown as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const page = await apiList<{ id: string }>('/api/tasks/list', { statuses: ['queued'] })
+
+    expect(page).toEqual({ items: [{ id: 'a' }], next_page_token: 'tok', total_count: 7 })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/tasks/list',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ statuses: ['queued'] }) }),
+    )
+  })
+
+  it('normalizes a last page, which omits next_page_token', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(JSON.stringify({ items: [], total_count: 0 })),
+      } as unknown as Response),
+    )
+
+    // Callers branch on `next_page_token !== ''`; an absent field must not
+    // reach them as undefined.
+    await expect(apiList('/api/tasks/list', {})).resolves.toEqual({
+      items: [],
+      next_page_token: '',
+      total_count: 0,
     })
   })
 })
