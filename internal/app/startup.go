@@ -38,7 +38,7 @@ func (a *App) runStartupTasks(ctx context.Context) {
 		// Headless env-driven provisioning (TFAC-411): when TF_HEADLESS is set,
 		// provision the local tenant and seed repos / Jira / identity from env so
 		// a keychain-less, browser-less install reaches setup_complete. Runs
-		// before startPolling → bootstrapBareClones so the seeded repos clone on
+		// before startBrain → bootstrapBareClones so the seeded repos clone on
 		// the first cycle. Local-mode only; if the seed vars are set without the
 		// trigger, warn rather than silently ignore them.
 		if server.HeadlessEnabled() {

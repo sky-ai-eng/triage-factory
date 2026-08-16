@@ -418,11 +418,11 @@ func (s *Spawner) ExpirePermissionsForClaim(orgID, claimID string) {
 //
 // With absent.enabled false this is the exact legacy select: ch vs the full
 // window. With it enabled the wait polls presence on a short ticker and tracks
-// two deadlines: the full window (always), and absentSince+grace (only while no
+// two deadlines: the full window (always), and the grace clock (only while no
 // answer-capable, focused tab is present in the run's org). The effective
 // deadline is whichever is sooner; presence flipping to present re-arms the wait
-// to the full window (clears absentSince), and flipping back resets the grace
-// clock. The grace deadline never exceeds the full window (clampGrace), so the
+// to the full window (disarming graceTimer), and flipping back restarts the
+// grace clock. The grace deadline never exceeds the full window (clampGrace), so the
 // total wait is bounded by permTimeout() in every branch.
 func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, runID string, full time.Duration, absent AbsentAutoDeny) (agentproc.PermissionDecision, bool, string, string) {
 	if !absent.enabled {
@@ -440,8 +440,8 @@ func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, r
 	//     invariant holds precisely, not within a poll interval.
 	//   - graceTimer is the absent deadline, armed only while unattended. The
 	//     ticker's sole job is to re-read presence and arm/disarm + reset this
-	//     timer on the present↔absent edges (so a present→absent flip restarts
-	//     the grace clock from that moment, matching "absentSince resets to now").
+	//     timer on the present↔absent edges, so a present→absent flip restarts
+	//     the grace clock from that moment.
 	fullTimer := time.NewTimer(full)
 	defer fullTimer.Stop()
 	ticker := time.NewTicker(s.presencePollInterval())

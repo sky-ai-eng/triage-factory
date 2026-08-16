@@ -339,7 +339,7 @@ func TestActiveOrg_Update_CrossOriginRejected(t *testing.T) {
 	}
 }
 
-// TestActiveOrg_Update_RevokedSession_Returns401 covers the race where
+// TestActiveOrg_Update_RevokedSession_StoreReturnsNoRows covers the race where
 // a session was revoked between withSession's lookup and the UPDATE.
 // In practice withSession's lookup would already have 401'd, but the
 // store API returns sql.ErrNoRows; the handler must surface that as

@@ -19,7 +19,7 @@ const testOrg = "org-1"
 type fakeApps struct {
 	db.GitHubAppsStore
 
-	// app is the org's registration. Defaulted to an ACTIVE App by newApps —
+	// app is the org's registration. Defaulted to an ACTIVE App by fakeApps —
 	// the shape every grant-reading test needs — since an inactive one is
 	// deliberately skipped before any grant read.
 	app *domain.OrgGitHubApp

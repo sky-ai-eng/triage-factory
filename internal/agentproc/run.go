@@ -736,7 +736,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	//      visible inside the alpine rootfs.
 	//
 	//   2. The per-run agenthost unix socket at /run/tf.sock (RW). Started
-	//      below when StartAgentHost is supplied. Caller-side hostAgentHost
+	//      below when StartAgentHost is supplied. The caller's StartAgentHost
 	//      handles chown/chmod so the sandbox UID can connect.
 	extraMounts := []sandbox.Mount{}
 	if hostSelfBin != "" {

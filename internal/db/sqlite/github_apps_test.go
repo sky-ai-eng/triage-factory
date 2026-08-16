@@ -237,7 +237,7 @@ func TestGitHubAppsStore_SQLite_DeleteForOrg(t *testing.T) {
 }
 
 // TestGitHubAppsStore_SQLite_InstallationLifecycle pins Upsert →
-// MarkRemoved → Upsert-revive against the active-only read.
+// MarkInstallationRemoved → Upsert-revive against the active-only read.
 func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)

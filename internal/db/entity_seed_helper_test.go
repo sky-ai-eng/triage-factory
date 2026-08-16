@@ -20,8 +20,7 @@ import (
 //
 // Returns a populated domain.Entity for caller convenience (most
 // tests want the generated id). state defaults to "active"; tests
-// that need a closed entity flip it after via the SQL UPDATE in
-// closeEntityForTest.
+// that need a closed entity flip it afterwards with their own UPDATE.
 func createEntityForTest(t *testing.T, database *sql.DB, source, sourceID, kind, title, url string) *domain.Entity {
 	t.Helper()
 	id := uuid.New().String()

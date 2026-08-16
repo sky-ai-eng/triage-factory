@@ -38,7 +38,7 @@ func forcedReply(analysis, summary string) scriptedTurn {
 	}}}
 }
 
-// deliveredRowWithContent finds the delivered row carrying content in the
+// rowWithContent finds the delivered row carrying content in the
 // request's row set, or nil.
 func rowWithContent(rows []domain.Message, content string) *domain.Message {
 	for i := range rows {

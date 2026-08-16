@@ -415,7 +415,7 @@ func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ClaimRejectsStealingFromBot pins the swipe-claim
+// TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover pins the swipe-claim
 // race-safe handler: when the task is bot-claimed, the handler must
 // route through TakeoverClaimFromAgent's optimistic guard and
 // produce a clean takeover (bot claim → user claim, atomic). This

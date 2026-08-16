@@ -80,7 +80,7 @@ type slackReadChannelArgs struct {
 }
 
 // slackMessageView is one message in a read verb's output array — sender
-// name resolution is best-effort (see resolveSenderNames in exec_host.go),
+// name resolution is best-effort (see resolveSender in exec_host.go),
 // so SenderName is "" rather than failing the whole read when it can't
 // resolve.
 type slackMessageView struct {

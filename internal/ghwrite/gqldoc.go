@@ -32,7 +32,7 @@ import "strings"
 // — and resolution touches each definition at most once, so a document cannot
 // spend this process's time by nesting or by pointing fragments at each other.
 
-// gqlOperationType names the three operation keywords. Only mutations are
+// gqlOperation names the three operation keywords. Only mutations are
 // audited; the other two are recognized so a document that mixes them can still
 // be resolved to the one operation that ran.
 const (

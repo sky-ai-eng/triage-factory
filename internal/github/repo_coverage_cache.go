@@ -38,8 +38,8 @@ const repoCoverageTTL = 5 * time.Minute
 // grant: a cached positive keeps using the App token until the TTL expires, so
 // that repo's call 403s for at most repoCoverageTTL before re-probing self-heals
 // it. There's no webhook for grant edits regardless, and an installation removal
-// needs no eviction here — once it's gone tier1AppClient stops resolving, so
-// ClientForRepo skips the tier-1 block and never reads a stale entry.
+// needs no eviction here — once it's gone the tier-1 App token stops resolving,
+// so ClientForRepo skips the tier-1 block and never reads a stale entry.
 //
 // A login changing hands (one account renames away, another claims the freed
 // handle) is the same staleness in a rarer shape: an entry probed against the

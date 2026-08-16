@@ -37,7 +37,7 @@ type setupResponse struct {
 func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	// Setup writes credentials through the SecretStore, which is
-	// org-scoped — see handleSettingsPost for the multi-mode rationale.
+	// org-scoped — see handleOrgSettingsPost for the multi-mode rationale.
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return

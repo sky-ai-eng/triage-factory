@@ -134,7 +134,7 @@ func TestSSODiscover_VerifiedDomain_RoutesToSSO(t *testing.T) {
 	if body.StartURL != want {
 		t.Errorf("start_url = %q; want %q", body.StartURL, want)
 	}
-	// The start_url is the same SP-initiated endpoint handleSAMLStart serves.
+	// The start_url is the same SP-initiated endpoint StartSSO serves.
 	if !strings.HasPrefix(body.StartURL, "/api/auth/oauth/saml?") {
 		t.Errorf("start_url = %q; want the /api/auth/oauth/saml start endpoint", body.StartURL)
 	}
@@ -167,7 +167,7 @@ func TestSSODiscover_HostileReturnTo_ClampedToRoot(t *testing.T) {
 
 // TestSSODiscover_VerifiedDomain_DrivesIntoSAMLStart: the returned start_url,
 // when followed, actually initiates the SP flow — discovery hands the login
-// page a URL that handleSAMLStart accepts (303 to the IdP), not a dead link.
+// page a URL that StartSSO accepts (303 to the IdP), not a dead link.
 func TestSSODiscover_VerifiedDomain_DrivesIntoSAMLStart(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)

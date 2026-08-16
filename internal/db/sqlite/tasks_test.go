@@ -37,7 +37,7 @@ func TestTaskStore_SQLite(t *testing.T) {
 		}
 		// The local-default agent + user sentinels are seeded by the
 		// migration's defaults, but the agents row itself isn't —
-		// production seeds it via BootstrapLocalAgent. Replicate that
+		// production seeds it via BootstrapAgentForOrg. Replicate that
 		// shape inline so claim methods that FK into agents resolve.
 		if _, err := conn.Exec(
 			`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,

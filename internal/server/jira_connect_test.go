@@ -542,7 +542,7 @@ func TestJiraIdentityPAT_EmptyToken_Returns400(t *testing.T) {
 	}
 }
 
-// TestJiraIdentityPAT_NoJiraHost_Returns422 pins that capturing before Jira is
+// TestJiraIdentityPAT_NoJiraHost_ReturnsNotConfigured pins that capturing before Jira is
 // configured (no jira_base_url) is a 409 NOT_CONFIGURED with the "ask your
 // admin" shape — server-side configuration the caller can't fix by resending —
 // not a host round-trip against an empty URL.

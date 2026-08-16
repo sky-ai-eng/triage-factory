@@ -93,7 +93,7 @@ type llmResolveFunc func(ctx context.Context, orgID string) (map[string]string, 
 // org. It batches into chunks of batchSize and runs them in parallel via
 // r.scoreFn (the injectable batch seam). The returned skippedTasks is the
 // exact count of task inputs that were in failed batches — computed per-batch
-// rather than inferred from failedBatches * batchSize so the final partial
+// rather than inferred from the failed-batch count * batchSize so the final partial
 // batch doesn't inflate the count, and so the number stays correct if
 // batchSize changes. Failures are non-fatal: the method still returns whatever
 // scores succeeded, and the caller surfaces skippedTasks as a warning toast.

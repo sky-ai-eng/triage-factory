@@ -260,7 +260,7 @@ func TestGitHubAppsStore_Postgres_NonAdminWriteDenied(t *testing.T) {
 
 // TestGitHubAppsStore_Postgres_InstallationLifecycle exercises the
 // admin-pool installation writes (tf_app is denied all writes to
-// org_github_app_installations): Upsert → MarkRemoved → Upsert-revive.
+// org_github_app_installations): Upsert → MarkInstallationRemoved → Upsert-revive.
 // Wires both pools to AdminDB (BYPASSRLS) so the test exercises the SQL
 // independent of the auth path.
 func TestGitHubAppsStore_Postgres_InstallationLifecycle(t *testing.T) {

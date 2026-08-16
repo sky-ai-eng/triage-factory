@@ -24,7 +24,7 @@ import (
 //   - Local mode only. The app gates the call on a.local() && HeadlessEnabled();
 //     none of these env vars can reach a multi-mode org.
 //   - One-time seed. Everything below is applied only on the boot that
-//     provisions the tenant (justProvisioned), and each item additionally
+//     provisions the tenant, and each item additionally
 //     guards on its target being empty, so a restart never overwrites config
 //     the operator later edited in the UI. The DB is authoritative once
 //     populated; the env is the initial seed, not a competing store.

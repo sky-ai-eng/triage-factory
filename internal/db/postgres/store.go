@@ -144,7 +144,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// Agents.Create routes through admin (bootstrap has no JWT
 		// claims and the agents_insert policy gates on
 		// tf.user_is_org_admin); every other method on app. Same
-		// pool-split pattern as PromptStore + TaskRuleStore.
+		// pool-split pattern as PromptStore + EventHandlerStore.
 		Agents: newAgentStore(app, admin),
 		// TeamAgents.AddForTeam routes through admin for the same
 		// bootstrap reason; SetEnabled/Overrides/Remove/Get run on
@@ -423,7 +423,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 	return s.stores
 }
 
-// Connection openers (OpenAdmin, OpenApp) are NOT defined here — this
+// The admin/app connection openers are NOT defined here — this
 // package deliberately doesn't register the pgx stdlib driver as a
 // side-effect import. internal/app/stores.go owns opening the admin and
 // app *sql.DB handles (sql.Open("pgx", ...) against the admin/app DSNs)

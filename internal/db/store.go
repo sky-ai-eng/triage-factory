@@ -562,7 +562,7 @@ type TxRunner interface {
 }
 
 // ErrNotApplicableInLocal is returned by SQLite impls of multi-only
-// store methods (SessionStore.Insert, MembershipStore.Add, …). The
+// store methods (InvitesStore.Create, OrgMembershipsStore.RoleFor, …). The
 // auth path is gated behind runmode.ModeMulti, so this should never
 // reach a production user; the error is the safety net for code that
 // escapes that gate.

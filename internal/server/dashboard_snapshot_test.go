@@ -165,7 +165,7 @@ func TestPatchPRSnapshotDraft_MissingEntity_NoError(t *testing.T) {
 }
 
 func TestPatchPRSnapshotDraft_EmptySnapshot_NoError(t *testing.T) {
-	// Entity exists (e.g., FindOrCreateEntity ran but UpdateEntitySnapshot
+	// Entity exists (e.g., FindOrCreateEntity ran but UpdateSnapshot
 	// hasn't fired yet). Treat as missing — nothing to patch.
 	s := newTestServer(t)
 	if _, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "sky-ai-eng/triage-factory#100", "pr", "Pending", ""); err != nil {

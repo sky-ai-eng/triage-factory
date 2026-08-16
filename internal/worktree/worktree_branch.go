@@ -322,7 +322,7 @@ func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, runI
 // symbolically points at), or "" when HEAD is detached, the path isn't a git
 // worktree, or HEAD can't be read. The push gate (internal/delegate) uses this
 // to authorize "whatever branch the checkout is currently on" rather than a
-// prescribed conversation_worktrees.FeatureBranch: a detached HEAD — the state a fresh
+// branch prescribed when the worktree was reserved: a detached HEAD — the state a fresh
 // default / --ref `workspace add` lands in — yields "" so no push is authorized
 // until the agent creates its own branch.
 //

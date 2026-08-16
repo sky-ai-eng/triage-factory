@@ -6,7 +6,7 @@ package domain
 // no entity-side metadata. Read-path equivalent of factoryEntityJSON's
 // pendingTaskRef on the wire.
 //
-// Populated by db.ListActiveTaskRefsForEntities.
+// Populated by db.Tasks.ListActiveRefsForEntities.
 type PendingTaskRef struct {
 	ID        string
 	EntityID  string

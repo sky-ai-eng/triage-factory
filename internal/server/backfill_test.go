@@ -163,7 +163,7 @@ func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 	}
 	// Real entities applied; bogus id surfaces as a per-row failure
 	// rather than being silently counted (relies on
-	// db.AssignEntityProject returning sql.ErrNoRows on 0-row UPDATE).
+	// EntityStore.AssignProject returning sql.ErrNoRows on 0-row UPDATE).
 	if resp.Applied != 2 {
 		t.Errorf("applied = %d, want 2 (a + b; bogus id should fail)", resp.Applied)
 	}

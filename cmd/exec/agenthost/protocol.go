@@ -628,7 +628,7 @@ type memoryLoadResult struct {
 	Result *MemoryLoadResult `json:"result"`
 }
 
-// methodCallNames are the wire-name constants. Used by both client
+// The method* constants are the wire names. Used by both client
 // and server so a rename here is the only edit needed to propagate.
 const (
 	methodLookupRun                  = "LookupRun"

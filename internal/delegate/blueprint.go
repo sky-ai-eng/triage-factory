@@ -78,7 +78,7 @@ func decideBlueprintStep(outcome string, isFinal bool) (decision blueprintStepOu
 }
 
 // terminateBlueprint finalizes the blueprint run row and runs the shared
-// worktree cleanup that runAgent's per-step defers skipped. taskDone
+// worktree cleanup that runAgent's per-step defers skipped. status
 // distinguishes "all steps green, mark task done like a single run
 // would" (status=completed) from "stopped early — leave the task open
 // for human review" (any other terminal). skipCleanup short-circuits

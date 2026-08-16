@@ -229,7 +229,7 @@ func TestExtractZip_PerFileSizeCapRejected(t *testing.T) {
 // many-entry archives (the classic "zip bomb" shape) that slip past the
 // compressed-download cap AND the per-file cap.
 //
-// Uses a small testTotal (5 KB) against 10 entries of 1 KB each (10 KB
+// Uses a small totalCap (5 KB) against 10 entries of 1 KB each (10 KB
 // total) so the test stays cheap. The per-file cap is set loose (10 KB)
 // so this test exercises the total cap specifically, not the per-file
 // cap.

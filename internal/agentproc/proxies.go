@@ -172,8 +172,8 @@ var ErrNoSandboxGitCredentials = errors.New("agentproc: no GitHub credential res
 const defaultGitUpstream = "https://github.com"
 
 // sigV4LiveSource re-reads the run's newest sealed LLM material for the
-// SigV4 proxy — the executor's live-refresh channel (RunOptions.
-// LLMCredentialSource). Returns the newest bundle.LLM env map plus its
+// SigV4 proxy — the executor's live-refresh channel (StartRunProxies'
+// llmSource). Returns the newest bundle.LLM env map plus its
 // expiry; nil means the proxy freezes the run-start snapshot (the default
 // for bearer / anthropic, brain-side consumers, and local).
 type sigV4LiveSource func(ctx context.Context) (env map[string]string, expiry time.Time, err error)

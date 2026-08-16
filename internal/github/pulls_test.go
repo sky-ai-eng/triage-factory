@@ -40,7 +40,7 @@ func servePRFixture(t *testing.T, prJSON string) http.Handler {
 // on the upstream URL coming from base.repo.clone_url (anything else
 // would point the bare's origin at a fork) and on head.repo.clone_url
 // for fork-tracking configuration. The SSH equivalents are picked when
-// GitHubConfig.CloneProtocol == "ssh". If the GitHub API ever moves
+// OrgSettings.GitHubCloneProtocol == "ssh". If the GitHub API ever moves
 // these fields or the parser regresses, this test catches it before
 // every PR delegation starts pushing to the wrong place.
 func TestGetPR_ForkPR_ParsesHeadAndBaseCloneURLs(t *testing.T) {
