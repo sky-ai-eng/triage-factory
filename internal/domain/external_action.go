@@ -17,6 +17,17 @@ import (
 // org-scoped credential is in, an individual user's own credential is out (the
 // Jira claim/swipe/done/requeue flows, already attributed natively in Jira).
 //
+// One amendment to "immutable", and exactly one: the record of the act —
+// Target, Action, DetailJSON, Credential, OccurredAt, and the url column as
+// captured — is frozen, while the POINTER to where the object now lives is
+// maintained. A repository rename fills the row's current_url column (in the
+// same transaction as the rest of its rewrite), and reads serve
+// COALESCE(current_url, url) through the URL field below, so the feed's link
+// keeps resolving after the freed name is re-claimed by a different
+// repository. current_url is the only column an UPDATE may touch; rewriting
+// Target on the same reasoning would make the log assert TF acted on a name
+// that did not exist at the time.
+//
 // Wherever the action carries a DB state change (the server approval flips), the
 // row is written in the SAME transaction as that change, so the log can't diverge
 // from the action. The bot funnels record alongside the artifact upsert under the
@@ -43,7 +54,10 @@ type ExternalAction struct {
 	// ExternalID is the provider-native id of the backing object (PR number /
 	// review node id / comment id / issue key / branch ref). Empty → SQL NULL.
 	ExternalID string `json:"external_id,omitempty"`
-	// URL links to the object; empty → SQL NULL.
+	// URL links to the object. On a read this is the maintained pointer —
+	// COALESCE(current_url, url), so it resolves under the object's current
+	// name — while the url column itself keeps the link as captured at the
+	// time of the act. Empty → SQL NULL.
 	URL string `json:"url,omitempty"`
 	// FromState / ToState carry a transition's endpoints (a Jira status move, a PR
 	// draft→open). Empty for a non-transition action → SQL NULL.

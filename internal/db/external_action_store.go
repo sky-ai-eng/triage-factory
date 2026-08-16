@@ -32,6 +32,13 @@ import (
 // passes a deterministic key (domain.BranchPushDedupKey) so the git hook+proxy
 // twin collapses. SQLite is N=1 and unscoped; both pools collapse to the one
 // connection.
+//
+// Append-only carries one amendment: the record of the act is immutable, and
+// the POINTER to where the object now lives (current_url) is maintained — a
+// repository rename fills it inside its rewrite transaction, and every list
+// read serves COALESCE(current_url, url) as the row's URL. No method on this
+// interface mutates; the one UPDATE lives in the rename rewrite, and it may
+// touch current_url and nothing else. See domain.ExternalAction.
 type ExternalActionStore interface {
 	// Record inserts one audit row for orgID on the APP pool. entry.ID may be
 	// empty (the impls generate a uuid; Postgres via gen_random_uuid()).

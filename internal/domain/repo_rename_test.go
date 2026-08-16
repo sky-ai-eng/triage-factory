@@ -129,31 +129,33 @@ func TestRewriteArtifactDedupKey(t *testing.T) {
 	}
 }
 
-func TestRewritePinnedRepos(t *testing.T) {
+func TestRewriteRepoURL(t *testing.T) {
 	const from, to = "octo/api", "octo/platform-api"
-
-	got, changed := RewritePinnedRepos([]string{"acme/tools", "Octo/API", "octo/api-gateway"}, from, to)
-	if !changed {
-		t.Fatal("changed = false, want true")
+	tests := []struct {
+		in      string
+		want    string
+		wantOK  bool
+		because string
+	}{
+		{in: "https://github.com/octo/api/pull/18", want: "https://github.com/octo/platform-api/pull/18", wantOK: true, because: "a PR link"},
+		{in: "https://github.com/Octo/API", want: "https://github.com/octo/platform-api", wantOK: true, because: "the repo home, matched case-insensitively"},
+		{in: "https://ghe.acme.dev/octo/api/pull/2?diff=split#discussion_r1", want: "https://ghe.acme.dev/octo/platform-api/pull/2?diff=split#discussion_r1", wantOK: true, because: "an enterprise host, query and fragment kept"},
+		// A branch named after the repository repeats the slug later in the
+		// path. Only the leading segments are the repository; the branch is a
+		// ref that never moved.
+		{in: "https://github.com/octo/api/tree/octo/api", want: "https://github.com/octo/platform-api/tree/octo/api", wantOK: true, because: "a later segment repeating the slug stays put"},
+		{in: "https://github.com/octo/api-gateway/pull/4", want: "https://github.com/octo/api-gateway/pull/4", because: "a longer name that merely starts the same"},
+		{in: "https://octo.api/somewhere", want: "https://octo.api/somewhere", because: "a host spelling the slug is not the slug"},
+		{in: "https://github.com/acme/octo/api", want: "https://github.com/acme/octo/api", because: "the slug is not at the path head"},
+		{in: "octo/api#18", want: "octo/api#18", because: "a composite key is not a URL"},
+		{in: "", want: "", because: "a URL TF never learned stays empty"},
 	}
-	if want := []string{"acme/tools", to, "octo/api-gateway"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("rewrite = %v, want %v — order is preserved and the neighbour is left alone", got, want)
-	}
-
-	if _, changed := RewritePinnedRepos([]string{"acme/tools"}, from, to); changed {
-		t.Error("changed = true for a list with nothing pinned under the old slug")
-	}
-	if _, changed := RewritePinnedRepos(nil, from, to); changed {
-		t.Error("changed = true for an empty list")
-	}
-
-	// A project that already pins the target absorbs the moved pin rather than
-	// listing one repository twice.
-	got, changed = RewritePinnedRepos([]string{to, from}, from, to)
-	if !changed {
-		t.Fatal("changed = false, want true")
-	}
-	if want := []string{to}; !reflect.DeepEqual(got, want) {
-		t.Errorf("rewrite = %v, want %v", got, want)
+	for _, tc := range tests {
+		t.Run(tc.because, func(t *testing.T) {
+			got, ok := RewriteRepoURL(tc.in, from, to)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("RewriteRepoURL(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.wantOK)
+			}
+		})
 	}
 }

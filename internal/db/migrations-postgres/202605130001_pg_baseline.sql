@@ -624,7 +624,11 @@ CREATE TABLE public.access_change_log (
 -- pre-push hook AND the git-proxy backstop both observe it) carries a
 -- deterministic key so the twin collapses under ON CONFLICT DO NOTHING; every
 -- other action gets a unique key, so DO NOTHING only ever collapses the twin.
--- See TFAC-483.
+-- One amendment to "immutable": the record of the act — target, action,
+-- detail_json, credential, occurred_at, url as captured — is frozen, while
+-- current_url, the POINTER to where the object lives now, is maintained (a
+-- repository rename fills it; reads serve COALESCE(current_url, url)). It is
+-- the only column an UPDATE may touch. See TFAC-483.
 CREATE TABLE public.external_actions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -634,6 +638,7 @@ CREATE TABLE public.external_actions (
     target text NOT NULL,
     external_id text,
     url text,
+    current_url text,
     from_state text,
     to_state text,
     conversation_id uuid,
