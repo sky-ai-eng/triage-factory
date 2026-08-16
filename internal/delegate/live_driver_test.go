@@ -501,7 +501,7 @@ func TestDriveLiveRun_InterruptBoundedResumeParksOpen(t *testing.T) {
 // with only cost/duration/turns taken cumulatively.
 func TestFoldAccounting_PauseDoesNotPoisonConclusion(t *testing.T) {
 	pause := &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true, CostUSD: 0.25, DurationMs: 1000, NumTurns: 15}
-	conclusion := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`, Subtype: "success", StopReason: "end_turn", CostUSD: 0.5, DurationMs: 500, NumTurns: 5}
+	conclusion := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`, Subtype: "success", CostUSD: 0.5, DurationMs: 500, NumTurns: 5}
 	merged := agentproc.MergeResult(pause, conclusion)
 	if !merged.IsError || !merged.Interrupted {
 		t.Fatal("precondition: MergeResult keeps IsError/Interrupted sticky across turns")
@@ -511,7 +511,7 @@ func TestFoldAccounting_PauseDoesNotPoisonConclusion(t *testing.T) {
 	if got.IsError || got.Interrupted {
 		t.Errorf("disposition must come from the classified turn: IsError=%v Interrupted=%v", got.IsError, got.Interrupted)
 	}
-	if got.Subtype != "success" || got.StopReason != "end_turn" || got.Result != conclusion.Result {
+	if got.Subtype != "success" || got.Result != conclusion.Result {
 		t.Errorf("classified turn's envelope/subtype must survive the fold: %+v", got)
 	}
 	if got.CostUSD != 0.75 || got.DurationMs != 1500 || got.NumTurns != 20 {

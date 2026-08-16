@@ -2513,7 +2513,7 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 		// so the UPDATE matches nothing.
 		updates := map[string]string{
 			"tasks":          `UPDATE tasks          SET status        = 'pwned' WHERE id = $1`,
-			"conversations":  `UPDATE conversations  SET stop_reason   = 'pwned' WHERE id = $1`,
+			"conversations":  `UPDATE conversations  SET park_reason   = 'pwned' WHERE id = $1`,
 			"prompts":        `UPDATE prompts        SET body          = 'pwned' WHERE id = $1`,
 			"projects":       `UPDATE projects       SET description   = 'pwned' WHERE id = $1`,
 			"event_handlers": `UPDATE event_handlers SET name          = 'pwned' WHERE id = $1`,

@@ -560,7 +560,7 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	// settling its own cost lump on that row and stamping its telemetry
 	// onto the claim it releases; the derived totals then ADD across the
 	// cycles.
-	settle := func(cost float64, durationMs, numTurns int, stopReason, resultSummary, outcome string) {
+	settle := func(cost float64, durationMs, numTurns int, resultSummary, outcome string) {
 		t.Helper()
 		if err := stores.Conversations.SetExecutorSystem(ctx, orgID, runID, "exec-lc", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
@@ -574,13 +574,13 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 			t.Fatalf("InsertMessage under synth claims: %v", err)
 		}
 		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-			return tx.Conversations.Complete(ctx, orgID, runID, "completed", cost, durationMs, numTurns, stopReason, resultSummary, outcome, "", "")
+			return tx.Conversations.Complete(ctx, orgID, runID, "completed", cost, durationMs, numTurns, resultSummary, outcome, "", "")
 		}); err != nil {
 			t.Fatalf("Complete under synth claims: %v", err)
 		}
 	}
-	settle(0.5, 1500, 3, "partial", "", "")
-	settle(0.25, 500, 2, "end_turn", "ok", "finish")
+	settle(0.5, 1500, 3, "", "")
+	settle(0.25, 500, 2, "ok", "finish")
 
 	// Verify through the derived projection: row landed in completed, the
 	// totals reflect both cycles, creator stayed the original user.
@@ -600,8 +600,10 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	if got.NumTurns == nil || *got.NumTurns != 5 {
 		t.Errorf("num_turns = %v, want 5 (3 + 2 across claims)", got.NumTurns)
 	}
-	if got.StopReason != "end_turn" {
-		t.Errorf("stop_reason = %q, want end_turn", got.StopReason)
+	// A terminal writes no park reason — it did not park, and the model's own
+	// stop reason is a per-turn fact on the messages rows.
+	if got.ParkReason != "" {
+		t.Errorf("park_reason = %q after two terminals, want empty", got.ParkReason)
 	}
 	if got.CreatorUserID != userID {
 		t.Errorf("creator_user_id = %v, want %s", got.CreatorUserID, userID)

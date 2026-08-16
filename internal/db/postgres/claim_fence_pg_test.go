@@ -199,7 +199,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-complete")
 		reap(t, h.AdminDB, fx.orgID, fx.runID)
 
-		err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, "completed", 1.5, 100, 2, "ok", "done", "finish", "", "")
+		err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, "completed", 1.5, 100, 2, "done", "finish", "", "")
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("complete after reap = %v, want ErrClaimReleased", err)
 		}
@@ -358,7 +358,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("insert onto another conversation = %v, want ErrClaimReleased", err)
 		}
-		if err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, other, fx.claimID, "completed", 0, 0, 0, "ok", "", "finish", "", ""); !errors.Is(err, db.ErrClaimReleased) {
+		if err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, other, fx.claimID, "completed", 0, 0, 0, "", "finish", "", ""); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("complete on another conversation = %v, want ErrClaimReleased", err)
 		}
 		if _, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, other, fx.claimID, string(domain.RunFailureCrash)); !errors.Is(err, db.ErrClaimReleased) {
@@ -528,7 +528,7 @@ func TestClaimFence_SuccessorWritesWhileTheZombieIsRefused(t *testing.T) {
 	// The zombie's terminal is refused too, so the successor keeps driving a
 	// conversation that is still `running` rather than one buried under a
 	// stale completion.
-	if err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.runID, zombieClaim, "failed", 0, 0, 0, "crash", "", "", "", string(domain.RunFailureCrash)); !errors.Is(err, db.ErrClaimReleased) {
+	if err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.runID, zombieClaim, "failed", 0, 0, 0, "", "", "", string(domain.RunFailureCrash)); !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("zombie complete = %v, want ErrClaimReleased", err)
 	}
 
@@ -555,7 +555,7 @@ func TestClaimFence_SuccessorWritesWhileTheZombieIsRefused(t *testing.T) {
 
 	// And the successor's own terminal still works — the fence refuses
 	// zombies, not owners.
-	if err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.runID, successorClaim, "completed", 0.25, 900, 1, "ok", "done", "finish", "", ""); err != nil {
+	if err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.runID, successorClaim, "completed", 0.25, 900, 1, "done", "finish", "", ""); err != nil {
 		t.Fatalf("successor complete: %v", err)
 	}
 	if got, _ := fx.store.Get(ctx, fx.orgID, fx.runID); got.Status != "completed" {

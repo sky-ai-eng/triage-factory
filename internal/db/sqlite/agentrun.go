@@ -64,7 +64,7 @@ func releaseActiveClaim(ctx context.Context, q queryer, runID, outcome string) e
 	return err
 }
 
-func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -78,13 +78,12 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 			UPDATE conversations
 			SET status = ?,
 			    completed_at = ?,
-			    stop_reason = ?,
 			    result_summary = ?,
 			    outcome = ?,
 			    outcome_reason = ?,
 			    failure_kind = ?
 			WHERE id = ?
-		`, status, time.Now(), stopReason, resultSummary,
+		`, status, time.Now(), resultSummary,
 			nullIfEmpty(outcome), nullIfEmpty(outcomeReason), nullIfEmpty(failureKind),
 			runID)
 		if err != nil {
@@ -219,26 +218,25 @@ func (s *agentRunStore) ParkOpen(ctx context.Context, orgID, runID string, park 
 // undelivered input is claimable, so a park that "succeeded" on a finished run
 // would hand it back to the dispatcher.
 //
-// COALESCE on stop_reason / result_summary rather than a bare assignment: an
-// idle park carries neither and must not blank what an earlier deliberate stop
-// recorded.
+// COALESCE on park_reason / result_summary rather than a bare assignment: a
+// park that carries neither must not blank what an earlier one recorded.
 func parkOpen(ctx context.Context, q queryer, runID string, park db.Park) (bool, error) {
 	// A deliberate stop re-parks an already-parked row; an idle turn-end does
 	// not. Spelled as an extra excluded status rather than two queries.
 	reparkGuard := `, 'open'`
-	if park.Deliberate() {
+	if park.Deliberate {
 		reparkGuard = ``
 	}
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations
 		SET status = 'open',
 		    parked_at = COALESCE(parked_at, ?),
-		    stop_reason = COALESCE(NULLIF(?, ''), stop_reason),
+		    park_reason = COALESCE(NULLIF(?, ''), park_reason),
 		    result_summary = COALESCE(NULLIF(?, ''), result_summary)
 		WHERE id = ?
 		  AND (status IS NULL
 		       OR status NOT IN (`+runTerminalStatusesSQL+reparkGuard+`))
-	`, time.Now().UTC(), park.StopReason, park.ResultSummary, runID)
+	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, runID)
 	if err != nil {
 		return false, err
 	}
@@ -258,7 +256,8 @@ func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID st
 	err := inTx(ctx, s.q, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = NULL,
-			                parked_at = NULL, preferred_executor_id = NULL
+			                parked_at = NULL, park_reason = NULL,
+			                preferred_executor_id = NULL
 			WHERE id = ?
 			  AND (status = 'open'
 			       OR (status = 'completed'
@@ -463,7 +462,7 @@ const sqliteRunColumns = `
 	(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id)     AS total_cost_usd,
 	(SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = r.id) AS duration_ms,
 	(SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = r.id)   AS num_turns,
-	r.stop_reason, r.worktree_path,
+	r.park_reason, r.worktree_path,
 	r.result_summary, r.outcome, r.outcome_reason, r.failure_kind, r.sdk_session_id, r.actor_agent_id,
 	COALESCE(r.trigger_type, ''),
 	r.creator_user_id,
@@ -744,8 +743,8 @@ func (s *agentRunStore) LookupOrgForRunSystem(ctx context.Context, runID string)
 	return orgID, err
 }
 
-func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
-	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind)
+func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
+	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, resultSummary, outcome, outcomeReason, failureKind)
 }
 
 func (s *agentRunStore) ParkOpenSystem(ctx context.Context, orgID, runID string, park db.Park) (bool, error) {
@@ -855,8 +854,8 @@ func (s *agentRunStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, 
 	return s.markDelivered(ctx, orgID, runID, ids, subtype)
 }
 
-func (s *agentRunStore) CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
-	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind)
+func (s *agentRunStore) CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
+	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, resultSummary, outcome, outcomeReason, failureKind)
 }
 
 func (s *agentRunStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, failureKind string) (bool, error) {
@@ -1074,11 +1073,11 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 		INSERT INTO messages (conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id,
 		                      is_error, metadata, model,
 		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
-		                      reasoning, content_blocks, delivered, window_state, seq, duration_ms)
+		                      reasoning, content_blocks, delivered, window_state, seq, duration_ms, stop_reason)
 		VALUES (?, ?,
 		        COALESCE(?, (SELECT id FROM claims
 		                     WHERE conversation_id = ? AND released_at IS NULL)),
-		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		msg.ConversationID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID), msg.ConversationID,
 		msg.Role, msg.Content, msg.Subtype,
@@ -1087,7 +1086,7 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 		sqliteNullInt(msg.CacheReadTokens), sqliteNullInt(msg.CacheCreationTokens),
 		sqliteNullFloat(msg.CostUSD), msg.CreatedAt,
 		reasoningJSON, contentBlocksJSON, delivered, string(windowState), sqliteNullFloat(msg.Seq),
-		sqliteNullInt(msg.DurationMs),
+		sqliteNullInt(msg.DurationMs), sqliteNullStr(msg.StopReason),
 	)
 	if err != nil {
 		return 0, err
@@ -1097,7 +1096,7 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 
 const sqliteMessageColumns = `id, conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
 	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
-	reasoning, content_blocks, delivered, window_state, seq, duration_ms`
+	reasoning, content_blocks, delivered, window_state, seq, duration_ms, stop_reason`
 
 // scanMessageRows drains a messages result set selecting
 // sqliteMessageColumns into domain.Message values. Shared by the
@@ -1115,17 +1114,19 @@ func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 		var windowState string
 		var seq sql.NullFloat64
 		var durationMs sql.NullInt64
+		var stopReason sql.NullString
 
 		if err := rows.Scan(
 			&m.ID, &m.ConversationID, &userID, &claimID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
 			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
-			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs,
+			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs, &stopReason,
 		); err != nil {
 			return nil, err
 		}
 
 		m.UserID = userID.String
+		m.StopReason = stopReason.String
 		m.ClaimID = claimID.String
 		m.Content = content.String
 		m.Subtype = subtype.String
@@ -1568,11 +1569,11 @@ func scanConversation(row *sql.Row, r *domain.Conversation) error {
 	var claimedAt sql.NullString
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
-	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
+	var parkReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
-		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
+		&costUSD, &durationMs, &numTurns, &parkReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
@@ -1580,7 +1581,7 @@ func scanConversation(row *sql.Row, r *domain.Conversation) error {
 		return err
 	}
 	return finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
-		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
+		model, parkReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
 }
 
 func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
@@ -1588,11 +1589,11 @@ func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
 	var claimedAt sql.NullString
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
-	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
+	var parkReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
-		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
+		&costUSD, &durationMs, &numTurns, &parkReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
@@ -1600,14 +1601,14 @@ func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
 		return err
 	}
 	return finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
-		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
+		model, parkReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
 }
 
 func finalizeConversation(r *domain.Conversation, queuedAt sql.NullTime, claimedAt sql.NullString, completedAt sql.NullTime, costUSD sql.NullFloat64,
 	durationMs, numTurns, blueprintStep sql.NullInt64,
-	model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID sql.NullString) error {
+	model, parkReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID sql.NullString) error {
 	r.Model = model.String
-	r.StopReason = stopReason.String
+	r.ParkReason = domain.ParkReason(parkReason.String)
 	r.WorktreePath = worktreePath.String
 	r.ResultSummary = resultSummary.String
 	r.Outcome = outcome.String

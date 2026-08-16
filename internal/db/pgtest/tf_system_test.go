@@ -204,7 +204,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		// (claims SELECT + newest-row fallback) under the executor role's
 		// grant set.
 		if err := stores.Conversations.CompleteSystem(ctx, orgID, runID, "completed", 0.01, 1000, 3,
-			"", "did the thing", "completed", "", ""); err != nil {
+			"did the thing", "completed", "", ""); err != nil {
 			t.Errorf("Conversations.CompleteSystem: %v", err)
 		}
 

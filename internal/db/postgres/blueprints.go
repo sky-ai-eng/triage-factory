@@ -1139,7 +1139,7 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 // stopped when its parent ended. Read the `open` as "stopped without
 // concluding", NOT as "resumable" — the parent is terminal, so the claim gate
 // refuses it. Scoped to status IS NULL: a child that already parked itself
-// keeps its own parked_at and stop_reason, and one that already reached a
+// keeps its own parked_at and park_reason, and one that already reached a
 // terminal is left alone.
 func parkOrphanedChildRunsWithClaims(ctx context.Context, q queryer, orgID, blueprintRunID string) error {
 	_, err := q.ExecContext(ctx, `
@@ -1147,7 +1147,7 @@ func parkOrphanedChildRunsWithClaims(ctx context.Context, q queryer, orgID, blue
 			UPDATE conversations
 			SET status = 'open',
 			    parked_at = COALESCE(parked_at, now()),
-			    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
+			    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
 			    result_summary = COALESCE(NULLIF(result_summary, ''), $3)
 			WHERE org_id = $1 AND blueprint_run_id = $2 AND status IS NULL
 			RETURNING id
@@ -1167,7 +1167,7 @@ func parkOrphanedChildRuns(ctx context.Context, q queryer, orgID, blueprintRunID
 		UPDATE conversations
 		SET status = 'open',
 		    parked_at = COALESCE(parked_at, now()),
-		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
+		    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
 		    result_summary = COALESCE(NULLIF(result_summary, ''), $3)
 		WHERE org_id = $1 AND blueprint_run_id = $2 AND status IS NULL
 		RETURNING id
@@ -1330,7 +1330,7 @@ func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID stri
 		       (SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id AND m.org_id = r.org_id),
 		       (SELECT SUM(cl.duration_ms)::bigint FROM claims cl WHERE cl.conversation_id = r.id),
 		       (SELECT SUM(cl.num_turns)::bigint FROM claims cl WHERE cl.conversation_id = r.id),
-		       r.stop_reason, r.worktree_path,
+		       r.park_reason, r.worktree_path,
 		       r.result_summary, r.sdk_session_id, r.outcome, r.outcome_reason,
 		       r.blueprint_run_id, r.blueprint_step_index
 		FROM conversations r
@@ -1353,7 +1353,7 @@ func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID stri
 			stepIdx       sql.NullInt64
 			promptID      sql.NullString
 			model         sql.NullString
-			stopReason    sql.NullString
+			parkReason    sql.NullString
 			worktreeP     sql.NullString
 			resultSum     sql.NullString
 			sessionID     sql.NullString
@@ -1362,13 +1362,13 @@ func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID stri
 			blueprintRun  sql.NullString
 		)
 		if err := rows.Scan(&r.ID, &r.TaskID, &promptID, &r.Status, &model, &r.StartedAt, &completedAt,
-			&costUSD, &durationMs, &numTurns, &stopReason, &worktreeP, &resultSum, &sessionID,
+			&costUSD, &durationMs, &numTurns, &parkReason, &worktreeP, &resultSum, &sessionID,
 			&outcome, &outcomeReason, &blueprintRun, &stepIdx); err != nil {
 			return nil, err
 		}
 		r.PromptID = promptID.String
 		r.Model = model.String
-		r.StopReason = stopReason.String
+		r.ParkReason = domain.ParkReason(parkReason.String)
 		r.WorktreePath = worktreeP.String
 		r.ResultSummary = resultSum.String
 		r.SessionID = sessionID.String

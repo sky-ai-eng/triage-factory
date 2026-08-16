@@ -69,7 +69,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
 			claimID:       cfg.claimID,
-			reason:        db.ParkStopped("user_cancelled", ""),
+			reason:        db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 		}, "")
 		return engagementDisposition{fenced: fenced}
 	}
@@ -609,7 +609,7 @@ func (s *Spawner) recordNativeResult(
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
 			claimID:       cfg.claimID,
-			reason:        db.ParkStopped("user_cancelled", ""),
+			reason:        db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 		}, "")
 
 	case agentloop.ResultFailed:
@@ -670,7 +670,7 @@ func (s *Spawner) recordNativeResult(
 	// runtime settles cost per assistant row at call time, so the ledger is
 	// already complete. Passing a lump would double-count.
 	bgCtx := context.WithoutCancel(ctx)
-	if err := s.agentRuns.CompleteForClaimSystem(bgCtx, orgID, runID, cfg.claimID, "completed", 0, result.DurationMs, result.NumTurns, "", result.ResultSummary, outcome, outcomeReason, ""); err != nil {
+	if err := s.agentRuns.CompleteForClaimSystem(bgCtx, orgID, runID, cfg.claimID, "completed", 0, result.DurationMs, result.NumTurns, result.ResultSummary, outcome, outcomeReason, ""); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			delegateLog.Error("engagement fenced out at conclusion; a successor owns the conversation",
 				"run", runID, "claim", cfg.claimID)

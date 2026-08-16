@@ -333,7 +333,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	if !blueprintDrivableForClaim(br, run.BlueprintStepIndex) {
 		closeGate(engagementCancelled, nil)
 		s.endEngagement(run.ID, engagementCancelled)
-		if _, mErr := s.agentRuns.ParkOpenForClaimSystem(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, db.ParkStopped("user_cancelled", "Blueprint cancelled by user")); errors.Is(mErr, db.ErrClaimReleased) {
+		if _, mErr := s.agentRuns.ParkOpenForClaimSystem(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, db.ParkStopped(domain.ParkReasonBlueprintCancelled, "Blueprint cancelled by user")); errors.Is(mErr, db.ErrClaimReleased) {
 			// This claim was released before it disposed of its own step, so
 			// a successor holds the run now. Everything below acts on it —
 			// consuming its pending input, broadcasting its state, finalizing
@@ -936,7 +936,7 @@ func resumeParkContext(orgID string, run *domain.Conversation, task *domain.Task
 		triggerType:   "manual",
 		creatorUserID: userID,
 		claimID:       run.ClaimID,
-		reason:        db.ParkStopped("user_cancelled", ""),
+		reason:        db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 	}
 }
 
@@ -1492,7 +1492,7 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, run domain.Conversatio
 			dispatchLog.Warn("settle pending input before parking a run that could not start failed", "run", run.ID, "error", err)
 		}
 	}
-	if _, err := s.agentRuns.ParkOpenForClaimSystem(bgCtx, orgID, run.ID, run.ClaimID, db.ParkStopped("launch_failed", "")); err != nil {
+	if _, err := s.agentRuns.ParkOpenForClaimSystem(bgCtx, orgID, run.ID, run.ClaimID, db.ParkStopped(domain.ParkReasonLaunchFailed, "")); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			dispatchLog.Error("claim fence refused the park after a launch failure — a successor owns this conversation",
 				"run", run.ID, "claim_id", run.ClaimID, "org_id", orgID)

@@ -352,7 +352,7 @@ func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 		`[{"step_index":0},{"step_index":1},{"step_index":2}]`, blueprintRunID)
 	execSQL(t, s.db, `UPDATE conversations SET blueprint_step_index = 0 WHERE id = ?`, runID)
 	if err := sqlitestore.New(s.db).Conversations.CompleteSystem(context.Background(), runmode.LocalDefaultOrgID,
-		runID, "completed", 0, 0, 0, "", "did my part", "continue", "", ""); err != nil {
+		runID, "completed", 0, 0, 0, "did my part", "continue", "", ""); err != nil {
 		t.Fatalf("complete run: %v", err)
 	}
 

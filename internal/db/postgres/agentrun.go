@@ -89,16 +89,16 @@ func releaseActiveClaim(ctx context.Context, q queryer, orgID, runID, outcome st
 // both crash shapes self-healing). The cost stamp rides the app pool: the
 // messages ledger is app-writable (tf_app holds UPDATE) and the row is the
 // caller's own conversation.
-func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
-	if err := completeRun(ctx, s.q, orgID, runID, status, costUSD, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
+	if err := completeRun(ctx, s.q, orgID, runID, status, costUSD, resultSummary, outcome, outcomeReason, failureKind); err != nil {
 		return err
 	}
 	return releaseActiveClaimWithTelemetry(ctx, s.admin, orgID, runID, claimOutcomeForStatus(status), durationMs, numTurns)
 }
 
-func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
 	return inTx(ctx, s.admin, func(q queryer) error {
-		if err := completeRun(ctx, q, orgID, runID, status, costUSD, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+		if err := completeRun(ctx, q, orgID, runID, status, costUSD, resultSummary, outcome, outcomeReason, failureKind); err != nil {
 			return err
 		}
 		return releaseActiveClaimWithTelemetry(ctx, q, orgID, runID, claimOutcomeForStatus(status), durationMs, numTurns)
@@ -110,19 +110,19 @@ func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status
 // releases is resolved the same way CompleteSystem resolves it (the
 // conversation's active claim) — which the fence has just proven to be
 // claimID, since only one claim per conversation can be unreleased at a time.
-func (s *agentRunStore) CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+func (s *agentRunStore) CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
 	return inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
 			return err
 		}
-		if err := completeRun(ctx, q, orgID, runID, status, costUSD, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+		if err := completeRun(ctx, q, orgID, runID, status, costUSD, resultSummary, outcome, outcomeReason, failureKind); err != nil {
 			return err
 		}
 		return releaseActiveClaimWithTelemetry(ctx, q, orgID, runID, claimOutcomeForStatus(status), durationMs, numTurns)
 	})
 }
 
-func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, resultSummary, outcome, outcomeReason, failureKind string) error {
 	// The conversation carries no accounting cache — cost settles as one
 	// lump on the invocation's last message row (the ledger) below. A
 	// resume's Complete stamps its own invocation's lump on its own last
@@ -131,13 +131,12 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 		UPDATE conversations
 		SET status = $1,
 		    completed_at = $2,
-		    stop_reason = $3,
-		    result_summary = $4,
-		    outcome = NULLIF($5, ''),
-		    outcome_reason = NULLIF($6, ''),
-		    failure_kind = NULLIF($7, '')
-		WHERE org_id = $8 AND id = $9
-	`, status, time.Now(), stopReason, resultSummary, outcome, outcomeReason, failureKind, orgID, runID)
+		    result_summary = $3,
+		    outcome = NULLIF($4, ''),
+		    outcome_reason = NULLIF($5, ''),
+		    failure_kind = NULLIF($6, '')
+		WHERE org_id = $7 AND id = $8
+	`, status, time.Now(), resultSummary, outcome, outcomeReason, failureKind, orgID, runID)
 	if err != nil {
 		return err
 	}
@@ -308,26 +307,25 @@ func (s *agentRunStore) ParkOpenForClaimSystem(ctx context.Context, orgID, runID
 // undelivered input is claimable, so a park that "succeeded" on a finished run
 // would hand it back to the dispatcher.
 //
-// COALESCE on stop_reason / result_summary rather than a bare assignment: an
-// idle park carries neither and must not blank what an earlier deliberate stop
-// recorded.
+// COALESCE on park_reason / result_summary rather than a bare assignment: a
+// park that carries neither must not blank what an earlier one recorded.
 func parkOpen(ctx context.Context, q queryer, orgID, runID string, park db.Park) (bool, error) {
 	// A deliberate stop re-parks an already-parked row; an idle turn-end does
 	// not. Spelled as an extra excluded status rather than two queries.
 	reparkGuard := `, 'open'`
-	if park.Deliberate() {
+	if park.Deliberate {
 		reparkGuard = ``
 	}
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations
 		SET status = 'open',
 		    parked_at = COALESCE(parked_at, $1),
-		    stop_reason = COALESCE(NULLIF($2, ''), stop_reason),
+		    park_reason = COALESCE(NULLIF($2, ''), park_reason),
 		    result_summary = COALESCE(NULLIF($3, ''), result_summary)
 		WHERE org_id = $4 AND id = $5
 		  AND (status IS NULL
 		       OR status NOT IN (`+runTerminalStatusesSQL+reparkGuard+`))
-	`, time.Now().UTC(), park.StopReason, park.ResultSummary, orgID, runID)
+	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, orgID, runID)
 	if err != nil {
 		return false, err
 	}
@@ -360,7 +358,8 @@ func parkOpen(ctx context.Context, q queryer, orgID, runID string, park db.Park)
 func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE conversations SET status = NULL,
-		                parked_at = NULL, preferred_executor_id = NULL
+		                parked_at = NULL, park_reason = NULL,
+		                preferred_executor_id = NULL
 		WHERE org_id = $1 AND id = $2
 		  AND (status = 'open'
 		       OR (status = 'completed'
@@ -673,7 +672,7 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKin
 const pgRunColumns = `
 	r.id, COALESCE(r.task_id::text, ''), COALESCE(r.runtime, ''), ` + pgDisplayStatusSQL + `, COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
 	msum.total_cost_usd, cl.duration_ms, cl.num_turns,
-	COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
+	COALESCE(r.park_reason, ''), COALESCE(r.worktree_path, ''),
 	COALESCE(r.result_summary, ''),
 	COALESCE(r.outcome, ''), COALESCE(r.outcome_reason, ''),
 	COALESCE(r.failure_kind, ''),
@@ -1156,12 +1155,13 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		                      tool_call_id, is_error, metadata, model,
 		                      input_tokens, output_tokens,
 		                      cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
-		                      reasoning, content_blocks, delivered, window_state, seq, duration_ms)
+		                      reasoning, content_blocks, delivered, window_state, seq, duration_ms,
+		                      stop_reason)
 		VALUES ($1, $2, $3,
 		        COALESCE($4, (SELECT id FROM claims
 		                      WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL)),
 		        $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		        $16, $17, $18, $19, $20, $21, $22, $23, $24)
+		        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 		RETURNING id
 	`,
 		orgID, msg.ConversationID, nullIfEmpty(msg.UserID), nullIfEmpty(msg.ClaimID),
@@ -1173,6 +1173,7 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		nullFloatPtr(msg.CostUSD), msg.CreatedAt,
 		nullableJSONB(reasoningJSON), nullableJSONB(contentBlocksJSON), delivered,
 		string(windowState), nullFloatPtr(msg.Seq), nullIntPtr(msg.DurationMs),
+		nullIfEmpty(msg.StopReason),
 	).Scan(&id)
 	if err != nil {
 		return 0, err
@@ -1214,7 +1215,8 @@ func nullInt64Ptr(p *int64) any {
 const pgMessageColumns = `id, conversation_id, COALESCE(user_id::text, ''), COALESCE(claim_id::text, ''),
 	role, content, subtype, tool_calls::text, tool_call_id, is_error, metadata::text,
 	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
-	reasoning::text, content_blocks::text, delivered, window_state, seq, duration_ms`
+	reasoning::text, content_blocks::text, delivered, window_state, seq, duration_ms,
+	COALESCE(stop_reason, '')`
 
 // scanMessageRows drains a messages result set selecting
 // pgMessageColumns into domain.Message values. Shared by the
@@ -1236,7 +1238,7 @@ func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 			&m.ID, &m.ConversationID, &m.UserID, &m.ClaimID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
 			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
-			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs,
+			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs, &m.StopReason,
 		); err != nil {
 			return nil, err
 		}
@@ -1646,11 +1648,11 @@ func scanConversation(row *sql.Row, r *domain.Conversation) error {
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var blueprintRunID sql.NullString
-	var failureKind string
+	var failureKind, parkReason string
 
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
-		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
+		&costUSD, &durationMs, &numTurns, &parkReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
@@ -1658,6 +1660,7 @@ func scanConversation(row *sql.Row, r *domain.Conversation) error {
 		return err
 	}
 	r.FailureKind = domain.RunFailureKind(failureKind)
+	r.ParkReason = domain.ParkReason(parkReason)
 	finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
 	return nil
 }
@@ -1667,11 +1670,11 @@ func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var blueprintRunID sql.NullString
-	var failureKind string
+	var failureKind, parkReason string
 
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
-		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
+		&costUSD, &durationMs, &numTurns, &parkReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
@@ -1679,6 +1682,7 @@ func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
 		return err
 	}
 	r.FailureKind = domain.RunFailureKind(failureKind)
+	r.ParkReason = domain.ParkReason(parkReason)
 	finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
 	return nil
 }

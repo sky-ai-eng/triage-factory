@@ -70,7 +70,7 @@ func SeedConversation(tb testing.TB, database *sql.DB, run domain.Conversation) 
 			id, org_id, type, creator_user_id, team_id, visibility, task_id,
 			prompt_id, trigger_id, trigger_type, origin, runtime, status, model,
 			sdk_session_id, worktree_path, result_summary, outcome,
-			outcome_reason, failure_kind, stop_reason, started_at, completed_at,
+			outcome_reason, failure_kind, park_reason, started_at, completed_at,
 			parked_at,
 			actor_agent_id, blueprint_run_id, blueprint_step_index,
 			triggering_event_id, queued_at, preferred_executor_id)
@@ -84,7 +84,7 @@ func SeedConversation(tb testing.TB, database *sql.DB, run domain.Conversation) 
 		nullIfEmpty(run.SessionID), nullIfEmpty(run.WorktreePath),
 		nullIfEmpty(run.ResultSummary), nullIfEmpty(run.Outcome),
 		nullIfEmpty(run.OutcomeReason), nullIfEmpty(string(run.FailureKind)),
-		nullIfEmpty(run.StopReason), startedAt, run.CompletedAt,
+		nullIfEmpty(string(run.ParkReason)), startedAt, run.CompletedAt,
 		nullIfEmpty(run.ActorAgentID), nullIfEmpty(run.BlueprintRunID),
 		stepIdx, nullIfEmpty(run.TriggeringEventID), run.QueuedAt,
 		nullIfEmpty(run.PreferredExecutorID)); err != nil {

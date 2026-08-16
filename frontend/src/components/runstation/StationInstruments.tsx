@@ -6,7 +6,7 @@ import {
   formatElapsed,
   QUEUE_DWELL_VISIBLE_MS,
   queueDwellMs,
-  stopReasonLabel,
+  parkReasonLabel,
   workStartedAt,
 } from '../../lib/runStatus'
 import { artifactSetKey } from '../../lib/approval'
@@ -112,7 +112,7 @@ export function TelemetryRail({
         {started && (
           <Readout k="started" v={clockStamp(started)} title={started.toLocaleString()} />
         )}
-        {run.StopReason && <Readout k="stop" v={stopReasonLabel(run.StopReason)} />}
+        {run.ParkReason && <Readout k="stop" v={parkReasonLabel(run.ParkReason)} />}
         {/* The stored token, plus what it meant for the task. On its own
             `continue` is an orchestration term the viewer has no way to read —
             and the one that decides whether anything runs after this. */}

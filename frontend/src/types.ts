@@ -188,7 +188,11 @@ export interface Conversation {
   TotalCostUSD?: number
   DurationMs?: number
   NumTurns?: number
-  StopReason?: string
+  // ParkReason is WHY the conversation was parked `open` — one of the
+  // domain.ParkReason vocabulary, glossed for display by parkReasonLabel
+  // (lib/runStatus.ts). Absent when it was never parked, or was resumed
+  // since. The MODEL's stop reason is per-turn and rides MessageDTO.
+  ParkReason?: string
   ResultSummary: string
   // Outcome is the parsed terminal-envelope outcome
   // (continue|finish|abort), persisted to runs.outcome. Empty/absent for an

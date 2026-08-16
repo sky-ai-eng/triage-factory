@@ -172,7 +172,7 @@ func TestHandleAgentStop_ParksAndLeavesBlueprintRunning(t *testing.T) {
 	var runStatus, stopReason, bpStatus string
 	var cancelRequested bool
 	if err := s.db.QueryRow(`
-		SELECT c.status, COALESCE(c.stop_reason, ''), br.status, br.cancel_requested
+		SELECT c.status, COALESCE(c.park_reason, ''), br.status, br.cancel_requested
 		  FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
 		 WHERE c.id = ?`, runID).Scan(&runStatus, &stopReason, &bpStatus, &cancelRequested); err != nil {
 		t.Fatalf("read post-stop state: %v", err)

@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import { Bot } from 'lucide-react'
 import { apiFetch, apiJSON } from '../lib/apiClient'
+import { TEAM_ROLE_LABELS } from '../lib/teamRoles'
 import MemberRoster from './MemberRoster'
 import TeamMemberPicker from './TeamMemberPicker'
 import type { MemberRosterAdapter, RosterMember } from '../hooks/useMemberRoster'
@@ -44,11 +45,6 @@ interface TeamRosterApiResponse {
 }
 
 const TEAM_ROLES = ['admin', 'member', 'viewer']
-// viewer is a read-only role: assignable here, and enforced end-to-end as of
-// TFAC-447 (team-scoped writes 403 server-side; mutation affordances hide on the
-// team surfaces). The label spells out the boundary so an admin picking it knows
-// what it grants.
-const TEAM_ROLE_LABELS: Record<string, string> = { viewer: 'viewer (read-only)' }
 
 export default function TeamMembersPanel({ orgId, teamId, canManage }: TeamMembersPanelProps) {
   // reloadKey remounts <MemberRoster> (re-running useMemberRoster's mount
