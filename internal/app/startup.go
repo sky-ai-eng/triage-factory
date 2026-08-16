@@ -242,16 +242,31 @@ func (a *App) wireCloneStatusCallback() {
 	// Org-scoped notifier (no RecipientsFunc): this hook is local-only,
 	// and at N=1 the org-wide broadcast IS the REST-parity scope.
 	notify := repoevent.NewNotifier(a.wsHub, nil)
+	// The event is keyed on the registry row id, and the clone hook is handed
+	// a name, so publishing costs one lookup. A repository with no row has
+	// nothing to update and nothing for a client to merge into — the stamp
+	// above no-ops on it too — so it publishes nothing rather than an event
+	// with an empty key.
+	publish := func(upd repoevent.Update, ref domain.RepoRef) {
+		row, err := a.stores.Repos.GetByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref)
+		if err != nil {
+			cloneStatusLog.Warn("resolve repository row for clone event failed; not broadcasting",
+				"owner", ref.Owner, "repo", ref.Repo, "error", err)
+			return
+		}
+		if row == nil {
+			return
+		}
+		upd.ID, upd.Slug = row.ID, row.Slug()
+		notify.Publish(context.Background(), runmode.LocalDefaultOrgID, upd)
+	}
 	worktree.SetOnCloneResult(func(owner, repo string, cloneErr error) {
 		ref := domain.RepoRef{Owner: owner, Repo: repo}
 		if cloneErr == nil {
 			if err := a.stores.Repos.UpdateCloneStatusByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref, "ok", "", ""); err != nil {
 				cloneStatusLog.Error("update ok status failed", "owner", owner, "repo", repo, "error", err)
 			}
-			notify.Publish(context.Background(), runmode.LocalDefaultOrgID, repoevent.Update{
-				ID:          ref.Slug(),
-				CloneStatus: repoevent.Ptr("ok"),
-			})
+			publish(repoevent.Update{CloneStatus: repoevent.Ptr("ok")}, ref)
 			return
 		}
 
@@ -279,12 +294,11 @@ func (a *App) wireCloneStatusCallback() {
 		if err := a.stores.Repos.UpdateCloneStatusByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref, "failed", cloneErr.Error(), kind); err != nil {
 			cloneStatusLog.Error("update failed status failed", "owner", owner, "repo", repo, "error", err)
 		}
-		notify.Publish(context.Background(), runmode.LocalDefaultOrgID, repoevent.Update{
-			ID:             ref.Slug(),
+		publish(repoevent.Update{
 			CloneStatus:    repoevent.Ptr("failed"),
 			CloneError:     repoevent.Ptr(cloneErr.Error()),
 			CloneErrorKind: repoevent.Ptr(kind),
-		})
+		}, ref)
 	})
 }
 

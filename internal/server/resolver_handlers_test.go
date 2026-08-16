@@ -165,8 +165,9 @@ func TestRepoBranches_AppOnlyOrg_Success(t *testing.T) {
 	stub := httptest.NewServer(mux)
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
+	repoID := seedConfiguredRepo(t, srv, "acme", "api")
 
-	rec := doJSON(t, srv, http.MethodPost, "/api/repos/acme/api/branches/list", map[string]any{})
+	rec := doJSON(t, srv, http.MethodPost, "/api/repos/"+repoID+"/branches/list", map[string]any{})
 	page := decodeList[branchJSON](t, rec)
 	// A proxy list cannot count its upstream, so total_count is null.
 	if page.TotalCount != nil {
@@ -190,8 +191,9 @@ func TestRepoBranches_NoCredentials_NotConfigured(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	logs := captureLog(t)
+	repoID := seedConfiguredRepo(t, srv, "acme", "api")
 
-	rec := doJSON(t, srv, http.MethodPost, "/api/repos/acme/api/branches/list", map[string]any{})
+	rec := doJSON(t, srv, http.MethodPost, "/api/repos/"+repoID+"/branches/list", map[string]any{})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("branches = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}

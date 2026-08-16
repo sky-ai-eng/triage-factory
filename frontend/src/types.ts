@@ -948,6 +948,15 @@ export interface SlackChannelsResponse {
  *  this. */
 export type ProjectVisibility = 'private' | 'team' | 'org'
 
+/** RepoOption is one repository as a picker offers it: the registry row id
+ *  it submits and the "owner/repo" name it shows. The split is the whole
+ *  addressing contract in one type — a repository is keyed by id and read by
+ *  name — and it is shared so the two pin pickers cannot drift on it. */
+export interface RepoOption {
+  id: string
+  slug: string
+}
+
 export interface Project {
   id: string
   name: string
@@ -971,7 +980,12 @@ export interface Project {
    *  compares this against the viewer's own id to gray that option out
    *  for anyone else. */
   creator_user_id: string
-  pinned_repos: string[]
+  /** The pinned repositories as registry row ids — the ids `/api/repos`
+   *  serves and the ids a PATCH sends back. A repository's "owner/repo"
+   *  name is a display property read off the repo, never a key that
+   *  round-trips through here: a rename mid-session would strand every
+   *  pin that did. */
+  pinned_repository_ids: string[]
   jira_project_key: string
   linear_project_key: string
   /** Per-project Curator spec-authorship skill. Empty string =
@@ -1242,7 +1256,12 @@ export type WSEvent =
       // AI profile text and vice versa.
       type: 'repository_updated'
       data: {
+        /** The registry row id — the merge key, and the same id
+         *  `/api/repos` serves. A repository renamed between two frames
+         *  keeps it, so the merge goes on matching. */
         id: string
+        /** "owner/repo", for display only. Never key on it. */
+        slug: string
         has_readme?: boolean
         has_claude_md?: boolean
         has_agents_md?: boolean

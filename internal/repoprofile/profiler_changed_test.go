@@ -191,8 +191,14 @@ func (s *batchRepositoryStore) ListTrackedNamesSystem(context.Context, string) (
 	return s.names, nil
 }
 
-func (s *batchRepositoryStore) GetByRefSystem(context.Context, string, domain.RepoRef) (*domain.Repository, error) {
-	return nil, nil
+// GetByRefSystem answers with a row carrying a registry id, because that is
+// what the real store answers with: a tracked repo has a row before the
+// profiler ever sees its name (the tracked-set reconcile creates one). The id
+// is what the websocket events are keyed on, so a double that returned nil
+// here would silently exercise the no-row path instead of the real one.
+// ProfiledAt stays unset, so the TTL gate never skips.
+func (s *batchRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
+	return &domain.Repository{ID: "repo-id-" + ref.Repo, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
 
 func (s *batchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) error {
@@ -260,8 +266,9 @@ func (s *changeRepositoryStore) ListTrackedNamesSystem(context.Context, string) 
 	return s.names, nil
 }
 
-func (s *changeRepositoryStore) GetByRefSystem(context.Context, string, domain.RepoRef) (*domain.Repository, error) {
-	return nil, nil
+// Same faithful shape as batchRepositoryStore's — see its doc.
+func (s *changeRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
+	return &domain.Repository{ID: "repo-id-" + ref.Repo, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
 
 func (s *changeRepositoryStore) UpsertSystem(context.Context, string, domain.Repository) error {

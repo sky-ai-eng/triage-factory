@@ -107,7 +107,9 @@ func doJSON(t *testing.T, s *Server, method, path string, body any) *httptest.Re
 // clobber each other the way ReplaceForTeam would.
 //
 // The registry row comes first: tracking references it by id.
-func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) {
+// Returns the registry row id, which is how every repo route and every
+// repo-identifying payload field addresses it.
+func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
 	ctx := context.Background()
 	if err := sqlitestore.New(s.db).Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
@@ -137,6 +139,38 @@ func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) {
 	`, runmode.LocalDefaultTeamID, repositoryID, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("track repo %s/%s on default team: %v", owner, repo, err)
 	}
+	return repositoryID
+}
+
+// seedUntrackedRepo mints a registry row no team tracks — the registry is a
+// superset of the tracked set, so this is a real state, and it is the one that
+// separates "no such repository" from "not yours to pin".
+func seedUntrackedRepo(t *testing.T, s *Server, owner, repo string) string {
+	t.Helper()
+	if err := sqlitestore.New(s.db).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
+		Owner:         owner,
+		Repo:          repo,
+		DefaultBranch: "main",
+	}); err != nil {
+		t.Fatalf("seed untracked repo %s/%s: %v", owner, repo, err)
+	}
+	return repoIDFor(t, s, owner, repo)
+}
+
+// repoIDFor resolves an already-seeded repository's registry id. Same folded
+// lookup seedConfiguredRepo does, for the tests that seed through another
+// path (or that need the id again after a rename moved the name).
+func repoIDFor(t *testing.T, s *Server, owner, repo string) string {
+	t.Helper()
+	var id string
+	if err := s.db.QueryRowContext(context.Background(), `
+		SELECT id FROM repositories
+		 WHERE org_id = ? AND source = ?
+		   AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, runmode.LocalDefaultOrgID, domain.RepoSourceGitHub, owner, repo).Scan(&id); err != nil {
+		t.Fatalf("resolve repository id for %s/%s: %v", owner, repo, err)
+	}
+	return id
 }
 
 // blueprintRunSeq makes the blueprint / blueprint_run IDs minted by

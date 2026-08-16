@@ -19,12 +19,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// errRepoGone marks the window between a repository being visible to the
-// caller's access gate and its registry row being read a statement later. It
-// never leaves this package — the handler maps it to the same 404 an
-// out-of-tracked-set repository gets.
-var errRepoGone = errors.New("repository row no longer resolves")
-
 // handleGitHubRepos returns the repositories the Settings picker offers. The
 // source is tier-aware:
 //
@@ -353,27 +347,37 @@ func (s *Server) isOrgAdmin(ctx context.Context, orgID, userID string) (bool, er
 	return s.az.UserIsOrgAdmin(ctx, userID, orgID)
 }
 
-// repoAccessAllowed reports whether the caller may *read* the given repo
+// The three repo gates below share a shape: the caller's org-admin answer is
+// resolved ONCE per request, outside any transaction (isOrgAdmin opens its
+// own), and handed in; each gate then does its team-scoped reads on the
+// transaction the handler already holds. Nothing here opens a nested
+// transaction — a gate called from inside a WithTx would take a second
+// connection out of the pool for the length of the outer one, which on a
+// list read is once per row.
+
+// repoVisible reports whether the caller may *read* the given repo
 // (TFAC-559): an org admin always may; a non-admin member may only when the
 // repo is tracked by at least one of their teams. Local mode (N=1) has no
-// team boundary and is covered by isOrgAdmin's short-circuit.
+// team boundary and resolves through isAdmin, which its isOrgAdmin
+// short-circuits to true.
 //
 // Mutations are a strictly narrower gate — see repoMutationAccess.
-func (s *Server) repoAccessAllowed(ctx context.Context, orgID, userID, owner, repo string) (bool, error) {
-	isAdmin, err := s.isOrgAdmin(ctx, orgID, userID)
-	if err != nil {
-		return false, err
-	}
+func repoVisible(ctx context.Context, tx db.TxStores, orgID string, isAdmin bool, row domain.Repository) (bool, error) {
 	if isAdmin {
 		return true, nil
 	}
-	var tracked bool
-	err = s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		var e error
-		tracked, e = tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgID, owner, repo)
-		return e
-	})
-	return tracked, err
+	return tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgID, row.Owner, row.Repo)
+}
+
+// repoCanEdit resolves the per-row can_edit annotation the read routes carry:
+// true for an org admin, otherwise true only when the caller administers a
+// team that tracks the repo. It is the read-shaped half of repoMutationAccess
+// — same predicate, no 404-vs-403 distinction to make.
+func repoCanEdit(ctx context.Context, tx db.TxStores, orgID string, isAdmin bool, row domain.Repository) (bool, error) {
+	if isAdmin {
+		return true, nil
+	}
+	return tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, orgID, row.Owner, row.Repo)
 }
 
 // repoWriteAccess is the outcome of the repo-mutation gate. Three-valued
@@ -408,41 +412,29 @@ const (
 // team), so this predicate is the whole enforcement — keep it here, in front
 // of every mutating repo handler.
 //
-// Local mode (N=1) resolves to repoWriteAllowed via isOrgAdmin's
-// short-circuit, before any store call.
-func (s *Server) repoMutationAccess(ctx context.Context, orgID, userID, owner, repo string) (repoWriteAccess, error) {
-	isAdmin, err := s.isOrgAdmin(ctx, orgID, userID)
-	if err != nil {
-		return repoWriteInvisible, err
-	}
+// Local mode (N=1) resolves to repoWriteAllowed via isAdmin, which its
+// isOrgAdmin short-circuits to true before any store call.
+func repoMutationAccess(ctx context.Context, tx db.TxStores, orgID string, isAdmin bool, row domain.Repository) (repoWriteAccess, error) {
 	if isAdmin {
 		return repoWriteAllowed, nil
 	}
-
-	var teamAdmin, tracked bool
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		var e error
-		teamAdmin, e = tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, orgID, owner, repo)
-		if e != nil || teamAdmin {
-			// A team admin of a tracking team is necessarily a member of
-			// one, so the visibility read below would only confirm what we
-			// already know.
-			return e
-		}
-		tracked, e = tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgID, owner, repo)
-		return e
-	}); err != nil {
+	teamAdmin, err := repoCanEdit(ctx, tx, orgID, isAdmin, row)
+	if err != nil {
 		return repoWriteInvisible, err
 	}
-
-	switch {
-	case teamAdmin:
+	if teamAdmin {
+		// A team admin of a tracking team is necessarily a member of one, so
+		// the visibility read below would only confirm what we already know.
 		return repoWriteAllowed, nil
-	case tracked:
-		return repoWriteForbidden, nil
-	default:
-		return repoWriteInvisible, nil
 	}
+	tracked, err := repoVisible(ctx, tx, orgID, isAdmin, row)
+	if err != nil {
+		return repoWriteInvisible, err
+	}
+	if tracked {
+		return repoWriteForbidden, nil
+	}
+	return repoWriteInvisible, nil
 }
 
 // repoJSON is the registry's row shape — the list rows and the single read
@@ -451,8 +443,16 @@ func (s *Server) repoMutationAccess(ctx context.Context, orgID, userID, owner, r
 // use. The client must not re-derive it from role: org admin and team admin
 // are orthogonal, and only the server knows which teams tracking a given repo
 // the caller administers.
+//
+// ID is the registry row id and Slug is the display name, and the split is the
+// whole point: the id is what a client sends back (every repo route is keyed
+// on it), the slug is what a person reads. Owner and Repo stay alongside for
+// the clients that need the halves — a GitHub blob URL, a per-owner group —
+// and Slug rather than a client-side join keeps exactly one renderer per side,
+// domain.Repository.Slug() here and this field there.
 type repoJSON struct {
 	ID             string  `json:"id"`
+	Slug           string  `json:"slug"`
 	Owner          string  `json:"owner"`
 	Repo           string  `json:"repo"`
 	Description    string  `json:"description,omitempty"`
@@ -471,13 +471,8 @@ type repoJSON struct {
 
 func repoToJSON(row domain.Repository, canEdit bool) repoJSON {
 	out := repoJSON{
-		// id stays the "owner/repo" slug on the wire: it is what the frontend
-		// keys rows on, what it puts back in the PATCH and branches paths, and
-		// what a person reads. row.ID is the registry handle (TFAC-834) and is
-		// deliberately NOT serialized — sending it here would compile, pass
-		// every test that doesn't assert on the field, and hand the frontend a
-		// uuid where it round-trips a slug.
-		ID:             row.Slug(),
+		ID:             row.ID,
+		Slug:           row.Slug(),
 		Owner:          row.Owner,
 		Repo:           row.Repo,
 		Description:    row.Description,
@@ -563,7 +558,7 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 		// rather than by the caller's whole tracked set, and still inside the
 		// single transaction the list read used.
 		for i, row := range repos {
-			canEdit[i], e = tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(r.Context(), orgID, row.Owner, row.Repo)
+			canEdit[i], e = repoCanEdit(r.Context(), tx, orgID, isAdmin, row)
 			if e != nil {
 				return e
 			}
@@ -581,13 +576,87 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteList(w, page, result, total)
 }
 
-// handleRepoGet is the canonical single read for a registry row, in the list's
-// row shape. Gated exactly like the list: a repo outside the caller's tracked
-// set is 404 (it isn't in their list either, so disclose nothing), and the
-// can_edit annotation is resolved the same way the list resolves it.
+// readRepo resolves one registry row for a read route and annotates it with
+// the caller's can_edit. lookup performs the resolution — by id for the
+// canonical route, by ref for the by-name one — so both share this gate and
+// neither can grow its own.
 //
-// GET /api/repos/{owner}/{repo}
+// Resolve first, gate second, and both failures answer the same 404: a row no
+// id answers to and a row outside the caller's tracked set are indistinguishable
+// on the wire, which is what the two-valued disclosure rule asks for on a read.
+// (Writes are where the distinction is drawn — see repoMutationAccess.)
+//
+// A nil row with a nil error is that 404; the caller writes it.
+func (s *Server) readRepo(
+	ctx context.Context, orgID, userID string,
+	lookup func(ctx context.Context, tx db.TxStores) (*domain.Repository, error),
+) (*domain.Repository, bool, error) {
+	isAdmin, err := s.isOrgAdmin(ctx, orgID, userID)
+	if err != nil {
+		return nil, false, err
+	}
+	var (
+		row     *domain.Repository
+		canEdit bool
+	)
+	err = s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		found, e := lookup(ctx, tx)
+		if e != nil || found == nil {
+			return e
+		}
+		visible, e := repoVisible(ctx, tx, orgID, isAdmin, *found)
+		if e != nil || !visible {
+			return e
+		}
+		row = found
+		canEdit, e = repoCanEdit(ctx, tx, orgID, isAdmin, *found)
+		return e
+	})
+	return row, canEdit, err
+}
+
+// handleRepoGet is the canonical single read for a registry row, in the list's
+// row shape.
+//
+// GET /api/repos/{id}
 func (s *Server) handleRepoGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id, ok := repoIDPath(w, r)
+	if !ok {
+		return
+	}
+
+	row, canEdit, err := s.readRepo(r.Context(), orgID, userID,
+		func(ctx context.Context, tx db.TxStores) (*domain.Repository, error) {
+			return repoByID(ctx, tx.Repos.Get, orgID, id)
+		})
+	if err != nil {
+		internalError(w, "repos", err)
+		return
+	}
+	if row == nil {
+		notFound(w, "repo")
+		return
+	}
+	writeJSON(w, http.StatusOK, repoToJSON(*row, canEdit))
+}
+
+// handleRepoGetByName is the same read addressed by the provider's current
+// name for the repository — the `GET /…/by-name/{name}` half the API rules
+// give every resource with a unique name, and here the org-scoped folded
+// identity index is that uniqueness.
+//
+// It is the ONLY repo route that accepts a slug. Everything else takes the id
+// it was served, including the writes: a client that wants to mutate goes
+// through the id, so a rename between the page render and the save cannot make
+// the request address a different repository (or nothing at all).
+//
+// GET /api/repos/by-name/{owner}/{repo}
+func (s *Server) handleRepoGetByName(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return
@@ -598,55 +667,65 @@ func (s *Server) handleRepoGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if allowed, err := s.repoAccessAllowed(r.Context(), orgID, userID, owner, repo); err != nil {
-		internalError(w, "repos", err)
-		return
-	} else if !allowed {
-		notFound(w, "repo")
-		return
-	}
-
-	var (
-		row     *domain.Repository
-		canEdit bool
-	)
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		// Ref-keyed, not id-keyed: the path segments are the provider's
-		// current NAME for the repository, and the registry id is a separate
-		// handle (TFAC-834). Get would take that handle and answer
-		// ErrNoSuchRepository for a slug — a 500 on a repo that exists.
-		// GetByRef's (nil, nil) miss is the answer this route wants anyway,
-		// since a name that resolves to nothing is a 404 here.
-		row, e = tx.Repos.GetByRef(r.Context(), orgID, domain.RepoRef{Owner: owner, Repo: repo})
-		if e != nil || row == nil {
-			return e
-		}
-		isAdmin, e := s.isOrgAdmin(r.Context(), orgID, userID)
-		if e != nil {
-			return e
-		}
-		if isAdmin {
-			canEdit = true
-			return nil
-		}
-		canEdit, e = tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(r.Context(), orgID, row.Owner, row.Repo)
-		return e
-	}); err != nil {
+	row, canEdit, err := s.readRepo(r.Context(), orgID, userID,
+		func(ctx context.Context, tx db.TxStores) (*domain.Repository, error) {
+			// Ref-keyed, not id-keyed: the path segments are the provider's
+			// current NAME for the repository, and the registry id is a
+			// separate handle (TFAC-834). GetByRef's (nil, nil) miss is the
+			// answer this route wants anyway, since a name that resolves to
+			// nothing is a 404 here.
+			return tx.Repos.GetByRef(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
+		})
+	if err != nil {
 		internalError(w, "repos", err)
 		return
 	}
 	if row == nil {
-		// Reachable by the tracked set (or org-admin) but absent from the
-		// registry — a repo a team tracks that has never been profiled.
 		notFound(w, "repo")
 		return
 	}
 	writeJSON(w, http.StatusOK, repoToJSON(*row, canEdit))
 }
 
-// repoSlugPath reads the two-segment {owner}/{repo} path id. Empty halves are
-// an invalid id rather than a lookup that would match nothing in particular.
+// repoIDPath reads the {id} path segment — the registry row id every repo
+// route but by-name is addressed by. Empty is an invalid id rather than a
+// lookup that would match nothing in particular.
+//
+// Nothing here tries to be helpful about a slug arriving in this position. It
+// is not parsed, not sniffed for a '/', and not retried against the by-name
+// lookup: a parameter that widens on fallback is the class the API rules ban,
+// and the miss it produces instead is a clean 404 the caller can act on.
+func repoIDPath(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := r.PathValue("id")
+	if id == "" {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidID, Message: "repository id is required",
+		})
+		return "", false
+	}
+	return id, true
+}
+
+// repoByID adapts an id-keyed store lookup to the (nil, nil)-means-404 shape
+// the routes want. ErrNoSuchRepository is the id-keyed miss (see its doc for
+// why it is an error rather than an empty answer), and at an HTTP edge holding
+// a client-supplied id it is exactly a 404 — the caller made the id up, or the
+// row went away since it was served.
+func repoByID(
+	ctx context.Context,
+	get func(ctx context.Context, orgID, id string) (*domain.Repository, error),
+	orgID, id string,
+) (*domain.Repository, error) {
+	row, err := get(ctx, orgID, id)
+	if errors.Is(err, db.ErrNoSuchRepository) {
+		return nil, nil
+	}
+	return row, err
+}
+
+// repoSlugPath reads the two-segment {owner}/{repo} path of the by-name route.
+// Empty halves are an invalid id rather than a lookup that would match nothing
+// in particular.
 func repoSlugPath(w http.ResponseWriter, r *http.Request) (owner, repo string, ok bool) {
 	owner, repo = r.PathValue("owner"), r.PathValue("repo")
 	if owner == "" || repo == "" {
@@ -663,27 +742,52 @@ func repoSlugPath(w http.ResponseWriter, r *http.Request) (owner, repo string, o
 // changing one changes behaviour for every team tracking it, and that takes
 // an admin — org admin, or team admin of a tracking team. Plain members of a
 // tracking team read the repo but can't repoint it.
+//
+// PATCH /api/repos/{id}
 func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	owner := r.PathValue("owner")
-	repo := r.PathValue("repo")
-	if owner == "" || repo == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidID, Message: "owner and repo are required",
-		})
+	id, ok := repoIDPath(w, r)
+	if !ok {
 		return
 	}
-	ref := domain.RepoRef{Owner: owner, Repo: repo}
 
-	access, err := s.repoMutationAccess(r.Context(), orgID, userID, owner, repo)
+	isAdmin, err := s.isOrgAdmin(r.Context(), orgID, userID)
 	if err != nil {
 		internalError(w, "repos", err)
 		return
 	}
+	// Resolve the id to a row before the gate, in the same transaction as the
+	// gate, because the gate reads team_github_repos by name and only the row
+	// knows what this repository is currently called. A rename between the
+	// page render and this save moves owner/repo and leaves the id alone, so
+	// the write still lands on the repo the user was looking at — the failure
+	// mode the slug-addressed route had, where the request 404'd on a name
+	// nothing answered to any more.
+	var (
+		row    *domain.Repository
+		access repoWriteAccess
+	)
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		found, e := repoByID(r.Context(), tx.Repos.Get, orgID, id)
+		if e != nil || found == nil {
+			return e
+		}
+		row = found
+		access, e = repoMutationAccess(r.Context(), tx, orgID, isAdmin, *found)
+		return e
+	}); err != nil {
+		internalError(w, "repos", err)
+		return
+	}
+	if row == nil {
+		notFound(w, "repo")
+		return
+	}
+	ref := domain.RepoRef{Owner: row.Owner, Repo: row.Repo}
 	// Every arm is spelled out, including the permitting one, and anything
 	// unrecognized denies. This is the only enforcement point for an
 	// org-wide write (RLS can't back it up), so a future enum member must
@@ -737,31 +841,14 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// Resolve the path segment to a row and write by its id, inside the one
-	// transaction so the resolution and the write see the same row. The path
-	// segment is a name — it is what the picker rendered and what the frontend
-	// echoes back — and a name is a thing that stops resolving: a rename
-	// landing between the page load and the save used to leave the UPDATE
-	// matching zero rows while this handler answered "updated".
-	//
-	// The lookup sits beside repoMutationAccess above rather than replacing
-	// it: that gate reads team_github_repos to decide who may write, and this
-	// reads repositories to decide what is being written. A repository outside
-	// the caller's tracked set never reaches here at all.
+	// Write by the id the caller addressed. The row resolved a moment ago to
+	// run the gate, and UpdateBaseBranch reports ErrNoSuchRepository rather
+	// than a silent zero-row UPDATE, so a repository deleted in between is a
+	// 404 and not an "updated" answering for a write that did nothing.
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		row, e := tx.Repos.GetByRef(r.Context(), orgID, ref)
-		if e != nil {
-			return e
-		}
-		if row == nil {
-			return errRepoGone
-		}
 		return tx.Repos.UpdateBaseBranch(r.Context(), orgID, row.ID, branch)
 	}); err != nil {
-		// Either half can report the row is gone — the read as a nil, the
-		// write as a miss on an id that resolved a statement ago. Both mean
-		// the same thing to the caller, and neither is a server fault.
-		if errors.Is(err, errRepoGone) || errors.Is(err, db.ErrNoSuchRepository) {
+		if errors.Is(err, db.ErrNoSuchRepository) {
 			notFound(w, "repo")
 			return
 		}
@@ -780,7 +867,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 // this feeds is a type-to-filter box, not a browse.
 const maxBranchPageSize = 100
 
-// branchListRequest is the body of POST /api/repos/{owner}/{repo}/branches/list.
+// branchListRequest is the body of POST /api/repos/{id}/branches/list.
 // Q is the same substring filter the old ?q= carried, moved to a body field
 // with its semantics unchanged.
 type branchListRequest struct {
@@ -809,9 +896,9 @@ type branchJSON struct {
 // this read, so total_count is null and next_page_token wraps the upstream
 // page cursor. See httpx.WriteProxyList.
 //
-// POST /api/repos/{owner}/{repo}/branches/list
+// POST /api/repos/{id}/branches/list
 func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
-	owner, repo, ok := repoSlugPath(w, r)
+	id, ok := repoIDPath(w, r)
 	if !ok {
 		return
 	}
@@ -835,18 +922,28 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = ok // the fault, if any, is already recorded on v
 
-	if allowed, err := s.repoAccessAllowed(r.Context(), orgID, userID, owner, repo); err != nil {
+	// The upstream call is name-shaped — GitHub has no idea what a registry id
+	// is — so the id resolves to a row here and the row supplies the name. That
+	// is the general shape of this flip: TF ids on the wire, provider
+	// coordinates on the provider hop, resolved once at the boundary between.
+	row, _, err := s.readRepo(r.Context(), orgID, userID,
+		func(ctx context.Context, tx db.TxStores) (*domain.Repository, error) {
+			return repoByID(ctx, tx.Repos.Get, orgID, id)
+		})
+	if err != nil {
 		internalError(w, "repos", err)
 		return
-	} else if !allowed {
+	}
+	if row == nil {
 		notFound(w, "repo")
 		return
 	}
+	owner, repo := row.Owner, row.Repo
 
 	// Resolve per-repo (org App installation token → PAT) so App-only orgs
 	// (no PAT) list branches through the installation client instead of 400-ing
-	// on a nil global client. owner/repo are path values; a selective App
-	// install that doesn't cover this repo falls through to the PAT.
+	// on a nil global client. A selective App install that doesn't cover this
+	// repo falls through to the PAT.
 	client, err := s.ghResolver.ClientForRepo(r.Context(), orgID, owner, repo)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
@@ -903,17 +1000,21 @@ func upstreamPageFromCursor(v *httpx.Validation, cursor string) (int, bool) {
 // Repo *tracking* selection is per-team: writes go through
 // PUT /api/settings/team/{id}/repos (handleTeamReposPut), which writes
 // team_github_repos and brings any newly-tracked repository into the registry.
+// That save stays name-shaped, and deliberately: it is the ingest edge, where
+// tracking a repository is what mints its registry row, so its input names
+// things that may not have a row to be addressed by yet.
+//
 // The old org-global POST /api/repos was removed in favor of that single,
-// team-admin-gated entry point; GET /api/repos (the org-wide registry),
-// PATCH /api/repos/{owner}/{repo} (base_branch), and GET
-// /api/repos/{owner}/{repo}/branches remain, scoped per-caller.
+// team-admin-gated entry point; the registry list, the single read, the
+// base_branch PATCH and the branch list remain, scoped per-caller and all
+// addressed by the registry row id.
 //
 // GET /api/repos lists the registry, which is a superset of the tracked set:
 // a repository the last team untracked keeps its row (a run's worktree ledger
 // or a pinned project may still name it), so an org admin can still see it and
 // re-track it. Non-admins see only what their own teams track.
 //
-// Reads (isOrgAdmin / repoAccessAllowed) go by membership: an org admin
+// Reads (isOrgAdmin / repoVisible) go by membership: an org admin
 // sees every repo, a member only the repos their own team(s) track. The
 // PATCH gate (repoMutationAccess) is narrower still, because a repository
 // row is org-wide and has no team to write against: it takes an org admin or a

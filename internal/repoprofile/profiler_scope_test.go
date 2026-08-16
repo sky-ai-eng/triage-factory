@@ -72,7 +72,7 @@ func TestRunOrg_RecipientScopedFanOut(t *testing.T) {
 	// doc-scan flags, then the AI profile text — as sparse diffs of one
 	// event type.
 	first := decodeRepoEvent(t, tracking.expectMessage(t, 2*time.Second))
-	if first.Type != repoevent.EventType || first.Data.ID != "own/withdocs" || first.Data.HasReadme == nil || !*first.Data.HasReadme {
+	if first.Type != repoevent.EventType || first.Data.Slug != "own/withdocs" || first.Data.HasReadme == nil || !*first.Data.HasReadme {
 		t.Errorf("first event = %+v; want %s doc-flags diff for own/withdocs", first, repoevent.EventType)
 	}
 	if first.Data.ProfileText != nil {
@@ -114,7 +114,7 @@ func TestRunOrg_LocalShape_OrgScopedBroadcastUnchanged(t *testing.T) {
 
 	for name, c := range map[string]*hubTestClient{"user-a": a, "user-b": b} {
 		evt := decodeRepoEvent(t, c.expectMessage(t, 2*time.Second))
-		if evt.Type != repoevent.EventType || evt.Data.ID != "own/withdocs" {
+		if evt.Type != repoevent.EventType || evt.Data.Slug != "own/withdocs" {
 			t.Errorf("%s: first event = %+v; want %s for own/withdocs", name, evt, repoevent.EventType)
 		}
 	}
@@ -152,7 +152,7 @@ func TestRunOrg_BatchFailureToast_ScopedPerUser(t *testing.T) {
 
 	// user-x: doc diffs for both repos, then a toast naming both.
 	for _, want := range []string{"own/alpha", "own/beta"} {
-		if evt := decodeRepoEvent(t, x.expectMessage(t, 2*time.Second)); evt.Data.ID != want {
+		if evt := decodeRepoEvent(t, x.expectMessage(t, 2*time.Second)); evt.Data.Slug != want {
 			t.Errorf("user-x event = %+v; want doc diff for %s", evt, want)
 		}
 	}
@@ -161,7 +161,7 @@ func TestRunOrg_BatchFailureToast_ScopedPerUser(t *testing.T) {
 	}
 
 	// user-y: only beta's doc diff, and a toast that must not name alpha.
-	if evt := decodeRepoEvent(t, y.expectMessage(t, 2*time.Second)); evt.Data.ID != "own/beta" {
+	if evt := decodeRepoEvent(t, y.expectMessage(t, 2*time.Second)); evt.Data.Slug != "own/beta" {
 		t.Errorf("user-y event = %+v; want doc diff for own/beta", evt)
 	}
 	if body := decodeToast(t, y.expectMessage(t, 2*time.Second)); body != "Profiling failed for own/beta — rows saved without AI summary" {

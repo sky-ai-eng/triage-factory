@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useParams, useNavigate, Link } from 'react-router'
 import * as Popover from '@radix-ui/react-popover'
 import {
@@ -19,11 +19,12 @@ import Markdown from 'react-markdown'
 import type {
   Project,
   ProjectVisibility,
+  RepoOption,
   KnowledgeFile,
   KnowledgeUploadResult,
   ProjectExportPreview,
 } from '../types'
-import { apiFetch, apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiJSON, apiListAll, HttpError, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
@@ -330,7 +331,7 @@ export default function ProjectDetail() {
             project={project}
             onPatchName={(name) => patch({ name })}
             onPatchDescription={(description) => patch({ description })}
-            onPatchPinnedRepos={(pinned_repos) => patch({ pinned_repos })}
+            onPatchPinnedRepos={(ids) => patch({ pinned_repository_ids: ids })}
           />
 
           <VisibilityPanel project={project} onPatch={patch} />
@@ -373,7 +374,7 @@ function ProjectHeader({
   project: Project
   onPatchName: (name: string) => Promise<boolean | undefined>
   onPatchDescription: (description: string) => Promise<boolean | undefined>
-  onPatchPinnedRepos: (pinned: string[]) => Promise<boolean | undefined>
+  onPatchPinnedRepos: (repositoryIDs: string[]) => Promise<boolean | undefined>
 }) {
   const [editingName, setEditingName] = useState(false)
   const [editingDesc, setEditingDesc] = useState(false)
@@ -531,7 +532,7 @@ function ProjectHeader({
       <div className="mt-4">
         {project.team_id ? (
           <PinnedReposInline
-            pinned={project.pinned_repos}
+            pinned={project.pinned_repository_ids}
             teamId={project.team_id}
             onChange={onPatchPinnedRepos}
             jiraKey={project.jira_project_key}
@@ -556,6 +557,12 @@ function ProjectHeader({
 // remove the pin (auto-saved), and a trailing "+" button opens a
 // popover that lists remaining configured repos to add.
 //
+// It holds repository ids throughout — `pinned`, `local`, and everything
+// the PATCH sends — and reads a name only to put one on a chip. That is
+// what makes a rename mid-session harmless: the ids the page is holding
+// go on addressing the same repositories, and the names refresh on the
+// next load.
+//
 // The tracker chips render inline but aren't editable here — that's
 // the IntegrationsPanel's job. Co-locating them visually keeps the
 // "this project is X plus these things" narrative tight.
@@ -566,6 +573,7 @@ function PinnedReposInline({
   jiraKey,
   linearKey,
 }: {
+  /** Registry row ids — see Project.pinned_repository_ids. */
   pinned: string[]
   teamId: string
   onChange: (next: string[]) => Promise<boolean | undefined>
@@ -573,7 +581,7 @@ function PinnedReposInline({
   linearKey: string
 }) {
   const orgHref = useOrgHref()
-  const [available, setAvailable] = useState<string[]>([])
+  const [available, setAvailable] = useState<RepoOption[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [adderOpen, setAdderOpen] = useState(false)
@@ -604,14 +612,17 @@ function PinnedReposInline({
     }
   }, [pinned])
 
-  // loadRepos populates `available` from the project's OWN team's
-  // tracked repos — the same set the PATCH validator accepts. Sourcing
-  // the org-wide /api/repos union instead would offer sibling-team repos
-  // this project's team doesn't track, so adding one would 400. Tracks
-  // loadError separately so a transient failure surfaces as a "couldn't
-  // load — try again" hint in the popover instead of the misleading "No
-  // repos configured" empty state, which would route the user to a setup
-  // page they may have already completed.
+  // loadRepos populates `available` with the project's OWN team's tracked
+  // repos — the same set the PATCH validator accepts — carrying the id to
+  // submit and the name to show. It takes both reads because the two facts
+  // live apart: tracking is name-shaped (it is the edge that mints a
+  // registry row), and the registry is what carries the ids. Offering the
+  // registry alone would include sibling teams' repos this project's team
+  // doesn't track, so adding one would 400. Tracks loadError separately so
+  // a transient failure surfaces as a "couldn't load — try again" hint in
+  // the popover instead of the misleading "No repos configured" empty
+  // state, which would route the user to a setup page they may have
+  // already completed.
   const loadRepos = useCallback(
     async (signal: AbortSignal) => {
       setLoadError(null)
@@ -627,11 +638,19 @@ function PinnedReposInline({
         return
       }
       try {
-        const data = await apiJSON<{ repos?: string[] }>(`/api/settings/team/${teamId}/repos`, {
-          signal,
-        })
+        const [team, registry] = await Promise.all([
+          apiJSON<{ repos?: string[] }>(`/api/settings/team/${teamId}/repos`, { signal }),
+          apiListAll<RepoOption>('/api/repos/list', {}, { signal }),
+        ])
         if (signal.aborted) return
-        setAvailable(data.repos ?? [])
+        // Fold both sides: GitHub names are case-insensitive and the two
+        // tables can hold different casings of one repository.
+        const tracked = new Set((team.repos ?? []).map((slug) => slug.toLowerCase()))
+        setAvailable(
+          registry
+            .filter((r) => tracked.has(r.slug.toLowerCase()))
+            .sort((a, b) => a.slug.localeCompare(b.slug)),
+        )
       } catch (err) {
         if (signal.aborted) return
         const message = httpErrorMessage(err, 'Could not load the tracked repos.')
@@ -680,13 +699,13 @@ function PinnedReposInline({
     }
   }
 
-  const remove = (slug: string) => {
-    applyChange(local.filter((s) => s !== slug))
+  const remove = (id: string) => {
+    applyChange(local.filter((pinnedID) => pinnedID !== id))
   }
 
-  const add = (slug: string) => {
-    if (local.includes(slug)) return
-    applyChange([...local, slug].sort())
+  const add = (id: string) => {
+    if (local.includes(id)) return
+    applyChange([...local, id])
     // Close the picker optimistically — the PATCH may still be
     // in flight, but the user's intent ("add this") is captured
     // in pendingTarget and the chip already shows in `local`.
@@ -694,18 +713,36 @@ function PinnedReposInline({
     setSearch('')
   }
 
+  // Chips read their name out of the offered set. An id with no entry is a
+  // repo the team stopped tracking since it was pinned: it still renders,
+  // so the user can see and remove it, labelled with the id because that
+  // is the only thing about it this component knows.
+  const nameByID = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const r of available) m.set(r.id, r.slug)
+    return m
+  }, [available])
+  // Sorted by what the user reads, not by the opaque id.
+  const chips = useMemo(
+    () =>
+      local
+        .map((id) => ({ id, slug: nameByID.get(id) ?? id }))
+        .sort((a, b) => a.slug.localeCompare(b.slug)),
+    [local, nameByID],
+  )
+
   const addable = available.filter(
-    (slug) =>
-      !local.includes(slug) &&
-      (!search.trim() || slug.toLowerCase().includes(search.trim().toLowerCase())),
+    (r) =>
+      !local.includes(r.id) &&
+      (!search.trim() || r.slug.toLowerCase().includes(search.trim().toLowerCase())),
   )
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       {jiraKey && <Chip label={`Jira: ${jiraKey}`} tone="accent" />}
       {linearKey && <Chip label={`Linear: ${linearKey}`} tone="accent" />}
-      {local.map((slug) => (
-        <RepoChip key={slug} slug={slug} onRemove={() => remove(slug)} />
+      {chips.map((r) => (
+        <RepoChip key={r.id} slug={r.slug} onRemove={() => remove(r.id)} />
       ))}
       <Popover.Root open={adderOpen} onOpenChange={setAdderOpen}>
         <Popover.Trigger asChild>
@@ -779,18 +816,18 @@ function PinnedReposInline({
                     : 'No matches.'}
                 </div>
               ) : (
-                addable.map((slug) => (
+                addable.map((r) => (
                   <button
-                    key={slug}
+                    key={r.id}
                     type="button"
-                    onClick={() => add(slug)}
+                    onClick={() => add(r.id)}
                     className="
                       w-full text-left px-2 py-1.5 rounded-md
                       text-[12px] text-text-primary
                       hover:bg-black/[0.04] transition-colors
                     "
                   >
-                    {slug}
+                    {r.slug}
                   </button>
                 ))
               )}
