@@ -160,7 +160,7 @@ export default function PromptPicker({
     const load = async () => {
       // The 'prompts' source is already a flat list carrying bodies + models.
       if (source !== 'blueprints') {
-        const { items: data } = await apiListAll<Prompt>('/api/prompts/list', teamFilter)
+        const data = await apiListAll<Prompt>('/api/prompts/list', teamFilter)
         if (!cancelled) setItems(data.map((p) => ({ ...p })))
         return
       }
@@ -171,11 +171,11 @@ export default function PromptPicker({
       // former per-blueprint N+1. A failed steps fetch degrades to empty
       // compositions rather than breaking the picker.
       const [blueprints, promptList, allSteps] = await Promise.all([
-        apiListAll<Blueprint>('/api/blueprints/list', teamFilter).then((p) => p.items),
-        apiListAll<Prompt>('/api/prompts/list', teamFilter).then((p) => p.items),
-        apiListAll<BlueprintStep>('/api/blueprint-steps/list', teamFilter)
-          .then((p) => p.items)
-          .catch(() => [] as BlueprintStep[]),
+        apiListAll<Blueprint>('/api/blueprints/list', teamFilter),
+        apiListAll<Prompt>('/api/prompts/list', teamFilter),
+        apiListAll<BlueprintStep>('/api/blueprint-steps/list', teamFilter).catch(
+          () => [] as BlueprintStep[],
+        ),
       ])
       const promptById = new Map(promptList.map((p): [string, Prompt] => [p.id, p]))
       const stepsByBlueprint = new Map<string, BlueprintStep[]>()

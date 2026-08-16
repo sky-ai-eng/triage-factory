@@ -79,6 +79,11 @@ interface Props {
   run: Conversation
   task: Task | null
   messages: Message[]
+  /** History remains behind the held transcript — the screen offers the way
+   *  back rather than presenting its tail as the whole run. */
+  hasOlderMessages?: boolean
+  loadingOlderMessages?: boolean
+  onLoadOlderMessages?: () => void
   now: number
   chainSteps?: Conversation[] | null
   /** Per-step names/briefs, index-aligned with chainSteps. Optional: the track
@@ -99,6 +104,9 @@ export default function RunStation({
   run,
   task,
   messages,
+  hasOlderMessages,
+  loadingOlderMessages,
+  onLoadOlderMessages,
   now,
   chainSteps,
   chainStepLabels,
@@ -166,7 +174,13 @@ export default function RunStation({
       <div className="relative flex min-h-0 flex-1">
         <ConveyorLane speed={st.belt} />
         <div className="relative flex min-h-0 flex-1 flex-col p-3">
-          <ScreenTranscript messages={messages} run={run} />
+          <ScreenTranscript
+            messages={messages}
+            run={run}
+            hasOlder={hasOlderMessages}
+            loadingOlder={loadingOlderMessages}
+            onLoadOlder={onLoadOlderMessages}
+          />
           <VentHeat heat={heat} light={st.light} live={st.live} />
         </div>
         <TelemetryRail

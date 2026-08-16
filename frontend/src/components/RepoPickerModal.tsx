@@ -6,7 +6,7 @@ import { useActiveOrgId } from '../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID, getGitHubAppStatus, getGitHubAppInstallURL } from '../lib/githubApp'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import SearchField from './SearchField'
-import { apiList, httpErrorMessage } from '../lib/apiClient'
+import { apiListAll, httpErrorMessage } from '../lib/apiClient'
 
 interface GitHubRepo {
   full_name: string
@@ -145,18 +145,11 @@ export default function RepoPickerModal({
     try {
       // Walk the proxy list to completion: the picker filters client-side
       // over the whole reachable set, and a partial set would silently hide
-      // repos the user can genuinely select. The page bound keeps a
-      // pathological account from spinning forever.
-      const all: GitHubRepo[] = []
-      let token = ''
-      for (let i = 0; i < 20; i++) {
-        const body: Record<string, unknown> = { page_size: 100 }
-        if (token) body.page_token = token
-        const page = await apiList<GitHubRepo>('/api/github/repos/list', body)
-        all.push(...page.items)
-        token = page.next_page_token
-        if (!token) break
-      }
+      // repos the user can genuinely select. apiListAll owns the walk and its
+      // ceiling, so this surface can't drift from the others — and past that
+      // ceiling it throws, which the catch below renders. The 100 is the
+      // route's own declared maximum (GitHub's per_page), not a choice here.
+      const all = await apiListAll<GitHubRepo>('/api/github/repos/list', {}, {}, 100)
       setRepos(all)
       onReposFetched?.(all)
     } catch (err) {

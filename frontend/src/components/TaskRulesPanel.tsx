@@ -55,9 +55,9 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
     // write must name the caller's ENTIRE visible rule set — a partial list
     // would submit a partial order.
     apiListAll<RuleHandler>('/api/event-handlers/list', { kind: 'rule' })
-      .then(({ items }) => {
+      .then((loaded) => {
         if (!cancelled) {
-          setRules(items)
+          setRules(loaded)
           setLoading(false)
         }
       })

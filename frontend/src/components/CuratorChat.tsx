@@ -70,9 +70,9 @@ export default function CuratorChat({ project, onPatch }: Props) {
       apiListAll<Prompt>('/api/prompts/list', promptTeamId ? { team_id: promptTeamId } : {}, {
         signal: ac.signal,
       })
-        .then(({ items }) => {
+        .then((prompts) => {
           if (ac.signal.aborted) return
-          setPrompts(items)
+          setPrompts(prompts)
         })
         .catch(() => {
           // Header button degrades to "Spec skill" without a name.

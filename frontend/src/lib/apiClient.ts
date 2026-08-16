@@ -172,43 +172,56 @@ export async function apiList<T>(
   }
 }
 
-/** How many pages `apiListAll` will walk before it stops. A declared ceiling,
- *  not a guess: at the server's 200-row maximum this is 2,000 rows, past which
- *  a picker is the wrong affordance and a search box is the right one. */
-const MAX_PAGES_TO_WALK = 10
+/** The most rows `apiListAll` will collect before it gives up. A declared
+ *  ceiling, not a guess: past a couple of thousand options a client-side filter
+ *  is the wrong affordance and a server-side search is the right one. Expressed
+ *  in rows rather than pages so a caller that has to use a smaller page (an
+ *  upstream-capped proxy list) gets the same bound. */
+const MAX_ROWS_TO_WALK = 2000
 
 /** apiListAll walks a `POST /…/list` read to completion and returns every row.
  *
  *  **Use it only where a surface genuinely needs the whole set**, which in
- *  practice means one thing: a picker that filters its options CLIENT-side. A
- *  partial load there is not a shorter list, it is a search that silently
- *  misses — the user types a name that exists and is told nothing matches. Any
- *  surface that renders rows for reading wants `usePagedList` instead, so the
- *  reader sees a page and asks for the next one.
+ *  practice means one thing: a consumer that filters or reasons over the
+ *  options CLIENT-side. A partial load there is not a shorter list — it is a
+ *  search that silently misses, a coverage check that answers "none" about a
+ *  row on page three, a reorder that submits a partial order. Any surface that
+ *  renders rows for reading wants `usePagedList` instead, so the reader sees a
+ *  page and asks for the next one.
  *
- *  It walks with the server's own tokens (never a computed offset) and stops at
- *  `MAX_PAGES_TO_WALK`, so a runaway result set costs a bounded number of
- *  requests rather than an unbounded one. `truncated` says whether it stopped
- *  early, so a caller can tell the user its options are incomplete rather than
- *  quietly presenting a partial list as the whole. */
+ *  It walks with the server's own tokens, never a computed offset, and
+ *  **throws** rather than returning a short set once the walk passes
+ *  `MAX_ROWS_TO_WALK`. Throwing is the point: the ceiling exists to bound a
+ *  runaway, so reaching it means the caller's premise — that this set fits in
+ *  memory and can be reasoned over whole — is false. Returning the rows it
+ *  managed to collect alongside a flag put the burden on every caller to notice
+ *  and say so, and no caller did; an exception lands on the error path each one
+ *  already has, and turns a quietly wrong answer into a visible failure.
+ *
+ *  `pageSize` exists for the routes that declare a smaller maximum than the
+ *  standard 200 — the GitHub repos proxy is capped at the upstream's own 100,
+ *  and asking for more is a 400. */
 export async function apiListAll<T>(
   path: string,
   body: ListRequest = {},
   options: ApiFetchOptions = {},
-): Promise<{ items: T[]; truncated: boolean }> {
+  pageSize = 200,
+): Promise<T[]> {
   const items: T[] = []
   let token = ''
-  for (let i = 0; i < MAX_PAGES_TO_WALK; i++) {
+  while (items.length <= MAX_ROWS_TO_WALK) {
     const page: ListPage<T> = await apiList<T>(
       path,
-      { ...body, page_size: 200, ...(token ? { page_token: token } : {}) },
+      { ...body, page_size: pageSize, ...(token ? { page_token: token } : {}) },
       options,
     )
     items.push(...page.items)
     token = page.next_page_token
-    if (!token) return { items, truncated: false }
+    if (!token) return items
   }
-  return { items, truncated: true }
+  throw new Error(
+    `${path} has more than ${MAX_ROWS_TO_WALK} rows; this surface reads the whole set and cannot show a partial one`,
+  )
 }
 
 /** One fault in the server's error envelope: `{"errors": [{reason, message,

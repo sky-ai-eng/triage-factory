@@ -50,8 +50,8 @@ export default function ChainStepEditor({
   useEffect(() => {
     let cancelled = false
     apiListAll<Prompt>('/api/prompts/list', lockedTeamId ? { team_id: lockedTeamId } : {})
-      .then(({ items }) => {
-        if (!cancelled) setAllPrompts(items)
+      .then((prompts) => {
+        if (!cancelled) setAllPrompts(prompts)
       })
       .catch(() => {})
     return () => {

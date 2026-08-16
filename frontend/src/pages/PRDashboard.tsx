@@ -83,6 +83,13 @@ export default function PRDashboard() {
     'Could not load your pull requests.',
   )
   const { items: prs, setItems: setPrs, load: loadPRs, loadMore, hasMore, total } = prList
+  // How many pages deep the user has paged. A refresh REPLACES the held items
+  // with page 1 (that is what usePagedList.load does), and this board refreshes
+  // on an interval, on tab focus, and on every debounced github:pr:* event — so
+  // without re-walking, a routine PR event would silently throw away every
+  // "Load more" the user clicked. Held in a ref because it describes what to
+  // re-fetch, not anything rendered.
+  const pagesLoaded = useRef(1)
   const [stats, setStats] = useState<Stats | null>(() => loadCached<Stats>('pr-dash-stats'))
   const [loading, setLoading] = useState(true)
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -110,6 +117,17 @@ export default function PRDashboard() {
         apiJSON<Stats>('/api/dashboard/stats'),
       ])
       setStats(statsRes)
+      // Re-walk to the depth the user had. Sequential, because each page's
+      // token comes from the one before it. A page that no longer exists (PRs
+      // merged since) just ends the walk early — loadMore is a no-op without a
+      // token — which is the right answer rather than an error.
+      if (prsRes) {
+        for (let i = 1; i < pagesLoaded.current; i++) {
+          await loadMore()
+        }
+      }
+      // Only page 1 is cached: the cache exists to paint something instantly on
+      // a cold open, and a cold open starts at page 1 anyway.
       if (prsRes) saveCache('pr-dash-prs', prsRes.items)
       saveCache('pr-dash-stats', statsRes)
       hasLoadedOnce.current = true
@@ -120,7 +138,7 @@ export default function PRDashboard() {
     } finally {
       setLoading(false)
     }
-  }, [loadPRs])
+  }, [loadPRs, loadMore])
 
   useEffect(() => {
     fetchAll()
@@ -331,7 +349,10 @@ export default function PRDashboard() {
       {hasMore && (
         <div className="mt-4 text-center">
           <button
-            onClick={loadMore}
+            onClick={() => {
+              pagesLoaded.current += 1
+              void loadMore()
+            }}
             disabled={loading}
             className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors disabled:opacity-50"
           >

@@ -660,13 +660,13 @@ function BindingGraphInner({
       // whole load down and the catch below leaves the prior canvas up.
       const [etRes, bpRes, promptRes, tRes, stepsRes] = await Promise.all([
         apiJSON<EventType[]>('/api/event-types'),
-        apiListAll<Blueprint>(`${blueprintsBase()}/list`, teamFilter).then((p) => p.items),
-        apiListAll<Prompt>(`${promptsBase()}/list`, teamFilter).then((p) => p.items),
+        apiListAll<Blueprint>(`${blueprintsBase()}/list`, teamFilter),
+        apiListAll<Prompt>(`${promptsBase()}/list`, teamFilter),
         apiListAll<TriggerHandler>(`${handlersBase()}/list`, {
           kind: 'trigger',
           ...teamFilter,
-        }).then((p) => p.items),
-        apiListAll<BlueprintStep>('/api/blueprint-steps/list', teamFilter).then((p) => p.items),
+        }),
+        apiListAll<BlueprintStep>('/api/blueprint-steps/list', teamFilter),
       ])
       setEventTypes(etRes)
       setTriggers(tRes)

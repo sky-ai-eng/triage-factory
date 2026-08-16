@@ -106,8 +106,8 @@ export default function PromptsWorkspace({
           }),
           apiListAll<RuleHandler>('/api/event-handlers/list', { kind: 'rule', ...teamFilter }),
         ])
-        const hasTrigger = triggersRes.items.some((t) => t.event_type === eventType && t.enabled)
-        const hasRule = rulesRes.items.some((r) => r.event_type === eventType && r.enabled)
+        const hasTrigger = triggersRes.some((t) => t.event_type === eventType && t.enabled)
+        const hasRule = rulesRes.some((r) => r.event_type === eventType && r.enabled)
         if (!hasTrigger && !hasRule) {
           setBannerEventType(eventType)
         }
