@@ -40,6 +40,13 @@ type RepoRenameSeeder struct {
 	// move this number in either direction.
 	CountTasks func(t *testing.T) int
 
+	// RawActionURL reads one external_actions row's url and current_url
+	// columns as stored, keyed by dedup_key. Raw on purpose, like
+	// ReferenceRows: the store's reads serve COALESCE(current_url, url), which
+	// is exactly the layer that would hide either a rewritten history column
+	// or an unfilled pointer. current_url is returned as "" when NULL.
+	RawActionURL func(t *testing.T, dedupKey string) (url, currentURL string)
+
 	// ReferenceRows returns every category-A repository reference the org
 	// holds, as the rows actually store them: the registry row id each of
 	// team_github_repos, conversation_worktrees and project_pinned_repos
@@ -185,6 +192,87 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		if proj, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindProject, fx.projectID); proj == nil {
 			t.Errorf("the project-kind override moved; only key_kind='repo' rows hold a slug")
+		}
+	})
+
+	t.Run("Rename_moves_the_stored_links_and_freezes_the_record", func(t *testing.T) {
+		// The stored-link half of the rewrite. An entity's URL and the audit
+		// ledger's rendered link must resolve under the new slug — the GitHub
+		// redirect they used to lean on stops the moment the freed name is
+		// re-claimed by a different repository — while the ledger's RECORD of
+		// each act stays byte-identical: target keeps naming what the act was
+		// performed against, and the url column keeps the link as captured.
+		s, orgID, seed := mk(t)
+		fx := seedRenameFixture(t, s, orgID, seed, "links")
+
+		movedBefore := findActionByKey(t, s, orgID, fx.movedActionKey)
+		capturedURL := "https://github.com/" + renameOldSlug + "/pull/18"
+
+		if _, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
+		}); err != nil {
+			t.Fatalf("RenameSystem: %v", err)
+		}
+
+		// The entity's link resolves under the new slug; the neighbour's —
+		// which shares the old slug as a string prefix, in the URL too — is
+		// untouched.
+		ent, err := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameNewSlug+"#18")
+		if err != nil || ent == nil {
+			t.Fatalf("entity by new source id = %v, %v", ent, err)
+		}
+		if want := "https://github.com/" + renameNewSlug + "/pull/18"; ent.URL != want {
+			t.Errorf("entity url = %q, want %q", ent.URL, want)
+		}
+		neighbour, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameNeighbourSlug+"#4")
+		if neighbour == nil || neighbour.URL != "https://github.com/"+renameNeighbourSlug+"/pull/4" {
+			t.Errorf("neighbour entity = %+v, want its url untouched", neighbour)
+		}
+
+		// The ledger row's rendered link resolves under the new slug while
+		// every record column still reads exactly as it was written.
+		moved := findActionByKey(t, s, orgID, fx.movedActionKey)
+		if want := "https://github.com/" + renameNewSlug + "/pull/18"; moved.URL != want {
+			t.Errorf("action url = %q, want %q", moved.URL, want)
+		}
+		if moved.Target != renameOldSlug+"#18" {
+			t.Errorf("action target = %q, want %s#18 — the record names what the act was performed against", moved.Target, renameOldSlug)
+		}
+		if moved.Action != movedBefore.Action || moved.DetailJSON != movedBefore.DetailJSON ||
+			moved.Credential != movedBefore.Credential || !moved.OccurredAt.Equal(movedBefore.OccurredAt) {
+			t.Errorf("record columns moved across the rename:\n before = %+v\n after  = %+v", movedBefore, moved)
+		}
+		if n := findActionByKey(t, s, orgID, fx.neighbourActionKey); n.URL != "https://github.com/"+renameNeighbourSlug+"/pull/4" {
+			t.Errorf("neighbour action url = %q, want it untouched", n.URL)
+		}
+
+		// The columns as stored: url is the captured link, byte-identical;
+		// current_url is the maintained pointer; the neighbour's pointer was
+		// never filled.
+		rawURL, rawCurrent := seed.RawActionURL(t, fx.movedActionKey)
+		if rawURL != capturedURL {
+			t.Errorf("stored url column = %q, want the captured %q — history is frozen", rawURL, capturedURL)
+		}
+		if want := "https://github.com/" + renameNewSlug + "/pull/18"; rawCurrent != want {
+			t.Errorf("stored current_url = %q, want %q", rawCurrent, want)
+		}
+		if _, rawCurrent := seed.RawActionURL(t, fx.neighbourActionKey); rawCurrent != "" {
+			t.Errorf("neighbour current_url = %q, want NULL — its object never moved", rawCurrent)
+		}
+
+		// A second rename chains off the pointer, not the captured link: the
+		// served URL follows the object again while the history column still
+		// holds the original capture.
+		if _, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Owner: "octo", Repo: "platform-api-v2", ExternalID: fx.externalID,
+		}); err != nil {
+			t.Fatalf("second RenameSystem: %v", err)
+		}
+		if got := findActionByKey(t, s, orgID, fx.movedActionKey); got.URL != "https://github.com/octo/platform-api-v2/pull/18" {
+			t.Errorf("action url after the second rename = %q, want it chained to octo/platform-api-v2", got.URL)
+		}
+		if rawURL, _ := seed.RawActionURL(t, fx.movedActionKey); rawURL != capturedURL {
+			t.Errorf("stored url column = %q after two renames, want the captured %q", rawURL, capturedURL)
 		}
 	})
 
@@ -631,6 +719,8 @@ type renameFixture struct {
 	branchArtifactID    string
 	neighbourArtifactID string
 	branchRef           string
+	movedActionKey      string
+	neighbourActionKey  string
 }
 
 // seedRenameFixture stages one repository referenced from every table that
@@ -675,12 +765,37 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		t.Fatalf("seed project: %v", err)
 	}
 
-	entity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", renameOldSlug+"#18", "pr", "A pull request", "")
+	entity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", renameOldSlug+"#18", "pr", "A pull request",
+		"https://github.com/"+renameOldSlug+"/pull/18")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", renameNeighbourSlug+"#4", "pr", "Neighbour PR", ""); err != nil {
+	if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", renameNeighbourSlug+"#4", "pr", "Neighbour PR",
+		"https://github.com/"+renameNeighbourSlug+"/pull/4"); err != nil {
 		t.Fatalf("seed neighbour entity: %v", err)
+	}
+
+	// Two ledger rows: one whose object the rename moves, one for the
+	// neighbour as the boundary control. Deterministic dedup keys so the
+	// assertions (and the raw column reads) can find them again.
+	movedActionKey := "rename-moved-" + suffix
+	neighbourActionKey := "rename-neighbour-" + suffix
+	if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
+		TeamID: seed.TeamID, Provider: "github", Action: domain.ActionPRCreated,
+		Target: renameOldSlug + "#18", ExternalID: "18",
+		URL:        "https://github.com/" + renameOldSlug + "/pull/18",
+		Credential: domain.CredentialGitHubApp, DedupKey: movedActionKey,
+		DetailJSON: `{"method":"POST","path":"/repos/` + renameOldSlug + `/pulls"}`,
+	}); err != nil {
+		t.Fatalf("seed moved action: %v", err)
+	}
+	if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
+		TeamID: seed.TeamID, Provider: "github", Action: domain.ActionPRCreated,
+		Target: renameNeighbourSlug + "#4", ExternalID: "4",
+		URL:        "https://github.com/" + renameNeighbourSlug + "/pull/4",
+		Credential: domain.CredentialGitHubApp, DedupKey: neighbourActionKey,
+	}); err != nil {
+		t.Fatalf("seed neighbour action: %v", err)
 	}
 
 	prArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
@@ -728,7 +843,27 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		branchArtifactID:    branchArtifact.ID,
 		neighbourArtifactID: neighbourArtifact.ID,
 		branchRef:           branchRef,
+		movedActionKey:      movedActionKey,
+		neighbourActionKey:  neighbourActionKey,
 	}
+}
+
+// findActionByKey resolves one ledger row through the store's own read — the
+// URL it returns is the served (coalesced) pointer, which is the value the
+// action feed renders.
+func findActionByKey(t *testing.T, s db.Stores, orgID, dedupKey string) domain.ExternalAction {
+	t.Helper()
+	actions, err := s.ExternalActions.ListByOrgSystem(context.Background(), orgID, domain.ExternalActionListOpts{})
+	if err != nil {
+		t.Fatalf("ListByOrgSystem: %v", err)
+	}
+	for _, a := range actions {
+		if a.DedupKey == dedupKey {
+			return a
+		}
+	}
+	t.Fatalf("no external action with dedup key %q", dedupKey)
+	return domain.ExternalAction{}
 }
 
 func trackedSlugs(repos []domain.TeamGitHubRepo) []string {

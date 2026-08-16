@@ -3,6 +3,7 @@ package reporename
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -10,11 +11,14 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 var testLog = logging.Component("reporename-test")
 
 func TestApply_RenamesOnlyWhatMoved(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
 	store := &renameStore{
 		stored: []domain.RepoRef{
 			{Source: "github", Owner: "octo", Repo: "api", ExternalID: "1"},
@@ -132,6 +136,7 @@ func TestApply_NoObservationsNoRead(t *testing.T) {
 func TestApply_ResolverWithoutTheExtensionIsFine(t *testing.T) {
 	// The invalidator is an optional Resolver extension; a fake that doesn't
 	// implement it (and a nil resolver) must not panic the rename.
+	paths.SetForTest(t, t.TempDir())
 	store := &renameStore{
 		stored:   []domain.RepoRef{{Source: "github", Owner: "octo", Repo: "api", ExternalID: "1"}},
 		outcomes: map[string]domain.RepoRenameOutcome{"1": {Renamed: true, From: "octo/api", To: "octo/platform-api"}},
@@ -144,6 +149,44 @@ func TestApply_ResolverWithoutTheExtensionIsFine(t *testing.T) {
 	if n := Apply(context.Background(), store, nil, testLog, "org-1",
 		[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 1 {
 		t.Errorf("applied = %d with a nil resolver, want 1", n)
+	}
+}
+
+func TestApply_ReclaimsTheOldSlugsDirectories(t *testing.T) {
+	// The acceptance case for local mode, where nothing else would: a rename
+	// leaves no unreferenced bare clone behind. The fixture is the on-disk
+	// shape the old slug named; Apply's post-commit disposal must remove it
+	// while leaving a sibling repository's clone alone.
+	paths.SetForTest(t, t.TempDir())
+	org := runmode.LocalDefaultOrgID
+	oldBare := paths.BareCacheDir(org, "octo", "api")
+	oldCurator := paths.CuratorSharedRepoDir(org, "octo", "api")
+	siblingBare := paths.BareCacheDir(org, "octo", "web")
+	for _, dir := range []string{oldBare, oldCurator, siblingBare} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("seed %s: %v", dir, err)
+		}
+	}
+
+	store := &renameStore{
+		stored: []domain.RepoRef{{Source: "github", Owner: "octo", Repo: "api", ExternalID: "1"}},
+		outcomes: map[string]domain.RepoRenameOutcome{
+			"1": {Renamed: true, From: "octo/api", To: "octo/platform-api"},
+		},
+	}
+	if n := Apply(context.Background(), store, nil, testLog, org,
+		[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 1 {
+		t.Fatalf("applied = %d, want 1", n)
+	}
+
+	if _, err := os.Stat(oldBare); !os.IsNotExist(err) {
+		t.Errorf("old bare still on disk after the rename: %v", err)
+	}
+	if _, err := os.Stat(oldCurator); !os.IsNotExist(err) {
+		t.Errorf("old curator checkout still on disk after the rename: %v", err)
+	}
+	if _, err := os.Stat(siblingBare); err != nil {
+		t.Errorf("sibling repository's bare was touched: %v", err)
 	}
 }
 

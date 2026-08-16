@@ -46,6 +46,17 @@ func TestRepoRename_SQLite(t *testing.T) {
 				t.Helper()
 				return sqliteCategoryAReferences(t, conn)
 			},
+			RawActionURL: func(t *testing.T, dedupKey string) (string, string) {
+				t.Helper()
+				var u, cur string
+				if err := conn.QueryRow(
+					`SELECT COALESCE(url, ''), COALESCE(current_url, '') FROM external_actions WHERE dedup_key = ?`,
+					dedupKey,
+				).Scan(&u, &cur); err != nil {
+					t.Fatalf("read action row %q: %v", dedupKey, err)
+				}
+				return u, cur
+			},
 		}
 		return stores, runmode.LocalDefaultOrgID, seed
 	})

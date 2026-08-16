@@ -62,6 +62,17 @@ func TestRepoRename_Postgres(t *testing.T) {
 				t.Helper()
 				return pgCategoryAReferences(t, h, orgID)
 			},
+			RawActionURL: func(t *testing.T, dedupKey string) (string, string) {
+				t.Helper()
+				var u, cur string
+				if err := h.AdminDB.QueryRow(
+					`SELECT COALESCE(url, ''), COALESCE(current_url, '') FROM external_actions WHERE org_id = $1 AND dedup_key = $2`,
+					orgID, dedupKey,
+				).Scan(&u, &cur); err != nil {
+					t.Fatalf("read action row %q: %v", dedupKey, err)
+				}
+				return u, cur
+			},
 		}
 		return stores, orgID, seed
 	})
