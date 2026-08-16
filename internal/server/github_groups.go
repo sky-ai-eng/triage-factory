@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // --------------------------------------------------------------------
@@ -153,7 +154,7 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		Groups []gitHubGroupJSON `json:"groups"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 

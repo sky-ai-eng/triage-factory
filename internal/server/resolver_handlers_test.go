@@ -179,16 +179,16 @@ func TestRepoBranches_AppOnlyOrg_Success(t *testing.T) {
 	}
 }
 
-func TestRepoBranches_NoCredentials_400(t *testing.T) {
+func TestRepoBranches_NoCredentials_NotConfigured(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	logs := captureLog(t)
 
 	rec := doJSON(t, srv, http.MethodGet, "/api/repos/acme/api/branches", nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("branches = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("branches = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
-	assertErrorBody(t, rec.Body.Bytes(), "GitHub not configured")
+	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 	assertLogged(t, logs, "github not configured")
 }
 

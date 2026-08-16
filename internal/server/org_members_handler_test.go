@@ -251,15 +251,17 @@ func TestOrgMembersList_AnyMemberReads(t *testing.T) {
 	}
 }
 
-// TestOrgMemberRoleChange_NonAdminIs404: a plain member cannot change roles —
-// the org-admin gate answers 404 (not 403), and the row is untouched.
-func TestOrgMemberRoleChange_NonAdminIs404(t *testing.T) {
+// TestOrgMemberRoleChange_NonAdminIsForbidden: a plain member cannot change
+// roles — the org-admin gate answers 403 naming the missing role (a member can
+// see their own org, so a 404 would deny something they can list), and the row
+// is untouched.
+func TestOrgMemberRoleChange_NonAdminIsForbidden(t *testing.T) {
 	r := newOrgMembersRig(t)
 
 	rec := httptest.NewRecorder()
 	r.omh.handleOrgMemberRoleChange(rec, r.req(http.MethodPatch, r.memb, r.admin, map[string]string{"role": "member"}))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (non-admin); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (non-admin); body=%s", rec.Code, rec.Body.String())
 	}
 	if got := r.roleOf(t, r.admin); got != "admin" {
 		t.Errorf("admin role = %q after blocked change, want admin (unchanged)", got)

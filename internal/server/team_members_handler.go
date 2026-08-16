@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // teamMembersHandler serves /api/teams/{team_id}/members — the team roster
@@ -77,7 +78,9 @@ type teamRosterResponse struct {
 // GET /api/teams/{team_id}/members
 func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The whole roster surface is multi-mode only; a route that doesn't
+		// exist in this deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, teamID, ok := h.resolve(w, r)
@@ -141,7 +144,9 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 // POST /api/teams/{team_id}/members  body: { "user_id": "<uuid>", "role": "<membership_role>" }
 func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The whole roster surface is multi-mode only; a route that doesn't
+		// exist in this deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, teamID, ok := h.resolve(w, r)
@@ -159,17 +164,19 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 		UserID string `json:"user_id"`
 		Role   string `json:"role"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	target := strings.TrimSpace(body.UserID)
+	var v httpx.Validation
 	if _, err := uuid.Parse(target); err != nil {
-		badRequest(w, "user_id must be a valid user id")
-		return
+		v.Invalid("user_id", "user_id must be a valid user id")
 	}
 	role := strings.TrimSpace(body.Role)
 	if !teamRoles[role] {
-		badRequest(w, "role must be one of admin, member, viewer")
+		v.Invalid("role", "role must be one of admin, member, viewer")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -182,8 +189,8 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 		return
 	}
 	if !isMember {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "the user must be a member of this org",
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason: httpx.ReasonCrossTeamRef, Message: "the user must be a member of this org", Field: "user_id",
 		})
 		return
 	}
@@ -205,9 +212,7 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 	case err == nil:
 		w.WriteHeader(http.StatusCreated)
 	case errors.Is(err, db.ErrTeamMemberExists):
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "that user is already on this team",
-		})
+		conflict(w, "that user is already on this team")
 	default:
 		internalError(w, "team-members", err)
 	}
@@ -220,7 +225,9 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 // PATCH /api/teams/{team_id}/members/{user_id}  body: { "role": "<membership_role>" }
 func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The whole roster surface is multi-mode only; a route that doesn't
+		// exist in this deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, teamID, ok := h.resolve(w, r)
@@ -241,12 +248,14 @@ func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r
 	var body struct {
 		Role string `json:"role"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	role := strings.TrimSpace(body.Role)
 	if !teamRoles[role] {
-		badRequest(w, "role must be one of admin, member, viewer")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "role must be one of admin, member, viewer", Field: "role",
+		})
 		return
 	}
 
@@ -278,7 +287,9 @@ func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r
 // DELETE /api/teams/{team_id}/members/{user_id}
 func (h *teamMembersHandler) handleTeamMemberRemove(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The whole roster surface is multi-mode only; a route that doesn't
+		// exist in this deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, teamID, ok := h.resolve(w, r)
@@ -336,9 +347,8 @@ func (h *teamMembersHandler) resolve(w http.ResponseWriter, r *http.Request) (or
 		return "", "", "", false
 	}
 	userID = claims.Subject
-	teamID = r.PathValue("team_id")
-	if _, err := uuid.Parse(teamID); err != nil {
-		http.NotFound(w, r)
+	teamID, ok = uuidPathOr404(w, r, "team_id", "team")
+	if !ok {
 		return "", "", "", false
 	}
 	if !h.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
@@ -349,8 +359,13 @@ func (h *teamMembersHandler) resolve(w http.ResponseWriter, r *http.Request) (or
 
 // requireTeamManager confirms the caller may mutate the team's roster: a team
 // admin OR an org admin (the union memberships_insert/_update/_delete RLS gate
-// on). On not-allowed it writes 404 (non-disclosure, matching the org roster's
-// posture) and returns false; an error renders a 500.
+// on). On not-allowed it writes 403 and returns false; an error renders a 500.
+//
+// 403, not the 404 it used to write: every caller reaching this point has
+// already passed VerifyTeamInOrg, which means the team is in their org and
+// GET /api/teams lists it for them. Hiding a row the caller can see elsewhere
+// reads as a bug, and the disclosure rule reserves 404 for what is genuinely
+// invisible — which VerifyTeamInOrg has already answered.
 func (h *teamMembersHandler) requireTeamManager(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
 	isTeamAdmin, err := h.az.UserIsTeamAdmin(r.Context(), userID, orgID, teamID)
 	if err != nil {
@@ -366,7 +381,7 @@ func (h *teamMembersHandler) requireTeamManager(w http.ResponseWriter, r *http.R
 		return false
 	}
 	if !isOrgAdmin {
-		http.NotFound(w, r)
+		forbidden(w, "team admin or org admin role required")
 		return false
 	}
 	return true
@@ -403,12 +418,7 @@ func teamBotFromAgent(agent *domain.Agent, ta *domain.TeamAgent) *teamRosterBotR
 // malformed UUID is a 404 (same response as "no such member") so a bad path
 // can't surface as a 500 from the uuid cast in the store query.
 func teamMemberTargetID(w http.ResponseWriter, r *http.Request) (string, bool) {
-	raw := r.PathValue("user_id")
-	if _, err := uuid.Parse(raw); err != nil {
-		http.NotFound(w, r)
-		return "", false
-	}
-	return raw, true
+	return uuidPathOr404(w, r, "user_id", "member")
 }
 
 // writeTeamMemberMutationResult renders the shared error mapping for the
@@ -421,9 +431,7 @@ func writeTeamMemberMutationResult(w http.ResponseWriter, err error) bool {
 	case err == nil:
 		return true
 	case errors.Is(err, db.ErrLastTeamAdminGuard):
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "can't remove or demote the last admin — assign another admin first",
-		})
+		conflict(w, "can't remove or demote the last admin — assign another admin first")
 	case errors.Is(err, db.ErrTeamMemberNotFound):
 		notFound(w, "member")
 	default:

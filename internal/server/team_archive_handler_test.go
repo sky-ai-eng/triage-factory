@@ -100,9 +100,11 @@ func TestTeamArchive_OrgAdminArchivesAndCounts(t *testing.T) {
 	}
 }
 
-// TestTeamArchive_NonOrgAdminIs404: a plain member can't archive / restore /
-// preview — the org-admin gate 404s (non-disclosure), and the team is untouched.
-func TestTeamArchive_NonOrgAdminIs404(t *testing.T) {
+// TestTeamArchive_NonOrgAdminIsForbidden: a plain member can't archive /
+// restore / preview. The denial is 403, not the 404 it used to be: the team is
+// in their org and GET /api/teams lists it for them, so the gate names the
+// role they lack instead of denying the team exists. The team is untouched.
+func TestTeamArchive_NonOrgAdminIsForbidden(t *testing.T) {
 	r := newTeamArchiveRig(t)
 
 	for _, tc := range []struct {
@@ -123,8 +125,8 @@ func TestTeamArchive_NonOrgAdminIs404(t *testing.T) {
 			case "preview":
 				r.th.handleTeamArchivePreview(rec, req)
 			}
-			if rec.Code != http.StatusNotFound {
-				t.Fatalf("%s by non-admin = %d, want 404; body=%s", tc.name, rec.Code, rec.Body.String())
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("%s by non-admin = %d, want 403; body=%s", tc.name, rec.Code, rec.Body.String())
 			}
 		})
 	}
@@ -178,7 +180,7 @@ func TestTeamRestore_RevivesTeam(t *testing.T) {
 }
 
 // TestTeamArchive_BlocksTeamSettingsWrite: an archived team rejects a
-// team-settings write with 403 + archived:true, and a restore re-opens it. This
+// team-settings write with 403 TEAM_ARCHIVED, and a restore re-opens it. This
 // is the VerifyTeamNotArchived gate end-to-end.
 func TestTeamArchive_BlocksTeamSettingsWrite(t *testing.T) {
 	r := newTeamArchiveRig(t)
@@ -203,19 +205,11 @@ func TestTeamArchive_BlocksTeamSettingsWrite(t *testing.T) {
 	if wrec.Code != http.StatusForbidden {
 		t.Fatalf("team-settings write on archived team = %d, want 403; body=%s", wrec.Code, wrec.Body.String())
 	}
-	var blocked struct {
-		Archived bool `json:"archived"`
-	}
-	if err := json.Unmarshal(wrec.Body.Bytes(), &blocked); err != nil {
-		t.Fatalf("decode 403 body: %v", err)
-	}
-	if !blocked.Archived {
-		t.Errorf("403 body missing archived:true marker; body=%s", wrec.Body.String())
-	}
+	assertFirstError(t, wrec, httpx.ReasonTeamArchived, "")
 }
 
 // TestTeamArchive_BlocksMembershipWrite: once archived, a team's roster is
-// frozen — a member add is rejected with 403 + archived:true. The membership
+// frozen — a member add is rejected with 403 TEAM_ARCHIVED. The membership
 // handlers gate on user_is_team_admin (no user_can_write_team filter), so this
 // proves the explicit VerifyTeamNotArchived gate covers them (TFAC-448).
 func TestTeamArchive_BlocksMembershipWrite(t *testing.T) {

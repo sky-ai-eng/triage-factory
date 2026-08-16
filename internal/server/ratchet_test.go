@@ -60,7 +60,6 @@ var ratchetAllowlist = []ratchetEntry{
 
 	// http.NotFound — Go's text-body 404 on JSON surfaces.
 	{"internal/server/auth_handlers.go", "http.NotFound"},
-	{"internal/server/authz/authz.go", "http.NotFound"},
 	{"internal/server/avatars_handler.go", "http.NotFound"},
 	{"internal/server/github_app_register.go", "http.NotFound"},
 	{"internal/server/invites_handler.go", "http.NotFound"},
@@ -68,9 +67,6 @@ var ratchetAllowlist = []ratchetEntry{
 	{"internal/server/middleware.go", "http.NotFound"},
 	{"internal/server/org_members_handler.go", "http.NotFound"},
 	{"internal/server/orgs_handler.go", "http.NotFound"},
-	{"internal/server/team_archive_handler.go", "http.NotFound"},
-	{"internal/server/team_members_handler.go", "http.NotFound"},
-	{"internal/server/teams_handler.go", "http.NotFound"},
 	{"internal/server/usage_access_log.go", "http.NotFound"},
 	{"internal/server/usage_activity_handler.go", "http.NotFound"},
 	{"internal/server/usage_handler.go", "http.NotFound"},
@@ -83,7 +79,6 @@ var ratchetAllowlist = []ratchetEntry{
 	{"ee/fleet/handlers.go", "request-decode"},
 
 	// error-map — ad-hoc {"error": "..."} bodies.
-	{"internal/server/authz/authz.go", "error-map"},
 	{"internal/server/bedrock_connect.go", "error-map"},
 	{"internal/server/bedrock_role.go", "error-map"},
 	{"internal/server/blueprints_handler.go", "error-map"},
@@ -105,13 +100,7 @@ var ratchetAllowlist = []ratchetEntry{
 	{"internal/server/org_members_handler.go", "error-map"},
 	{"internal/server/orgs_handler.go", "error-map"},
 	{"internal/server/prompts_handler.go", "error-map"},
-	{"internal/server/repos_handler.go", "error-map"},
-	{"internal/server/settings.go", "error-map"},
-	{"internal/server/settings_handlers.go", "error-map"},
 	{"internal/server/skills_handler.go", "error-map"},
-	{"internal/server/team_archive_handler.go", "error-map"},
-	{"internal/server/team_members_handler.go", "error-map"},
-	{"internal/server/teams_handler.go", "error-map"},
 	{"internal/server/usage_activity_handler.go", "error-map"},
 	{"internal/server/usage_ops_handler.go", "error-map"},
 	{"ee/slack/workspaces.go", "error-map"},

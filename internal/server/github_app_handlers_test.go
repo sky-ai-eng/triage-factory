@@ -428,9 +428,11 @@ func TestGitHubAppInstallationsRefresh_MultiMode_AdminGate(t *testing.T) {
 
 	path := "/api/orgs/" + orgA.String() + "/github/app/installations/refresh"
 
-	t.Run("non_admin_member_404", func(t *testing.T) {
-		if resp := rig.requestWithSid("POST", path, sidC); resp.StatusCode != http.StatusNotFound {
-			t.Errorf("member status=%d, want 404 (admin-only)", resp.StatusCode)
+	// A member of the org can see the org, so the admin gate answers 403 and
+	// names the role; only a non-member gets the non-disclosure 404.
+	t.Run("non_admin_member_403", func(t *testing.T) {
+		if resp := rig.requestWithSid("POST", path, sidC); resp.StatusCode != http.StatusForbidden {
+			t.Errorf("member status=%d, want 403 (admin-only)", resp.StatusCode)
 		}
 	})
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -90,15 +91,26 @@ func (s *Server) handleTeamMembers(w http.ResponseWriter, r *http.Request) {
 	// (implicit) user, so we render their identity directly rather than
 	// querying memberships — the SQLite roster methods are multi-only stubs.
 	var username, displayName, jiraAccount string
-	_ = s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+	// The tx error was discarded here, so a failed read answered 200 with a
+	// blank roster row — a roster that says the user has no identity looks
+	// exactly like one that couldn't be read. The per-field lookups stay
+	// tolerant (an unbound identity is a legitimate empty), but a transaction
+	// that could not run at all is a 500.
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Identity is host-scoped: resolve the org's GitHub
 		// host from org_settings, then look up the login for (user, host).
-		orgSet, _ := tx.Orgs.GetSettings(r.Context(), orgID)
+		orgSet, e := tx.Orgs.GetSettings(r.Context(), orgID)
+		if e != nil {
+			return fmt.Errorf("org settings: %w", e)
+		}
 		username, _ = tx.Users.GetGitHubLogin(r.Context(), userID, orgSet.GitHubBaseURL)
 		displayName, _ = tx.Users.GetDisplayName(r.Context(), userID)
 		jiraAccount, _, _ = tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
 		return nil
-	})
+	}); err != nil {
+		internalError(w, "config", err)
+		return
+	}
 	var login, jiraID *string
 	if username != "" {
 		login = &username

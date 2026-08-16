@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/zalando/go-keyring"
 )
 
@@ -161,9 +162,10 @@ func TestAnthropicConnect_Unreachable_Returns422(t *testing.T) {
 }
 
 // TestAnthropicConnect_BulkPostNoBackDoor pins that the bulk org-settings POST
-// is NOT a write path for the key: a non-empty anthropic_api_key in that body
-// is ignored (the field was removed), so the only way to set it is the
-// validated endpoint.
+// is NOT a write path for the key: an anthropic_api_key in that body is now
+// REJECTED (strict decoding — the field doesn't exist on the schema) rather
+// than silently ignored, so the only way to set it is the validated endpoint
+// and a client that tries the back door is told so.
 func TestAnthropicConnect_BulkPostNoBackDoor(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -177,9 +179,10 @@ func TestAnthropicConnect_BulkPostNoBackDoor(t *testing.T) {
 		"github_poll_interval": "5m0s",
 		"jira_poll_interval":   "5m0s",
 	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bulk settings status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bulk settings status=%d body=%s, want 400", rec.Code, rec.Body.String())
 	}
+	assertFirstError(t, rec, httpx.ReasonUnknownField, "anthropic_api_key")
 	stored, _ := s.secrets.Get(ctx, runmode.LocalDefaultOrgID, "anthropic_api_key")
 	if stored != "" {
 		t.Errorf("bulk POST stored the key (back door): %q", stored)

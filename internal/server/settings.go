@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -339,11 +341,13 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		Email string `json:"email"`
 		Token string `json:"token"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.URL == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "url is required", Field: "url",
+		})
 		return
 	}
 
@@ -362,13 +366,24 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 	var cfg jira.Config
 	if cloud {
 		if req.Email == "" || req.Token == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "email and API token are required for Jira Cloud"})
+			var v httpx.Validation
+			if req.Email == "" {
+				v.Missing("email")
+			}
+			if req.Token == "" {
+				v.Missing("token")
+			}
+			v.Flush(w, http.StatusBadRequest)
 			return
 		}
 		cfg = jira.CloudAPIToken(req.URL, req.Email, req.Token)
 	} else {
 		if req.PAT == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a personal access token is required for Jira Data Center"})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonMissingField,
+				Message: "a personal access token is required for Jira Data Center",
+				Field:   "pat",
+			})
 			return
 		}
 		cfg = jira.DataCenterPAT(req.URL, req.PAT)
@@ -390,7 +405,9 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		case !cloud && hostDeployment == jira.DeploymentCloud:
 			msg += " — this looks like an Atlassian Cloud URL, which uses an email + API token rather than a personal access token. Double-check your Jira deployment."
 		}
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msg})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason: httpx.ReasonUpstreamRejected, Message: msg,
+		})
 		return
 	}
 
@@ -452,8 +469,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		// Log the underlying wrap-chain (SQL / vault / FK errors) for
 		// operator debugging, but return a stable user-facing message
 		// so we don't leak Postgres internals to API clients.
-		settingsLog.Error("jira connect persist failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to connect Jira"})
+		internalError(w, "settings", fmt.Errorf("persist jira connection: %w", err))
 		return
 	}
 
@@ -486,7 +502,7 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 	var req struct {
 		APIKey string `json:"api_key"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	key := strings.TrimSpace(req.APIKey)
@@ -522,8 +538,7 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 			// arm records.
 			return recordCredentialRemovals(r.Context(), tx, orgID, userID, removed)
 		}); err != nil {
-			settingsLog.Error("anthropic connect clear failed", "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update Claude credentials"})
+			internalError(w, "settings", fmt.Errorf("clear anthropic credentials: %w", err))
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
@@ -535,7 +550,9 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 	// "bad credential" and "couldn't reach the host" into one 422 for the connect
 	// surface.
 	if err := auth.ValidateAnthropicAPIKey(r.Context(), key); err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason: httpx.ReasonUpstreamRejected, Message: err.Error(), Field: "api_key",
+		})
 		return
 	}
 
@@ -586,8 +603,7 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 		return recordCredentialRemovals(r.Context(), tx, orgID, userID,
 			[]string{domain.CredentialKindBedrock})
 	}); err != nil {
-		settingsLog.Error("anthropic connect persist failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store Claude credentials"})
+		internalError(w, "settings", fmt.Errorf("persist anthropic credentials: %w", err))
 		return
 	}
 
@@ -600,12 +616,32 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
 	projects := r.URL.Query()["project"]
+	// Validate every requested key against the same grammar the write path
+	// enforces. Unvalidated, a garbage key reached Jira and came back as a
+	// 502 — an upstream failure standing in for a malformed request.
+	for _, p := range projects {
+		if !jiraProjectKeyRe.MatchString(normalizeJiraProjectKey(p)) {
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidParam,
+				Message: "project " + strconv.Quote(p) + " is not a valid Jira project key",
+				Field:   "project",
+			})
+			return
+		}
+	}
 	// Read creds + (if needed) the team's tracked-projects fallback
 	// through the app pool inside WithTx so the org_secrets read and
 	// team_settings_select run under the user's claims.
 	var creds auth.Credentials
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
+		// A failed credential read is a 500, not "Jira not configured" —
+		// telling a configured org to re-enter its credentials is the
+		// swallowed-error failure mode this sweep closes.
+		var lerr error
+		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
+		if lerr != nil {
+			return fmt.Errorf("load integration credentials: %w", lerr)
+		}
 		if len(projects) > 0 {
 			return nil
 		}
@@ -629,11 +665,15 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 	// alone would 400 a configured Cloud org here.
 	cfg, ok := integrations.JiraSystemConfig(creds)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
+		writeNotConfigured(w, "Jira is not connected for this workspace")
 		return
 	}
 	if len(projects) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no projects specified"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidParam,
+			Message: "no projects specified, and this workspace's team tracks none",
+			Field:   "project",
+		})
 		return
 	}
 
@@ -647,7 +687,10 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 	for i, proj := range projects {
 		projectStatuses, err := client.ProjectStatuses(r.Context(), proj)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch statuses for " + proj + " from Jira" + localDetail(err)})
+			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{
+				Reason:  httpx.ReasonUpstreamUnavailable,
+				Message: "failed to fetch statuses for " + proj + " from Jira" + httpx.LocalDetail(err),
+			})
 			return
 		}
 		if i == 0 {
@@ -697,10 +740,10 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	// machinery is ever touched in multi mode. The UI hides the button there;
 	// this is the defense-in-depth backstop.
 	if runmode.Current() != runmode.ModeLocal {
-		writeJSON(w, http.StatusNotFound, map[string]any{
-			"ok":    false,
-			"error": "ssh clone protocol is not available in this deployment",
-		})
+		// A route that doesn't exist in this deployment mode is a plain 404
+		// in the envelope — not a verdict body, which is reserved for a
+		// probe that actually ran.
+		notFound(w, "route")
 		return
 	}
 	// Probe target tracks the configured GitHub base URL so the Test
@@ -714,10 +757,11 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	userID := ClaimsFrom(r.Context()).Subject
 	var creds auth.Credentials
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
-		return nil
+		var lerr error
+		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
+		return lerr
 	}); err != nil {
-		internalError(w, "settings", err)
+		internalError(w, "settings", fmt.Errorf("load integration credentials: %w", err))
 		return
 	}
 	sshHost := worktree.SSHHostFromBaseURL(creds.GitHubURL)

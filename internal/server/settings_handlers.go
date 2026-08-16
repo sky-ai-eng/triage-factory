@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -81,7 +82,7 @@ func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) 
 	userID := ClaimsFrom(r.Context()).Subject
 	orgID := OrgIDFrom(r.Context())
 	var req userSettingsUpdate
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -235,7 +236,7 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req teamSettingsUpdate
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -507,7 +508,12 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
+		// A vault fault is a 500, never "not configured" — the status read
+		// drives the whole settings page's connected/disconnected rendering.
+		creds, err = integrations.Load(r.Context(), tx.Secrets, orgID)
+		if err != nil {
+			return fmt.Errorf("load integration credentials: %w", err)
+		}
 		// The login the org PAT authenticates as, recorded on the agents row by
 		// every PAT bind. Only meaningful while the BOUND PAT is the credential —
 		// an App org's bot login (<slug>[bot]) resolves live from the
@@ -634,7 +640,7 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req orgSettingsUpdate
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -675,9 +681,10 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if app != nil {
-				writeJSON(w, http.StatusConflict, map[string]string{
-					"error": "this workspace's GitHub App is registered against this host — remove the App before clearing it",
-					"field": "github_base_url",
+				httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+					Reason:  httpx.ReasonConflict,
+					Message: "this workspace's GitHub App is registered against this host — remove the App before clearing it",
+					Field:   "github_base_url",
 				})
 				return
 			}
@@ -765,11 +772,14 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		err := worktree.PreflightSSH(ctx, sshHost)
 		cancel()
 		if err != nil {
+			// The probe's stderr used to ride along in its own key, a
+			// dialect only this route spoke. It is already the second half
+			// of the message, and the full output is in the log line above.
 			settingsOrgLog.Warn("blocked ssh switch", "ssh_host", sshHost, "error", err)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error":  fmt.Sprintf("SSH preflight against %s failed — fix your SSH setup or keep HTTPS. %s", sshHost, err.Error()),
-				"field":  "github_clone_protocol",
-				"stderr": err.Error(),
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: fmt.Sprintf("SSH preflight against %s failed — fix your SSH setup or keep HTTPS. %s", sshHost, err.Error()),
+				Field:   "github_clone_protocol",
 			})
 			return
 		}

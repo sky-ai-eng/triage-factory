@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // appRepoStub stands in for GitHub's REST API for the App-mode repo picker: it
@@ -201,15 +202,12 @@ func TestHandleGitHubRepos_AppActiveZeroInstallations(t *testing.T) {
 	seedApp(t, srv, stub, nil) // active App, zero installations
 
 	rec := doJSON(t, srv, http.MethodGet, "/api/github/repos", nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("GET /api/github/repos = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("GET /api/github/repos = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
-	var out map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if want := "GitHub App is not installed on any account"; out["error"] != want {
-		t.Errorf("error=%q, want %q", out["error"], want)
+	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
+	if want := "the GitHub App is not installed on any account"; !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("body=%s, want it to say %q", rec.Body.String(), want)
 	}
 }
 
@@ -227,16 +225,12 @@ func TestHandleGitHubRepos_AppListInstallationsErrorNotReportedAsUninstalled(t *
 	}
 
 	rec := doJSON(t, srv, http.MethodGet, "/api/github/repos", nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("GET /api/github/repos = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("GET /api/github/repos = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
-	var out map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if out["error"] != "GitHub not configured" {
-		t.Errorf("error=%q, want generic %q (a failed read must not report 'not installed')",
-			out["error"], "GitHub not configured")
+	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
+	if body := rec.Body.String(); strings.Contains(body, "not installed") {
+		t.Errorf("body=%s, want the generic not-connected message (a failed read must not report 'not installed')", body)
 	}
 }
 

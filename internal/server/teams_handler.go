@@ -2,10 +2,10 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // teamsHandler serves /api/teams — the caller's team list and the org-admin
@@ -54,6 +55,15 @@ type teamJSON struct {
 type teamsResponse struct {
 	Teams            []teamJSON `json:"teams"`
 	LastActingTeamID string     `json:"last_acting_team_id,omitempty"`
+}
+
+// writeDuplicateTeamName answers the (org_id, slug) collision both create and
+// rename can hit. Generic by design — the index name is not the caller's
+// business.
+func writeDuplicateTeamName(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+		Reason: httpx.ReasonDuplicateName, Message: "a team with that name or slug already exists", Field: "name",
+	})
 }
 
 // handleTeamsList returns the caller's teams in the active org plus their
@@ -137,8 +147,9 @@ type teamDetailJSON struct {
 func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
 		// Hosted-only: local mode has exactly one team by construction and
-		// hides the whole team-management surface.
-		http.NotFound(w, r)
+		// hides the whole team-management surface. A route that doesn't
+		// exist in this deployment mode is a 404, not a 501.
+		notFound(w, "route")
 		return
 	}
 	orgID, ok := requireOrg(w, r)
@@ -147,9 +158,8 @@ func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request)
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	teamID := r.PathValue("team_id")
-	if _, err := uuid.Parse(teamID); err != nil {
-		http.NotFound(w, r)
+	teamID, ok := uuidPathOr404(w, r, "team_id", "team")
+	if !ok {
 		return
 	}
 	// Cross-org 404 before the role gate — non-disclosure of teams in other
@@ -170,7 +180,7 @@ func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request)
 		Name        *string `json:"name"`
 		Description *string `json:"description"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 
@@ -219,12 +229,10 @@ func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request)
 	case errors.Is(err, db.ErrTeamNotFound):
 		// Raced past VerifyTeamInOrg (deleted between gate and write) — 404.
 		notFound(w, "team")
-	case strings.Contains(err.Error(), "UNIQUE constraint") || strings.Contains(err.Error(), "duplicate key"):
+	case isUniqueViolation(err):
 		// Re-deriving slug from the new name collided with a sibling team —
 		// same 409 + generic message as Create.
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "a team with that name or slug already exists",
-		})
+		writeDuplicateTeamName(w)
 	default:
 		internalError(w, "teams", err)
 	}
@@ -250,7 +258,7 @@ func (th *teamsHandler) requireTeamAdminOrOrgAdmin(w http.ResponseWriter, r *htt
 		return false
 	}
 	if !isOrgAdmin {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "team admin or org admin role required"})
+		forbidden(w, "team admin or org admin role required")
 		return false
 	}
 	return true
@@ -265,8 +273,9 @@ func (th *teamsHandler) requireTeamAdminOrOrgAdmin(w http.ResponseWriter, r *htt
 // POST /api/teams  body: { "name": "<display name>", "slug"?: "<slug>" }
 func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		// Hosted-only: local mode has exactly one team by construction.
-		http.NotFound(w, r)
+		// Hosted-only: local mode has exactly one team by construction. A
+		// route absent in this mode is a 404, not a 501.
+		notFound(w, "route")
 		return
 	}
 	orgID, ok := requireOrg(w, r)
@@ -281,9 +290,11 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !isAdmin {
-		// 404 not 403 — same non-disclosure posture as withOrg /
-		// requireOrgAdmin: don't reveal the org to a non-admin.
-		http.NotFound(w, r)
+		// The caller is a member of the org (requireOrg resolved it from
+		// their own session), so the org is visible to them and the denial
+		// names the role they lack. A 404 here would report their own
+		// workspace missing.
+		forbidden(w, "org admin role required")
 		return
 	}
 
@@ -291,12 +302,20 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 		Name string `json:"name"`
 		Slug string `json:"slug"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	name := strings.TrimSpace(body.Name)
+	var v httpx.Validation
 	if name == "" {
-		badRequest(w, "name is required")
+		v.Missing("name")
+	}
+	if len([]rune(name)) > maxTeamNameLen {
+		// The same cap PATCH enforces. Create used to accept any length,
+		// so a name could be created that its own rename would reject.
+		v.OutOfRange("name", fmt.Sprintf("name must be at most %d characters", maxTeamNameLen))
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 	slug := strings.TrimSpace(body.Slug)
@@ -317,14 +336,12 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 		return e
 	}); err != nil {
 		// UNIQUE (org_id, slug) collision → 409 with a generic message
-		// (don't echo the index name). SQLite: "UNIQUE constraint";
-		// Postgres: "duplicate key". The constraint is on the *slug*, not
-		// the name, so two distinct names can collide ("Engineering" and
+		// (don't echo the index name); the kernel's shim owns the
+		// per-driver strings. The constraint is on the *slug*, not the
+		// name, so two distinct names can collide ("Engineering" and
 		// "Engineering!" both slugify to "engineering") — say so.
-		if strings.Contains(err.Error(), "UNIQUE constraint") || strings.Contains(err.Error(), "duplicate key") {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "a team with that name or slug already exists",
-			})
+		if isUniqueViolation(err) {
+			writeDuplicateTeamName(w)
 			return
 		}
 		internalError(w, "teams", err)

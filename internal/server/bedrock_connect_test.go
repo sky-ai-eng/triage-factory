@@ -396,7 +396,8 @@ func TestBedrockConnect_MethodSwitchRequiresSecrets(t *testing.T) {
 
 // TestBedrockConnect_BulkPostNoBackDoor pins that the bulk org-settings
 // POST is not a write path for any Bedrock field — the validated connect
-// endpoint is the only door, mirroring the Anthropic rule.
+// endpoint is the only door, mirroring the Anthropic rule. Strict decoding
+// now rejects the attempt outright rather than ignoring the fields.
 func TestBedrockConnect_BulkPostNoBackDoor(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -411,8 +412,8 @@ func TestBedrockConnect_BulkPostNoBackDoor(t *testing.T) {
 		"github_poll_interval":     "5m0s",
 		"jira_poll_interval":       "5m0s",
 	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bulk settings status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bulk settings status=%d body=%s, want 400", rec.Code, rec.Body.String())
 	}
 	for _, k := range integrations.BedrockKeys() {
 		if got := mustSecret(t, s, k); got != "" {

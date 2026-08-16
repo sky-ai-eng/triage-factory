@@ -739,10 +739,11 @@ func TestGitHubPATPut_WithApp409(t *testing.T) {
 }
 
 // TestOrgSettingsSave_CarriesNoCredential proves the bulk settings save can't
-// reach the vault: a body carrying a token is accepted as an ordinary config
-// save (the field is not part of the schema, so it's ignored) and stores
-// nothing. This is the structural version of the old XOR guard on this route —
-// there is no longer a code path from here to a credential write to guard.
+// reach the vault: a body carrying a token is REJECTED (the field is not part
+// of the schema, and strict decoding says so instead of ignoring it) and
+// stores nothing. This is the structural version of the old XOR guard on this
+// route — there is no longer a code path from here to a credential write to
+// guard.
 func TestOrgSettingsSave_CarriesNoCredential(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -750,8 +751,8 @@ func TestOrgSettingsSave_CarriesNoCredential(t *testing.T) {
 	seedLocalApp(t, s, true)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/settings/org", map[string]any{"github_pat": "ghp_new"})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("settings save = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("settings save = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 	stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT)
 	if stored != "" {
