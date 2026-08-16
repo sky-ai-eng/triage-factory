@@ -63,8 +63,8 @@ func TestInstallationGrant_SQLite(t *testing.T) {
 					t.Fatalf("resolve repository id: %v", err)
 				}
 				if _, err := conn.Exec(
-					`INSERT INTO team_github_repos (team_id, repository_id) VALUES (?, ?) ON CONFLICT DO NOTHING`,
-					teamID, repositoryID,
+					`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+					teamID, repositoryID, runmode.LocalDefaultOrgID,
 				); err != nil {
 					t.Fatalf("seed team_github_repos: %v", err)
 				}

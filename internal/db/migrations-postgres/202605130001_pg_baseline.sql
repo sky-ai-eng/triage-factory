@@ -857,9 +857,17 @@ CREATE TABLE public.team_github_groups (
 -- HERE and leaves the registry row standing, because a worktree ledger entry,
 -- a pinned project or a task may still name that repository. Tracking is
 -- forward-only in both directions.
+--
+-- org_id is denormalized from the team so both references can be COMPOSITE
+-- foreign keys — see the constraints below. It is not a scoping convenience:
+-- it is what makes "the team and the repository belong to the same org" a
+-- thing the database checks rather than a thing each writer remembers. A
+-- cross-tenant row is invisible to every org-scoped read, so the failure it
+-- produces is a save that reports success and tracks nothing.
 CREATE TABLE public.team_github_repos (
     team_id uuid NOT NULL,
     repository_id uuid NOT NULL,
+    org_id uuid NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -2203,6 +2211,18 @@ ALTER TABLE ONLY public.repositories
 
 
 --
+-- Name: repositories repositories_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+-- Redundant on its own — id alone is already unique — and present so that
+-- team_github_repos can reference (repository_id, org_id) as a composite
+-- foreign key. Postgres requires a unique constraint over exactly the
+-- referenced columns; this is that requirement, not a second identity.
+ALTER TABLE ONLY public.repositories
+    ADD CONSTRAINT repositories_id_org_id_key UNIQUE (id, org_id);
+
+
+--
 -- Name: system_llm_runs system_llm_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2368,6 +2388,22 @@ ALTER TABLE ONLY public.teams
 
 ALTER TABLE ONLY public.teams
     ADD CONSTRAINT teams_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: teams teams_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+-- Same rationale as repositories_id_org_id_key: a composite-FK target, not a
+-- second identity for a team. Two tables reference it — team_github_repos for
+-- the tracking row's team half, org_invites for an invite's target team — and
+-- it is declared here so it precedes both.
+--
+-- This is the schema's established shape for "these two rows must belong to
+-- the same tenant": agents, entities, runs, tasks and blueprint_runs all pair
+-- an (id, org_id) unique constraint with a composite foreign key.
+ALTER TABLE ONLY public.teams
+    ADD CONSTRAINT teams_id_org_id_key UNIQUE (id, org_id);
 
 
 --
@@ -3235,8 +3271,16 @@ ALTER TABLE ONLY public.team_github_groups
 -- Name: team_github_repos team_github_repos_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
+-- Both references carry org_id, so a tracking row cannot straddle two tenants:
+-- the team half and the repository half must agree on the org, or neither
+-- parent row exists to reference. This replaces a pair of single-column keys
+-- that checked existence and said nothing about tenancy.
+--
+-- No ON UPDATE clause on either: moving a team or a repository between orgs
+-- would drag its tracking rows across the tenant boundary, so refusing (the
+-- default) is the wanted behaviour. Nothing writes those columns.
 ALTER TABLE ONLY public.team_github_repos
-    ADD CONSTRAINT team_github_repos_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
+    ADD CONSTRAINT team_github_repos_team_id_fkey FOREIGN KEY (team_id, org_id) REFERENCES public.teams(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3244,7 +3288,7 @@ ALTER TABLE ONLY public.team_github_repos
 --
 
 ALTER TABLE ONLY public.team_github_repos
-    ADD CONSTRAINT team_github_repos_repository_id_fkey FOREIGN KEY (repository_id) REFERENCES public.repositories(id) ON DELETE CASCADE;
+    ADD CONSTRAINT team_github_repos_repository_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -6683,13 +6727,9 @@ ALTER TABLE public.team_settings ADD COLUMN permission_absent_autodeny_enabled b
 -- sha256(token) in token_hash. Redeem hashes the presented token and looks
 -- it up by that hash.
 
--- Tenant-scoped FK target for target_team_id below. teams.id is already the
--- PK, so (id, org_id) is trivially unique; declaring it lets org_invites FK
--- the *pair* and pin a target team to the invite's own org at the schema
--- level — the same (id, org_id)-unique + composite-FK pattern the rest of the
--- schema uses (agents, entities, runs, tasks, blueprint_runs, …). teams is
--- just the one parent that never needed it until now.
-ALTER TABLE public.teams ADD CONSTRAINT teams_id_org_id_key UNIQUE (id, org_id);
+-- The tenant-scoped FK target for target_team_id below is teams_id_org_id_key,
+-- declared with the teams table's other constraints because team_github_repos
+-- references it too and does so earlier in this file.
 
 CREATE TABLE public.org_invites (
     id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),

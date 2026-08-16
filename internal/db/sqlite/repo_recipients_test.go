@@ -71,8 +71,8 @@ func TestRepoRecipients_SQLite(t *testing.T) {
 					          AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?))
 				`, uuid.NewString(), owner, repo, teamID, owner, repo)
 				exec(t, `
-					INSERT INTO team_github_repos (team_id, repository_id)
-					SELECT t.id, r.id
+					INSERT INTO team_github_repos (team_id, repository_id, org_id)
+					SELECT t.id, r.id, t.org_id
 					  FROM teams t
 					  JOIN repositories r
 					    ON r.org_id = t.org_id AND r.source = 'github'

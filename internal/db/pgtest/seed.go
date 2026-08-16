@@ -86,9 +86,9 @@ func SeedTrackedRepo(t *testing.T, h *Harness, orgID, teamID, owner, repo string
 	t.Helper()
 	repositoryID := SeedRepository(t, h, orgID, owner, repo)
 	MustExec(t, h.AdminDB, `
-		INSERT INTO team_github_repos (team_id, repository_id) VALUES ($1, $2)
+		INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)
 		ON CONFLICT DO NOTHING
-	`, teamID, repositoryID)
+	`, teamID, repositoryID, orgID)
 	return repositoryID
 }
 

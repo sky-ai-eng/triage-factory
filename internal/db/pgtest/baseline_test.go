@@ -3085,7 +3085,7 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 
 	// carol (admin of teamB) tracks a repo for teamB.
 	if err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
-		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, repository_id) VALUES ($1, $2)`, teamB, repoB)
+		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`, teamB, repoB, orgA)
 		return e
 	}); err != nil {
 		t.Fatalf("carol INSERT teamB repo: %v", err)
@@ -3094,7 +3094,7 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 	// alice (admin of teamA — owner is implicitly team admin) tracks a
 	// repo for teamA.
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, repository_id) VALUES ($1, $2)`, teamA, repoA)
+		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`, teamA, repoA, orgA)
 		return e
 	}); err != nil {
 		t.Fatalf("alice INSERT teamA repo: %v", err)
@@ -3130,7 +3130,7 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 	// bob (non-admin) cannot INSERT into teamA — INSERT WITH CHECK is
 	// admin-gated → SQLSTATE 42501.
 	err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, repository_id) VALUES ($1, $2)`, teamA, repoA)
+		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`, teamA, repoA, orgA)
 		return e
 	})
 	assertPgCode(t, err, "42501", "bob INSERT teamA repo (non-admin)")
@@ -3215,4 +3215,57 @@ func TestTeamGitHubRepos_TrackingSurvivesUntrackingTheRegistryRow(t *testing.T) 
 	if trackingRows != 0 {
 		t.Errorf("tracking rows after the registry row went = %d; want 0 (ON DELETE CASCADE)", trackingRows)
 	}
+}
+
+// TestTeamGitHubRepos_CrossTenantRowIsUnrepresentable pins the composite
+// foreign keys. A tracking row joins a team to a repository and both belong to
+// an org, so the row carries org_id and references (team_id, org_id) and
+// (repository_id, org_id) rather than the two ids alone.
+//
+// This is asserted on the ADMIN pool on purpose: RLS refuses a cross-org write
+// on the app pool, and the store refuses one before it reaches the database at
+// all. Both of those are checks somebody has to remember to keep. The
+// constraint is the one that holds when they are bypassed, and the admin pool
+// is where "bypassed" is testable.
+//
+// The failure this prevents is quiet rather than loud. A row pairing org A's
+// team with org B's repository satisfies both single-column keys, and every
+// org-scoped read filters it out — so the save reports success and the repo is
+// never tracked, never polled, never profiled.
+func TestTeamGitHubRepos_CrossTenantRowIsUnrepresentable(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, _, teamA := SeedOrgWithUser(t, h, "alice")
+	orgB, _, teamB := SeedOrgWithUser(t, h, "bob")
+	repoA := SeedRepository(t, h, orgA, "acme", "shared")
+	repoB := SeedRepository(t, h, orgB, "acme", "shared")
+
+	// org A's team pointed at org B's repository, stamped with either org.
+	// Whichever org_id is written, one of the two composite keys has no parent.
+	for _, tc := range []struct{ name, org string }{
+		{"stamped with the team's org", orgA},
+		{"stamped with the repository's org", orgB},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := h.AdminDB.Exec(
+				`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`,
+				teamA, repoB, tc.org)
+			if err == nil {
+				t.Fatal("a cross-tenant tracking row was accepted; the composite foreign keys are not doing their job")
+			}
+			if !strings.Contains(err.Error(), "foreign key") && !strings.Contains(err.Error(), "23503") {
+				t.Errorf("refused for the wrong reason: %v", err)
+			}
+		})
+	}
+
+	// The same-tenant pairs still insert, so the constraint is discriminating
+	// rather than just strict.
+	MustExec(t, h.AdminDB,
+		`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`,
+		teamA, repoA, orgA)
+	MustExec(t, h.AdminDB,
+		`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`,
+		teamB, repoB, orgB)
 }

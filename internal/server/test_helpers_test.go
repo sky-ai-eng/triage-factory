@@ -121,10 +121,10 @@ func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) {
 		t.Fatalf("resolve repository id for %s/%s: %v", owner, repo, err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
-		INSERT INTO team_github_repos (team_id, repository_id)
-		VALUES (?, ?)
+		INSERT INTO team_github_repos (team_id, repository_id, org_id)
+		VALUES (?, ?, ?)
 		ON CONFLICT(team_id, repository_id) DO NOTHING
-	`, runmode.LocalDefaultTeamID, repositoryID); err != nil {
+	`, runmode.LocalDefaultTeamID, repositoryID, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("track repo %s/%s on default team: %v", owner, repo, err)
 	}
 }

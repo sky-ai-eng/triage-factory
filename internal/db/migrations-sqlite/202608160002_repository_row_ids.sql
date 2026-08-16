@@ -167,21 +167,49 @@ ON CONFLICT DO NOTHING;
 -- tracking row is a *statement about* a repository, so it cannot outlive the
 -- registry row it points at. The converse does not hold — untracking a
 -- repository is a delete on THIS table and leaves the registry row standing.
+-- A tracking row joins a team to a repository, and both of those belong to an
+-- org. Carrying org_id here lets the two references be COMPOSITE foreign keys,
+-- so the pair has to agree on the tenant: a team in org A cannot be pointed at
+-- a repository in org B, because there is no (repository_id, org_id) row to
+-- reference. The alternative is two independent single-column keys plus every
+-- writer remembering to check — and a cross-tenant row is invisible to every
+-- org-scoped read, so forgetting produces a save that reports success and
+-- tracks nothing rather than an error.
+--
+-- SQLite needs the parent columns under a unique index before it will accept a
+-- composite reference to them.
+CREATE UNIQUE INDEX IF NOT EXISTS teams_id_org_idx ON teams(id, org_id);
+CREATE UNIQUE INDEX IF NOT EXISTS repositories_id_org_idx ON repositories(id, org_id);
+
 CREATE TABLE team_github_repos_new (
-    team_id       TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    team_id       TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    org_id        TEXT NOT NULL,
     created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (team_id, repository_id)
+    PRIMARY KEY (team_id, repository_id),
+    -- No ON UPDATE clause on either: moving a team or a repository between orgs
+    -- would silently drag its tracking rows across the tenant boundary, so the
+    -- default (refuse) is the wanted behaviour. Nothing writes those columns.
+    FOREIGN KEY (team_id, org_id) REFERENCES teams(id, org_id) ON DELETE CASCADE,
+    FOREIGN KEY (repository_id, org_id) REFERENCES repositories(id, org_id) ON DELETE CASCADE
 );
 
 -- INSERT OR IGNORE collapses a team that tracked one repository under two
 -- casings onto the single row the folded join resolves both to — the absorb
 -- the rename rewrite used to perform inline, now done once, here.
-INSERT OR IGNORE INTO team_github_repos_new (team_id, repository_id, created_at)
-SELECT g.team_id, r.id, g.created_at
+--
+-- org_id comes from the team, and the join to repositories is constrained to
+-- the same org: a pre-migration row that was already cross-tenant has no
+-- destination here and is dropped rather than carried across as a row the new
+-- foreign keys would have refused.
+INSERT OR IGNORE INTO team_github_repos_new (team_id, repository_id, org_id, created_at)
+SELECT g.team_id, r.id, t.org_id, g.created_at
   FROM team_github_repos g
+  JOIN teams t
+    ON t.id = g.team_id
   JOIN repositories r
     ON r.source = 'github'
+   AND r.org_id = t.org_id
    AND LOWER(r.owner) = LOWER(g.owner)
    AND LOWER(r.repo) = LOWER(g.repo);
 

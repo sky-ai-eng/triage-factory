@@ -150,6 +150,28 @@ func TestMigrate_RepoRowIDsPreservesReferences(t *testing.T) {
 		t.Errorf("worktree repo = %q, want octo/untracked — a ledger entry outlives its tracking", got)
 	}
 
+	// The composite foreign keys refuse a tracking row that straddles two
+	// tenants. Asserted here rather than through the store because the store
+	// checks first and would mask the constraint — and the constraint is the
+	// half that holds when a writer forgets.
+	if _, err := database.Exec(
+		`INSERT INTO orgs (id, slug, name) VALUES ('00000000-0000-0000-0000-000000000002', 'other', 'Other')`,
+	); err != nil {
+		t.Fatalf("seed second org: %v", err)
+	}
+	var trackedRepoID string
+	if err := database.QueryRow(
+		`SELECT id FROM repositories WHERE owner = 'octo' AND repo = 'tracked'`,
+	).Scan(&trackedRepoID); err != nil {
+		t.Fatalf("read tracked repository id: %v", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO team_github_repos (team_id, repository_id, org_id)
+		VALUES (?, ?, '00000000-0000-0000-0000-000000000002')
+	`, teamID, trackedRepoID); err == nil {
+		t.Error("a tracking row naming one org's team and another org's repository was accepted")
+	}
+
 	// The pins came across in order.
 	rows, err := database.Query(`
 		SELECT r.owner || '/' || r.repo FROM project_pinned_repos pr

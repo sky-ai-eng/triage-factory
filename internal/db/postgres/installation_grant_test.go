@@ -52,9 +52,9 @@ func TestInstallationGrant_Postgres(t *testing.T) {
 					t.Fatalf("resolve repository id: %v", err)
 				}
 				pgtest.MustExec(t, h.AdminDB,
-					`INSERT INTO team_github_repos (team_id, repository_id) VALUES ($1, $2)
+					`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)
 					 ON CONFLICT DO NOTHING`,
-					teamID, repositoryID)
+					teamID, repositoryID, orgID)
 			},
 		}
 	})

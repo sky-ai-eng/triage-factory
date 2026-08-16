@@ -137,15 +137,13 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, orgID); err != nil {
 			return fmt.Errorf("lock org for repo tracking write: %w", err)
 		}
-		// The two arguments have to describe one tenant. orgID scopes the
-		// registry rows this mints; teamID is written straight onto the
-		// tracking row. A mismatched pair would point a team in one org at a
-		// repository in another — a row no org-scoped read can see, so the
-		// save would report success and nothing would be tracked or polled.
-		//
-		// On the app pool the team_github_repos_insert policy already refuses
-		// it (tf.team_in_current_org), so this is the admin pool's only check
-		// and the app pool's legible error instead of an RLS denial.
+		// The two arguments have to describe one tenant. The composite foreign
+		// keys on team_github_repos are what enforce that — a mismatched pair
+		// has no (team_id, org_id) or (repository_id, org_id) parent row to
+		// reference — so this check is not the enforcement. It is here to fail
+		// with a name instead of an integrity-violation string, and to fail
+		// BEFORE the registry mint below, so a refused save leaves no bare
+		// repository row behind for a tenant that was never going to track it.
 		if err := assertTeamInOrg(ctx, tx, orgID, teamID); err != nil {
 			return err
 		}
@@ -166,10 +164,10 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 				return fmt.Errorf("resolve repository %s/%s: %w", r.Owner, r.Repo, err)
 			}
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO team_github_repos (team_id, repository_id)
-				VALUES ($1, $2)
+				INSERT INTO team_github_repos (team_id, repository_id, org_id)
+				VALUES ($1, $2, $3)
 				ON CONFLICT (team_id, repository_id) DO NOTHING
-			`, teamID, id); err != nil {
+			`, teamID, id, orgID); err != nil {
 				return fmt.Errorf("insert team_github_repos[%s/%s]: %w", r.Owner, r.Repo, err)
 			}
 			ids = append(ids, id)

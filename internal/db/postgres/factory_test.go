@@ -125,10 +125,11 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("seed entity repository %s/%s: %v", owner, repo, err)
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO team_github_repos (team_id, repository_id)
+				INSERT INTO team_github_repos (team_id, repository_id, org_id)
 				VALUES ((SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1),
 				        (SELECT id FROM repositories
-				          WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)))
+				          WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)),
+				        $1)
 				ON CONFLICT (team_id, repository_id) DO NOTHING
 			`, orgID, owner, repo); err != nil {
 				t.Fatalf("track entity repo %s/%s: %v", owner, repo, err)

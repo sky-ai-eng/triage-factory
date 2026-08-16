@@ -67,8 +67,8 @@ func TestRepoRecipients_Postgres(t *testing.T) {
 					ON CONFLICT DO NOTHING
 				`, teamID, owner, repo)
 				pgtest.MustExec(t, h.AdminDB, `
-					INSERT INTO team_github_repos (team_id, repository_id)
-					SELECT t.id, r.id
+					INSERT INTO team_github_repos (team_id, repository_id, org_id)
+					SELECT t.id, r.id, t.org_id
 					  FROM teams t
 					  JOIN repositories r
 					    ON r.org_id = t.org_id AND r.source = 'github'

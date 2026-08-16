@@ -144,12 +144,11 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 		return err
 	}
 	return inTx(ctx, s.q, func(tx queryer) error {
-		// The two arguments have to describe one tenant. Local mode is N=1 so
-		// assertLocalOrg has already pinned orgID, but the teamID is still the
-		// caller's word — and the tracking row a mismatch would write is one
-		// no org-scoped read returns, so the save would report success and
-		// track nothing. Checked before the registry mint so a refused save
-		// leaves no row behind.
+		// The two arguments have to describe one tenant. The composite foreign
+		// keys on team_github_repos are what enforce that; this check is here
+		// to fail with a name instead of "FOREIGN KEY constraint failed", and
+		// to fail BEFORE the registry mint below, so a refused save leaves no
+		// bare repository row behind.
 		if err := assertTeamInOrg(ctx, tx, orgID, teamID); err != nil {
 			return err
 		}
@@ -167,10 +166,10 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 				return fmt.Errorf("resolve repository %s/%s: %w", r.Owner, r.Repo, err)
 			}
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO team_github_repos (team_id, repository_id)
-				VALUES (?, ?)
+				INSERT INTO team_github_repos (team_id, repository_id, org_id)
+				VALUES (?, ?, ?)
 				ON CONFLICT(team_id, repository_id) DO NOTHING
-			`, teamID, id); err != nil {
+			`, teamID, id, orgID); err != nil {
 				return fmt.Errorf("insert team_github_repos[%s/%s]: %w", r.Owner, r.Repo, err)
 			}
 			ids = append(ids, id)
