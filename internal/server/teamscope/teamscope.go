@@ -64,10 +64,15 @@ func IsSelectionError(err error) bool {
 // when err is a caller-fault team-selection error; returns false otherwise so
 // the caller falls through to its normal (500) handling. Lets every
 // team-stamping handler map the picker errors with one line after its WithTx
-// returns.
+// returns. All three selection errors are faults in the request's team pick,
+// so they carry the team_id field attribution.
 func WriteIfSelectionError(w http.ResponseWriter, err error) bool {
 	if IsSelectionError(err) {
-		httpx.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: err.Error(),
+			Field:   "team_id",
+		})
 		return true
 	}
 	return false
@@ -280,4 +285,55 @@ func SingleParam(r *http.Request) string {
 		return "" // drop malformed (stale localStorage, hand-edited URL)
 	}
 	return v
+}
+
+// FilterParamStrict is FilterParam under the strict-params contract: a
+// malformed ?team_id= is rejected as a 400 INVALID_PARAM instead of silently
+// dropped — dropping a corrupt filter *widens* the result set, the exact
+// failure the contract forbids. On a malformed value the response is already
+// written and ok is false; callers return immediately. The lenient FilterParam
+// remains only for handlers not yet converted; converted handlers never go
+// back, and the lenient variants are deleted once the sweep finishes.
+func FilterParamStrict(w http.ResponseWriter, r *http.Request) (teams []string, ok bool) {
+	raw := r.URL.Query()["team_id"]
+	if len(raw) == 0 {
+		return nil, true
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if _, err := uuid.Parse(v); err != nil {
+			writeBadTeamID(w, v)
+			return nil, false
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out, true
+}
+
+// SingleParamStrict is SingleParam under the same strict-params contract as
+// FilterParamStrict: absent stays "" (no narrow), malformed is a 400 instead
+// of a silent fall-through to the default team.
+func SingleParamStrict(w http.ResponseWriter, r *http.Request) (team string, ok bool) {
+	v := r.URL.Query().Get("team_id")
+	if v == "" {
+		return "", true
+	}
+	if _, err := uuid.Parse(v); err != nil {
+		writeBadTeamID(w, v)
+		return "", false
+	}
+	return v, true
+}
+
+func writeBadTeamID(w http.ResponseWriter, v string) {
+	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		Reason:  httpx.ReasonInvalidParam,
+		Message: fmt.Sprintf("team_id %q is not a valid team id", v),
+		Field:   "team_id",
+	})
 }
