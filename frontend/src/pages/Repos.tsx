@@ -42,7 +42,7 @@ interface Repository {
   // no settings shortcut).
   clone_error_kind?: 'ssh' | 'other'
   // Whether this caller may change the repo's settings. The server
-  // decides — a repo profile is org-wide, so writing it takes an org
+  // decides — a repository row is org-wide, so writing it takes an org
   // admin or a team admin of a team tracking it, and only the server
   // knows which of the tracking teams the caller administers. Never
   // re-derive this from the viewer's role. Absent (older server) reads

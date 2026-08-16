@@ -16,7 +16,7 @@ import (
 // reconcile reading the cross-team union via the tf.org_tracked_repos()
 // SECURITY DEFINER helper and rewriting the org-shared repositories
 // cache atomically. Proves the derived-cache contract end-to-end under
-// real RLS: add materializes a profile row, last-tracker drop GCs it, a
+// real RLS: add materializes a repository row, last-tracker drop GCs it, a
 // repo another team still tracks survives.
 func TestTeamGitHubRepos_ReplaceForTeam_AppPath(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -130,8 +130,8 @@ func TestTeamGitHubRepos_Postgres_TracksRepoViewerScoped_RLS(t *testing.T) {
 
 // TestTeamGitHubRepos_Postgres_TracksRepoViewerAdminScoped_RLS pins the
 // mutation gate for org-wide repo configuration: seeing a repo (membership)
-// and being allowed to change it (team admin) are separate answers. repo
-// profiles carry no team_id, so a member of one tracking team writing the
+// and being allowed to change it (team admin) are separate answers. Repository
+// rows carry no team_id, so a member of one tracking team writing the
 // row changes behaviour for every tracking team — hence the narrower
 // predicate.
 func TestTeamGitHubRepos_Postgres_TracksRepoViewerAdminScoped_RLS(t *testing.T) {

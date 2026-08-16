@@ -252,7 +252,7 @@ type gitSeed struct {
 }
 
 // gitSeedFor resolves the seed for a GitHub-backed run's rehydrate. The clone
-// URL comes from the repo profile (written in the org's configured protocol) —
+// URL comes from the repository row (written in the org's configured protocol) —
 // no PR is fetched on a later step or a resume, so there is no per-run URL to
 // inherit.
 //

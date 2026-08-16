@@ -96,7 +96,7 @@ func TestTeamGitHubRepos_SQLite_CasingChangePreservesCache(t *testing.T) {
 	ctx := context.Background()
 	teamA := runmode.LocalDefaultTeamID
 
-	// Track acme/API, then populate cached columns on its profile row.
+	// Track acme/API, then populate cached columns on its repository row.
 	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA,
 		[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "API"}}); err != nil {
 		t.Fatalf("initial track: %v", err)
@@ -112,7 +112,7 @@ func TestTeamGitHubRepos_SQLite_CasingChangePreservesCache(t *testing.T) {
 		t.Fatalf("recased track: %v", err)
 	}
 
-	// Exactly one profile row, casing sticky to the original, cache intact.
+	// Exactly one repository row, casing sticky to the original, cache intact.
 	var (
 		n          int
 		id, branch string

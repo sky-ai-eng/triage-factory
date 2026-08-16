@@ -68,7 +68,7 @@ var (
 // is the only provider that issues repositories. The methods that DO
 // name one take a domain.RepoRef.
 type RepositoryStore interface {
-	// Upsert inserts or updates a repo profile. On conflict it
+	// Upsert inserts or updates a repository row. On conflict it
 	// refreshes profiling metadata (description, has_readme,
 	// has_claude_md, has_agents_md, profile_text, clone_url,
 	// default_branch, profiled_at) but PRESERVES user-configured
@@ -147,7 +147,7 @@ type RepositoryStore interface {
 	// case-insensitively like UpdateBaseBranch. TFAC-109.
 	SeedCloneURL(ctx context.Context, orgID, repoID, cloneURL string) error
 
-	// Get returns a single repo profile by "owner/repo" id, or nil
+	// Get returns a single repository row by "owner/repo" id, or nil
 	// if not configured.
 	Get(ctx context.Context, orgID, repoID string) (*domain.Repository, error)
 

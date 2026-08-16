@@ -54,7 +54,7 @@ func newRepoScopeRig(t *testing.T) *repoScopeRig {
 	// plainB is on teamB with no admin role at either grain — the shape the
 	// read gate and the write gate answer differently: they can *see*
 	// teamB's repos (membership), but must not be able to mutate an
-	// org-wide repo profile every tracking team's runs read.
+	// org-wide repository row every tracking team's runs read.
 	plainB := pgtest.SeedUser(t, h, "plain-b")
 	pgtest.AddOrgMember(t, h, plainB, orgID, teamB, "member", "member")
 	teamless := pgtest.SeedUser(t, h, "teamless")
@@ -157,7 +157,7 @@ func TestHandleRepositories_TeamScoped(t *testing.T) {
 	}
 }
 
-// baseBranch reads a repo profile's stored base_branch straight off the
+// baseBranch reads a repository row's stored base_branch straight off the
 // admin pool, so a "the write was rejected" assertion checks the row rather
 // than trusting the status code.
 func (r *repoScopeRig) baseBranch(t *testing.T, owner, repo string) string {
@@ -216,7 +216,7 @@ func TestHandleRepoUpdate_TeamScoped(t *testing.T) {
 }
 
 // TestHandleRepoUpdate_RequiresAdmin pins the mutation gate: changing an
-// org-wide repo profile takes an admin, not just membership of a team that
+// org-wide repository row takes an admin, not just membership of a team that
 // tracks it.
 // The two rejection codes are load-bearing and different — 403 for a repo
 // the caller can see in their own GET /api/repos list (404 there would read

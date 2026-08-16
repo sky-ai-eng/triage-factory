@@ -364,7 +364,7 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping_DubiousOwnership(t *testi
 }
 
 // TestGitAuthorizeDecision_UniversalProtectionWithoutProfile pins that main and
-// master are refused even when the repo has no profile row to name them (the
+// master are refused even when the repo has no repository row to name them (the
 // universal protected set), so an unprofiled repo can't be pushed to on its
 // default branch. A non-default feature branch on the same repo is still
 // authorized.

@@ -183,7 +183,7 @@ func parseAddArgs(args []string) (ownerRepo string, spec checkoutSpec, err error
 //     live directory, return it. If the row exists but the path is
 //     missing/not-a-dir (e.g. wiped by startup orphan sweep), drop
 //     the stale row so the reservation step below can re-reserve.
-//  3. Repo profile lookup (clone URL required) + team-tracking gate.
+//  3. Repository row lookup (clone URL required) + team-tracking gate.
 //  4. Reserve the conversation_worktrees row with the deterministic path
 //     {runRoot}/{owner}/{repo}. PK conflict picks the winner.
 //  5. Loser path: return winner's path immediately.

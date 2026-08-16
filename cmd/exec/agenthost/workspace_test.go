@@ -29,7 +29,7 @@ func (r tokenResolver) TokenFor(_ context.Context, _, _ string) (githubapp.Token
 	return githubapp.Token{Value: r.cloneToken}, nil
 }
 
-// seedWorkspaceRepo seeds an org-configured, team-tracked repo profile — the
+// seedWorkspaceRepo seeds an org-configured, team-tracked repository row — the
 // state CreateWorkspaceCheckout's gates require.
 func seedWorkspaceRepo(t *testing.T, stores db.Stores, owner, repo, cloneURL string) {
 	t.Helper()

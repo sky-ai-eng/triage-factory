@@ -27,7 +27,7 @@ import (
 // shared blobless bare cache and landing the checkout in the REAL host run
 // root, which the sandbox sees appear under /work.
 //
-// The create re-derives everything security-relevant host-side — repo profile,
+// The create re-derives everything security-relevant host-side — repository row,
 // clone URLs, team-tracking gate, ref validation — and takes only
 // (owner, repo, ref, pr) from the caller. The workspace CLI performs the same
 // checks first for friendlier agent-facing errors, but a sandboxed process
@@ -77,7 +77,7 @@ func (c *LocalClient) WorkspaceRoots(ctx context.Context) (hostRoot, agentRoot s
 // (materializeWorkspace's ordering); this method only does the git work.
 //
 // Everything authorization-relevant is re-derived here rather than trusted
-// from the arguments: the repo must be org-configured (repo profile exists,
+// from the arguments: the repo must be org-configured (repository row exists,
 // with a clone URL) and tracked by the run's team — the same gates the git
 // proxy's Authorize applies, so a checkout is only ever created for a repo the
 // proxy will then let the agent push to. Clone URLs come from the stored

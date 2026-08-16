@@ -65,7 +65,7 @@ func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, llmR
 	return p
 }
 
-// repoWithDocs groups a repo profile with the documentation text to send to the LLM.
+// repoWithDocs groups a repository row with the documentation text to send to the LLM.
 type repoWithDocs struct {
 	profile domain.Repository
 	docs    string
