@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -64,6 +65,21 @@ func TestParseArtifactListOpts(t *testing.T) {
 	} {
 		if _, errMsg := parseArtifactListOpts(q); errMsg == "" {
 			t.Errorf("%s: expected a validation error, got none", name)
+		}
+	}
+
+	// The other side of a closed vocabulary: every value the writers can
+	// actually store has to be accepted. A union assembled by hand omitted
+	// 'posted', so ?kind=comment&state=posted — a combination the comment and
+	// message writers produce — was rejected as a typo.
+	for _, state := range domain.ArtifactStates() {
+		if _, errMsg := parseArtifactListOpts(url.Values{"state": {state}}); errMsg != "" {
+			t.Errorf("state=%q rejected: %s", state, errMsg)
+		}
+	}
+	for _, kind := range domain.ArtifactKinds() {
+		if _, errMsg := parseArtifactListOpts(url.Values{"kind": {kind}}); errMsg != "" {
+			t.Errorf("kind=%q rejected: %s", kind, errMsg)
 		}
 	}
 }

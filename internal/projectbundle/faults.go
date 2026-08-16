@@ -2,7 +2,8 @@ package projectbundle
 
 import (
 	"errors"
-	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The import path fails for two reasons that are not the server's, and both
@@ -35,13 +36,16 @@ func IsClientFault(err error) bool {
 
 // isPermissionDenial reports whether a store error is the database refusing
 // the write on authorization grounds rather than failing it. Postgres answers
-// an RLS-refused INSERT/UPDATE with SQLSTATE 42501, whose message is one of
-// these two forms; SQLite (local, N=1, no RLS) never produces either, so the
-// check is inert there rather than wrong.
+// an RLS-refused INSERT/UPDATE with SQLSTATE 42501, so the check is on the
+// code and not on the message text — wording varies by server version and
+// locale, and "permission denied" appears in errors that are not this one.
+// SQLite (local, N=1, no RLS) never produces a PgError, so the check is inert
+// there rather than wrong.
 func isPermissionDenial(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return strings.Contains(s, "row-level security") || strings.Contains(s, "permission denied")
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgErrCodeInsufficientPrivilege
 }
+
+// pgErrCodeInsufficientPrivilege is SQLSTATE 42501, which Postgres raises when
+// a row-level security policy refuses a write.
+const pgErrCodeInsufficientPrivilege = "42501"

@@ -124,7 +124,9 @@ func (m *Manifest) Validate() error {
 func decodeManifest(data []byte) (*Manifest, error) {
 	var m Manifest
 	if err := yaml.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("decode manifest (%v): %w", err, ErrBadBundle)
+		// Both wrapped: the parse error stays inspectable (it names the line
+		// and column the uploader has to fix), and ErrBadBundle classifies it.
+		return nil, fmt.Errorf("decode manifest: %w: %w", err, ErrBadBundle)
 	}
 	if err := m.Validate(); err != nil {
 		// A manifest that fails its own invariants is a property of the

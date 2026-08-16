@@ -145,17 +145,42 @@ func ArtifactKinds() []string {
 	}
 }
 
-// ArtifactStates is the deduplicated union of the per-kind lifecycles. A state
-// is only meaningful read with its kind (values alias across kinds), so this is
-// a filter vocabulary, not a per-kind contract.
-func ArtifactStates() []string {
-	return []string{
-		ArtifactStateBranchPushed, ArtifactStateBranchDeleted,
+// artifactStatesByKind is every kind's full lifecycle, one entry per kind in
+// ArtifactKinds. ArtifactStates is derived from it rather than hand-listed, so
+// a state added to a kind above joins the read filters' vocabulary with it — a
+// separately maintained union drifts silently, and the failure mode is a valid
+// request rejected as a typo.
+var artifactStatesByKind = map[string][]string{
+	ArtifactKindBranch: {ArtifactStateBranchPushed, ArtifactStateBranchDeleted},
+	ArtifactKindPullRequest: {
 		ArtifactStatePRPending, ArtifactStatePRDraft, ArtifactStatePROpen,
 		ArtifactStatePRMerged, ArtifactStatePRClosed,
-		ArtifactStateReviewSubmitted, ArtifactStateReviewDismissed,
-		ArtifactStateIssueCreated, ArtifactStateIssueUpdated,
+	},
+	ArtifactKindReview: {
+		ArtifactStateReviewPending, ArtifactStateReviewSubmitted, ArtifactStateReviewDismissed,
+	},
+	ArtifactKindIssue:   {ArtifactStateIssueCreated, ArtifactStateIssueUpdated},
+	ArtifactKindComment: {ArtifactStateCommentPosted, ArtifactStateCommentDeleted},
+	ArtifactKindMessage: {ArtifactStateMessagePosted},
+}
+
+// ArtifactStates is the deduplicated union of the per-kind lifecycles. A state
+// is only meaningful read with its kind (values alias across kinds), so this is
+// a filter vocabulary, not a per-kind contract. Iteration is over ArtifactKinds
+// rather than the map, so the order is stable for the "want one of …" message.
+func ArtifactStates() []string {
+	out := make([]string, 0, len(artifactStatesByKind))
+	seen := map[string]bool{}
+	for _, kind := range ArtifactKinds() {
+		for _, state := range artifactStatesByKind[kind] {
+			if seen[state] {
+				continue
+			}
+			seen[state] = true
+			out = append(out, state)
+		}
 	}
+	return out
 }
 
 // ArtifactProviders is the closed provider vocabulary, for the same use.
