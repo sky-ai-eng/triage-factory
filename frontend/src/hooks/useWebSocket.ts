@@ -133,9 +133,14 @@ function ensureConnected() {
       if (event.type === 'repository_updated' && event.data && typeof event.data === 'object') {
         const data = event.data as {
           id?: string
+          slug?: string
           clone_status?: 'ok' | 'failed' | 'pending'
           clone_error_kind?: 'ssh' | 'other'
         }
+        // Keyed on the row id, worded with the slug — the two jobs the
+        // event's two identity fields exist to keep apart. Keying on the
+        // name would restart the dedupe on a rename and re-fire a toast
+        // for a failure the user already saw.
         if (data.id && data.clone_status) {
           const prev = cloneStatusByRepo.get(data.id)
           cloneStatusByRepo.set(data.id, data.clone_status)
@@ -144,7 +149,7 @@ function ensureConnected() {
             toastStore.push({
               level: 'error',
               title: 'Clone failed',
-              body: `Could not clone ${data.id}${kind}. Open the Repos page for details.`,
+              body: `Could not clone ${data.slug ?? 'a repository'}${kind}. Open the Repos page for details.`,
               action: { label: 'Go to Repos', to: '/repos' },
             })
           }

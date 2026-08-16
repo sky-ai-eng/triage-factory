@@ -15,20 +15,21 @@ import (
 // Both directions leak, under different keys. Outbound, otelhttp records
 // url.full, and TF's outbound URLs put tenant data in the path —
 // /repos/{owner}/{repo}/pulls/{n}, a Jira issue key, an artifact filename.
-// Inbound, it records url.path, and TF's own API has routes keyed by
-// repository rather than by id (PATCH /api/repos/{owner}/{repo} and its
-// /branches sibling), so a server span carries the customer's repo name
-// just as plainly. Either way the export hands a tenant's repository
-// inventory to whatever backend the operator runs, and it is no less an
-// egress for having been written by a library rather than by TF.
+// Inbound, it records url.path, and TF's own API is not all opaque ids —
+// GET /api/repos/by-name/{owner}/{repo} names a repository, and the
+// dashboard's PR family names one plus a pull request number — so a server
+// span carries the customer's repo name just as plainly. Either way the
+// export hands a tenant's repository inventory to whatever backend the
+// operator runs, and it is no less an egress for having been written by a
+// library rather than by TF.
 //
 // What survives says nearly everything those did, minus the names: the
-// span name is the matched route, uninterpolated (PATCH
-// /api/repos/{owner}/{repo}) on the server side and the client's identity
-// outbound; server.address is the host, and method and status describe the
-// exchange. The one real loss is diagnosing an unrecognized path from a
-// trace alone — accepted, because the alternative is exporting every path
-// that ever reaches TF.
+// span name is the matched route, uninterpolated (GET
+// /api/repos/by-name/{owner}/{repo}) on the server side and the client's
+// identity outbound; server.address is the host, and method and status
+// describe the exchange. The one real loss is diagnosing an unrecognized
+// path from a trace alone — accepted, because the alternative is exporting
+// every path that ever reaches TF.
 var scrubbedAttrs = map[attribute.Key]struct{}{
 	"url.full":  {},
 	"url.path":  {},

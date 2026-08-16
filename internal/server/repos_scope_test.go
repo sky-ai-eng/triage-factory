@@ -47,7 +47,7 @@ func newRepoScopeRig(t *testing.T) *repoScopeRig {
 	// memberB is teamB's *team* admin (needed so replaceTeamRepos below, run
 	// as memberB, satisfies team_github_repos_insert's tf.user_is_team_admin
 	// check) but an org-level plain "member" — the role isOrgAdmin/
-	// repoAccessAllowed actually gate on. Team role and org role are
+	// repoVisible actually gate on. Team role and org role are
 	// orthogonal; this is a common real shape (team admins who aren't org
 	// admins).
 	pgtest.AddOrgMember(t, h, memberB, orgID, teamB, "member", "admin")
@@ -83,6 +83,21 @@ func (r *repoScopeRig) replaceTeamRepos(t *testing.T, actingUser, teamID string,
 	}
 }
 
+// repoID resolves a seeded repository's registry row id — how every repo
+// route addresses one. Read off the admin pool so the lookup itself is not
+// subject to the gate under test.
+func (r *repoScopeRig) repoID(t *testing.T, owner, repo string) string {
+	t.Helper()
+	var id string
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT id::text FROM repositories WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)`,
+		r.orgID, owner, repo,
+	).Scan(&id); err != nil {
+		t.Fatalf("resolve repository id for %s/%s: %v", owner, repo, err)
+	}
+	return id
+}
+
 // req builds a request to path as callerID with claims + active org
 // injected, mirroring viewerRig.req.
 func (r *repoScopeRig) req(method, path, callerID string, body any) *http.Request {
@@ -111,7 +126,7 @@ func (r *repoScopeRig) listRepos(t *testing.T, callerID string) listEnvelope[rep
 func listedRepoSlugs(page listEnvelope[repoJSON]) []string {
 	out := make([]string, len(page.Items))
 	for i, row := range page.Items {
-		out[i] = row.Owner + "/" + row.Repo
+		out[i] = row.Slug
 	}
 	return out
 }
@@ -167,10 +182,10 @@ func (r *repoScopeRig) baseBranch(t *testing.T, owner, repo string) string {
 
 func (r *repoScopeRig) patchBaseBranch(t *testing.T, callerID, owner, repo, branch string) *httptest.ResponseRecorder {
 	t.Helper()
+	id := r.repoID(t, owner, repo)
 	rec := httptest.NewRecorder()
-	req := r.req(http.MethodPatch, "/api/repos/"+owner+"/"+repo, callerID, map[string]string{"base_branch": branch})
-	req.SetPathValue("owner", owner)
-	req.SetPathValue("repo", repo)
+	req := r.req(http.MethodPatch, "/api/repos/"+id, callerID, map[string]string{"base_branch": branch})
+	req.SetPathValue("id", id)
 	r.s.handleRepoUpdate(rec, req)
 	return rec
 }
@@ -259,7 +274,7 @@ func TestHandleRepositories_CanEdit(t *testing.T) {
 		page := rig.listRepos(t, callerID)
 		out := make(map[string]bool, len(page.Items))
 		for _, row := range page.Items {
-			out[row.Owner+"/"+row.Repo] = row.CanEdit
+			out[row.Slug] = row.CanEdit
 		}
 		return out
 	}
@@ -300,10 +315,10 @@ func TestHandleRepoBranches_TeamScoped(t *testing.T) {
 	rig := newRepoScopeRig(t)
 
 	branches := func(callerID, owner, repo string) *httptest.ResponseRecorder {
+		id := rig.repoID(t, owner, repo)
 		rec := httptest.NewRecorder()
-		req := rig.req(http.MethodPost, "/api/repos/"+owner+"/"+repo+"/branches/list", callerID, map[string]any{})
-		req.SetPathValue("owner", owner)
-		req.SetPathValue("repo", repo)
+		req := rig.req(http.MethodPost, "/api/repos/"+id+"/branches/list", callerID, map[string]any{})
+		req.SetPathValue("id", id)
 		rig.s.handleRepoBranches(rec, req)
 		return rec
 	}

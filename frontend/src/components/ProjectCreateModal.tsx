@@ -25,7 +25,7 @@ interface Props {
 export default function ProjectCreateModal({ onClose, onCreated }: Props) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [pinnedRepos, setPinnedRepos] = useState<string[]>([])
+  const [pinnedRepositoryIDs, setPinnedRepositoryIDs] = useState<string[]>([])
   const [jiraKey, setJiraKey] = useState('')
   const [linearKey, setLinearKey] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -81,7 +81,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
   // can't be submitted under another (the Jira picker also refetches its
   // options for the new team from its own teamId-keyed effect).
   useEffect(() => {
-    setPinnedRepos([])
+    setPinnedRepositoryIDs([])
     setJiraKey('')
   }, [team, showTeamScopedFields])
   // Holds the in-flight POST's AbortController so the close path
@@ -129,7 +129,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
           body: JSON.stringify({
             name: name.trim(),
             description: description.trim(),
-            pinned_repos: pinnedRepos,
+            pinned_repository_ids: pinnedRepositoryIDs,
             jira_project_key: jiraKey,
             linear_project_key: linearKey,
             team_id: team,
@@ -152,7 +152,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
         setSubmitting(false)
       }
     },
-    [name, description, pinnedRepos, jiraKey, linearKey, team, visibility, onCreated],
+    [name, description, pinnedRepositoryIDs, jiraKey, linearKey, team, visibility, onCreated],
   )
 
   // Backdrop click closes only when no submit is in flight. If a
@@ -264,8 +264,8 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
             <>
               <Field label="Pinned repos">
                 <RepoMultiSelect
-                  value={pinnedRepos}
-                  onChange={setPinnedRepos}
+                  value={pinnedRepositoryIDs}
+                  onChange={setPinnedRepositoryIDs}
                   teamId={team}
                   disabled={!repoPickerReady}
                 />

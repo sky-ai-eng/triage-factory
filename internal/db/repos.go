@@ -112,6 +112,8 @@ type RepositoryStore interface {
 	// and leaves it alone when empty — the profiler reads the id off the
 	// same /repos/{owner}/{repo} response it takes default_branch and
 	// clone_url from, and a caller with no id has learned nothing to write.
+	//
+	// TODO(TFAC-837): return the persisted row (RETURNING), UpsertSystem too.
 	Upsert(ctx context.Context, orgID string, p domain.Repository) error
 
 	// List returns one page of the org's configured repos plus the unpaged
@@ -171,6 +173,8 @@ type RepositoryStore interface {
 	// zero-rows the slug-keyed predecessor produced. The caller is the PATCH
 	// handler, which resolved the id from its path segment moments earlier
 	// and would otherwise answer "updated" for a write that did nothing.
+	// TODO(TFAC-837): return the updated row so the PATCH answers with the
+	// resource instead of a status stub.
 	UpdateBaseBranch(ctx context.Context, orgID, id, baseBranch string) error
 
 	// SeedCloneURL sets clone_url for the repository with this registry id
@@ -282,6 +286,8 @@ type RepositoryStore interface {
 	// one. Handing back ids would make all four resolve straight back to the
 	// name, and the ids would be dead weight in the poll loop's hot path.
 	ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error)
+	// TODO(TFAC-837): return the updated row; the clone-status publish path
+	// re-reads it today just to learn the id and slug.
 	UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) error
 	CountConfiguredSystem(ctx context.Context, orgID string) (int, error)
 	GetSystem(ctx context.Context, orgID, id string) (*domain.Repository, error)
