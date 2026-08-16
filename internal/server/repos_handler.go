@@ -128,10 +128,11 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	// yet" is a promise that looking will eventually produce something, and for
 	// an org with no usable credential it never will. It costs no GitHub call —
 	// every read here is the store or the keychain.
-	class, ok := s.pickerCredentialClass(w, r, orgID, userID)
+	pre, ok := s.pickerCredentialClass(w, r, orgID, userID)
 	if !ok {
 		return
 	}
+	class := pre.class
 
 	state, err := s.reachableRepos.ReachableStateSystem(r.Context(), orgID, class)
 	if err != nil {
@@ -152,6 +153,18 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	// refresh on every open, which is the unbounded enumeration the TTL exists to
 	// prevent.
 	if !state.Known() {
+		// ...and this is where an unestablished preflight has to be paid for. The
+		// readiness state is a PROMISE that looking will produce something, and
+		// the preflight is what backs it; when its installations read failed we
+		// could not establish that, so an org whose mirror is also empty would be
+		// told to wait for a discovery that may never resolve. Serving the error
+		// is the honest answer — and it costs nothing in the common case, because
+		// a failed read on an org that HAS a mirror never reaches here.
+		if pre.err != nil {
+			reposLog.Error("cannot establish whether discovery will resolve", "org", orgID, "error", pre.err)
+			internalError(w, "repos", pre.err)
+			return
+		}
 		writeJSON(w, http.StatusOK, githubRepoListResponse{
 			Items:  []githubRepoJSON{},
 			Status: githubRepoStatusDiscovering,
@@ -221,16 +234,39 @@ func (s *Server) handleGitHubReposRefresh(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "refreshing"})
 }
 
+// pickerPreflight is what the configuration check established. class is the
+// credential class the org's reachable entries are keyed under; err is set when
+// the check could not be COMPLETED — as opposed to completing and finding the
+// org unusable, which refuses the request outright.
+//
+// A non-nil err is deliberately not fatal on its own. It means one thing was
+// unreadable, and what that thing decides is only whether the org is usable at
+// all — not what the picker serves, which is the mirror. So a request whose
+// mirror answers is served, and only a request that would otherwise fall into
+// the readiness state has to reckon with it: that state promises discovery will
+// resolve, and an unestablished preflight cannot back the promise.
+type pickerPreflight struct {
+	class domain.GitHubCredentialClass
+	err   error
+}
+
 // pickerCredentialClass resolves the class the org's reachable entries are keyed
-// under, and refuses the request when GitHub is not usable for the org at all.
-// It writes the response on every false return.
+// under, and refuses the request when GitHub is established to be unusable for
+// the org. It writes the response on every false return.
 //
 // The two refusals are deliberately different, and the difference is the
 // first-run dead-end this handler exists to keep diagnosable: an org whose App
 // is registered and active but installed nowhere is told to install it, while
 // everything else gets the generic "not connected". Reporting the first as the
 // second reads as "add a PAT", which is the one thing that will not help.
-func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, orgID, userID string) (domain.GitHubCredentialClass, bool) {
+//
+// A third outcome — "we could not tell" — is neither of those and is reported
+// through pickerPreflight.err rather than as a refusal, because the two claims
+// it could be mistaken for are both wrong: "not installed" is a claim only a
+// SUCCESSFUL read of zero installations can support, and a hard failure would
+// blank a picker whose data is sitting in the mirror and did not need this read
+// at all.
+func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, orgID, userID string) (pickerPreflight, bool) {
 	// The EFFECTIVE class — the org's stored class narrowed by the App-XOR-PAT
 	// gate — because that is what the refresh keys its rows under. An
 	// unreadable or unrecognised class fails the request: the picker's whole job
@@ -238,26 +274,28 @@ func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, o
 	// system's idea of that is worse than showing an error.
 	class, err := s.reachableCredentialClass(r.Context(), orgID)
 	if err != nil {
+		// The class is not optional: it is the key every subsequent read uses, so
+		// there is nothing to serve without it.
 		reposLog.Error("resolve reachable credential class failed", "org", orgID, "error", err)
 		internalError(w, "repos", err)
-		return "", false
+		return pickerPreflight{}, false
 	}
 	if class == domain.GitHubCredentialClassBYOApp {
 		// An active App with at least one installation is usable by definition —
-		// the installations ARE the reach. A read failure here is not a reason to
-		// refuse: it would be reported as "not installed", which is a claim only a
-		// successful read of zero installations can support.
+		// the installations ARE the reach. A read failure here is carried rather
+		// than refused: reporting it would mean claiming "not installed", which
+		// only a successful read of zero installations can support.
 		insts, err := s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
 		if err != nil {
-			reposLog.Warn("list installations failed; serving the mirror as-is", "org", orgID, "error", err)
-			return class, true
+			reposLog.Warn("list installations failed; serving the mirror if there is one", "org", orgID, "error", err)
+			return pickerPreflight{class: class, err: err}, true
 		}
 		if len(insts) == 0 {
 			reposLog.Warn("app registered and active but installed on zero accounts", "org", orgID)
 			writeNotConfigured(w, "the GitHub App is not installed on any account")
-			return "", false
+			return pickerPreflight{}, false
 		}
-		return class, true
+		return pickerPreflight{class: class}, true
 	}
 
 	// PAT tier. Credentials + per-org base URL read through the app pool inside
@@ -281,14 +319,14 @@ func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, o
 		return lerr
 	}); err != nil {
 		internalError(w, "repos", err)
-		return "", false
+		return pickerPreflight{}, false
 	}
 	if creds.GitHubPAT == "" || (orgSet.GitHubBaseURL == "" && creds.GitHubURL == "") {
 		reposLog.Warn("github not configured, no usable app installation and no pat", "org", orgID)
 		writeNotConfigured(w, "GitHub is not connected for this workspace")
-		return "", false
+		return pickerPreflight{}, false
 	}
-	return class, true
+	return pickerPreflight{class: class}, true
 }
 
 // isOrgAdmin reports whether userID is an org admin of orgID, short-circuiting

@@ -305,12 +305,17 @@ func TestHandleGitHubRepos_AppActiveZeroInstallations(t *testing.T) {
 	}
 }
 
-// A failed installations read (transient DB/store error) must NOT be reported as
-// "not installed" — that claim is only valid on a positive read of zero
-// installations. The preflight degrades to serving whatever is mirrored, which
-// for a fresh org is the readiness state: honest about not knowing, rather than
-// asserting a configuration problem the read never established.
-func TestHandleGitHubRepos_AppListInstallationsErrorNotReportedAsUninstalled(t *testing.T) {
+// A failed installations read (transient DB/store error) has three wrong answers
+// available to it and this pins which one the handler gives.
+//
+// It must NOT be reported as "not installed" — that claim is only valid on a
+// positive read of zero installations, and it sends the user to fix an install
+// that is fine. It must NOT be reported as DISCOVERING either, which is the
+// subtler mistake: that state promises the list will fill in, and the read that
+// would have established the promise is exactly the one that failed, so an org
+// with nothing mirrored would sit on a spinner that may never resolve. With no
+// mirror to fall back on, the honest answer is the error.
+func TestHandleGitHubRepos_AppListInstallationsErrorIsNotDiscovering(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	seedBYOAppCredentialClass(t, srv, runmode.LocalDefaultOrgID)
@@ -319,9 +324,50 @@ func TestHandleGitHubRepos_AppListInstallationsErrorNotReportedAsUninstalled(t *
 		listErr: errors.New("transient store failure"),
 	}
 
+	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("picker list = %d on a failed installations read with an empty mirror, want 500; body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); strings.Contains(body, "not installed") {
+		t.Errorf("body=%s, want no 'not installed' claim — only a successful read of zero installations supports it", body)
+	}
+	if body := rec.Body.String(); strings.Contains(body, githubRepoStatusDiscovering) {
+		t.Errorf("body=%s, want no discovering state — nothing established that discovery will resolve", body)
+	}
+}
+
+// The same failed read, on an org whose mirror already answers: the read decides
+// only whether to offer install guidance, and the picker's data does not come
+// from it. Blanking a working picker over a hint it could not compute would be
+// the failure this degrade exists to avoid.
+func TestHandleGitHubRepos_AppListInstallationsErrorStillServesAMirror(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	stub := newAppRepoStub(t, map[string][]string{
+		"111": {"acme/api"},
+	})
+	seedApp(t, srv, stub, []domain.OrgGitHubAppInstallation{
+		{InstallationID: "111", AccountType: "Organization", AccountLogin: "acme"},
+	})
+	reach := wireReachRefresh(t, srv)
+	reach.refresh(t, runmode.LocalDefaultOrgID, true)
+
+	// Only now does the installations read start failing — the mirror is already
+	// written, which is the state this test is about.
+	liveApps := srv.githubApps
+	srv.githubApps = &fakeGitHubAppsStore{
+		app:     &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "123", Slug: "acme-bot", Active: true},
+		listErr: errors.New("transient store failure"),
+	}
+	t.Cleanup(func() { srv.githubApps = liveApps })
+
 	page := fetchPickerPage(t, srv, map[string]any{})
-	if page.Status != githubRepoStatusDiscovering {
-		t.Errorf("picker status = %q on a failed installations read; want %q", page.Status, githubRepoStatusDiscovering)
+	if page.Status != githubRepoStatusReady {
+		t.Fatalf("picker status = %q with a written mirror, want %q", page.Status, githubRepoStatusReady)
+	}
+	if page.TotalCount != 1 || len(page.Items) != 1 {
+		t.Errorf("picker = %d items / total %d; want the mirrored one", len(page.Items), page.TotalCount)
 	}
 }
 
