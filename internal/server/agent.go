@@ -448,7 +448,7 @@ func runResponse(run *domain.Conversation, artifactCount int, arts []domain.Arti
 		"TotalCostUSD":  run.TotalCostUSD,
 		"DurationMs":    run.DurationMs,
 		"NumTurns":      run.NumTurns,
-		"StopReason":    run.StopReason,
+		"ParkReason":    string(run.ParkReason),
 		"WorktreePath":  run.WorktreePath,
 		"ResultSummary": run.ResultSummary,
 		// The terminal envelope's parsed outcome and its abort note. PascalCase

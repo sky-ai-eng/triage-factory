@@ -569,4 +569,43 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		// sitting in the work list that no claim could ever reach.
 		mustNotClaim(t, h)
 	})
+
+	// The claim gate's `open` arm is an UN-PARK, and it has to clear the
+	// park's own columns — park_reason included.
+	//
+	// This is the second door out of a park, and the quieter one. The loud
+	// one is MarkQueuedForResume; this is a parked conversation woken by
+	// undelivered input and claimed straight off the queue, which is what an
+	// ordinary follow-up does. park_reason answers "why is this parked", so
+	// once the row is mid-flight again the old value is not history, it is a
+	// wrong answer to the only question the column asks — and it is
+	// single-valued, so nothing overwrites it until the NEXT park. A stale
+	// one therefore rides this engagement all the way to whatever terminal
+	// follows, and the run station prints it beside a failed run as "stopped
+	// by user" on a run nobody stopped.
+	t.Run("ClaimingAParkedConversationClearsItsParkReason", func(t *testing.T) {
+		h := mk(t)
+		convID := h.EnqueueDelegation(t, "sdk")
+		if _, err := h.Stores.Conversations.ParkOpen(ctx, h.OrgID, convID,
+			db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil {
+			t.Fatalf("park: %v", err)
+		}
+		if got, _ := h.Stores.Conversations.Get(ctx, h.OrgID, convID); got.ParkReason != domain.ParkReasonUserCancelled {
+			t.Fatalf("precondition: park_reason = %q, want user_cancelled", got.ParkReason)
+		}
+
+		// A follow-up wakes it, and the dispatcher claims it directly — no
+		// resume flip in between. That is the whole path.
+		h.InsertRow(t, convID, userRow("keep going", false))
+		mustClaim(t, h, convID)
+
+		got, err := h.Stores.Conversations.Get(ctx, h.OrgID, convID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.ParkReason != "" {
+			t.Errorf("park_reason = %q after the claim un-parked it, want cleared — "+
+				"the row is mid-flight, so it is not parked for any reason", got.ParkReason)
+		}
+	})
 }

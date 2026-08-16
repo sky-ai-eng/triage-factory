@@ -2,7 +2,8 @@ package domain
 
 // The conversation status vocabulary and its classifiers — one Go home for
 // both halves of a set of names that is otherwise spelled as bare strings in
-// Go, SQL and TypeScript.
+// Go, SQL and TypeScript. ParkReason, at the bottom, is the second such set:
+// not a status, but the same kind of name under the same discipline.
 //
 // Two vocabularies meet in one field. `Conversation.Status` carries a
 // DISPLAYED status: the value the read projections produce after coalescing
@@ -129,6 +130,90 @@ func AllRunStatuses() []string {
 func IsTerminalRunStatus(status string) bool {
 	switch status {
 	case StatusCompleted, StatusFailed:
+		return true
+	}
+	return false
+}
+
+// ParkReason is WHY a conversation was parked `open` — the closed vocabulary
+// of conversations.park_reason.
+//
+// It answers one question and one only: what stopped this conversation
+// without concluding it. The column it lives in used to answer two, because
+// the terminal write put the MODEL's stop reason (`end_turn` / `max_tokens`)
+// in the same place a park put its own, so the value meant whichever thing
+// happened to write last. The model's answer is a per-turn fact and now lives
+// per turn, on messages.stop_reason; this one is a per-conversation fact and
+// stays here.
+//
+// Not a failure kind: a park is not a failure. RunFailureKind owns "the
+// infrastructure died" and counting `user_cancelled` beside `memory_limit`
+// would make every failure count wrong. Not the claim's outcome either — that
+// records `parked` vs `cancelled` per engagement, and a conversation
+// accumulates engagements.
+//
+// Empty === SQL NULL: never parked, or parked before this column existed.
+type ParkReason string
+
+const (
+	// ParkReasonIdle — the turn simply ended and nothing more arrived. The
+	// live driver's no-conclusion turn and its idle close.
+	ParkReasonIdle ParkReason = "idle"
+	// ParkReasonUserCancelled — a person stopped this run.
+	ParkReasonUserCancelled ParkReason = "user_cancelled"
+	// ParkReasonSystemCancelled — TF stopped it with no user asking: a task
+	// closing its runs, a team archive's force-stop cascade, the reaper
+	// finalizing a cancel-requested step under a dead executor.
+	ParkReasonSystemCancelled ParkReason = "system_cancelled"
+	// ParkReasonBlueprintCancelled — the blueprint behind the step was
+	// cancelled, so the step it would have run is moot.
+	ParkReasonBlueprintCancelled ParkReason = "blueprint_cancelled"
+	// ParkReasonBlueprintTerminal — the blueprint behind the step ended on
+	// its own (concluded, failed, aborted) while this child was still
+	// mid-flight. Distinct from the cancel above because nobody stopped this
+	// work: it was simply overtaken, which is a different thing to read on a
+	// run station and a different thing to go looking for.
+	ParkReasonBlueprintTerminal ParkReason = "blueprint_terminal"
+	// ParkReasonLaunchFailed — the runtime never started, and the claim's
+	// retry budget for this loss episode is spent. The conversation parks
+	// rather than fails: nothing ran, so there is nothing to have failed, and
+	// a message wakes it to try again.
+	ParkReasonLaunchFailed ParkReason = "launch_failed"
+	// ParkReasonDrained — the executor holding this run is draining
+	// (scale-down). A forward seam: no writer yet, and the one that lands is
+	// the drain trigger internal/delegate/workspace_snapshot.go documents.
+	ParkReasonDrained ParkReason = "drained"
+)
+
+// AllParkReasons returns the park_reason vocabulary. Same discipline as
+// AllClaimPhases: SQL cannot import a Go const, so the dual-dialect
+// conformance suite derives its coverage from this set and a reason added
+// here but never taught to a store fails on both backends. The frontend
+// mirror is PARK_REASON_LABELS in frontend/src/lib/runStatus.ts, pinned by
+// TestFrontendMirrorsParkReasonVocabulary — a park reason with no gloss is
+// printed to a human as a raw identifier, which is what this vocabulary
+// exists to stop.
+func AllParkReasons() []ParkReason {
+	return []ParkReason{
+		ParkReasonIdle,
+		ParkReasonUserCancelled,
+		ParkReasonSystemCancelled,
+		ParkReasonBlueprintCancelled,
+		ParkReasonBlueprintTerminal,
+		ParkReasonLaunchFailed,
+		ParkReasonDrained,
+	}
+}
+
+// IsParkReason reports whether reason names a park. Closed-world, like
+// IsClaimPhase: the empty string and anything unrecognized are NOT park
+// reasons, which is what lets the migration recognize a model stop reason
+// sitting in the renamed column and clear it.
+func IsParkReason(reason string) bool {
+	switch ParkReason(reason) {
+	case ParkReasonIdle, ParkReasonUserCancelled, ParkReasonSystemCancelled,
+		ParkReasonBlueprintCancelled, ParkReasonBlueprintTerminal,
+		ParkReasonLaunchFailed, ParkReasonDrained:
 		return true
 	}
 	return false

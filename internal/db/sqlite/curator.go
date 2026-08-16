@@ -827,15 +827,16 @@ func importCuratorMessage(ctx context.Context, q queryer, orgID string, msg *dom
 		                      tool_calls, tool_call_id, is_error, metadata, model,
 		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		                      cost_usd, created_at, reasoning, content_blocks, delivered,
-		                      window_state, seq, duration_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      window_state, seq, duration_ms, stop_reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, orgID, msg.ConversationID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID),
 		msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, sqliteNullStr(msg.ToolCallID), msg.IsError, metadataJSON,
 		sqliteNullStr(msg.Model), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),
 		sqliteNullInt(msg.CacheReadTokens), sqliteNullInt(msg.CacheCreationTokens),
 		sqliteNullFloat(msg.CostUSD), msg.CreatedAt, reasoningJSON, contentBlocksJSON, delivered,
-		string(windowState), sqliteNullFloat(msg.Seq), sqliteNullInt(msg.DurationMs))
+		string(windowState), sqliteNullFloat(msg.Seq), sqliteNullInt(msg.DurationMs),
+		sqliteNullStr(msg.StopReason))
 	if err != nil {
 		return fmt.Errorf("import curator message: %w", err)
 	}

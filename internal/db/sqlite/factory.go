@@ -135,7 +135,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id),
 			(SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = r.id),
 			(SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = r.id),
-			COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
+			COALESCE(r.park_reason, ''), COALESCE(r.worktree_path, ''),
 			COALESCE(r.result_summary, ''), COALESCE(r.sdk_session_id, ''),
 			(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
 			r.trigger_type, COALESCE(r.trigger_id, ''),
@@ -165,13 +165,13 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 		var completedAt sql.NullTime
 		var costUSD sql.NullFloat64
 		var durationMs, numTurns sql.NullInt64
-		var failureKind string
+		var failureKind, parkReason string
 
 		runTargets := []any{
 			&r.ID, &r.TaskID, &r.PromptID,
 			&r.Status, &r.Model, &r.StartedAt, &completedAt,
 			&costUSD, &durationMs, &numTurns,
-			&r.StopReason, &r.WorktreePath,
+			&parkReason, &r.WorktreePath,
 			&r.ResultSummary, &r.SessionID,
 			&r.MemoryMissing, &r.TriggerType, &r.TriggerID,
 			&r.ActorAgentID, &r.ActorAgentName,
@@ -197,6 +197,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			r.NumTurns = &v
 		}
 		r.FailureKind = domain.RunFailureKind(failureKind)
+		r.ParkReason = domain.ParkReason(parkReason)
 		out = append(out, domain.FactoryActiveRun{Run: r, Task: t, EntityEventTyp: t.EventType})
 	}
 	return out, rows.Err()

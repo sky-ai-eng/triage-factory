@@ -124,7 +124,13 @@ func TestParseLine_FixtureStream(t *testing.T) {
 		t.Fatal("expected a terminal Result")
 	}
 	if result.IsError || result.DurationMs != 42 || result.NumTurns != 2 || result.CostUSD != 0.05 ||
-		result.StopReason != "end_turn" || result.Result != "Done." {
+		result.Result != "Done." {
 		t.Errorf("Result wrong: %+v", result)
+	}
+
+	// The model's stop reason rides the assistant rows, one per turn — the
+	// tool-calling turn and the one that finished, each with its own.
+	if asst1.StopReason != "tool_use" || asst2.StopReason != "end_turn" {
+		t.Errorf("per-turn stop reasons = (%q, %q), want (tool_use, end_turn)", asst1.StopReason, asst2.StopReason)
 	}
 }

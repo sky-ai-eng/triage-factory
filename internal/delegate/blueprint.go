@@ -473,7 +473,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	// whoever holds its steps, and this process holds a claim on none of them
 	// (that is the branch condition). Same category as Spawner.Cancel.
 	for _, runID := range stepIDs {
-		if _, mErr := s.agentRuns.ParkOpenSystem(context.Background(), orgID, runID, db.ParkStopped("user_cancelled", "Blueprint cancelled by user")); mErr != nil {
+		if _, mErr := s.agentRuns.ParkOpenSystem(context.Background(), orgID, runID, db.ParkStopped(domain.ParkReasonBlueprintCancelled, "Blueprint cancelled by user")); mErr != nil {
 			blueprintLog.Warn("park cancelled step run failed", "step_run", runID, "error", mErr)
 		}
 	}

@@ -135,6 +135,34 @@ func TestFrontendMirrorsRunStatusVocabulary(t *testing.T) {
 	}
 }
 
+// TestFrontendMirrorsParkReasonVocabulary asserts that every park reason the
+// backend can write onto conversations.park_reason has a gloss in the
+// frontend's PARK_REASON_LABELS, and that the map glosses nothing the backend
+// never writes.
+//
+// Both directions decide what a person reads on the run station's "stop"
+// readout. A reason missing from the map falls through parkReasonLabel to the
+// raw identifier — the run station printing `blueprint_terminal` at a viewer is
+// the exact defect the typed vocabulary replaced, since the old column printed
+// whatever the last writer happened to leave, model stop reasons included. A
+// key the backend never writes is the opposite: a phrase that can never appear,
+// which is how a gloss outlives the reason it described.
+func TestFrontendMirrorsParkReasonVocabulary(t *testing.T) {
+	src, err := os.ReadFile("frontend/src/lib/runStatus.ts")
+	if err != nil {
+		t.Fatalf("read runStatus.ts: %v", err)
+	}
+	got := tsObjectKeys(t, string(src), "PARK_REASON_LABELS: Record<string, string>")
+
+	want := make([]string, 0, len(domain.AllParkReasons()))
+	for _, r := range domain.AllParkReasons() {
+		want = append(want, string(r))
+	}
+	if diff := vocabularyDiff(want, got); diff != "" {
+		t.Errorf("frontend PARK_REASON_LABELS has drifted from internal/domain/run_status.go:\n%s", diff)
+	}
+}
+
 // TestFrontendMirrorsExternalActionVocabulary asserts that every external-action
 // discriminator the backend can write has a presentation in the frontend's
 // ACTION_META, and that ACTION_META spells no action the backend never writes.
@@ -194,12 +222,12 @@ func tsObjectKeys(t *testing.T, src, decl string) []string {
 	open := "export const " + decl + " = {"
 	start := strings.Index(src, open)
 	if start < 0 {
-		t.Fatalf("actionMeta.ts has no `%s…}` declaration — the Go vocabulary needs a frontend mirror to check against", open)
+		t.Fatalf("no `%s…}` declaration found — the Go vocabulary needs a frontend mirror to check against", open)
 	}
 	body := src[start+len(open):]
 	end := strings.Index(body, "\n}")
 	if end < 0 {
-		t.Fatalf("actionMeta.ts declaration %s is unterminated", decl)
+		t.Fatalf("declaration %s is unterminated", decl)
 	}
 	var keys []string
 	for _, m := range tsObjectKey.FindAllStringSubmatch(body[:end], -1) {

@@ -230,8 +230,15 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 		// park by definition, so the row goes back to mid-flight (NULL).
 		// That keeps "parked" and "an engagement is driving this" disjoint at
 		// every instant, which is what every recovery guard downstream reads.
+		//
+		// All THREE park columns clear together, and park_reason is the one
+		// that bites if it doesn't: it answers "why is this parked", so on a
+		// row that is no longer parked it is not history, it is a wrong
+		// answer. Left behind, it rides through this engagement onto whatever
+		// terminal follows — and the run station prints it beside a failed
+		// run as "stopped by user" on a run nobody stopped.
 		if _, err := q.ExecContext(ctx, `
-			UPDATE conversations SET status = NULL, parked_at = NULL
+			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL
 			WHERE id = ? AND status IS NOT NULL
 		`, claimed.ID); err != nil {
 			return err
@@ -568,7 +575,7 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 			UPDATE conversations
 			SET status = 'open',
 			    parked_at = COALESCE(parked_at, ?),
-			    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
+			    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
 			    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
 			WHERE status IS NULL
 			  AND blueprint_run_id IN (

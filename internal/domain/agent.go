@@ -234,7 +234,11 @@ type Conversation struct {
 	CacheReadTokens     int `json:"cache_read_tokens"`
 	CacheCreationTokens int `json:"cache_creation_tokens"`
 
-	StopReason    string
+	// ParkReason is WHY this conversation was parked `open` — the closed
+	// ParkReason vocabulary, see the type. Empty === SQL NULL: never parked,
+	// or resumed since (a resume clears it, so a conversation that went on to
+	// conclude doesn't still name the stop it was picked back up from).
+	ParkReason    ParkReason
 	WorktreePath  string
 	ResultSummary string
 
@@ -433,6 +437,21 @@ type Message struct {
 	CostUSD   *float64
 	CreatedAt time.Time
 
+	// StopReason is why the provider stopped generating THIS turn, in the
+	// provider's own spelling ("end_turn" / "max_tokens" / "tool_use" /
+	// "refusal" / …) — the API's field name for the API's fact. Assistant
+	// rows only; empty everywhere else and on any row whose stream reported
+	// none, which is why "" and "unknown" stay the same thing rather than
+	// being separated by a placeholder.
+	//
+	// It sits beside the token and cost columns because it is the same kind
+	// of per-call measurement, and at turn scope because that is its scope: a
+	// conversation of N turns has N of these, and the one an investigation
+	// wants is the one attached to the turn it is looking at. Not an assembly
+	// input — the loop classifies the reason it just received, never one read
+	// back from a row.
+	StopReason string
+
 	// DurationMs is the wall-clock milliseconds of the work this row
 	// represents: for an assistant row, request issued → message complete
 	// (reasoning included); for a tool row, dispatch → result; nil for every
@@ -514,7 +533,11 @@ type MessageDTO struct {
 	// from the JSON rather than zero: a consumer has to be able to tell "took
 	// 0ms" from "nobody measured", and every row written before the runtime
 	// stamped timing is the latter.
-	DurationMs    *int              `json:"duration_ms,omitempty"`
+	DurationMs *int `json:"duration_ms,omitempty"`
+	// StopReason is the provider's own reason for ending this turn (see
+	// Message.StopReason). Omitted rather than empty when the stream reported
+	// none, so a consumer can't read "not reported" as a reason of its own.
+	StopReason    string            `json:"stop_reason,omitempty"`
 	Reasoning     []ReasoningDetail `json:"reasoning,omitempty"`
 	ContentBlocks []ContentBlock    `json:"content_blocks,omitempty"`
 }
@@ -539,6 +562,7 @@ func (m Message) ToDTO() MessageDTO {
 		CostUSD:             m.CostUSD,
 		CreatedAt:           m.CreatedAt,
 		DurationMs:          m.DurationMs,
+		StopReason:          m.StopReason,
 		Reasoning:           m.Reasoning,
 		ContentBlocks:       m.ContentBlocks,
 	}

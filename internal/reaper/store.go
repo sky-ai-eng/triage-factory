@@ -185,7 +185,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	// workspace, which the retention TTL collects on its own schedule instead
 	// of a reaper throwing it away the instant a host went quiet.
 	parkedBlueprintIDs, parkedIDs, err := reapUpdateRuns(ctx, tx, staleSecs, nil, `
-		UPDATE conversations SET status = 'open', parked_at = COALESCE(parked_at, now()), stop_reason = 'system_cancelled',
+		UPDATE conversations SET status = 'open', parked_at = COALESCE(parked_at, now()), park_reason = 'system_cancelled',
 			result_summary = 'Stopped: owning blueprint run was cancel-requested under a dead executor (reaper)'
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`
@@ -213,8 +213,10 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	// episode is what makes this a crash loop rather than a conversation with
 	// a long life behind it — see ReapDeadExecutors' contract.
 	failedBlueprintIDs, failedIDs, err := reapUpdateRuns(ctx, tx, staleSecs, &maxAttempts, `
+		-- No park_reason: this arm does not park, it fails. failure_kind is
+		-- where a failure's cause is recorded, and stamping the same word into
+		-- the park column would put a value on a row that was never parked.
 		UPDATE conversations SET status = 'failed', failure_kind = 'executor_lost', completed_at = now(),
-			stop_reason = 'executor_lost',
 			result_summary = 'Failed: executor lost repeatedly and the retry budget (TF_RUN_MAX_ATTEMPTS) for this loss episode is exhausted (reaper)'
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`

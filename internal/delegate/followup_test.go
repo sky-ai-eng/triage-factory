@@ -92,8 +92,8 @@ func TestFollowUpOnFinishedBlueprint_IsClaimedAndDriven(t *testing.T) {
 		t.Fatalf("stored status = %q, want a terminal — the claim never reached delivery", st)
 	}
 	var stopReason sql.NullString
-	if err := database.QueryRow(`SELECT stop_reason FROM conversations WHERE id='r-followup'`).Scan(&stopReason); err != nil {
-		t.Fatalf("read stop_reason: %v", err)
+	if err := database.QueryRow(`SELECT park_reason FROM conversations WHERE id='r-followup'`).Scan(&stopReason); err != nil {
+		t.Fatalf("read park_reason: %v", err)
 	}
 	if stopReason.String == "user_cancelled" {
 		t.Error("the follow-up claim was parked as a cancelled blueprint step; it must route to the resume path")

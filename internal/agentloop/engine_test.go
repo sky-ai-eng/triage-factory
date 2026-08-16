@@ -415,8 +415,8 @@ func TestRun_EmptyLengthStopIsNeverAConclusion(t *testing.T) {
 	if truncated.OutputTokens == nil || *truncated.OutputTokens != 8000 {
 		t.Errorf("the truncated row must keep its usage stamp: %+v", truncated.OutputTokens)
 	}
-	if got, ok := truncated.Metadata["finish_reason"].(string); !ok || got != "length" {
-		t.Errorf("finish_reason metadata = %v, want \"length\" — the transcript should say why it stopped", truncated.Metadata)
+	if truncated.StopReason != "length" {
+		t.Errorf("stop_reason = %q, want \"length\" — the transcript should say why it stopped", truncated.StopReason)
 	}
 
 	notice := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionOutputLimit })
@@ -582,8 +582,8 @@ func TestRun_FinishReasonIsRecordedOnEveryAssistantTurn(t *testing.T) {
 		if r.Role != "assistant" {
 			continue
 		}
-		if got, _ := r.Metadata["finish_reason"].(string); got != want[r.Content] {
-			t.Errorf("assistant row %q: finish_reason = %q, want %q", r.Content, got, want[r.Content])
+		if r.StopReason != want[r.Content] {
+			t.Errorf("assistant row %q: stop_reason = %q, want %q", r.Content, r.StopReason, want[r.Content])
 		}
 	}
 }

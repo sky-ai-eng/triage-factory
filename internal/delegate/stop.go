@@ -302,9 +302,9 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note s
 	// verdict block, and a stop concluded nothing — the note written above is
 	// the record. The machine code stays: it is claim-layer vocabulary the
 	// claim outcome is derived from, not text anyone reads.
-	park := db.ParkStopped("user_cancelled", "")
+	park := db.ParkStopped(domain.ParkReasonUserCancelled, "")
 	if userID == "" {
-		park = db.ParkStopped("system_cancelled", "")
+		park = db.ParkStopped(domain.ParkReasonSystemCancelled, "")
 	}
 	if userID != "" {
 		err = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, userID, func(ts db.TxStores) error {

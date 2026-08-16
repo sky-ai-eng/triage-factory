@@ -126,8 +126,8 @@ func TestRun_WindowWallCompactsAndNeverConcludes(t *testing.T) {
 		if cut == nil {
 			t.Fatal("the wall-cut turn must persist — its tokens and dollars are real")
 		}
-		if reason, _ := cut.Metadata["finish_reason"].(string); reason != wallStop {
-			t.Errorf("finish_reason = %q, want %q — a wall hit and a cap hit must be distinguishable", reason, wallStop)
+		if cut.StopReason != wallStop {
+			t.Errorf("stop_reason = %q, want %q — a wall hit and a cap hit must be distinguishable", cut.StopReason, wallStop)
 		}
 		if cut.WindowState != domain.MessageWindowInactive {
 			t.Errorf("window_state = %q, want inactive: the compaction commit supersedes the cut turn "+
@@ -500,7 +500,7 @@ func TestRun_ToolCallsStopWithNoCallsParks(t *testing.T) {
 // TestRun_EmptyFinishReasonConcludesWithAWarning: a stream that never reported
 // a reason is read as an ordinary stop — the conservative choice, and what
 // every reason got before the allowlist existed. The warn is what makes the
-// real distribution observable, since the persisted metadata deliberately
+// real distribution observable, since the persisted column deliberately
 // stores nothing for an absent reason.
 func TestRun_EmptyFinishReasonConcludesWithAWarning(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
@@ -521,9 +521,9 @@ func TestRun_EmptyFinishReasonConcludesWithAWarning(t *testing.T) {
 	if row == nil {
 		t.Fatal("the concluding turn must persist")
 	}
-	if _, present := row.Metadata["finish_reason"]; present {
-		t.Errorf("metadata = %v, want no finish_reason key: \"not reported\" and \"unknown\" are the same thing "+
-			"and storing \"\" would make them look different", row.Metadata)
+	if row.StopReason != "" {
+		t.Errorf("stop_reason = %q, want empty: \"not reported\" and \"unknown\" are the same thing "+
+			"and inventing a value would make them look different", row.StopReason)
 	}
 }
 

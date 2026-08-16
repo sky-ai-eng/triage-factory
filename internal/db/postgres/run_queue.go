@@ -452,7 +452,9 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 			LIMIT 1
 		),
 		unparked AS (
-			UPDATE conversations SET status = NULL, parked_at = NULL
+			-- Every park column clears together — see the SQLite twin for why
+			-- park_reason in particular must not survive its own park.
+			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL
 			FROM candidate
 			WHERE conversations.id = candidate.id AND conversations.status IS NOT NULL
 			RETURNING conversations.id
@@ -756,7 +758,7 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 				UPDATE conversations
 				SET status = 'open',
 				    parked_at = COALESCE(parked_at, now()),
-				    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
+				    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
 				    result_summary = COALESCE(NULLIF(result_summary, ''), $1)
 				WHERE status IS NULL
 				  AND blueprint_run_id IN (

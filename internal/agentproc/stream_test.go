@@ -41,7 +41,7 @@ func TestParseLine_CaptureSessionAndAccumulate(t *testing.T) {
 	if res == nil {
 		t.Fatal("expected Result on result event")
 	}
-	if res.DurationMs != 120 || res.NumTurns != 2 || res.CostUSD != 0.01 || res.StopReason != "end_turn" {
+	if res.DurationMs != 120 || res.NumTurns != 2 || res.CostUSD != 0.01 {
 		t.Errorf("result accounting mismatch: %+v", res)
 	}
 }

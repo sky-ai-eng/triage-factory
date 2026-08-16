@@ -308,7 +308,15 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 	// the arrival of its last one.
 	s.current.DurationMs = s.sinceRequest()
 
+	// The reason the model stopped THIS turn, recorded on the turn it
+	// describes. Stamped before the flush below rather than after it, because
+	// the flush hands the row away: a row that leaves without it would carry
+	// nothing, and the harness reports the reason on the same line that ends
+	// the message. A row flushed some other way (a new message id arriving, a
+	// tool result, the terminal event) genuinely had none reported, and stays
+	// empty — "not reported" and "unknown" are the same thing.
 	if stopReason, _ := msgObj["stop_reason"].(string); stopReason != "" {
+		s.current.StopReason = stopReason
 		if msg := s.flush(); msg != nil {
 			flushed = append(flushed, msg)
 		}
@@ -460,13 +468,18 @@ func parseImageBlock(m map[string]any) (domain.ContentBlock, bool) {
 
 // Result is the terminal `result` event from a claude -p stream:
 // final accounting (cost, duration, turn count) plus the agent's
-// last message text and stop reason.
+// last message text.
+//
+// The model's stop reason is deliberately not here. It describes ONE
+// assistant turn, and an invocation is many, so it is parsed off each
+// assistant event and stored on the row that turn produced
+// (messages.stop_reason) rather than being carried out as an
+// invocation-level summary of whichever turn happened to be last.
 type Result struct {
 	IsError    bool
 	DurationMs int
 	NumTurns   int
 	CostUSD    float64
-	StopReason string
 	Result     string
 
 	// Subtype mirrors the SDK result event's `subtype` field
@@ -502,7 +515,6 @@ func parseResult(raw map[string]any) *Result {
 	if c, ok := raw["total_cost_usd"].(float64); ok {
 		rc.CostUSD = c
 	}
-	rc.StopReason, _ = raw["stop_reason"].(string)
 	rc.Result, _ = raw["result"].(string)
 	rc.Subtype, _ = raw["subtype"].(string)
 	if tr, _ := raw["terminal_reason"].(string); tr == "aborted_streaming" || tr == "aborted_tools" {

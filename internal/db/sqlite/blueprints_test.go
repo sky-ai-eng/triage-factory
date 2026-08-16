@@ -501,7 +501,7 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
 		Model: "claude-sonnet-4-6", BlueprintRunID: "op-blueprint-run", BlueprintStepIndex: &step0,
 	})
 	// Persist a terminal outcome the way processCompletion does.
-	if err := stores.Conversations.CompleteSystem(ctx, org, "op-run", "completed", 0, 0, 0, "", "did the thing", "continue", "", ""); err != nil {
+	if err := stores.Conversations.CompleteSystem(ctx, org, "op-run", "completed", 0, 0, 0, "did the thing", "continue", "", ""); err != nil {
 		t.Fatalf("complete step run: %v", err)
 	}
 

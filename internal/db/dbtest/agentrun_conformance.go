@@ -205,7 +205,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage 1: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 4000, 3, "partial", "", "", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 4000, 3, "", "", "", ""); err != nil {
 			t.Fatalf("first Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
@@ -231,7 +231,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage 2: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 2000, 5, "ok", "all done", "abort", "needs human", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 2000, 5, "all done", "abort", "needs human", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got, err = store.Get(ctx, orgID, runID)
@@ -253,8 +253,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got.NumTurns == nil || *got.NumTurns != 8 {
 			t.Errorf("num_turns = %v, want 8 (claims telemetry SUM)", got.NumTurns)
 		}
-		if got.StopReason != "ok" {
-			t.Errorf("stop_reason = %q, want ok", got.StopReason)
+		// A terminal records no park reason: it did not park. The row's
+		// park_reason is whatever an earlier park left, which here is nothing.
+		if got.ParkReason != "" {
+			t.Errorf("park_reason = %q after a terminal, want empty", got.ParkReason)
 		}
 		if got.Outcome != "abort" {
 			t.Errorf("outcome = %q, want abort", got.Outcome)
@@ -312,7 +314,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 0, 4000, 3, "", "done", "continue", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 4000, 3, "done", "continue", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 
@@ -361,7 +363,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage a: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 0, 0, "", "", "abort", "wait", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 0, 0, "", "abort", "wait", ""); err != nil {
 			t.Fatalf("first Complete: %v", err)
 		}
 
@@ -378,7 +380,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage c: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("second Complete: %v", err)
 		}
 
@@ -426,7 +428,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("InsertMessage 2: %v", err)
 		}
 		// No active claim at all: the fallback owns the settle.
-		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("first Complete: %v", err)
 		}
 		// A live claim whose engagement recorded nothing (both rows predate
@@ -434,7 +436,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-rowless", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("rowless-engagement Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
@@ -494,7 +496,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage synthetic: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, runID, "failed", 1.5, 1000, 2, "error", "", "", "", "infra"); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "failed", 1.5, 1000, 2, "", "", "", "infra"); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		msgs, err := store.Messages(ctx, orgID, runID)
@@ -529,7 +531,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage only-synthetic: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, onlySynthID, "failed", 0.25, 0, 0, "error", "", "", "", "infra"); err != nil {
+		if err := store.Complete(ctx, orgID, onlySynthID, "failed", 0.25, 0, 0, "", "", "", "infra"); err != nil {
 			t.Fatalf("Complete only-synth: %v", err)
 		}
 		gotOnly, err := store.Get(ctx, orgID, onlySynthID)
@@ -574,7 +576,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("InsertMessage tool: %v", err)
 		}
 		// No claim at all: the fallback arm owns this settle.
-		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		msgs, err := store.Messages(ctx, orgID, runID)
@@ -608,7 +610,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage synthetic: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, noRealID, "failed", 0.5, 0, 0, "error", "", "", "", "infra"); err != nil {
+		if err := store.Complete(ctx, orgID, noRealID, "failed", 0.5, 0, 0, "", "", "", "infra"); err != nil {
 			t.Fatalf("Complete no-real: %v", err)
 		}
 		noRealMsgs, err := store.Messages(ctx, orgID, noRealID)
@@ -638,7 +640,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-norows", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 9.99, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 9.99, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
@@ -690,7 +692,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 				got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
 		}
 
-		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "ok", "done", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "done", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got2, err := store.Get(ctx, orgID, runID)
@@ -739,7 +741,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		t.Run("ParkOpen_stopped", func(t *testing.T) {
 			store, orgID, _, seed := mk(t)
 			runID := seedRunningWithTokens(t, store, orgID, seed)
-			ok, err := store.ParkOpen(context.Background(), orgID, runID, db.ParkStopped("user_cancelled", "cancelled"))
+			ok, err := store.ParkOpen(context.Background(), orgID, runID, db.ParkStopped(domain.ParkReasonUserCancelled, "cancelled"))
 			if err != nil || !ok {
 				t.Fatalf("ParkOpen stopped: ok=%v err=%v", ok, err)
 			}
@@ -795,7 +797,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 
 		runID := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, "", "", "", "", string(domain.RunFailureAgentError)); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, "", "", "", string(domain.RunFailureAgentError)); err != nil {
 			t.Fatalf("Complete with kind: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
@@ -811,7 +813,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Empty kind on a failed Complete → NULL → unclassified zero value.
 		plainID := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, plainID, "failed", 0, 0, 0, "", "", "", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, plainID, "failed", 0, 0, 0, "", "", "", ""); err != nil {
 			t.Fatalf("Complete without kind: %v", err)
 		}
 		if got, _ := store.Get(ctx, orgID, plainID); got == nil || got.FailureKind != domain.RunFailureUnclassified {
@@ -931,7 +933,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// order the reactor writes in; the window between the two writes is the
 		// subtest below.
 		abortRun, abortBR := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human", ""); err != nil {
+		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "stopped", "abort", "needs a human", ""); err != nil {
 			t.Fatalf("complete+abort: %v", err)
 		}
 		seed.SetBlueprintRunStatus(t, abortBR, "aborted")
@@ -939,7 +941,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("from completed+abort: ok=%v err=%v, want true", ok, err)
 		}
 		finishRun, finishBR := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "", "shipped", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "shipped", "finish", "", ""); err != nil {
 			t.Fatalf("complete+finish: %v", err)
 		}
 		seed.SetBlueprintRunStatus(t, finishBR, "completed")
@@ -950,7 +952,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// workspace to land a follow-up in; this is the one rest state the CAS
 		// still excludes.
 		failedRun := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, failedRun, "failed", 0, 0, 0, "", "", "", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, failedRun, "failed", 0, 0, 0, "", "", "", ""); err != nil {
 			t.Fatalf("fail: %v", err)
 		}
 		if ok, _ := store.MarkQueuedForResume(ctx, orgID, failedRun); ok {
@@ -966,7 +968,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 
 		runID, brID := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "handed off", "continue", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "handed off", "continue", "", ""); err != nil {
 			t.Fatalf("complete step: %v", err)
 		}
 		// The blueprint has not reacted yet — exactly the live failure.
@@ -997,7 +999,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 
 		runID, _ := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped("manual", "")); err != nil || !ok {
+		if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
 			t.Fatalf("park: ok=%v err=%v", ok, err)
 		}
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, runID); err != nil || !ok {
@@ -1035,13 +1037,13 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedConversationForTest(t, orgID, seed, "running")
-		ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped("manual", "user cancelled"))
+		ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped(domain.ParkReasonUserCancelled, "user cancelled"))
 		if err != nil || !ok {
 			t.Fatalf("cancel active: ok=%v err=%v", ok, err)
 		}
 		got, _ := store.Get(ctx, orgID, runID)
-		if got.Status != "open" || got.StopReason != "manual" {
-			t.Errorf("after cancel: status=%q stop_reason=%q, want (open, manual)", got.Status, got.StopReason)
+		if got.Status != "open" || got.ParkReason != domain.ParkReasonUserCancelled {
+			t.Errorf("after cancel: status=%q park_reason=%q, want (open, user_cancelled)", got.Status, got.ParkReason)
 		}
 		// The workspace is retained and the retention TTL is what collects it,
 		// so the parked row must enumerate as a reapable snapshot key. That is
@@ -1061,11 +1063,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		// A parked run cancels again (the gesture still has to finalize the
 		// blueprint), but a terminal one is refused.
-		if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped("manual", "")); err != nil || !ok {
+		if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
 			t.Errorf("re-cancel a parked run: ok=%v err=%v, want true/nil", ok, err)
 		}
 		doneRun := seedConversationForTest(t, orgID, seed, "completed")
-		if ok, err := store.ParkOpen(ctx, orgID, doneRun, db.ParkStopped("manual", "")); err != nil || ok {
+		if ok, err := store.ParkOpen(ctx, orgID, doneRun, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || ok {
 			t.Errorf("cancel a completed run: ok=%v err=%v, want false/nil", ok, err)
 		}
 	})
@@ -1088,19 +1090,71 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		// A deliberate stop DOES land on the same parked row: the caller has
 		// to learn it took so it can finalize the blueprint behind it.
-		if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped("user_cancelled", "stopped")); err != nil || !ok {
+		if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped(domain.ParkReasonUserCancelled, "stopped")); err != nil || !ok {
 			t.Errorf("stop on a parked row: ok=%v err=%v, want true/nil", ok, err)
 		}
 		got, _ := store.Get(ctx, orgID, runID)
-		if got.StopReason != "user_cancelled" {
-			t.Errorf("stop_reason = %q, want user_cancelled", got.StopReason)
+		if got.ParkReason != domain.ParkReasonUserCancelled {
+			t.Errorf("park_reason = %q, want user_cancelled", got.ParkReason)
 		}
-		// …and an idle park after it must not blank the reason it recorded.
+		// …and an idle park after it must not overwrite the reason it
+		// recorded. An idle park carries `idle`, so this is a real write that
+		// the already-parked guard is what stops.
 		if _, err := store.ParkOpen(ctx, orgID, runID, db.ParkIdle()); err != nil {
 			t.Fatalf("idle park after stop: %v", err)
 		}
-		if got, _ := store.Get(ctx, orgID, runID); got.StopReason != "user_cancelled" {
-			t.Errorf("stop_reason = %q after an idle park, want it preserved", got.StopReason)
+		if got, _ := store.Get(ctx, orgID, runID); got.ParkReason != domain.ParkReasonUserCancelled {
+			t.Errorf("park_reason = %q after an idle park, want it preserved", got.ParkReason)
+		}
+	})
+
+	// Every reason in the vocabulary round-trips through both dialects.
+	// Coverage is derived from domain.AllParkReasons() rather than copied out
+	// of it, so a reason added in Go and never taught to a store fails here on
+	// both backends — the discipline AllClaimPhases is held to, for the same
+	// reason: SQL cannot import a Go const, so this suite is the join.
+	t.Run("ParkOpen_RoundTripsEveryParkReason", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		for _, reason := range domain.AllParkReasons() {
+			runID := seedConversationForTest(t, orgID, seed, "running")
+			if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped(reason, "")); err != nil || !ok {
+				t.Fatalf("park with %q: ok=%v err=%v", reason, ok, err)
+			}
+			got, err := store.Get(ctx, orgID, runID)
+			if err != nil || got == nil {
+				t.Fatalf("Get after park with %q: err=%v got=%v", reason, err, got)
+			}
+			if got.ParkReason != reason {
+				t.Errorf("park_reason = %q, want %q", got.ParkReason, reason)
+			}
+		}
+	})
+
+	// The discriminator the Park type now carries explicitly. It used to be
+	// inferred from the reason being non-empty, which made "someone stopped
+	// this" and "there is something to display" one bit: an idle park that
+	// wanted to say WHY it parked could only do so by also releasing its claim
+	// as a cancellation. `idle` is exactly such a reason, so this is the arm
+	// that would have silently broken.
+	t.Run("ParkOpen_IdleRecordsItsReasonAndStillReleasesParked", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-idle-park", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+
+		if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkIdle()); err != nil || !ok {
+			t.Fatalf("idle park: ok=%v err=%v", ok, err)
+		}
+		got, _ := store.Get(ctx, orgID, runID)
+		if got.ParkReason != domain.ParkReasonIdle {
+			t.Errorf("park_reason = %q, want idle — an idle park says why it parked too", got.ParkReason)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "parked" {
+			t.Fatalf("claims = %+v, want the engagement released as parked, never cancelled", claims)
 		}
 	})
 
@@ -1129,10 +1183,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			})
 		}
 		step1, step2 := mkStep(), mkStep()
-		if err := store.Complete(ctx, orgID, step1, "completed", 0, 0, 0, "", "handed off", "continue", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, step1, "completed", 0, 0, 0, "handed off", "continue", "", ""); err != nil {
 			t.Fatalf("complete step 1: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, step2, "completed", 0, 0, 0, "", "shipped it", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, step2, "completed", 0, 0, 0, "shipped it", "finish", "", ""); err != nil {
 			t.Fatalf("complete step 2: %v", err)
 		}
 
@@ -1257,21 +1311,21 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		t.Run("Complete_completed", func(t *testing.T) {
 			runID := stage(t)
-			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			assertReleased(t, runID, "completed")
 		})
 		t.Run("Complete_failed", func(t *testing.T) {
 			runID := stage(t)
-			if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, "", "", "", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, "", "", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			assertReleased(t, runID, "failed")
 		})
 		t.Run("ParkOpen_stopped", func(t *testing.T) {
 			runID := stage(t)
-			if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped("manual", "")); err != nil || !ok {
+			if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
 				t.Fatalf("ParkOpen stopped: ok=%v err=%v", ok, err)
 			}
 			assertReleased(t, runID, "cancelled")
@@ -1317,7 +1371,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			// claim (simulating a racing engagement), then fail — the guard
 			// refuses and the claim stays live.
 			runID := stage(t)
-			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-race", 9); err != nil {
@@ -1387,7 +1441,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err := store.SetActiveClaimPhaseSystem(ctx, orgID, runID, "agent_starting"); err != nil {
 			t.Fatalf("SetActiveClaimPhaseSystem: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		// A write against the released claim is a silent no-op: the released
@@ -1460,7 +1514,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("row delivered = %v, want true", msgs[0].Delivered)
 		}
 
-		if err := store.CompleteForClaimSystem(ctx, orgID, runID, claimID, "completed", 0.5, 1500, 2, "ok", "done", "finish", "", ""); err != nil {
+		if err := store.CompleteForClaimSystem(ctx, orgID, runID, claimID, "completed", 0.5, 1500, 2, "done", "finish", "", ""); err != nil {
 			t.Fatalf("CompleteForClaimSystem: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
@@ -1696,7 +1750,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		claimID := seed.ClaimRows(t, runID)[0].ID
 
-		ok, err := store.ParkOpenForClaimSystem(ctx, orgID, runID, claimID, db.ParkStopped("user_cancelled", "Run cancelled by user"))
+		ok, err := store.ParkOpenForClaimSystem(ctx, orgID, runID, claimID, db.ParkStopped(domain.ParkReasonUserCancelled, "Run cancelled by user"))
 		if err != nil {
 			t.Fatalf("ParkOpenForClaimSystem: %v", err)
 		}
@@ -1707,8 +1761,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v got=%v", err, got)
 		}
-		if got.Status != "open" || got.StopReason != "user_cancelled" {
-			t.Errorf("run = (%q, %q), want (open, user_cancelled)", got.Status, got.StopReason)
+		if got.Status != "open" || got.ParkReason != domain.ParkReasonUserCancelled {
+			t.Errorf("run = (%q, %q), want (open, user_cancelled)", got.Status, got.ParkReason)
 		}
 		claims := seed.ClaimRows(t, runID)
 		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "cancelled" {
@@ -1897,7 +1951,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// bookkeeping releases the claim, so the stamp must land on a
 		// released row. An active-claim predicate here would silently drop
 		// every run's actuals.
-		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		peak2, cpu2 := 998, int64(20_000_000)
@@ -2259,7 +2313,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Terminate the event run; only terminal event-trigger rows
 		// remain plus the still-running manual — gate flips back to
 		// false.
-		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if has, _ := store.HasActiveAutoRunForTask(ctx, orgID, taskID); has {
@@ -2312,7 +2366,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// as a live auto run again — for its own task, and only its own. A
 		// human-paced follow-up on one card must never hold up automated
 		// triage of a different card on the same entity.
-		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("conclude before resume: %v", err)
 		}
 		// The blueprint settles first: a resume fixture that skipped this would
@@ -2330,7 +2384,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Terminate it — terminal-only, plus the still-active manual run,
 		// resolves back to "".
-		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if id, err := store.ActiveAutoRunIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
@@ -2754,6 +2808,49 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if dto := msgs[2].ToDTO(); dto.DurationMs != nil {
 			t.Errorf("unstamped row's DTO carries duration %v; the wire must omit the key entirely", *dto.DurationMs)
+		}
+	})
+
+	t.Run("Messages_RoundTripsStopReason", func(t *testing.T) {
+		// The MODEL's stop reason, per turn. Both runtimes write it — the SDK
+		// parser off each assistant event, the native loop off the
+		// completion's finish reason — so a `max_tokens` truncation is visible
+		// whichever engine ran, in either dialect. Its scope is the point: a
+		// conversation of N turns has N of these, which is why recording it at
+		// conversation scope (where the last terminal write won) said nothing.
+		//
+		// The vocabulary is the provider's and it is OPEN — a model ships a new
+		// reason whenever it likes — so the column is a passthrough, not a
+		// closed set like park_reason. Empty stays empty: "the stream reported
+		// none" and "unknown" are the same thing, and a placeholder would make
+		// them look different.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+		for _, m := range []*domain.Message{
+			{ConversationID: runID, Role: "assistant", Content: "calling", StopReason: "tool_use"},
+			{ConversationID: runID, Role: "assistant", Content: "cut off", StopReason: "max_tokens"},
+			{ConversationID: runID, Role: "assistant", Content: "unreported"},
+		} {
+			if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		if len(msgs) != 3 {
+			t.Fatalf("len = %d, want 3", len(msgs))
+		}
+		for i, want := range []string{"tool_use", "max_tokens", ""} {
+			if msgs[i].StopReason != want {
+				t.Errorf("message %d StopReason = %q, want %q", i, msgs[i].StopReason, want)
+			}
+		}
+		if dto := msgs[2].ToDTO(); dto.StopReason != "" {
+			t.Errorf("unreported row's DTO carries stop_reason %q; the wire must omit the key entirely", dto.StopReason)
 		}
 	})
 
@@ -3390,7 +3487,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: stepID, Role: "assistant", Content: "work"}); err != nil {
 				t.Fatalf("InsertMessage %s: %v", stepID, err)
 			}
-			if err := store.Complete(ctx, orgID, stepID, "completed", cost, 1000, 1, "ok", "", "finish", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, stepID, "completed", cost, 1000, 1, "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete %s: %v", stepID, err)
 			}
 		}
@@ -3465,7 +3562,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			if err := store.SetExecutorSystem(ctx, orgID, stepID, "exec-dur", 1); err != nil {
 				t.Fatalf("SetExecutorSystem %s: %v", stepID, err)
 			}
-			if err := store.Complete(ctx, orgID, stepID, "completed", 0, durationMs, 1, "ok", "", "finish", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, stepID, "completed", 0, durationMs, 1, "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete %s: %v", stepID, err)
 			}
 		}
