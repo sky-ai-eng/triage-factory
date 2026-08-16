@@ -452,7 +452,9 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 			LIMIT 1
 		),
 		unparked AS (
-			UPDATE conversations SET status = NULL, parked_at = NULL
+			-- Every park column clears together — see the SQLite twin for why
+			-- park_reason in particular must not survive its own park.
+			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL
 			FROM candidate
 			WHERE conversations.id = candidate.id AND conversations.status IS NOT NULL
 			RETURNING conversations.id
