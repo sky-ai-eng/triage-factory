@@ -248,15 +248,30 @@ func TestTaskList_ClosedSinceIsExplicit(t *testing.T) {
 		t.Errorf("unwindowed done = %v, want both %s and %s (no hidden window)", got, oldID, recentID)
 	}
 
+	// Milliseconds on the wire: the browser sends this field as
+	// Date.toISOString(), which always carries a fractional second. Go's
+	// time.Parse accepts one after the seconds field even though
+	// time.RFC3339's layout doesn't spell it, so the two agree — pinned here
+	// because the layout constant reads as though they wouldn't.
 	windowed := postTaskList(t, s, map[string]any{
 		"statuses":     []string{"done"},
-		"closed_since": time.Now().UTC().AddDate(0, 0, -7).Format(time.RFC3339),
+		"closed_since": time.Now().UTC().AddDate(0, 0, -7).Format("2006-01-02T15:04:05.000Z07:00"),
 	})
 	if want := []string{recentID}; !slices.Equal(listedIDs(windowed), want) {
 		t.Errorf("7-day window = %v, want %v", listedIDs(windowed), want)
 	}
 	if windowed.TotalCount != 1 {
 		t.Errorf("windowed total_count = %d, want 1 (the filtered total)", windowed.TotalCount)
+	}
+
+	// And a seconds-precision timestamp, the other spelling of the same
+	// field, is accepted too.
+	plain := postTaskList(t, s, map[string]any{
+		"statuses":     []string{"done"},
+		"closed_since": time.Now().UTC().AddDate(0, 0, -7).Format(time.RFC3339),
+	})
+	if want := []string{recentID}; !slices.Equal(listedIDs(plain), want) {
+		t.Errorf("7-day window (seconds precision) = %v, want %v", listedIDs(plain), want)
 	}
 }
 

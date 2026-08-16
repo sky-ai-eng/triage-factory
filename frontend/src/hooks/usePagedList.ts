@@ -54,17 +54,22 @@ export function usePagedList<T>(path: string, fallbackError: string): PagedList<
   const [error, setError] = useState('')
   const [nextToken, setNextToken] = useState('')
 
-  // The filters the current page set was fetched with, and the token that
-  // continues it. Refs rather than state: loadMore must read the latest of
-  // both without being re-created on every page, since callers hold it in
-  // effects and event handlers.
+  // The filters the held items were fetched with, and the token that continues
+  // them. Refs rather than state: loadMore must read the latest of both
+  // without being re-created on every page, since callers hold it in effects
+  // and event handlers.
+  //
+  // The two move together, only on a successful load, and that is load-bearing:
+  // a token is valid only for the filter set the server minted it under. If a
+  // failed load left the new filters here beside the previous query's token,
+  // the next loadMore would pair them and earn a 400 — so on failure the pair
+  // stays describing the query whose items are still on screen.
   const filtersRef = useRef<ListRequest>({})
   const tokenRef = useRef('')
   const inFlight = useRef(false)
 
   const load = useCallback(
     async (filters: ListRequest): Promise<ListPage<T> | null> => {
-      filtersRef.current = filters
       inFlight.current = true
       setLoading(true)
       try {
@@ -72,6 +77,7 @@ export function usePagedList<T>(path: string, fallbackError: string): PagedList<
         setItems(page.items)
         setTotal(page.total_count)
         setNextToken(page.next_page_token)
+        filtersRef.current = filters
         tokenRef.current = page.next_page_token
         setError('')
         return page

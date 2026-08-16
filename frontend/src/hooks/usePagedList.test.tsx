@@ -100,6 +100,42 @@ describe('usePagedList', () => {
     expect(result.current.hasMore).toBe(false)
   })
 
+  it('does not pair a failed load’s filters with the previous query’s token', async () => {
+    // A token is only valid for the filter set it was minted under. If a
+    // failed load left its filters behind next to the surviving token, the
+    // next loadMore would send that mismatched pair and earn a 400 — and the
+    // items on screen still belong to the query that token continues.
+    const bodies: unknown[] = []
+    let fail = false
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_input: unknown, init?: { body?: string }) => {
+        bodies.push(init?.body ? JSON.parse(init.body) : null)
+        return fail
+          ? Promise.resolve({ ok: false, status: 500, ...jsonBody({}) })
+          : Promise.resolve({
+              ok: true,
+              ...jsonBody({ items: [{ id: 'a' }], next_page_token: 'tok-1', total_count: 3 }),
+            })
+      }),
+    )
+    const { result } = renderHook(() => usePagedList<Row>('/api/tasks/list', 'Could not load.'))
+
+    await act(async () => {
+      await result.current.load({ statuses: ['queued'] })
+    })
+    fail = true
+    await act(async () => {
+      await result.current.load({ statuses: ['done'] })
+    })
+    fail = false
+    await act(async () => {
+      await result.current.loadMore()
+    })
+
+    expect(bodies[2]).toEqual({ statuses: ['queued'], page_token: 'tok-1' })
+  })
+
   it('keeps the current page and surfaces a message when a load fails', async () => {
     let fail = false
     vi.stubGlobal(
