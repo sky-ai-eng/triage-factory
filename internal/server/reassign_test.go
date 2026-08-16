@@ -49,13 +49,13 @@ func TestHandleSwipe_ReassignHappyPath(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id, team_id)
-		 VALUES ('t_re', 'e_re', ?, 'ev_re', 'in_progress', ?, ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000018', 'e_re', ?, 'ev_re', 'in_progress', ?, ?)`,
 		eventType, fromUser, runmode.LocalDefaultTeamID,
 	); err != nil {
 		t.Fatalf("seed claimed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_re/swipe",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000018/swipe",
 		map[string]any{"action": "reassign", "target_user_id": toUser})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -64,7 +64,7 @@ func TestHandleSwipe_ReassignHappyPath(t *testing.T) {
 	var status string
 	var claimedUser, claimedAgent sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT status, claimed_by_user_id, claimed_by_agent_id FROM tasks WHERE id = 't_re'`,
+		`SELECT status, claimed_by_user_id, claimed_by_agent_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000018'`,
 	).Scan(&status, &claimedUser, &claimedAgent); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestHandleSwipe_ReassignHappyPath(t *testing.T) {
 
 	var swipeCount int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_re' AND action = 'reassign'`,
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000018' AND action = 'reassign'`,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}
@@ -98,7 +98,10 @@ func TestHandleSwipe_ReassignHappyPath(t *testing.T) {
 func TestHandleSwipe_ReassignRefusalReasons(t *testing.T) {
 	t.Run("missing_target_user_id_400", func(t *testing.T) {
 		s := newTestServer(t)
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/swipe",
+		// A well-formed (uuid) id: the malformed-id guard answers 404 before
+		// any body validation, so this subtest reaches the missing-target
+		// check with an id shape that passes the guard.
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-0000000000ff/swipe",
 			map[string]any{"action": "reassign"})
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
@@ -133,12 +136,12 @@ func TestHandleSwipe_ReassignRefusalReasons(t *testing.T) {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-			 VALUES ('t_ret', 'e_ret', 'github:pr:opened', 'ev_ret', 'done', ?)`,
+			 VALUES ('00000000-0000-4000-8000-000000000016', 'e_ret', 'github:pr:opened', 'ev_ret', 'done', ?)`,
 			runmode.LocalDefaultUserID,
 		); err != nil {
 			t.Fatalf("seed terminal claimed task: %v", err)
 		}
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_ret/swipe",
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000016/swipe",
 			map[string]any{"action": "reassign", "target_user_id": otherUserID})
 		if rec.Code != http.StatusConflict {
 			t.Errorf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
@@ -160,11 +163,11 @@ func TestHandleSwipe_ReassignRefusalReasons(t *testing.T) {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-			 VALUES ('t_reu', 'e_reu', 'github:pr:opened', 'ev_reu', 'queued')`,
+			 VALUES ('00000000-0000-4000-8000-000000000017', 'e_reu', 'github:pr:opened', 'ev_reu', 'queued')`,
 		); err != nil {
 			t.Fatalf("seed unclaimed task: %v", err)
 		}
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_reu/swipe",
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000017/swipe",
 			map[string]any{"action": "reassign", "target_user_id": runmode.LocalDefaultUserID})
 		if rec.Code != http.StatusConflict {
 			t.Errorf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
@@ -186,12 +189,12 @@ func TestHandleSwipe_ReassignRefusalReasons(t *testing.T) {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
-			 VALUES ('t_reb', 'e_reb', 'github:pr:opened', 'ev_reb', 'queued', ?)`,
+			 VALUES ('00000000-0000-4000-8000-000000000014', 'e_reb', 'github:pr:opened', 'ev_reb', 'queued', ?)`,
 			runmode.LocalDefaultAgentID,
 		); err != nil {
 			t.Fatalf("seed bot-claimed task: %v", err)
 		}
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_reb/swipe",
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000014/swipe",
 			map[string]any{"action": "reassign", "target_user_id": runmode.LocalDefaultUserID})
 		if rec.Code != http.StatusConflict {
 			t.Errorf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
@@ -217,20 +220,20 @@ func TestHandleSwipe_ReassignIdempotentToCurrentClaimant(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_rei', 'e_rei', 'github:pr:opened', 'ev_rei', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000015', 'e_rei', 'github:pr:opened', 'ev_rei', 'queued', ?)`,
 		runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed claimed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_rei/swipe",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000015/swipe",
 		map[string]any{"action": "reassign", "target_user_id": runmode.LocalDefaultUserID})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var claimedUser sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id FROM tasks WHERE id = 't_rei'`,
+		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000015'`,
 	).Scan(&claimedUser); err != nil {
 		t.Fatalf("scan: %v", err)
 	}

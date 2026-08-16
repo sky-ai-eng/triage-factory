@@ -39,6 +39,17 @@ func requireOrg(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return httpx.RequireOrg(w, r)
 }
 
+// writeNotConfigured answers a route that requires an integration the org
+// hasn't set up: 409 NOT_CONFIGURED. A 409 rather than a 400 because the
+// fault is server-side state, not the request — and never a 500, which is
+// reserved for a backend that failed to *read* the configuration.
+func writeNotConfigured(w http.ResponseWriter, msg string) {
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+		Reason:  httpx.ReasonNotConfigured,
+		Message: msg,
+	})
+}
+
 // requireOrg is the Server-method form of the package-level org gate, so
 // handlers written as Server methods use the same path.
 func (s *Server) requireOrg(w http.ResponseWriter, r *http.Request) (string, bool) {

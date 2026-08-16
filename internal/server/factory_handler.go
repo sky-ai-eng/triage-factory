@@ -211,7 +211,10 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	// Only the belt narrows here — the throughput counters stay at the
 	// viewer-union (a deliberate scope line; the belt is what "hides
 	// cross-team rows" refers to on the factory).
-	teamFilter := teamscope.FilterParam(r)
+	teamFilter, ok := teamscope.FilterParamStrict(w, r)
+	if !ok {
+		return
+	}
 
 	// Session user's GitHub login drives the "mine" flag. Identity lives in
 	// user_github_identities, host-scoped — resolve the org's

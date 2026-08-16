@@ -1,7 +1,27 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { apiFetch, apiJSON, httpErrorMessage, HttpError, setUnauthHandler } from './apiClient'
+import {
+  apiErrors,
+  apiFetch,
+  apiJSON,
+  httpErrorMessage,
+  HttpError,
+  setUnauthHandler,
+} from './apiClient'
 
 describe('httpErrorMessage', () => {
+  it('prefers the envelope first message over the legacy error key', () => {
+    // Converted routes dual-emit during the migration; the envelope item is
+    // the contract, the top-level "error" only mirrors it.
+    const e = new HttpError(
+      400,
+      JSON.stringify({
+        errors: [{ reason: 'MISSING_FIELD', message: 'until is required', field: 'until' }],
+        error: 'until is required',
+      }),
+    )
+    expect(httpErrorMessage(e, 'fallback')).toBe('until is required')
+  })
+
   it('returns the server JSON { error } string when present', () => {
     const e = new HttpError(
       409,
@@ -31,6 +51,41 @@ describe('httpErrorMessage', () => {
   it('returns the fallback for a non-Error throw', () => {
     expect(httpErrorMessage('boom', 'fb')).toBe('fb')
     expect(httpErrorMessage(undefined, 'fb')).toBe('fb')
+  })
+})
+
+describe('apiErrors', () => {
+  it('returns every envelope item, fields included', () => {
+    const e = new HttpError(
+      400,
+      JSON.stringify({
+        errors: [
+          { reason: 'MISSING_FIELD', message: 'entity_id is required', field: 'entity_id' },
+          { reason: 'MISSING_FIELD', message: 'blueprint_id is required', field: 'blueprint_id' },
+        ],
+        error: 'entity_id is required',
+      }),
+    )
+    expect(apiErrors(e)).toEqual([
+      { reason: 'MISSING_FIELD', message: 'entity_id is required', field: 'entity_id' },
+      { reason: 'MISSING_FIELD', message: 'blueprint_id is required', field: 'blueprint_id' },
+    ])
+  })
+
+  it('returns [] for legacy single-string bodies, non-JSON bodies, and non-HttpErrors', () => {
+    expect(apiErrors(new HttpError(409, JSON.stringify({ error: 'nope' })))).toEqual([])
+    expect(apiErrors(new HttpError(500, '<html>boom</html>'))).toEqual([])
+    expect(apiErrors(new TypeError('Failed to fetch'))).toEqual([])
+  })
+
+  it('drops malformed items instead of returning junk', () => {
+    const e = new HttpError(
+      400,
+      JSON.stringify({
+        errors: [{ reason: 'CONFLICT', message: 'real item' }, { message: 42 }, 'garbage'],
+      }),
+    )
+    expect(apiErrors(e)).toEqual([{ reason: 'CONFLICT', message: 'real item' }])
   })
 })
 

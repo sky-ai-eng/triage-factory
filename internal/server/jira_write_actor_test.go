@@ -84,9 +84,9 @@ func seedQueuedJiraTask(t *testing.T, db *sql.DB, entityID, sourceID, taskID str
 func TestSwipeClaim_JiraTask_NoUserCredential_Returns409(t *testing.T) {
 	s := newTestServer(t)
 	s.jiraResolver = &recordingJiraResolver{userErr: jira.ErrNoJiraUserCredential}
-	seedQueuedJiraTask(t, s.db, "e_jira_nocred", "SKY-1", "t_jira_nocred")
+	seedQueuedJiraTask(t, s.db, "e_jira_nocred", "SKY-1", "00000000-0000-4000-8000-000000000020")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_jira_nocred/swipe",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000020/swipe",
 		map[string]any{"action": "claim", "hesitation_ms": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
@@ -98,7 +98,7 @@ func TestSwipeClaim_JiraTask_NoUserCredential_Returns409(t *testing.T) {
 	// Refused before mutation: no claim stamped, no audit row.
 	var claim sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id FROM tasks WHERE id = 't_jira_nocred'`,
+		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000020'`,
 	).Scan(&claim); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestSwipeClaim_JiraTask_NoUserCredential_Returns409(t *testing.T) {
 	}
 	var swipeCount int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_jira_nocred'`,
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000020'`,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}
@@ -124,9 +124,9 @@ func TestSwipeClaim_JiraTask_NoUserCredential_Returns409(t *testing.T) {
 func TestSwipeClaim_JiraTask_ResolverBackendError_Returns500(t *testing.T) {
 	s := newTestServer(t)
 	s.jiraResolver = &recordingJiraResolver{userErr: errors.New("vault unreachable: org=secret user=secret")}
-	seedQueuedJiraTask(t, s.db, "e_jira_bkerr", "SKY-9", "t_jira_bkerr")
+	seedQueuedJiraTask(t, s.db, "e_jira_bkerr", "SKY-9", "00000000-0000-4000-8000-000000000019")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_jira_bkerr/swipe",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000019/swipe",
 		map[string]any{"action": "claim", "hesitation_ms": 0})
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
@@ -135,7 +135,7 @@ func TestSwipeClaim_JiraTask_ResolverBackendError_Returns500(t *testing.T) {
 	// Backend error preempts the claim — no mutation, no audit.
 	var claim sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id FROM tasks WHERE id = 't_jira_bkerr'`,
+		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000019'`,
 	).Scan(&claim); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -156,9 +156,9 @@ func TestSwipeClaim_JiraTask_ResolvesActingUserCredential(t *testing.T) {
 		userClient: jira.NewClient(jira.DataCenterPAT("http://127.0.0.1:0", "user-tok")),
 	}
 	s.jiraResolver = res
-	seedQueuedJiraTask(t, s.db, "e_jira_ok", "SKY-2", "t_jira_ok")
+	seedQueuedJiraTask(t, s.db, "e_jira_ok", "SKY-2", "00000000-0000-4000-8000-000000000021")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_jira_ok/swipe",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000021/swipe",
 		map[string]any{"action": "claim", "hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -178,7 +178,7 @@ func TestSwipeClaim_JiraTask_ResolvesActingUserCredential(t *testing.T) {
 	// The claim landed on the TF side.
 	var claim sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id FROM tasks WHERE id = 't_jira_ok'`,
+		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000021'`,
 	).Scan(&claim); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -211,12 +211,12 @@ func TestSwipeClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-		 VALUES ('t_gh', 'e_gh', ?, 'ev_gh', 'queued')`, eventType,
+		 VALUES ('00000000-0000-4000-8000-000000000022', 'e_gh', ?, 'ev_gh', 'queued')`, eventType,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_gh/swipe",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000022/swipe",
 		map[string]any{"action": "claim", "hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (GitHub claim unaffected by Jira cred); body=%s", rec.Code, rec.Body.String())

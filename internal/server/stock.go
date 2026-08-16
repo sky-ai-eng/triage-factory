@@ -15,6 +15,7 @@ import (
 	jiraevents "github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 )
@@ -84,14 +85,22 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	// The optional ?team_id= read filter narrows the deck to one team's
 	// Jira projects (the per-page selector). The deck is single-team by
 	// construction; teamscope.ResolveRead defaults to the sticky/first team
-	// when no filter is set rather than blocking a multi-team caller.
-	// teamscope.SingleParam drops a malformed id to "" — same validation the
-	// prompts / event-handlers read paths use, so a junk value can't reach
-	// a future ::uuid cast.
-	filterTeam := teamscope.SingleParam(r)
+	// when no filter is set rather than blocking a multi-team caller. A
+	// malformed id is rejected outright — silently falling through to the
+	// default team would retarget the deck instead of narrowing it.
+	filterTeam, ok := teamscope.SingleParamStrict(w, r)
+	if !ok {
+		return
+	}
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
 		var e error
+		// A credential-store failure is a backend fault, not "no credentials":
+		// swallowing it here used to answer "Jira not configured", telling the
+		// user to re-enter a credential they have.
+		creds, e = integrations.Load(r.Context(), tx.Secrets, orgID)
+		if e != nil {
+			return fmt.Errorf("load integration credentials: %w", e)
+		}
 		orgSet, e = tx.Orgs.GetSettings(r.Context(), orgID)
 		if e != nil {
 			return fmt.Errorf("load org settings: %w", e)
@@ -126,7 +135,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	// presence, so DC and Cloud orgs both gate correctly and consistently with
 	// the resolver.
 	if _, ok := integrations.JiraSystemConfig(creds); !ok || len(jiraRules) == 0 || localAccountID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
+		writeNotConfigured(w, "Jira not configured")
 		return
 	}
 
@@ -357,7 +366,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		// validate against, so claim writes land on the picked team.
 		TeamID string `json:"team_id"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -370,8 +379,13 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		localAccountID, localDisplayName string
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
 		var e error
+		// See handleJiraStockGet: a failed credential read is a 500, never
+		// "not configured".
+		creds, e = integrations.Load(r.Context(), tx.Secrets, orgID)
+		if e != nil {
+			return fmt.Errorf("load integration credentials: %w", e)
+		}
 		teamID, e = teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
@@ -398,7 +412,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 	// presence, so DC and Cloud orgs both gate correctly and consistently with
 	// the resolver.
 	if _, ok := integrations.JiraSystemConfig(creds); !ok || len(jiraRules) == 0 || localAccountID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
+		writeNotConfigured(w, "Jira not configured")
 		return
 	}
 

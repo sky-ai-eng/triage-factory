@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -46,10 +48,13 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := taskIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	var req swipeRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -57,7 +62,11 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	case "claim", "dismiss", "snooze", "delegate", "complete", "reassign":
 		// valid
 	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid action: must be claim, dismiss, snooze, delegate, complete, or reassign"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "action must be one of: claim, dismiss, snooze, delegate, complete, reassign",
+			Field:   "action",
+		})
 		return
 	}
 
@@ -123,7 +132,9 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Action == "delegate" && s.spawner != nil {
-		s.swipeTriggerDelegation(r, orgID, userID, id, req, response)
+		if !s.swipeTriggerDelegation(w, r, orgID, userID, id, req, response) {
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, response)
@@ -156,8 +167,9 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 	// vestigial status='queued' write — reopening a closed task as a side
 	// effect of the audit.
 	if task.Status == "done" || task.Status == "dismissed" {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "task is closed; claim transitions aren't allowed past close",
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonAlreadyTerminal,
+			Message: "task is closed; claim transitions aren't allowed past close",
 		})
 		return "", nil, false
 	}
@@ -170,8 +182,9 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 	if task.EntitySource == "jira" {
 		c, jerr := s.jiraResolver.ForUser(r.Context(), orgID, userID)
 		if errors.Is(jerr, jira.ErrNoJiraUserCredential) {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "connect your Jira to act on tickets",
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonNotConfigured,
+				Message: "connect your Jira to act on tickets",
 			})
 			return "", nil, false
 		}
@@ -187,8 +200,9 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 	case task.ClaimedByUserID == userID:
 		// Idempotent: same user already owns it.
 	case task.ClaimedByUserID != "":
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "task is already claimed by another user",
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "task is already claimed by another user",
 		})
 		return "", nil, false
 	case task.ClaimedByAgentID != "":
@@ -199,12 +213,14 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 			return e
 		}); err != nil {
 			swipeLog.Error("takeover claim flip failed", "task", id, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed" + localDetail(err)})
+			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
+				Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
+			})
 			return "", nil, false
 		}
 		if !claimOK {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "claim race lost; refetch task and retry",
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason: httpx.ReasonConflict, Message: "claim race lost; refetch task and retry",
 			})
 			return "", nil, false
 		}
@@ -217,12 +233,14 @@ func (s *Server) swipeClaim(w http.ResponseWriter, r *http.Request, orgID, userI
 			return e
 		}); err != nil {
 			swipeLog.Error("user claim stamp failed", "task", id, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed" + localDetail(err)})
+			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
+				Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
+			})
 			return "", nil, false
 		}
 		if !claimOK {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "claim race lost; refetch task and retry",
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason: httpx.ReasonConflict, Message: "claim race lost; refetch task and retry",
 			})
 			return "", nil, false
 		}
@@ -281,8 +299,9 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 		return "", false
 	}
 	if task.Status == "done" || task.Status == "dismissed" {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "task is closed; delegate transitions aren't allowed past close",
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonAlreadyTerminal,
+			Message: "task is closed; delegate transitions aren't allowed past close",
 		})
 		return "", false
 	}
@@ -298,18 +317,23 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 		return e
 	}); err != nil {
 		swipeLog.Error("delegate aborted", "task", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed" + localDetail(err)})
+		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
+			Reason: httpx.ReasonInternal, Message: "delegate failed" + localDetail(err),
+		})
 		return "", false
 	}
 	a, enabled, err := s.agentEnabledForTeam(r.Context(), orgID, userID, claimTeamID)
 	if err != nil {
 		swipeLog.Error("delegate aborted", "task", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed" + localDetail(err)})
+		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
+			Reason: httpx.ReasonInternal, Message: "delegate failed" + localDetail(err),
+		})
 		return "", false
 	}
 	if !enabled {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "bot is disabled for this team; enable it in team settings to delegate",
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "bot is disabled for this team; enable it in team settings to delegate",
 		})
 		return "", false
 	}
@@ -320,15 +344,17 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 		return e
 	}); err != nil {
 		swipeLog.Error("failed to stamp agent claim", "task", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed" + localDetail(err)})
+		httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
+			Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
+		})
 		return "", false
 	}
 	if result == db.HandoffRefused {
 		// Pre-load ruled out missing + terminal, so the only remaining refusal
 		// is "different user owns the claim." The TOCTOU window is narrow but
 		// real; the user retries from a fresh view either way.
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "task is claimed by another user; refusing to steal",
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason: httpx.ReasonConflict, Message: "task is claimed by another user; refusing to steal",
 		})
 		return "", false
 	}
@@ -404,7 +430,11 @@ func (s *Server) swipeDelegate(w http.ResponseWriter, r *http.Request, orgID, us
 func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, userID, id string, req swipeRequest) (string, bool) {
 	targetUserID := req.TargetUserID
 	if targetUserID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_user_id is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "target_user_id is required",
+			Field:   "target_user_id",
+		})
 		return "", false
 	}
 
@@ -422,14 +452,16 @@ func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, us
 		return "", false
 	}
 	if task.Status == "done" || task.Status == "dismissed" {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "task is closed; reassign transitions aren't allowed past close",
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonAlreadyTerminal,
+			Message: "task is closed; reassign transitions aren't allowed past close",
 		})
 		return "", false
 	}
 	if task.ClaimedByUserID == "" {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "task isn't claimed by a user; claim it or take it over instead of reassigning",
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "task isn't claimed by a user; claim it or take it over instead of reassigning",
 		})
 		return "", false
 	}
@@ -446,8 +478,9 @@ func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, us
 	if task.ClaimedByUserID != userID {
 		if runmode.Current() != runmode.ModeLocal {
 			if task.TeamID == nil || *task.TeamID == "" {
-				writeJSON(w, http.StatusForbidden, map[string]string{
-					"error": "only the current claimant or a team admin can reassign this task",
+				httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+					Reason:  httpx.ReasonForbidden,
+					Message: "only the current claimant or a team admin can reassign this task",
 				})
 				return "", false
 			}
@@ -457,8 +490,9 @@ func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, us
 				return "", false
 			}
 			if !isAdmin {
-				writeJSON(w, http.StatusForbidden, map[string]string{
-					"error": "only the current claimant or a team admin can reassign this task",
+				httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+					Reason:  httpx.ReasonForbidden,
+					Message: "only the current claimant or a team admin can reassign this task",
 				})
 				return "", false
 			}
@@ -474,7 +508,9 @@ func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, us
 			return e
 		}); err != nil {
 			swipeLog.Error("reassign claim flip failed", "task", id, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "reassign failed" + localDetail(err)})
+			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
+				Reason: httpx.ReasonInternal, Message: "reassign failed" + localDetail(err),
+			})
 			return "", false
 		}
 		if !ok {
@@ -491,12 +527,12 @@ func (s *Server) swipeReassign(w http.ResponseWriter, r *http.Request, orgID, us
 				return e
 			})
 			if fresh != nil && fresh.ClaimedByUserID == task.ClaimedByUserID && fresh.Status == task.Status {
-				writeJSON(w, http.StatusConflict, map[string]string{
-					"error": "target user isn't on a team that can see this task",
+				httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+					Reason: httpx.ReasonConflict, Message: "target user isn't on a team that can see this task",
 				})
 			} else {
-				writeJSON(w, http.StatusConflict, map[string]string{
-					"error": "reassign race lost; refetch task and retry",
+				httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+					Reason: httpx.ReasonConflict, Message: "reassign race lost; refetch task and retry",
 				})
 			}
 			return "", false
@@ -552,20 +588,32 @@ func (s *Server) swipeLifecycle(w http.ResponseWriter, r *http.Request, orgID, u
 	// standalone snooze route, so the two ways of snoozing take the same input.
 	var snoozeUntil *time.Time
 	if req.Action == "snooze" {
-		until, err := parseSnoozeUntil(req.Until)
-		if err != nil {
-			badRequest(w, "invalid snooze duration: "+err.Error())
+		until, ok := parseSnoozeUntilField(w, req.Until)
+		if !ok {
 			return "", false
 		}
 		snoozeUntil = &until
 	}
+	// Existence pre-load, inside the same tx as the write: without it a
+	// missing task surfaces as RecordSwipe tripping the swipe_events tasks(id)
+	// FK — a raw driver string as a 500 where a legitimate caller racing a
+	// deletion deserves a 404.
+	var task *domain.Task
 	var newStatus string
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
+		task, e = tx.Tasks.Get(r.Context(), orgID, id)
+		if e != nil || task == nil {
+			return e
+		}
 		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, req.Action, req.HesitationMs, snoozeUntil)
 		return e
 	}); err != nil {
 		internalError(w, "swipe", err)
+		return "", false
+	}
+	if task == nil {
+		notFound(w, "task")
 		return "", false
 	}
 	// Broadcast on the status axis so peer sessions refetch — without this a
@@ -679,17 +727,31 @@ func (s *Server) swipeJiraClaimSync(r *http.Request, orgID, userID, id string, j
 }
 
 // swipeTriggerDelegation fires the delegation run for a delegate swipe and
-// records the run_id (or delegate_error) on the response map. The caller has
-// already verified s.spawner != nil.
-func (s *Server) swipeTriggerDelegation(r *http.Request, orgID, userID, id string, req swipeRequest, response map[string]any) {
+// records the conversation_id on the response map. The caller has already
+// verified s.spawner != nil. Failures are real statuses, not a 200 with a
+// delegate_error field: a bad blueprint reference is a 422, everything else a
+// 500, and both carry reason SPAWN_FAILED because the claim swipeDelegate
+// stamped stays stamped — the user's gesture committed at the claim axis —
+// so the client refetches on that reason and finds the task in the bot's
+// lane without a run. Returns false once an error response is written.
+func (s *Server) swipeTriggerDelegation(w http.ResponseWriter, r *http.Request, orgID, userID, id string, req swipeRequest, response map[string]any) bool {
 	var task *domain.Task
 	err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
 		return e
 	})
-	if err != nil || task == nil {
-		return
+	if err != nil {
+		// The claim landed but the post-dispatch re-read failed, so no run can
+		// be spawned this attempt. Failing honestly beats the former silent
+		// 200 with neither conversation_id nor delegate_error — and because
+		// the claim survives, it's a SPAWN_FAILED, not a bare INTERNAL.
+		writeDelegateSpawnInternal(w, err)
+		return false
+	}
+	if task == nil {
+		writeDelegateSpawnInternal(w, fmt.Errorf("task %s vanished between delegate claim and spawn", id))
+		return false
 	}
 	// The actor is the agent this swipe just claimed the task with (swipeDelegate
 	// stamped claimed_by_agent_id before this re-read, and Tasks.Get hydrates it).
@@ -702,8 +764,44 @@ func (s *Server) swipeTriggerDelegation(r *http.Request, orgID, userID, id strin
 		ActorAgentID:        task.ClaimedByAgentID,
 	})
 	if err != nil {
-		response["delegate_error"] = err.Error()
-	} else {
-		response["conversation_id"] = runID
+		writeDelegateSpawnError(w, err)
+		return false
 	}
+	response["conversation_id"] = runID
+	return true
+}
+
+// writeDelegateSpawnError maps a spawner.Delegate failure to its status: a
+// bad or missing blueprint reference is the caller's fault (422 — the body
+// was well-formed, the object it names can't back a run), anything else is a
+// spawn/DB fault (500, logged + redacted). Shared by the swipe delegate arm
+// and the factory drag-to-delegate so the two gestures fail identically.
+//
+// Both arms carry reason SPAWN_FAILED: every caller reaches here only after
+// the agent claim stamped, and the reason — not the status — is what tells
+// a client the claim survived. The pre-claim failure paths in these handlers
+// answer plain INTERNAL 500s, so without the distinct reason a client could
+// not tell "bot-claimed, retry the run" from "nothing landed".
+func writeDelegateSpawnError(w http.ResponseWriter, err error) {
+	if errors.Is(err, delegate.ErrBlueprintNotFound) || errors.Is(err, delegate.ErrBlueprintUnspecified) ||
+		errors.Is(err, delegate.ErrPromptNotFound) || errors.Is(err, delegate.ErrPromptUnspecified) {
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonSpawnFailed,
+			Message: err.Error(),
+			Field:   "blueprint_id",
+		})
+		return
+	}
+	writeDelegateSpawnInternal(w, err)
+}
+
+// writeDelegateSpawnInternal is the 500 arm of the post-claim spawn failure:
+// same logging and multi-mode redaction posture as httpx.InternalError, but
+// under the SPAWN_FAILED reason a plain internal error must never carry.
+func writeDelegateSpawnInternal(w http.ResponseWriter, err error) {
+	delegateSpawnLog.Error("delegate spawn failed after claim stamp", "error", err)
+	httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
+		Reason:  httpx.ReasonSpawnFailed,
+		Message: "delegate spawn failed" + localDetail(err),
+	})
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // dashboardHandler serves the personal dashboard endpoints: PR stats, the
@@ -148,24 +149,39 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, prs)
 }
 
+// dashboardPRRef strictly parses the (path {number}, ?repo=owner/repo) pair
+// the live per-PR routes share, reporting every fault at once: a
+// non-positive or non-numeric PR number, a missing repo param, or a repo
+// with an empty owner/name half (which "owner/" and "/repo" used to slip
+// past as a two-element split).
+func dashboardPRRef(w http.ResponseWriter, r *http.Request) (owner, repo string, number int, ok bool) {
+	var v httpx.Validation
+	number, err := strconv.Atoi(r.PathValue("number"))
+	if err != nil || number <= 0 {
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidID, Message: "PR number must be a positive integer"})
+	}
+	repoParam := r.URL.Query().Get("repo")
+	if repoParam == "" {
+		v.Param("repo", "repo query parameter required (owner/repo)")
+	} else {
+		parts := strings.SplitN(repoParam, "/", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			v.Param("repo", "repo must be owner/repo format")
+		} else {
+			owner, repo = parts[0], parts[1]
+		}
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return "", "", 0, false
+	}
+	return owner, repo, number, true
+}
+
 // handleDashboardPRStatus fetches live CI/review status for a single PR.
 // This stays as a live API call since it's on-demand detail, not aggregated data.
 func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request) {
-	numberStr := r.PathValue("number")
-	number, err := strconv.Atoi(numberStr)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid PR number"})
-		return
-	}
-
-	repoParam := r.URL.Query().Get("repo")
-	if repoParam == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo query parameter required (owner/repo)"})
-		return
-	}
-	parts := strings.SplitN(repoParam, "/", 2)
-	if len(parts) != 2 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo must be owner/repo format"})
+	owner, repo, number, ok := dashboardPRRef(w, r)
+	if !ok {
 		return
 	}
 
@@ -176,20 +192,20 @@ func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *ht
 
 	// Repo-scoped read: decide the credential tier on the whole owner/repo,
 	// not just the owner. A "Selected repositories" App install mints a token
-	// for any repo under parts[0] but 403s on repos outside the grant, so a
+	// for any repo under owner but 403s on repos outside the grant, so a
 	// bare-owner resolve would skip the PAT that would have worked. ClientForRepo
 	// falls through to the PAT when the App doesn't cover this repo.
-	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
+	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, owner, repo)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
+			writeNotConfigured(w, "GitHub not configured")
 			return
 		}
 		// Real DB/vault/RLS failure — internalError redacts in multi-mode + logs detail.
 		internalError(w, "dashboard", err)
 		return
 	}
-	status, err := client.GetPRStatus(r.Context(), parts[0], parts[1], number)
+	status, err := client.GetPRStatus(r.Context(), owner, repo, number)
 	if err != nil {
 		internalError(w, "dashboard", err)
 		return
@@ -199,30 +215,27 @@ func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *ht
 }
 
 func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) {
-	numberStr := r.PathValue("number")
-	number, err := strconv.Atoi(numberStr)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid PR number"})
+	owner, repo, number, ok := dashboardPRRef(w, r)
+	if !ok {
 		return
 	}
 
-	repoParam := r.URL.Query().Get("repo")
-	if repoParam == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo query parameter required (owner/repo)"})
-		return
-	}
-	parts := strings.SplitN(repoParam, "/", 2)
-	if len(parts) != 2 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo must be owner/repo"})
-		return
-	}
-
+	// Draft is a pointer so an absent field is distinguishable from an
+	// explicit false: {} must not silently mark a draft PR ready — the same
+	// zero-value trap the event-handler toggle shipped with.
 	var body struct {
-		Draft bool `json:"draft"`
+		Draft *bool `json:"draft"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
+	if body.Draft == nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "draft is required", Field: "draft",
+		})
+		return
+	}
+	draft := *body.Draft
 
 	// requireOrg must run BEFORE the GitHub mutation below — a 409 after
 	// the external draft flip would have already changed the PR on
@@ -238,20 +251,20 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	// Repo-scoped mutation: resolve on the whole owner/repo so a selective App
 	// install that doesn't cover this repo falls through to the PAT instead of
 	// minting a token that 403s on the draft toggle (see handleDashboardPRStatus).
-	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
+	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, owner, repo)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
+			writeNotConfigured(w, "GitHub not configured")
 			return
 		}
 		internalError(w, "dashboard", err)
 		return
 	}
 
-	if body.Draft {
-		err = client.ConvertPRToDraft(r.Context(), parts[0], parts[1], number)
+	if draft {
+		err = client.ConvertPRToDraft(r.Context(), owner, repo, number)
 	} else {
-		err = client.MarkPRReady(r.Context(), parts[0], parts[1], number)
+		err = client.MarkPRReady(r.Context(), owner, repo, number)
 	}
 	if err != nil {
 		internalError(w, "dashboard", err)
@@ -265,20 +278,20 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	// its own tx after the pessimistic GitHub write — never fails the toggle.
 	draftAction := domain.ActionPRMarkedReady
 	draftFrom, draftTo := domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen
-	if body.Draft {
+	if draft {
 		draftAction = domain.ActionPRConvertedToDraft
 		draftFrom, draftTo = domain.ArtifactStatePROpen, domain.ArtifactStatePRDraft
 	}
 	recordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, domain.ExternalAction{
 		Provider:    domain.ArtifactProviderGitHub,
 		Action:      draftAction,
-		Target:      fmt.Sprintf("%s/%s#%d", parts[0], parts[1], number),
+		Target:      fmt.Sprintf("%s/%s#%d", owner, repo, number),
 		ExternalID:  strconv.Itoa(number),
-		URL:         domain.GitHubPullURL(parts[0]+"/"+parts[1], number),
+		URL:         domain.GitHubPullURL(owner+"/"+repo, number),
 		FromState:   draftFrom,
 		ToState:     draftTo,
 		ActorUserID: userID,
-		Credential:  githubCredentialFor(r.Context(), dh.ghResolver, orgID, parts[0], parts[1]),
+		Credential:  githubCredentialFor(r.Context(), dh.ghResolver, orgID, owner, repo),
 	})
 
 	// Patch the local entity snapshot to match the state we just pushed to
@@ -291,14 +304,14 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	// signal and a second event would race the next poll's diff and confuse
 	// the audit trail. Revisit if a user reports "my trigger didn't fire
 	// when I dragged the card."
-	sourceID := fmt.Sprintf("%s/%s#%d", parts[0], parts[1], number)
+	sourceID := fmt.Sprintf("%s/%s#%d", owner, repo, number)
 	if patchErr := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, sourceID, body.Draft)
+		return patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, sourceID, draft)
 	}); patchErr != nil {
 		dashboardLog.Warn("failed to patch snapshot after draft toggle", "source_id", sourceID, "error", patchErr)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"draft": body.Draft})
+	writeJSON(w, http.StatusOK, map[string]any{"draft": draft})
 }
 
 // patchPRSnapshotDraft flips the is_draft field on an entity's PR snapshot

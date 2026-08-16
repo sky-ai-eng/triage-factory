@@ -6,6 +6,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // GET /api/event-schemas
@@ -46,7 +47,9 @@ func handleEventSchemaGet(w http.ResponseWriter, r *http.Request) {
 	eventType := r.PathValue("event_type")
 	sc, found := events.Get(eventType)
 	if !found || !entitlements.EventTypeAllowed(orgID, eventType) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown event type: " + eventType})
+		httpx.WriteErrors(w, http.StatusNotFound, httpx.ErrorItem{
+			Reason: httpx.ReasonNotFound, Message: "unknown event type: " + eventType,
+		})
 		return
 	}
 	writeJSON(w, http.StatusOK, toPayload(sc))

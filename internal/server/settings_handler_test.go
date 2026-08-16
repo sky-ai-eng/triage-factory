@@ -221,12 +221,16 @@ func TestTeamSettingsPost_PickupCanonical_Rejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
+	// This arm errors via the shared badRequest helper, which now emits the
+	// envelope; the legacy "error" key survives via the dual-key shim.
+	var resp struct {
+		Error string `json:"error"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if !strings.Contains(resp["error"], "canonical must be empty") {
-		t.Errorf("error should mention pickup canonical invariant, got: %q", resp["error"])
+	if !strings.Contains(resp.Error, "canonical must be empty") {
+		t.Errorf("error should mention pickup canonical invariant, got: %q", resp.Error)
 	}
 }
 

@@ -1,12 +1,14 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // failedEventsHandler serves the parked-event operator surface: the list of
@@ -49,8 +51,10 @@ type failedEventJSON struct {
 }
 
 // handleFailedEventsList serves GET /api/events/failed — the org's parked
-// rows, newest first. ?limit= is advisory: the store clamps it, so a hand-
-// typed 100000 returns the ceiling rather than a 400.
+// rows, newest first. ?limit= is strict: the default applies only when the
+// param is absent, and a non-integer, non-positive, or over-cap value is
+// rejected rather than clamped — a clamp reports a truncated page as if it
+// were the requested one.
 func (h *failedEventsHandler) handleFailedEventsList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := h.resolveAdmin(w, r)
 	if !ok {
@@ -61,7 +65,17 @@ func (h *failedEventsHandler) handleFailedEventsList(w http.ResponseWriter, r *h
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil {
-			badRequest(w, "limit must be a whole number")
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidParam, Message: "limit must be a whole number", Field: "limit",
+			})
+			return
+		}
+		if n <= 0 || n > db.MaxFailedEventsLimit {
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonOutOfRange,
+				Message: fmt.Sprintf("limit must be between 1 and %d", db.MaxFailedEventsLimit),
+				Field:   "limit",
+			})
 			return
 		}
 		limit = n
@@ -121,18 +135,24 @@ func (h *failedEventsHandler) handleFailedEventsRequeue(w http.ResponseWriter, r
 	}
 
 	var req failedEventsRequeueRequest
-	if !decodeJSON(w, r, &req, "invalid requeue request") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if len(req.IDs) == 0 {
-		badRequest(w, "ids must contain at least one queue id")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "ids must contain at least one queue id", Field: "ids",
+		})
 		return
 	}
 	if len(req.IDs) > db.MaxFailedEventsLimit {
-		// A selection can't exceed a page, and the page is clamped — so this
+		// A selection can't exceed a page, and the page is capped — so this
 		// only rejects a hand-rolled request, and rejecting it keeps the
 		// statement's bind list bounded.
-		badRequest(w, "too many ids in one requeue")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonOutOfRange,
+			Message: fmt.Sprintf("at most %d ids per requeue", db.MaxFailedEventsLimit),
+			Field:   "ids",
+		})
 		return
 	}
 

@@ -63,13 +63,15 @@ func TestHandleFactoryDelegate_404OnMissingEntity(t *testing.T) {
 	}
 }
 
-// TestHandleFactoryDelegate_400OnNoMatchingEvent confirms the
-// "no matching event" 400 fires for an active entity that hasn't
+// TestHandleFactoryDelegate_422OnNoMatchingEvent confirms the
+// "no matching event" rejection fires for an active entity that hasn't
 // produced an event of the requested type — a malformed snapshot
-// reference or a stale frontend retry. Pinned without a spawner so
-// the test also doubles as a regression for the gate ordering: any
-// request validation error must precede the 503 infrastructure gate.
-func TestHandleFactoryDelegate_400OnNoMatchingEvent(t *testing.T) {
+// reference or a stale frontend retry. A 422, not a 400: the body is
+// well-formed, the station it references doesn't exist for this entity.
+// Pinned without a spawner so the test also doubles as a regression for
+// the gate ordering: any request validation error must precede the 503
+// infrastructure gate.
+func TestHandleFactoryDelegate_422OnNoMatchingEvent(t *testing.T) {
 	s := newTestServer(t)
 	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#400e", "pr", "", "")
 	if err != nil {
@@ -82,8 +84,8 @@ func TestHandleFactoryDelegate_400OnNoMatchingEvent(t *testing.T) {
 		"event_type":   domain.EventGitHubPRCICheckPassed,
 		"blueprint_id": "p1",
 	})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 (no matching event)", rec.Code)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422 (no matching event)", rec.Code)
 	}
 }
 
@@ -147,18 +149,13 @@ func TestHandleFactoryDelegate_400OnMalformedJSON(t *testing.T) {
 }
 
 // TestHandleFactoryDelegate_DelegateErrorPreservesClaim pins the
-// semantic: when the user's drag-to-delegate gesture commits at the
-// claim axis but the spawner.Delegate call fails (e.g. ErrPromptNotFound
-// from a race-deleted prompt), the handler returns 200 OK with
-// delegate_error populated and claim_stamped=true. Mirrors the swipe-
-// delegate response shape exactly. The claim must survive in the DB so
-// the Board renders the bot-claimed-but-no-run card with a Retry
-// affordance.
-//
-// Replaces the previous "TestHandleFactoryDelegate_400OnMissingPrompt"
-// which asserted a 400 — that contract changed when factory_delegate
-// adopted the swipe convention of 200 + delegate_error for partial
-// success (claim committed, run didn't fire).
+// partial-success semantic: when the user's drag-to-delegate gesture
+// commits at the claim axis but the spawner.Delegate call fails (here a
+// blueprint id that doesn't resolve), the handler reports the failure as
+// a real status — 422 for a bad blueprint reference — instead of the
+// former 200 + delegate_error body. The claim and the swipe audit row
+// must survive that failure in the DB: the FE refetches on error and
+// renders the bot-claimed-but-no-run card with a Retry affordance.
 func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
@@ -180,34 +177,33 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 		"event_type":   domain.EventGitHubPRCICheckPassed,
 		"blueprint_id": "no-such-prompt",
 	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (partial-success convention: claim stamped, run didn't fire)", rec.Code)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (bad blueprint reference; claim stamped, run didn't fire)", rec.Code)
 	}
 	var resp struct {
-		TaskID         string `json:"task_id"`
-		ConversationID string `json:"conversation_id"`
-		DelegateError  string `json:"delegate_error"`
-		ClaimStamped   bool   `json:"claim_stamped"`
+		Errors []struct {
+			Reason string `json:"reason"`
+			Field  string `json:"field"`
+		} `json:"errors"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if resp.DelegateError == "" {
-		t.Errorf("delegate_error empty; expected spawner failure message")
-	}
-	if resp.ConversationID != "" {
-		t.Errorf("conversation_id = %q; want empty (spawn failed)", resp.ConversationID)
-	}
-	if !resp.ClaimStamped {
-		t.Errorf("claim_stamped = false; want true (claim committed before spawn attempt)")
-	}
-	if resp.TaskID == "" {
-		t.Fatal("task_id empty; can't verify claim persistence")
+	// SPAWN_FAILED is the claim-survived marker the FE keys the retry
+	// affordance on — a plain INTERNAL here would read as "nothing landed".
+	if len(resp.Errors) != 1 || resp.Errors[0].Reason != "SPAWN_FAILED" || resp.Errors[0].Field != "blueprint_id" {
+		t.Errorf("errors = %+v; want one SPAWN_FAILED item attributing blueprint_id", resp.Errors)
 	}
 
-	// Verify the claim survives in the DB — the FE relies on this to
-	// surface the bot-claimed-with-failed-run state.
-	task, err := s.tasks.Get(t.Context(), runmode.LocalDefaultOrgID, resp.TaskID)
+	// Verify the claim survives in the DB despite the error status — the FE
+	// refetches on error and relies on this to surface the
+	// bot-claimed-with-failed-run state. The task isn't in the response
+	// anymore, so read it back through the entity.
+	var taskID string
+	if err := s.db.QueryRow(`SELECT id FROM tasks WHERE entity_id = ?`, entity.ID).Scan(&taskID); err != nil {
+		t.Fatalf("read task id back: %v", err)
+	}
+	task, err := s.tasks.Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
 	if err != nil || task == nil {
 		t.Fatalf("read task back: task=%v err=%v", task, err)
 	}
@@ -223,7 +219,7 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	var swipeCount int
 	if err := s.db.QueryRow(
 		`SELECT COUNT(*) FROM swipe_events WHERE task_id = ? AND action = 'delegate'`,
-		resp.TaskID,
+		taskID,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}

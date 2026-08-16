@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -59,15 +60,15 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	}
 	if _, err := database.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
-		 VALUES ('t_pa', 'e_pa', ?, 'ev_pa', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000024', 'e_pa', ?, 'ev_pa', 'queued', ?)`,
 		eventType, runmode.LocalDefaultAgentID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	blueprintRunID := seedBlueprintRunSQLite(t, database, "t_pa")
+	blueprintRunID := seedBlueprintRunSQLite(t, database, "00000000-0000-4000-8000-000000000024")
 	if _, err := database.Exec(
 		`INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index)
-		 VALUES ('r_pa', 't_pa', 'p_pa', 'completed', 'manual', ?, 0)`,
+		 VALUES ('r_pa', '00000000-0000-4000-8000-000000000024', 'p_pa', 'completed', 'manual', ?, 0)`,
 		blueprintRunID,
 	); err != nil {
 		t.Fatalf("seed run: %v", err)
@@ -109,7 +110,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	if err != nil {
 		t.Fatalf("seed review artifact: %v", err)
 	}
-	return "t_pa", "r_pa", stored.ID
+	return "00000000-0000-4000-8000-000000000024", "r_pa", stored.ID
 }
 
 // assertPendingApprovalCleanedUp checks every post-condition the task-level
@@ -386,12 +387,12 @@ func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 		INSERT INTO events (id, entity_id, event_type, dedup_key)
 		VALUES ('ev1', 'e1', ?, '');
 		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-		VALUES ('task-noruns', 'e1', ?, 'ev1', 'queued');
+		VALUES ('00000000-0000-4000-8000-000000000002', 'e1', ?, 'ev1', 'queued');
 	`, eventType, eventType); err != nil {
 		t.Fatalf("seed FK chain: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-noruns/swipe",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000002/swipe",
 		map[string]any{"action": "claim", "hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -402,7 +403,7 @@ func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 	var status string
 	var claimedByUserID sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT status, claimed_by_user_id FROM tasks WHERE id = 'task-noruns'`,
+		`SELECT status, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000002'`,
 	).Scan(&status, &claimedByUserID); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -438,13 +439,13 @@ func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
-		 VALUES ('task-bot', 'e_bot', ?, 'ev_bot', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000001', 'e_bot', ?, 'ev_bot', 'queued', ?)`,
 		eventType, runmode.LocalDefaultAgentID,
 	); err != nil {
 		t.Fatalf("seed task with bot claim: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-bot/swipe",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000001/swipe",
 		map[string]any{"action": "claim", "hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -452,7 +453,7 @@ func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
 
 	var claimedAgent, claimedUser sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 'task-bot'`,
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000001'`,
 	).Scan(&claimedAgent, &claimedUser); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -498,13 +499,13 @@ func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_refuse', 'e_refuse', ?, 'ev_refuse', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000009', 'e_refuse', ?, 'ev_refuse', 'queued', ?)`,
 		eventType, otherUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_refuse/swipe",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000009/swipe",
 		map[string]any{"action": "claim", "hesitation_ms": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
@@ -513,7 +514,7 @@ func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
 	// No swipe_events row written — refused gesture leaves no trace.
 	var swipeCount int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_refuse'`,
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000009'`,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}
@@ -525,7 +526,7 @@ func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
 	var status string
 	var claim sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT status, claimed_by_user_id FROM tasks WHERE id = 't_refuse'`,
+		`SELECT status, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000009'`,
 	).Scan(&status, &claim); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -568,13 +569,13 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_drefuse', 'e_drefuse', ?, 'ev_drefuse', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000007', 'e_drefuse', ?, 'ev_drefuse', 'queued', ?)`,
 		eventType, otherUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_drefuse/swipe",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000007/swipe",
 		map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
@@ -582,7 +583,7 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 
 	var swipeCount int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_drefuse'`,
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000007'`,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}
@@ -592,7 +593,7 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 	var claimUser sql.NullString
 	var claimAgent sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id, claimed_by_agent_id FROM tasks WHERE id = 't_drefuse'`,
+		`SELECT claimed_by_user_id, claimed_by_agent_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000007'`,
 	).Scan(&claimUser, &claimAgent); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -639,13 +640,13 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 			// would have triggered the reopen bug pre-guards.
 			if _, err := s.db.Exec(
 				`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-				 VALUES ('t_term', 'e_term', ?, 'ev_term', ?, ?)`,
+				 VALUES ('00000000-0000-4000-8000-000000000012', 'e_term', ?, 'ev_term', ?, ?)`,
 				eventType, terminalStatus, runmode.LocalDefaultUserID,
 			); err != nil {
 				t.Fatalf("seed terminal task: %v", err)
 			}
 
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_term/swipe",
+			rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000012/swipe",
 				map[string]any{"action": "claim", "hesitation_ms": 0})
 			if rec.Code != http.StatusConflict {
 				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
@@ -655,7 +656,7 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 			// flipped it to 'queued' via RecordSwipe's lifecycle write.
 			var status string
 			if err := s.db.QueryRow(
-				`SELECT status FROM tasks WHERE id = 't_term'`,
+				`SELECT status FROM tasks WHERE id = '00000000-0000-4000-8000-000000000012'`,
 			).Scan(&status); err != nil {
 				t.Fatalf("scan task: %v", err)
 			}
@@ -666,7 +667,7 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 			// Audit must be silent on the refusal.
 			var swipeCount int
 			if err := s.db.QueryRow(
-				`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_term'`,
+				`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000012'`,
 			).Scan(&swipeCount); err != nil {
 				t.Fatalf("scan swipe_events: %v", err)
 			}
@@ -715,12 +716,12 @@ func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-			 VALUES ('t_term_del', 'e_term_del', ?, 'ev_term_del', 'done')`,
+			 VALUES ('00000000-0000-4000-8000-000000000011', 'e_term_del', ?, 'ev_term_del', 'done')`,
 			eventType,
 		); err != nil {
 			t.Fatalf("seed terminal task: %v", err)
 		}
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_term_del/swipe",
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000011/swipe",
 			map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
@@ -755,12 +756,12 @@ func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-			 VALUES ('t_diff_del', 'e_diff_del', ?, 'ev_diff_del', 'queued', ?)`,
+			 VALUES ('00000000-0000-4000-8000-000000000006', 'e_diff_del', ?, 'ev_diff_del', 'queued', ?)`,
 			eventType, otherUserID,
 		); err != nil {
 			t.Fatalf("seed other-user-claimed task: %v", err)
 		}
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_diff_del/swipe",
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000006/swipe",
 			map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
@@ -803,13 +804,13 @@ func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-		 VALUES ('t_bot_off', 'e_bot_off', ?, 'ev_bot_off', 'queued')`,
+		 VALUES ('00000000-0000-4000-8000-000000000005', 'e_bot_off', ?, 'ev_bot_off', 'queued')`,
 		eventType,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_bot_off/swipe",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000005/swipe",
 		map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
@@ -818,7 +819,7 @@ func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
 	// No state changes — claim cols untouched, no swipe_events row.
 	var claimAgent, claimUser sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 't_bot_off'`,
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000005'`,
 	).Scan(&claimAgent, &claimUser); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -830,7 +831,7 @@ func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
 	}
 	var swipeCount int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_bot_off'`,
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000005'`,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}
@@ -883,13 +884,13 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_snz_claim', 'e_snz_claim', ?, 'ev_snz_claim', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000010', 'e_snz_claim', ?, 'ev_snz_claim', 'queued', ?)`,
 		eventType, runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed claimed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_snz_claim/snooze",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000010/snooze",
 		map[string]any{"until": "1h", "hesitation_ms": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (snooze refused on claimed task); body=%s", rec.Code, rec.Body.String())
@@ -902,7 +903,7 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 	var snoozeUntil sql.NullTime
 	var claim sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT status, snooze_until, claimed_by_user_id FROM tasks WHERE id = 't_snz_claim'`,
+		`SELECT status, snooze_until, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000010'`,
 	).Scan(&status, &snoozeUntil, &claim); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -917,7 +918,7 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 	}
 	var swipeCount int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_snz_claim'`,
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000010'`,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}
@@ -959,29 +960,42 @@ func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('task-y2a', 'e_y2a', ?, 'ev_y2a', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000004', 'e_y2a', ?, 'ev_y2a', 'queued', ?)`,
 		eventType, runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed user-claimed task: %v", err)
 	}
 
-	// Use a prompt id that won't resolve — the spawner will fail
+	// Use a blueprint id that won't resolve — the spawner will fail
 	// before producing a run, but the claim stamping is the part
-	// under test and that runs before the spawn. delegate_error in
-	// the response is expected; what we care about is that the
-	// transfer landed (claim flipped to bot).
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-y2a/swipe", map[string]any{
+	// under test and that runs before the spawn. The failed spawn is a
+	// 422 (bad blueprint reference); what we care about is that the
+	// transfer landed (claim flipped to bot) despite the error status.
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000004/swipe", map[string]any{
 		"action":        "delegate",
 		"hesitation_ms": 0,
 		"blueprint_id":  "no-such-prompt",
 	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (delegate accepted as user→bot transfer); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (spawn failed on a bad blueprint; transfer still landed); body=%s", rec.Code, rec.Body.String())
+	}
+	// The claim-survived marker: without SPAWN_FAILED the FE would read this
+	// as a nothing-landed failure and skip the refetch + retry affordance.
+	var errBody struct {
+		Errors []struct {
+			Reason string `json:"reason"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if len(errBody.Errors) != 1 || errBody.Errors[0].Reason != "SPAWN_FAILED" {
+		t.Errorf("errors = %+v; want one SPAWN_FAILED item", errBody.Errors)
 	}
 
 	var claimedAgent, claimedUser sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 'task-y2a'`,
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000004'`,
 	).Scan(&claimedAgent, &claimedUser); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -1034,13 +1048,13 @@ func TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('task-oth', 'e_oth', ?, 'ev_oth', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000003', 'e_oth', ?, 'ev_oth', 'queued', ?)`,
 		eventType, otherUserID,
 	); err != nil {
 		t.Fatalf("seed task with other-user claim: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-oth/swipe",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000003/swipe",
 		map[string]any{"action": "claim", "hesitation_ms": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
@@ -1049,7 +1063,7 @@ func TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409(t *testing.T) {
 	// Claim must be unchanged — the swipe refused to overwrite.
 	var claimedUser sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id FROM tasks WHERE id = 'task-oth'`,
+		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000003'`,
 	).Scan(&claimedUser); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -1134,18 +1148,18 @@ func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_plain', 'e_plain', 'github:pr:opened', 'ev_plain', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000008', 'e_plain', 'github:pr:opened', 'ev_plain', 'queued', ?)`,
 		runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_plain/undo", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000008/undo", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var taskStatus string
-	if err := s.db.QueryRow(`SELECT status FROM tasks WHERE id = ?`, "t_plain").Scan(&taskStatus); err != nil {
+	if err := s.db.QueryRow(`SELECT status FROM tasks WHERE id = ?`, "00000000-0000-4000-8000-000000000008").Scan(&taskStatus); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
 	if taskStatus != "queued" {
@@ -1185,13 +1199,13 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_undo_claim', 'e_undo_claim', 'github:pr:opened', 'ev_undo_claim', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000013', 'e_undo_claim', 'github:pr:opened', 'ev_undo_claim', 'queued', ?)`,
 		runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_undo_claim/undo", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000013/undo", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -1200,7 +1214,7 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 	var snoozeUntil sql.NullTime
 	if err := s.db.QueryRow(
 		`SELECT status, claimed_by_agent_id, claimed_by_user_id, snooze_until
-		 FROM tasks WHERE id = ?`, "t_undo_claim",
+		 FROM tasks WHERE id = ?`, "00000000-0000-4000-8000-000000000013",
 	).Scan(&status, &claimedAgent, &claimedUser, &snoozeUntil); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}

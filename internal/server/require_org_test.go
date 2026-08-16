@@ -15,7 +15,7 @@ import (
 // in multi mode, a session whose active_org_id is NULL flows through
 // withSession with ClaimsFrom set but OrgIDFrom returning empty.
 // requireOrg must reject the handler with a 409 carrying the stable
-// "no_active_org" error code so the SPA can prompt the user to pick or
+// NO_ACTIVE_ORG reason so the SPA can prompt the user to pick or
 // join an org. The local-mode shim guarantees a non-empty orgID so this
 // branch never fires there; we exercise the empty path directly by
 // constructing a context without ctxKeyOrgID set.
@@ -38,15 +38,24 @@ func TestRequireOrg_MultiModeNoActiveOrg_Returns409(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", rec.Code)
 	}
-	var body map[string]string
+	var body struct {
+		Errors []struct {
+			Reason  string `json:"reason"`
+			Message string `json:"message"`
+		} `json:"errors"`
+		Error string `json:"error"`
+	}
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if body["error"] != "no_active_org" {
-		t.Errorf("error code = %q, want %q", body["error"], "no_active_org")
+	if len(body.Errors) != 1 || body.Errors[0].Reason != httpx.ReasonNoActiveOrg {
+		t.Errorf("errors = %+v, want one NO_ACTIVE_ORG item", body.Errors)
 	}
-	if body["message"] == "" {
+	if len(body.Errors) == 1 && body.Errors[0].Message == "" {
 		t.Error("message field is empty; should describe how to pick an org")
+	}
+	if body.Error == "" {
+		t.Error("legacy error key is empty; the dual-key shim should mirror the first message")
 	}
 }
 

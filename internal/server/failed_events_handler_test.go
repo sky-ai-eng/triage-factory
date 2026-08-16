@@ -158,19 +158,31 @@ func TestFailedEventsList_LimitAndErrors(t *testing.T) {
 		}
 	})
 
-	// An oversized limit is clamped by the store, not rejected — a diagnostics
-	// read shouldn't fail over a display preference.
-	t.Run("oversized_limit_forwarded_for_clamping", func(t *testing.T) {
+	// An oversized limit is rejected outright — a clamp would report a
+	// truncated page as if it were the requested one. The default applies
+	// only when the param is absent.
+	t.Run("oversized_limit_400", func(t *testing.T) {
 		q := &stubFailedEventsQueue{}
 		h := localFailedEventsRig(t, q)
 		rec := httptest.NewRecorder()
 		h.handleFailedEventsList(rec, failedEventsReq(http.MethodGet, "/api/events/failed?limit=100000",
 			runmode.LocalDefaultOrgID, "local-user", ""))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200", rec.Code)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
 		}
-		if q.gotLimit != 100000 {
-			t.Errorf("limit forwarded = %d, want the raw value (the store clamps)", q.gotLimit)
+		if q.gotLimit != 0 {
+			t.Errorf("store was called with limit %d; an over-cap limit must not reach the store", q.gotLimit)
+		}
+	})
+
+	t.Run("non_positive_limit_400", func(t *testing.T) {
+		q := &stubFailedEventsQueue{}
+		h := localFailedEventsRig(t, q)
+		rec := httptest.NewRecorder()
+		h.handleFailedEventsList(rec, failedEventsReq(http.MethodGet, "/api/events/failed?limit=0",
+			runmode.LocalDefaultOrgID, "local-user", ""))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
 		}
 	})
 
