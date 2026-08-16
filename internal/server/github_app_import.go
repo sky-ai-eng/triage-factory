@@ -57,15 +57,23 @@ type githubAppPermissionRow struct {
 	Feature    string `json:"feature,omitempty"`
 }
 
-// githubAppImportErrorResponse is the 422 body for a permission gap: the full
-// granted-vs-required table plus whether the gap is Blocking. Blocking=true is a
-// hard gap (a core permission is missing — accept_partial can't override it);
-// Blocking=false means only soft gaps remain, which the frontend resubmits past
-// with accept_partial=true after an acknowledgment.
+// githubAppImportErrorResponse is the 422 body for a permission gap: the
+// standard error envelope, plus the full granted-vs-required table and whether
+// the gap is Blocking. Blocking=true is a hard gap (a core permission is
+// missing — accept_partial can't override it); Blocking=false means only soft
+// gaps remain, which the frontend resubmits past with accept_partial=true after
+// an acknowledgment. The extra keys ride alongside `errors` because the table is
+// structured data no envelope field can hold; the message itself is in the
+// envelope like every other fault, so the shared client parser reads it.
 type githubAppImportErrorResponse struct {
-	Error       string                   `json:"error"`
+	Errors      []httpx.ErrorItem        `json:"errors"`
 	Permissions []githubAppPermissionRow `json:"permissions"`
 	Blocking    bool                     `json:"blocking"`
+}
+
+// permissionGapErrors wraps a preflight message in the standard envelope.
+func permissionGapErrors(msg string) []httpx.ErrorItem {
+	return []httpx.ErrorItem{{Reason: httpx.ReasonPermissionGap, Message: msg}}
 }
 
 // githubAppImportResponse is the success body: the same status payload the
@@ -356,7 +364,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	rows, hardGaps, softGaps := preflightImportPermissions(app.Permissions)
 	if len(hardGaps) > 0 {
 		writeJSON(w, http.StatusUnprocessableEntity, githubAppImportErrorResponse{
-			Error:       hardGapMessage(hardGaps),
+			Errors:      permissionGapErrors(hardGapMessage(hardGaps)),
 			Permissions: rows,
 			Blocking:    true,
 		})
@@ -364,7 +372,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(softGaps) > 0 && !req.AcceptPartial {
 		writeJSON(w, http.StatusUnprocessableEntity, githubAppImportErrorResponse{
-			Error:       softGapMessage(softGaps),
+			Errors:      permissionGapErrors(softGapMessage(softGaps)),
 			Permissions: rows,
 			Blocking:    false,
 		})

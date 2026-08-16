@@ -255,8 +255,11 @@ describe('ArtifactList', () => {
     expect(await screen.findByText(/No artifacts yet/)).toBeInTheDocument()
   })
 
-  it('surfaces a load error, preferring the server JSON error', async () => {
-    failingFetch({ status: 500, jsonBody: { error: 'boom' } })
+  it('surfaces a load error, preferring the server error envelope', async () => {
+    failingFetch({
+      status: 500,
+      jsonBody: { errors: [{ reason: 'INTERNAL', message: 'boom' }] },
+    })
     render(<ArtifactList runId="r1" />)
     // The server's message reaches the user verbatim — no fallback prefix.
     await waitFor(() => expect(screen.getByText('boom')).toBeInTheDocument())
@@ -275,8 +278,8 @@ describe('ArtifactList', () => {
 
 // failingFetch stubs a non-ok Response shaped the way apiClient reads one:
 // HttpError carries the body from text(), and httpErrorMessage parses the
-// server's JSON `error` out of it. There is no clone()/json() path any more —
-// the wrapper reads the body exactly once.
+// first message out of the server's error envelope. There is no clone()/json()
+// path any more — the wrapper reads the body exactly once.
 function failingFetch({
   status = 500,
   jsonBody,

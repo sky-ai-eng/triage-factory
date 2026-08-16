@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { Plus, Trash2, Upload } from 'lucide-react'
 import { useOrgHref } from '../hooks/useOrgHref'
-import type { Project, ProjectImportError, ProjectImportResult } from '../types'
-import { apiFetch, apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
+import type { Project, ProjectImportResult } from '../types'
+import { apiErrors, apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import ProjectCreateModal from '../components/ProjectCreateModal'
@@ -313,7 +313,7 @@ function ProjectImportModal({
 }) {
   const [file, setFile] = useState<File | null>(initialFile ?? null)
   const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<ProjectImportError | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const dragDepth = useRef(0)
@@ -340,10 +340,7 @@ function ProjectImportModal({
     }
     if (!isTfprojectFile(next)) {
       clearSelectedFile()
-      setError({
-        error: 'invalid_file',
-        message: 'Only .tfproject files can be imported.',
-      })
+      setError('Only .tfproject files can be imported.')
       return
     }
     setFile(next)
@@ -358,7 +355,7 @@ function ProjectImportModal({
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!file) {
-      setError({ error: 'no_file', message: 'Choose a .tfproject file to import.' })
+      setError('Choose a .tfproject file to import.')
       return
     }
     setSubmitting(true)
@@ -380,12 +377,16 @@ function ProjectImportModal({
       toast.success(`Imported project "${result.project.name}"`)
       onImported(result.project)
     } catch (err) {
-      // The import failure body is a typed ProjectImportError — the code drives
-      // which remediation the form renders, not just a message — so it is read
-      // off the HttpError whole rather than through httpErrorMessage.
-      const parsed = parseImportError(err)
+      // Every import rejection is the standard error envelope now — a
+      // duplicate name, a bad bundle, an unreachable pinned repo (one item per
+      // repo). Render every message the server sent rather than only the
+      // first: the unreachable-repos case is a list, and showing one name
+      // would send the user round the loop once per repo.
+      const items = apiErrors(err)
       setError(
-        parsed ?? { error: 'import_failed', message: httpErrorMessage(err, 'Import failed.') },
+        items.length > 0
+          ? items.map((i) => i.message).join('\n')
+          : httpErrorMessage(err, 'Import failed.'),
       )
     } finally {
       setSubmitting(false)
@@ -466,10 +467,7 @@ function ProjectImportModal({
               const picked = pickTfprojectFile(e.dataTransfer.files)
               if (!picked) {
                 clearSelectedFile()
-                setError({
-                  error: 'invalid_file',
-                  message: 'Only .tfproject files can be imported.',
-                })
+                setError('Only .tfproject files can be imported.')
                 return
               }
               selectBundle(picked)
@@ -512,8 +510,8 @@ function ProjectImportModal({
           </div>
 
           {error && (
-            <div className="rounded-lg border border-dismiss/20 bg-dismiss/5 px-3 py-2 text-[12px] text-dismiss">
-              {renderImportError(error)}
+            <div className="whitespace-pre-line rounded-lg border border-dismiss/20 bg-dismiss/5 px-3 py-2 text-[12px] text-dismiss">
+              {error}
             </div>
           )}
 
@@ -546,33 +544,6 @@ function ProjectImportModal({
       </div>
     </div>
   )
-}
-
-// parseImportError lifts the typed failure body off a rejected import. The
-// import endpoint answers a rejection with a ProjectImportError whose `error`
-// code selects the remediation the form shows (rename the project, restore the
-// missing repos) — a message alone would lose that, which is why this reads the
-// body rather than going through httpErrorMessage. Null for anything that isn't
-// that shape: a network drop, a proxy's HTML error page, a bare string body.
-function parseImportError(e: unknown): ProjectImportError | null {
-  if (!(e instanceof HttpError)) return null
-  try {
-    const body = JSON.parse(e.body) as ProjectImportError
-    return body && typeof body.error === 'string' ? body : null
-  } catch {
-    return null
-  }
-}
-
-function renderImportError(err: ProjectImportError): string {
-  if (err.error === 'duplicate_name') {
-    return err.message || 'A project with that name already exists. Rename or delete it first.'
-  }
-  if (err.error === 'missing_repos' && err.missing_repos && err.missing_repos.length > 0) {
-    const list = err.missing_repos.map((m) => `${m.repo} (${m.error})`).join(', ')
-    return `Missing pinned repos: ${list}`
-  }
-  return err.message || err.error || 'Import failed.'
 }
 
 function hasDroppedFiles(dataTransfer: DataTransfer | null): boolean {

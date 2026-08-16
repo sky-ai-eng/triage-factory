@@ -28,6 +28,25 @@ func assertFirstError(t *testing.T, rec *httptest.ResponseRecorder, wantReason, 
 	}
 }
 
+// firstErrorMessage decodes the error envelope off rec and returns the first
+// item's message — the prose half of the contract, for tests that assert on
+// what the response says rather than on its reason code.
+func firstErrorMessage(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode envelope: %v (body=%s)", err, rec.Body.String())
+	}
+	if len(body.Errors) == 0 {
+		t.Fatalf("empty errors list; body=%s", rec.Body.String())
+	}
+	return body.Errors[0].Message
+}
+
 // TestTaskRoutes_404OnMalformedID pins the family-wide contract: every
 // /api/tasks/{id} route validates the path id as a UUID before any store
 // call and answers 404 for a malformed one. Production ids are UUIDs in both

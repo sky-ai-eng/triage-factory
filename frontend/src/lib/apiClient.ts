@@ -126,9 +126,8 @@ export interface ApiErrorItem {
 
 /** apiErrors extracts the envelope's error list from a caught error. Returns
  *  every item — validation reports all failing fields at once, so a form can
- *  highlight each `field`. A non-HttpError, a non-JSON body, or a legacy
- *  single-string `{ error }` body (still emitted by unconverted routes)
- *  yields `[]`; use `httpErrorMessage` when all you need is one string. */
+ *  highlight each `field`. A non-HttpError or a non-JSON body yields `[]`; use
+ *  `httpErrorMessage` when all you need is one string. */
 export function apiErrors(e: unknown): ApiErrorItem[] {
   if (!(e instanceof HttpError)) return []
   try {
@@ -147,9 +146,10 @@ export function apiErrors(e: unknown): ApiErrorItem[] {
 }
 
 /** httpErrorMessage extracts a user-facing string from a caught error: the
- *  envelope's first `message` when present, else the legacy JSON `{ error }`
- *  string (routes not yet converted to the envelope still emit only that),
- *  then the supplied fallback.
+ *  envelope's first `message` when present, else the supplied fallback. The
+ *  legacy top-level `{ error }` fallback is gone — every `/api/*` failure
+ *  speaks the envelope, so a body without one is a body from outside the API
+ *  (a proxy page, a dev-server index.html), which has nothing to show a user.
  *
  *  An HttpError WITHOUT a usable body returns the fallback, not its own
  *  `.message`: that message embeds the raw response body (`HTTP <status>:
@@ -160,12 +160,6 @@ export function httpErrorMessage(e: unknown, fallback: string): string {
   if (e instanceof HttpError) {
     const items = apiErrors(e)
     if (items.length > 0 && items[0].message) return items[0].message
-    try {
-      const body = JSON.parse(e.body) as { error?: unknown }
-      if (typeof body.error === 'string' && body.error) return body.error
-    } catch {
-      // body wasn't JSON — fall through to the fallback below.
-    }
     return fallback
   }
   return e instanceof Error ? e.message : fallback

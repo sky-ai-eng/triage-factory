@@ -221,16 +221,8 @@ func TestTeamSettingsPost_PickupCanonical_Rejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	// This arm errors via the shared badRequest helper, which now emits the
-	// envelope; the legacy "error" key survives via the dual-key shim.
-	var resp struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if !strings.Contains(resp.Error, "canonical must be empty") {
-		t.Errorf("error should mention pickup canonical invariant, got: %q", resp.Error)
+	if msg := firstErrorMessage(t, rec); !strings.Contains(msg, "canonical must be empty") {
+		t.Errorf("error should mention pickup canonical invariant, got: %q", msg)
 	}
 }
 
@@ -246,10 +238,9 @@ func TestTeamSettingsPost_InProgressCanonicalNotInMembers_Rejected(t *testing.T)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "not in members") {
-		t.Errorf("error should mention canonical not in members, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "not in members") {
+		t.Errorf("error should mention canonical not in members, got: %q", resp)
 	}
 }
 
@@ -265,10 +256,9 @@ func TestTeamSettingsPost_InProgressMembersWithoutCanonical_Rejected(t *testing.
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "canonical is required") {
-		t.Errorf("error should mention canonical required, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "canonical is required") {
+		t.Errorf("error should mention canonical required, got: %q", resp)
 	}
 }
 
@@ -284,10 +274,9 @@ func TestTeamSettingsPost_DoneCanonicalNotInMembers_Rejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "not in members") {
-		t.Errorf("error should mention canonical not in members, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "not in members") {
+		t.Errorf("error should mention canonical not in members, got: %q", resp)
 	}
 }
 
@@ -391,10 +380,9 @@ func TestTeamSettingsPost_DuplicateProjectKey_Rejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 on duplicate project key, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "duplicate project key") {
-		t.Errorf("error should mention duplicate, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "duplicate project key") {
+		t.Errorf("error should mention duplicate, got: %q", resp)
 	}
 }
 
@@ -974,10 +962,9 @@ func TestOrgSettingsPost_DailyCostCap_NegativeRejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("negative cap should 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "max_daily_cost_usd must be >= 0") {
-		t.Errorf("expected >= 0 validation message, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "max_daily_cost_usd must be >= 0") {
+		t.Errorf("expected >= 0 validation message, got: %q", resp)
 	}
 }
 
@@ -1042,10 +1029,9 @@ func TestOrgSettingsPost_ConcurrentRuns_NegativeRejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("negative limit should 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "max_concurrent_runs must be >= 0") {
-		t.Errorf("expected >= 0 validation message, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "max_concurrent_runs must be >= 0") {
+		t.Errorf("expected >= 0 validation message, got: %q", resp)
 	}
 }
 
@@ -1059,10 +1045,9 @@ func TestOrgSettingsPost_ConcurrentRuns_OversizedRejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("oversized limit should 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "max_concurrent_runs must be at most") {
-		t.Errorf("expected upper-bound validation message, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "max_concurrent_runs must be at most") {
+		t.Errorf("expected upper-bound validation message, got: %q", resp)
 	}
 	// The ceiling itself is accepted.
 	postJSONResp(t, s, "/api/settings/org",

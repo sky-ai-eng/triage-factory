@@ -22,12 +22,15 @@ describe('httpErrorMessage', () => {
     expect(httpErrorMessage(e, 'fallback')).toBe('until is required')
   })
 
-  it('returns the server JSON { error } string when present', () => {
+  it('returns the fallback for a legacy single-string { error } body', () => {
+    // The dual-emission shim is gone: every /api/* failure carries the
+    // envelope, so a bare { error } body is not one of ours and its string is
+    // not shown to the user.
     const e = new HttpError(
       409,
       JSON.stringify({ error: 'an invite for that email is already pending' }),
     )
-    expect(httpErrorMessage(e, 'fallback')).toBe('an invite for that email is already pending')
+    expect(httpErrorMessage(e, 'fallback')).toBe('fallback')
   })
 
   it('returns the fallback for an HttpError with a non-JSON body (no raw-body leak)', () => {
@@ -38,10 +41,12 @@ describe('httpErrorMessage', () => {
     expect(msg).not.toContain('<html>')
   })
 
-  it('returns the fallback for JSON without a usable error field', () => {
+  it('returns the fallback for JSON without a usable envelope', () => {
     expect(httpErrorMessage(new HttpError(400, JSON.stringify({ detail: 'x' })), 'fb')).toBe('fb')
-    expect(httpErrorMessage(new HttpError(400, JSON.stringify({ error: '' })), 'fb')).toBe('fb')
-    expect(httpErrorMessage(new HttpError(400, JSON.stringify({ error: 42 })), 'fb')).toBe('fb')
+    expect(httpErrorMessage(new HttpError(400, JSON.stringify({ errors: [] })), 'fb')).toBe('fb')
+    expect(
+      httpErrorMessage(new HttpError(400, JSON.stringify({ errors: [{ reason: 'X' }] })), 'fb'),
+    ).toBe('fb')
   })
 
   it('surfaces a non-HttpError Error message', () => {
@@ -72,7 +77,7 @@ describe('apiErrors', () => {
     ])
   })
 
-  it('returns [] for legacy single-string bodies, non-JSON bodies, and non-HttpErrors', () => {
+  it('returns [] for non-envelope bodies, non-JSON bodies, and non-HttpErrors', () => {
     expect(apiErrors(new HttpError(409, JSON.stringify({ error: 'nope' })))).toEqual([])
     expect(apiErrors(new HttpError(500, '<html>boom</html>'))).toEqual([])
     expect(apiErrors(new TypeError('Failed to fetch'))).toEqual([])

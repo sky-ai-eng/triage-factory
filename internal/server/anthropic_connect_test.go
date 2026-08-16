@@ -89,13 +89,7 @@ func TestAnthropicConnect_BadKey_Returns422_NothingStored(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
 	}
-	var out struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if out.Error == "" {
+	if firstErrorMessage(t, rec) == "" {
 		t.Error("422 carried no error message")
 	}
 

@@ -42,6 +42,12 @@ const (
 	ReasonOutOfRange   = "OUT_OF_RANGE"
 	ReasonCrossTeamRef = "CROSS_TEAM_REF"
 
+	// A third-party App the caller asked us to adopt is missing permissions we
+	// require. Its own code because the body carries a granted-vs-required
+	// table alongside the envelope and the client renders that table rather
+	// than the message alone.
+	ReasonPermissionGap = "PERMISSION_GAP"
+
 	// Partial success reported as an error: the delegation's claim stamped
 	// but the agent run could not be spawned (bad blueprint reference at
 	// 422, spawn/DB fault at 500). Clients key the claim-survived retry
@@ -66,29 +72,27 @@ type ErrorItem struct {
 	Field   string `json:"field,omitempty"`
 }
 
-// errorEnvelope is the wire shape WriteErrors emits. Errors is the contract;
-// Error duplicates the first item's message under the pre-envelope top-level
-// key because dozens of frontend call sites and tests still read `.error`
-// today — dual emission lets every shared helper flip at once without
-// sweeping every consumer in the same change. The legacy key is removed at
-// the end of the mechanical handler sweep, once the last frontend call site
-// reads the envelope through the shared parser.
+// errorEnvelope is the wire shape WriteErrors emits — the whole of it. It
+// carried a second, top-level "error" key through the mechanical handler
+// sweep, duplicating the first item's message so unconverted consumers kept
+// working while the surface converted family by family. Every consumer now
+// reads the list through the shared parser, so the shim is gone: one shape,
+// no second spelling for a client to prefer.
 type errorEnvelope struct {
 	Errors []ErrorItem `json:"errors"`
-	Error  string      `json:"error"`
 }
 
-// WriteErrors writes the error envelope: {"errors": [...]} plus the legacy
-// dual-key shim (see errorEnvelope). Always a list — a handler validating a
-// multi-field body accumulates every failing field (see Validation) and
-// flushes them in one response. The HTTP status is blanket for the response.
+// WriteErrors writes the error envelope: {"errors": [...]}. Always a list — a
+// handler validating a multi-field body accumulates every failing field (see
+// Validation) and flushes them in one response. The HTTP status is blanket for
+// the response.
 func WriteErrors(w http.ResponseWriter, status int, items ...ErrorItem) {
 	if len(items) == 0 {
 		// A caller reporting an error with no items is a bug, but answering
 		// with an empty list would hand clients a success-shaped failure.
 		items = []ErrorItem{{Reason: ReasonInternal, Message: "unspecified error"}}
 	}
-	WriteJSON(w, status, errorEnvelope{Errors: items, Error: items[0].Message})
+	WriteJSON(w, status, errorEnvelope{Errors: items})
 }
 
 // Validation accumulates field faults so a multi-field body reports every

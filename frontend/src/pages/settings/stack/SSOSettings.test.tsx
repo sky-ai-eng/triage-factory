@@ -321,7 +321,14 @@ describe('SSOSettings — domains', () => {
     seedConnected([makeDomain()])
     verifyError = new HttpError(
       409,
-      JSON.stringify({ error: 'DNS record not found yet — propagation can take time, retry.' }),
+      JSON.stringify({
+        errors: [
+          {
+            reason: 'CONFLICT',
+            message: 'DNS record not found yet — propagation can take time, retry.',
+          },
+        ],
+      }),
     )
     render(<SSOSettings />)
 
@@ -336,7 +343,14 @@ describe('SSOSettings — domains', () => {
     seedConnected([makeDomain()])
     verifyError = new HttpError(
       409,
-      JSON.stringify({ error: 'this domain is already verified by another organization' }),
+      JSON.stringify({
+        errors: [
+          {
+            reason: 'CONFLICT',
+            message: 'this domain is already verified by another organization',
+          },
+        ],
+      }),
     )
     render(<SSOSettings />)
 

@@ -228,17 +228,6 @@ func TestProjectBundleProbe_NoCredentials_SurfacesError(t *testing.T) {
 	}
 }
 
-func assertErrorBody(t *testing.T, body []byte, want string) {
-	t.Helper()
-	var out map[string]string
-	if err := json.Unmarshal(body, &out); err != nil {
-		t.Fatalf("decode error body: %v; raw=%s", err, string(body))
-	}
-	if out["error"] != want {
-		t.Errorf("error = %q, want %q", out["error"], want)
-	}
-}
-
 func assertLogged(t *testing.T, logs *bytes.Buffer, want string) {
 	t.Helper()
 	if !strings.Contains(logs.String(), want) {

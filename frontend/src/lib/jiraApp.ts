@@ -4,7 +4,7 @@
 // against; the card also shows the callback URL the app owner must register.
 // The endpoints are org-scoped under /api/orgs/{org_id}/jira/app.
 
-import { apiJSON, HttpError, httpErrorMessage } from './apiClient'
+import { apiErrors, apiJSON, httpErrorMessage } from './apiClient'
 
 // asError mirrors githubApp's: the card renders `err.message` directly, so a
 // raw HttpError (whose message embeds the response body) must not escape here.
@@ -76,17 +76,11 @@ export async function importJiraApp(
     })
     return { ok: true, result }
   } catch (e) {
-    // `field` is what routes a rejection to the right input, so the failure
-    // body is read whole rather than through httpErrorMessage's `error`-only
-    // view.
-    if (e instanceof HttpError) {
-      try {
-        const body = JSON.parse(e.body) as { error?: string; field?: string }
-        return { ok: false, error: body.error || fallback, field: body.field }
-      } catch {
-        // Body wasn't JSON — fall through.
-      }
-    }
+    // `field` is what routes a rejection to the right input, so the failure is
+    // read through the shared envelope parser rather than for its message
+    // alone — apiErrors carries the field with it.
+    const item = apiErrors(e)[0]
+    if (item) return { ok: false, error: item.message || fallback, field: item.field }
     return { ok: false, error: httpErrorMessage(e, fallback) }
   }
 }

@@ -217,7 +217,8 @@ describe('ActivityFeed', () => {
       vi.fn().mockResolvedValue({
         ok: false,
         status: 500,
-        text: () => Promise.resolve(JSON.stringify({ error: 'boom' })),
+        text: () =>
+          Promise.resolve(JSON.stringify({ errors: [{ reason: 'CONFLICT', message: 'boom' }] })),
       }),
     )
     render(<ActivityFeed baseUrl="/api/usage/teams/t1/activity" />)

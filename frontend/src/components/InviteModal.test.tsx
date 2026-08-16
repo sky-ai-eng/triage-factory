@@ -92,7 +92,11 @@ describe('InviteModal', () => {
       .mockRejectedValue(
         new HttpError(
           409,
-          JSON.stringify({ error: 'an invite for that email is already pending' }),
+          JSON.stringify({
+            errors: [
+              { reason: 'CONFLICT', message: 'an invite for that email is already pending' },
+            ],
+          }),
         ),
       )
     render(<InviteModal create={create} onClose={vi.fn()} />)

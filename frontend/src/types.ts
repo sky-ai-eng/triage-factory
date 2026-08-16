@@ -996,15 +996,6 @@ export interface ProjectImportResult {
   warnings: ProjectImportWarning[]
 }
 
-export interface ProjectImportError {
-  error: string
-  message?: string
-  missing_repos?: Array<{
-    repo: string
-    error: string
-  }>
-}
-
 export interface KnowledgeFile {
   path: string
   /** RFC 6838 content type detected from the filename extension —
