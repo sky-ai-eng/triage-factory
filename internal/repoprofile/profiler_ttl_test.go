@@ -21,7 +21,7 @@ func TestRunOrg_TTLSkipsFreshUnlessForced(t *testing.T) {
 	fresh := time.Now()
 	repos := &ttlRepositoryStore{
 		names:   []string{"own/fresh"},
-		profile: &domain.Repository{Owner: "own", Repo: "fresh", ProfiledAt: &fresh},
+		profile: &domain.Repository{ID: "repo-id-fresh", Owner: "own", Repo: "fresh", ProfiledAt: &fresh},
 	}
 
 	t.Run("force=false skips a fresh repo", func(t *testing.T) {

@@ -239,36 +239,36 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 		owner, repo := parts[0], parts[1]
 
-		// One read of the stored row, serving two purposes: the TTL gate
-		// (skipped when forced) and the registry id the websocket events
-		// below are keyed on. Ref-keyed, because name came out of the tracked
-		// set and is the same name the GitHub fetches are built from; the
-		// rename applied further down moves owner/repo and leaves the id
-		// alone, so an id read here stays the right one either way.
+		// One read of the stored row, serving three purposes: the TTL gate
+		// (skipped when forced), the registry id the websocket events below
+		// are keyed on, and proof the repository is still tracked. Ref-keyed,
+		// because name came out of the tracked set and is the same name the
+		// GitHub fetches are built from; the rename applied further down
+		// moves owner/repo and leaves the id alone, so an id read here stays
+		// the right one either way.
 		existing, existingErr := p.repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
 		switch {
-		case existingErr != nil && !force:
-			// Without the row the TTL gate cannot be evaluated, and profiling
-			// every repo every cycle is exactly what it exists to prevent.
-			repoprofileLog.Warn("check existing profile failed, skipping", "repo", name, "error", existingErr)
-			continue
 		case existingErr != nil:
-			// A forced pass has no gate to fail, so it proceeds — minus the
-			// live updates, which have no id to be keyed on.
-			repoprofileLog.Warn("read existing repository row failed; forced pass continues without live updates", "repo", name, "error", existingErr)
-		case !force && existing != nil && existing.ProfiledAt != nil:
+			// Forced passes skip too: without the row there is no id to key
+			// the events on, and this pass would end in a write against the
+			// same store the read just failed on. The next cycle — or a
+			// re-press of the re-profile button — retries.
+			repoprofileLog.Warn("read repository row failed, skipping", "repo", name, "error", existingErr)
+			continue
+		case existing == nil:
+			// The tracked-set list this loop walks joins tracking to the
+			// registry, and tracking rows cascade with their repository — so
+			// a name with no row was untracked between that read and this
+			// one. Profiling it anyway would upsert the row back into
+			// existence, resurrecting a repository a config save just
+			// deleted.
+			repoprofileLog.Info("repository row gone since the tracked-set read, skipping", "repo", name)
+			continue
+		case !force && existing.ProfiledAt != nil:
 			if age := time.Since(*existing.ProfiledAt); age < reprofileTTL {
 				repoprofileLog.Debug("recently profiled, skipping", "repo", name, "age", age.Round(time.Hour), "ttl", reprofileTTL)
 				continue
 			}
-		}
-		// Empty when the read failed, or when no row exists yet — the upsert
-		// below is what creates one, and a repo first learned about on this
-		// pass has nothing for a client to merge into anyway. Events keyed on
-		// nothing merge into nothing, so they are dropped rather than sent.
-		repositoryID := ""
-		if existing != nil {
-			repositoryID = existing.ID
 		}
 
 		// Resolve the per-(org, owner) GitHub client. Done after the TTL
@@ -331,7 +331,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		// columns below and ignores it. It rides along because prof travels
 		// into the batch path, and both emit sites key their event on it.
 		prof := domain.Repository{
-			ID:     repositoryID,
+			ID:     existing.ID,
 			Owner:  owner,
 			Repo:   repo,
 			Source: domain.RepoSourceGitHub,
@@ -369,15 +369,13 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		} else {
 			touched = true
 		}
-		if prof.ID != "" {
-			p.notify.Publish(ctx, orgID, repoevent.Update{
-				ID:          prof.ID,
-				Slug:        prof.Slug(),
-				HasReadme:   repoevent.Ptr(prof.HasReadme),
-				HasClaudeMd: repoevent.Ptr(prof.HasClaudeMd),
-				HasAgentsMd: repoevent.Ptr(prof.HasAgentsMd),
-			})
-		}
+		p.notify.Publish(ctx, orgID, repoevent.Update{
+			ID:          prof.ID,
+			Slug:        prof.Slug(),
+			HasReadme:   repoevent.Ptr(prof.HasReadme),
+			HasClaudeMd: repoevent.Ptr(prof.HasClaudeMd),
+			HasAgentsMd: repoevent.Ptr(prof.HasAgentsMd),
+		})
 
 		if docs == "" {
 			withoutDocs = append(withoutDocs, prof)
@@ -458,9 +456,6 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			touched = true
 			if prof.ProfileText != "" {
 				profiled++
-				if prof.ID == "" {
-					continue
-				}
 				p.notify.Publish(ctx, orgID, repoevent.Update{
 					ID:          prof.ID,
 					Slug:        prof.Slug(),

@@ -194,9 +194,10 @@ func (s *batchRepositoryStore) ListTrackedNamesSystem(context.Context, string) (
 // GetByRefSystem answers with a row carrying a registry id, because that is
 // what the real store answers with: a tracked repo has a row before the
 // profiler ever sees its name (the tracked-set reconcile creates one). The id
-// is what the websocket events are keyed on, so a double that returned nil
-// here would silently exercise the no-row path instead of the real one.
-// ProfiledAt stays unset, so the TTL gate never skips.
+// is what the websocket events are keyed on, and a nil here means "untracked
+// mid-pass" — the profiler would skip the repo outright and the test would
+// assert against an empty run. ProfiledAt stays unset, so the TTL gate never
+// skips.
 func (s *batchRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
 	return &domain.Repository{ID: "repo-id-" + ref.Repo, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
@@ -276,7 +277,69 @@ func (s *changeRepositoryStore) UpsertSystem(context.Context, string, domain.Rep
 	return s.upsertErr
 }
 
+// TestRunOrg_RowGoneMidPass_SkipsRepo pins what a missing registry row means
+// mid-pass. The tracked-set list joins tracking to the registry, and tracking
+// rows cascade with their repository — so a name whose row is gone by the
+// per-repo point read was untracked between the two statements. Profiling it
+// anyway would upsert the row back into existence, resurrecting a repository
+// a config save just deleted; the repo is skipped outright instead, forced
+// pass included, before a GitHub client is even resolved. A failed read skips
+// the same way: with no row there is no TTL state and no id to key events on.
+func TestRunOrg_RowGoneMidPass_SkipsRepo(t *testing.T) {
+	cases := []struct {
+		name   string
+		getErr error
+	}{
+		{"row deleted between reads", nil},
+		{"row read failed", stubErr("simulated repo-store read outage")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repos := &goneRepositoryStore{names: []string{"own/gone"}, getErr: tc.getErr}
+			res := &countingResolver{}
+			p := NewProfiler(res, nil, nil, repos, oneOrgStore{}, nil, nil, nil)
+			changed, err := p.RunOrg(context.Background(), "org-1", true)
+			if err != nil {
+				t.Fatalf("RunOrg: %v", err)
+			}
+			if changed {
+				t.Error("changed=true for a skipped repo; want false")
+			}
+			if n := res.calls.Load(); n != 0 {
+				t.Errorf("resolver.ClientFor called %d times for a rowless repo; want 0 (skipped before any fetch)", n)
+			}
+			if n := repos.upserts.Load(); n != 0 {
+				t.Errorf("UpsertSystem called %d times for a rowless repo; want 0 (no resurrection)", n)
+			}
+		})
+	}
+}
+
+// goneRepositoryStore names a repo whose registry row is already gone — or
+// unreadable — by the time the per-repo point read runs, the state a config
+// save racing the profiler produces.
+type goneRepositoryStore struct {
+	db.RepositoryStore
+	names   []string
+	getErr  error
+	upserts atomic.Int64
+}
+
+func (s *goneRepositoryStore) ListTrackedNamesSystem(context.Context, string) ([]string, error) {
+	return s.names, nil
+}
+
+func (s *goneRepositoryStore) GetByRefSystem(context.Context, string, domain.RepoRef) (*domain.Repository, error) {
+	return nil, s.getErr
+}
+
+func (s *goneRepositoryStore) UpsertSystem(context.Context, string, domain.Repository) error {
+	s.upserts.Add(1)
+	return nil
+}
+
 var (
 	errUpsertDown                    = stubErr("simulated repo-store upsert outage")
 	_             db.RepositoryStore = (*changeRepositoryStore)(nil)
+	_             db.RepositoryStore = (*goneRepositoryStore)(nil)
 )

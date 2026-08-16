@@ -126,10 +126,13 @@ func (s *fetchRepositoryStore) ListTrackedNamesSystem(context.Context, string) (
 	return s.names, nil
 }
 
-// GetSystem is consulted only on the non-forced TTL path; the test forces, so
-// this stays a stub returning "no existing row."
-func (s *fetchRepositoryStore) GetByRefSystem(context.Context, string, domain.RepoRef) (*domain.Repository, error) {
-	return nil, nil
+// GetByRefSystem answers with a row carrying a registry id — the real store's
+// shape, since a tracked repo has a row before the profiler ever sees its
+// name. A nil here would read as "untracked mid-pass" and skip the repo
+// before any fetch, and every test built on this double would assert against
+// an empty run. ProfiledAt stays unset, so the TTL gate never skips.
+func (s *fetchRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
+	return &domain.Repository{ID: "repo-id-" + ref.Repo, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
 
 func (s *fetchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) error {
