@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { Plus, Users } from 'lucide-react'
 import * as Switch from '@radix-ui/react-switch'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiList, httpErrorMessage } from '../lib/apiClient'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useInvites } from '../hooks/useInvites'
@@ -40,10 +40,14 @@ function useOrgRosterAdapter(orgId: string): MemberRosterAdapter {
       roles: ORG_ROLES,
       protectedRole: 'owner',
       async fetchMembers(): Promise<RosterMember[]> {
-        const data = await apiJSON<{ members: OrgMemberApiRow[] }>(
-          `/api/orgs/${encodeURIComponent(orgId)}/members`,
+        // The roster component renders the whole org, so ask for the route's
+        // maximum page rather than threading a token through an adapter whose
+        // contract is "give me the members".
+        const page = await apiList<OrgMemberApiRow>(
+          `/api/orgs/${encodeURIComponent(orgId)}/members/list`,
+          { page_size: 200 },
         )
-        return data.members.map((m) => ({
+        return page.items.map((m) => ({
           userId: m.user_id,
           displayName: m.display_name,
           githubUsername: m.github_username,
@@ -175,11 +179,12 @@ function resolveTab(raw: string | null, isAdmin: boolean): OrgTab {
 // org-adapter-specific invite surface (TFAC-418) — the "+ Invite" modal in the
 // roster's addAffordance slot, the pending-invite ghost rows in extraRows, and
 // the "Show invited" header toggle. The whole invite surface is gated on
-// canManage: non-admins get a 404 on GET /api/invites (non-disclosure), so the
-// hook stays inert for them and they see a plain read-only roster.
+// canManage: non-admins are refused the invite list, so the hook stays inert
+// for them and they see a plain read-only roster.
 function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) {
   const base = useOrgRosterAdapter(orgId)
-  const { invites, error, create, revoke, resend } = useInvites(canManage)
+  const { invites, total, loading, hasMore, loadMore, error, create, revoke, resend } =
+    useInvites(canManage)
   // Default shown (per the ticket). Hidden only collapses the ghost rows; the
   // invites still exist and the "+ Invite" button stays put.
   const [showInvited, setShowInvited] = useState(true)
@@ -291,6 +296,19 @@ function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) 
       )}
 
       <MemberRoster adapter={adapter} canManage={canManage} />
+
+      {canManage && showInvited && hasMore && (
+        <button
+          type="button"
+          onClick={() => void loadMore()}
+          disabled={loading}
+          className="w-full rounded-xl border border-border-subtle py-2 text-[12px] text-text-tertiary transition-colors hover:text-text-secondary disabled:opacity-50"
+        >
+          {loading
+            ? 'Loading…'
+            : `Load more invites — showing ${invites.length}${total === null ? '' : ` of ${total}`}`}
+        </button>
+      )}
 
       {modalOpen && <InviteModal create={create} onClose={() => setModalOpen(false)} />}
     </div>

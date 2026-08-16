@@ -49,9 +49,22 @@ export interface Task {
   team_id?: string
 }
 
-// TeamSummary is one entry of GET /api/teams — the identity row the
-// multi-team selectors enumerate. The team count drives
-// whether a team control renders at all (the ≥2 gate).
+// TranscriptPage is GET /api/agent/conversations/{id}/messages.
+//
+// The transcript stays a GET because it is followed, not browsed: `?since_id=`
+// walks FORWARD from a watermark the client holds (the tail-follow that
+// repairs a transcript assembled from websocket frames), while
+// `next_page_token` walks BACKWARD through history from the oldest row the
+// response carried. There is no total — counting a stream still being
+// appended to would be wrong by the time it rendered.
+export interface TranscriptPage {
+  items: Message[]
+  next_page_token?: string
+}
+
+// TeamSummary is one row of POST /api/teams/list, GET /api/teams/{id}, and
+// POST /api/teams/archived/list — one team shape across all three. The team
+// count drives whether a team control renders at all (the ≥2 gate).
 export interface TeamSummary {
   id: string
   name: string
@@ -59,16 +72,16 @@ export interface TeamSummary {
   /** The viewer's membership role in this team ("admin" | "member" |
    *  "viewer"). The settings surface renders the Team section only when the
    *  viewer admins ≥1 team and filters its selector to those teams. Local /
-   *  N=1 reports "admin" for the sole team. */
-  role: string
-}
-
-// TeamsResponse is GET /api/teams: the viewer's teams in the active org
-// plus their sticky default (last_acting_team_id), present only when it is
-// still one of those teams.
-export interface TeamsResponse {
-  teams: TeamSummary[]
-  last_acting_team_id?: string
+   *  N=1 reports "admin" for the sole team. Absent on rows with no membership
+   *  to report — an archived team an org admin never joined. */
+  role?: string
+  description?: string
+  /** Soft-delete timestamp, present only on an archived team. */
+  archived_at?: string
+  /** True on the viewer's sticky default team, and on at most one row. A
+   *  default that has been archived or left marks no row at all, so a
+   *  selector never seeds to a team it isn't offering. */
+  is_last_acting?: boolean
 }
 
 // TeamBot mirrors the bot half of /api/team/members. Null
@@ -1364,20 +1377,15 @@ export interface UsageOrgResponse {
   by_rule?: UsageRuleBucket[]
 }
 
-/** One team in GET /api/usage/org/team-caps — its id, name, and per-team daily
- *  spend cap (TFAC-482; null = no cap). The governance cap editor lists EVERY
- *  active team this way (not just those with spend), so an idle team can be
- *  pre-capped; window spend is looked up separately from the org rollup's by_team. */
+/** One row of POST /api/usage/org/team-caps/list — a team's id, name, and
+ *  per-team daily spend cap (null = no cap). The governance cap editor lists
+ *  EVERY active team (not just those with spend), so an idle team can be
+ *  pre-capped; window spend is looked up separately from the org rollup's
+ *  by_team. Org admin + governance only; 404 unlicensed. */
 export interface UsageTeamCap {
   team_id: string
   team_name: string
   cap: number | null
-}
-
-/** GET /api/usage/org/team-caps — every active team + its cap (org admin +
- *  governance only; 404 unlicensed). */
-export interface UsageTeamCapsResponse {
-  teams: UsageTeamCap[]
 }
 
 /** One row of the EE access & credential change-log (GET
@@ -1401,17 +1409,12 @@ export interface AccessChangeRow {
   created_at: string
 }
 
-/** GET /api/usage/org/access-log — one page of the org-admin EE audit viewer
- *  (org admin + governance entitlement; 404 unlicensed). Newest-first; paginate
- *  via limit/offset and `has_more`. The `category` query narrows to membership vs
+/** POST /api/usage/org/access-log/list — the org-admin EE audit viewer (org
+ *  admin + governance entitlement; 404 unlicensed), newest-first, answering the
+ *  standard list envelope. The body's `category` narrows to membership vs
  *  credential vs policy (SSO connection, enforcement, domains, break-glass)
- *  changes. */
-export interface AccessLogResponse {
-  items: AccessChangeRow[]
-  limit: number
-  offset: number
-  has_more: boolean
-}
+ *  changes. The rows are AccessChangeRow. */
+export type AccessLogListRow = AccessChangeRow
 
 // --- Fleet console (TFAC-589) — mirrors ee/fleet DTOs ---
 

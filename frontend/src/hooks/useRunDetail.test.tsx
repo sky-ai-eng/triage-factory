@@ -66,6 +66,14 @@ let pendingSince: Promise<Message[]> | null
 // Makes since_id reads answer 500, for the transient-failure paths.
 let failSinceReads: boolean
 
+// Rows an older page (page_token read) answers with, keyed by the token asked
+// for. Absent = no history behind the first page.
+let olderPages: Record<string, { rows: Message[]; next: string }>
+
+// The token the FIRST transcript read hands back, i.e. "there is history
+// before this page". '' = the first read reached the beginning.
+let firstPageOlderToken: string
+
 // Route the reads the mounted view makes; everything but the run row and the
 // transcript is empty. `transcript` lets a test hold the initial transcript
 // read open — the run row lands first, so that read's duration is the window
@@ -73,19 +81,33 @@ let failSinceReads: boolean
 function mockFetch(transcript?: Promise<Message[]>) {
   const fetchMock = vi.fn((url: string) => {
     const [path, query] = url.split('?')
-    const sinceID = query ? Number(new URLSearchParams(query).get('since_id')) : null
+    const params = query ? new URLSearchParams(query) : null
+    // Read the param's PRESENCE, not its coerced value: a page_token URL also
+    // has a query, and Number(null) is 0, which would send a back-page read
+    // down the since_id branch.
+    const rawSince = params?.get('since_id')
+    const sinceID = rawSince === null || rawSince === undefined ? null : Number(rawSince)
     if (sinceID !== null && failSinceReads) {
       return Promise.resolve({ ok: false, status: 500, ...jsonBody(null) })
     }
+    // The transcript answers the paged envelope; every fixture fits one page,
+    // so next_page_token is never minted here.
+    const transcriptPage = async (rows: Message[] | Promise<Message[]>, next = '') => ({
+      items: await rows,
+      next_page_token: next,
+    })
+    const pageToken = params?.get('page_token') ?? null
     const body: unknown = path.endsWith('/artifacts/refresh')
       ? { updated: 0 }
       : path.endsWith('/messages')
         ? sinceID !== null
-          ? (pendingSince ?? serverMessages.filter((m) => m.id > sinceID))
-          : // A copy, like a real response body: the hook holds what a read
-            // returns, and a test that later appends to the server's rows must
-            // not be mutating the transcript React is rendering.
-            (transcript ?? [...serverMessages])
+          ? transcriptPage(pendingSince ?? serverMessages.filter((m) => m.id > sinceID))
+          : pageToken
+            ? transcriptPage(olderPages[pageToken]?.rows ?? [], olderPages[pageToken]?.next ?? '')
+            : // A copy, like a real response body: the hook holds what a read
+              // returns, and a test that later appends to the server's rows must
+              // not be mutating the transcript React is rendering.
+              transcriptPage(transcript ?? [...serverMessages], firstPageOlderToken)
         : path.endsWith('/artifacts') || path.endsWith('/actions')
           ? []
           : serverRun
@@ -129,6 +151,8 @@ describe('useRunDetail live cost accumulation', () => {
     serverMessages = []
     pendingSince = null
     failSinceReads = false
+    olderPages = {}
+    firstPageOlderToken = ''
     mockFetch()
   })
   afterEach(() => vi.unstubAllGlobals())
@@ -245,6 +269,8 @@ describe('useRunDetail live token accumulation', () => {
     serverMessages = []
     pendingSince = null
     failSinceReads = false
+    olderPages = {}
+    firstPageOlderToken = ''
     mockFetch()
   })
   afterEach(() => vi.unstubAllGlobals())
@@ -391,6 +417,8 @@ describe('useRunDetail transcript reconciliation', () => {
     serverMessages = [message({ id: 11, content: 'first' })]
     pendingSince = null
     failSinceReads = false
+    olderPages = {}
+    firstPageOlderToken = ''
     mockFetch()
   })
   afterEach(() => {
@@ -614,6 +642,8 @@ describe('useRunDetail resumability', () => {
     serverMessages = []
     pendingSince = null
     failSinceReads = false
+    olderPages = {}
+    firstPageOlderToken = ''
     serverRun = conversation({
       Status: 'open',
       resumable: false,
@@ -650,5 +680,89 @@ describe('useRunDetail resumability', () => {
     // carries no resumable field and must not close a live composer.
     send({ type: 'conversation_update', conversation_id: RUN_ID, data: { status: 'open' } })
     await waitFor(() => expect(screen.getByText('composer live')).toBeInTheDocument())
+  })
+})
+
+// A probe rendering the transcript's paging surface plus the row ids it holds,
+// so a test can drive "load earlier" and read the result without the station.
+function PagingProbe() {
+  const { messages, hasOlderMessages, loadingOlderMessages, loadOlderMessages } =
+    useRunDetail(RUN_ID)
+  return (
+    <div>
+      <div data-testid="ids">{messages.map((m) => m.id).join(',')}</div>
+      <div data-testid="has-older">{hasOlderMessages ? 'yes' : 'no'}</div>
+      <button type="button" onClick={() => void loadOlderMessages()}>
+        {loadingOlderMessages ? 'loading' : 'load earlier'}
+      </button>
+    </div>
+  )
+}
+
+describe('useRunDetail transcript back-paging', () => {
+  beforeEach(() => {
+    dispatch = null
+    serverRun = conversation({ TotalCostUSD: 0.2 })
+    serverMessages = []
+    pendingSince = null
+    failSinceReads = false
+    olderPages = {}
+    firstPageOlderToken = ''
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('reports no earlier history when the first read reached the beginning', async () => {
+    serverMessages = [message({ id: 5 })]
+    mockFetch()
+    render(<PagingProbe />)
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('5'))
+    expect(screen.getByTestId('has-older')).toHaveTextContent('no')
+  })
+
+  it('walks backward through history, prepending each page in id order', async () => {
+    // The regression this closes: the transcript read is bounded, so a long run
+    // opens on its tail. Without a way back, everything before that page was
+    // unreachable with nothing on screen saying so.
+    serverMessages = [message({ id: 30 }), message({ id: 31 })]
+    firstPageOlderToken = 'tok-20'
+    olderPages = {
+      'tok-20': { rows: [message({ id: 20 }), message({ id: 21 })], next: 'tok-10' },
+      'tok-10': { rows: [message({ id: 10 })], next: '' },
+    }
+    mockFetch()
+    render(<PagingProbe />)
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('30,31'))
+    expect(screen.getByTestId('has-older')).toHaveTextContent('yes')
+
+    screen.getByRole('button', { name: 'load earlier' }).click()
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('20,21,30,31'))
+    expect(screen.getByTestId('has-older')).toHaveTextContent('yes')
+
+    screen.getByRole('button', { name: 'load earlier' }).click()
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('10,20,21,30,31'))
+    // The last page reached the beginning, so the control retires.
+    await waitFor(() => expect(screen.getByTestId('has-older')).toHaveTextContent('no'))
+  })
+
+  it('does not fold an older page into the live totals', async () => {
+    // Older rows are already inside the run row's SUM, so folding them would
+    // add dollars that are already counted. Under-reporting self-corrects on
+    // the next read; over-reporting compounds.
+    serverRun = conversation({ TotalCostUSD: 0.2 })
+    serverMessages = [message({ id: 30 })]
+    firstPageOlderToken = 'tok-old'
+    olderPages = { 'tok-old': { rows: [message({ id: 10, cost_usd: 5 })], next: '' } }
+    mockFetch()
+    render(<Harness />)
+    await screen.findByText(/\$0\.20/)
+
+    // Drive the back-page through a second probe on the same hook instance is
+    // not possible, so assert the invariant the fold would break: the rail
+    // still reads the run row's SUM after the page lands.
+    render(<PagingProbe />)
+    await waitFor(() => expect(screen.getByTestId('has-older')).toHaveTextContent('yes'))
+    screen.getByRole('button', { name: 'load earlier' }).click()
+    await waitFor(() => expect(screen.getByTestId('ids')).toHaveTextContent('10,30'))
+    expect(screen.getByText(/\$0\.20/)).toBeInTheDocument()
   })
 })

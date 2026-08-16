@@ -630,7 +630,11 @@ func diffChannelIDs(prior []slackstore.TeamChannel, desired []string) (added, re
 // own trigger is respected (no default forced beside it), and a team that
 // deleted the default doesn't get it resurrected on the next PUT.
 func teamHasSlackMessageTrigger(ctx context.Context, tx db.TxStores, orgID, teamID string) (bool, error) {
-	handlers, err := tx.EventHandlers.List(ctx, orgID, domain.EventHandlerKindTrigger, teamID)
+	// Unwindowed (ListOpts zero Limit): this derives a per-channel set from
+	// the team's whole trigger list rather than browsing it, so a page would
+	// silently narrow what the channel is reported as tracking.
+	handlers, _, err := tx.EventHandlers.List(ctx, orgID,
+		db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.Unwindowed)
 	if err != nil {
 		return false, err
 	}

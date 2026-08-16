@@ -134,7 +134,7 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 	if len(arts) != 0 {
 		t.Fatalf("got %d artifacts for a refused push, want 0", len(arts))
 	}
-	acts, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushFailed})
+	acts, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushFailed})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 	if len(arts) != 1 {
 		t.Fatalf("got %d artifacts after the successful retry, want 1", len(arts))
 	}
-	pushed, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushed})
+	pushed, _, err := stores.ExternalActions.ListByOrgSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{Action: domain.ActionBranchPushed})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem (branch_pushed): %v", err)
 	}

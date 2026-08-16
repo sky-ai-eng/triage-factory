@@ -166,16 +166,23 @@ func TestRepoBranches_AppOnlyOrg_Success(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/repos/acme/api/branches", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("branches = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	rec := doJSON(t, srv, http.MethodPost, "/api/repos/acme/api/branches/list", map[string]any{})
+	page := decodeList[branchJSON](t, rec)
+	// A proxy list cannot count its upstream, so total_count is null.
+	if page.TotalCount != nil {
+		t.Errorf("total_count = %d, want null on a proxy list", *page.TotalCount)
 	}
-	var names []string
-	if err := json.Unmarshal(rec.Body.Bytes(), &names); err != nil {
-		t.Fatalf("decode: %v", err)
+	names := make([]string, len(page.Items))
+	for i, b := range page.Items {
+		names[i] = b.Name
 	}
 	if strings.Join(names, ",") != "main,feature/x" {
 		t.Errorf("branches = %v, want [main feature/x]", names)
+	}
+	// Two rows against the default 50-row window is a short page, which is
+	// how GitHub says there is no more — so no next token.
+	if page.NextPageToken != "" {
+		t.Errorf("next_page_token = %q, want empty on a short upstream page", page.NextPageToken)
 	}
 }
 
@@ -184,7 +191,7 @@ func TestRepoBranches_NoCredentials_NotConfigured(t *testing.T) {
 	srv := newTestServer(t)
 	logs := captureLog(t)
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/repos/acme/api/branches", nil)
+	rec := doJSON(t, srv, http.MethodPost, "/api/repos/acme/api/branches/list", map[string]any{})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("branches = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}

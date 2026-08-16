@@ -350,16 +350,21 @@ func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []s
 	return scanArtifactRows(rows)
 }
 
-func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {
+func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, int, error) {
+	total, err := countPgArtifacts(ctx, s.q, `org_id = $1 AND team_id = $2`, []any{orgID, teamID}, opts)
+	if err != nil {
+		return nil, 0, err
+	}
 	// Base WHERE only — the filter helper appends the optional predicates, the
 	// ORDER BY, and LIMIT/OFFSET so this and ListByOrgSystem share one builder.
 	query := `SELECT ` + pgArtifactColumns + ` FROM artifacts WHERE org_id = $1 AND team_id = $2`
 	query, args := appendPgArtifactFilters(query, []any{orgID, teamID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanArtifactRows(rows)
+	out, err := scanArtifactRows(rows)
+	return out, total, err
 }
 
 // appendPgArtifactFilters appends opts' optional provider/kind/state/time
@@ -369,6 +374,23 @@ func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, op
 // any number of leading binds (org_id, team_id) without a filter colliding with
 // LIMIT — the same defensive numbering ListByTeam used for its lone LIMIT.
 func appendPgArtifactFilters(query string, args []any, opts db.ArtifactListOpts) (string, []any) {
+	query, args = appendPgArtifactPredicates(query, args, opts)
+	query += " ORDER BY created_at DESC, id DESC"
+	if opts.Limit > 0 {
+		args = append(args, opts.Limit)
+		query += fmt.Sprintf(" LIMIT $%d", len(args))
+		// OFFSET only with a LIMIT — paging the newest-first feed.
+		if opts.Offset > 0 {
+			args = append(args, opts.Offset)
+			query += fmt.Sprintf(" OFFSET $%d", len(args))
+		}
+	}
+	return query, args
+}
+
+// appendPgArtifactPredicates is the filter half alone — no ordering, no window
+// — so the count and the page apply exactly the same predicate.
+func appendPgArtifactPredicates(query string, args []any, opts db.ArtifactListOpts) (string, []any) {
 	if opts.Provider != "" {
 		args = append(args, opts.Provider)
 		query += fmt.Sprintf(" AND provider = $%d", len(args))
@@ -389,17 +411,14 @@ func appendPgArtifactFilters(query string, args []any, opts db.ArtifactListOpts)
 		args = append(args, opts.Until)
 		query += fmt.Sprintf(" AND created_at < $%d", len(args))
 	}
-	query += " ORDER BY created_at DESC, id DESC"
-	if opts.Limit > 0 {
-		args = append(args, opts.Limit)
-		query += fmt.Sprintf(" LIMIT $%d", len(args))
-		// OFFSET only with a LIMIT — paging the newest-first feed.
-		if opts.Offset > 0 {
-			args = append(args, opts.Offset)
-			query += fmt.Sprintf(" OFFSET $%d", len(args))
-		}
-	}
 	return query, args
+}
+
+func countPgArtifacts(ctx context.Context, q queryer, where string, base []any, opts db.ArtifactListOpts) (int, error) {
+	query, args := appendPgArtifactPredicates(`SELECT COUNT(*) FROM artifacts WHERE `+where, base, opts)
+	var n int
+	err := q.QueryRowContext(ctx, query, args...).Scan(&n)
+	return n, err
 }
 
 // ListByOrgSystem runs on the admin pool (BYPASSRLS), org-wide and across every
@@ -407,14 +426,19 @@ func appendPgArtifactFilters(query string, args []any, opts db.ArtifactListOpts)
 // states (terminal included), in contrast to ListNonTerminalBySystem's
 // reconciler working set. Same org-wide admin shape as ListNonTerminalBySystem;
 // org_id stays in the WHERE clause as defense in depth.
-func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {
+func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts db.ArtifactListOpts) ([]domain.Artifact, int, error) {
+	total, err := countPgArtifacts(ctx, s.admin, `org_id = $1`, []any{orgID}, opts)
+	if err != nil {
+		return nil, 0, err
+	}
 	query := `SELECT ` + pgArtifactColumns + ` FROM artifacts WHERE org_id = $1`
 	query, args := appendPgArtifactFilters(query, []any{orgID}, opts)
 	rows, err := s.admin.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanArtifactRows(rows)
+	out, err := scanArtifactRows(rows)
+	return out, total, err
 }
 
 // ListNonTerminalBySystem runs on the admin pool (BYPASSRLS), org-scoped — the

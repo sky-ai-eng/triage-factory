@@ -207,9 +207,10 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// A malformed id is "not found" (parity with the team handlers), not a
-	// role failure — don't let it surface as a 500 from a uuid cast.
-	teamID, ok := uuidPathOr404(w, r, "team_id", "team")
+	// The one {team_id} grammar: a uuid, plus the literal "default" in local
+	// mode. A segment that resolves to nothing is "not found" (parity with the
+	// team handlers), not a role failure or a 500 from a uuid cast.
+	teamID, ok := h.az.TeamIDFromPath(w, r, "usage", orgID, userID)
 	if !ok {
 		return
 	}
@@ -388,8 +389,9 @@ func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request
 	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
-	// A malformed id is "not found" (parity with handleUsageTeam), not a 500.
-	teamID, ok := uuidPathOr404(w, r, "team_id", "team")
+	// The one {team_id} grammar; a segment that resolves to nothing is "not
+	// found" (parity with handleUsageTeam), not a 500.
+	teamID, ok := h.az.TeamIDFromPath(w, r, "usage", orgID, userID)
 	if !ok {
 		return
 	}
@@ -446,28 +448,25 @@ func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"max_daily_cost_usd": stored})
 }
 
-// usageTeamCapEntry is one team in the GET /api/usage/org/team-caps list: its id,
-// name, and configured per-team daily cap (TFAC-482; null = no cap).
+// usageTeamCapEntry is one team in the team-caps list: its id, name, and
+// configured per-team daily cap (null = no cap).
 type usageTeamCapEntry struct {
 	TeamID   string   `json:"team_id"`
 	TeamName string   `json:"team_name"`
 	Cap      *float64 `json:"cap"`
 }
 
-type usageTeamCapsResponse struct {
-	Teams []usageTeamCapEntry `json:"teams"`
-}
-
-// handleUsageTeamCaps lists EVERY active team in the org with its per-team daily
-// cap (TFAC-482), for the governance cap editor. Gate: governance (404 unlicensed)
-// + org admin (403) — same posture as the PUT. Unlike the spend rollup's by_team
-// (only teams with spend in the window), this lists all active teams so an org
-// admin can pre-cap an idle team before any runaway happens. Admin pool
-// throughout: an org admin may not be a member of every team. Archived teams are
-// excluded — they can't be capped (the PUT 403s on archived). The FE pairs each
-// entry with its window spend looked up from /api/usage/org by_team (0 if idle).
+// handleUsageTeamCaps lists EVERY active team in the org with its per-team
+// daily cap, for the governance cap editor. Gate: governance (404 unlicensed)
+// + org admin (403) — same posture as the PUT. Unlike the spend rollup's
+// by_team (only teams with spend in the window), this lists all active teams
+// so an org admin can pre-cap an idle team before any runaway happens. Admin
+// pool throughout: an org admin may not be a member of every team. Archived
+// teams are excluded — they can't be capped (the PUT 403s on archived). The FE
+// pairs each entry with its window spend looked up from /api/usage/org by_team
+// (0 if idle).
 //
-// GET /api/usage/org/team-caps
+// POST /api/usage/org/team-caps/list
 func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveCaller(w, r)
 	if !ok {
@@ -482,31 +481,36 @@ func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	entries := []usageTeamCapEntry{}
+	var req httpx.PageRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	// The list has no filters — it is every active team in the caller's org —
+	// so every request fingerprints the same.
+	page := httpx.ResolvePage(&v, req, httpx.FilterFingerprint("org-team-caps"), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		caps  []domain.TeamCap
+		total int
+	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teams, e := tx.Teams.ListActiveForOrgSystem(r.Context(), orgID)
-		if e != nil {
-			return e
-		}
-		for _, t := range teams {
-			set, e := tx.Teams.GetSettingsSystem(r.Context(), t.ID)
-			if e != nil {
-				return e
-			}
-			var capPtr *float64
-			if set.MaxDailyCostUSD > 0 {
-				v := set.MaxDailyCostUSD
-				capPtr = &v
-			}
-			entries = append(entries, usageTeamCapEntry{TeamID: t.ID, TeamName: t.Name, Cap: capPtr})
-		}
-		return nil
+		var e error
+		caps, total, e = tx.Teams.ListActiveCapsForOrgSystem(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		return e
 	}); err != nil {
 		internalError(w, "usage", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, usageTeamCapsResponse{Teams: entries})
+	entries := make([]usageTeamCapEntry, len(caps))
+	for i, c := range caps {
+		entries[i] = usageTeamCapEntry{TeamID: c.TeamID, TeamName: c.TeamName, Cap: c.Cap}
+	}
+	httpx.WriteList(w, page, entries, total)
 }
 
 // --- gating ---

@@ -36,16 +36,27 @@ var _ db.PromptStore = (*promptStore)(nil)
 // List ignores teamID: local mode is single-team, so every prompt
 // already belongs to the sole team and the multi-team narrowing the
 // param expresses is a no-op here.
-func (s *promptStore) List(ctx context.Context, orgID string, _ string) ([]domain.Prompt, error) {
+func (s *promptStore) List(ctx context.Context, orgID string, _ string, opts db.ListOpts) ([]domain.Prompt, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	rows, err := s.q.QueryContext(ctx, `
+	var total int
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM prompts WHERE hidden = 0 AND deleted_at IS NULL
+	`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `
 		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
-		FROM prompts WHERE hidden = 0 AND deleted_at IS NULL ORDER BY updated_at DESC
-	`)
+		FROM prompts WHERE hidden = 0 AND deleted_at IS NULL ORDER BY updated_at DESC, id`
+	args := []any{}
+	if opts.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -53,11 +64,11 @@ func (s *promptStore) List(ctx context.Context, orgID string, _ string) ([]domai
 	for rows.Next() {
 		p, err := scanPromptRowSQLite(rows.Scan)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		prompts = append(prompts, p)
 	}
-	return prompts, rows.Err()
+	return prompts, total, rows.Err()
 }
 
 // Get is request-facing: it filters deleted_at IS NULL so a soft-deleted prompt

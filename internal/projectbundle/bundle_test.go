@@ -334,7 +334,7 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	if len(claims) != 1 || claims[0].Outcome != "completed" {
 		t.Fatalf("imported claims = %+v, want one completed engagement", claims)
 	}
-	msgs, err := targetStores.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, importedConv.ID)
+	msgs, err := targetStores.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, importedConv.ID, 0)
 	if err != nil {
 		t.Fatalf("list imported messages: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestImport_MissingReposAbortsWithoutWrites(t *testing.T) {
 	if len(missing.Missing) != 1 || missing.Missing[0].Repo != "sky-ai-eng/triage-factory" {
 		t.Fatalf("unexpected missing repos payload: %+v", missing.Missing)
 	}
-	projects, err := sqlitestore.New(targetDB).Projects.List(t.Context(), runmode.LocalDefaultOrgID)
+	projects, _, err := sqlitestore.New(targetDB).Projects.List(t.Context(), runmode.LocalDefaultOrgID, db.ListOpts{Limit: 200})
 	if err != nil {
 		t.Fatalf("list projects: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestImport_DuplicateNameAborts(t *testing.T) {
 	if !errors.As(err, &dup) {
 		t.Fatalf("expected DuplicateNameError, got %v", err)
 	}
-	projects, err := sqlitestore.New(targetDB).Projects.List(t.Context(), runmode.LocalDefaultOrgID)
+	projects, _, err := sqlitestore.New(targetDB).Projects.List(t.Context(), runmode.LocalDefaultOrgID, db.ListOpts{Limit: 200})
 	if err != nil {
 		t.Fatalf("list projects: %v", err)
 	}

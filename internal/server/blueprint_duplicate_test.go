@@ -68,11 +68,7 @@ func TestBlueprintDuplicate_FullBlueprintAtomic(t *testing.T) {
 
 	// Originals untouched: source blueprint still has its 3 steps with the
 	// original prompt ids.
-	srcSteps := doJSON(t, s, http.MethodGet, "/api/blueprints/"+src+"/steps", nil)
-	var got composeSteps
-	if err := json.Unmarshal(srcSteps.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode source steps: %v", err)
-	}
+	got := listBlueprintSteps(t, s, src)
 	if len(got) != 3 || got[0]["step_prompt_id"] != p[0] || got[2]["step_prompt_id"] != p[2] {
 		t.Fatalf("source mutated by duplicate: %+v", got)
 	}
@@ -134,11 +130,7 @@ func TestBlueprintDuplicate_CopyIsTriggerlessSourceUntouched(t *testing.T) {
 	copyID, _ := out[0].Blueprint["id"].(string)
 
 	// The source's trigger is intact; the copy has none.
-	handlers := doJSON(t, s, http.MethodGet, "/api/event-handlers", nil)
-	var hs []map[string]any
-	if err := json.Unmarshal(handlers.Body.Bytes(), &hs); err != nil {
-		t.Fatalf("decode handlers: %v", err)
-	}
+	hs := listEventHandlers(t, s, "")
 	var srcTriggered, copyTriggered bool
 	for _, h := range hs {
 		if h["kind"] != "trigger" {

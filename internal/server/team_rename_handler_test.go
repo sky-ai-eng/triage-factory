@@ -102,7 +102,7 @@ func TestTeamRename_TeamAdminRenamesOwnTeam(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var resp teamDetailJSON
+	var resp teamJSON
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -276,5 +276,86 @@ func TestTeamRename_LocalIs404(t *testing.T) {
 	r.th.handleTeamUpdate(rec, r.req(r.admin, r.teamID, map[string]string{"name": "Local"}))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 in local mode; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// getReq builds a GET against the team single read as callerID, with the same
+// path value + claims + active org the PATCH helper seeds.
+func (r *teamRenameRig) getReq(callerID, teamID string) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/api/teams/"+teamID, nil)
+	req.SetPathValue("team_id", teamID)
+	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: callerID})
+	ctx = httpx.WithOrgID(ctx, r.orgID)
+	return req.WithContext(ctx)
+}
+
+// TestTeamGet_ReadsBackTheDescription_Postgres is the regression the single
+// read exists for: teams.description was WRITE-ONLY. PATCH accepted it, the
+// store persisted it, and no read on the whole surface returned it — so the
+// field a user typed was unreadable by the UI that typed it, and nothing
+// failed to say so. Only a round-trip catches that class.
+func TestTeamGet_ReadsBackTheDescription_Postgres(t *testing.T) {
+	r := newTeamRenameRig(t)
+	const blurb = "Owns the ingestion pipeline and its on-call rotation."
+
+	rec := httptest.NewRecorder()
+	r.th.handleTeamUpdate(rec, r.req(r.admin, r.teamID, map[string]string{"description": blurb}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH description = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	r.th.handleTeamGet(rec, r.getReq(r.admin, r.teamID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got teamJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Description != blurb {
+		t.Errorf("description = %q, want the value PATCH wrote (%q)", got.Description, blurb)
+	}
+
+	// Clearing round-trips too, so "" is a readable state rather than
+	// indistinguishable from a field the read forgot to project.
+	rec = httptest.NewRecorder()
+	r.th.handleTeamUpdate(rec, r.req(r.admin, r.teamID, map[string]string{"description": ""}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH clear = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	r.th.handleTeamGet(rec, r.getReq(r.admin, r.teamID))
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode after clear: %v", err)
+	}
+	if got.Description != "" {
+		t.Errorf("description after clear = %q, want empty", got.Description)
+	}
+}
+
+// TestTeamGet_DisclosureSplit_Postgres pins the two-valued denial: a team in
+// another org is 404 (it isn't in the caller's list either — disclose
+// nothing), while a team in the caller's own org that they are simply not on
+// is still readable, because team membership is not the read gate for a team's
+// identity — org membership is. The 403 arm belongs to the writes.
+func TestTeamGet_DisclosureSplit_Postgres(t *testing.T) {
+	r := newTeamRenameRig(t)
+
+	// The org admin is deliberately NOT on the team, and still reads it.
+	rec := httptest.NewRecorder()
+	r.th.handleTeamGet(rec, r.getReq(r.orgAdmin, r.teamID))
+	if rec.Code != http.StatusOK {
+		t.Errorf("org admin (not on the team) = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// A team in a different org: 404, not 403.
+	otherOrg, otherFounder, otherTeam := pgtest.SeedOrgWithUser(t, r.h, "other-founder")
+	_ = otherOrg
+	_ = otherFounder
+	rec = httptest.NewRecorder()
+	r.th.handleTeamGet(rec, r.getReq(r.admin, otherTeam))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("cross-org team = %d, want 404 (non-disclosure); body=%s", rec.Code, rec.Body.String())
 	}
 }

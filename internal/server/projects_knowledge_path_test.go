@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -48,14 +47,7 @@ func TestProjectKnowledge_PercentNamesRoundTrip(t *testing.T) {
 	}
 
 	// The listing is the client's source of truth for names.
-	rec = doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("list = %d, body=%s", rec.Code, rec.Body.String())
-	}
-	var listed []knowledgeFile
-	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
-		t.Fatalf("decode listing: %v", err)
-	}
+	listed := listKnowledge(t, s, id)
 	names := make(map[string]bool, len(listed))
 	for _, f := range listed {
 		names[f.Path] = true

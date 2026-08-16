@@ -121,11 +121,12 @@ func TestCrossOrgHTTP_AgentActions(t *testing.T) {
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
 	runA := seedRunInOrg(t, r, orgA, alice, "run-acts")
 
-	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA+"/actions", sidA).StatusCode; got != http.StatusOK {
-		t.Errorf("alice GET /api/agent/conversations/%s/actions = %d, want 200", runA, got)
+	path := "/api/agent/conversations/" + runA + "/actions/list"
+	if got := r.postJSONWithSid("POST", path, sidA, map[string]any{}).StatusCode; got != http.StatusOK {
+		t.Errorf("alice POST %s = %d, want 200", path, got)
 	}
-	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA+"/actions", sidB).StatusCode; got != http.StatusNotFound {
-		t.Errorf("bob GET /api/agent/conversations/%s/actions = %d, want 404 (cross-org leak)", runA, got)
+	if got := r.postJSONWithSid("POST", path, sidB, map[string]any{}).StatusCode; got != http.StatusNotFound {
+		t.Errorf("bob POST %s = %d, want 404 (cross-org leak)", path, got)
 	}
 }
 

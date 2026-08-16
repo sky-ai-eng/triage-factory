@@ -21,7 +21,7 @@ import EventBadge from './EventBadge'
 import TaskRuleEditor from './TaskRuleEditor'
 import type { RuleHandler } from '../types'
 import { toast } from './Toast/toastStore'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiListAll, httpErrorMessage } from '../lib/apiClient'
 
 interface TaskRulesPanelProps {
   open: boolean
@@ -51,10 +51,13 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true)
 
-    apiJSON<RuleHandler[]>('/api/event-handlers?kind=rule')
-      .then((data) => {
+    // Walked to completion: the panel reorders rules by drag, and a reorder
+    // write must name the caller's ENTIRE visible rule set — a partial list
+    // would submit a partial order.
+    apiListAll<RuleHandler>('/api/event-handlers/list', { kind: 'rule' })
+      .then((loaded) => {
         if (!cancelled) {
-          setRules(Array.isArray(data) ? data : [])
+          setRules(loaded)
           setLoading(false)
         }
       })

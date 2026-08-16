@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // usageOrgOpsResponse is the org-scoped operations subset an org admin sees on
@@ -52,7 +53,9 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 	}
 	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
 	if errMsg != "" {
-		writeBadActivityParam(w, errMsg)
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidParam, Message: errMsg,
+		})
 		return
 	}
 

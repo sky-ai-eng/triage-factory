@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ActivityAction, ActivityArtifact, ArtifactKind } from '../types'
-import { apiJSON, httpErrorMessage } from '../lib/apiClient'
+import type { ListRequest } from '../lib/apiClient'
+import { usePagedList } from '../hooks/usePagedList'
 import { ArtifactRow } from './ArtifactRow'
 import { ActionRow } from './ActionRow'
 import {
@@ -26,16 +27,19 @@ import { ACTION_OPTIONS, ACTION_PROVIDERS } from './actionMeta'
 //     human made, which are NOT TF actions). Rendered by ArtifactRow. The PR #505
 //     feed, kept.
 //
-// Two scopes, set by the caller's baseUrl:
+// Two scopes, set by the caller's basePath:
 //
-//   - team: /api/usage/teams/{id}/activity (team admin or org admin).
-//   - org : /api/usage/org/activity, showTeam (org admin) — rows carry the owning
-//     team (+ the authorizing actor on the Actions lens), with a client-side
+//   - team: /api/usage/teams/{id} (team admin or org admin).
+//   - org : /api/usage/org, showTeam (org admin) — rows carry the owning team
+//     (+ the authorizing actor on the Actions lens), with a client-side
 //     team-scope (and, on Actions, actor-scope) filter narrowing the loaded page.
 //
-// The lens is sent as ?view=actions|objects; the server filters + pages. Filters
-// adapt per lens (Actions: provider/action/time; Objects: provider/kind/state/
-// time). Filter state is in-memory (v1).
+// The lens is an ADDRESS, not a parameter: `${basePath}/actions/list` and
+// `${basePath}/artifacts/list` are two resources with different row shapes and
+// different filter vocabularies. They used to be one route selected by ?view=,
+// where an Objects-only `state=` filter silently did nothing on the Actions
+// lens. Filters adapt per lens (Actions: provider/action/time; Objects:
+// provider/kind/state/time). Filter state is in-memory (v1).
 
 const PAGE_SIZE = 50
 
@@ -84,45 +88,37 @@ const EMPTY_FILTERS: Filters = {
 
 type FeedRow = ActivityArtifact | ActivityAction
 
-// Loaded is one settled server page-set, tagged with the request that produced
-// it. Keeping the lens + url ALONGSIDE the rows is what lets the feed hold its
-// last good content while the next request is in flight (stale-while-revalidate,
-// same stance as the Usage page's useUsageFetch): `mode` says which row
-// component can render these rows, and `url` says whether they still answer the
-// current lens + filters. Without the tag we'd have to blank the list on every
-// toggle, which collapses the section to a 4-row skeleton and back.
-interface Loaded {
-  mode: Mode
-  url: string
-  rows: FeedRow[]
-  hasMore: boolean
+/** listPathFor resolves the lens to its own route. */
+function listPathFor(basePath: string, mode: Mode): string {
+  return `${basePath}/${mode === 'actions' ? 'actions' : 'artifacts'}/list`
 }
 
-// buildUrl composes the activity request: the lens (?view=), the server-side
-// filters for that lens, and limit/offset paging. 'all' / '' selections are
-// omitted so the backend leaves that column unfiltered.
-function buildUrl(base: string, mode: Mode, f: Filters, offset: number): string {
-  const q = new URLSearchParams()
-  q.set('view', mode)
-  if (f.provider !== 'all') q.set('provider', f.provider)
+/** filterBodyFor builds the lens's filter half of the list body. 'all' / ''
+ *  selections are omitted so the backend leaves that column unfiltered — and
+ *  each lens sends only ITS OWN vocabulary, since the routes decode strictly
+ *  and a stray `state` on the actions list is now a 400 rather than a filter
+ *  that silently does nothing. */
+function filterBodyFor(mode: Mode, f: Filters): ListRequest {
+  const body: ListRequest = {}
+  if (f.provider !== 'all') body.provider = f.provider
   if (mode === 'objects') {
-    if (f.kind !== 'all') q.set('kind', f.kind)
-    if (f.state !== 'all') q.set('state', f.state)
-  } else {
-    if (f.action !== 'all') q.set('action', f.action)
+    if (f.kind !== 'all') body.kind = f.kind
+    if (f.state !== 'all') body.state = f.state
+  } else if (f.action !== 'all') {
+    body.action = f.action
   }
   const since = sinceFor(f.range)
-  if (since) q.set('since', since)
-  q.set('limit', String(PAGE_SIZE))
-  if (offset > 0) q.set('offset', String(offset))
-  return `${base}?${q.toString()}`
+  if (since) body.since = since
+  return body
 }
 
 export default function ActivityFeed({
-  baseUrl,
+  basePath,
   showTeam = false,
 }: {
-  baseUrl: string
+  /** The scope prefix — `/api/usage/org` or `/api/usage/teams/{id}`. The lens
+   *  appends its own resource segment. */
+  basePath: string
   /** Org feed: show the owning team (+ authorizing actor) per row + client-side scope filters. */
   showTeam?: boolean
 }) {
@@ -130,9 +126,24 @@ export default function ActivityFeed({
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS)
   const [teamFilter, setTeamFilter] = useState('') // org feed only; '' = all teams
   const [actorFilter, setActorFilter] = useState('') // org + actions only; '' = all actors
-  const [loaded, setLoaded] = useState<Loaded | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [loadingMore, setLoadingMore] = useState(false)
+
+  // The request the rows on screen answer. Held alongside the hook's items so
+  // the feed can keep its last good content while the next request is in flight
+  // (stale-while-revalidate, same stance as the Usage page's useUsageFetch):
+  // `mode` says which row component can render these rows, and `key` says
+  // whether they still answer the current lens + filters. Without it we'd have
+  // to blank the list on every toggle, which collapses the section to a 4-row
+  // skeleton and back.
+  const [loaded, setLoaded] = useState<{ mode: Mode; key: string } | null>(null)
+
+  const listPath = listPathFor(basePath, mode)
+  const filterBody = filterBodyFor(mode, filters)
+  // The freshness key for the current lens + filters. (loadMore appends later
+  // pages without changing it.)
+  const pageKey = `${listPath}|${JSON.stringify(filterBody)}`
+
+  const feed = usePagedList<FeedRow>(listPath, "Couldn't load activity.")
+  const { items, load, loadMore, hasMore, loading, error } = feed
 
   const setFilter = useCallback(<K extends keyof Filters>(key: K, value: Filters[K]) => {
     setFilters((prev) => ({ ...prev, [key]: value }))
@@ -147,82 +158,52 @@ export default function ActivityFeed({
     setActorFilter('')
   }, [])
 
-  // The page-0 request for the current lens + filters. It doubles as the freshness
-  // key: `loaded.url !== pageURL` means what's on screen answers a superseded
-  // request. (loadMore appends later pages without changing it.)
-  const pageURL = buildUrl(baseUrl, mode, filters, 0)
-
-  // Page 0 (replace) on mount and whenever the lens, server-side filters, or the
-  // base url (team switch) change. The in-memory team/actor scopes are
+  // Page 1 (replace) on mount and whenever the lens, server-side filters, or the
+  // base path (team switch) change. The in-memory team/actor scopes are
   // deliberately NOT dependencies — narrowing never refetches.
   //
-  // Deliberately does NOT blank `loaded` first: the last good page stays on
+  // Deliberately does NOT blank the items first: the last good page stays on
   // screen (dimmed) until the new one lands, so toggling the lens or a filter
   // never collapses the section to a skeleton and springs back. `loaded.mode`
   // picks the row component, so holding rows across a lens switch is safe —
   // action rows keep rendering as action rows until the objects page arrives.
+  //
+  // pageKey is the only dependency: it is a string derived from the path and
+  // the filters, so a re-render that rebuilds an equal filter object doesn't
+  // refetch. `load` is stable per path, and mode/filters are what pageKey is
+  // made of.
   useEffect(() => {
     let cancelled = false
-    setError(null)
-    ;(async () => {
-      try {
-        const data = (await apiJSON<FeedRow[] | null>(pageURL)) ?? []
-        if (!cancelled) {
-          setLoaded({ mode, url: pageURL, rows: data, hasMore: data.length === PAGE_SIZE })
-        }
-      } catch (err) {
-        if (!cancelled) setError(httpErrorMessage(err, "Couldn't load activity."))
-      }
-    })()
+    load({ ...filterBody, page_size: PAGE_SIZE }).then((page) => {
+      if (page && !cancelled) setLoaded({ mode, key: pageKey })
+    })
     return () => {
       cancelled = true
     }
-  }, [pageURL, mode])
+  }, [pageKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // `superseded` = the rows on screen answer an older request than the current
-  // lens + filters, so paging against them would splice two views together.
+  // lens + filters, so paging against them would splice two views together —
+  // and the hook's held page token belongs to that older request, which the
+  // server would reject outright.
   // `stale` is the VISUAL hold that dims them; it clears on error so a failed
   // refetch doesn't leave the list dimmed forever — the error note renders under
   // the rows we still have instead.
-  const superseded = loaded !== null && loaded.url !== pageURL
-  const stale = superseded && error === null
-
-  const loadMore = useCallback(async () => {
-    if (loaded === null || loaded.url !== pageURL || loadingMore) return
-    setLoadingMore(true)
-    try {
-      // Offset is the count actually fetched from the server (loaded.rows
-      // accumulates server pages; the in-memory filters only narrow the render),
-      // so paging stays aligned with the server's newest-first cursor.
-      const data =
-        (await apiJSON<FeedRow[] | null>(buildUrl(baseUrl, mode, filters, loaded.rows.length))) ??
-        []
-      // Drop the page if the lens/filters moved while it was in flight — appending
-      // it would splice another request's rows into the current view.
-      setLoaded((prev) =>
-        prev && prev.url === pageURL
-          ? { ...prev, rows: [...prev.rows, ...data], hasMore: data.length === PAGE_SIZE }
-          : prev,
-      )
-    } catch (err) {
-      setError(httpErrorMessage(err, "Couldn't load activity."))
-    } finally {
-      setLoadingMore(false)
-    }
-  }, [baseUrl, mode, filters, pageURL, loaded, loadingMore])
+  const superseded = loaded !== null && loaded.key !== pageKey
+  const stale = superseded && error === ''
 
   // Distinct teams present in the loaded rows — the org feed's team-scope
   // options. In-memory because the org endpoint is org-wide (no team param).
   const teamOptions = useMemo(() => {
     if (!showTeam || loaded === null) return []
     const seen = new Map<string, string>()
-    for (const r of loaded.rows) {
+    for (const r of items) {
       if (r.team_id) seen.set(r.team_id, r.team_name || r.team_id)
     }
     return [...seen.entries()]
       .map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [showTeam, loaded])
+  }, [showTeam, loaded, items])
 
   // Distinct human actors present in the loaded action rows — the org + Actions
   // feed's actor-scope options (mirrors the team scope). Empty on Objects (no
@@ -230,30 +211,30 @@ export default function ActivityFeed({
   const actorOptions = useMemo(() => {
     if (!showTeam || loaded === null || loaded.mode !== 'actions') return []
     const seen = new Map<string, string>()
-    for (const r of loaded.rows as ActivityAction[]) {
+    for (const r of items as ActivityAction[]) {
       if (r.actor_user_id) seen.set(r.actor_user_id, r.actor_name || r.actor_user_id)
     }
     return [...seen.entries()]
       .map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [showTeam, loaded])
+  }, [showTeam, loaded, items])
 
   const visible = useMemo(() => {
     if (loaded === null) return null
-    let out = loaded.rows
+    let out = items
     if (showTeam && teamFilter) out = out.filter((r) => r.team_id === teamFilter)
     if (showTeam && loaded.mode === 'actions' && actorFilter) {
       out = out.filter((r) => (r as ActivityAction).actor_user_id === actorFilter)
     }
     return out
-  }, [loaded, showTeam, teamFilter, actorFilter])
+  }, [loaded, items, showTeam, teamFilter, actorFilter])
 
   const count = visible?.length ?? 0
   // The noun follows the rows actually on screen, not the selected lens — during
   // a hold the header would otherwise count "objects" over a list of actions.
   const rowMode = loaded?.mode ?? mode
   const noun = rowMode === 'actions' ? 'action' : 'object'
-  const hasMore = loaded?.hasMore ?? false
+  const loadingMore = loading && loaded !== null
 
   return (
     <section className="mb-12 last:mb-0">

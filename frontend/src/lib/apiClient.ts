@@ -124,7 +124,11 @@ export async function apiJSON<T>(path: string, options: ApiFetchOptions = {}): P
 export interface ListPage<T> {
   items: T[]
   next_page_token: string
-  total_count: number
+  /** The filtered total across every page, or `null` when the resource cannot
+   *  count itself — a proxy list over an upstream API that reports no total
+   *  (see `httpx.WriteProxyList`). `null` is never zero and never a truncation
+   *  signal: `next_page_token` is the only "there is more" on any list. */
+  total_count: number | null
 }
 
 /** Request shape for a `POST /api/<resource>/list` read: the route's filters
@@ -140,18 +144,84 @@ export type ListRequest = Record<string, unknown> & {
  *
  *  It is a POST because the filters are a body — the method is about how the
  *  request is framed, not about whether it mutates. The read itself has no
- *  side effects. */
-export async function apiList<T>(path: string, body: ListRequest): Promise<ListPage<T>> {
+ *  side effects.
+ *
+ *  `options` passes through to `apiFetch` for the few callers that need an
+ *  AbortSignal or an `allow` status. The method, content type, and body are
+ *  the hook's own: the caller's headers are spread FIRST so its
+ *  `Content-Type` cannot win. That ordering is load-bearing rather than
+ *  stylistic — the list routes decode strictly, and a caller that set some
+ *  other content type would send a JSON body under a header the server
+ *  doesn't decode as JSON, failing the request for a reason nothing in the
+ *  call site names. */
+export async function apiList<T>(
+  path: string,
+  body: ListRequest,
+  options: ApiFetchOptions = {},
+): Promise<ListPage<T>> {
   const page = await apiJSON<Partial<ListPage<T>>>(path, {
+    ...options,
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...options.headers, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
   return {
     items: page.items ?? [],
     next_page_token: page.next_page_token ?? '',
-    total_count: page.total_count ?? 0,
+    total_count: page.total_count ?? null,
   }
+}
+
+/** The most rows `apiListAll` will collect before it gives up. A declared
+ *  ceiling, not a guess: past a couple of thousand options a client-side filter
+ *  is the wrong affordance and a server-side search is the right one. Expressed
+ *  in rows rather than pages so a caller that has to use a smaller page (an
+ *  upstream-capped proxy list) gets the same bound. */
+const MAX_ROWS_TO_WALK = 2000
+
+/** apiListAll walks a `POST /…/list` read to completion and returns every row.
+ *
+ *  **Use it only where a surface genuinely needs the whole set**, which in
+ *  practice means one thing: a consumer that filters or reasons over the
+ *  options CLIENT-side. A partial load there is not a shorter list — it is a
+ *  search that silently misses, a coverage check that answers "none" about a
+ *  row on page three, a reorder that submits a partial order. Any surface that
+ *  renders rows for reading wants `usePagedList` instead, so the reader sees a
+ *  page and asks for the next one.
+ *
+ *  It walks with the server's own tokens, never a computed offset, and
+ *  **throws** rather than returning a short set once the walk passes
+ *  `MAX_ROWS_TO_WALK`. Throwing is the point: the ceiling exists to bound a
+ *  runaway, so reaching it means the caller's premise — that this set fits in
+ *  memory and can be reasoned over whole — is false. Returning the rows it
+ *  managed to collect alongside a flag put the burden on every caller to notice
+ *  and say so, and no caller did; an exception lands on the error path each one
+ *  already has, and turns a quietly wrong answer into a visible failure.
+ *
+ *  `pageSize` exists for the routes that declare a smaller maximum than the
+ *  standard 200 — the GitHub repos proxy is capped at the upstream's own 100,
+ *  and asking for more is a 400. */
+export async function apiListAll<T>(
+  path: string,
+  body: ListRequest = {},
+  options: ApiFetchOptions = {},
+  pageSize = 200,
+): Promise<T[]> {
+  const items: T[] = []
+  let token = ''
+  while (items.length <= MAX_ROWS_TO_WALK) {
+    const page: ListPage<T> = await apiList<T>(
+      path,
+      { ...body, page_size: pageSize, ...(token ? { page_token: token } : {}) },
+      options,
+    )
+    items.push(...page.items)
+    token = page.next_page_token
+    if (!token) return items
+  }
+  throw new Error(
+    `${path} has more than ${MAX_ROWS_TO_WALK} rows; this surface reads the whole set and cannot show a partial one`,
+  )
 }
 
 /** One fault in the server's error envelope: `{"errors": [{reason, message,

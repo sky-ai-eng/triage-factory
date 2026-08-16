@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"time"
 
@@ -234,44 +235,85 @@ func (s *eventQueueStore) PruneDone(ctx context.Context, before time.Time) (int,
 	return int(n), nil
 }
 
-func (s *eventQueueStore) ListFailedEvents(ctx context.Context, orgID string, limit int) ([]domain.FailedEvent, error) {
+// sqliteFailedEventColumns is the projection both the list and the single read
+// answer with, so a row read one way is byte-identical to the same row read
+// the other. LEFT JOIN for the same reason as the Postgres impl: entity_id is
+// nullable and a parked row must list whether or not its entity is still
+// there. No org_id term on the join — local is N=1, so every row in both
+// tables carries the one sentinel org and the extra predicate would only
+// restate assertLocalOrg.
+const sqliteFailedEventSelect = `
+	SELECT q.id, q.event_type,
+	       COALESCE(q.entity_id, ''), COALESCE(e.source, ''), COALESCE(e.source_id, ''), COALESCE(e.title, ''),
+	       q.attempts, COALESCE(q.last_error, ''), q.enqueued_at
+	FROM event_queue q
+	LEFT JOIN entities e ON e.id = q.entity_id
+	WHERE q.status = 'failed'`
+
+func (s *eventQueueStore) ListFailedEvents(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.FailedEvent, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	// LEFT JOIN for the same reason as the Postgres impl: entity_id is
-	// nullable and a parked row must list whether or not its entity is still
-	// there. No org_id term on the join — local is N=1, so every row in both
-	// tables carries the one sentinel org and the extra predicate would only
-	// restate assertLocalOrg above.
-	//
-	// id DESC is enqueue order reversed: most recently dropped work first.
-	rows, err := s.conn.QueryContext(ctx, `
-		SELECT q.id, q.event_type,
-		       COALESCE(q.entity_id, ''), COALESCE(e.source, ''), COALESCE(e.source_id, ''), COALESCE(e.title, ''),
-		       q.attempts, COALESCE(q.last_error, ''), q.enqueued_at
-		FROM event_queue q
-		LEFT JOIN entities e ON e.id = q.entity_id
-		WHERE q.status = 'failed'
-		ORDER BY q.id DESC
-		LIMIT ?
-	`, db.NormalizeFailedEventsLimit(limit))
+	var total int
+	if err := s.conn.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM event_queue WHERE status = 'failed'
+	`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	// id DESC is enqueue order reversed — most recently dropped work first —
+	// and it is a total order, so offset paging can neither drop nor repeat a
+	// row between pages.
+	query := sqliteFailedEventSelect + `
+		ORDER BY q.id DESC`
+	args := []any{}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT ? OFFSET ?`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.conn.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := []domain.FailedEvent{}
 	for rows.Next() {
-		var fe domain.FailedEvent
-		if err := rows.Scan(
-			&fe.ID, &fe.EventType,
-			&fe.EntityID, &fe.EntitySource, &fe.EntitySourceID, &fe.EntityTitle,
-			&fe.Attempts, &fe.LastError, &fe.EnqueuedAt,
-		); err != nil {
-			return nil, err
+		fe, err := scanFailedEvent(rows)
+		if err != nil {
+			return nil, 0, err
 		}
 		out = append(out, fe)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
+}
+
+func (s *eventQueueStore) GetFailedEvent(ctx context.Context, orgID string, id int64) (*domain.FailedEvent, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	fe, err := scanFailedEvent(s.conn.QueryRowContext(ctx, sqliteFailedEventSelect+`
+		AND q.id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &fe, nil
+}
+
+// scanFailedEvent reads one sqliteFailedEventSelect row. It takes the narrow
+// Scan interface so *sql.Row and *sql.Rows share it — the two reads must not
+// drift on column order.
+func scanFailedEvent(row interface{ Scan(...any) error }) (domain.FailedEvent, error) {
+	var fe domain.FailedEvent
+	err := row.Scan(
+		&fe.ID, &fe.EventType,
+		&fe.EntityID, &fe.EntitySource, &fe.EntitySourceID, &fe.EntityTitle,
+		&fe.Attempts, &fe.LastError, &fe.EnqueuedAt,
+	)
+	return fe, err
 }
 
 func (s *eventQueueStore) RequeueFailedEvents(ctx context.Context, orgID string, ids []int64) (int, error) {

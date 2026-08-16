@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
@@ -83,16 +84,11 @@ func TestKnowledgeMulti_RoundTrip(t *testing.T) {
 
 	// --- List: both present, note.md inlined ---
 	{
-		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader("{}"))
+		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		s.handleProjectKnowledge(rec, authed(req))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("list = %d; want 200; body=%s", rec.Code, rec.Body.String())
-		}
-		var files []knowledgeFile
-		if err := json.Unmarshal(rec.Body.Bytes(), &files); err != nil {
-			t.Fatalf("decode list: %v", err)
-		}
+		files := decodeList[knowledgeFile](t, rec).Items
 		byName := map[string]knowledgeFile{}
 		for _, f := range files {
 			byName[f.Path] = f
@@ -187,11 +183,11 @@ func TestKnowledgeMulti_RoundTrip(t *testing.T) {
 
 	// --- Final list: only clip.bin remains ---
 	{
-		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader("{}"))
+		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		s.handleProjectKnowledge(rec, authed(req))
-		var files []knowledgeFile
-		json.Unmarshal(rec.Body.Bytes(), &files)
+		files := decodeList[knowledgeFile](t, rec).Items
 		if len(files) != 1 || files[0].Path != "clip.bin" {
 			t.Fatalf("final list = %+v; want only clip.bin", files)
 		}

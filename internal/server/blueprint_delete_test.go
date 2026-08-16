@@ -22,8 +22,8 @@ func TestBlueprintDelete_CascadesPromptsAndTrigger(t *testing.T) {
 	}
 
 	// Header gone from request-facing reads (steps GET + List).
-	if g := doJSON(t, s, http.MethodGet, "/api/blueprints/"+bp+"/steps", nil); g.Code != http.StatusNotFound {
-		t.Fatalf("deleted blueprint steps GET: expected 404, got %d", g.Code)
+	if blueprintExists(t, s, bp) {
+		t.Fatal("deleted blueprint steps GET: the blueprint is still readable")
 	}
 	list := doJSON(t, s, http.MethodGet, "/api/blueprints", nil)
 	var bps []map[string]any

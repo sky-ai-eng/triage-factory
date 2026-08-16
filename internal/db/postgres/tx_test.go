@@ -78,7 +78,7 @@ func TestSyntheticClaimsWithTx_Postgres_CrossOrgLeakage(t *testing.T) {
 	// must reject the read because tf.current_org_id() resolves to
 	// orgA and repositories_all gates on (org_id = current_org_id()).
 	if err := stores.Tx.SyntheticClaimsWithTx(context.Background(), orgA, userA, func(tx db.TxStores) error {
-		got, err := tx.Repos.List(context.Background(), orgB)
+		got, _, err := tx.Repos.List(context.Background(), orgB, db.ListOpts{})
 		if err != nil {
 			return fmt.Errorf("orgB List under orgA claims: %w", err)
 		}

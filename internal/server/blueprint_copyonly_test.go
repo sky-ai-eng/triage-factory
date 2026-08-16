@@ -38,30 +38,21 @@ func TestBlueprintCreate_AutoWrapFirstPrompt(t *testing.T) {
 
 	// The blueprint has exactly one step pointing at the new prompt (the node
 	// the canvas renders, wireable to an event).
-	stepsRec := doJSON(t, s, http.MethodGet, "/api/blueprints/"+created.ID+"/steps", nil)
-	if stepsRec.Code != http.StatusOK {
-		t.Fatalf("steps GET: %d: %s", stepsRec.Code, stepsRec.Body.String())
-	}
-	var steps []map[string]any
-	if err := json.Unmarshal(stepsRec.Body.Bytes(), &steps); err != nil {
-		t.Fatalf("decode steps: %v", err)
-	}
+	steps := listBlueprintSteps(t, s, created.ID)
 	if len(steps) != 1 || steps[0]["step_prompt_id"] != created.FirstPromptID {
 		t.Fatalf("steps=%+v; want one step on %s", steps, created.FirstPromptID)
 	}
 
 	// And the prompt is visible in the prompts list.
-	listRec := doJSON(t, s, http.MethodGet, "/api/prompts", nil)
-	var prompts []map[string]any
-	_ = json.Unmarshal(listRec.Body.Bytes(), &prompts)
+	prompts := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost, "/api/prompts/list", map[string]any{}))
 	found := false
-	for _, p := range prompts {
+	for _, p := range prompts.Items {
 		if p["id"] == created.FirstPromptID {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("auto-wrapped prompt %s not in /api/prompts", created.FirstPromptID)
+		t.Fatalf("auto-wrapped prompt %s not in the prompts list", created.FirstPromptID)
 	}
 }
 
@@ -184,8 +175,8 @@ func TestPromptDelete_MultiStepBlueprintConflicts(t *testing.T) {
 		t.Fatalf("p2 should live in a new blueprint after the head split, got owner %q (original %s)", down, bp)
 	}
 	// The original blueprint is retired (request-facing steps 404).
-	if g := doJSON(t, s, http.MethodGet, "/api/blueprints/"+bp+"/steps", nil); g.Code != http.StatusNotFound {
-		t.Fatalf("retired blueprint steps GET: expected 404, got %d", g.Code)
+	if blueprintExists(t, s, bp) {
+		t.Fatal("retired blueprint steps GET: the blueprint is still readable")
 	}
 }
 
@@ -229,8 +220,8 @@ func TestPromptDelete_HeadDetachesTrigger(t *testing.T) {
 	}
 	// The original blueprint_id retires with the entry prompt; its (user) trigger
 	// is hard-deleted, not left dangling on a soft-deleted blueprint.
-	if g := doJSON(t, s, http.MethodGet, "/api/blueprints/"+bp+"/steps", nil); g.Code != http.StatusNotFound {
-		t.Fatalf("retired blueprint steps GET: expected 404, got %d", g.Code)
+	if blueprintExists(t, s, bp) {
+		t.Fatal("retired blueprint steps GET: the blueprint is still readable")
 	}
 	if n := len(triggersForBlueprint(t, s, bp)); n != 0 {
 		t.Errorf("original blueprint trigger count after head delete = %d, want 0 (detached)", n)
@@ -372,12 +363,7 @@ func attachTrigger(t *testing.T, s *Server, blueprintID, eventType string) strin
 // triggersForBlueprint returns the trigger handlers bound to blueprintID.
 func triggersForBlueprint(t *testing.T, s *Server, blueprintID string) []map[string]any {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers?kind=trigger", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("list triggers: %d: %s", rec.Code, rec.Body.String())
-	}
-	var all []map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &all)
+	all := listEventHandlers(t, s, "trigger")
 	var out []map[string]any
 	for _, h := range all {
 		if h["blueprint_id"] == blueprintID {
@@ -391,12 +377,7 @@ func triggersForBlueprint(t *testing.T, s *Server, blueprintID string) []map[str
 // blueprint.
 func stepPromptIDs(t *testing.T, s *Server, blueprintID string) []string {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodGet, "/api/blueprints/"+blueprintID+"/steps", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("steps GET %s: %d: %s", blueprintID, rec.Code, rec.Body.String())
-	}
-	var steps []map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &steps)
+	steps := listBlueprintSteps(t, s, blueprintID)
 	out := make([]string, len(steps))
 	for i, st := range steps {
 		out[i], _ = st["step_prompt_id"].(string)
@@ -409,16 +390,11 @@ func stepPromptIDs(t *testing.T, s *Server, blueprintID string) []string {
 // locatable without knowing its id).
 func ownerBlueprintOf(t *testing.T, s *Server, promptID string) string {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodGet, "/api/blueprint-steps", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bulk steps: %d: %s", rec.Code, rec.Body.String())
-	}
-	var steps []map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &steps)
-	for _, st := range steps {
-		if st["step_prompt_id"] == promptID {
-			id, _ := st["blueprint_id"].(string)
-			return id
+	for bp, steps := range listAllBlueprintSteps(t, s) {
+		for _, st := range steps {
+			if st["step_prompt_id"] == promptID {
+				return bp
+			}
 		}
 	}
 	return ""

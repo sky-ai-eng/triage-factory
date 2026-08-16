@@ -114,9 +114,13 @@ type RepositoryStore interface {
 	// clone_url from, and a caller with no id has learned nothing to write.
 	Upsert(ctx context.Context, orgID string, p domain.Repository) error
 
-	// List returns every configured repo, including those without
-	// profile text. Ordered by owner/repo for stable display.
-	List(ctx context.Context, orgID string) ([]domain.Repository, error)
+	// List returns one page of the org's configured repos plus the unpaged
+	// total, including repos without profile text. Ordered by (owner, repo)
+	// with an id tiebreaker, so the order is total and the pages partition
+	// it. A zero ListOpts.Limit (db.Unwindowed) means "no window" — the
+	// internal callers that need the whole registry to resolve a ref pass
+	// that; a list route never does.
+	List(ctx context.Context, orgID string, opts ListOpts) ([]domain.Repository, int, error)
 
 	// ListTeamScoped is the non-admin discovery read (TFAC-559): it
 	// returns only the configured repos tracked by at least one of the
@@ -135,7 +139,7 @@ type RepositoryStore interface {
 	// Local mode (SQLite, N=1): returns the same set as List — there is
 	// no other team to scope away, mirroring the local-mode asymmetry of
 	// ListActiveJiraTeamScoped / FactoryReadStore.Entities.
-	ListTeamScoped(ctx context.Context, orgID string) ([]domain.Repository, error)
+	ListTeamScoped(ctx context.Context, orgID string, opts ListOpts) ([]domain.Repository, int, error)
 
 	// ListWithContent returns only repos that have a non-empty
 	// profile_text — the subset the curator + delegate context

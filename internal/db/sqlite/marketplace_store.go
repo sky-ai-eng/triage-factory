@@ -36,8 +36,8 @@ func (s *marketplaceStore) Relist(context.Context, string, string) error {
 	return db.ErrNotApplicableInLocal
 }
 
-func (s *marketplaceStore) List(context.Context, string, string, domain.ListingFilter) ([]domain.ListingSummary, error) {
-	return nil, db.ErrNotApplicableInLocal
+func (s *marketplaceStore) List(context.Context, string, string, domain.ListingFilter, db.ListOpts) ([]domain.ListingSummary, int, error) {
+	return nil, 0, db.ErrNotApplicableInLocal
 }
 
 func (s *marketplaceStore) Get(context.Context, string, string, string) (domain.ListingDetail, error) {

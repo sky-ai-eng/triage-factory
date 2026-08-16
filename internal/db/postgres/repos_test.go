@@ -63,12 +63,12 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 
 	// List cross-org must return empty.
-	got, err := stores.Repos.List(ctx, orgB)
+	got, total, err := stores.Repos.List(ctx, orgB, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("List cross-org: %v", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("orgB List returned %d rows, want 0", len(got))
+	if len(got) != 0 || total != 0 {
+		t.Errorf("orgB List returned %d rows (total %d), want 0 / 0", len(got), total)
 	}
 
 	// ListWithContent cross-org must also return empty.
@@ -234,7 +234,7 @@ func TestRepositoryStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 		var got []domain.Repository
 		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
 			var e error
-			got, e = tx.Repos.ListTeamScoped(ctx, orgA)
+			got, _, e = tx.Repos.ListTeamScoped(ctx, orgA, db.ListOpts{Limit: 50})
 			return e
 		}); err != nil {
 			t.Fatalf("ListTeamScoped(%s): %v", userID, err)

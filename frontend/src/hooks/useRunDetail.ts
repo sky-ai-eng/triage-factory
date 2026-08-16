@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Message, Conversation, Artifact, Task, WSEvent } from '../types'
+import type { Message, Conversation, Artifact, Task, TranscriptPage, WSEvent } from '../types'
 import { apiJSON, HttpError, httpErrorMessage } from '../lib/apiClient'
 import { isActiveRun, isPermissionTerminalStatus } from '../lib/runStatus'
 import { useWebSocket } from './useWebSocket'
@@ -38,6 +38,16 @@ export interface RunDetailState {
    *  surface (has_unresolved_artifacts + the list) updates in place without
    *  blanking the whole station to a spinner mid-resolve. */
   softRefresh: () => void
+  /** True while history remains behind the held transcript. The transcript
+   *  read is bounded, so a long run opens on its tail; this is what tells a
+   *  surface to offer the way back instead of presenting the tail as the
+   *  whole conversation. */
+  hasOlderMessages: boolean
+  /** True while a back-page is in flight. */
+  loadingOlderMessages: boolean
+  /** Prepend the next page of older history. A no-op at the beginning of the
+   *  transcript or while a page is already loading. */
+  loadOlderMessages: () => Promise<void>
 }
 
 // mergeMessages folds rows into the held transcript, keeping it ordered by id
@@ -94,6 +104,17 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   const [notFound, setNotFound] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [refetchTick, setRefetchTick] = useState(0)
+  // The token addressing the page of history OLDER than the held transcript,
+  // or '' when the held copy reaches the beginning. The transcript read is
+  // bounded (500 rows), so a long run opens on its tail and this is the only
+  // way back — without it everything before the newest page is unreachable,
+  // with nothing on screen to say history was cut.
+  const [olderToken, setOlderToken] = useState('')
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  // Mirrored so loadOlder stays stable across renders (the station holds it in
+  // a click handler) while still reading the current token.
+  const olderTokenRef = useRef('')
+  const loadingOlderRef = useRef(false)
 
   const refetch = useCallback(() => setRefetchTick((n) => n + 1), [])
 
@@ -257,6 +278,48 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
     if (runID) refreshPermissions(runID)
   }, [runID, refreshPermissions])
 
+  // loadOlderMessages walks one page further back through history.
+  //
+  // The rows it brings back are OLDER than everything held, so they carry no
+  // usage the run row's SUM doesn't already count — they are seeded into the
+  // baselines exactly as the first page's rows are, and deliberately not
+  // folded. Folding them would add dollars to a total that already includes
+  // them, and over-reporting compounds where the under-reporting the load
+  // comment describes self-corrects.
+  //
+  // completeThroughRef is untouched: it is the tail watermark, and reading
+  // backward tells the repair poll nothing about the newest row.
+  const loadOlderMessages = useCallback(async () => {
+    if (!runID || !olderTokenRef.current || loadingOlderRef.current) return
+    loadingOlderRef.current = true
+    setLoadingOlder(true)
+    const token = olderTokenRef.current
+    try {
+      const page = await apiJSON<TranscriptPage>(
+        `/api/agent/conversations/${runID}/messages?page_token=${encodeURIComponent(token)}`,
+      )
+      // A run switch (or a refetch) while the page was in flight retires this
+      // answer: its rows belong to a transcript the hook no longer holds, and
+      // the token it carries was minted against that read.
+      if (runID !== lastRunIDRef.current || olderTokenRef.current !== token) return
+      for (const m of page.items) {
+        if (m.cost_usd != null) costBaseline.current?.add(m.id)
+        if (tokenDelta(m) !== null) tokenBaseline.current?.add(m.id)
+      }
+      olderTokenRef.current = page.next_page_token ?? ''
+      setOlderToken(olderTokenRef.current)
+      setMessages((prev) => mergeMessages(prev, page.items))
+    } catch (err) {
+      // Non-fatal: the held transcript stays exactly as it was, and the
+      // control stays up to retry. Blanking the station because a page of
+      // history failed would lose what is already on screen.
+      setError(httpErrorMessage(err, 'Could not load earlier messages.'))
+    } finally {
+      loadingOlderRef.current = false
+      setLoadingOlder(false)
+    }
+  }, [runID])
+
   // resolvePermission answers a prompt for this run via the shared resolver,
   // which drops it on a definitive response (200/404) and toasts a transient
   // failure (prompt stays up to retry).
@@ -282,6 +345,12 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
       completeThroughRef.current = 0
       messagesRef.current = []
       sawActiveRef.current = false
+      // The back-page token belongs to the run that minted it, and the server
+      // rejects one presented against a different read. Clearing it here is
+      // also what hides the control until the new run's load says whether
+      // there is any history behind its first page.
+      olderTokenRef.current = ''
+      setOlderToken('')
       // A new run starts with no prompts; drop the prior run's queue + timers.
       if (prevRunID) dropRun(prevRunID)
     }
@@ -313,8 +382,8 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
         // than throwing it, because the two are independent — a run whose task
         // row has gone still has a transcript worth rendering, and letting the
         // task 404 reject the pair would blank it.
-        const [msgs, taskRow] = await Promise.all([
-          apiJSON<Message[]>(`/api/agent/conversations/${runID}/messages`),
+        const [transcript, taskRow] = await Promise.all([
+          apiJSON<TranscriptPage>(`/api/agent/conversations/${runID}/messages`),
           runData.TaskID
             ? apiJSON<Task>(`/api/tasks/${runData.TaskID}`).catch((err: unknown) => ({
                 taskError: httpErrorMessage(err, 'Could not load the task.'),
@@ -322,6 +391,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
             : null,
         ])
         if (cancelled) return
+        const msgs = transcript.items
 
         // The fetched transcript's stamped rows become the baselines the
         // fold counts from: a websocket replay of any of them can't be
@@ -351,6 +421,11 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
         // A whole read: the transcript is complete through its last row,
         // so repairs start asking from there.
         completeThroughRef.current = maxMessageID(msgs)
+        // The page addressing older history, if the read was bounded. Set
+        // before the merge so a station that paints immediately already knows
+        // whether to offer the control.
+        olderTokenRef.current = transcript.next_page_token ?? ''
+        setOlderToken(olderTokenRef.current)
         // Merge by id rather than replacing. If a websocket
         // `message` event arrived between the run fetch starting and
         // the messages fetch resolving, a wholesale replace would
@@ -409,8 +484,9 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
       const settled = !isActiveRun(current)
       if (settled && !sawActiveRef.current) return
       const sinceID = completeThroughRef.current
-      apiJSON<Message[]>(`/api/agent/conversations/${runID}/messages?since_id=${sinceID}`)
-        .then((rows) => {
+      apiJSON<TranscriptPage>(`/api/agent/conversations/${runID}/messages?since_id=${sinceID}`)
+        .then((page) => {
+          const rows = page.items
           if (cancelled || runID !== lastRunIDRef.current) return
           // The closing read landed, so stop asking. Only a real response
           // counts — a failed one leaves the flag up so the next tick retries,
@@ -546,5 +622,8 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
     pendingPermissions,
     resolvePermission,
     softRefresh,
+    hasOlderMessages: olderToken !== '',
+    loadingOlderMessages: loadingOlder,
+    loadOlderMessages,
   }
 }

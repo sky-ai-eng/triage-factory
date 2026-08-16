@@ -1,5 +1,7 @@
 package db
 
+import "strings"
+
 // ListOpts is the pagination window every paginated store read takes. It is
 // deliberately dialect-neutral and filter-neutral: the filters are the read's
 // own options type, this is only "which slice of that result set."
@@ -16,4 +18,46 @@ package db
 type ListOpts struct {
 	Limit  int
 	Offset int
+}
+
+// Unwindowed is the zero ListOpts, spelled so a call site that wants every
+// matching row SAYS so.
+//
+// A read is legitimately unwindowed when its answer is a decision rather than
+// a page: which teams the caller may act as, whether a referenced blueprint is
+// visible to them, whether any handler still covers an event type. Those need
+// the whole set — a page of it would answer a different question, and answer
+// it wrongly (the row that decides the case is as likely to be on page two).
+//
+// Nothing that becomes an HTTP response body may use it. A route that returns
+// rows resolves a page through httpx.ResolvePage and passes that window; the
+// ratchet test in internal/server enforces the difference, which is the whole
+// reason this constant exists rather than a bare `ListOpts{}` literal that
+// reads the same at both kinds of call site.
+var Unwindowed = ListOpts{}
+
+// LikeEscape escapes the LIKE metacharacters in a literal so it matches
+// itself. The escape character it inserts is a single backslash, and the
+// statement must declare that same character — the clause is exactly
+//
+//	ESCAPE '\'
+//
+// one backslash between the quotes. Spelling it `ESCAPE '\\'` is not an
+// escaped backslash: neither dialect treats a backslash as special inside a
+// string literal, so those quotes hold a TWO-character string, and SQLite
+// rejects it outright ("ESCAPE expression must be a single character"). That
+// exact mistake shipped in the backfill-candidates predicate, where the query
+// lived in a Go raw string and the doubling read as ordinary Go escaping.
+// Declaring the character is still required rather than assumed, because
+// neither dialect defaults to one.
+func LikeEscape(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '\\' || r == '%' || r == '_' {
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

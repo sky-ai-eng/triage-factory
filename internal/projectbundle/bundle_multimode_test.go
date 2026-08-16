@@ -239,7 +239,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 		if len(claims) != 1 || claims[0].Outcome != "completed" {
 			t.Errorf("imported claims = %+v, want one completed engagement", claims)
 		}
-		msgs, e := tx.Curator.ListConversationMessages(ctx, dstOrg, importedConv.ID)
+		msgs, e := tx.Curator.ListConversationMessages(ctx, dstOrg, importedConv.ID, 0)
 		if e != nil {
 			return e
 		}

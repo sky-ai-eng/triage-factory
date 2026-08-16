@@ -3,7 +3,7 @@
 // further writes — no "let it finish" branch. Restore flips it back (killed runs
 // do NOT resurrect). Org-admin only, multi-mode only.
 
-import { apiFetch, apiJSON, httpErrorMessage } from './apiClient'
+import { apiFetch, apiJSON, apiList, httpErrorMessage } from './apiClient'
 
 // asError keeps a raw HttpError (message = the whole response body) out of the
 // confirm modal, which renders `err.message` directly.
@@ -28,7 +28,7 @@ export interface ArchiveResult {
   cancelled_curator_sessions: number
 }
 
-// ArchivedTeam is one entry of GET /api/teams/archived — the org-admin restore
+// ArchivedTeam is one row of POST /api/teams/archived/list — the org-admin restore
 // surface.
 export interface ArchivedTeam {
   id: string
@@ -65,8 +65,10 @@ export async function restoreTeam(teamId: string): Promise<void> {
 
 export async function fetchArchivedTeams(): Promise<ArchivedTeam[]> {
   try {
-    const data = await apiJSON<{ teams?: ArchivedTeam[] }>('/api/teams/archived')
-    return data.teams ?? []
+    // page_size at the route max: the restore surface renders the whole
+    // archived set, which is bounded by how many teams an org ever had.
+    const page = await apiList<ArchivedTeam>('/api/teams/archived/list', { page_size: 200 })
+    return page.items
   } catch (e) {
     throw asError(e, 'Could not load the archived teams.')
   }

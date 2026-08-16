@@ -2470,6 +2470,17 @@ CREATE INDEX idx_entities_closed_at ON public.entities USING btree (closed_at) W
 
 
 --
+-- Name: idx_entities_github_author; Type: INDEX; Schema: public; Owner: -
+--
+-- Serves the dashboard PR list's author predicate. That read used to select
+-- every GitHub entity in the org and drop the non-matches in Go, so its cost
+-- scaled with the org's whole PR history rather than with the caller's own
+-- PRs. The index expression and the partial predicate both match the query's.
+
+CREATE INDEX idx_entities_github_author ON public.entities USING btree (org_id, ((snapshot_json ->> 'author'::text)), last_polled_at DESC) WHERE ((source = 'github'::text) AND (snapshot_json IS NOT NULL));
+
+
+--
 -- Name: idx_entities_org_source_polled; Type: INDEX; Schema: public; Owner: -
 --
 

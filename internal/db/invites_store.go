@@ -50,12 +50,20 @@ type InvitesStore interface {
 	// App pool.
 	Create(ctx context.Context, p domain.CreateInviteParams) (string, error)
 
-	// ListActive returns the org's *redeemable* invites — un-accepted,
-	// un-revoked, AND not past expires_at — newest first. Expired rows are
-	// excluded so the list matches its name (they linger un-revoked until a
-	// re-invite's auto-revoke in Create reclaims them). Drives the
-	// pending-ghost-rows UI (a follow-up ticket). App pool.
-	ListActive(ctx context.Context, orgID string) ([]domain.OrgInvite, error)
+	// ListActive returns one page of the org's *redeemable* invites —
+	// un-accepted, un-revoked, AND not past expires_at — newest first with an
+	// id tiebreaker, plus the unpaged total. Expired rows are excluded so the
+	// list matches its name (they linger un-revoked until a re-invite's
+	// auto-revoke in Create reclaims them). Drives the pending-ghost-rows UI.
+	// App pool.
+	ListActive(ctx context.Context, orgID string, opts ListOpts) ([]domain.OrgInvite, int, error)
+
+	// GetActive returns one redeemable invite by id under the same predicate
+	// ListActive applies, or (nil, nil) when none matches. Same projection as
+	// the list, and deliberately NOT the token — the accept URL exists only in
+	// the create response, and an invite that could be re-read for its link
+	// would turn every admin read into a second issuance. App pool.
+	GetActive(ctx context.Context, orgID, inviteID string) (*domain.OrgInvite, error)
 
 	// Revoke marks a pending invite revoked in the given org and reports the
 	// outcome (not-found / ok / already-accepted). Idempotent: revoking an

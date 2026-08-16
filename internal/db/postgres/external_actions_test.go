@@ -42,7 +42,7 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 	if err := stores.ExternalActions.Record(ctx, orgID, in); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
-	got, err := stores.ExternalActions.ListByOrgSystem(ctx, orgID, domain.ExternalActionListOpts{})
+	got, _, err := stores.ExternalActions.ListByOrgSystem(ctx, orgID, domain.ExternalActionListOpts{})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 
 	// Alice reads her org's actions via the team read (app pool, RLS-active).
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByTeam(ctx, orgA, teamA, domain.ExternalActionListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByTeam(ctx, orgA, teamA, domain.ExternalActionListOpts{})
 		if err != nil {
 			return err
 		}
@@ -156,7 +156,7 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 
 	// Bob (a different org) reads zero of orgA's actions — cross-org isolation.
 	if err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-		rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByTeam(ctx, orgA, teamA, domain.ExternalActionListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByTeam(ctx, orgA, teamA, domain.ExternalActionListOpts{})
 		if err != nil {
 			return err
 		}
@@ -169,7 +169,7 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 	}
 
 	// ListByOrgSystem (admin pool) sees orgA's rows org-wide.
-	all, err := stores.ExternalActions.ListByOrgSystem(ctx, orgA, domain.ExternalActionListOpts{})
+	all, _, err := stores.ExternalActions.ListByOrgSystem(ctx, orgA, domain.ExternalActionListOpts{})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
 	}
 
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByRun(ctx, orgA, runA, domain.ExternalActionListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByRun(ctx, orgA, runA, domain.ExternalActionListOpts{})
 		if err != nil {
 			return err
 		}
@@ -225,7 +225,7 @@ func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
 	}
 
 	if err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-		rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByRun(ctx, orgA, runA, domain.ExternalActionListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByRun(ctx, orgA, runA, domain.ExternalActionListOpts{})
 		if err != nil {
 			return err
 		}

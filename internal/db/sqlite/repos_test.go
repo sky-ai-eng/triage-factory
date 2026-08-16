@@ -47,7 +47,7 @@ func TestRepositoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.Repos.GetByRef(t.Context(), bogusOrg, domain.RepoRefFromSlug("any/repo")); err == nil {
 		t.Errorf("Get with non-local orgID should error")
 	}
-	if _, err := stores.Repos.List(t.Context(), bogusOrg); err == nil {
+	if _, _, err := stores.Repos.List(t.Context(), bogusOrg, db.ListOpts{}); err == nil {
 		t.Errorf("List with non-local orgID should error")
 	}
 }
@@ -65,11 +65,11 @@ func TestRepositoryStore_SQLite_ListTeamScoped_MirrorsList(t *testing.T) {
 		t.Fatalf("SetConfigured: %v", err)
 	}
 
-	all, err := stores.Repos.List(ctx, runmode.LocalDefaultOrgID)
+	all, _, err := stores.Repos.List(ctx, runmode.LocalDefaultOrgID, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	scoped, err := stores.Repos.ListTeamScoped(ctx, runmode.LocalDefaultOrgID)
+	scoped, _, err := stores.Repos.ListTeamScoped(ctx, runmode.LocalDefaultOrgID, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("ListTeamScoped: %v", err)
 	}

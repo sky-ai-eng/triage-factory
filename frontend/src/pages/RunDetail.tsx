@@ -35,6 +35,9 @@ export default function RunDetail() {
     pendingPermissions,
     resolvePermission,
     softRefresh,
+    hasOlderMessages,
+    loadingOlderMessages,
+    loadOlderMessages,
   } = useRunDetail(runID)
 
   const [chainSteps, setChainSteps] = useState<Conversation[] | null>(null)
@@ -277,6 +280,9 @@ export default function RunDetail() {
         chainStepLabels={chainStepLabels}
         actions={actions}
         pendingPermissions={pendingPermissions}
+        hasOlderMessages={hasOlderMessages}
+        loadingOlderMessages={loadingOlderMessages}
+        onLoadOlderMessages={loadOlderMessages}
       />
     </div>
   )

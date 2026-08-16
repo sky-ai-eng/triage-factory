@@ -209,8 +209,8 @@ func TestTeamReposPut_HotPathCacheAuthoritative(t *testing.T) {
 	}
 
 	// Warm the cache through the picker endpoint.
-	if rec := doJSON(t, srv, http.MethodGet, "/api/github/repos", nil); rec.Code != http.StatusOK {
-		t.Fatalf("picker GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	if rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{}); rec.Code != http.StatusOK {
+		t.Fatalf("picker list = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
 	// Cache hit → owner/ghost absent from the enumeration → 400.

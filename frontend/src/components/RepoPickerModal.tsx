@@ -6,7 +6,7 @@ import { useActiveOrgId } from '../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID, getGitHubAppStatus, getGitHubAppInstallURL } from '../lib/githubApp'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import SearchField from './SearchField'
-import { apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiListAll, httpErrorMessage } from '../lib/apiClient'
 
 interface GitHubRepo {
   full_name: string
@@ -143,9 +143,15 @@ export default function RepoPickerModal({
     setLoading(true)
     setError('')
     try {
-      const data = await apiJSON<GitHubRepo[]>('/api/github/repos')
-      setRepos(data)
-      onReposFetched?.(data)
+      // Walk the proxy list to completion: the picker filters client-side
+      // over the whole reachable set, and a partial set would silently hide
+      // repos the user can genuinely select. apiListAll owns the walk and its
+      // ceiling, so this surface can't drift from the others — and past that
+      // ceiling it throws, which the catch below renders. The 100 is the
+      // route's own declared maximum (GitHub's per_page), not a choice here.
+      const all = await apiListAll<GitHubRepo>('/api/github/repos/list', {}, {}, 100)
+      setRepos(all)
+      onReposFetched?.(all)
     } catch (err) {
       console.error('Failed to fetch repos:', err)
       // TFAC-324's distinct 400: an active App installed on zero accounts (and

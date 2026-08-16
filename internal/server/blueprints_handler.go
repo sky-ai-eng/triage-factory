@@ -58,73 +58,106 @@ func (bh *blueprintsHandler) gateBlueprintWrite(w http.ResponseWriter, r *http.R
 
 // --- Blueprint header CRUD -----------------------------------------------
 
+// blueprintListRequest is the body of POST /api/blueprints/list. TeamID
+// narrows to one team's blueprints on the multi-team page; empty returns
+// everything visible.
+type blueprintListRequest struct {
+	TeamID string `json:"team_id"`
+
+	httpx.PageRequest
+}
+
+type blueprintListFilterKey struct {
+	TeamID string `json:"team_id"`
+}
+
+// POST /api/blueprints/list
 func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID := teamscope.SingleParam(r)
-	var blueprints []domain.Blueprint
+
+	var req blueprintListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	teamIDFilterField(&v, req.TeamID)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(blueprintListFilterKey{TeamID: req.TeamID}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	// The entitlement gate (TFAC-524) hides a blueprint whose every attached
+	// trigger fires on an event type this org isn't licensed for. It rides
+	// into the query as a filter rather than trimming the page afterwards:
+	// a post-window trim makes the page short and total_count a lie about
+	// rows the caller cannot see.
+	filter := db.BlueprintListFilter{TeamID: req.TeamID, GatedEventTypes: gatedEventTypes(orgID)}
+
+	var (
+		blueprints []domain.Blueprint
+		total      int
+	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		listed, e := tx.Blueprints.List(r.Context(), orgID, teamID)
-		if e != nil {
-			return e
-		}
-		// One query for every trigger visible at this scope, grouped by
-		// blueprint_id, instead of a per-blueprint ListForBlueprint call
-		// (TFAC-524 code review: avoids N+1 / a longer-held tx as the
-		// blueprint count grows). Safe to scope by the same teamID as the
-		// blueprint list: a trigger's team_id is pinned to its blueprint's
-		// team_id by the (blueprint_id, team_id) composite FK, so this set
-		// is exactly what per-blueprint ListForBlueprint calls would have
-		// returned.
-		triggers, e := tx.EventHandlers.List(r.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
-		if e != nil {
-			return e
-		}
-		triggersByBlueprint := make(map[string][]domain.EventHandler, len(triggers))
-		for _, tr := range triggers {
-			triggersByBlueprint[tr.BlueprintID] = append(triggersByBlueprint[tr.BlueprintID], tr)
-		}
-		// Hide a blueprint iff it has ≥1 attached trigger AND every one of its
-		// triggers' EventType fails EventTypeAllowed (TFAC-524). A blueprint
-		// with at least one allowed trigger stays (it has live non-gated
-		// behavior); a trigger-less blueprint stays (unrelated to gating).
-		// Rows persist — visibility only.
-		visible := make([]domain.Blueprint, 0, len(listed))
-		for _, bp := range listed {
-			if blueprintGatedOff(orgID, triggersByBlueprint[bp.ID]) {
-				continue
-			}
-			visible = append(visible, bp)
-		}
-		blueprints = visible
-		return nil
+		var e error
+		blueprints, total, e = tx.Blueprints.List(r.Context(), orgID, filter, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)
 		return
 	}
-	if blueprints == nil {
-		blueprints = []domain.Blueprint{}
-	}
-	writeJSON(w, http.StatusOK, blueprints)
+	httpx.WriteList(w, page, blueprints, total)
 }
 
-// blueprintGatedOff reports whether every one of triggers' event types fails
-// EventTypeAllowed for orgID. A trigger-less blueprint (len(triggers) == 0)
-// is never gated off by this check — that's the pre-existing orphaned/
-// trigger-less state, unrelated to entitlement gating.
-func blueprintGatedOff(orgID string, triggers []domain.EventHandler) bool {
-	if len(triggers) == 0 {
-		return false
-	}
-	for _, tr := range triggers {
-		if entitlements.EventTypeAllowed(orgID, tr.EventType) {
-			return false
+// gatedEventTypes returns the event types orgID is NOT entitled to fire on.
+// The catalog is a fixed, small registry, so deriving the complement here is
+// cheaper than teaching the store about entitlements — and it keeps the gate's
+// policy in one place while the store only applies a set.
+func gatedEventTypes(orgID string) []string {
+	var gated []string
+	for _, et := range domain.AllEventTypes() {
+		if !entitlements.EventTypeAllowed(orgID, et.ID) {
+			gated = append(gated, et.ID)
 		}
 	}
-	return true
+	return gated
+}
+
+// handleBlueprintGet is the canonical single read: one blueprint, in the
+// list's row shape. It is deliberately NOT entitlement-gated the way the list
+// is — the gate is a visibility rule for a browse surface, and a caller
+// holding a blueprint's id (from a run, a trigger, a link) must be able to
+// resolve its name rather than meet a 404 that reads as deletion.
+//
+// GET /api/blueprints/{id}
+func (bh *blueprintsHandler) handleBlueprintGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	if !ok {
+		return
+	}
+
+	var blueprint *domain.Blueprint
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "blueprints", err)
+		return
+	}
+	if blueprint == nil {
+		notFound(w, "blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, blueprint)
 }
 
 // firstPromptInput is the optional inline prompt the canvas's "New Prompt"
@@ -398,71 +431,150 @@ func (bh *blueprintsHandler) handleBlueprintDelete(w http.ResponseWriter, r *htt
 
 // --- Blueprint steps -----------------------------------------------------
 
-// handleBlueprintStepsAll returns every step of the scope's blueprints in one
-// read — the binding canvas's bulk fetch, which avoids an N+1 of
-// GET .../{id}/steps over the blueprint list. Always an array; the client
-// groups by blueprint_id.
+// blueprintStepListRequest is the body of POST /api/blueprint-steps/list.
+//
+// It is ONE route for what used to be two GETs — the canvas's org-wide bulk
+// fetch and the per-blueprint read. They differed only in a filter, and a
+// filter is what a list body is for; keeping them apart meant two shapes, two
+// envelopes, and two places to remember the ordering contract.
+type blueprintStepListRequest struct {
+	// TeamID narrows to one team's blueprints, like the blueprint list's.
+	TeamID string `json:"team_id"`
+	// BlueprintIDs narrows to specific blueprints. Empty is the canvas's
+	// bulk read; a single id is the old per-blueprint read.
+	BlueprintIDs []string `json:"blueprint_ids"`
+
+	httpx.PageRequest
+}
+
+type blueprintStepListFilterKey struct {
+	TeamID       string   `json:"team_id"`
+	BlueprintIDs []string `json:"blueprint_ids"`
+}
+
+// maxBlueprintStepIDs bounds the id set one request may name. A canvas asks
+// for every blueprint in scope by sending none; a caller naming more ids than
+// a team could plausibly hold is hand-rolled, and the bound keeps the IN-list
+// from growing without limit.
+const maxBlueprintStepIDs = 200
+
+// handleBlueprintStepsAll returns the steps of the scope's blueprints — the
+// binding canvas's bulk fetch (which avoids an N+1 over the blueprint list)
+// and, with blueprint_ids, the per-blueprint read.
+//
+// POST /api/blueprint-steps/list
 func (bh *blueprintsHandler) handleBlueprintStepsAll(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID := teamscope.SingleParam(r)
-	var steps []domain.BlueprintStep
+
+	var req blueprintStepListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	teamIDFilterField(&v, req.TeamID)
+	blueprintIDs := canonicalStrings(req.BlueprintIDs)
+	if len(blueprintIDs) > maxBlueprintStepIDs {
+		v.OutOfRange("blueprint_ids", fmt.Sprintf("at most %d blueprint ids per request", maxBlueprintStepIDs))
+	}
+	for _, id := range blueprintIDs {
+		if _, err := uuid.Parse(id); err != nil {
+			v.Invalid("blueprint_ids", fmt.Sprintf("blueprint id %q is not a valid blueprint id", id))
+		}
+	}
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(blueprintStepListFilterKey{
+		TeamID: req.TeamID, BlueprintIDs: blueprintIDs,
+	}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		steps []domain.BlueprintStep
+		total int
+	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		steps, e = tx.Blueprints.ListAllSteps(r.Context(), orgID, teamID)
+		steps, total, e = tx.Blueprints.ListAllSteps(r.Context(), orgID,
+			db.BlueprintStepListFilter{TeamID: req.TeamID, BlueprintIDs: blueprintIDs},
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)
 		return
 	}
-	if steps == nil {
-		steps = []domain.BlueprintStep{}
-	}
-	writeJSON(w, http.StatusOK, steps)
+	httpx.WriteList(w, page, steps, total)
 }
 
-// handleBlueprintStepsGet returns the ordered step list for a blueprint.
-// Always returns an array (never null) so frontend code can iterate without a
-// nil check.
-func (bh *blueprintsHandler) handleBlueprintStepsGet(w http.ResponseWriter, r *http.Request) {
+// blueprintRunListRequest is the body of POST /api/blueprint-runs/list. Before
+// this route the collection was unenumerable — a run could only be read by an
+// id the caller already held.
+type blueprintRunListRequest struct {
+	BlueprintID string   `json:"blueprint_id"`
+	Statuses    []string `json:"statuses"`
+
+	httpx.PageRequest
+}
+
+type blueprintRunListFilterKey struct {
+	BlueprintID string   `json:"blueprint_id"`
+	Statuses    []string `json:"statuses"`
+}
+
+// POST /api/blueprint-runs/list
+func (bh *blueprintsHandler) handleBlueprintRunsList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "blueprint")
-	if !ok {
+
+	var req blueprintRunListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	if req.BlueprintID != "" {
+		if _, err := uuid.Parse(req.BlueprintID); err != nil {
+			v.Invalid("blueprint_id", fmt.Sprintf("blueprint_id %q is not a valid blueprint id", req.BlueprintID))
+		}
+	}
+	statuses := canonicalStrings(req.Statuses)
+	for _, st := range statuses {
+		if !domain.ValidBlueprintRunStatus(st) {
+			v.Invalid("statuses", fmt.Sprintf("unknown status %q; must be one of: %s",
+				st, strings.Join(domain.BlueprintRunStatuses, ", ")))
+		}
+	}
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(blueprintRunListFilterKey{
+		BlueprintID: req.BlueprintID, Statuses: statuses,
+	}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
-	var blueprint *domain.Blueprint
-	var steps []domain.BlueprintStep
+	var (
+		runs  []domain.BlueprintRun
+		total int
+	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, id)
-		if e != nil {
-			return e
-		}
-		if blueprint == nil {
-			return nil
-		}
-		steps, e = tx.Blueprints.ListSteps(r.Context(), orgID, id)
+		runs, total, e = tx.Blueprints.ListRuns(r.Context(), orgID,
+			db.BlueprintRunListFilter{BlueprintID: req.BlueprintID, Statuses: statuses},
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)
 		return
 	}
-	if blueprint == nil {
-		notFound(w, "blueprint")
-		return
-	}
-	if steps == nil {
-		steps = []domain.BlueprintStep{}
-	}
-	writeJSON(w, http.StatusOK, steps)
+	// The rows are the run objects themselves — the same shape the single
+	// read carries under its "blueprint_run" key. The single read adds the
+	// per-step views, which are a composite of the run and its conversations
+	// and belong to opening one run, not to enumerating many.
+	httpx.WriteList(w, page, runs, total)
 }
 
 type blueprintStepInput struct {

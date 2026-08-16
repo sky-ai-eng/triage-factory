@@ -219,14 +219,7 @@ func TestRunResponse_HasUnresolved_List(t *testing.T) {
 		"octo/repo", 9, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/9", "T", "B", true))
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_id="+fixtureUUID("t_pklist"), nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET runs = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var runs []map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &runs); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	runs := listConversations(t, s, fixtureUUID("t_pklist"))
 	if len(runs) != 1 {
 		t.Fatalf("listed %d runs, want 1", len(runs))
 	}
@@ -239,8 +232,8 @@ func TestRunResponse_HasUnresolved_List(t *testing.T) {
 }
 
 // TestRunResponse_ArtifactCount_List pins that the batched count flows through
-// the run-list path (GET /api/agent/conversations?task_id=...): two runs on one task get
-// their own correct counts from the single CountByRun batch.
+// the run-list path (POST /api/agent/conversations/list): two runs on one task
+// get their own correct counts from the single CountByRun batch.
 func TestRunResponse_ArtifactCount_List(t *testing.T) {
 	s := newTestServer(t)
 	// seedSteerRun mints task t_lst with run r_lst and prompt p_lst; add a
@@ -261,14 +254,7 @@ func TestRunResponse_ArtifactCount_List(t *testing.T) {
 	seedRunArtifact(t, s, run1, mkComment("l2"))
 	seedRunArtifact(t, s, run2, mkComment("l3"))
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_id="+taskID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET runs = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var runs []map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &runs); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	runs := listConversations(t, s, taskID)
 	if len(runs) != 2 {
 		t.Fatalf("listed %d runs, want 2", len(runs))
 	}

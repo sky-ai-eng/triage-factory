@@ -15,7 +15,7 @@ import { useOrgHref } from '../hooks/useOrgHref'
 import { linkifyMarkdown, type LinkifyContext } from '../lib/linkify'
 import { toast } from './Toast/toastStore'
 import PromptPicker from './PromptPicker'
-import { apiJSON } from '../lib/apiClient'
+import { apiJSON, apiListAll } from '../lib/apiClient'
 import type { Message, CuratorRequestWithMessages, Project, Prompt, ToolCall } from '../types'
 
 const SYSTEM_TICKET_SPEC_PROMPT_ID = 'system-ticket-spec'
@@ -67,11 +67,12 @@ export default function CuratorChat({ project, onPatch }: Props) {
   const refetchPrompts = useMemo(
     () => () => {
       const ac = new AbortController()
-      const q = promptTeamId ? `?team_id=${encodeURIComponent(promptTeamId)}` : ''
-      apiJSON<Prompt[]>(`/api/prompts${q}`, { signal: ac.signal })
-        .then((d) => {
+      apiListAll<Prompt>('/api/prompts/list', promptTeamId ? { team_id: promptTeamId } : {}, {
+        signal: ac.signal,
+      })
+        .then((prompts) => {
           if (ac.signal.aborted) return
-          if (Array.isArray(d)) setPrompts(d)
+          setPrompts(prompts)
         })
         .catch(() => {
           // Header button degrades to "Spec skill" without a name.

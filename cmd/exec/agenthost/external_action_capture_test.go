@@ -70,7 +70,7 @@ func newCaptureStoresConn(t *testing.T, eventTriggered bool) (*sql.DB, db.Stores
 
 func listExternalActions(t *testing.T, stores db.Stores) []domain.ExternalAction {
 	t.Helper()
-	rows, err := stores.ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{})
+	rows, _, err := stores.ExternalActions.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalActionListOpts{})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem: %v", err)
 	}

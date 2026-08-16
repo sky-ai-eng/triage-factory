@@ -113,6 +113,53 @@ equivalent so the two are distinguishable — the `PATCH
 One clearing convention everywhere: no empty-string sentinels, no
 zero-means-null, no fields that cannot be cleared at all.
 
+### R6 — Addressing: what a scope segment means
+
+Three ways of naming a scope coexist on this surface, and they are not
+interchangeable. Each says something different about *whose* data is
+being read, and the difference is what tells a reader — and an auditor —
+which authorization applies. Writing them down here is the point: the
+inconsistency the audit found was never that three forms exist, it was
+that nothing said which was which, so new routes picked one at random.
+
+**Session-implied scope — viewer-relative reads.** `/api/me`,
+`/api/usage/me`, `/api/dashboard/*`. The subject is *the caller*, and it
+comes from the session, never from the path. These are the only routes
+where the absence of a scope segment is meaningful: there is no id to
+put there, because the answer is different for every caller and no
+caller may address another's. A `?user=` on one of these would be an
+impersonation surface.
+
+**Path-scoped — admin-scoped resources.** `/api/orgs/{org_id}/…`,
+`/api/teams/{team_id}/…`, `/api/usage/teams/{team_id}/…`. The subject is
+a *named* org or team, so the caller is asserting a scope and the
+handler authorizes them against it. Anything an admin reads about
+somebody else's scope belongs here, because the id in the path is what
+the authorization check has to be about.
+
+**Query-scoped — operator diagnostics.** The fleet console's `?org=`.
+The subject is a deployment-wide view being narrowed for inspection, not
+a tenant boundary being asserted; the authorization is "operator", and
+it does not vary with the value. This form is available to the fleet
+surface and nothing else — a tenant-facing route that narrows by a
+query param is a route whose scope check can be skipped by omitting the
+param.
+
+**A team segment takes one grammar, everywhere.** `{team_id}` accepts a
+uuid, and in local mode additionally the literal `default` (the sole
+team, which has no id a user could know). Multi mode requires the uuid.
+One resolver implements this — `authz.Checker.ResolveTeamID`, wrapped by
+`TeamIDFromPath` — and every handler with a `{team_id}` segment calls
+it, so a segment that resolves to nothing is a 404 rather than a 500
+from a uuid cast three layers down.
+
+**Moving a route between these forms is a route change, not a cleanup.**
+The settings family is the one migration in flight (8/8 moves
+`/api/settings/team/{team_id}` and `/api/settings/org` under their
+resources); nothing else moves on the strength of this section. The
+section exists so the next route is placed correctly, not so existing
+ones get churned.
+
 ---
 
 ## 2. Kernel work (cross-cutting)

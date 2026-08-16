@@ -100,23 +100,23 @@ func (r *repoScopeRig) req(method, path, callerID string, body any) *http.Reques
 	return req.WithContext(ctx)
 }
 
-func repoSlugsFromJSON(t *testing.T, body []byte) []string {
+// listRepos calls the registry list as callerID and returns the page.
+func (r *repoScopeRig) listRepos(t *testing.T, callerID string) listEnvelope[repoJSON] {
 	t.Helper()
-	var rows []struct {
-		Owner string `json:"owner"`
-		Repo  string `json:"repo"`
-	}
-	if err := json.Unmarshal(body, &rows); err != nil {
-		t.Fatalf("decode repo list: %v; body=%s", err, body)
-	}
-	out := make([]string, len(rows))
-	for i, row := range rows {
+	rec := httptest.NewRecorder()
+	r.s.handleRepositories(rec, r.req(http.MethodPost, "/api/repos/list", callerID, map[string]any{}))
+	return decodeList[repoJSON](t, rec)
+}
+
+func listedRepoSlugs(page listEnvelope[repoJSON]) []string {
+	out := make([]string, len(page.Items))
+	for i, row := range page.Items {
 		out[i] = row.Owner + "/" + row.Repo
 	}
 	return out
 }
 
-// TestHandleRepositories_TeamScoped pins the TFAC-559 fix: GET /api/repos
+// TestHandleRepositories_TeamScoped pins the TFAC-559 fix: the registry list
 // returns the org-wide union for an org admin, only the caller's own team's
 // tracked repos for a plain member, and nothing for a teamless member —
 // where before the fix every caller saw the full org-wide list regardless
@@ -124,36 +124,26 @@ func repoSlugsFromJSON(t *testing.T, body []byte) []string {
 func TestHandleRepositories_TeamScoped(t *testing.T) {
 	rig := newRepoScopeRig(t)
 
-	// Org owner (admin) sees the org-wide union: both teams' repos.
-	rec := httptest.NewRecorder()
-	rig.s.handleRepositories(rec, rig.req(http.MethodGet, "/api/repos", rig.orgOwner, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("owner GET /api/repos: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := repoSlugsFromJSON(t, rec.Body.Bytes()); !equalSlugs(got, []string{"acme/api", "acme/web"}) {
-		t.Errorf("owner (org admin) repos = %v, want org-wide [acme/api acme/web]", got)
+	// Org owner (admin) sees the org-wide union: both teams' repos. The
+	// total_count is scoped the same way the rows are — it counts what the
+	// caller may see, not what the table holds.
+	owner := rig.listRepos(t, rig.orgOwner)
+	if got := listedRepoSlugs(owner); !equalSlugs(got, []string{"acme/api", "acme/web"}) || owner.Total() != 2 {
+		t.Errorf("owner (org admin) repos = %v (total %d), want org-wide [acme/api acme/web]", got, owner.Total())
 	}
 
 	// teamB member sees only teamB's tracked repo (acme/web), not teamA's
 	// (acme/api) — the cross-team leak this ticket fixes.
-	rec = httptest.NewRecorder()
-	rig.s.handleRepositories(rec, rig.req(http.MethodGet, "/api/repos", rig.memberB, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("memberB GET /api/repos: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := repoSlugsFromJSON(t, rec.Body.Bytes()); !equalSlugs(got, []string{"acme/web"}) {
-		t.Errorf("memberB repos = %v, want only [acme/web]", got)
+	member := rig.listRepos(t, rig.memberB)
+	if got := listedRepoSlugs(member); !equalSlugs(got, []string{"acme/web"}) || member.Total() != 1 {
+		t.Errorf("memberB repos = %v (total %d), want only [acme/web] with total 1", got, member.Total())
 	}
 
 	// A teamless member sees zero repos — before the fix this returned the
 	// full org-wide list to any org member regardless of team membership.
-	rec = httptest.NewRecorder()
-	rig.s.handleRepositories(rec, rig.req(http.MethodGet, "/api/repos", rig.teamless, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("teamless GET /api/repos: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := repoSlugsFromJSON(t, rec.Body.Bytes()); len(got) != 0 {
-		t.Errorf("teamless member repos = %v, want empty", got)
+	teamless := rig.listRepos(t, rig.teamless)
+	if got := listedRepoSlugs(teamless); len(got) != 0 || teamless.Total() != 0 {
+		t.Errorf("teamless member repos = %v (total %d), want empty", got, teamless.Total())
 	}
 }
 
@@ -266,21 +256,9 @@ func TestHandleRepositories_CanEdit(t *testing.T) {
 
 	canEdit := func(callerID string) map[string]bool {
 		t.Helper()
-		rec := httptest.NewRecorder()
-		rig.s.handleRepositories(rec, rig.req(http.MethodGet, "/api/repos", callerID, nil))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s GET /api/repos: status = %d; body=%s", callerID, rec.Code, rec.Body.String())
-		}
-		var rows []struct {
-			Owner   string `json:"owner"`
-			Repo    string `json:"repo"`
-			CanEdit bool   `json:"can_edit"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
-			t.Fatalf("decode repo list: %v; body=%s", err, rec.Body.String())
-		}
-		out := make(map[string]bool, len(rows))
-		for _, row := range rows {
+		page := rig.listRepos(t, callerID)
+		out := make(map[string]bool, len(page.Items))
+		for _, row := range page.Items {
 			out[row.Owner+"/"+row.Repo] = row.CanEdit
 		}
 		return out
@@ -323,7 +301,7 @@ func TestHandleRepoBranches_TeamScoped(t *testing.T) {
 
 	branches := func(callerID, owner, repo string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
-		req := rig.req(http.MethodGet, "/api/repos/"+owner+"/"+repo+"/branches", callerID, nil)
+		req := rig.req(http.MethodPost, "/api/repos/"+owner+"/"+repo+"/branches/list", callerID, map[string]any{})
 		req.SetPathValue("owner", owner)
 		req.SetPathValue("repo", repo)
 		rig.s.handleRepoBranches(rec, req)
@@ -333,14 +311,14 @@ func TestHandleRepoBranches_TeamScoped(t *testing.T) {
 	// memberB's team doesn't track acme/api — blocked at the gate, 404,
 	// before any GitHub credential resolution is attempted.
 	if rec := branches(rig.memberB, "acme", "api"); rec.Code != http.StatusNotFound {
-		t.Fatalf("memberB GET acme/api/branches: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("memberB branches list for acme/api: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 
 	// memberB's team does track acme/web — passes the gate and reaches the
 	// (unconfigured, in this test) GitHub resolver, which answers 409
 	// NOT_CONFIGURED, distinctly from the gate's 404.
 	if rec := branches(rig.memberB, "acme", "web"); rec.Code != http.StatusConflict {
-		t.Fatalf("memberB GET acme/web/branches: status = %d, want 409 (gate passed, no GitHub creds); body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("memberB branches list for acme/web: status = %d, want 409 (gate passed, no GitHub creds); body=%s", rec.Code, rec.Body.String())
 	}
 }
 

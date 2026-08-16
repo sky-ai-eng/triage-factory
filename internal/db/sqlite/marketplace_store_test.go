@@ -37,7 +37,7 @@ func TestMarketplaceStore_SQLite_EveryMethodReturnsErrNotApplicableInLocal(t *te
 	if err := m.Relist(ctx, orgID, listingID); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("Relist = %v, want ErrNotApplicableInLocal", err)
 	}
-	if _, err := m.List(ctx, orgID, userID, domain.ListingFilter{}); !errors.Is(err, db.ErrNotApplicableInLocal) {
+	if _, _, err := m.List(ctx, orgID, userID, domain.ListingFilter{}, db.ListOpts{Limit: 50}); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("List = %v, want ErrNotApplicableInLocal", err)
 	}
 	if _, err := m.Get(ctx, orgID, listingID, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {

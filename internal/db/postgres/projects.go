@@ -143,12 +143,14 @@ func (s *projectStore) GetSystem(ctx context.Context, orgID, id string) (*domain
 	return getProjectWithPins(ctx, s.admin, row)
 }
 
-func (s *projectStore) List(ctx context.Context, orgID string) ([]domain.Project, error) {
-	return listProjects(ctx, s.q, orgID)
+func (s *projectStore) List(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Project, int, error) {
+	return listProjects(ctx, s.q, orgID, opts)
 }
 
 func (s *projectStore) ListSystem(ctx context.Context, orgID string) ([]domain.Project, error) {
-	return listProjects(ctx, s.admin, orgID)
+	// Unwindowed: system callers resolve the whole set.
+	rows, _, err := listProjects(ctx, s.admin, orgID, db.Unwindowed)
+	return rows, err
 }
 
 // ResolveOrgSystem returns the project's owning org id via the admin
@@ -179,40 +181,49 @@ func (s *projectStore) ResolveOrgSystem(ctx context.Context, projectID string) (
 	return orgID, nil
 }
 
-func listProjects(ctx context.Context, q queryer, orgID string) ([]domain.Project, error) {
-	rows, err := q.QueryContext(ctx, `
+func listProjects(ctx context.Context, q queryer, orgID string, opts db.ListOpts) ([]domain.Project, int, error) {
+	var total int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE org_id = $1`, orgID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `
 		SELECT id, name, description,
 		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
 		       team_id, visibility, creator_user_id, created_at, updated_at
 		FROM projects
 		WHERE org_id = $1
-		ORDER BY LOWER(name) ASC
-	`, orgID)
+		ORDER BY LOWER(name) ASC, id`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += ` LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := []domain.Project{}
 	for rows.Next() {
 		p, err := scanProjectRow(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if p != nil {
 			out = append(out, *p)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	refs := make([]*domain.Project, len(out))
 	for i := range out {
 		refs[i] = &out[i]
 	}
 	if err := attachPinnedRepos(ctx, q, refs); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return out, nil
+	return out, total, nil
 }
 
 // getProjectWithPins scans one project row and fills its pinned repos, on

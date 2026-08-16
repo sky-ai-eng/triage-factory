@@ -93,41 +93,50 @@ func (s *projectStore) GetSystem(ctx context.Context, orgID, id string) (*domain
 	return s.Get(ctx, orgID, id)
 }
 
-func (s *projectStore) List(ctx context.Context, orgID string) ([]domain.Project, error) {
+func (s *projectStore) List(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Project, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	rows, err := s.q.QueryContext(ctx, `
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `
 		SELECT id, name, description,
 		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
 		       team_id, visibility, creator_user_id, created_at, updated_at
-		FROM projects ORDER BY LOWER(name) ASC
-	`)
+		FROM projects ORDER BY LOWER(name) ASC, id`
+	args := []any{}
+	if opts.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := []domain.Project{}
 	for rows.Next() {
 		p, err := scanSqliteProjectRow(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if p != nil {
 			out = append(out, *p)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	refs := make([]*domain.Project, len(out))
 	for i := range out {
 		refs[i] = &out[i]
 	}
 	if err := attachPinnedRepos(ctx, s.q, refs); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return out, nil
+	return out, total, nil
 }
 
 func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Project) error {
@@ -168,7 +177,9 @@ func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Projec
 // so this delegates straight through with the same assertLocalOrg
 // gate.
 func (s *projectStore) ListSystem(ctx context.Context, orgID string) ([]domain.Project, error) {
-	return s.List(ctx, orgID)
+	// Unwindowed: system callers resolve the whole set.
+	rows, _, err := s.List(ctx, orgID, db.Unwindowed)
+	return rows, err
 }
 
 // ResolveOrgSystem returns the local sentinel org for any known

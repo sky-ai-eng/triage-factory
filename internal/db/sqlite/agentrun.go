@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -545,53 +546,85 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 	return runs, rows.Err()
 }
 
-func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.Conversation, error) {
+func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string, opts db.ListOpts) ([]domain.Conversation, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if len(taskIDs) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
+	// A window is meaningless across statements, so a windowed read must be a
+	// single IN list. The HTTP route caps its id set at exactly inListChunkSize,
+	// so this refusal is unreachable from a real caller and exists so a future
+	// one fails loudly instead of receiving a window over the first chunk only.
+	if opts.Limit > 0 && len(taskIDs) > inListChunkSize {
+		return nil, 0, fmt.Errorf("sqlite ListForTasks: a windowed read takes at most %d task ids, got %d", inListChunkSize, len(taskIDs))
+	}
+
+	total := 0
+	for _, chunk := range chunkIDs(taskIDs) {
+		placeholders, args := inListArgs(chunk)
+		var n int
+		if err := s.q.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM conversations WHERE task_id IN (`+placeholders+`)`, args...,
+		).Scan(&n); err != nil {
+			return nil, 0, err
+		}
+		total += n
+	}
+
 	// ?-placeholder IN list (SQLite has no array bind), mirroring
 	// artifactStore.ListByRuns, chunked to stay inside SQLite's variable
-	// limit (chunkIDs). Each task_id falls in exactly one chunk, so a task's
-	// runs are returned contiguously and newest-first among themselves
-	// (order ACROSS tasks is chunk order, not started_at) — which is all the
-	// caller, grouping by run.TaskID, relies on. Same projection as ListForTask.
+	// limit (chunkIDs) on the unwindowed path. Ordering by (task_id,
+	// started_at DESC, id) makes a windowed read's pages partition a total
+	// order; on the unwindowed chunked path the order ACROSS chunks is chunk
+	// order, which is all the caller — grouping by run.TaskID — relies on.
+	// Same projection as ListForTask.
 	var runs []domain.Conversation
 	for _, chunk := range chunkIDs(taskIDs) {
-		placeholders := make([]string, len(chunk))
-		args := make([]any, len(chunk))
-		for i, id := range chunk {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-		rows, err := s.q.QueryContext(ctx, `
-			SELECT `+sqliteRunColumns+`
+		placeholders, args := inListArgs(chunk)
+		query := `
+			SELECT ` + sqliteRunColumns + `
 			FROM conversations r
 			LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id
 			LEFT JOIN agents a ON a.id = r.actor_agent_id
-			WHERE r.task_id IN (`+strings.Join(placeholders, ", ")+`)
-			ORDER BY r.started_at DESC
-		`, args...)
+			WHERE r.task_id IN (` + placeholders + `)
+			ORDER BY r.task_id, r.started_at DESC, r.id`
+		if opts.Limit > 0 {
+			query += ` LIMIT ? OFFSET ?`
+			args = append(args, opts.Limit, opts.Offset)
+		}
+		rows, err := s.q.QueryContext(ctx, query, args...)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		for rows.Next() {
 			var r domain.Conversation
 			if err := scanConversationRows(rows, &r); err != nil {
 				rows.Close()
-				return nil, err
+				return nil, 0, err
 			}
 			runs = append(runs, r)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, 0, err
 		}
 		rows.Close()
 	}
-	return runs, nil
+	return runs, total, nil
+}
+
+// inListArgs renders an id slice as a "?, ?, ?" placeholder list plus its
+// bind args.
+func inListArgs(ids []string) (string, []any) {
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	return strings.Join(placeholders, ", "), args
 }
 
 // HasActiveAutoRunForTask: any non-terminal trigger_type='event' run on the
@@ -1194,6 +1227,53 @@ func (s *agentRunStore) MessagesSince(ctx context.Context, orgID, runID string, 
 	}
 	defer rows.Close()
 	return scanMessageRows(rows)
+}
+
+func (s *agentRunStore) MessagesWindow(ctx context.Context, orgID, runID string, w db.MessageWindow) ([]domain.Message, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	// Same visibility filter and same placement ordering as MessagesSince —
+	// see its comment. What differs is the window: a backward page selects
+	// the NEWEST rows below a ceiling, which means ordering DESC to pick them
+	// and reversing afterwards so the caller always receives oldest-first.
+	where := `conversation_id = ? AND NOT (delivered = 0 AND window_state = 'inactive')`
+	args := []any{runID}
+	order := `ORDER BY COALESCE(seq, id) ASC`
+	reverse := false
+	switch {
+	case w.SinceID > 0:
+		where += ` AND id > ?`
+		args = append(args, w.SinceID)
+	case w.BeforeID > 0:
+		where += ` AND id < ?`
+		args = append(args, w.BeforeID)
+		order = `ORDER BY COALESCE(seq, id) DESC`
+		reverse = true
+	default:
+		if w.Limit > 0 {
+			order = `ORDER BY COALESCE(seq, id) DESC`
+			reverse = true
+		}
+	}
+	query := `SELECT ` + sqliteMessageColumns + ` FROM messages WHERE ` + where + ` ` + order
+	if w.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, w.Limit)
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out, err := scanMessageRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	if reverse {
+		slices.Reverse(out)
+	}
+	return out, nil
 }
 
 func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Message, error) {

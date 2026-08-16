@@ -32,6 +32,25 @@ import (
 //     otherwise gate on creator_user_id = tf.current_user_id().
 //
 // SQLite: one connection; orgID is the local sentinel for local mode.
+// EventHandlerListFilter is the event-handler list's filter set.
+type EventHandlerListFilter struct {
+	// Kind is "" (both), "rule", or "trigger".
+	Kind string
+	// TeamID scopes to one team's handlers; "" returns everything visible
+	// (solo/local, or an unfiltered view). Every handler is team-owned
+	// (team_id NOT NULL, no org-visible tier), so this is a plain team
+	// filter. The SQLite impl ignores it — local mode is single-team.
+	TeamID string
+	// GatedEventTypes are event types this org is not entitled to; handlers
+	// bound to one are hidden. Rows persist regardless of entitlement state —
+	// this is visibility only.
+	//
+	// It filters in the query rather than after the read for the same reason
+	// BlueprintListFilter's does: a post-window trim shortens the page and
+	// leaves total_count counting rows the caller cannot see.
+	GatedEventTypes []string
+}
+
 type EventHandlerStore interface {
 	// Seed materializes every row in ShippedEventHandlers as the given
 	// team's own copy if it isn't already present, leaving existing rows
@@ -60,16 +79,11 @@ type EventHandlerStore interface {
 	// creation time to inherit the shipped defaults.
 	Seed(ctx context.Context, orgID, teamID string, blueprintIDsBySlug map[string]string) error
 
-	// List returns handlers in the order:
+	// List returns one page of handlers plus the unpaged total, in the order:
 	//   rules first by sort_order ASC, then name ASC,
-	//   then triggers by created_at DESC.
-	// kind="" returns all. kind="rule" or kind="trigger" filters.
-	// teamID="" returns all (solo/local, or unfiltered). A non-empty
-	// teamID — the multi-team prompts page narrowed to one team — scopes
-	// to that team's handlers. Every handler is team-owned (team_id NOT
-	// NULL, no org-visible tier), so this is a plain team
-	// filter. The SQLite impl ignores it (local mode is single-team).
-	List(ctx context.Context, orgID string, kind string, teamID string) ([]domain.EventHandler, error)
+	//   then triggers by created_at DESC,
+	// with an id tiebreaker so the order is total and the pages partition it.
+	List(ctx context.Context, orgID string, f EventHandlerListFilter, opts ListOpts) ([]domain.EventHandler, int, error)
 
 	// Get returns one handler by id, or (nil, nil) if not found or soft-deleted.
 	Get(ctx context.Context, orgID string, id string) (*domain.EventHandler, error)

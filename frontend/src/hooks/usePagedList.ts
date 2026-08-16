@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import { apiList, httpErrorMessage } from '../lib/apiClient'
+import { apiList, httpErrorMessage, HttpError } from '../lib/apiClient'
 import type { ListPage, ListRequest } from '../lib/apiClient'
 
 /** What a paged list surface gets back from the hook.
@@ -7,9 +7,20 @@ import type { ListPage, ListRequest } from '../lib/apiClient'
  *  `items` accumulates: `load` replaces it with the first page, `loadMore`
  *  appends the next one. `total` is what the filters match, so a caller can
  *  render "12 of 213" without counting anything itself. */
+export interface PagedListOptions {
+  /** HTTP statuses that mean "you have nothing here", not "the read failed".
+   *  A list behind an admin gate answers 403 to a viewer whose role changed
+   *  mid-session; rendering that as an empty panel is honest, while an error
+   *  line alarms about a surface they are simply no longer entitled to. */
+  emptyOnStatus?: number[]
+}
+
 export interface PagedList<T> {
   items: T[]
-  total: number
+  /** What the filters match across every page, so a caller can render
+   *  "12 of 213" without counting anything itself — or `null` on a proxy list,
+   *  whose upstream reports no total. Render "12" there, not "12 of 0". */
+  total: number | null
   /** True while a load or loadMore is in flight. */
   loading: boolean
   /** The last failure's user-facing message, or '' — the items are left
@@ -47,9 +58,13 @@ export interface PagedList<T> {
  *
  *  `fallbackError` is the message surfaced when a request fails without a
  *  server-supplied one; write it as a whole sentence. */
-export function usePagedList<T>(path: string, fallbackError: string): PagedList<T> {
+export function usePagedList<T>(
+  path: string,
+  fallbackError: string,
+  opts: PagedListOptions = {},
+): PagedList<T> {
   const [items, setItems] = useState<T[]>([])
-  const [total, setTotal] = useState(0)
+  const [total, setTotal] = useState<number | null>(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [nextToken, setNextToken] = useState('')
@@ -82,6 +97,14 @@ export function usePagedList<T>(path: string, fallbackError: string): PagedList<
         setError('')
         return page
       } catch (err) {
+        if (isEmptyStatus(err, opts.emptyOnStatus)) {
+          setItems([])
+          setTotal(0)
+          setNextToken('')
+          tokenRef.current = ''
+          setError('')
+          return null
+        }
         // Keep the items: blanking a column on one failed poll is worse than
         // showing a slightly stale page, and the next load reconciles.
         setError(httpErrorMessage(err, fallbackError))
@@ -91,7 +114,7 @@ export function usePagedList<T>(path: string, fallbackError: string): PagedList<
         setLoading(false)
       }
     },
-    [path, fallbackError],
+    [path, fallbackError, opts.emptyOnStatus],
   )
 
   const loadMore = useCallback(async () => {
@@ -109,12 +132,20 @@ export function usePagedList<T>(path: string, fallbackError: string): PagedList<
       tokenRef.current = page.next_page_token
       setError('')
     } catch (err) {
-      setError(httpErrorMessage(err, fallbackError))
+      if (!isEmptyStatus(err, opts.emptyOnStatus)) {
+        setError(httpErrorMessage(err, fallbackError))
+      }
     } finally {
       inFlight.current = false
       setLoading(false)
     }
-  }, [path, fallbackError])
+  }, [path, fallbackError, opts.emptyOnStatus])
 
   return { items, total, loading, error, hasMore: nextToken !== '', load, loadMore, setItems }
+}
+
+/** isEmptyStatus reports whether a failed request is one the caller declared
+ *  as "nothing to show" rather than a failure. */
+function isEmptyStatus(err: unknown, statuses: number[] | undefined): boolean {
+  return statuses !== undefined && err instanceof HttpError && statuses.includes(err.status)
 }

@@ -292,7 +292,7 @@ func TestUsageAccessLog_GatesAndEntitlement_Postgres(t *testing.T) {
 
 	t.Run("org_member_403", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageAccessLog(rec, r.req(r.member, ""))
+		r.uh.handleUsageAccessLog(rec, r.activityReq(r.member, "", ""))
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("plain member = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
@@ -301,7 +301,7 @@ func TestUsageAccessLog_GatesAndEntitlement_Postgres(t *testing.T) {
 	t.Run("team_admin_org_member_403", func(t *testing.T) {
 		// A team admin is still only an org member — the audit log is org-admin-only.
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageAccessLog(rec, r.req(r.teamAdmin, ""))
+		r.uh.handleUsageAccessLog(rec, r.activityReq(r.teamAdmin, "", ""))
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("team admin (org member) = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
@@ -309,14 +309,10 @@ func TestUsageAccessLog_GatesAndEntitlement_Postgres(t *testing.T) {
 
 	t.Run("org_admin_200_reads_log_with_names", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageAccessLog(rec, r.req(r.orgAdmin, ""))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("org admin = %d, want 200; body=%s", rec.Code, rec.Body.String())
-		}
-		var resp accessLogResponse
-		mustDecode(t, rec, &resp)
-		if len(resp.Items) != 1 {
-			t.Fatalf("items = %d, want 1: %+v", len(resp.Items), resp.Items)
+		r.uh.handleUsageAccessLog(rec, r.activityReq(r.orgAdmin, "", ""))
+		resp := decodeList[accessChangeJSON](t, rec)
+		if len(resp.Items) != 1 || resp.Total() != 1 {
+			t.Fatalf("items = %d / total %d, want 1/1: %+v", len(resp.Items), resp.Total(), resp.Items)
 		}
 		row := resp.Items[0]
 		if row.Action != domain.AccessActionOrgRoleChanged {

@@ -36,7 +36,10 @@ export function useTeamRole(): TeamRoleState {
 
   const byId = useMemo(() => {
     const m = new Map<string, string>()
-    for (const t of teams) m.set(t.id, t.role)
+    // A row with no role (an archived team an org admin never joined) simply
+    // isn't in the map, so roleForTeam answers null the same way it does for a
+    // team the viewer cannot see at all.
+    for (const t of teams) if (t.role) m.set(t.id, t.role)
     return m
   }, [teams])
 

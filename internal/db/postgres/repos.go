@@ -265,23 +265,38 @@ func insertRepositoryRow(ctx context.Context, q queryer, orgID string, ref domai
 	return nil
 }
 
-func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.Repository, error) {
-	return listRepositories(ctx, s.q, orgID)
+func (s *repoStore) List(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Repository, int, error) {
+	return listRepositories(ctx, s.q, orgID, opts)
 }
 
 func (s *repoStore) ListSystem(ctx context.Context, orgID string) ([]domain.Repository, error) {
-	return listRepositories(ctx, s.admin, orgID)
+	// System callers resolve the whole registry (a slug lookup, a profiling
+	// pass), so they take the unwindowed read and discard the count.
+	rows, _, err := listRepositories(ctx, s.admin, orgID, db.Unwindowed)
+	return rows, err
 }
 
-func listRepositories(ctx context.Context, q queryer, orgID string) ([]domain.Repository, error) {
-	rows, err := q.QueryContext(ctx, `
-		SELECT `+repoProfileFullColumns+`
+func listRepositories(ctx context.Context, q queryer, orgID string, opts db.ListOpts) ([]domain.Repository, int, error) {
+	var total int
+	if err := q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM repositories WHERE org_id = $1
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `
+		SELECT ` + repoProfileFullColumns + `
 		FROM repositories
 		WHERE org_id = $1
-		ORDER BY owner, repo
-	`, orgID)
+		ORDER BY owner, repo, id`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -289,11 +304,11 @@ func listRepositories(ctx context.Context, q queryer, orgID string) ([]domain.Re
 	for rows.Next() {
 		p, err := pgScanRepositoryFull(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // repoProfileTrackedByViewerTeams scopes a repositories row (alias rp) to
@@ -316,16 +331,31 @@ const repoProfileTrackedByViewerTeams = `EXISTS (
 	  AND g.repository_id = rp.id
 )`
 
-func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string) ([]domain.Repository, error) {
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT `+repoProfileFullColumnsAliased+`
+func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Repository, int, error) {
+	var total int
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*)
 		FROM repositories rp
 		WHERE rp.org_id = $1
 		  AND `+repoProfileTrackedByViewerTeams+`
-		ORDER BY rp.owner, rp.repo
-	`, orgID)
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `
+		SELECT ` + repoProfileFullColumnsAliased + `
+		FROM repositories rp
+		WHERE rp.org_id = $1
+		  AND ` + repoProfileTrackedByViewerTeams + `
+		ORDER BY rp.owner, rp.repo, rp.id`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -333,11 +363,11 @@ func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string) ([]domain.
 	for rows.Next() {
 		p, err := pgScanRepositoryFull(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 func (s *repoStore) ListWithContent(ctx context.Context, orgID string) ([]domain.Repository, error) {

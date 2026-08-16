@@ -27,6 +27,7 @@ import PRCard from '../components/PRCard'
 import { useWebSocket } from '../hooks/useWebSocket'
 import type { WSEvent } from '../types'
 import { apiFetch, apiJSON } from '../lib/apiClient'
+import { usePagedList } from '../hooks/usePagedList'
 
 export interface PRSummary {
   number: number
@@ -70,12 +71,39 @@ function saveCache(key: string, data: unknown) {
   }
 }
 
+/** How many PRs one page of the board carries. The board buckets its rows into
+ *  four columns, so a page is a page of the *whole* list, not of one column —
+ *  which is why the "Load more" below the board is not optional decoration: the
+ *  next page is where the rest of the merged/closed history lives. */
+const PR_PAGE_SIZE = 100
+
 export default function PRDashboard() {
-  const [prs, setPrs] = useState<PRSummary[]>(() => loadCached<PRSummary[]>('pr-dash-prs') ?? [])
+  const prList = usePagedList<PRSummary>(
+    '/api/dashboard/prs/list',
+    'Could not load your pull requests.',
+  )
+  const { items: prs, setItems: setPrs, load: loadPRs, loadMore, hasMore, total } = prList
+  // How many pages deep the user has paged. A refresh REPLACES the held items
+  // with page 1 (that is what usePagedList.load does), and this board refreshes
+  // on an interval, on tab focus, and on every debounced github:pr:* event — so
+  // without re-walking, a routine PR event would silently throw away every
+  // "Load more" the user clicked. Held in a ref because it describes what to
+  // re-fetch, not anything rendered.
+  const pagesLoaded = useRef(1)
   const [stats, setStats] = useState<Stats | null>(() => loadCached<Stats>('pr-dash-stats'))
-  const [loading, setLoading] = useState(prs.length === 0)
+  const [loading, setLoading] = useState(true)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [overColumn, setOverColumn] = useState<ColumnId | null>(null)
+
+  // Paint the last session's rows immediately, before the first fetch lands.
+  // The hook owns the items, so the cache is seeded into it rather than being
+  // a second copy of the list living beside it.
+  const seededFromCache = useRef(false)
+  if (!seededFromCache.current) {
+    seededFromCache.current = true
+    const cached = loadCached<PRSummary[]>('pr-dash-prs')
+    if (cached && cached.length > 0) setPrs(() => cached)
+  }
 
   // Tracks whether we've completed a first fetch. Used to avoid flashing
   // skeletons on every interval refresh — they should only show on cold load.
@@ -85,12 +113,22 @@ export default function PRDashboard() {
     if (!hasLoadedOnce.current) setLoading(true)
     try {
       const [prsRes, statsRes] = await Promise.all([
-        apiJSON<PRSummary[]>('/api/dashboard/prs'),
+        loadPRs({ page_size: PR_PAGE_SIZE }),
         apiJSON<Stats>('/api/dashboard/stats'),
       ])
-      setPrs(prsRes)
       setStats(statsRes)
-      saveCache('pr-dash-prs', prsRes)
+      // Re-walk to the depth the user had. Sequential, because each page's
+      // token comes from the one before it. A page that no longer exists (PRs
+      // merged since) just ends the walk early — loadMore is a no-op without a
+      // token — which is the right answer rather than an error.
+      if (prsRes) {
+        for (let i = 1; i < pagesLoaded.current; i++) {
+          await loadMore()
+        }
+      }
+      // Only page 1 is cached: the cache exists to paint something instantly on
+      // a cold open, and a cold open starts at page 1 anyway.
+      if (prsRes) saveCache('pr-dash-prs', prsRes.items)
       saveCache('pr-dash-stats', statsRes)
       hasLoadedOnce.current = true
     } catch (err) {
@@ -100,7 +138,7 @@ export default function PRDashboard() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [loadPRs, loadMore])
 
   useEffect(() => {
     fetchAll()
@@ -211,7 +249,7 @@ export default function PRDashboard() {
 
     // Hit the API
     try {
-      await apiFetch(`/api/dashboard/prs/${pr.number}/draft?repo=${pr.repo}`, {
+      await apiFetch(`/api/dashboard/prs/${pr.repo}/${pr.number}/draft`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ draft: makeDraft }),
@@ -307,6 +345,21 @@ export default function PRDashboard() {
           ) : null}
         </DragOverlay>
       </DndContext>
+
+      {hasMore && (
+        <div className="mt-4 text-center">
+          <button
+            onClick={() => {
+              pagesLoaded.current += 1
+              void loadMore()
+            }}
+            disabled={loading}
+            className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors disabled:opacity-50"
+          >
+            Load more{total !== null ? ` (${prs.length} of ${total})` : ''}
+          </button>
+        </div>
+      )}
 
       {/* Merged & closed — non-draggable history */}
       {(mergedPRs.length > 0 || closedPRs.length > 0) && (

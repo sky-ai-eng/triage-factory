@@ -49,17 +49,10 @@ func (c *Client) ListUserRepos(ctx context.Context) ([]UserRepo, error) {
 				"resource", "user/repos", "page_cap", maxFetchPages)
 			break
 		}
-		path := fmt.Sprintf("/user/repos?sort=pushed&direction=desc&per_page=100&page=%d", page)
-		data, err := c.Get(ctx, path)
+		repos, err := c.ListUserReposPage(ctx, 100, page)
 		if err != nil {
-			return nil, fmt.Errorf("fetch repos page %d: %w", page, err)
+			return nil, err
 		}
-
-		var repos []UserRepo
-		if err := json.Unmarshal(data, &repos); err != nil {
-			return nil, fmt.Errorf("parse repos page %d: %w", page, err)
-		}
-
 		if len(repos) == 0 {
 			break
 		}
@@ -67,6 +60,30 @@ func (c *Client) ListUserRepos(ctx context.Context) ([]UserRepo, error) {
 	}
 
 	return all, nil
+}
+
+// ListUserReposPage fetches ONE upstream page of GET /user/repos. It is the
+// primitive behind both the whole-enumeration ListUserRepos above and the
+// paginated repo-picker proxy, which passes the caller's page window straight
+// through instead of walking the account. page is 1-based, matching GitHub's
+// own ?page=.
+func (c *Client) ListUserReposPage(ctx context.Context, perPage, page int) ([]UserRepo, error) {
+	if perPage <= 0 {
+		perPage = 100
+	}
+	if page < 1 {
+		page = 1
+	}
+	path := fmt.Sprintf("/user/repos?sort=pushed&direction=desc&per_page=%d&page=%d", perPage, page)
+	data, err := c.Get(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("fetch repos page %d: %w", page, err)
+	}
+	var repos []UserRepo
+	if err := json.Unmarshal(data, &repos); err != nil {
+		return nil, fmt.Errorf("parse repos page %d: %w", page, err)
+	}
+	return repos, nil
 }
 
 // ListInstallationRepos returns every repository a GitHub App installation
@@ -109,26 +126,17 @@ func (c *Client) ListInstallationReposComplete(ctx context.Context) ([]UserRepo,
 				"resource", "installation/repositories", "page_cap", maxFetchPages)
 			return all, false, nil
 		}
-		path := fmt.Sprintf("/installation/repositories?per_page=100&page=%d", page)
-		data, err := c.Get(ctx, path)
+		repos, pageTotal, err := c.ListInstallationReposPage(ctx, 100, page)
 		if err != nil {
-			return nil, false, fmt.Errorf("fetch installation repositories page %d: %w", page, err)
+			return nil, false, err
 		}
+		total = pageTotal
 
-		var resp struct {
-			TotalCount   int        `json:"total_count"`
-			Repositories []UserRepo `json:"repositories"`
-		}
-		if err := json.Unmarshal(data, &resp); err != nil {
-			return nil, false, fmt.Errorf("parse installation repositories page %d: %w", page, err)
-		}
-		total = resp.TotalCount
-
-		if len(resp.Repositories) == 0 {
+		if len(repos) == 0 {
 			break
 		}
-		all = append(all, resp.Repositories...)
-		if len(all) >= resp.TotalCount {
+		all = append(all, repos...)
+		if len(all) >= pageTotal {
 			break
 		}
 	}
@@ -136,6 +144,33 @@ func (c *Client) ListInstallationReposComplete(ctx context.Context) ([]UserRepo,
 	// Ran out of pages before reaching the count GitHub advertised. Rare, and
 	// benign for the poller, but for a mirror it is precisely a partial fetch.
 	return all, total >= 0 && len(all) >= total, nil
+}
+
+// ListInstallationReposPage fetches ONE upstream page of
+// GET /installation/repositories, returning the page's rows and the
+// total_count GitHub advertises for the whole grant. It is the primitive
+// behind the whole-grant walk above and behind the paginated repo-picker
+// proxy. page is 1-based, matching GitHub's own ?page=.
+func (c *Client) ListInstallationReposPage(ctx context.Context, perPage, page int) ([]UserRepo, int, error) {
+	if perPage <= 0 {
+		perPage = 100
+	}
+	if page < 1 {
+		page = 1
+	}
+	path := fmt.Sprintf("/installation/repositories?per_page=%d&page=%d", perPage, page)
+	data, err := c.Get(ctx, path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("fetch installation repositories page %d: %w", page, err)
+	}
+	var resp struct {
+		TotalCount   int        `json:"total_count"`
+		Repositories []UserRepo `json:"repositories"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, 0, fmt.Errorf("parse installation repositories page %d: %w", page, err)
+	}
+	return resp.Repositories, resp.TotalCount, nil
 }
 
 // CheckRepoAccess probes GET /repos/{owner}/{repo} to decide whether this
@@ -236,38 +271,43 @@ type Branch struct {
 // ListBranches returns branches for a repo, optionally filtered by prefix.
 // The GitHub REST branches endpoint doesn't support server-side search,
 // so we fetch up to 100 branches and filter client-side.
-func (c *Client) ListBranches(ctx context.Context, owner, repo, query string, limit int) ([]Branch, error) {
-	if limit <= 0 {
-		limit = 30
+// ListBranchesPage fetches ONE upstream page of a repo's branches and applies
+// the caller's substring filter to it.
+//
+// It returns the filtered rows and the size of the raw upstream page. Both
+// halves matter: GitHub has no branch-search parameter, so the filter is
+// applied here, and a filtered page can be short — or empty — while further
+// upstream pages remain. Deciding "is there more" from the filtered length
+// would end the walk at the first page whose branches happened not to match.
+// The raw count is the honest signal: it equals perPage until GitHub runs out.
+//
+// page is 1-based, matching GitHub's own ?page=.
+func (c *Client) ListBranchesPage(ctx context.Context, owner, repo, query string, perPage, page int) (filtered []Branch, rawCount int, err error) {
+	if perPage <= 0 {
+		perPage = 30
 	}
-	// Fetch more than we need to allow for filtering
-	fetchSize := 100
-	path := fmt.Sprintf("/repos/%s/%s/branches?per_page=%d", owner, repo, fetchSize)
+	if page < 1 {
+		page = 1
+	}
+	path := fmt.Sprintf("/repos/%s/%s/branches?per_page=%d&page=%d", owner, repo, perPage, page)
 	data, err := c.Get(ctx, path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var all []Branch
 	if err := json.Unmarshal(data, &all); err != nil {
-		return nil, fmt.Errorf("parse branches: %w", err)
+		return nil, 0, fmt.Errorf("parse branches: %w", err)
 	}
 	if query == "" {
-		if len(all) > limit {
-			return all[:limit], nil
-		}
-		return all, nil
+		return all, len(all), nil
 	}
 	q := strings.ToLower(query)
-	var filtered []Branch
 	for _, b := range all {
 		if strings.Contains(strings.ToLower(b.Name), q) {
 			filtered = append(filtered, b)
-			if len(filtered) >= limit {
-				break
-			}
 		}
 	}
-	return filtered, nil
+	return filtered, len(all), nil
 }
 
 // fileContent is the GitHub API response for a repository file.

@@ -853,7 +853,9 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 // action feed renders.
 func findActionByKey(t *testing.T, s db.Stores, orgID, dedupKey string) domain.ExternalAction {
 	t.Helper()
-	actions, err := s.ExternalActions.ListByOrgSystem(context.Background(), orgID, domain.ExternalActionListOpts{})
+	// Unwindowed (zero Limit) and the total discarded: this scans for one known
+	// dedup key rather than rendering a page.
+	actions, _, err := s.ExternalActions.ListByOrgSystem(context.Background(), orgID, domain.ExternalActionListOpts{})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem: %v", err)
 	}

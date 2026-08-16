@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -83,6 +84,24 @@ func uuidPathOr404(w http.ResponseWriter, r *http.Request, param, thing string) 
 		return "", false
 	}
 	return id, true
+}
+
+// teamIDFilterField validates a list body's optional team_id narrow. Empty
+// means "no narrow" (the union of what the caller may see); anything else must
+// be a well-formed team id.
+//
+// It is strict for the reason the whole list contract is: dropping a corrupt
+// filter *widens* the result set, and a read that silently returns more than
+// was asked for is a wrong answer that looks like a right one. The old
+// ?team_id= query param dropped a malformed value, which is how a page scoped
+// to one team could quietly show every team's rows.
+func teamIDFilterField(v *httpx.Validation, teamID string) {
+	if teamID == "" {
+		return
+	}
+	if _, err := uuid.Parse(teamID); err != nil {
+		v.Invalid("team_id", fmt.Sprintf("team_id %q is not a valid team id", teamID))
+	}
 }
 
 // requireOrg is the Server-method form of the package-level org gate, so

@@ -60,7 +60,7 @@ func turnState(t *testing.T, stores db.Stores, projectID, requestID string) (sta
 	if err != nil {
 		t.Fatalf("parse request id %q: %v", requestID, err)
 	}
-	msgs, err := stores.Curator.ListConversationMessages(ctx, org, conv.ID)
+	msgs, err := stores.Curator.ListConversationMessages(ctx, org, conv.ID, 0)
 	if err != nil {
 		t.Fatalf("list messages: %v", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -34,27 +35,53 @@ type teamsHandler struct {
 	curator func() *curator.Curator
 }
 
-// teamJSON is the wire shape the multi-team selectors enumerate. Slug is
-// included for a stable, human-readable secondary label; the frontend
-// renders name as the primary. Role is the caller's membership role in the
-// team ("admin" | "member" | "viewer") — the settings surface renders the
-// Team section only for users who admin ≥1 team and filters its selector to
-// those teams, so a non-admin never sees fields that would 403 on save.
+// teamJSON is the one wire shape for a team: the list rows, the single read,
+// the archived list, and the PATCH response all serialize this. Slug is
+// included for a stable, human-readable secondary label; the frontend renders
+// name as the primary.
+//
+// Two of its fields are caller-relative and named as such rather than folded
+// into a second envelope key:
+//
+//   - Role is the caller's membership role in the team ("admin" | "member" |
+//     "viewer"). The settings surface renders the Team section only for users
+//     who admin ≥1 team and filters its selector to those teams, so a
+//     non-admin never sees fields that would 403 on save. Empty when the
+//     caller is not on the team (an org admin reading a team they never
+//     joined) or when the route has no membership to report.
+//   - IsLastActing marks the caller's sticky default team. At most one row in
+//     a result carries it, and a stale default carries it nowhere — so the
+//     frontend never seeds a selector to a team that isn't offered.
 type teamJSON struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Slug string `json:"slug"`
-	Role string `json:"role"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Slug        string `json:"slug"`
+	Role        string `json:"role,omitempty"`
+	Description string `json:"description"`
+	// ArchivedAt is the soft-delete timestamp (RFC3339 UTC), present only on
+	// an archived team. The active list filters archived teams out, so this is
+	// empty there and populated on the archived list and the single read.
+	ArchivedAt   string `json:"archived_at,omitempty"`
+	IsLastActing bool   `json:"is_last_acting,omitempty"`
 }
 
-// teamsResponse is GET /api/teams. Teams is the caller's teams in the
-// active org (the count drives whether the frontend renders any team
-// control — the ≥2 gate). LastActingTeamID is the caller's sticky default
-// when it is still one of those teams (a stale default is omitted so the
-// frontend never seeds to a team that isn't offered).
-type teamsResponse struct {
-	Teams            []teamJSON `json:"teams"`
-	LastActingTeamID string     `json:"last_acting_team_id,omitempty"`
+// teamToJSON renders a stored team. lastActing is the caller's sticky default
+// team id, which the single read and the active list pass through and the
+// lifecycle routes leave empty.
+func teamToJSON(t domain.Team, lastActing string) teamJSON {
+	archivedAt := ""
+	if t.DeletedAt != nil {
+		archivedAt = t.DeletedAt.UTC().Format(time.RFC3339)
+	}
+	return teamJSON{
+		ID:           t.ID,
+		Name:         t.Name,
+		Slug:         t.Slug,
+		Role:         t.Role,
+		Description:  t.Description,
+		ArchivedAt:   archivedAt,
+		IsLastActing: lastActing != "" && t.ID == lastActing,
+	}
 }
 
 // writeDuplicateTeamName answers the (org_id, slug) collision both create and
@@ -66,13 +93,25 @@ func writeDuplicateTeamName(w http.ResponseWriter) {
 	})
 }
 
-// handleTeamsList returns the caller's teams in the active org plus their
-// sticky default. The single data source for both selectors: the per-page
-// read filter and the write-time picker. Renders in both modes — local
-// returns the one local team (so the frontend's ≥2 gate keeps every
-// control hidden) without a mode branch here.
+// teamListRequest is the body of POST /api/teams/list. The resource is "the
+// teams I belong to", which has no filters of its own, so the body is the
+// paging pair alone.
+type teamListRequest struct {
+	httpx.PageRequest
+}
+
+// handleTeamsList returns the caller's active teams in the org. The single
+// data source for both selectors: the per-page read filter and the write-time
+// picker. Renders in both modes — local returns the one local team (so the
+// frontend's ≥2 gate keeps every control hidden) without a mode branch here.
 //
-// GET /api/teams
+// The caller's sticky default team rides on the row that is it
+// (`is_last_acting`) rather than as a second top-level key: the envelope is
+// the shared list shape, and a default that has been archived or left simply
+// marks no row, which is the same "omit a stale default" the old
+// `last_acting_team_id` gave.
+//
+// POST /api/teams/list
 func (th *teamsHandler) handleTeamsList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -80,13 +119,24 @@ func (th *teamsHandler) handleTeamsList(w http.ResponseWriter, r *http.Request) 
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
+	var req teamListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
 	var (
 		teams      []domain.Team
+		total      int
 		lastActing string
 	)
 	if err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		teams, e = tx.Teams.ListForUser(r.Context(), orgID)
+		teams, total, e = tx.Teams.ListForUser(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		if e != nil {
 			return e
 		}
@@ -98,14 +148,56 @@ func (th *teamsHandler) handleTeamsList(w http.ResponseWriter, r *http.Request) 
 	}
 
 	out := make([]teamJSON, len(teams))
-	validLastActing := ""
 	for i, t := range teams {
-		out[i] = teamJSON{ID: t.ID, Name: t.Name, Slug: t.Slug, Role: t.Role}
-		if t.ID == lastActing {
-			validLastActing = lastActing
-		}
+		out[i] = teamToJSON(t, lastActing)
 	}
-	writeJSON(w, http.StatusOK, teamsResponse{Teams: out, LastActingTeamID: validLastActing})
+	httpx.WriteList(w, page, out, total)
+}
+
+// handleTeamGet is the canonical single read. It is the only reader of a
+// team's description — before it, the column was writable through PATCH and
+// unreadable anywhere.
+//
+// Any member of the org may read any team in it: the org roster and the
+// archived-teams surface both name teams the caller may not belong to, so
+// hiding one here would deny the existence of a row they can already see. The
+// team's own membership is reported as `role` (empty when the caller is not on
+// it). A team in another org is invisible under RLS and answers 404, which is
+// the disclosure rule's own answer rather than a handler predicate's.
+//
+// GET /api/teams/{team_id}
+func (th *teamsHandler) handleTeamGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	teamID, ok := th.az.TeamIDFromPath(w, r, "teams", orgID, userID)
+	if !ok {
+		return
+	}
+
+	var (
+		team       *domain.Team
+		lastActing string
+	)
+	if err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		team, e = tx.Teams.Get(r.Context(), orgID, teamID)
+		if e != nil || team == nil {
+			return e
+		}
+		lastActing, e = tx.Users.GetLastActingTeam(r.Context(), userID)
+		return e
+	}); err != nil {
+		internalError(w, "teams", err)
+		return
+	}
+	if team == nil {
+		notFound(w, "team")
+		return
+	}
+	writeJSON(w, http.StatusOK, teamToJSON(*team, lastActing))
 }
 
 // maxTeamNameLen caps a team name's length (in runes). A generous bound that
@@ -138,18 +230,6 @@ func validateTeamName(v *httpx.Validation, name string) string {
 	return slug
 }
 
-// teamDetailJSON is the PATCH /api/teams/{team_id} response — the updated
-// identity row plus its description (the field this endpoint manages). Role is
-// omitted: the caller already knows their relationship to the team (they had to
-// be team-admin-or-org-admin to reach the write), and the list endpoint carries
-// role for the selectors.
-type teamDetailJSON struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Slug        string `json:"slug"`
-	Description string `json:"description"`
-}
-
 // handleTeamUpdate renames a team and/or rewrites its description. Multi-mode
 // only (local is N=1; 404 matches the create affordance's posture). Gated
 // team-admin-or-org-admin: a team admin can edit their own team (the widened
@@ -177,7 +257,7 @@ func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request)
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
-	teamID, ok := uuidPathOr404(w, r, "team_id", "team")
+	teamID, ok := th.az.TeamIDFromPath(w, r, "teams", orgID, userID)
 	if !ok {
 		return
 	}
@@ -235,9 +315,10 @@ func (th *teamsHandler) handleTeamUpdate(w http.ResponseWriter, r *http.Request)
 	})
 	switch {
 	case err == nil:
-		writeJSON(w, http.StatusOK, teamDetailJSON{
-			ID: updated.ID, Name: updated.Name, Slug: updated.Slug, Description: updated.Description,
-		})
+		// The list row shape, with role left empty: the write carries no
+		// membership lookup, and the caller already knows their relationship
+		// to a team they just had the role to edit.
+		writeJSON(w, http.StatusOK, teamToJSON(updated, ""))
 	case errors.Is(err, db.ErrTeamNotFound):
 		// Raced past VerifyTeamInOrg (deleted between gate and write) — 404.
 		notFound(w, "team")
@@ -368,5 +449,6 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 	// The creator is enrolled as admin (Teams.Create), so stamp the role on
 	// the response — the settings Team selector lists admin'd teams, and this
 	// lets a freshly-created team surface there without waiting on a refetch.
-	writeJSON(w, http.StatusCreated, teamJSON{ID: created.ID, Name: created.Name, Slug: created.Slug, Role: "admin"})
+	created.Role = "admin"
+	writeJSON(w, http.StatusCreated, teamToJSON(created, ""))
 }

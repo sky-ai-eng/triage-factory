@@ -136,14 +136,15 @@ type TeamsStore interface {
 	// schema defaults when none exists. SQLite is N=1 / no RLS and writes directly.
 	SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) error
 
-	// ListForUser returns the requesting user's active teams in the org,
-	// ordered oldest-first (the same created_at tiebreak the default-
-	// team pick uses, so teams[0] is the org's default team). This is
-	// the data source for the multi-team selectors: the frontend
-	// renders a team control only when the count is ≥2. Archived teams
-	// (deleted_at IS NOT NULL) are filtered out — the request-facing read
-	// filter that makes an archived team vanish from every selector (TFAC-448);
-	// the archive/restore lifecycle paths use the unfiltered ...System reads.
+	// ListForUser returns one page of the requesting user's active teams in
+	// the org plus the unpaged total, ordered oldest-first (the same
+	// created_at tiebreak the default-team pick uses, with an id tiebreaker
+	// so the order is total and the pages partition it). This is the data
+	// source for the multi-team selectors: the frontend renders a team
+	// control only when the count is ≥2. Archived teams (deleted_at IS NOT
+	// NULL) are filtered out — the request-facing read filter that makes an
+	// archived team vanish from every selector (TFAC-448); the
+	// archive/restore lifecycle paths use the unfiltered ...System reads.
 	//
 	// Postgres joins memberships under the caller's claims — teams_select
 	// RLS alone returns *every* team in the org (it gates on org access,
@@ -151,7 +152,21 @@ type TeamsStore interface {
 	// result to the teams the user actually belongs to. SQLite is N=1
 	// (single synthetic user) and returns every team in the org, which
 	// is the same set. Routes through the app pool in Postgres.
-	ListForUser(ctx context.Context, orgID string) ([]domain.Team, error)
+	ListForUser(ctx context.Context, orgID string, opts ListOpts) ([]domain.Team, int, error)
+
+	// Get returns a single team by id under the caller's claims, or (nil,
+	// nil) when no row matches. Role carries the CALLER's membership role and
+	// is empty when they are not on the team — teams_select RLS gates on org
+	// access rather than membership, so an org admin reads a team they never
+	// joined and gets an empty role rather than a 404. Description and
+	// DeletedAt are populated: this is the canonical single read, and the
+	// description column had no reader at all before it (only the PATCH
+	// response echoed it back).
+	//
+	// App pool in Postgres, so a cross-org id is invisible and answers
+	// not-found. SQLite is N=1 and reports the sole user as 'admin', matching
+	// ListForUser.
+	Get(ctx context.Context, orgID, teamID string) (*domain.Team, error)
 
 	// TeamIDsForUserInOrgSystem returns the ids of every team in orgID
 	// that userID belongs to (memberships ⋈ teams WHERE teams.org_id =
@@ -230,12 +245,14 @@ type TeamsStore interface {
 	// the WHERE clause as defense in depth.
 	GetSystem(ctx context.Context, orgID, teamID string) (*domain.Team, error)
 
-	// ListArchivedForOrgSystem returns the org's archived teams (deleted_at IS
-	// NOT NULL), most-recently-archived first, with DeletedAt populated. Admin pool / org-scoped:
-	// the org-admin "Archived teams" restore surface enumerates them even for
-	// teams the admin never joined (the per-user membership join ListForUser uses
-	// would hide those). Empty slice when the org has no archived teams.
-	ListArchivedForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error)
+	// ListArchivedForOrgSystem returns one page of the org's archived teams
+	// (deleted_at IS NOT NULL) plus the unpaged total, most-recently-archived
+	// first with an id tiebreaker, with DeletedAt populated. Admin pool /
+	// org-scoped: the org-admin "Archived teams" restore surface enumerates
+	// them even for teams the admin never joined (the per-user membership join
+	// ListForUser uses would hide those). Empty slice when the org has no
+	// archived teams.
+	ListArchivedForOrgSystem(ctx context.Context, orgID string, opts ListOpts) ([]domain.Team, int, error)
 
 	// ListActiveForOrgSystem returns the org's ACTIVE teams (deleted_at IS NULL),
 	// ordered by name, on the admin pool — the org-scoped sibling of
@@ -245,6 +262,20 @@ type TeamsStore interface {
 	// the per-user-scoped ListForUser would hide those. Empty slice for a teamless
 	// org (a bootstrap bug). DeletedAt is left nil (all rows are active).
 	ListActiveForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error)
+
+	// ListActiveCapsForOrgSystem returns one page of the org's active teams
+	// with each one's configured per-team daily cost cap, ordered by name with
+	// an id tiebreaker, plus the total. Admin pool, org-scoped: the governance
+	// cap editor crosses teams its org admin may not belong to.
+	//
+	// The cap is joined, not looked up per team. The editor used to call
+	// ListActiveForOrgSystem and then GetSettingsSystem once per row, so the
+	// query count grew with the org's team count on every render of one panel
+	// — and a page of that list would have been a page of teams with a full
+	// scan of settings behind it. A missing team_settings row means the team
+	// has never been configured, which is a nil cap (no cap), the same answer
+	// the per-team read's ErrNoRows default gave.
+	ListActiveCapsForOrgSystem(ctx context.Context, orgID string, opts ListOpts) ([]domain.TeamCap, int, error)
 
 	// NamesForIDsSystem resolves id->name for exactly the given team IDs
 	// (deduped; blanks ignored), on the admin pool — the narrow cross-team

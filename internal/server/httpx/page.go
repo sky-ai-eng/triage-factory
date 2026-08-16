@@ -53,6 +53,11 @@ type Page struct {
 	Limit  int
 	Offset int
 
+	// Cursor is the upstream position a proxy list resumes from — see
+	// WriteProxyList. Empty on the first page and on every store-backed list,
+	// which pages by Offset instead.
+	Cursor string
+
 	fingerprint string
 }
 
@@ -68,9 +73,14 @@ type Page struct {
 // A token is only valid for that filter set: without the check, page 2 of one
 // query could be requested with page 1's token of another, and the offset would
 // silently address a different result set.
+// C carries an upstream position instead of O for a proxy list (see
+// WriteProxyList): the two are alternatives, never both, because a proxy list
+// has no offset of its own to advance and a store-backed list has no upstream
+// to resume.
 type pageToken struct {
 	O int    `json:"o"`
 	F string `json:"f"`
+	C string `json:"c,omitempty"`
 }
 
 // FilterFingerprint returns a short, stable hash of a list route's filter set.
@@ -120,7 +130,7 @@ func ResolvePage(v *Validation, req PageRequest, fingerprint string, maxPageSize
 		limit = req.PageSize
 	}
 
-	offset := 0
+	offset, cursor := 0, ""
 	if req.PageToken != "" {
 		tok, err := decodePageToken(req.PageToken)
 		switch {
@@ -137,10 +147,10 @@ func ResolvePage(v *Validation, req PageRequest, fingerprint string, maxPageSize
 				Field:   "page_token",
 			})
 		default:
-			offset = tok.O
+			offset, cursor = tok.O, tok.C
 		}
 	}
-	return Page{Limit: limit, Offset: offset, fingerprint: fingerprint}
+	return Page{Limit: limit, Offset: offset, Cursor: cursor, fingerprint: fingerprint}
 }
 
 func encodePageToken(tok pageToken) string {
@@ -172,10 +182,14 @@ func decodePageToken(s string) (pageToken, error) {
 // null — an empty page is `[]`, so a client can iterate the field without a
 // nil check. next_page_token is omitted on the last page rather than sent
 // empty, and total_count is the filtered total, not the length of this page.
+//
+// total_count is a pointer so a proxy list can send JSON null: the field is
+// always present (a client reads one shape everywhere) and null says "this
+// resource cannot count itself" rather than claiming zero. See WriteProxyList.
 type listResponse[T any] struct {
 	Items         []T    `json:"items"`
 	NextPageToken string `json:"next_page_token,omitempty"`
-	TotalCount    int    `json:"total_count"`
+	TotalCount    *int   `json:"total_count"`
 }
 
 // WriteList writes the list envelope for one page: the items, the filtered
@@ -191,5 +205,45 @@ func WriteList[T any](w http.ResponseWriter, page Page, items []T, total int) {
 	if end := page.Offset + len(items); end < total && len(items) > 0 {
 		next = encodePageToken(pageToken{O: end, F: page.fingerprint})
 	}
-	WriteJSON(w, http.StatusOK, listResponse[T]{Items: items, NextPageToken: next, TotalCount: total})
+	WriteJSON(w, http.StatusOK, listResponse[T]{Items: items, NextPageToken: next, TotalCount: &total})
+}
+
+// NextPageToken mints the token for the page after this one, or "" when this
+// is the last. It is the token half of WriteList, exported for the rare route
+// whose response body cannot be the flat list envelope — the conversation list
+// groups its rows by task id, and a map is not a slice — so it writes its own
+// shape while still speaking the same paging contract.
+//
+// pageLen is how many rows this response carries; total is the filtered total.
+// Prefer WriteList: a route that mints its own token is a route that can get
+// the arithmetic wrong.
+func NextPageToken(page Page, pageLen, total int) string {
+	if end := page.Offset + pageLen; end < total && pageLen > 0 {
+		return encodePageToken(pageToken{O: end, F: page.fingerprint})
+	}
+	return ""
+}
+
+// WriteProxyList writes the list envelope for a page this server did not
+// count: the rows come from an upstream API that pages by its own cursor and
+// reports no total. nextCursor is the upstream position the following page
+// resumes from, or "" when the upstream said there isn't one; it is wrapped in
+// the same opaque page_token as an offset, fingerprinted against the same
+// filter set, so the client's loop is byte-identical to a store-backed list's.
+//
+// **total_count is null on a proxy list, and that is contract, not omission.**
+// The alternative would be counting the upstream ourselves — walking every
+// remaining page on the first request — which is exactly the fetch-the-world
+// read pagination exists to retire. A client renders "showing N" rather than
+// "N of M" here; a null total is never a zero total, and never a truncation
+// signal (next_page_token is the only "there is more" signal on any list).
+func WriteProxyList[T any](w http.ResponseWriter, page Page, items []T, nextCursor string) {
+	if items == nil {
+		items = []T{}
+	}
+	next := ""
+	if nextCursor != "" && len(items) > 0 {
+		next = encodePageToken(pageToken{F: page.fingerprint, C: nextCursor})
+	}
+	WriteJSON(w, http.StatusOK, listResponse[T]{Items: items, NextPageToken: next})
 }

@@ -885,7 +885,7 @@ func assertState(t *testing.T, stores db.Stores, orgID, dedupKey, want string) {
 	t.Helper()
 	// Read the row back via a fresh non-terminal/team listing is awkward; query
 	// the team list and find by dedup key (ListByTeam returns all states).
-	all, err := stores.Artifacts.ListByTeam(context.Background(), orgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
+	all, _, err := stores.Artifacts.ListByTeam(context.Background(), orgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
 	if err != nil {
 		t.Fatalf("ListByTeam: %v", err)
 	}

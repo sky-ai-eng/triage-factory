@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -52,16 +51,12 @@ func TestHandleAgentActions(t *testing.T) {
 		Target: "octo/repo", Credential: domain.CredentialGitHubApp,
 	})
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/actions", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET actions = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	var got []map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
-	}
-	if len(got) != 2 {
-		t.Fatalf("returned %d actions, want 2 (the other run's must not appear)", len(got))
+	page := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
+		"/api/agent/conversations/"+runID+"/actions/list", map[string]any{}))
+	got := page.Items
+	if len(got) != 2 || page.Total() != 2 {
+		t.Fatalf("returned %d actions (total %d), want 2/2 (the other run's must not appear)",
+			len(got), page.Total())
 	}
 
 	byAction := map[string]map[string]any{}
@@ -95,17 +90,18 @@ func TestHandleAgentActions(t *testing.T) {
 }
 
 // TestHandleAgentActions_Empty pins that a run that touched nothing outside the
-// box answers with an empty array rather than null — the run view renders "no
-// external actions yet" off it, which is itself an answer.
+// box answers with an empty items array rather than null — the run view renders
+// "no external actions yet" off it, which is itself an answer.
 func TestHandleAgentActions_Empty(t *testing.T) {
 	s := newTestServer(t)
 	runID := seedSteerRun(t, s.db, "noacts", "completed")
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/actions", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/"+runID+"/actions/list", map[string]any{})
+	page := decodeList[map[string]any](t, rec)
+	if len(page.Items) != 0 || page.Total() != 0 {
+		t.Errorf("empty run actions = %+v (total %d), want an empty page", page.Items, page.Total())
 	}
-	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
-		t.Errorf("empty run actions body = %q, want []", body)
+	if !strings.Contains(rec.Body.String(), `"items":[]`) {
+		t.Errorf("body = %s, want an empty array (never null)", rec.Body.String())
 	}
 }
 
@@ -114,7 +110,7 @@ func TestHandleAgentActions_Empty(t *testing.T) {
 // a 404, never an empty list that would confirm the id exists.
 func TestHandleAgentActions_RunNotFound(t *testing.T) {
 	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/r_ghost/actions", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/r_ghost/actions/list", map[string]any{})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("GET missing run = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
@@ -135,14 +131,8 @@ func TestHandleAgentActions_CorruptDetails(t *testing.T) {
 		t.Fatalf("corrupt detail: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/actions", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET = %d, want 200 (corrupt detail must not 500); body=%s", rec.Code, rec.Body.String())
-	}
-	var got []map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
-	}
+	got := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
+		"/api/agent/conversations/"+runID+"/actions/list", map[string]any{})).Items
 	if len(got) != 1 {
 		t.Fatalf("returned %d actions, want 1", len(got))
 	}

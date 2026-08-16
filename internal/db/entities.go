@@ -49,6 +49,21 @@ import (
 // Reactivate and AssignProject expose distinct success signals
 // (boolean / sql.ErrNoRows) because their callers need to know
 // whether the row changed.
+// BackfillCandidateFilter is the project-scope filter
+// EntityStore.ListBackfillCandidates applies. Its fields mirror a project's
+// own scoping columns; see the method doc for the empty-means-unfiltered rule.
+type BackfillCandidateFilter struct {
+	// ExcludeProjectID is the project doing the claiming. Its own entities
+	// are not candidates.
+	ExcludeProjectID string
+	// GitHubRepos are the project's pinned "owner/repo" slugs. Empty means
+	// every GitHub entity qualifies.
+	GitHubRepos []string
+	// JiraProjectKey is the project's tracked Jira key. Empty means every
+	// Jira entity qualifies.
+	JiraProjectKey string
+}
+
 type EntityStore interface {
 	// --- Lookup ---
 
@@ -128,12 +143,31 @@ type EntityStore interface {
 	// FactoryReadStore.Entities asymmetry.
 	ListActiveJiraTeamScoped(ctx context.Context, orgID, teamID string) ([]domain.Entity, error)
 
+	// ListBackfillCandidates returns one page of the entities a project's
+	// create-flow popup can claim, plus the unpaged total. It replaces two
+	// whole-org ListActive scans the handler used to filter in Go — the
+	// scan-everything read the list contract exists to retire.
+	//
+	// The scope rules are the popup's, moved into SQL unchanged:
+	//
+	//   - active entities only, from the github and jira sources;
+	//   - entities already assigned to this project are excluded (there is
+	//     nothing to backfill for them), while entities in ANOTHER project
+	//     stay — claiming one is a legitimate reassignment;
+	//   - GitHubRepos empty means "no filter on GitHub", not "exclude
+	//     GitHub"; likewise JiraProjectKey. A project that scopes only one
+	//     tracker still wants candidates from the other.
+	//
+	// Ordering is (source, last_polled_at, id): a total order, so the pages
+	// partition the candidate set.
+	ListBackfillCandidates(ctx context.Context, orgID string, f BackfillCandidateFilter, opts ListOpts) ([]domain.Entity, int, error)
+
 	// ListProjectPanel returns the trimmed-column projection used
 	// by the Projects panel: id, source, source_id, kind, title,
 	// url, state, classification_rationale, created_at,
 	// last_polled_at — no snapshot_json / description blob. Ordered
 	// by last_polled_at DESC with NULLs last.
-	ListProjectPanel(ctx context.Context, orgID, projectID string) ([]domain.ProjectPanelEntity, error)
+	ListProjectPanel(ctx context.Context, orgID, projectID string, opts ListOpts) ([]domain.ProjectPanelEntity, int, error)
 
 	// --- Mutation ---
 

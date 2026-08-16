@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -121,22 +122,38 @@ func (s *curatorStore) EnqueueUserMessage(ctx context.Context, orgID, conversati
 
 // --- History ---
 
-func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
+func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conversationID string, limit int) ([]domain.Message, error) {
 	// Withdrawn-pending rows (undelivered + inactive) never happened and are
 	// hidden; delivered + inactive stays visible — that is retired history
 	// (compaction, a dead-lettered turn's input) the transcript still shows.
+	//
+	// A bounded read selects DESC and reverses, so the bound keeps the NEWEST
+	// rows: an ASC read with a LIMIT would hand back the oldest N and call it
+	// the transcript.
+	order, reverse := "ASC", false
+	tail := ""
+	args := []any{orgID, conversationID}
+	if limit > 0 {
+		order, reverse = "DESC", true
+		tail = " LIMIT $3"
+		args = append(args, limit)
+	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
 		WHERE org_id = $1 AND conversation_id = $2
 		  AND NOT (delivered = false AND window_state = 'inactive')
-		ORDER BY COALESCE(seq, id) ASC
-	`, orgID, conversationID)
+		ORDER BY COALESCE(seq, id) `+order+tail, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanMessageRows(rows)
+	out, err := scanMessageRows(rows)
+	if err != nil || !reverse {
+		return out, err
+	}
+	slices.Reverse(out)
+	return out, nil
 }
 
 func (s *curatorStore) ListClaims(ctx context.Context, orgID, conversationID string) ([]domain.Claim, error) {

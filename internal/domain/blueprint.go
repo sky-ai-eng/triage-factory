@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"slices"
 	"time"
 )
 
@@ -18,6 +19,23 @@ const (
 	BlueprintRunStatusFailed    BlueprintRunStatus = "failed"
 	BlueprintRunStatusCancelled BlueprintRunStatus = "cancelled"
 )
+
+// BlueprintRunStatuses is the closed vocabulary above, for the list route's
+// filter validation and its error message. Order is lifecycle-then-terminal so
+// the message reads naturally.
+var BlueprintRunStatuses = []string{
+	string(BlueprintRunStatusRunning),
+	string(BlueprintRunStatusCompleted),
+	string(BlueprintRunStatusAborted),
+	string(BlueprintRunStatusFailed),
+	string(BlueprintRunStatusCancelled),
+}
+
+// ValidBlueprintRunStatus reports whether s is one of BlueprintRunStatuses. A
+// status outside the vocabulary is a client fault, not an empty page.
+func ValidBlueprintRunStatus(s string) bool {
+	return slices.Contains(BlueprintRunStatuses, s)
+}
 
 // Terminal reports whether the status is an end state (no further steps will
 // run). A terminal blueprint_run must hold zero non-terminal child runs — the

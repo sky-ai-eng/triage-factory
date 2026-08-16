@@ -2,13 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import ActionList from './ActionList'
 import type { ActivityAction } from '../types'
-import { jsonBody } from '../test/apiResponse'
+import { jsonBody, listBody } from '../test/apiResponse'
 
-// One fetch mock returning the given rows for GET …/actions.
-function mockActions(actions: ActivityAction[]) {
+// One fetch mock returning the given rows as one complete page of
+// POST …/actions/list.
+function mockActions(actions: ActivityAction[], next = '', total = actions.length) {
   const fetchMock = vi.fn().mockResolvedValue({
     ok: true,
-    ...jsonBody(actions),
+    ...listBody(actions, next, total),
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -37,7 +38,10 @@ describe('ActionList', () => {
 
     expect(await screen.findByText('Comment posted')).toBeInTheDocument()
     expect(screen.getByText('Branch pushed')).toBeInTheDocument()
-    expect(fetchMock).toHaveBeenCalledWith('/api/agent/conversations/r1/actions', expect.anything())
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/agent/conversations/r1/actions/list',
+      expect.objectContaining({ method: 'POST' }),
+    )
   })
 
   it('shows an unclassified write as the request it actually was', async () => {
@@ -108,10 +112,14 @@ describe('ActionList', () => {
     expect(await screen.findByText('No external actions yet.')).toBeInTheDocument()
   })
 
-  it('admits when it is showing only the most recent page', async () => {
-    mockActions(Array.from({ length: 200 }, (_, i) => action({ id: `a${i}` })))
+  it('offers to fetch the rest instead of announcing a truncation', async () => {
+    // It used to cap at 200 rows and print "older actions are in the activity
+    // feed"; the older actions are now one click away on this surface.
+    mockActions([action({ id: 'a1' })], 'tok-2', 250)
     render(<ActionList runId="r1" />)
-    expect(await screen.findByText(/Most recent 200/)).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: /Load more \(1 of 250\)/ }),
+    ).toBeInTheDocument()
   })
 
   it('surfaces a failed load instead of an empty audit list', async () => {
@@ -125,7 +133,7 @@ describe('ActionList', () => {
   it('keeps the rows it has when a soft refetch fails', async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, ...jsonBody([action({ id: 'a1' })]) })
+      .mockResolvedValueOnce({ ok: true, ...listBody([action({ id: 'a1' })]) })
       .mockResolvedValueOnce({ ok: false, status: 500, ...jsonBody({}) })
     vi.stubGlobal('fetch', fetchMock)
 

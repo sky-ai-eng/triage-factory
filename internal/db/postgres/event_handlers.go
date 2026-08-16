@@ -156,9 +156,30 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 	return nil
 }
 
-func (s *eventHandlerStore) List(ctx context.Context, orgID string, kind string, teamID string) ([]domain.EventHandler, error) {
-	query, args := s.buildListQuery(orgID, kind, teamID)
-	return s.scanList(ctx, query, args)
+func (s *eventHandlerStore) List(ctx context.Context, orgID string, f db.EventHandlerListFilter, opts db.ListOpts) ([]domain.EventHandler, int, error) {
+	where, args := s.buildListWhere(orgID, f)
+
+	var total int
+	if err := s.app.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_handlers`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	// Order: rules first (sort_order ASC, name ASC), then triggers
+	// (created_at DESC), with an id tiebreaker so ties can't reshuffle
+	// between pages.
+	q := `SELECT ` + pgEventHandlerColumns + `
+	      FROM event_handlers` + where + `
+	      ORDER BY kind ASC,
+	               CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
+	               CASE WHEN kind = 'rule' THEN name ELSE '' END ASC,
+	               created_at DESC, id`
+	pageArgs := args
+	if opts.Limit > 0 {
+		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.scanList(ctx, q, pageArgs)
+	return rows, total, err
 }
 
 func (s *eventHandlerStore) Get(ctx context.Context, orgID, id string) (*domain.EventHandler, error) {
@@ -687,34 +708,28 @@ func applyHandlerPG(ctx context.Context, q queryer, orgID, id string, kind strin
 	return fmt.Errorf("postgres event_handlers Sync: apply: unknown kind %q", kind)
 }
 
-// buildListQuery composes the WHERE for List, with optional kind filter.
-// kind="" returns both kinds.
-func (s *eventHandlerStore) buildListQuery(orgID, kind, teamID string) (string, []any) {
+// buildListWhere composes the WHERE clause List's count and page share, so the
+// two can't apply different filters to the same request.
+func (s *eventHandlerStore) buildListWhere(orgID string, f db.EventHandlerListFilter) (string, []any) {
 	args := []any{orgID}
-	q := `SELECT ` + pgEventHandlerColumns + `
-	      FROM event_handlers
-	      WHERE org_id = $1 AND deleted_at IS NULL`
-	if kind != "" {
-		args = append(args, kind)
-		q += fmt.Sprintf(" AND kind = $%d", len(args))
+	where := ` WHERE org_id = $1 AND deleted_at IS NULL`
+	if f.Kind != "" {
+		args = append(args, f.Kind)
+		where += fmt.Sprintf(" AND kind = $%d", len(args))
 	}
-	if teamID != "" {
+	if f.TeamID != "" {
 		// Prompts page narrowed to one team: that team's handlers. Every
 		// handler is team-owned (team_id NOT NULL, no org-visible tier), so
 		// this is a plain team filter. RLS still gates the row set; this
 		// narrows within it.
-		args = append(args, teamID)
-		q += fmt.Sprintf(" AND team_id = $%d", len(args))
+		args = append(args, f.TeamID)
+		where += fmt.Sprintf(" AND team_id = $%d", len(args))
 	}
-	// Order: rules first (sort_order ASC, name ASC), then triggers
-	// (created_at DESC). Same shape as the predecessor stores' List
-	// methods so handler-level callers get identical ordering.
-	q += `
-	      ORDER BY kind ASC,
-	               CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
-	               CASE WHEN kind = 'rule' THEN name ELSE '' END ASC,
-	               created_at DESC`
-	return q, args
+	if len(f.GatedEventTypes) > 0 {
+		args = append(args, f.GatedEventTypes)
+		where += fmt.Sprintf(" AND NOT (event_type = ANY($%d))", len(args))
+	}
+	return where, args
 }
 
 func (s *eventHandlerStore) scanList(ctx context.Context, query string, args []any) ([]domain.EventHandler, error) {

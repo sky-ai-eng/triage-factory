@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Plus, UserPlus } from 'lucide-react'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
 // TeamMemberPicker is the team roster's "add member" affordance (TFAC-444): a
@@ -80,13 +80,19 @@ function PickerModal({
   useEffect(() => {
     let alive = true
     Promise.all([
-      apiJSON<{ members: OrgMemberApiRow[] }>(`/api/orgs/${encodeURIComponent(orgId)}/members`),
+      // page_size at the route max: the picker's candidate set is "org
+      // members minus team members", which needs both rosters whole. An org
+      // past 200 members would need a search-as-you-type picker rather than a
+      // longer page.
+      apiList<OrgMemberApiRow>(`/api/orgs/${encodeURIComponent(orgId)}/members/list`, {
+        page_size: 200,
+      }),
       apiJSON<{ members: TeamRosterApiRow[] }>(`/api/teams/${teamId}/members`),
     ])
       .then(([org, team]) => {
         if (!alive) return
         const onTeam = new Set(team.members.map((m) => m.user_id))
-        const addable = org.members.filter((m) => !onTeam.has(m.user_id))
+        const addable = org.items.filter((m) => !onTeam.has(m.user_id))
         setCandidates(addable)
         setSelected(addable[0]?.user_id ?? '')
       })

@@ -3,17 +3,15 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"net/url"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Access & credential change-log viewer (TFAC-484) — the org-admin EE audit
@@ -27,13 +25,6 @@ import (
 // VIEWER is Enterprise — a cross-team, org-wide lens gated by FeatureGovernance.
 // Only the gate is EE, so the endpoint lives next to the spend rollup in the core
 // usageHandler rather than in the ee/ subtree.
-
-const (
-	// accessLogDefaultLimit is the page size when the caller omits / malforms
-	// limit; accessLogMaxLimit caps it so one request can't scan the whole log.
-	accessLogDefaultLimit = 50
-	accessLogMaxLimit     = 200
-)
 
 // accessChangeJSON is one rendered audit row. ActionLabel is the server-rendered
 // human predicate the FE shows after the actor + timestamp ("changed Alice from
@@ -52,14 +43,16 @@ type accessChangeJSON struct {
 	CreatedAt   time.Time       `json:"created_at"`
 }
 
-// accessLogResponse is one page of the audit log, newest-first. HasMore drives
-// the viewer's "Older" pager without a COUNT — the handler reads Limit+1 rows and
-// reports HasMore when the extra row came back.
-type accessLogResponse struct {
-	Items   []accessChangeJSON `json:"items"`
-	Limit   int                `json:"limit"`
-	Offset  int                `json:"offset"`
-	HasMore bool               `json:"has_more"`
+// accessLogListRequest is the body of POST /api/usage/org/access-log/list.
+// Category narrows to one bucket of actions; empty is every action.
+type accessLogListRequest struct {
+	Category string `json:"category"`
+
+	httpx.PageRequest
+}
+
+type accessLogFilterKey struct {
+	Category string `json:"category"`
 }
 
 // handleUsageAccessLog serves the EE access & credential change-log viewer.
@@ -77,7 +70,12 @@ type accessLogResponse struct {
 // admin's own org and nothing else — the org-admin gate is the authorization for
 // the org-wide lens, RLS the defense-in-depth.
 //
-// GET /api/usage/org/access-log?limit=&offset=&category=
+// It answers the shared list envelope. Its old ad-hoc
+// `{items, limit, offset, has_more}` shape is gone, and with it the read-one-
+// past-the-page trick that stood in for a total: the viewer now knows how many
+// rows the filter matches, not merely that another page exists.
+//
+// POST /api/usage/org/access-log/list
 func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveCaller(w, r)
 	if !ok {
@@ -91,22 +89,33 @@ func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	q := r.URL.Query()
-	limit, offset, category, ok := parseAccessLogParams(w, q)
-	if !ok {
+	var req accessLogListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	category := strings.TrimSpace(req.Category)
+	// A closed vocabulary: an unknown category used to pass straight through to
+	// a filter that matched nothing, so a typo returned an
+	// authoritative-looking empty log.
+	if category != "" && !slices.Contains(accessLogCategories, category) {
+		v.Invalid("category", "must be one of: "+strings.Join(accessLogCategories, ", "))
+	}
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(accessLogFilterKey{Category: category}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
 	var (
 		rows  []domain.AccessChange
+		total int
 		names map[string]string // user id -> display name (actors + targets)
 		teams map[string]string // team id -> team name
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		// Peek one row past the page so HasMore needs no separate COUNT.
-		rows, e = tx.AccessChangeLog.ListByOrg(r.Context(), orgID, domain.AccessChangeListOpts{
-			Limit: limit + 1, Offset: offset, Category: category,
+		rows, total, e = tx.AccessChangeLog.ListByOrg(r.Context(), orgID, domain.AccessChangeListOpts{
+			Limit: page.Limit, Offset: page.Offset, Category: category,
 		})
 		if e != nil {
 			return e
@@ -121,10 +130,6 @@ func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	hasMore := len(rows) > limit
-	if hasMore {
-		rows = rows[:limit]
-	}
 	items := make([]accessChangeJSON, 0, len(rows))
 	for _, e := range rows {
 		target := names[e.TargetUserID]
@@ -140,51 +145,10 @@ func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Reque
 			CreatedAt:   e.CreatedAt,
 		})
 	}
-	writeJSON(w, http.StatusOK, accessLogResponse{
-		Items: items, Limit: limit, Offset: offset, HasMore: hasMore,
-	})
+	httpx.WriteList(w, page, items, total)
 }
 
-// --- paging param parsing ---
-
-// parseAccessLogParams parses the access log's three query parameters under the
-// strict-params contract, writing the error and returning ok=false on the first
-// fault. Absent means the default; present must parse, sit in range, and — for
-// category — name a bucket the store knows. It used to default a malformed
-// limit/offset silently and pass an unknown category straight through to a
-// filter that matched nothing, so a typo returned an authoritative-looking
-// empty log while the sibling activity feed 400'd the same input.
-func parseAccessLogParams(w http.ResponseWriter, q url.Values) (limit, offset int, category string, ok bool) {
-	limit = accessLogDefaultLimit
-	if s := strings.TrimSpace(q.Get("limit")); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n < 1 {
-			writeBadActivityParam(w, "invalid 'limit': want a positive integer")
-			return 0, 0, "", false
-		}
-		if n > accessLogMaxLimit {
-			writeBadActivityParam(w, fmt.Sprintf("'limit' must be at most %d", accessLogMaxLimit))
-			return 0, 0, "", false
-		}
-		limit = n
-	}
-	if s := strings.TrimSpace(q.Get("offset")); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n < 0 {
-			writeBadActivityParam(w, "invalid 'offset': want a non-negative integer")
-			return 0, 0, "", false
-		}
-		offset = n
-	}
-	category = strings.TrimSpace(q.Get("category"))
-	if category != "" && !slices.Contains(accessLogCategories, category) {
-		writeBadActivityParam(w, "invalid 'category': want one of "+strings.Join(accessLogCategories, ", "))
-		return 0, 0, "", false
-	}
-	return limit, offset, category, true
-}
-
-// accessLogCategories is the closed ?category= vocabulary — the buckets
+// accessLogCategories is the closed category vocabulary — the buckets
 // domain.AccessChangeListOpts knows how to narrow to.
 var accessLogCategories = []string{
 	domain.AccessCategoryMembership,

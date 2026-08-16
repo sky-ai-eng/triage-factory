@@ -59,7 +59,7 @@ func TestProjectStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB Get returned orgA project %s", id)
 	}
 
-	if got, err := stores.Projects.List(ctx, orgB); err != nil {
+	if got, _, err := stores.Projects.List(ctx, orgB, db.ListOpts{Limit: 200}); err != nil {
 		t.Fatalf("List cross-org: %v", err)
 	} else if len(got) != 0 {
 		t.Errorf("orgB List returned %d rows, want 0", len(got))
@@ -300,7 +300,7 @@ func TestProjectStore_Postgres_GetPopulatesTeamID(t *testing.T) {
 		t.Fatalf("Get().TeamID = %q, want teamB %q", teamID(got), teamB)
 	}
 
-	list, err := stores.Projects.List(ctx, orgA)
+	list, _, err := stores.Projects.List(ctx, orgA, db.ListOpts{Limit: 200})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

@@ -1,8 +1,8 @@
 import { useSyncExternalStore, useCallback, useEffect, useRef, useState } from 'react'
-import type { TeamsResponse, TeamSummary } from '../types'
-import { apiJSON, httpErrorMessage } from '../lib/apiClient'
+import type { TeamSummary } from '../types'
+import { apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
 
-// Shared store for GET /api/teams — the data source for the multi-team
+// Shared store for POST /api/teams/list — the data source for the multi-team
 // selectors (the per-page read filter and the write-time picker) plus the
 // org-admin "add team" control. A single module-level cache means every
 // selector across pages and modals shares one round-trip, and a mutation
@@ -57,12 +57,16 @@ function load(): Promise<void> {
   if (inFlight) return inFlight
   const gen = generation
   setState({ loading: true, error: null })
-  inFlight = apiJSON<TeamsResponse>('/api/teams')
-    .then((data) => {
+  // page_size at the route max: this is a picker cache, and every selector
+  // that reads it wants the whole set. An org past 200 teams would page, and
+  // the cache would hold the first page — worth revisiting only if that
+  // becomes real, since a team picker with 200 entries has a bigger problem.
+  inFlight = apiList<TeamSummary>('/api/teams/list', { page_size: 200 })
+    .then((page) => {
       if (gen !== generation) return // superseded — a newer invalidation won
       setState({
-        teams: data.teams ?? [],
-        lastActingTeamId: data.last_acting_team_id ?? '',
+        teams: page.items,
+        lastActingTeamId: page.items.find((t) => t.is_last_acting)?.id ?? '',
         loaded: true,
         loading: false,
         error: null,

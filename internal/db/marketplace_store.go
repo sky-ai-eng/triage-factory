@@ -68,7 +68,7 @@ type MarketplaceStore interface {
 	// caller with no user context (viewer_voted always false). RLS scopes
 	// the underlying rows to org members + published-or-own-team listings —
 	// this method applies no additional visibility filtering beyond f.
-	List(ctx context.Context, orgID string, viewerUserID string, f domain.ListingFilter) ([]domain.ListingSummary, error)
+	List(ctx context.Context, orgID string, viewerUserID string, f domain.ListingFilter, opts ListOpts) ([]domain.ListingSummary, int, error)
 
 	// Get returns one listing's full detail — header, computed counts, the
 	// version at listing.current_version as CurrentSnapshot, and the full

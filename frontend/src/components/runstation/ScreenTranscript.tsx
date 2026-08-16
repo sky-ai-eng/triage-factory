@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import { Check, Copy } from 'lucide-react'
 import type { Message, Conversation, ToolCall } from '../../types'
@@ -11,6 +11,12 @@ import { stationState } from './stationStyle'
 interface Props {
   messages: Message[]
   run: Conversation
+  /** History remains before the held transcript's first row. The transcript
+   *  read is bounded, so a long run opens on its tail; without this control
+   *  everything before that page is unreachable and nothing on screen says so. */
+  hasOlder?: boolean
+  loadingOlder?: boolean
+  onLoadOlder?: () => void
 }
 
 // react-markdown parses its source on every render. Memoizing it means an
@@ -32,7 +38,7 @@ const MemoMarkdown = memo(Markdown)
 // Memoized (default export below): RunDetail re-renders once per second for
 // its elapsed-time tick, and the transcript — the most expensive subtree on
 // the page — doesn't depend on the clock at all.
-function ScreenTranscript({ messages, run }: Props) {
+function ScreenTranscript({ messages, run, hasOlder, loadingOlder, onLoadOlder }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
@@ -52,6 +58,25 @@ function ScreenTranscript({ messages, run }: Props) {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [messages, run])
+
+  // Loading earlier history grows the content ABOVE the viewport, which would
+  // otherwise slide whatever the reader was looking at down the screen by the
+  // height of the page they just asked for. The anchor is the distance from the
+  // bottom — invariant under a prepend — captured at click time and restored
+  // once the rows land, before paint.
+  const pendingAnchorRef = useRef<number | null>(null)
+  const handleLoadOlder = useCallback(() => {
+    const el = scrollRef.current
+    pendingAnchorRef.current = el ? el.scrollHeight - el.scrollTop : null
+    onLoadOlder?.()
+  }, [onLoadOlder])
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    const anchor = pendingAnchorRef.current
+    if (!el || anchor === null) return
+    pendingAnchorRef.current = null
+    el.scrollTop = el.scrollHeight - anchor
+  }, [messages])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -143,6 +168,23 @@ function ScreenTranscript({ messages, run }: Props) {
         className="absolute inset-0 overflow-y-auto px-5 py-5 focus:outline-none md:px-8"
       >
         <div ref={contentRef}>
+          {hasOlder && (
+            <div className="flex justify-center pb-3">
+              <button
+                type="button"
+                onClick={handleLoadOlder}
+                disabled={loadingOlder}
+                className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] transition-opacity hover:opacity-80 disabled:opacity-40"
+                style={{
+                  color: 'var(--hmi-ink-dim)',
+                  background: 'color-mix(in srgb, var(--hmi-screen-lift) 80%, transparent)',
+                  boxShadow: 'inset 0 0 0 1px var(--hmi-line)',
+                }}
+              >
+                {loadingOlder ? 'loading…' : 'load earlier messages'}
+              </button>
+            </div>
+          )}
           {rows.length === 0 && !verdict ? (
             <EmptyReadout active={isActiveRun(run)} />
           ) : (

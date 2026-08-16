@@ -29,14 +29,16 @@ import (
 // no role concept; both pools collapse to one connection and assertLocalOrg
 // pins orgID to LocalDefaultOrgID.
 type PromptStore interface {
-	// List returns non-hidden prompts ordered by updated_at DESC. When
+	// List returns one page of non-hidden prompts plus the unpaged total,
+	// ordered by updated_at DESC with an id tiebreaker so the order is total
+	// and the pages partition it. When
 	// teamID is non-empty — the multi-team prompts page narrowed to one
 	// team — the result is scoped to that team's prompts (team_id=teamID).
 	// Every prompt is team-scoped, so there is no org-visible
 	// tier to union in. Empty teamID returns everything visible (solo/local,
 	// or an unfiltered view). The SQLite impl ignores teamID (local mode is
 	// single-team).
-	List(ctx context.Context, orgID string, teamID string) ([]domain.Prompt, error)
+	List(ctx context.Context, orgID string, teamID string, opts ListOpts) ([]domain.Prompt, int, error)
 
 	// Get returns one prompt by id (regardless of hidden state) or
 	// (nil, nil) if not found. Request-facing, so it filters

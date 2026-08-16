@@ -173,42 +173,9 @@ func TestFrontendMirrorsExternalActionVocabulary(t *testing.T) {
 	}
 }
 
-// TestFrontendMirrorsRunActionsLimit pins the run view's copy of the
-// server's action-page cap to the server's own.
-//
-// The list renders a "most recent N" note when it receives a full page, so the
-// two numbers together are what stop a bounded list from reading as a complete
-// one. Raise the cap on the server alone and the note stops firing: the view
-// goes back to truncating silently, which on a governance surface is the
-// failure the note exists to prevent.
-func TestFrontendMirrorsRunActionsLimit(t *testing.T) {
-	// Both sides are read out of their own source, so neither needs an export
-	// that exists only for this test.
-	find := func(file string, re *regexp.Regexp, what string) string {
-		t.Helper()
-		src, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatalf("read %s: %v", file, err)
-		}
-		m := re.FindStringSubmatch(string(src))
-		if m == nil {
-			t.Fatalf("%s has no %s — this guard has stopped reading it", file, what)
-		}
-		return m[1]
-	}
-	server := find("internal/server/agent.go", goRunActionsLimit, "`runActionsLimit = <n>` declaration")
-	frontend := find("frontend/src/components/ActionList.tsx", tsPageConst, "`const PAGE = <n>` declaration")
-	if server != frontend {
-		t.Errorf("ActionList.tsx PAGE = %s, but the server caps the run-scoped action read at %s — a full page would stop being recognized as one",
-			frontend, server)
-	}
-}
-
 var (
-	goRunActionsLimit = regexp.MustCompile(`(?m)^const runActionsLimit = (\d+)$`)
-	tsPageConst       = regexp.MustCompile(`(?m)^const PAGE = (\d+)$`)
-	tsQuotedMember    = regexp.MustCompile(`'([a-z_]+)'`)
-	tsSpreadMember    = regexp.MustCompile(`\.\.\.([A-Z_]+)`)
+	tsQuotedMember = regexp.MustCompile(`'([a-z_]+)'`)
+	tsSpreadMember = regexp.MustCompile(`\.\.\.([A-Z_]+)`)
 	// The const block's one-per-line `ActionX = "x"` form. Anchored to a leading
 	// tab so a doc comment quoting a value can't be mistaken for a declaration.
 	goActionConst = regexp.MustCompile(`(?m)^\tAction\w+\s+=\s+"([a-z_]+)"$`)

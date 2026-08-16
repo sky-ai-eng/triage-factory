@@ -184,7 +184,7 @@ type ArtifactStore interface {
 	// team_created index order). Backs team-level C2 (TFAC-449) through the
 	// shared A·6 API. Detached rows (run purged → run_id NULL) are still
 	// the team's and are included.
-	ListByTeam(ctx context.Context, orgID, teamID string, opts ArtifactListOpts) ([]domain.Artifact, error)
+	ListByTeam(ctx context.Context, orgID, teamID string, opts ArtifactListOpts) ([]domain.Artifact, int, error)
 
 	// ListNonTerminalBySystem returns every artifact for the org whose
 	// (kind, state) is still reconcilable — PR draft|open, review pending,
@@ -216,7 +216,7 @@ type ArtifactStore interface {
 	// context, so it must see every team's rows. org_id stays bound in the
 	// WHERE clause as defense in depth. Identical to a plain org read in SQLite
 	// (single-tenant, no RLS).
-	ListByOrgSystem(ctx context.Context, orgID string, opts ArtifactListOpts) ([]domain.Artifact, error)
+	ListByOrgSystem(ctx context.Context, orgID string, opts ArtifactListOpts) ([]domain.Artifact, int, error)
 }
 
 // ArtifactListOpts carries the optional filters/paging for

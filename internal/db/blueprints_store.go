@@ -204,13 +204,52 @@ func DedupPreserveOrder(ids []string) []string {
 // ShippedDefaultsStore.SeedShippedIntoTeam, likewise inserts them unflagged).
 // Delete, IncrementUsage/IncrementUsageSystem, and DuplicatePrompts (fresh
 // user-source copies; originals untouched) never touch the flag.
+// BlueprintListFilter is the blueprint list's filter set.
+type BlueprintListFilter struct {
+	// TeamID narrows to one team's blueprints (the multi-team page scoped to
+	// a team). Empty means every blueprint the caller may see. The SQLite
+	// impl ignores it — local mode is single-team.
+	TeamID string
+
+	// GatedEventTypes are the event types this org is NOT entitled to. A
+	// blueprint is hidden when it has at least one attached trigger and every
+	// one of those triggers fires on a gated type — it has no live behavior
+	// the org can use. A blueprint with no triggers at all is never hidden by
+	// this (that is the orphaned state, unrelated to entitlements).
+	//
+	// The gate lives here rather than as a post-read filter in the handler
+	// because a filter applied after the window makes the page short and the
+	// total wrong: the rows a caller cannot see must not be counted, and the
+	// only place that can be true is the query that counts them.
+	GatedEventTypes []string
+}
+
+// BlueprintStepListFilter is the step list's filter set.
+type BlueprintStepListFilter struct {
+	// TeamID narrows to one team's blueprints, like BlueprintListFilter's.
+	TeamID string
+	// BlueprintIDs narrows to specific blueprints. Empty means every
+	// blueprint in scope — the canvas's bulk read. A non-empty set is the
+	// per-blueprint read, which is why there is no second route for it.
+	BlueprintIDs []string
+}
+
+// BlueprintRunListFilter is the blueprint-run list's filter set.
+type BlueprintRunListFilter struct {
+	// BlueprintID narrows to the runs of one blueprint. Empty means every
+	// run in the org.
+	BlueprintID string
+	// Statuses narrows by run status. Empty means every status.
+	Statuses []string
+}
+
 type BlueprintStore interface {
 	// --- Blueprint header CRUD (modeled on PromptStore) ----------------
 
-	// List returns non-hidden blueprints ordered by updated_at DESC, scoped
-	// to teamID when non-empty (the multi-team page narrowed to one team).
-	// The SQLite impl ignores teamID (local mode is single-team).
-	List(ctx context.Context, orgID string, teamID string) ([]domain.Blueprint, error)
+	// List returns one page of non-hidden blueprints plus the unpaged total,
+	// ordered by updated_at DESC with an id tiebreaker so the pages partition
+	// a total order.
+	List(ctx context.Context, orgID string, f BlueprintListFilter, opts ListOpts) ([]domain.Blueprint, int, error)
 
 	// Get returns one blueprint by id or (nil, nil) if not found.
 	// Request-facing, so it filters deleted_at IS NULL — a soft-deleted
@@ -271,12 +310,14 @@ type BlueprintStore interface {
 	// (not error) when the blueprint has no steps configured.
 	ListSteps(ctx context.Context, orgID string, blueprintID string) ([]domain.BlueprintStep, error)
 
-	// ListAllSteps returns every step of teamID's non-deleted blueprints in one
-	// read, ordered by (blueprint_id, step_index) — the binding canvas's bulk
-	// alternative to ListSteps-per-blueprint (avoids an N+1 over the blueprint
-	// list). Soft-deleted blueprints' steps are excluded (the canvas only renders
-	// listed blueprints). Caller groups by blueprint_id.
-	ListAllSteps(ctx context.Context, orgID, teamID string) ([]domain.BlueprintStep, error)
+	// ListAllSteps returns one page of blueprint steps plus the unpaged total,
+	// ordered by (blueprint_id, step_index) — a total order, since a step's
+	// index is unique within its blueprint. It is the binding canvas's bulk
+	// read, and with f.BlueprintIDs it is also the per-blueprint read, so the
+	// two GETs it replaced are one route. Soft-deleted and hidden blueprints'
+	// steps are excluded (the canvas only renders listed blueprints). Caller
+	// groups by blueprint_id.
+	ListAllSteps(ctx context.Context, orgID string, f BlueprintStepListFilter, opts ListOpts) ([]domain.BlueprintStep, int, error)
 
 	// CountStepReferences returns the number of distinct non-deleted blueprints
 	// that reference the given prompt as a step. Request-facing, so it filters
@@ -451,6 +492,12 @@ type BlueprintStore interface {
 
 	// GetRun returns a blueprint run by id, or (nil, nil) when not found.
 	GetRun(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)
+
+	// ListRuns returns one page of the org's blueprint runs plus the unpaged
+	// total, newest first (started_at DESC) with an id tiebreaker. Before it
+	// the collection was unenumerable: a run could only be read by an id a
+	// caller already held, so a run whose id was lost was invisible forever.
+	ListRuns(ctx context.Context, orgID string, f BlueprintRunListFilter, opts ListOpts) ([]domain.BlueprintRun, int, error)
 
 	// GetRunForRun returns the blueprint run that owns a step run, plus the
 	// step index. Returns (nil, nil, nil) when the supplied run is not part of

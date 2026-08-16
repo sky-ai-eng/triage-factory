@@ -292,22 +292,43 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
+// projectListRequest is the body of POST /api/projects/list. The resource is
+// "the projects I can see", which RLS decides; the body carries no filters.
+type projectListRequest struct {
+	httpx.PageRequest
+}
+
+// POST /api/projects/list
 func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	var projects []domain.Project
+
+	var req projectListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		projects []domain.Project
+		total    int
+	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		projects, e = tx.Projects.List(r.Context(), orgID)
+		projects, total, e = tx.Projects.List(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "projects", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, projects)
+	httpx.WriteList(w, page, projects, total)
 }
 
 func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
@@ -766,7 +787,11 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			var visible []domain.Blueprint
 			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 				var e error
-				visible, e = tx.Blueprints.List(r.Context(), orgID, existing.TeamID)
+				// Unwindowed (ListOpts zero Limit): this is a membership
+				// check over the team's blueprints, not a browse, and a page
+				// would make "is this blueprint in my team" depend on where it
+				// sorted.
+				visible, _, e = tx.Blueprints.List(r.Context(), orgID, db.BlueprintListFilter{TeamID: existing.TeamID}, db.Unwindowed)
 				return e
 			}); err != nil {
 				internalError(w, "projects", fmt.Errorf("list blueprints for project %s: %w", existing.ID, err))
@@ -1260,6 +1285,24 @@ const knowledgeMaxRequestBytes = 25 * 1024 * 1024
 // home dir, which would otherwise leak filesystem layout to the
 // browser. Detail goes to the server log where the operator can find
 // it; the client gets a stable string.
+// knowledgeListRequest is the body of POST /api/projects/{id}/knowledge/list.
+// The project is the path id and the knowledge base has no filters, so the
+// body is paging alone.
+type knowledgeListRequest struct {
+	httpx.PageRequest
+}
+
+// POST /api/projects/{id}/knowledge/list
+//
+// The rows keep the 256KB inline-content rule per file (knowledgeInlineMaxBytes):
+// a text-shaped file under the cap carries its body, anything larger carries
+// metadata and is fetched by path. Paging does not change that — the cap is
+// about one file, the page is about how many files.
+//
+// The window is applied in Go rather than at the source. Both backends
+// enumerate a flat directory (or its blob-store equivalent) as a unit and
+// neither offers a windowed listing, so a page here is a slice of an
+// already-complete answer — which is also why total_count is exact.
 func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -1270,6 +1313,17 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+
+	var req knowledgeListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
 	var project *domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -1283,29 +1337,42 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 		notFound(w, "project")
 		return
 	}
+
+	var files []knowledgeFile
 	// Multi mode: the blob store is the KB source of truth (control's own disk
 	// hosts no KB). Local mode keeps the byte-identical on-disk read below.
 	if runmode.Current() == runmode.ModeMulti {
-		files, err := s.listKnowledgeFromStore(r.Context(), orgID, id)
+		var err error
+		files, err = s.listKnowledgeFromStore(r.Context(), orgID, id)
 		if err != nil {
 			internalError(w, "projects", fmt.Errorf("list knowledge from store for project %s: %w", id, err))
 			return
 		}
-		writeJSON(w, http.StatusOK, files)
-		return
+	} else {
+		root, err := curator.KnowledgeDir(orgID, id)
+		if err != nil {
+			internalError(w, "projects", fmt.Errorf("resolve knowledge dir for project %s: %w", id, err))
+			return
+		}
+		kbDir := filepath.Join(root, "knowledge-base")
+		files, err = readKnowledgeFiles(kbDir)
+		if err != nil {
+			internalError(w, "projects", fmt.Errorf("read knowledge dir %s: %w", kbDir, err))
+			return
+		}
 	}
-	root, err := curator.KnowledgeDir(orgID, id)
-	if err != nil {
-		internalError(w, "projects", fmt.Errorf("resolve knowledge dir for project %s: %w", id, err))
-		return
+	httpx.WriteList(w, page, windowSlice(files, page), len(files))
+}
+
+// windowSlice takes the page's slice of an already-materialized list. An
+// offset past the end yields an empty page rather than a panic, which is the
+// same answer a store gives for a window past its result set.
+func windowSlice[T any](all []T, page httpx.Page) []T {
+	if page.Offset >= len(all) {
+		return nil
 	}
-	kbDir := filepath.Join(root, "knowledge-base")
-	files, err := readKnowledgeFiles(kbDir)
-	if err != nil {
-		internalError(w, "projects", fmt.Errorf("read knowledge dir %s: %w", kbDir, err))
-		return
-	}
-	writeJSON(w, http.StatusOK, files)
+	end := min(page.Offset+page.Limit, len(all))
+	return all[page.Offset:end]
 }
 
 // readKnowledgeFiles walks one level of the knowledge-base directory

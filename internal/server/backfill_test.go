@@ -49,19 +49,11 @@ func TestBackfillCandidates_ScopesByPinnedReposAndJiraKey(t *testing.T) {
 	mustEntity(t, s.db, "jira", "SKY-100", "issue", "matching jira")
 	mustEntity(t, s.db, "jira", "FOO-200", "issue", "non-matching jira")
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+pid+"/backfill-candidates", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		Candidates []backfillCandidate `json:"candidates"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	candidates := decodeList[backfillCandidate](t, doJSON(t, s, http.MethodPost,
+		"/api/projects/"+pid+"/backfill-candidates/list", map[string]any{})).Items
 
-	gotIDs := make(map[string]bool, len(resp.Candidates))
-	for _, c := range resp.Candidates {
+	gotIDs := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
 		gotIDs[c.SourceID] = true
 	}
 	if !gotIDs["sky-ai-eng/triage-factory#1"] {
@@ -92,18 +84,10 @@ func TestBackfillCandidates_EmptyConfigShowsAll(t *testing.T) {
 	mustEntity(t, s.db, "github", "owner/repo#1", "pr", "T1")
 	mustEntity(t, s.db, "jira", "ANY-1", "issue", "T2")
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+pid+"/backfill-candidates", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		Candidates []backfillCandidate `json:"candidates"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(resp.Candidates) != 2 {
-		t.Errorf("expected 2 candidates with empty config, got %d", len(resp.Candidates))
+	candidates := decodeList[backfillCandidate](t, doJSON(t, s, http.MethodPost,
+		"/api/projects/"+pid+"/backfill-candidates/list", map[string]any{})).Items
+	if len(candidates) != 2 {
+		t.Errorf("expected 2 candidates with empty config, got %d", len(candidates))
 	}
 }
 
@@ -132,16 +116,11 @@ func TestBackfillCandidates_ExcludesAlreadyInProject(t *testing.T) {
 	}
 	free := mustEntity(t, s.db, "github", "owner/repo#3", "pr", "unassigned")
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+pid+"/backfill-candidates", nil)
-	var resp struct {
-		Candidates []backfillCandidate `json:"candidates"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	candidates := decodeList[backfillCandidate](t, doJSON(t, s, http.MethodPost,
+		"/api/projects/"+pid+"/backfill-candidates/list", map[string]any{})).Items
 
 	got := map[string]string{}
-	for _, c := range resp.Candidates {
+	for _, c := range candidates {
 		got[c.ID] = c.CurrentProjectName
 	}
 	if _, ok := got[already.ID]; ok {

@@ -76,7 +76,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 
 	t.Run("list_for_user_returns_both_teams", func(t *testing.T) {
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			teams, e := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.ListForUser(ctx, orgID)
+			teams, _, e := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.ListForUser(ctx, orgID, db.ListOpts{Limit: 50})
 			if e != nil {
 				return e
 			}
@@ -313,21 +313,21 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).Prompts
-			a, e := store.List(ctx, orgID, teamA)
+			a, _, e := store.List(ctx, orgID, teamA, db.ListOpts{Limit: 50})
 			if e != nil {
 				return e
 			}
 			if ga := promptIDs(a); !ga[pA] || ga[pB] {
 				t.Errorf("List(teamA): want {A} without B; got A=%v B=%v", ga[pA], ga[pB])
 			}
-			b, e := store.List(ctx, orgID, teamB)
+			b, _, e := store.List(ctx, orgID, teamB, db.ListOpts{Limit: 50})
 			if e != nil {
 				return e
 			}
 			if gb := promptIDs(b); !gb[pB] || gb[pA] {
 				t.Errorf("List(teamB): want {B} without A; got B=%v A=%v", gb[pB], gb[pA])
 			}
-			all, e := store.List(ctx, orgID, "")
+			all, _, e := store.List(ctx, orgID, "", db.ListOpts{Limit: 50})
 			if e != nil {
 				return e
 			}
@@ -378,14 +378,14 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers
-			a, e := store.List(ctx, orgID, domain.EventHandlerKindRule, teamA)
+			a, _, e := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule, TeamID: teamA}, db.ListOpts{Limit: 200})
 			if e != nil {
 				return e
 			}
 			if ga := handlerIDs(a); !ga[rA] || ga[rB] {
 				t.Errorf("List(rule, teamA): want A without B; got A=%v B=%v", ga[rA], ga[rB])
 			}
-			b, e := store.List(ctx, orgID, domain.EventHandlerKindRule, teamB)
+			b, _, e := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule, TeamID: teamB}, db.ListOpts{Limit: 200})
 			if e != nil {
 				return e
 			}
@@ -480,7 +480,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			}
 			newTeamID = created.ID
 			// The creator is now a member, so ListForUser sees three teams.
-			teams, e := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.ListForUser(ctx, orgID)
+			teams, _, e := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.ListForUser(ctx, orgID, db.ListOpts{Limit: 50})
 			if e != nil {
 				return fmt.Errorf("list after create: %w", e)
 			}

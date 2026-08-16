@@ -61,10 +61,12 @@ type ProjectStore interface {
 	// SQLite is N=1 and unscoped — it collapses to Get.
 	GetSystem(ctx context.Context, orgID, id string) (*domain.Project, error)
 
-	// List returns all projects ordered by name (case-insensitive).
-	// No pagination — counts stay small (≤100 in any plausible install).
-	// Empty result returns []domain.Project{}, not nil.
-	List(ctx context.Context, orgID string) ([]domain.Project, error)
+	// List returns one page of the org's projects plus the unpaged total,
+	// ordered by name (case-insensitive) with an id tiebreaker so two
+	// same-named projects can't swap places between pages. Empty result
+	// returns []domain.Project{}, not nil. A zero ListOpts.Limit means "no
+	// window" for the internal callers that need every project.
+	List(ctx context.Context, orgID string, opts ListOpts) ([]domain.Project, int, error)
 
 	// Update writes the full mutable row from p (caller is responsible
 	// for merging partial PATCH input over an existing row first).

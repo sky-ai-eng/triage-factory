@@ -261,7 +261,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 				t.Fatalf("Upsert %s: %v", id, err)
 			}
 		}
-		got, err := s.List(ctx, orgID)
+		got, total, err := s.List(ctx, orgID, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -272,6 +272,38 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		want := []string{"a/first", "m/middle", "z/last"}
 		if !equalStringSlice(ids, want) {
 			t.Errorf("List order = %v, want %v", ids, want)
+		}
+		if total != 3 {
+			t.Errorf("total = %d, want 3", total)
+		}
+
+		// The pages partition that order: a two-row window then a one-row
+		// window covers the set exactly once, and each page reports the
+		// filtered total rather than its own length.
+		first, total, err := s.List(ctx, orgID, db.ListOpts{Limit: 2})
+		if err != nil {
+			t.Fatalf("List page 1: %v", err)
+		}
+		second, total2, err := s.List(ctx, orgID, db.ListOpts{Limit: 2, Offset: 2})
+		if err != nil {
+			t.Fatalf("List page 2: %v", err)
+		}
+		if len(first) != 2 || len(second) != 1 || total != 3 || total2 != 3 {
+			t.Fatalf("pages = %d + %d (totals %d, %d), want 2 + 1 with total 3 on both",
+				len(first), len(second), total, total2)
+		}
+		// Compared by slug, like the whole-set assertion above: ID is the
+		// registry handle (TFAC-834), so it says nothing about ORDER, which is
+		// what this walk is checking.
+		walked := []string{first[0].Slug(), first[1].Slug(), second[0].Slug()}
+		if !equalStringSlice(walked, want) {
+			t.Errorf("paged walk = %v, want %v", walked, want)
+		}
+
+		// The unwindowed read (Limit 0) is the internal callers' escape
+		// hatch and must return everything rather than an empty page.
+		if all, _, err := s.List(ctx, orgID, db.Unwindowed); err != nil || len(all) != 3 {
+			t.Errorf("unwindowed List = %d rows, %v; want all 3", len(all), err)
 		}
 	})
 

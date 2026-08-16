@@ -33,16 +33,48 @@ var _ db.BlueprintStore = (*blueprintStore)(nil)
 // --- Blueprint header CRUD -----------------------------------------------
 
 // List ignores teamID: local mode is single-team.
-func (s *blueprintStore) List(ctx context.Context, orgID string, _ string) ([]domain.Blueprint, error) {
+func (s *blueprintStore) List(ctx context.Context, orgID string, f db.BlueprintListFilter, opts db.ListOpts) ([]domain.Blueprint, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	rows, err := s.q.QueryContext(ctx, `
+	// f.TeamID is ignored — local mode is single-team.
+	where := ` WHERE hidden = 0 AND deleted_at IS NULL`
+	args := []any{}
+	if len(f.GatedEventTypes) > 0 {
+		// Same predicate as the Postgres impl, spelled with an IN list since
+		// SQLite has no array bind: hide a blueprint iff it HAS triggers and
+		// none of them fires on an ungated type.
+		placeholders := make([]string, len(f.GatedEventTypes))
+		for i, et := range f.GatedEventTypes {
+			placeholders[i] = "?"
+			args = append(args, et)
+		}
+		where += `
+		  AND NOT (
+		    EXISTS (SELECT 1 FROM event_handlers h
+		             WHERE h.blueprint_id = blueprints.id AND h.kind = 'trigger')
+		    AND NOT EXISTS (SELECT 1 FROM event_handlers h
+		                     WHERE h.blueprint_id = blueprints.id AND h.kind = 'trigger'
+		                       AND h.event_type NOT IN (` + strings.Join(placeholders, ",") + `))
+		  )`
+	}
+
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM blueprints`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := `
 		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
-		FROM blueprints WHERE hidden = 0 AND deleted_at IS NULL ORDER BY updated_at DESC
-	`)
+		FROM blueprints` + where + ` ORDER BY updated_at DESC, id`
+	pageArgs := args
+	if opts.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, pageArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -50,11 +82,11 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, _ string) ([]do
 	for rows.Next() {
 		b, err := scanBlueprintRowSQLite(rows.Scan)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, b)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // Get is request-facing: it filters deleted_at IS NULL. GetSystem omits the
@@ -258,30 +290,52 @@ func (s *blueprintStore) ListSteps(ctx context.Context, orgID, blueprintID strin
 // in one read (the canvas's bulk steps fetch). The blueprints join mirrors
 // List's gate (hidden = 0, deleted_at IS NULL); teamID is ignored in single-team
 // local mode.
-func (s *blueprintStore) ListAllSteps(ctx context.Context, orgID, _ string) ([]domain.BlueprintStep, error) {
+func (s *blueprintStore) ListAllSteps(ctx context.Context, orgID string, f db.BlueprintStepListFilter, opts db.ListOpts) ([]domain.BlueprintStep, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT bs.blueprint_id, bs.step_index, bs.step_prompt_id, bs.brief, bs.created_at
+	// f.TeamID is ignored — local mode is single-team.
+	where := `
 		FROM blueprint_steps bs
 		JOIN blueprints b ON b.id = bs.blueprint_id
-		WHERE b.hidden = 0 AND b.deleted_at IS NULL
-		ORDER BY bs.blueprint_id, bs.step_index
-	`)
+		WHERE b.hidden = 0 AND b.deleted_at IS NULL`
+	args := []any{}
+	if len(f.BlueprintIDs) > 0 {
+		placeholders := make([]string, len(f.BlueprintIDs))
+		for i, id := range f.BlueprintIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		where += ` AND bs.blueprint_id IN (` + strings.Join(placeholders, ",") + `)`
+	}
+
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*)`+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count blueprint steps: %w", err)
+	}
+
+	query := `
+		SELECT bs.blueprint_id, bs.step_index, bs.step_prompt_id, bs.brief, bs.created_at` +
+		where + ` ORDER BY bs.blueprint_id, bs.step_index`
+	pageArgs := args
+	if opts.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, pageArgs...)
 	if err != nil {
-		return nil, fmt.Errorf("query all blueprint steps: %w", err)
+		return nil, 0, fmt.Errorf("query all blueprint steps: %w", err)
 	}
 	defer rows.Close()
 	var out []domain.BlueprintStep
 	for rows.Next() {
 		var st domain.BlueprintStep
 		if err := rows.Scan(&st.BlueprintID, &st.StepIndex, &st.StepPromptID, &st.Brief, &st.CreatedAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, st)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 func (s *blueprintStore) CountStepReferences(ctx context.Context, orgID, stepPromptID string) (int, error) {
@@ -785,12 +839,8 @@ func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.
 		cancelRequested int
 		stepPlanRaw     string
 	)
-	err := s.q.QueryRowContext(ctx, `
-		SELECT id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id, status,
-		       current_step_index, cancel_requested, step_plan,
-		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at
-		FROM blueprint_runs WHERE id = ?
-	`, id).Scan(&br.ID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &actorAgentID, &br.Status,
+	err := s.q.QueryRowContext(ctx, blueprintRunSelect+` WHERE id = ?`, id).Scan(
+		&br.ID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &actorAgentID, &br.Status,
 		&br.CurrentStepIndex, &cancelRequested, &stepPlanRaw,
 		&abortReason, &abortedAtStep, &br.WorktreePath, &br.StartedAt, &completedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -821,6 +871,86 @@ func (s *blueprintStore) GetRun(ctx context.Context, orgID, id string) (*domain.
 		br.CompletedAt = &t
 	}
 	return &br, nil
+}
+
+// blueprintRunSelect is the projection GetRun and ListRuns share, so the two
+// reads of one row cannot drift on column order.
+const blueprintRunSelect = `
+		SELECT id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id, status,
+		       current_step_index, cancel_requested, step_plan,
+		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at
+		FROM blueprint_runs`
+
+func (s *blueprintStore) ListRuns(ctx context.Context, orgID string, f db.BlueprintRunListFilter, opts db.ListOpts) ([]domain.BlueprintRun, int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, 0, err
+	}
+	where := ` WHERE 1 = 1`
+	args := []any{}
+	if f.BlueprintID != "" {
+		where += ` AND blueprint_id = ?`
+		args = append(args, f.BlueprintID)
+	}
+	if len(f.Statuses) > 0 {
+		placeholders := make([]string, len(f.Statuses))
+		for i, st := range f.Statuses {
+			placeholders[i] = "?"
+			args = append(args, st)
+		}
+		where += ` AND status IN (` + strings.Join(placeholders, ",") + `)`
+	}
+
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM blueprint_runs`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := blueprintRunSelect + where + ` ORDER BY started_at DESC, id`
+	pageArgs := args
+	if opts.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []domain.BlueprintRun{}
+	for rows.Next() {
+		var (
+			br              domain.BlueprintRun
+			triggerID       sql.NullString
+			actorAgentID    sql.NullString
+			abortReason     sql.NullString
+			abortedAtStep   sql.NullInt64
+			completedAt     sql.NullTime
+			cancelRequested int
+			stepPlanRaw     string
+		)
+		if err := rows.Scan(&br.ID, &br.BlueprintID, &br.TaskID, &br.TriggerType, &triggerID, &actorAgentID, &br.Status,
+			&br.CurrentStepIndex, &cancelRequested, &stepPlanRaw,
+			&abortReason, &abortedAtStep, &br.WorktreePath, &br.StartedAt, &completedAt); err != nil {
+			return nil, 0, err
+		}
+		if br.StepPlan, err = domain.UnmarshalStepPlan(stepPlanRaw); err != nil {
+			return nil, 0, fmt.Errorf("unmarshal step plan for blueprint_run %s: %w", br.ID, err)
+		}
+		br.CancelRequested = cancelRequested != 0
+		br.TriggerID = triggerID.String
+		br.ActorAgentID = actorAgentID.String
+		br.AbortReason = abortReason.String
+		if abortedAtStep.Valid {
+			i := int(abortedAtStep.Int64)
+			br.AbortedAtStep = &i
+		}
+		if completedAt.Valid {
+			t := completedAt.Time
+			br.CompletedAt = &t
+		}
+		out = append(out, br)
+	}
+	return out, total, rows.Err()
 }
 
 func (s *blueprintStore) GetRunForRun(ctx context.Context, orgID, runID string) (*domain.BlueprintRun, *int, error) {

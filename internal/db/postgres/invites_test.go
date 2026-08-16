@@ -120,16 +120,19 @@ func TestInvitesStore_Postgres_ListActiveExcludesTerminal(t *testing.T) {
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
-	var list []domain.OrgInvite
+	var (
+		list  []domain.OrgInvite
+		total int
+	)
 	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		list, e = tx.Invites.ListActive(ctx, orgID)
+		list, total, e = tx.Invites.ListActive(ctx, orgID, db.ListOpts{Limit: 50})
 		return e
 	}); err != nil {
 		t.Fatalf("ListActive: %v", err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("ListActive = %d rows; want 1 (only pending)", len(list))
+	if len(list) != 1 || total != 1 {
+		t.Fatalf("ListActive = %d rows (total %d); want 1 (only pending)", len(list), total)
 	}
 	if list[0].Email != "pending@x.com" {
 		t.Errorf("active invite = %q; want pending@x.com", list[0].Email)

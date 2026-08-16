@@ -860,6 +860,9 @@ func (s *Server) routes() {
 	// "Start your Factory" onboarding CTA. Multi-mode only (404 in
 	// local); 403 when org creation is disabled on the instance.
 	s.apiMutating("POST /api/orgs", s.handleOrgCreate)
+	// The canonical single read for an org: the same {id, name, role} row
+	// /api/me carries per membership. Member-visible; a non-member 404s.
+	s.api("GET /api/orgs/{org_id}", s.handleOrgGet)
 	// multi-team selectors. GET /api/teams is the data source
 	// for the per-page read filter + write-time picker (count-gated to
 	// ≥2 teams in the frontend); it carries the last-acting-team the write
@@ -874,8 +877,12 @@ func (s *Server) routes() {
 		spawner:   func() *delegate.Spawner { return s.spawner },
 		curator:   func() *curator.Curator { return s.curator },
 	}
-	s.api("GET /api/teams", th.handleTeamsList)
+	s.apiMutating("POST /api/teams/list", th.handleTeamsList)
 	s.apiMutating("POST /api/teams", th.handleTeamCreate)
+	// The canonical single read, and the only reader of a team's description.
+	// Any org member may read any team in their org; a cross-org id 404s under
+	// RLS. {team_id} takes the literal "default" in local mode (authz.ResolveTeamID).
+	s.api("GET /api/teams/{team_id}", th.handleTeamGet)
 	// PATCH /api/teams/{team_id} renames a team / edits its description
 	// (hosted-only; 404 in local). Gated team-admin-or-org-admin; a plain
 	// member 403s, a cross-org team_id 404s (VerifyTeamInOrg).
@@ -885,7 +892,7 @@ func (s *Server) routes() {
 	// curator sessions and blocks further writes; restore flips it back (dead
 	// runs stay dead). The preview + archived-list back the confirm modal and the
 	// org-admin restore surface.
-	s.api("GET /api/teams/archived", th.handleTeamArchivedList)
+	s.apiMutating("POST /api/teams/archived/list", th.handleTeamArchivedList)
 	s.api("GET /api/teams/{team_id}/archive/preview", th.handleTeamArchivePreview)
 	s.apiMutating("POST /api/teams/{team_id}/archive", th.handleTeamArchive)
 	s.apiMutating("POST /api/teams/{team_id}/restore", th.handleTeamRestore)
@@ -931,7 +938,7 @@ func (s *Server) routes() {
 			}
 		},
 	}
-	s.api("GET /api/orgs/{org_id}/members", omh.handleOrgMembersList)
+	s.apiMutating("POST /api/orgs/{org_id}/members/list", omh.handleOrgMembersList)
 	s.apiMutating("PATCH /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRoleChange)
 	s.apiMutating("DELETE /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRemove)
 	// Ownership transfer: owner-only (gated on tf.user_owns_org + the
@@ -956,19 +963,24 @@ func (s *Server) routes() {
 	// audit log) + Objects (artifact history) lenses, selected by ?view= — same
 	// scope gates as the spend reads above, plus the entitlement (unlicensed →
 	// 404). TFAC-483.
-	s.api("GET /api/usage/teams/{team_id}/activity", uh.handleUsageTeamActivity)
-	s.api("GET /api/usage/org/activity", uh.handleUsageOrgActivity)
+	// Two resources, two routes each. The single ?view=-multiplexed /activity
+	// route they replaced answered with two different row shapes and two
+	// different filter vocabularies from one address.
+	s.apiMutating("POST /api/usage/teams/{team_id}/artifacts/list", uh.handleUsageTeamArtifacts)
+	s.apiMutating("POST /api/usage/teams/{team_id}/actions/list", uh.handleUsageTeamActions)
+	s.apiMutating("POST /api/usage/org/artifacts/list", uh.handleUsageOrgArtifacts)
+	s.apiMutating("POST /api/usage/org/actions/list", uh.handleUsageOrgActions)
 	// Per-team daily spend cap (TFAC-482) — org-admin-set, EE/governance-gated
 	// (the handlers 404 when unlicensed). The GET lists every active team + its cap
 	// for the editor (so an idle team can be pre-capped); the PUT writes one cap and
 	// is mutating, so it runs through the CSRF + session wrap. Both write/read the
 	// admin pool: an org admin may cap a team they don't belong to.
-	s.api("GET /api/usage/org/team-caps", uh.handleUsageTeamCaps)
+	s.apiMutating("POST /api/usage/org/team-caps/list", uh.handleUsageTeamCaps)
 	s.apiMutating("PUT /api/usage/teams/{team_id}/cap", uh.handleUsageTeamCap)
 	// EE governance audit surface (TFAC-484): the access & credential change-log
 	// viewer. Org-admin-gated AND FeatureGovernance-gated (404 unlicensed) inside
 	// the handler — the data is core, only the cross-team lens is Enterprise.
-	s.api("GET /api/usage/org/access-log", uh.handleUsageAccessLog)
+	s.apiMutating("POST /api/usage/org/access-log/list", uh.handleUsageAccessLog)
 
 	// Avatar proxy (TFAC-480): serves a user's OAuth-captured avatar first-party
 	// so it renders under the app's tight `img-src 'self'` CSP instead of being
@@ -1006,8 +1018,12 @@ func (s *Server) routes() {
 			return s.authDeps.sessions.UpdateActiveOrgSystem(ctx, sessID, orgID)
 		},
 	}
-	s.api("GET /api/invites", ih.handleInviteList)
+	s.apiMutating("POST /api/invites/list", ih.handleInviteList)
 	s.apiMutating("POST /api/invites", ih.handleInviteCreate)
+	// The single read carries no token and no accept URL — those live only in
+	// the create response. Registered after /preview, which is a literal and
+	// so wins the {id} segment on GET.
+	s.api("GET /api/invites/{id}", ih.handleInviteGet)
 	s.apiMutating("POST /api/invites/{id}/revoke", ih.handleInviteRevoke)
 	s.apiMutating("POST /api/invites/accept", ih.handleInviteAccept)
 	// Pre-auth: the invitee previews the token before signing in. The handler
@@ -1055,7 +1071,7 @@ func (s *Server) routes() {
 	// Its sibling above answers "what objects does this run own"; this answers
 	// "what did it do", including the writes that produce no object at all (a
 	// review-thread reply, a refused merge, a denied push).
-	s.api("GET /api/agent/conversations/{conversationID}/actions", ag.handleAgentActions)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/actions/list", ag.handleAgentActions)
 	// The one conversation-level stop. It replaces the former /cancel and
 	// /interrupt outright rather than aliasing them: two addresses is how they
 	// drifted into two meanings of `open` in the first place.
@@ -1069,30 +1085,30 @@ func (s *Server) routes() {
 	// Tier-2 run-scoped artifact reconcile (TFAC-464): the run view polls this
 	// while open to refresh that run's non-terminal artifacts against GitHub.
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/artifacts/refresh", ag.handleArtifactRefresh)
-	s.api("GET /api/agent/conversations", ag.handleConversations)
+	s.apiMutating("POST /api/agent/conversations/list", ag.handleConversations)
 
 	// Projects. Pure CRUD over the projects table; the
 	// Curator runtime that populates conversations.sdk_session_id and
 	// per-project entity classification land separately.
 	s.apiMutating("POST /api/projects", s.handleProjectCreate)
-	s.api("GET /api/projects", s.handleProjectList)
+	s.apiMutating("POST /api/projects/list", s.handleProjectList)
 	s.api("GET /api/projects/{id}", s.handleProjectGet)
 	s.apiMutating("PATCH /api/projects/{id}", s.handleProjectUpdate)
 	s.apiMutating("DELETE /api/projects/{id}", s.handleProjectDelete)
 	s.api("GET /api/projects/{id}/export/preview", s.handleProjectExportPreview)
 	s.api("GET /api/projects/{id}/export", s.handleProjectExport)
 	s.apiMutating("POST /api/projects/import", s.handleProjectImport)
-	s.api("GET /api/projects/{id}/knowledge", s.handleProjectKnowledge)
+	s.apiMutating("POST /api/projects/{id}/knowledge/list", s.handleProjectKnowledge)
 	s.apiMutating("POST /api/projects/{id}/knowledge", s.handleProjectKnowledgeUpload)
 	s.api("GET /api/projects/{id}/knowledge/{path}", s.handleProjectKnowledgeFile)
 	s.apiMutating("DELETE /api/projects/{id}/knowledge/{path}", s.handleProjectKnowledgeDelete)
 	// Project-creation backfill popup.
 	bf := &backfillHandler{tx: s.tx, ws: s.ws}
-	s.api("GET /api/projects/{id}/backfill-candidates", bf.handleBackfillCandidates)
+	s.apiMutating("POST /api/projects/{id}/backfill-candidates/list", bf.handleBackfillCandidates)
 	s.apiMutating("POST /api/projects/{id}/backfill", bf.handleBackfill)
 	// Project entities panel.
 	pe := &projectEntitiesHandler{tx: s.tx}
-	s.api("GET /api/projects/{id}/entities", pe.handleProjectEntities)
+	s.apiMutating("POST /api/projects/{id}/entities/list", pe.handleProjectEntities)
 
 	// Curator chat per project. The Curator package owns the
 	// long-lived CC session lifecycle; these endpoints are the API
@@ -1113,9 +1129,9 @@ func (s *Server) routes() {
 
 	dh := &dashboardHandler{tx: s.tx, ghResolver: s.ghResolver, backfill: s.kickDashboardBackfill}
 	s.api("GET /api/dashboard/stats", dh.handleDashboardStats)
-	s.api("GET /api/dashboard/prs", dh.handleDashboardPRs)
-	s.api("GET /api/dashboard/prs/{number}/status", dh.handleDashboardPRStatus)
-	s.apiMutating("POST /api/dashboard/prs/{number}/draft", dh.handleDashboardPRDraft)
+	s.apiMutating("POST /api/dashboard/prs/list", dh.handleDashboardPRs)
+	s.api("GET /api/dashboard/prs/{owner}/{repo}/{number}/status", dh.handleDashboardPRStatus)
+	s.apiMutating("POST /api/dashboard/prs/{owner}/{repo}/{number}/draft", dh.handleDashboardPRDraft)
 
 	s.api("GET /api/settings/user", s.handleUserSettingsGet)
 	s.apiMutating("POST /api/settings/user", s.handleUserSettingsPost)
@@ -1138,15 +1154,18 @@ func (s *Server) routes() {
 	sk := &skillsHandler{db: s.db, prompts: s.prompts, tx: s.tx, az: s.az}
 	s.apiMutating("POST /api/skills/import", sk.handleSkillsImport)
 	s.apiMutating("POST /api/skills/upload", sk.handleSkillUpload)
-	s.api("GET /api/github/repos", s.handleGitHubRepos)
+	// Proxy list: the rows come from GitHub, which reports no total for this
+	// read, so total_count is null and page_token wraps the upstream cursor.
+	s.apiMutating("POST /api/github/repos/list", s.handleGitHubRepos)
 	se := &settingsHandler{tx: s.tx, az: s.az, bedrockRole: func() bedrockRoleResolver { return s.bedrockRole }}
 	s.apiMutating("POST /api/github/preflight-ssh", se.handleGitHubPreflightSSH)
 	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
 	// distinct from the creds stage (auth.ValidateGitHub / /api/jira/connect).
 	s.apiMutating("POST /api/github/reachability", handleGitHubReachability)
-	s.api("GET /api/repos", s.handleRepositories)
+	s.apiMutating("POST /api/repos/list", s.handleRepositories)
+	s.api("GET /api/repos/{owner}/{repo}", s.handleRepoGet)
 	s.apiMutating("PATCH /api/repos/{owner}/{repo}", s.handleRepoUpdate)
-	s.api("GET /api/repos/{owner}/{repo}/branches", s.handleRepoBranches)
+	s.apiMutating("POST /api/repos/{owner}/{repo}/branches/list", s.handleRepoBranches)
 	s.apiMutating("POST /api/jira/reachability", handleJiraReachability)
 	// Validated org Anthropic-key capture — the single write path for the
 	// anthropic_api_key vault secret (an empty key clears it for "system creds").
@@ -1162,6 +1181,13 @@ func (s *Server) routes() {
 	// apiMutating).
 	s.apiMutating("POST /api/bedrock/role-setup", se.handleBedrockRoleSetup)
 	s.api("GET /api/jira/statuses", se.handleJiraStatuses)
+	// **Declared exception.** The stock deck is a composite the discovery UI
+	// deals from — a readiness status plus two partitions of the same set —
+	// not a row list a client walks, and the deck's own restructure is its own
+	// ticket. Converting the envelope here without that restructure would mint
+	// a contract the next change immediately breaks. It reads the team's whole
+	// active Jira set, bounded by the team's tracked projects rather than by a
+	// window; the deck is meant to be dealt whole.
 	s.api("GET /api/jira/stock", s.handleJiraStockGet)
 	s.apiMutating("POST /api/jira/stock", s.handleJiraStockPost)
 
@@ -1187,6 +1213,14 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/factory/delegate", s.handleFactoryDelegate)
 
 	ph := &promptsHandler{db: s.db, tx: s.tx, az: s.az}
+	// **Declared exceptions to the paginated-list rule.** These two are not
+	// lists of rows a tenant owns; they are the build's own vocabulary —
+	// domain.AllEventTypes() and the schemas derived from it, fixed at compile
+	// time and identical for every caller. There is nothing to filter by,
+	// nothing that grows with usage, and a page token would address a set that
+	// only changes when the binary does. A client reads them once and caches.
+	// Their shape stays a bare list on purpose: paginating a constant is
+	// ceremony that makes the surface look mutable.
 	s.api("GET /api/event-types", ph.handleEventTypes)
 	s.api("GET /api/event-schemas", handleEventSchemasList)
 	s.api("GET /api/event-schemas/{event_type}", handleEventSchemaGet)
@@ -1194,7 +1228,10 @@ func (s *Server) routes() {
 	// /api/task-rules + /api/triggers split — kind is passed as ?kind=
 	// on list, in the body on create, derived on update.
 	eh := &eventHandlersHandler{tx: s.tx, az: s.az}
-	s.api("GET /api/event-handlers", eh.handleEventHandlersList)
+	s.apiMutating("POST /api/event-handlers/list", eh.handleEventHandlersList)
+	// The canonical single read: five mutation routes preloaded this row
+	// internally and none would hand it back.
+	s.api("GET /api/event-handlers/{id}", eh.handleEventHandlerGet)
 	s.apiMutating("POST /api/event-handlers", eh.handleEventHandlerCreate)
 	s.apiMutating("PUT /api/event-handlers/reorder", eh.handleEventHandlerReorder)
 	s.apiMutating("PATCH /api/event-handlers/{id}", eh.handleEventHandlerUpdate)
@@ -1208,26 +1245,30 @@ func (s *Server) routes() {
 	// inside the handler; the store is the admin-pool EventQueueStore with
 	// org_id bound by argument, the same shape as the usage-ops read.
 	fe := &failedEventsHandler{az: s.az, queue: s.allStores.EventQueue}
-	s.api("GET /api/events/failed", fe.handleFailedEventsList)
+	s.apiMutating("POST /api/events/failed/list", fe.handleFailedEventsList)
+	s.api("GET /api/events/failed/{id}", fe.handleFailedEventGet)
 	s.apiMutating("POST /api/events/failed/requeue", fe.handleFailedEventsRequeue)
-	s.api("GET /api/prompts", ph.handlePromptsList)
+	s.apiMutating("POST /api/prompts/list", ph.handlePromptsList)
 	s.apiMutating("POST /api/prompts", ph.handlePromptCreate)
 	s.api("GET /api/prompts/{id}", ph.handlePromptGet)
 	s.apiMutating("PUT /api/prompts/{id}", ph.handlePromptPut)
 	s.apiMutating("DELETE /api/prompts/{id}", ph.handlePromptDelete)
 	s.api("GET /api/prompts/{id}/stats", ph.handlePromptStats)
 	bh := &blueprintsHandler{tx: s.tx, az: s.az, spawner: func() *delegate.Spawner { return s.spawner }}
-	s.api("GET /api/blueprints", bh.handleBlueprintsList)
+	s.apiMutating("POST /api/blueprints/list", bh.handleBlueprintsList)
+	s.api("GET /api/blueprints/{id}", bh.handleBlueprintGet)
 	s.apiMutating("POST /api/blueprints", bh.handleBlueprintCreate)
 	s.apiMutating("PUT /api/blueprints/{id}", bh.handleBlueprintUpdate)
 	s.apiMutating("DELETE /api/blueprints/{id}", bh.handleBlueprintDelete)
-	s.api("GET /api/blueprint-steps", bh.handleBlueprintStepsAll)
-	s.api("GET /api/blueprints/{id}/steps", bh.handleBlueprintStepsGet)
+	// One route for the canvas's bulk read and the per-blueprint read: they
+	// differed only in a filter, and a filter is what a list body is for.
+	s.apiMutating("POST /api/blueprint-steps/list", bh.handleBlueprintStepsAll)
 	s.apiMutating("PUT /api/blueprints/{id}/steps", bh.handleBlueprintStepsPut)
 	s.apiMutating("POST /api/blueprints/{id}/merge", bh.handleBlueprintMerge)
 	s.apiMutating("POST /api/blueprints/{id}/split", bh.handleBlueprintSplit)
 	s.apiMutating("POST /api/blueprints/{id}/reconnect", bh.handleBlueprintReconnect)
 	s.apiMutating("POST /api/blueprints/duplicate", bh.handleBlueprintDuplicate)
+	s.apiMutating("POST /api/blueprint-runs/list", bh.handleBlueprintRunsList)
 	s.api("GET /api/blueprint-runs/{id}", bh.handleBlueprintRunGet)
 	s.apiMutating("POST /api/blueprint-runs/{id}/cancel", bh.handleBlueprintRunCancel)
 
@@ -1235,7 +1276,7 @@ func (s *Server) routes() {
 	// handler opens with gateMarketplace, which 404s in local mode (see
 	// marketplace_handler.go).
 	mh := &marketplaceHandler{tx: s.tx, az: s.az}
-	s.api("GET /api/marketplace/listings", mh.handleMarketplaceList)
+	s.apiMutating("POST /api/marketplace/listings/list", mh.handleMarketplaceList)
 	s.apiMutating("POST /api/marketplace/listings", mh.handleMarketplacePublish)
 	s.api("GET /api/marketplace/listings/{id}", mh.handleMarketplaceGet)
 	s.apiMutating("POST /api/marketplace/listings/{id}/versions", mh.handleMarketplaceListingVersionCreate)

@@ -31,7 +31,7 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
   useEffect(() => {
     if (!expanded) return
     let cancelled = false
-    apiJSON<PRStatusData>(`/api/dashboard/prs/${pr.number}/status?repo=${pr.repo}`)
+    apiJSON<PRStatusData>(`/api/dashboard/prs/${pr.repo}/${pr.number}/status`)
       .then((d) => {
         if (!cancelled) {
           setStatus(d)

@@ -58,7 +58,7 @@ func TestEventQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.EventQueue.ListForEntity(ctx, bogusOrg, "e"); err == nil {
 		t.Errorf("ListForEntity with non-local orgID should error")
 	}
-	if _, err := stores.EventQueue.ListFailedEvents(ctx, bogusOrg, 0); err == nil {
+	if _, _, err := stores.EventQueue.ListFailedEvents(ctx, bogusOrg, db.ListOpts{Limit: 50}); err == nil {
 		t.Errorf("ListFailedEvents with non-local orgID should error")
 	}
 	// Non-empty ids: the guard must run before the early "nothing to do"

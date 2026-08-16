@@ -38,6 +38,17 @@ type Team struct {
 	Role string
 }
 
+// TeamCap pairs a team's identity with its configured per-team daily cost cap,
+// as the governance cap editor reads it. Cap is nil when the team has no cap —
+// which is what both "no cap configured" and "never configured at all" mean,
+// since an absent team_settings row and a NULL max_daily_cost_usd are the same
+// answer to "what is this team's ceiling."
+type TeamCap struct {
+	TeamID   string
+	TeamName string
+	Cap      *float64
+}
+
 // TeamMember is one row of the team roster (TFAC-444): a member's identity
 // facts plus their team-level role. The team-tier sibling of OrgMember,
 // structurally identical but distinct so the two membership tiers don't share
