@@ -56,7 +56,7 @@ func newSQLiteForConversationTest(t *testing.T) *sql.DB {
 	}
 	// Conformance suite's conv.PromptID points at this stable ID.
 	if _, err := conn.Exec(
-		`INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_agentrun_test', 'Test', 'body', ?, ?)`,
+		`INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_conversation_test', 'Test', 'body', ?, ?)`,
 		runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
 	); err != nil {
 		t.Fatalf("seed prompt: %v", err)
@@ -296,7 +296,7 @@ func TestConversationStore_SQLite_RuntimeDefaultsToSDK(t *testing.T) {
 	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 	conversationID := seedSQLiteConversation(t, conn, domain.Conversation{
-		TaskID: taskID, PromptID: "p_agentrun_test", Status: "running", Model: "m",
+		TaskID: taskID, PromptID: "p_conversation_test", Status: "running", Model: "m",
 		BlueprintRunID: seed.BlueprintRun(t, taskID),
 	})
 
@@ -326,7 +326,7 @@ func TestConversationStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
 
 	mk := func(status string) string {
 		return seedSQLiteConversation(t, conn, domain.Conversation{
-			TaskID: taskID, PromptID: "p_agentrun_test", Status: status, Model: "m",
+			TaskID: taskID, PromptID: "p_conversation_test", Status: status, Model: "m",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})
 	}

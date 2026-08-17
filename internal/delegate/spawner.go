@@ -193,18 +193,18 @@ type Spawner struct {
 	// event's intent survives (TFAC-585's "gone" ack path). Wired
 	// unconditionally — both dialects support pending_firings.
 	pendingFirings db.PendingFiringsStore
-	// runSignals is the cross-pod run-control outbox (TFAC-585, Postgres
+	// conversationSignals is the cross-pod run-control outbox (TFAC-585, Postgres
 	// only). Nil except when SetConversationSignals wires it — always nil in local
 	// mode and in every test that doesn't opt in, which is what keeps
 	// s.controller as the plain inProcessController and every cross-pod
 	// code path (crossPodController, the apply loop, StageOrDeliverAdditiveEvent's
 	// remote branch) a no-op/never-reached by construction. Guarded by mu
 	// like the other post-construction seams.
-	runSignals db.ConversationSignalStore
+	conversationSignals db.ConversationSignalStore
 	// signalNotifyDB is the admin-pool *sql.DB SetConversationSignals wires
-	// alongside runSignals — NOTIFY needs no session affinity (unlike
+	// alongside conversationSignals — NOTIFY needs no session affinity (unlike
 	// LISTEN), so it rides whatever pooled connection is at hand. Nil
-	// exactly when runSignals is nil.
+	// exactly when conversationSignals is nil.
 	signalNotifyDB *sql.DB
 	// ackWaiters holds one wake channel per in-flight signal a control
 	// request on this pod is waiting to see acked, keyed by conversation_signals.id.

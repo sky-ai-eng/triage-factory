@@ -15,7 +15,7 @@ import (
 // have an entity to FK-point to without reaching for the EntityStore
 // impl (which lives in internal/db/sqlite and would form a circular
 // import if pulled into package db). Mirrors createConversationForTest in
-// agentrun_seed_helper_test.go — see that helper's doc for the
+// conversation_seed_helper_test.go — see that helper's doc for the
 // rationale.
 //
 // Returns a populated domain.Entity for caller convenience (most

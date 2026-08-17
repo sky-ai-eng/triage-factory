@@ -153,14 +153,14 @@ func TestFleet_BootOverlap_TwoInstancesRegisterConcurrently(t *testing.T) {
 	}
 }
 
-// TestFleet_ReaperRequeue_DeadExecutorRunClaimedBySurvivor is the ticket's
+// TestFleet_ReaperRequeue_DeadExecutorConversationClaimedBySurvivor is the ticket's
 // headline acceptance criterion end to end: instance A claims the fixture's
 // run, goes silent (heartbeat backdated past the threshold — standing in
 // for `kill -9`), the leader reaper requeues its row, and instance B — a
 // SEPARATE Spawner against the SAME Postgres — successfully claims and
 // would complete it. Exactly one live owner at a time; the dead owner's
 // claim never resurfaces.
-func TestFleet_ReaperRequeue_DeadExecutorRunClaimedBySurvivor(t *testing.T) {
+func TestFleet_ReaperRequeue_DeadExecutorConversationClaimedBySurvivor(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	fx := seedFleetFixture(t, h)

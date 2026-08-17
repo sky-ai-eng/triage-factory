@@ -79,18 +79,18 @@ func seedPgConversationOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, agen
 }
 
 // seedPgConversationPrompt inserts a user-source prompt the conformance
-// suite's conversations FK into. Stable id `p_agentrun_test` matches the
+// suite's conversations FK into. Stable id `p_conversation_test` matches the
 // constant the shared harness expects.
 func seedPgConversationPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
 	t.Helper()
 	teamID := firstTeamForOrg(t, h, orgID)
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, created_at, updated_at)
-		VALUES ('p_agentrun_test', $1, $2, $3, 'Conversation Test', 'body', 'user', '', now(), now())
+		VALUES ('p_conversation_test', $1, $2, $3, 'Conversation Test', 'body', 'user', '', now(), now())
 	`, orgID, userID, teamID); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
-	return "p_agentrun_test"
+	return "p_conversation_test"
 }
 
 // newPgConversationSeeder builds the FactorySeeder-style callbacks the

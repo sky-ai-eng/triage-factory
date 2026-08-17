@@ -23,7 +23,7 @@ func TestConversationStore_SQLite_LookupOrgForRunSystem_ReturnsSentinelOrgID(t *
 	taskID := seeder.Task(t, entityID, "github:pr:opened", eventID)
 
 	conversationID := seeder.Run(t, domain.Conversation{
-		ID: "run-lookup-1", TaskID: taskID, PromptID: "p_agentrun_test", Status: "running", Model: "m",
+		ID: "run-lookup-1", TaskID: taskID, PromptID: "p_conversation_test", Status: "running", Model: "m",
 		BlueprintRunID: seeder.BlueprintRun(t, taskID),
 	})
 

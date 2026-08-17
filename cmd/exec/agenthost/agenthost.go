@@ -74,7 +74,7 @@ const ProtocolVersion = 1
 // artifacts.team_id off it (NOT NULL per TFAC-455 F1), so it must be
 // populated on every construction path: the spawner reads it off the run
 // row (no task hop), and the local resolver carries it from
-// ConversationIdentity. Empty only on synthetic RunInfos that don't back a real
+// ConversationIdentity. Empty only on synthetic ConversationInfos that don't back a real
 // run (test seams).
 //
 // Mirrors convident.ConversationIdentity but lives in this package so the IPC

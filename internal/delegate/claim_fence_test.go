@@ -64,10 +64,10 @@ func (f *fencedConversationStore) ParkOpenForClaimSystem(context.Context, string
 	return false, db.ErrClaimReleased
 }
 
-// TestRunSink_FenceTripKillsTheRunAndRecordsIt: a refused transcript write
+// TestConversationSink_FenceTripKillsTheRunAndRecordsIt: a refused transcript write
 // stops the agent and marks the engagement fenced, so runAgent abandons the
 // run instead of writing a terminal for it.
-func TestRunSink_FenceTripKillsTheRunAndRecordsIt(t *testing.T) {
+func TestConversationSink_FenceTripKillsTheRunAndRecordsIt(t *testing.T) {
 	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-sink")
 	_ = database
 	s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
@@ -92,9 +92,9 @@ func TestRunSink_FenceTripKillsTheRunAndRecordsIt(t *testing.T) {
 	}
 }
 
-// TestRunSink_UnfencedWithoutAClaim: a sink with no claim in scope keeps the
+// TestConversationSink_UnfencedWithoutAClaim: a sink with no claim in scope keeps the
 // pre-fence write path, so the paths that never claimed a run are unaffected.
-func TestRunSink_UnfencedWithoutAClaim(t *testing.T) {
+func TestConversationSink_UnfencedWithoutAClaim(t *testing.T) {
 	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-sink-noclaim")
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = stub
@@ -118,11 +118,11 @@ func TestRunSink_UnfencedWithoutAClaim(t *testing.T) {
 	}
 }
 
-// TestRunSink_SessionFenceTripDiscardsTheSessionID: the session id is the
+// TestConversationSink_SessionFenceTripDiscardsTheSessionID: the session id is the
 // resume coordinate, so a refused write is not a write to retry — it is a
 // write that must never land. The engagement stops, and the id dies with it;
 // falling back to the unfenced door would be the corruption itself.
-func TestRunSink_SessionFenceTripDiscardsTheSessionID(t *testing.T) {
+func TestConversationSink_SessionFenceTripDiscardsTheSessionID(t *testing.T) {
 	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-session")
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = stub
@@ -157,9 +157,9 @@ func TestRunSink_SessionFenceTripDiscardsTheSessionID(t *testing.T) {
 	}
 }
 
-// TestRunSink_SessionWithoutAClaim: a manual run that never claimed keeps its
+// TestConversationSink_SessionWithoutAClaim: a manual run that never claimed keeps its
 // pre-fence door, so the paths with no engagement to name are unaffected.
-func TestRunSink_SessionWithoutAClaim(t *testing.T) {
+func TestConversationSink_SessionWithoutAClaim(t *testing.T) {
 	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-session-noclaim")
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = stub
@@ -364,9 +364,9 @@ func TestProcessCompletion_FenceTripRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestFailRun_FenceTripRecordsNothing: the same for the infra-failure
+// TestFailConversation_FenceTripRecordsNothing: the same for the infra-failure
 // terminal — a fenced-out engagement's crash is not the successor's failure.
-func TestFailRun_FenceTripRecordsNothing(t *testing.T) {
+func TestFailConversation_FenceTripRecordsNothing(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-fail")
 	s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
 
@@ -430,13 +430,13 @@ func (p *phaseFencedStore) SetActiveClaimPhaseSystem(context.Context, string, st
 	return nil
 }
 
-// TestParkRunOpen_CancelFenceTripRecordsNothing: the path a partition
+// TestParkConversationOpen_CancelFenceTripRecordsNothing: the path a partition
 // self-fence trip drives every live run down. Killing the sandboxes cancels
 // each run's ctx, and each goroutine then arrives here to record its own
 // cancellation — so if the self-fence fired late, this is the write that
 // would bury a successor's live conversation. It must be refused, and
 // nothing around it may happen either.
-func TestParkRunOpen_CancelFenceTripRecordsNothing(t *testing.T) {
+func TestParkConversationOpen_CancelFenceTripRecordsNothing(t *testing.T) {
 	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-cancelled")
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = stub
@@ -475,11 +475,11 @@ func TestParkRunOpen_CancelFenceTripRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestParkRunOpen_ResumeCancelFenceTripRecordsNothing: the resume path's own
+// TestParkConversationOpen_ResumeCancelFenceTripRecordsNothing: the resume path's own
 // self-cancel, same contract — and the workspace snapshot the successor
 // resumes from survives. It is the same park as every other stop now; what
 // this pins is that routing it through the fence (claimID set) still refuses.
-func TestParkRunOpen_ResumeCancelFenceTripRecordsNothing(t *testing.T) {
+func TestParkConversationOpen_ResumeCancelFenceTripRecordsNothing(t *testing.T) {
 	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-resume-cancel")
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = stub

@@ -619,7 +619,7 @@ func (s *marketplaceStore) MaterializeListing(ctx context.Context, orgID, teamID
 }
 
 // blueprintRunTerminalStatusesSQL is the blueprint_runs.status counterpart
-// to conversationTerminalStatusesSQL (run_queue.go) — the terminal set per
+// to conversationTerminalStatusesSQL (conversation_queue.go) — the terminal set per
 // domain.BlueprintRunStatus.Terminal(). No shared constant exists for this
 // table today; defined here since this is the first blueprint_runs query
 // that needs to distinguish terminal from in-flight.
@@ -629,7 +629,7 @@ const blueprintRunTerminalStatusesSQL = `'completed','aborted','failed','cancell
 // kind=prompt listing in $1. teams distinct-counts installing teams whose
 // copy (a prompts row) still exists and isn't soft-deleted.
 //
-// runs_agg counts only TERMINAL runs (conversationTerminalStatusesSQL, run_queue.go)
+// runs_agg counts only TERMINAL runs (conversationTerminalStatusesSQL, conversation_queue.go)
 // against any copy this listing has ever produced — a queued/cloning/running
 // run hasn't resolved yet, so it must count toward neither total_runs nor
 // success_rate until it does. Counting it as a not-yet-completed run would

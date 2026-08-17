@@ -156,8 +156,8 @@ func (c *LocalClient) Close() error { return nil }
 
 // --- review draft finalization ---
 
-// conversationReviewArtifact locates the pending review draft this run's add/finalize op
-// is acting on. A run can hold several review drafts at once (run-scoped dedup,
+// conversationReviewArtifact locates the pending review draft this conversation's add/finalize op
+// is acting on. A conversation can hold several review drafts at once (conversation-scoped dedup,
 // one per PR — TFAC-494), so it resolves by the handle the agent passes (the
 // artifact id) rather than just the first pending review, which could be a
 // different PR's draft. An empty handle (defensive — exec always passes one)
@@ -653,7 +653,7 @@ func shortCommit(sha string) string {
 }
 
 // ResetReviewDraft is the host side of `gh pr start-review --fresh`: a pure local
-// reset of this run's review draft for owner/repo#number, with zero GitHub calls.
+// reset of this conversation's review draft for owner/repo#number, with zero GitHub calls.
 // It clears the staged comments, the body/event ready sentinel, and the
 // write-once Proposed snapshot back to an empty pending draft, keeping the
 // artifact row, its handle, and its pinned head SHA. Returns the draft's handle
@@ -713,7 +713,7 @@ func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, 
 	return art.ID, details.HeadSHA, nil
 }
 
-// listArtifactsByConversation reads the calling run's artifacts through the runtime
+// listArtifactsByConversation reads the calling conversation's artifacts through the runtime
 // (directRuntime respects the event-vs-manual pool split; relayRuntime relays).
 func (c *LocalClient) listArtifactsByConversation(ctx context.Context) ([]domain.Artifact, error) {
 	return c.rt.ListConversationArtifacts(ctx)
@@ -1819,7 +1819,7 @@ func errIfFinalized(details domain.ReviewArtifactDetails) error {
 	return nil
 }
 
-// conversationStagedComment locates this run's pending review draft that holds the staged
+// conversationStagedComment locates this conversation's pending review draft that holds the staged
 // comment with the given TF-local id, returning the artifact, its parsed details,
 // and the comment's index in details.StagedComments. The id is a UUID minted at
 // add-review-comment, unique within the run, so scanning every pending review

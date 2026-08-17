@@ -724,7 +724,7 @@ const pgDisplayStatusSQL = `COALESCE(
 // `attempts` here is the LIFETIME claim count — engagement history for a
 // human, matching the lifetime sums beside it. It is deliberately not the
 // same quantity ClaimNextConversation returns under that name, which is the retry
-// budget's current-episode counter (EpisodeAttemptsSQL, run_queue.go). Two
+// budget's current-episode counter (EpisodeAttemptsSQL, conversation_queue.go). Two
 // questions, one field; see domain.Conversation.Attempts before carrying
 // either one somewhere new.
 const conversationClaimLateral = `

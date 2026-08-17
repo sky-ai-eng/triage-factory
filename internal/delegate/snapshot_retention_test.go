@@ -34,7 +34,7 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 		t.Fatal("processCompletion(draft PR) = true; want parked=false (a draft PR is a sidecar; the step never parks)")
 	}
 	if conv := loadConversation(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "continue" {
-		t.Fatalf("run = {status:%q outcome:%q}, want {completed continue}", conv.Status, conv.Outcome)
+		t.Fatalf("conv = {status:%q outcome:%q}, want {completed continue}", conv.Status, conv.Outcome)
 	}
 	assertSnapshotPresent(t, s, bpr, true)
 }
@@ -58,7 +58,7 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 		t.Error("processCompletion(plain abort) = true; want parked=false (worktree torn down, snapshot is the resume path)")
 	}
 	if conv := loadConversation(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "abort" {
-		t.Fatalf("run = {status:%q outcome:%q}, want {completed abort}", conv.Status, conv.Outcome)
+		t.Fatalf("conv = {status:%q outcome:%q}, want {completed abort}", conv.Status, conv.Outcome)
 	}
 	assertSnapshotPresent(t, s, bpr, true)
 }
@@ -81,7 +81,7 @@ func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 		t.Error("processCompletion(clean finish) = true; want parked=false (a finish is terminal; the snapshot is the resume path, not a warm tree)")
 	}
 	if conv := loadConversation(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "finish" {
-		t.Fatalf("run = {status:%q outcome:%q}, want {completed finish}", conv.Status, conv.Outcome)
+		t.Fatalf("conv = {status:%q outcome:%q}, want {completed finish}", conv.Status, conv.Outcome)
 	}
 	assertSnapshotPresent(t, s, bpr, true)
 }
@@ -102,7 +102,7 @@ func TestProcessCompletion_FailedWritesNoSnapshot(t *testing.T) {
 		errored, t.TempDir(), nil, "", "event", "")
 
 	if conv := loadConversation(t, s, conversationID); conv.Status != "failed" {
-		t.Fatalf("run status = %q, want failed", conv.Status)
+		t.Fatalf("conv status = %q, want failed", conv.Status)
 	}
 	assertSnapshotPresent(t, s, bpr, false)
 }

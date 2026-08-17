@@ -109,10 +109,10 @@ func TestProcessCompletion_BlueprintStepDraftPRDoesNotPark(t *testing.T) {
 
 	conv := loadConversation(t, s, conversationID)
 	if conv.Outcome != "continue" {
-		t.Errorf("run.outcome = %q, want continue (a queued draft PR no longer coerces the outcome)", conv.Outcome)
+		t.Errorf("conv.outcome = %q, want continue (a queued draft PR no longer coerces the outcome)", conv.Outcome)
 	}
 	if conv.Status != "completed" {
-		t.Errorf("run.status = %q, want completed (a draft PR is a sidecar; the step never parks)", conv.Status)
+		t.Errorf("conv.status = %q, want completed (a draft PR is a sidecar; the step never parks)", conv.Status)
 	}
 }
 
@@ -131,10 +131,10 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 
 	conv := loadConversation(t, s, conversationID)
 	if conv.Outcome != "continue" {
-		t.Errorf("run.outcome = %q, want continue (no pending action → no coercion)", conv.Outcome)
+		t.Errorf("conv.outcome = %q, want continue (no pending action → no coercion)", conv.Outcome)
 	}
 	if conv.Status != "completed" {
-		t.Errorf("run.status = %q, want completed", conv.Status)
+		t.Errorf("conv.status = %q, want completed", conv.Status)
 	}
 	// The blueprint orchestrator owns task lifecycle — a mid-blueprint step
 	// completion must not close the task.

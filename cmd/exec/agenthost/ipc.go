@@ -203,7 +203,7 @@ func (c *IPCClient) GetConversation(ctx context.Context) (*domain.Conversation, 
 	if err := c.call(ctx, methodGetConversation, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}
-	return res.Run, nil
+	return res.Conversation, nil
 }
 
 func (c *IPCClient) GetTask(ctx context.Context, taskID string) (*domain.Task, error) {

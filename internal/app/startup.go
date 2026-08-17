@@ -112,18 +112,18 @@ func (a *App) startWorkers(ctx context.Context) {
 		// LISTEN (TFAC-586) is the same gate: only a dispatcher-capable
 		// role has a claim loop worth nudging.
 		if a.plan.dispatcher {
-			go a.spawner.RunSignalApplyLoop(ctx, delegate.DefaultSignalApplyScanInterval)
+			go a.spawner.ConversationSignalApplyLoop(ctx, delegate.DefaultSignalApplyScanInterval)
 			go a.startWakeListener(ctx)
 		}
 		// The purge reaper is system housekeeping, not tied to executor
 		// identity — runs on brain roles like the other reapers/sweepers
 		// (never on a plain executor, avoiding N-executor duplicate sweeps).
 		if a.plan.brain {
-			purgeAge, perr := delegate.ParseRunSignalPurgeAge(os.Getenv("TF_RUN_SIGNAL_PURGE_AFTER"))
+			purgeAge, perr := delegate.ParseConversationSignalPurgeAge(os.Getenv("TF_RUN_SIGNAL_PURGE_AFTER"))
 			if perr != nil {
 				appLog.Warn("run signal purge age", "error", perr)
 			}
-			go a.spawner.RunSignalPurgeReaper(ctx, delegate.DefaultRunSignalPurgeInterval, purgeAge)
+			go a.spawner.ConversationSignalPurgeReaper(ctx, delegate.DefaultConversationSignalPurgeInterval, purgeAge)
 		}
 	}
 

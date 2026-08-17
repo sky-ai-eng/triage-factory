@@ -232,7 +232,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(getConversationResult{Run: conv})
+		return json.Marshal(getConversationResult{Conversation: conv})
 
 	case opGetTask:
 		var a getTaskArgs
@@ -318,7 +318,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(listRunArtifactsResult{Artifacts: arts})
+		return json.Marshal(listConversationArtifactsResult{Artifacts: arts})
 
 	case opOrgJiraBase:
 		url, err := s.rt.OrgJiraBaseURL(ctx)

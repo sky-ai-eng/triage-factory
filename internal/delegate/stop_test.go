@@ -443,14 +443,14 @@ func TestStop_MidBlueprintStep_ResumesAndIsDriven(t *testing.T) {
 	}
 }
 
-// TestParkRunOpen_StoppedKeepsTheWorkspace is the stop-costs-disk
+// TestParkConversationOpen_StoppedKeepsTheWorkspace is the stop-costs-disk
 // trade, pinned. The old cancel terminal removed the worktree on its way out,
 // which threw the workspace away at exactly the moment a user who just killed
 // a wedged run is most likely to want it back. Now the run parks `open`, the
 // snapshot is written BEFORE the flip (so a resume that lands without the warm
 // worktree can still rebuild it), and the warm tree is left for the
 // blueprint's own cleanup.
-func TestParkRunOpen_StoppedKeepsTheWorkspace(t *testing.T) {
+func TestParkConversationOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "cancel-park")

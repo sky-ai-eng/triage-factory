@@ -2,7 +2,7 @@
 // per-run credential channel: it resolves a claimed run's LLM/GitHub/Jira
 // credentials (using the real, key-bearing secret store only the brain
 // holds), seals them to the claiming executor's published X25519 public
-// key (credseal), and writes the result to run_credentials for that
+// key (credseal), and writes the result to claim_credentials for that
 // executor to unseal.
 //
 // Manager is brain-unit member the same way the fleet reaper and drain
@@ -94,7 +94,7 @@ func NewManager(stores db.Stores, llm llmResolver) *Manager {
 }
 
 // ProvisionForConversation resolves conversationID's credentials and seals them to its
-// current claimant's published pubkey, writing run_credentials. Called
+// current claimant's published pubkey, writing claim_credentials. Called
 // synchronously off the executor's cred_request notification (the fast
 // path) and by both sweeps (the backstop / refresh paths) — idempotent and
 // safe to call repeatedly for the same run.

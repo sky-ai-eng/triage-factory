@@ -457,7 +457,7 @@ func TestReconcileOrphanedRuns_MintCrashStampMatchesMarkRunStatus(t *testing.T) 
 	refRaw, sweptRaw := completedAtText(reference), completedAtText(swept)
 	if refShape, sweptShape := storedTimestampShape(t, refRaw), storedTimestampShape(t, sweptRaw); refShape != sweptShape {
 		t.Errorf("completed_at shapes disagree:\n  MarkRunStatus  %q (%s)\n  mint-crash arm %q (%s)\n"+
-			"both writers must serialize this column identically — see the arm's comment in run_queue.go",
+			"both writers must serialize this column identically — see the arm's comment in conversation_queue.go",
 			refRaw, refShape, sweptRaw, sweptShape)
 	}
 }

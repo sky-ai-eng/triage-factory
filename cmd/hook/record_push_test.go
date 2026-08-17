@@ -22,7 +22,7 @@ type pushDetails struct {
 }
 
 // newTestStores opens an in-memory SQLite, migrates it, and seeds one
-// conversations row the artifacts FK (run_id) can point at. Returns the
+// conversations row the artifacts FK (conversation_id) can point at. Returns the
 // stores plus the run id to wire into ConversationInfo.
 func newTestStores(t *testing.T) (db.Stores, string) {
 	t.Helper()
@@ -42,7 +42,7 @@ func newTestStores(t *testing.T) (db.Stores, string) {
 	// Minimal valid run: event-triggered (creator_user_id NULL) + a
 	// non-blueprint origin so the parent-pairing CHECKs don't demand a
 	// task/prompt/blueprint chain. org_id/team_id default to the local
-	// sentinels. The artifact only needs run_id to satisfy its FK.
+	// sentinels. The artifact only needs conversation_id to satisfy its FK.
 	if _, err := conn.Exec(`INSERT INTO conversations (id, trigger_type, creator_user_id, origin, status) VALUES ('r1', 'event', NULL, 'interactive', 'running')`); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}

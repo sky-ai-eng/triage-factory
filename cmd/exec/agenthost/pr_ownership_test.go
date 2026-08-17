@@ -130,11 +130,11 @@ func TestStampPROwnership_DoesNotOverwriteExistingOwner(t *testing.T) {
 	}
 }
 
-// TestStampPROwnership_NoTeamOnRun is the defensive case. Auto-delegation is
+// TestStampPROwnership_NoTeamOnConversation is the defensive case. Auto-delegation is
 // gated on an owned task, so a teamless run should not reach the funnel — but
 // if one does there is no owner to record, and it must leave the column NULL
 // for a later writer rather than erroring or stamping something empty.
-func TestStampPROwnership_NoTeamOnRun(t *testing.T) {
+func TestStampPROwnership_NoTeamOnConversation(t *testing.T) {
 	ctx := context.Background()
 	_, stores, info, _ := prOwnershipFixture(t)
 

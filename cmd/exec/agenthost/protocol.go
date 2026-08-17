@@ -186,7 +186,7 @@ type finalizeReviewDraftResult struct {
 }
 
 type getConversationResult struct {
-	Run *domain.Conversation `json:"run,omitempty"`
+	Conversation *domain.Conversation `json:"conversation,omitempty"`
 }
 
 type getTaskArgs struct {

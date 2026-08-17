@@ -72,12 +72,12 @@ func withLoweredLifecycleCacheBounds(t *testing.T, max, target int) {
 	})
 }
 
-// TestPruneRunCache_EvictsOldestDownToTarget pins the actual size cap: once
+// TestPruneConversationCache_EvictsOldestDownToTarget pins the actual size cap: once
 // over slackLifecycleCacheMaxEntries, pruneConversationCache evicts oldest-first
 // (regardless of how recently they were cached) until back at
 // slackLifecycleCachePruneTarget — the bug the prior TTL-only sweep had was
 // that a cache full of entries younger than the TTL was never capped at all.
-func TestPruneRunCache_EvictsOldestDownToTarget(t *testing.T) {
+func TestPruneConversationCache_EvictsOldestDownToTarget(t *testing.T) {
 	withLoweredLifecycleCacheBounds(t, 5, 3)
 
 	base := time.Now()
@@ -89,7 +89,7 @@ func TestPruneRunCache_EvictsOldestDownToTarget(t *testing.T) {
 	pruneConversationCache(convs)
 
 	if len(convs) != 3 {
-		t.Fatalf("len(runs) = %d, want 3 (pruned down to target)", len(convs))
+		t.Fatalf("len(convs) = %d, want 3 (pruned down to target)", len(convs))
 	}
 	for i := 0; i < 3; i++ {
 		if _, ok := convs[fmt.Sprintf("run-%d", i)]; ok {
@@ -103,11 +103,11 @@ func TestPruneRunCache_EvictsOldestDownToTarget(t *testing.T) {
 	}
 }
 
-// TestPruneRunCache_NeverEvictsLiveWorker pins that a run with a live
+// TestPruneConversationCache_NeverEvictsLiveWorker pins that a run with a live
 // worker is never evicted even when it's the OLDEST entry in the cache —
 // losing it would leak the worker, since the dispatcher would no longer
 // know to route that run's future sentinels to it.
-func TestPruneRunCache_NeverEvictsLiveWorker(t *testing.T) {
+func TestPruneConversationCache_NeverEvictsLiveWorker(t *testing.T) {
 	withLoweredLifecycleCacheBounds(t, 2, 1)
 
 	base := time.Now()
@@ -123,13 +123,13 @@ func TestPruneRunCache_NeverEvictsLiveWorker(t *testing.T) {
 		t.Error("a run with a live worker must never be evicted, even when it's the oldest entry")
 	}
 	if len(convs) != 1 {
-		t.Errorf("len(runs) = %d, want 1 (both idle entries evicted trying to reach target=1; the worker entry can't be evicted so the loop stops there)", len(convs))
+		t.Errorf("len(convs) = %d, want 1 (both idle entries evicted trying to reach target=1; the worker entry can't be evicted so the loop stops there)", len(convs))
 	}
 }
 
-// TestPruneRunCache_UnderCap_NoOp pins that pruning does nothing while the
+// TestPruneConversationCache_UnderCap_NoOp pins that pruning does nothing while the
 // cache is at or under the cap — the common-case fast path.
-func TestPruneRunCache_UnderCap_NoOp(t *testing.T) {
+func TestPruneConversationCache_UnderCap_NoOp(t *testing.T) {
 	withLoweredLifecycleCacheBounds(t, 5, 3)
 
 	convs := map[string]*conversationEntry{
@@ -139,11 +139,11 @@ func TestPruneRunCache_UnderCap_NoOp(t *testing.T) {
 	pruneConversationCache(convs)
 
 	if len(convs) != 2 {
-		t.Errorf("len(runs) = %d, want 2 (under the cap, nothing pruned)", len(convs))
+		t.Errorf("len(convs) = %d, want 2 (under the cap, nothing pruned)", len(convs))
 	}
 }
 
-// TestPruneRunCache_KeepsMidTeardownEntry pins that an entry whose prevDone
+// TestPruneConversationCache_KeepsMidTeardownEntry pins that an entry whose prevDone
 // hasn't closed yet — a retiring worker still mid-flight on its trailing
 // setStatus("") — is never evicted, even as the oldest entry: evicting it
 // would drop the run's only reference to the ordering handle, so a resume
@@ -151,7 +151,7 @@ func TestPruneRunCache_UnderCap_NoOp(t *testing.T) {
 // the gate, silently reintroducing the stale-clear-clobbers-resume race.
 // Once the teardown finishes (prevDone closes), the same entry becomes
 // ordinary and a later prune may evict it.
-func TestPruneRunCache_KeepsMidTeardownEntry(t *testing.T) {
+func TestPruneConversationCache_KeepsMidTeardownEntry(t *testing.T) {
 	withLoweredLifecycleCacheBounds(t, 3, 1)
 
 	base := time.Now()
@@ -169,7 +169,7 @@ func TestPruneRunCache_KeepsMidTeardownEntry(t *testing.T) {
 		t.Fatal("an entry with an unclosed prevDone must never be evicted, even as the oldest")
 	}
 	if len(convs) != 1 {
-		t.Errorf("len(runs) = %d, want 1 (all three idle entries evicted; the mid-teardown one protected)", len(convs))
+		t.Errorf("len(convs) = %d, want 1 (all three idle entries evicted; the mid-teardown one protected)", len(convs))
 	}
 
 	// Teardown completes — the entry is ordinary now; a later over-cap prune
@@ -186,13 +186,13 @@ func TestPruneRunCache_KeepsMidTeardownEntry(t *testing.T) {
 	}
 }
 
-// TestHandleRunStatus_CacheHit_RefreshesLRUStamp pins the LRU touch: a
+// TestHandleConversationStatus_CacheHit_RefreshesLRUStamp pins the LRU touch: a
 // run-status sentinel for an already-cached run bumps cachedAt (via
 // slackLifecycleNow), so pruneConversationCache's oldest-first eviction tracks
 // sentinel activity, not just when the run was first resolved. Uses a
 // non-Slack cached entry — the hit path touches no store and no Slack, so
 // no pg harness or fake server is needed.
-func TestHandleRunStatus_CacheHit_RefreshesLRUStamp(t *testing.T) {
+func TestHandleConversationStatus_CacheHit_RefreshesLRUStamp(t *testing.T) {
 	resolvedAt := time.Now().Add(-time.Hour)
 	touchedAt := time.Now()
 	origNow := slackLifecycleNow
@@ -204,7 +204,7 @@ func TestHandleRunStatus_CacheHit_RefreshesLRUStamp(t *testing.T) {
 		"run-1": {isSlack: false, cachedAt: resolvedAt},
 	}
 
-	adapter.dispatch(context.Background(), runStatusEvent("org-1", "run-1", "running"), convs)
+	adapter.dispatch(context.Background(), conversationStatusEvent("org-1", "run-1", "running"), convs)
 
 	if got := convs["run-1"].cachedAt; !got.Equal(touchedAt) {
 		t.Errorf("cachedAt = %v, want the touch time %v (refreshed on cache hit)", got, touchedAt)

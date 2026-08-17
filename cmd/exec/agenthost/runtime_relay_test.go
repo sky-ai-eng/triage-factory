@@ -110,13 +110,13 @@ func TestRelayRuntime_RecordReadTouch_RoundTrips(t *testing.T) {
 	}
 }
 
-// TestRelayServer_BindsOrgFromRunInfoNotArgs is the org-scoping guarantee: the
+// TestRelayServer_BindsOrgFromConversationInfoNotArgs is the org-scoping guarantee: the
 // relay envelope carries no org id, so the orchestrator binds identity from the
 // RelayServer's own ConversationInfo. A sidecar runtime that believes it is a DIFFERENT
 // org (a compromised or confused sidecar) still can only touch the org the
 // orchestrator sealed the run to — the write lands under the SERVER's org, not
 // the runtime's.
-func TestRelayServer_BindsOrgFromRunInfoNotArgs(t *testing.T) {
+func TestRelayServer_BindsOrgFromConversationInfoNotArgs(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	srv := NewRelayServer(stores, info, nil)
 

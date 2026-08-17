@@ -317,7 +317,7 @@ func TestCrossPodController_Interrupt_NoLiveOwnerFallsBackToNotLive(t *testing.T
 }
 
 // TestCrossPodController_LocalHitNeverGoesRemote: a registered local proc
-// short-circuits before ever consulting runSignals — proven by asserting no
+// short-circuits before ever consulting conversationSignals — proven by asserting no
 // signal was ever inserted. A bare &agentproc.LiveRun{} has no real
 // subprocess wired up, so the local call itself may panic deep inside
 // agentproc once it tries to write to the (nil) control pipe; that's
@@ -376,7 +376,7 @@ func TestStop_SignalsRemoteOwnerBestEffort(t *testing.T) {
 
 // TestStop_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic:
 // signalCancelBestEffort must not dereference a nil s.instances — a
-// deployment can wire runSignals without an instance store (e.g. a
+// deployment can wire conversationSignals without an instance store (e.g. a
 // misconfigured role), and the fire-and-forget hastening path must simply
 // no-op rather than panic in its own goroutine.
 func TestStop_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic(t *testing.T) {
@@ -649,9 +649,9 @@ func TestApplySignal_Inject_GoneCompensatesWithPendingFiring(t *testing.T) {
 	}
 }
 
-// TestRunSignalPurgeReaper_RemovesOldAckedRows: the reaper deletes acked
+// TestConversationSignalPurgeReaper_RemovesOldAckedRows: the reaper deletes acked
 // rows past the age cutoff and leaves fresher ones alone.
-func TestRunSignalPurgeReaper_RemovesOldAckedRows(t *testing.T) {
+func TestConversationSignalPurgeReaper_RemovesOldAckedRows(t *testing.T) {
 	fakeSignals := newFakeRunSignalStore()
 	id1, _ := fakeSignals.Insert(context.Background(), "org", "run", domain.ConversationSignalCancel, "", "t")
 	id2, _ := fakeSignals.Insert(context.Background(), "org", "run", domain.ConversationSignalCancel, "", "t")
@@ -695,11 +695,11 @@ func TestParseSignalAckTimeout(t *testing.T) {
 	}
 }
 
-// TestRunSignalApplyLoop_AppliesQueuedSignalsAndWakesOnAck: the apply loop
+// TestConversationSignalApplyLoop_AppliesQueuedSignalsAndWakesOnAck: the apply loop
 // scans+applies a queued signal for this executor and acks it — proven
 // end-to-end via a cancel signal (the simplest to assert, since it only
 // touches s.cancels, no LiveRun internals).
-func TestRunSignalApplyLoop_AppliesQueuedSignalsAndWakesOnAck(t *testing.T) {
+func TestConversationSignalApplyLoop_AppliesQueuedSignalsAndWakesOnAck(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-apply", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
@@ -720,7 +720,7 @@ func TestRunSignalApplyLoop_AppliesQueuedSignalsAndWakesOnAck(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go s.RunSignalApplyLoop(ctx, 50*time.Millisecond)
+	go s.ConversationSignalApplyLoop(ctx, 50*time.Millisecond)
 
 	select {
 	case <-cancelled:

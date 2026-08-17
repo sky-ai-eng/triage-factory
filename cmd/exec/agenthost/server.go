@@ -453,7 +453,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err != nil {
 			return nil, err
 		}
-		return getConversationResult{Run: conv}, nil
+		return getConversationResult{Conversation: conv}, nil
 
 	case methodGetTask:
 		var a getTaskArgs

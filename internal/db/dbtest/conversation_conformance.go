@@ -3704,6 +3704,6 @@ func seedConversationForTaskTest(t *testing.T, orgID, taskID, status string, see
 // it by this constant when creating runs; the seeder doesn't surface
 // it as a field because every call uses the same value within one
 // subtest.
-const conversationTestPromptID = "p_agentrun_test"
+const conversationTestPromptID = "p_conversation_test"
 
 func conversationTestPrompt(_ *testing.T) string { return conversationTestPromptID }

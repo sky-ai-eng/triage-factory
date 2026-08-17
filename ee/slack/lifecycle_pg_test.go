@@ -45,7 +45,7 @@ type fakeLifecycleSlack struct {
 	reactionError string // if set, reactions.add responds {"ok":false,"error":reactionError}
 	// statusClearDelay, when set, makes a setStatus("") call (a clearing
 	// call — status=="") sleep before this fake records/answers it —
-	// TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker's way of
+	// TestLifecycleAdapter_ConversationStatus_SuccessorGatesOnRetiringWorker's way of
 	// forcing the retiring-worker-still-mid-flight window the predecessor
 	// gate closes. Only clears are delayed; a non-empty set answers
 	// instantly.
@@ -317,12 +317,12 @@ func dispositionEvent(orgID, eventID, eventType, disposition string) domain.Even
 	return domain.Event{OrgID: orgID, EventType: domain.EventSystemRoutingDisposition, MetadataJSON: string(meta)}
 }
 
-func runStatusEvent(orgID, conversationID, status string) domain.Event {
+func conversationStatusEvent(orgID, conversationID, status string) domain.Event {
 	meta, _ := json.Marshal(events.SystemConversationStatusMetadata{ConversationID: conversationID, Status: status})
 	return domain.Event{OrgID: orgID, EventType: domain.EventSystemConversationStatus, MetadataJSON: string(meta)}
 }
 
-func runActivityEvent(orgID, conversationID string, tools []events.ConversationActivityTool) domain.Event {
+func conversationActivityEvent(orgID, conversationID string, tools []events.ConversationActivityTool) domain.Event {
 	meta, _ := json.Marshal(events.SystemConversationActivityMetadata{ConversationID: conversationID, Tools: tools})
 	return domain.Event{OrgID: orgID, EventType: domain.EventSystemConversationActivity, MetadataJSON: string(meta)}
 }
@@ -582,7 +582,7 @@ func TestLifecycleAdapter_Disposition_NonSlackEventType_Ignored(t *testing.T) {
 
 // ---------- run-status consumer: setStatus lifecycle ----------
 
-func TestLifecycleAdapter_RunStatus_RunningThenActivity_SetsDescriptionDerivedText(t *testing.T) {
+func TestLifecycleAdapter_ConversationStatus_RunningThenActivity_SetsDescriptionDerivedText(t *testing.T) {
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
@@ -593,7 +593,7 @@ func TestLifecycleAdapter_RunStatus_RunningThenActivity_SetsDescriptionDerivedTe
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, convs) })
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 	first := fake.statusCalls()[0]
 	if first.Channel != fx.Meta.Channel || first.Status != slackLifecycleInitialStatusText {
@@ -603,7 +603,7 @@ func TestLifecycleAdapter_RunStatus_RunningThenActivity_SetsDescriptionDerivedTe
 		t.Errorf("initial loading_messages = %q, want [%q] (the bubble must show ours, not Slack's default rotation)", first.Loading, slackLifecycleInitialLoadingText)
 	}
 
-	adapter.dispatch(ctx, runActivityEvent(orgID, fx.ConversationID, []events.ConversationActivityTool{{Name: "Bash", Description: "Running go test ./..."}}), convs)
+	adapter.dispatch(ctx, conversationActivityEvent(orgID, fx.ConversationID, []events.ConversationActivityTool{{Name: "Bash", Description: "Running go test ./..."}}), convs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
 		if len(calls) == 0 {
@@ -615,12 +615,12 @@ func TestLifecycleAdapter_RunStatus_RunningThenActivity_SetsDescriptionDerivedTe
 	})
 }
 
-// TestLifecycleAdapter_RunStatus_PreRunningPhases_ShowSetupProgress walks a
+// TestLifecycleAdapter_ConversationStatus_PreRunningPhases_ShowSetupProgress walks a
 // run through queued → cloning → running and pins that the indicator starts
 // at the first setup phase's pair (on both surfaces — no default-verbs gap
 // before the agent is live), retexts on the next phase, and swaps to the
 // generic working pair once the agent goes live.
-func TestLifecycleAdapter_RunStatus_PreRunningPhases_ShowSetupProgress(t *testing.T) {
+func TestLifecycleAdapter_ConversationStatus_PreRunningPhases_ShowSetupProgress(t *testing.T) {
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
@@ -631,14 +631,14 @@ func TestLifecycleAdapter_RunStatus_PreRunningPhases_ShowSetupProgress(t *testin
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, convs) })
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "queued"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "queued"), convs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 	first := fake.statusCalls()[0]
 	if first.Status != "is queued…" || len(first.Loading) != 1 || first.Loading[0] != "Waiting for a free agent slot…" {
 		t.Errorf("queued status call = %+v, want the queued phase pair on both surfaces", first)
 	}
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "cloning"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "cloning"), convs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
 		if len(calls) == 0 {
@@ -649,7 +649,7 @@ func TestLifecycleAdapter_RunStatus_PreRunningPhases_ShowSetupProgress(t *testin
 			len(last.Loading) == 1 && last.Loading[0] == "Preparing a workspace…"
 	})
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
 		if len(calls) == 0 {
@@ -661,10 +661,10 @@ func TestLifecycleAdapter_RunStatus_PreRunningPhases_ShowSetupProgress(t *testin
 	})
 }
 
-// TestLifecycleAdapter_RunStatus_ActivityBurst_DebounceCollapsesToOneCall
+// TestLifecycleAdapter_ConversationStatus_ActivityBurst_DebounceCollapsesToOneCall
 // fires a rapid burst of activity sentinels and pins that they collapse to
 // exactly one additional setStatus call, carrying the LAST event's text.
-func TestLifecycleAdapter_RunStatus_ActivityBurst_DebounceCollapsesToOneCall(t *testing.T) {
+func TestLifecycleAdapter_ConversationStatus_ActivityBurst_DebounceCollapsesToOneCall(t *testing.T) {
 	withFastLifecycleTimings(t)
 	// The refresh ticker is independent of the debounce window; push it well
 	// past this test's short duration so it can't sneak in an extra call.
@@ -681,12 +681,12 @@ func TestLifecycleAdapter_RunStatus_ActivityBurst_DebounceCollapsesToOneCall(t *
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, convs) })
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 	before := len(fake.statusCalls())
 
 	for i := 0; i < 5; i++ {
-		adapter.dispatch(ctx, runActivityEvent(orgID, fx.ConversationID, []events.ConversationActivityTool{{Name: fmt.Sprintf("tool_%d", i)}}), convs)
+		adapter.dispatch(ctx, conversationActivityEvent(orgID, fx.ConversationID, []events.ConversationActivityTool{{Name: fmt.Sprintf("tool_%d", i)}}), convs)
 	}
 
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) > before })
@@ -705,10 +705,10 @@ func TestLifecycleAdapter_RunStatus_ActivityBurst_DebounceCollapsesToOneCall(t *
 	}
 }
 
-// TestLifecycleAdapter_RunStatus_TickerRefresh_Fires pins the dead-man-switch
+// TestLifecycleAdapter_ConversationStatus_TickerRefresh_Fires pins the dead-man-switch
 // ticker: with no further activity, setStatus keeps getting re-sent on the
 // (lowered, injectable) refresh interval.
-func TestLifecycleAdapter_RunStatus_TickerRefresh_Fires(t *testing.T) {
+func TestLifecycleAdapter_ConversationStatus_TickerRefresh_Fires(t *testing.T) {
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
@@ -718,7 +718,7 @@ func TestLifecycleAdapter_RunStatus_TickerRefresh_Fires(t *testing.T) {
 	convs := map[string]*conversationEntry{}
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, convs) })
 
-	adapter.dispatch(context.Background(), runStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	adapter.dispatch(context.Background(), conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
 	waitForCondition(t, 3*time.Second, func() bool { return len(fake.statusCalls()) >= 3 })
 
 	for _, c := range fake.statusCalls() {
@@ -728,11 +728,11 @@ func TestLifecycleAdapter_RunStatus_TickerRefresh_Fires(t *testing.T) {
 	}
 }
 
-// TestLifecycleAdapter_RunStatus_Failed_ClearsAndPostsFailureReplyWithURL
+// TestLifecycleAdapter_ConversationStatus_Failed_ClearsAndPostsFailureReplyWithURL
 // covers the terminal "failed" arm: the indicator clears (a final
 // setStatus("")) and a thread reply lands with the run URL fragment when
 // PublicURL() is non-empty.
-func TestLifecycleAdapter_RunStatus_Failed_ClearsAndPostsFailureReplyWithURL(t *testing.T) {
+func TestLifecycleAdapter_ConversationStatus_Failed_ClearsAndPostsFailureReplyWithURL(t *testing.T) {
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
@@ -743,10 +743,10 @@ func TestLifecycleAdapter_RunStatus_Failed_ClearsAndPostsFailureReplyWithURL(t *
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, convs) })
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "failed"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "failed"), convs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
 		return len(calls) > 0 && calls[len(calls)-1].Status == "" && len(calls[len(calls)-1].Loading) == 0
@@ -764,9 +764,9 @@ func TestLifecycleAdapter_RunStatus_Failed_ClearsAndPostsFailureReplyWithURL(t *
 	}
 }
 
-// TestLifecycleAdapter_RunStatus_Failed_NoPublicURL_NoURLFragment covers the
+// TestLifecycleAdapter_ConversationStatus_Failed_NoPublicURL_NoURLFragment covers the
 // "omit the link entirely" rule when api.PublicURL() is "".
-func TestLifecycleAdapter_RunStatus_Failed_NoPublicURL_NoURLFragment(t *testing.T) {
+func TestLifecycleAdapter_ConversationStatus_Failed_NoPublicURL_NoURLFragment(t *testing.T) {
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
@@ -779,7 +779,7 @@ func TestLifecycleAdapter_RunStatus_Failed_NoPublicURL_NoURLFragment(t *testing.
 
 	// Never went "running" — a run that fails during setup still owes the
 	// failure note, via the worker-less direct path in handleConversationStatus.
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "failed"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "failed"), convs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.postCalls()) >= 1 })
 
 	last := fake.postCalls()[len(fake.postCalls())-1]
@@ -791,9 +791,9 @@ func TestLifecycleAdapter_RunStatus_Failed_NoPublicURL_NoURLFragment(t *testing.
 	}
 }
 
-// TestLifecycleAdapter_RunStatus_Parked_ClearsWithoutFailureReply covers the
+// TestLifecycleAdapter_ConversationStatus_Parked_ClearsWithoutFailureReply covers the
 // "open" (parked/awaiting-input) terminal: cleared silently, no message.
-func TestLifecycleAdapter_RunStatus_Parked_ClearsWithoutFailureReply(t *testing.T) {
+func TestLifecycleAdapter_ConversationStatus_Parked_ClearsWithoutFailureReply(t *testing.T) {
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
@@ -804,10 +804,10 @@ func TestLifecycleAdapter_RunStatus_Parked_ClearsWithoutFailureReply(t *testing.
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, convs) })
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "open"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "open"), convs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
 		return len(calls) > 0 && calls[len(calls)-1].Status == ""
@@ -820,7 +820,7 @@ func TestLifecycleAdapter_RunStatus_Parked_ClearsWithoutFailureReply(t *testing.
 	}
 }
 
-// TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker is the
+// TestLifecycleAdapter_ConversationStatus_SuccessorGatesOnRetiringWorker is the
 // direct regression test for the park→resume ordering guarantee, and pins
 // BOTH halves of the design at once:
 //
@@ -841,7 +841,7 @@ func TestLifecycleAdapter_RunStatus_Parked_ClearsWithoutFailureReply(t *testing.
 // setStatus handler), so the last entry in statusCalls() is the indicator's
 // actual final state: without the gate, the instant set would record first
 // and the delayed stale clear last.
-func TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker(t *testing.T) {
+func TestLifecycleAdapter_ConversationStatus_SuccessorGatesOnRetiringWorker(t *testing.T) {
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
@@ -852,12 +852,12 @@ func TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker(t *testing.T)
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, convs) })
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 
 	fake.setStatusClearDelay(400 * time.Millisecond)
 	start := time.Now()
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "open"), convs) // parked — resumable
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "open"), convs) // parked — resumable
 	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
 		t.Errorf("terminal-status dispatch blocked %v on the retiring worker's Slack call; the dispatcher must never wait on Slack for a teardown", elapsed)
 	}
@@ -866,8 +866,8 @@ func TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker(t *testing.T)
 	// via an activity probe — both workers' plain lifecycle texts are
 	// identical ("is working on it…"), so ordering the retiring clear
 	// against "a successor call" needs a text only the successor can emit.
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), convs)
-	adapter.dispatch(ctx, runActivityEvent(orgID, fx.ConversationID, []events.ConversationActivityTool{{Name: "resumed_probe"}}), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	adapter.dispatch(ctx, conversationActivityEvent(orgID, fx.ConversationID, []events.ConversationActivityTool{{Name: "resumed_probe"}}), convs)
 
 	const probe = "is running: resumed probe"
 	waitForCondition(t, 2*time.Second, func() bool {
@@ -903,7 +903,7 @@ func TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker(t *testing.T)
 	}
 }
 
-// TestLifecycleAdapter_RunStatus_GatedStopChainSurvivesChurn is the direct
+// TestLifecycleAdapter_ConversationStatus_GatedStopChainSurvivesChurn is the direct
 // regression test for TFAC-621 part 3 (stale-clear race on a gated stop):
 // running→terminal→running→terminal→running (W1, W2, W3) with W1's clear
 // slow to resolve (a 429-retry stand-in). W2 is created gated on W1 (still
@@ -915,7 +915,7 @@ func TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker(t *testing.T)
 // status BEFORE the stale clear wiped it. Post-fix, W2's done can't close
 // until W1's does, so W3 transitively waits out the whole chain and its
 // status is what's live once everything settles.
-func TestLifecycleAdapter_RunStatus_GatedStopChainSurvivesChurn(t *testing.T) {
+func TestLifecycleAdapter_ConversationStatus_GatedStopChainSurvivesChurn(t *testing.T) {
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
@@ -927,23 +927,23 @@ func TestLifecycleAdapter_RunStatus_GatedStopChainSurvivesChurn(t *testing.T) {
 	ctx := context.Background()
 
 	// W1: running, then park it with a slow trailing clear in flight.
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 	fake.setStatusClearDelay(400 * time.Millisecond)
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "open"), convs) // W1 stops; its clear is now in flight
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "open"), convs) // W1 stops; its clear is now in flight
 
 	// W2: resume immediately (gates on W1's still-open done), then park it
 	// again immediately too — WHILE it is still gated on W1. This is the
 	// stop-while-gated race: W2 never got past the predecessor gate to make
 	// any Slack call of its own.
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), convs)
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "open"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "open"), convs)
 
 	// W3: resume again immediately — gates on entry.prevDone, which now
 	// traces W2 -> W1. A distinguishable activity probe marks W3's status
 	// unambiguously (its plain lifecycle text is identical to W1's/W2's).
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), convs)
-	adapter.dispatch(ctx, runActivityEvent(orgID, fx.ConversationID, []events.ConversationActivityTool{{Name: "w3_probe"}}), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	adapter.dispatch(ctx, conversationActivityEvent(orgID, fx.ConversationID, []events.ConversationActivityTool{{Name: "w3_probe"}}), convs)
 
 	const probe = "is running: w3 probe"
 	waitForCondition(t, 3*time.Second, func() bool {
@@ -994,14 +994,14 @@ func TestLifecycleAdapter_RunStatus_GatedStopChainSurvivesChurn(t *testing.T) {
 
 // ---------- run-status consumer: non-Slack cache ----------
 
-// TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup pins the
+// TestLifecycleAdapter_ConversationStatus_NonSlackConversation_CachedAfterFirstLookup pins the
 // per-conversationID cache: after the first system:conversation:status resolves a run as
 // non-Slack, the underlying data is mutated to look Slack-shaped (entity
 // source flipped to 'slack', task's event_type flipped to slack:message) —
 // if resolution were re-run on a later sentinel for the SAME conversationID, it would
 // now (incorrectly) start a worker and call Slack. It must not: the cached
 // negative verdict is never re-queried.
-func TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup(t *testing.T) {
+func TestLifecycleAdapter_ConversationStatus_NonSlackConversation_CachedAfterFirstLookup(t *testing.T) {
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	taskID, conversationID := seedGitHubTaskAndConversation(t, h, orgID, owner, teamID)
 
@@ -1009,7 +1009,7 @@ func TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup(t *testin
 	convs := map[string]*conversationEntry{}
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, conversationID, "running"), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, conversationID, "running"), convs)
 	entry, ok := convs[conversationID]
 	if !ok {
 		t.Fatal("expected a cache entry after the first system:conversation:status")
@@ -1033,8 +1033,8 @@ func TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup(t *testin
 		t.Fatalf("mutate task event_type: %v", err)
 	}
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, conversationID, "running"), convs)
-	adapter.dispatch(ctx, runActivityEvent(orgID, conversationID, []events.ConversationActivityTool{{Name: "Bash"}}), convs)
+	adapter.dispatch(ctx, conversationStatusEvent(orgID, conversationID, "running"), convs)
+	adapter.dispatch(ctx, conversationActivityEvent(orgID, conversationID, []events.ConversationActivityTool{{Name: "Bash"}}), convs)
 
 	time.Sleep(50 * time.Millisecond)
 	if len(fake.statusCalls()) != 0 {
@@ -1047,16 +1047,16 @@ func TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup(t *testin
 
 // ---------- run-activity consumer: unknown run ----------
 
-// TestLifecycleAdapter_RunActivity_UnknownRun_Ignored covers activity
+// TestLifecycleAdapter_ConversationActivity_UnknownConversation_Ignored covers activity
 // arriving for a conversationID this adapter has never seen a system:conversation:status for
 // (the verdict-priming event) — it must be dropped, not trigger its own
 // resolution.
-func TestLifecycleAdapter_RunActivity_UnknownRun_Ignored(t *testing.T) {
+func TestLifecycleAdapter_ConversationActivity_UnknownConversation_Ignored(t *testing.T) {
 	_, stores, fake, orgID, _, _ := newLifecycleTestRig(t)
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	convs := map[string]*conversationEntry{}
 
-	adapter.dispatch(context.Background(), runActivityEvent(orgID, "unseen-run-id", []events.ConversationActivityTool{{Name: "Bash"}}), convs)
+	adapter.dispatch(context.Background(), conversationActivityEvent(orgID, "unseen-run-id", []events.ConversationActivityTool{{Name: "Bash"}}), convs)
 
 	if _, ok := convs["unseen-run-id"]; ok {
 		t.Error("run-activity must not prime the cache — only run-status does")

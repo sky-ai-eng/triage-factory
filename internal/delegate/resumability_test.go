@@ -151,7 +151,7 @@ func TestResumabilityFor_FailedRunIsNotSteerable(t *testing.T) {
 	}
 }
 
-// TestParkRunOpen_FencedSnapshotAnnouncesResumable closes the residual window a
+// TestParkConversationOpen_FencedSnapshotAnnouncesResumable closes the residual window a
 // cross-pod stop leaves open. Control parks the row and announces `open`
 // seconds before the executor's teardown writes the snapshot, so every watcher
 // reads that park as unresumable — truthfully, at the time. When the blob
@@ -161,7 +161,7 @@ func TestResumabilityFor_FailedRunIsNotSteerable(t *testing.T) {
 // The status repeats what the row already has; that is the shape the field was
 // chosen for (failure_kind rides the failed status the same way), and it is why
 // consumers must merge a repeated `open` idempotently.
-func TestParkRunOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
+func TestParkConversationOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "fenced-resumable")
@@ -225,11 +225,11 @@ func TestParkRunOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 	}
 }
 
-// TestParkRunOpen_FencedWithoutSnapshotAnnouncesNothing is the other side of the
+// TestParkConversationOpen_FencedWithoutSnapshotAnnouncesNothing is the other side of the
 // branch: a teardown fenced before it had any workspace to capture (a stop
 // during setup) has learned nothing a watcher needs, and saying "resumable"
 // there would enable a composer over a workspace that does not exist.
-func TestParkRunOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T) {
+func TestParkConversationOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T) {
 	s, _, conversationID, _ := setupAdvanceFixture(t, "fenced-no-snapshot")
 	hub, captured := capturingHub(t)
 	s.wsHub = hub
@@ -256,7 +256,7 @@ func TestParkRunOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T) {
 	}
 }
 
-// TestParkRunOpen_FencedIdleParkAnnouncesNothing pins the other refusal the
+// TestParkConversationOpen_FencedIdleParkAnnouncesNothing pins the other refusal the
 // fence raises, and why the announcement is scoped to a deliberate stop.
 //
 // An idle park has no outside actor: nobody parked this row on the user's
@@ -264,7 +264,7 @@ func TestParkRunOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T) {
 // it right now. Repeating `open` there would be a torn-down engagement
 // reporting a status the row does not have — and the board writes a frame's
 // status onto its card optimistically.
-func TestParkRunOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
+func TestParkConversationOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "fenced-idle")

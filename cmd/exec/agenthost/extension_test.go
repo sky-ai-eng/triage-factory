@@ -105,11 +105,11 @@ func TestLocalClient_CallExtension_NoProvider_NotEnabled(t *testing.T) {
 	}
 }
 
-// TestLocalClient_CallExtension_Entitled_InvokesHandlerWithRunInfo pins the
+// TestLocalClient_CallExtension_Entitled_InvokesHandlerWithConversationInfo pins the
 // success path: a Provider that grants the feature lets the call through,
 // the run's identity threads to the handler unmodified, and args/result
 // round-trip.
-func TestLocalClient_CallExtension_Entitled_InvokesHandlerWithRunInfo(t *testing.T) {
+func TestLocalClient_CallExtension_Entitled_InvokesHandlerWithConversationInfo(t *testing.T) {
 	t.Cleanup(ResetExtensions)
 	t.Cleanup(entitlements.Reset)
 	entitlements.RegisterProvider(entitlements.Static(fakeExtensionFeature))

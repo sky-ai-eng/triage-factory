@@ -1147,7 +1147,7 @@ export type WSEvent =
   // awaiting_credentials/running/terminal) plus failure_kind on a failure; a
   // curator turn carries project_id and { request_id, status }. failure_kind
   // rides along only when status === 'failed' AND the backend classified the
-  // cause (domain.RunFailureKind); absent === generic failure.
+  // cause (domain.ConversationFailureKind); absent === generic failure.
   | {
       type: 'conversation_update'
       conversation_id?: string

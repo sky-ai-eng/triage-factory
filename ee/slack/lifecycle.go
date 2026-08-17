@@ -369,11 +369,11 @@ type conversationEntry struct {
 	cachedAt time.Time
 }
 
-// isTerminalRunStatus reports whether status is one of the run-lifecycle
+// isTerminalConversationStatus reports whether status is one of the run-lifecycle
 // terminals (domain.Conversation's documented vocabulary) or the parked/
 // awaiting-input "open" state — both stop the worker and clear the
 // indicator; only "failed" additionally posts the failure reply.
-func isTerminalRunStatus(status string) bool {
+func isTerminalConversationStatus(status string) bool {
 	return domain.IsTerminalConversationStatus(status) || status == domain.StatusOpen
 }
 
@@ -451,7 +451,7 @@ func (a *lifecycleAdapter) handleConversationStatus(ctx context.Context, evt dom
 			entry.worker.keepAlive()
 		}
 		entry.agentLive = true
-	case isTerminalRunStatus(meta.Status):
+	case isTerminalConversationStatus(meta.Status):
 		failed := meta.Status == "failed"
 		if entry.worker != nil {
 			entry.worker.stop(failed)

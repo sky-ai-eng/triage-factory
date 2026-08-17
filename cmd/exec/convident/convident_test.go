@@ -90,7 +90,7 @@ func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, conversation
 	})
 }
 
-func TestResolveConversationIdentity_EmptyRunID(t *testing.T) {
+func TestResolveConversationIdentity_EmptyConversationID(t *testing.T) {
 	stores, _ := newStores(t)
 	_, err := ResolveConversationIdentity(context.Background(), stores, "")
 	if !errors.Is(err, ErrConversationIdentityMissing) {
@@ -98,7 +98,7 @@ func TestResolveConversationIdentity_EmptyRunID(t *testing.T) {
 	}
 }
 
-func TestResolveConversationIdentity_RunNotFound(t *testing.T) {
+func TestResolveConversationIdentity_ConversationNotFound(t *testing.T) {
 	stores, _ := newStores(t)
 	_, err := ResolveConversationIdentity(context.Background(), stores, "ghost")
 	if !errors.Is(err, ErrConversationIdentityNotFound) {
@@ -106,7 +106,7 @@ func TestResolveConversationIdentity_RunNotFound(t *testing.T) {
 	}
 }
 
-func TestResolveConversationIdentity_ManualRun(t *testing.T) {
+func TestResolveConversationIdentity_ManualConversation(t *testing.T) {
 	stores, conn := newStores(t)
 	seedConversation(t, stores, conn, "m1", "manual")
 
@@ -131,7 +131,7 @@ func TestResolveConversationIdentity_ManualRun(t *testing.T) {
 	}
 }
 
-func TestResolveConversationIdentity_EventTriggeredRun(t *testing.T) {
+func TestResolveConversationIdentity_EventTriggeredConversation(t *testing.T) {
 	stores, conn := newStores(t)
 	seedConversation(t, stores, conn, "e1", "event")
 

@@ -46,7 +46,7 @@ const conversationTerminalStatusesSQL = `'completed','failed'`
 // --- The needs-driving predicate ---------------------------------------
 //
 // The SQLite mirror of the Postgres fragments — see
-// internal/db/postgres/run_queue.go for the model. Stored conversation
+// internal/db/postgres/conversation_queue.go for the model. Stored conversation
 // status is outcome-or-nothing ('open' | a terminal | NULL); "queued" and
 // "running" are derived from the claim table and these predicates, never
 // stored. Every fragment is written against the conversation alias `r`.
@@ -613,7 +613,7 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 	}
 
 	// Claim-desync janitor arm — the SQLite mirror of the Postgres twin's
-	// healClaimDesyncs (see internal/db/postgres/run_queue.go for the one
+	// healClaimDesyncs (see internal/db/postgres/conversation_queue.go for the one
 	// stranded shape that survives the derived model). SQLite's single
 	// connection makes the non-System terminal writes atomic, so this is
 	// conformance symmetry here rather than a live hazard; it runs after the

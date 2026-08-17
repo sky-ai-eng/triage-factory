@@ -482,7 +482,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		if isActiveClaimConflict(err) {
 			return nil, nil
 		}
-		return conv, wrapAdminPoolPermErr(err, "run_queue.ClaimNextConversation")
+		return conv, wrapAdminPoolPermErr(err, "conversation_queue.ClaimNextConversation")
 	}
 }
 

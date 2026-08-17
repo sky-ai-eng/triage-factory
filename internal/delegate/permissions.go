@@ -620,9 +620,9 @@ func (s *Spawner) ResolvePermission(orgID, conversationID, toolCallID, decidedBy
 		return ErrNoPendingPermission
 	}
 	s.mu.Lock()
-	runSignals := s.runSignals
+	conversationSignals := s.conversationSignals
 	s.mu.Unlock()
-	if runSignals == nil {
+	if conversationSignals == nil {
 		return ErrNoPendingPermission
 	}
 	return s.routePermission(orgID, conversationID, toolCallID, decidedBy, d)

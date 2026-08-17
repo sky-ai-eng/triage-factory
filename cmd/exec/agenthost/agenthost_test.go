@@ -296,7 +296,7 @@ func TestServer_UnknownMethod_RejectsCleanly(t *testing.T) {
 
 // TestServer_ConcurrentSockets_NoCrossContamination pins the
 // per-run identity isolation: two daemons serving two different
-// RunInfos, two clients connecting in parallel — LookupConversation on
+// ConversationInfos, two clients connecting in parallel — LookupConversation on
 // client A returns A's identity, not B's. The test simulates two
 // sandboxed runs operating in parallel.
 func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {

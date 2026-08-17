@@ -114,7 +114,7 @@ func (s *Spawner) signalTimeout() time.Duration {
 // callers must gate this on runmode.Current() == ModeMulti before calling;
 // there is no internal mode check here, matching the other post-
 // construction seams like SetJiraResolver). Installing a non-nil
-// runSignals swaps s.controller for crossPodController, the RunController
+// conversationSignals swaps s.controller for crossPodController, the RunController
 // seam's second implementation; leaving it unset (the default) keeps the
 // plain inProcessController, which is what makes local mode's "no
 // conversation_signals writes" invariant structural rather than a runtime check.
@@ -122,10 +122,10 @@ func (s *Spawner) signalTimeout() time.Duration {
 // comment on why it needs no session affinity, unlike the dedicated LISTEN
 // connection (internal/pgnotify.Listener, wired separately against
 // s.HandleCtlNotification).
-func (s *Spawner) SetConversationSignals(runSignals db.ConversationSignalStore, notifyDB *sql.DB) {
+func (s *Spawner) SetConversationSignals(conversationSignals db.ConversationSignalStore, notifyDB *sql.DB) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.runSignals = runSignals
+	s.conversationSignals = conversationSignals
 	s.signalNotifyDB = notifyDB
 	s.controller = crossPodController{inProcessController: inProcessController{s: s}}
 }
@@ -252,13 +252,13 @@ func (s *Spawner) routeControlSignal(ctx context.Context, conversationID string,
 // doesn't own locally — fire-and-forget, per the reply-leg contract's
 // cancel row: the caller's DB-only park write is already
 // the source of truth and already works cross-pod, so a failure or
-// timeout here is never surfaced. No-op when runSignals isn't wired
+// timeout here is never surfaced. No-op when conversationSignals isn't wired
 // (local mode, or multi mode before/without SetConversationSignals).
 func (s *Spawner) signalCancelBestEffort(orgID, conversationID, executorID string) {
 	s.mu.Lock()
-	runSignals := s.runSignals
+	conversationSignals := s.conversationSignals
 	s.mu.Unlock()
-	if runSignals == nil || s.instances == nil || executorID == "" {
+	if conversationSignals == nil || s.instances == nil || executorID == "" {
 		return
 	}
 	go func() {
@@ -268,7 +268,7 @@ func (s *Spawner) signalCancelBestEffort(orgID, conversationID, executorID strin
 		if err != nil || inst == nil || time.Since(inst.LastHeartbeatAt) > instanceStaleThreshold {
 			return
 		}
-		id, err := runSignals.Insert(ctx, orgID, conversationID, domain.ConversationSignalCancel, "", executorID)
+		id, err := conversationSignals.Insert(ctx, orgID, conversationID, domain.ConversationSignalCancel, "", executorID)
 		if err != nil {
 			delegateLog.Warn("cancel hastening signal insert failed (DB-only cancel already recorded)", "conversation", conversationID, "error", err)
 			return
@@ -282,7 +282,7 @@ func (s *Spawner) signalCancelBestEffort(orgID, conversationID, executorID strin
 // resolveLiveOwner reports the executor id owning conversationID's live process,
 // and whether that executor's instance-registry heartbeat is fresh enough
 // to be worth signaling. false covers every reason a remote signal can't
-// help: no runSignals/instances wired, the run has no executor_id, or the
+// help: no conversationSignals/instances wired, the run has no executor_id, or the
 // stamped executor's heartbeat is stale.
 func (s *Spawner) resolveLiveOwner(ctx context.Context, orgID, conversationID string) (executorID string, ok bool) {
 	if s.instances == nil {
@@ -314,7 +314,7 @@ func (s *Spawner) sendSignalAndAwaitAck(ctx context.Context, orgID, conversation
 	if !ok {
 		return "", false, nil
 	}
-	id, err := s.runSignals.Insert(ctx, orgID, conversationID, kind, payload, executorID)
+	id, err := s.conversationSignals.Insert(ctx, orgID, conversationID, kind, payload, executorID)
 	if err != nil {
 		return "", true, fmt.Errorf("insert signal: %w", err)
 	}
@@ -347,7 +347,7 @@ func (s *Spawner) awaitAck(ctx context.Context, id int64) (string, error) {
 	}()
 
 	check := func() (string, bool) {
-		acked, result, err := s.runSignals.AckStatus(ctx, id)
+		acked, result, err := s.conversationSignals.AckStatus(ctx, id)
 		if err != nil {
 			delegateLog.Warn("poll signal ack status failed", "signal_id", id, "error", err)
 			return "", false
@@ -488,9 +488,9 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 		return InjectDeliveredLocal
 	}
 	s.mu.Lock()
-	runSignals := s.runSignals
+	conversationSignals := s.conversationSignals
 	s.mu.Unlock()
-	if runSignals != nil {
+	if conversationSignals != nil {
 		if executorID, ok := s.resolveLiveOwner(ctx, orgID, conversationID); ok {
 			payload, merr := json.Marshal(injectPayload{
 				Producer: producer, Body: body,
@@ -500,7 +500,7 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 			})
 			if merr != nil {
 				delegateLog.Warn("marshal inject payload failed; falling back to the staged queue", "conversation", conversationID, "error", merr)
-			} else if id, ierr := runSignals.Insert(ctx, orgID, conversationID, domain.ConversationSignalInject, string(payload), executorID); ierr != nil {
+			} else if id, ierr := conversationSignals.Insert(ctx, orgID, conversationID, domain.ConversationSignalInject, string(payload), executorID); ierr != nil {
 				delegateLog.Warn("insert inject signal failed; falling back to the staged queue", "conversation", conversationID, "error", ierr)
 			} else {
 				if nerr := s.notifyCtl(ctx, "new", id); nerr != nil {
@@ -544,15 +544,15 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 // delivery, never loses it.
 const DefaultSignalApplyScanInterval = 5 * time.Second
 
-// RunSignalApplyLoop is the owner's half of the cross-pod control seam: it
+// ConversationSignalApplyLoop is the owner's half of the cross-pod control seam: it
 // scans conversation_signals for unacked rows targeting this executor and applies
 // each through the local (never cross-pod — see applySignal) RunController,
 // acking with a result. One goroutine, deliberately serial (§5.2: "do not
 // parallelize" — signal volume is human-action-scale). No-op when
-// runSignals isn't wired (local mode, or a role that never called
+// conversationSignals isn't wired (local mode, or a role that never called
 // SetConversationSignals).
-func (s *Spawner) RunSignalApplyLoop(ctx context.Context, scanInterval time.Duration) {
-	if s.runSignals == nil {
+func (s *Spawner) ConversationSignalApplyLoop(ctx context.Context, scanInterval time.Duration) {
+	if s.conversationSignals == nil {
 		return
 	}
 	s.drainSignals(ctx)
@@ -588,7 +588,7 @@ func (s *Spawner) drainSignals(ctx context.Context) {
 	if executorID == "" {
 		return
 	}
-	sigs, err := s.runSignals.ListUnackedForTarget(ctx, executorID)
+	sigs, err := s.conversationSignals.ListUnackedForTarget(ctx, executorID)
 	if err != nil {
 		delegateLog.Warn("scan unacked conversation_signals failed; retrying on the next tick", "error", err)
 		return
@@ -738,7 +738,7 @@ func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.Conversati
 // return leaves the signal in the unacked scan, so applySignal keeps its
 // delivered-marker to re-ack (never re-deliver) on the next drain.
 func (s *Spawner) ackSignal(ctx context.Context, id int64, result string) bool {
-	if err := s.runSignals.Ack(ctx, id, result); err != nil {
+	if err := s.conversationSignals.Ack(ctx, id, result); err != nil {
 		delegateLog.Error("ack run_signal failed", "signal_id", id, "result", result, "error", err)
 		return false
 	}
@@ -750,36 +750,36 @@ func (s *Spawner) ackSignal(ctx context.Context, id int64, result string) bool {
 
 // --- Acked-signal purge reaper ---
 
-// DefaultRunSignalPurgeInterval is how often the reaper sweeps.
-const DefaultRunSignalPurgeInterval = time.Hour
+// DefaultConversationSignalPurgeInterval is how often the reaper sweeps.
+const DefaultConversationSignalPurgeInterval = time.Hour
 
-// DefaultRunSignalPurgeAge is the audit-convenience retention window for
+// DefaultConversationSignalPurgeAge is the audit-convenience retention window for
 // acked signal rows (decision log #5, env-tunable via
-// TF_RUN_SIGNAL_PURGE_AFTER — ParseRunSignalPurgeAge).
-const DefaultRunSignalPurgeAge = 24 * time.Hour
+// TF_RUN_SIGNAL_PURGE_AFTER — ParseConversationSignalPurgeAge).
+const DefaultConversationSignalPurgeAge = 24 * time.Hour
 
-// ParseRunSignalPurgeAge interprets the TF_RUN_SIGNAL_PURGE_AFTER env
+// ParseConversationSignalPurgeAge interprets the TF_RUN_SIGNAL_PURGE_AFTER env
 // value. Empty → the default. Non-positive or unparseable → the default
 // plus an error the caller logs.
-func ParseRunSignalPurgeAge(raw string) (time.Duration, error) {
+func ParseConversationSignalPurgeAge(raw string) (time.Duration, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return DefaultRunSignalPurgeAge, nil
+		return DefaultConversationSignalPurgeAge, nil
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
-		return DefaultRunSignalPurgeAge, fmt.Errorf(
+		return DefaultConversationSignalPurgeAge, fmt.Errorf(
 			"invalid TF_RUN_SIGNAL_PURGE_AFTER %q (want a positive duration like \"24h\"); using default %s",
-			raw, DefaultRunSignalPurgeAge)
+			raw, DefaultConversationSignalPurgeAge)
 	}
 	return d, nil
 }
 
-// RunSignalPurgeReaper periodically deletes acked conversation_signals rows older
-// than age — the 24h audit-convenience window. No-op when runSignals
+// ConversationSignalPurgeReaper periodically deletes acked conversation_signals rows older
+// than age — the 24h audit-convenience window. No-op when conversationSignals
 // isn't wired.
-func (s *Spawner) RunSignalPurgeReaper(ctx context.Context, interval, age time.Duration) {
-	if s.runSignals == nil {
+func (s *Spawner) ConversationSignalPurgeReaper(ctx context.Context, interval, age time.Duration) {
+	if s.conversationSignals == nil {
 		return
 	}
 	tick := time.NewTicker(interval)
@@ -789,7 +789,7 @@ func (s *Spawner) RunSignalPurgeReaper(ctx context.Context, interval, age time.D
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			n, err := s.runSignals.PurgeAcked(ctx, age)
+			n, err := s.conversationSignals.PurgeAcked(ctx, age)
 			if err != nil {
 				delegateLog.Warn("purge acked conversation_signals failed", "error", err)
 				continue

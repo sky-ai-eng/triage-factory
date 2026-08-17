@@ -47,11 +47,11 @@ func newConversationWorktreeStore(q, admin queryer) db.ConversationWorktreeStore
 var _ db.ConversationWorktreeStore = (*conversationWorktreeStore)(nil)
 
 func (s *conversationWorktreeStore) Insert(ctx context.Context, orgID string, w domain.ConversationWorktree) (bool, string, error) {
-	return insertRunWorktree(ctx, s.q, orgID, w, s.GetByRepoRef)
+	return insertConversationWorktree(ctx, s.q, orgID, w, s.GetByRepoRef)
 }
 
 func (s *conversationWorktreeStore) InsertSystem(ctx context.Context, orgID string, w domain.ConversationWorktree) (bool, string, error) {
-	return insertRunWorktree(ctx, s.admin, orgID, w, s.GetByRepoRefSystem)
+	return insertConversationWorktree(ctx, s.admin, orgID, w, s.GetByRepoRefSystem)
 }
 
 // resolveWorktreeRepositoryID maps the slug a caller passes to the registry
@@ -76,7 +76,7 @@ func resolveWorktreeRepositoryID(ctx context.Context, q queryer, orgID, repoID s
 	return id, nil
 }
 
-func insertRunWorktree(
+func insertConversationWorktree(
 	ctx context.Context,
 	q queryer,
 	orgID string,

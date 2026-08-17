@@ -87,10 +87,10 @@ func (f *fakeLiveProc) exit(result *agentproc.Result, err error) {
 	}
 }
 
-// TestDriveLiveRun_TerminalResultClosesAndReturns: a turn-terminal result
+// TestDriveLiveConversation_TerminalResultClosesAndReturns: a turn-terminal result
 // closes the process (freeing the session for the gate's resume) and is
 // handed back for processCompletion — no hibernation.
-func TestDriveLiveRun_TerminalResultClosesAndReturns(t *testing.T) {
+func TestDriveLiveConversation_TerminalResultClosesAndReturns(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 1)
@@ -110,10 +110,10 @@ func TestDriveLiveRun_TerminalResultClosesAndReturns(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_CtxCancelReturnsErr: a cancelled ctx (the hard-kill path)
+// TestDriveLiveConversation_CtxCancelReturnsErr: a cancelled ctx (the hard-kill path)
 // closes the process and surfaces the ctx error so the caller routes through
 // its cancelled handling.
-func TestDriveLiveRun_CtxCancelReturnsErr(t *testing.T) {
+func TestDriveLiveConversation_CtxCancelReturnsErr(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -132,11 +132,11 @@ func TestDriveLiveRun_CtxCancelReturnsErr(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_ProcessExitCarriesResult covers the proc.Done() branch:
+// TestDriveLiveConversation_ProcessExitCarriesResult covers the proc.Done() branch:
 // when the process exits on its own (rather than us closing it off the
 // results channel), the driver hands back the folded result for
 // processCompletion — and does not hibernate.
-func TestDriveLiveRun_ProcessExitCarriesResult(t *testing.T) {
+func TestDriveLiveConversation_ProcessExitCarriesResult(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"exited"}`}
@@ -152,10 +152,10 @@ func TestDriveLiveRun_ProcessExitCarriesResult(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_ProcessExitCarriesErr is the crash half of the proc.Done()
+// TestDriveLiveConversation_ProcessExitCarriesErr is the crash half of the proc.Done()
 // branch: an exit with no result surfaces the process error so the caller
 // routes through failConversation.
-func TestDriveLiveRun_ProcessExitCarriesErr(t *testing.T) {
+func TestDriveLiveConversation_ProcessExitCarriesErr(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	wantErr := errors.New("agent runtime exited with error")
@@ -171,10 +171,10 @@ func TestDriveLiveRun_ProcessExitCarriesErr(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_IdleHibernates is the acceptance check for idle
+// TestDriveLiveConversation_IdleHibernates is the acceptance check for idle
 // hibernation: a live run quiet past the (injected short) threshold closes
 // its process and parks to `open`, keeping the worktree.
-func TestDriveLiveRun_IdleHibernates(t *testing.T) {
+func TestDriveLiveConversation_IdleHibernates(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-idle", "sess-idle", "/tmp/wt-idle")
 	markEngaged(t, database, "r-idle")
@@ -208,11 +208,11 @@ func TestDriveLiveRun_IdleHibernates(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_ActivityDefersHibernation pins the activity-reset: a
+// TestDriveLiveConversation_ActivityDefersHibernation pins the activity-reset: a
 // slow-but-working agent (steady stream activity) must NOT hibernate. We pump
 // activity well past the idle window, then deliver a terminal result — if the
 // timer reset correctly the run returns the result rather than hibernating.
-func TestDriveLiveRun_ActivityDefersHibernation(t *testing.T) {
+func TestDriveLiveConversation_ActivityDefersHibernation(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 1)
@@ -248,12 +248,12 @@ pumping:
 	}
 }
 
-// TestDriveLiveRun_NoneKeepsProcOpenAndLoops: a turn that ends with no
+// TestDriveLiveConversation_NoneKeepsProcOpenAndLoops: a turn that ends with no
 // conclusion (prose) must NOT close the process or hibernate — the run is
 // open, so the driver keeps the process warm and loops. We prove the loop by
 // delivering prose first and a valid conclusion second: the driver returns the
 // valid result, which it could only reach by looping past the prose.
-func TestDriveLiveRun_NoneKeepsProcOpenAndLoops(t *testing.T) {
+func TestDriveLiveConversation_NoneKeepsProcOpenAndLoops(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 8)
@@ -274,14 +274,14 @@ func TestDriveLiveRun_NoneKeepsProcOpenAndLoops(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_InvalidRepromptsToBoundThenHandsBack: an envelope-shaped but
+// TestDriveLiveConversation_InvalidRepromptsToBoundThenHandsBack: an envelope-shaped but
 // invalid conclusion is re-prompted to fix, up to maxCompletionRetries. When
 // the bound is exhausted the driver hands the (still invalid) result back —
 // keeping the totals the live process folded — rather than dropping them on a
 // bare error; processCompletion records the failure (see
 // TestProcessCompletion_InvalidEnvelopeFails). Each correction here produces
 // another invalid turn, so the bound is exhausted.
-func TestDriveLiveRun_InvalidRepromptsToBoundThenHandsBack(t *testing.T) {
+func TestDriveLiveConversation_InvalidRepromptsToBoundThenHandsBack(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 8)
@@ -305,11 +305,11 @@ func TestDriveLiveRun_InvalidRepromptsToBoundThenHandsBack(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_BoundedResumeRepromptsInvalid: a bounded resume (idleTimeout
+// TestDriveLiveConversation_BoundedResumeRepromptsInvalid: a bounded resume (idleTimeout
 // 0) holds a live process too, so it re-prompts an invalid envelope in place
 // just like an autonomous run — the fix for the asymmetry where a resume used
 // to accept an invalid envelope uncorrected.
-func TestDriveLiveRun_BoundedResumeRepromptsInvalid(t *testing.T) {
+func TestDriveLiveConversation_BoundedResumeRepromptsInvalid(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 8)
@@ -327,10 +327,10 @@ func TestDriveLiveRun_BoundedResumeRepromptsInvalid(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_BoundedResumeNoneHandsBack: a bounded resume (idleTimeout 0)
+// TestDriveLiveConversation_BoundedResumeNoneHandsBack: a bounded resume (idleTimeout 0)
 // has no idle timer to close a warm process, so a no-conclusion turn is handed
 // straight back (not looped) for processCompletion to mark open.
-func TestDriveLiveRun_BoundedResumeNoneHandsBack(t *testing.T) {
+func TestDriveLiveConversation_BoundedResumeNoneHandsBack(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 1)
@@ -347,10 +347,10 @@ func TestDriveLiveRun_BoundedResumeNoneHandsBack(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_InvalidThenValidReturns: an invalid conclusion is re-prompted
+// TestDriveLiveConversation_InvalidThenValidReturns: an invalid conclusion is re-prompted
 // once and the corrected turn is a valid conclusion → the driver returns it
 // (no failure).
-func TestDriveLiveRun_InvalidThenValidReturns(t *testing.T) {
+func TestDriveLiveConversation_InvalidThenValidReturns(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
 	results := make(chan *agentproc.Result, 8)
@@ -371,14 +371,14 @@ func TestDriveLiveRun_InvalidThenValidReturns(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_NoneFlipsStatusOpen: an autonomous turn that ends without a
+// TestDriveLiveConversation_NoneFlipsStatusOpen: an autonomous turn that ends without a
 // conclusion flips the run to `open` in the DB while the process stays warm —
 // so a crash in the warm window leaves an open run (which the boot reconcile
 // leaves alone) rather than a running one (which it would re-queue). We deliver
 // a no-conclusion turn followed by a valid one: the driver returns the valid
 // result, and the row is left `open` from the no-conclusion turn (driveLiveConversation
 // records the conclusion via processCompletion, not here).
-func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
+func TestDriveLiveConversation_NoneFlipsStatusOpen(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-none", "sess-none", "/tmp/wt-none")
 	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-none'`); err != nil {
@@ -414,12 +414,12 @@ func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_InterruptParksOpenNotTerminal pins the pause semantics: a
+// TestDriveLiveConversation_InterruptParksOpenNotTerminal pins the pause semantics: a
 // result the reader marked Interrupted (our own interrupt() ended the turn)
 // is a pause, not a failure — the run flips open, the process stays warm, and
 // the driver keeps consuming turns. The follow-up valid conclusion proves the
 // loop survived the pause.
-func TestDriveLiveRun_InterruptParksOpenNotTerminal(t *testing.T) {
+func TestDriveLiveConversation_InterruptParksOpenNotTerminal(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-pause", "sess-pause", "/tmp/wt-pause")
 	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-pause'`); err != nil {
@@ -456,10 +456,10 @@ func TestDriveLiveRun_InterruptParksOpenNotTerminal(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_ErrorWithoutInterruptStaysTerminal pins the inverse: the
+// TestDriveLiveConversation_ErrorWithoutInterruptStaysTerminal pins the inverse: the
 // same is_error/error_during_execution shape with NO pause in flight is a
 // genuine failure and stays terminal.
-func TestDriveLiveRun_ErrorWithoutInterruptStaysTerminal(t *testing.T) {
+func TestDriveLiveConversation_ErrorWithoutInterruptStaysTerminal(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess-err")
 	results := make(chan *agentproc.Result, 1)
@@ -475,10 +475,10 @@ func TestDriveLiveRun_ErrorWithoutInterruptStaysTerminal(t *testing.T) {
 	}
 }
 
-// TestDriveLiveRun_InterruptBoundedResumeParksOpen: pausing during a bounded
+// TestDriveLiveConversation_InterruptBoundedResumeParksOpen: pausing during a bounded
 // resume (no idle timer) can't loop — the driver closes the process and parks
 // the run open to a durable resume.
-func TestDriveLiveRun_InterruptBoundedResumeParksOpen(t *testing.T) {
+func TestDriveLiveConversation_InterruptBoundedResumeParksOpen(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess-bounded")
 

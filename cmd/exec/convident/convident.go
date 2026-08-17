@@ -10,9 +10,9 @@
 // import cycle through cmd/exec's top-level dispatch.
 //
 // The pattern matches what internal/delegate/run.go established for
-// the spawner-side bookkeeping: branch on the run's trigger_type so
-// manual runs route through synthetic-claims (carrying the human's
-// identity) and event-triggered runs route through admin-pool
+// the spawner-side bookkeeping: branch on the conversation's trigger_type so
+// manual conversations route through synthetic-claims (carrying the human's
+// identity) and event-triggered conversations route through admin-pool
 // `...System` methods (no human identity exists).
 //
 // This helper backs cmd/exec/agenthost's LocalClient, which every
@@ -49,23 +49,23 @@ var ErrConversationIdentityMissing = errors.New("TRIAGE_FACTORY_CONVERSATION_ID 
 // as a clear "stale env var / spawner bug" message in subcommand
 // stderr. Subcommands errors.Is against this sentinel when they want
 // to remap to their own package-level "not found" sentinels.
-var ErrConversationIdentityNotFound = errors.New("TRIAGE_FACTORY_CONVERSATION_ID points at a run that does not exist; check spawner injection")
+var ErrConversationIdentityNotFound = errors.New("TRIAGE_FACTORY_CONVERSATION_ID points at a conversation that does not exist; check spawner injection")
 
 // ConversationIdentity is the resolved (orgID, userID, conversationID) triple for a
 // cmd/exec subcommand invocation. Returned by ResolveConversationIdentity at
 // every subcommand's entry point so the body can branch on
 // IsEventTriggered to pick its store-routing strategy.
 type ConversationIdentity struct {
-	// OrgID is the run's owning org, read from the conversations row
+	// OrgID is the conversation's owning org, read from the conversations row
 	// keyed by TRIAGE_FACTORY_CONVERSATION_ID. In local mode this collapses
 	// to runmode.LocalDefaultOrgID (the single seeded tenant); in
 	// multi mode it carries the real tenant UUID so every
 	// subcommand write attributes to the correct org.
 	OrgID string
 
-	// UserID is the run's creator_user_id — non-empty for manual
-	// runs (the human who pressed delegate / swiped agent), empty
-	// for event-triggered runs (no human asked for the work).
+	// UserID is the conversation's creator_user_id — non-empty for manual
+	// conversations (the human who pressed delegate / swiped agent), empty
+	// for event-triggered conversations (no human asked for the work).
 	// Manual subcommand callers wrap their writes in
 	// SyntheticClaimsWithTx using this value; event-triggered
 	// callers route through `...System` admin-pool methods.
@@ -77,13 +77,13 @@ type ConversationIdentity struct {
 	// messages.
 	ConversationID string
 
-	// TeamID is the run's owning team (conversations.team_id, NOT NULL), read
-	// straight off the run row GetSystem already loads — no task hop.
+	// TeamID is the conversation's owning team (conversations.team_id, NOT NULL), read
+	// straight off the conversation row GetSystem already loads — no task hop.
 	// Carried onto the local-mode ConversationInfo (TFAC-458) so the capture
 	// writers can stamp artifacts.team_id (NOT NULL per TFAC-455 F1).
 	TeamID string
 
-	// IsEventTriggered is true when the run was spawned by an
+	// IsEventTriggered is true when the conversation was spawned by an
 	// auto-delegation trigger rather than by a human action. The
 	// discriminator that picks synthetic-claims vs admin-pool
 	// routing in every subcommand. Mirrors the same trigger_type
@@ -101,31 +101,31 @@ func ResolveConversationIdentityFromEnv(ctx context.Context, stores db.Stores) (
 	return ResolveConversationIdentity(ctx, stores, os.Getenv(ConversationIDEnvVar))
 }
 
-// ResolveConversationIdentity looks up the run via the admin pool (we don't
+// ResolveConversationIdentity looks up the conversation via the admin pool (we don't
 // have user claims yet) and returns the routing-relevant identity
 // fields. Empty conversationID surfaces as ErrConversationIdentityMissing — callers
 // reading from env should validate up front and not pass "".
 //
-// Two admin-pool reads: first resolve the run's owning org by
+// Two admin-pool reads: first resolve the conversation's owning org by
 // conversationID alone (the agent subprocess only has TRIAGE_FACTORY_CONVERSATION_ID
-// in env, never the orgID), then load the full run row scoped to
+// in env, never the orgID), then load the full conversation row scoped to
 // that org. Both reads bypass RLS because the subprocess hasn't
 // entered a claims-bound tx — we don't know who to claim AS until
-// after the lookup tells us run.CreatorUserID.
+// after the lookup tells us conv.CreatorUserID.
 func ResolveConversationIdentity(ctx context.Context, stores db.Stores, conversationID string) (ConversationIdentity, error) {
 	if conversationID == "" {
 		return ConversationIdentity{}, ErrConversationIdentityMissing
 	}
 	orgID, err := stores.Conversations.LookupOrgForConversationSystem(ctx, conversationID)
 	if err != nil {
-		return ConversationIdentity{}, fmt.Errorf("lookup org for run %s: %w", conversationID, err)
+		return ConversationIdentity{}, fmt.Errorf("lookup org for conversation %s: %w", conversationID, err)
 	}
 	if orgID == "" {
 		return ConversationIdentity{}, fmt.Errorf("%w: %s", ErrConversationIdentityNotFound, conversationID)
 	}
 	conv, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
-		return ConversationIdentity{}, fmt.Errorf("lookup run %s: %w", conversationID, err)
+		return ConversationIdentity{}, fmt.Errorf("lookup conversation %s: %w", conversationID, err)
 	}
 	if conv == nil {
 		return ConversationIdentity{}, fmt.Errorf("%w: %s", ErrConversationIdentityNotFound, conversationID)

@@ -172,7 +172,7 @@ func ownDurationMs(conv *domain.Conversation) (int, bool) {
 // blueprint_run, so a published review/PR discloses the total spend of
 // the multi-step blueprint rather than just the step that authored it.
 //
-// The authoring run's cost prefers run.TotalCostUSD (canonical, derived
+// The authoring run's cost prefers conv.TotalCostUSD (canonical, derived
 // at read time from the messages ledger) and falls back to recomputing
 // from TokenTotalsSystem for the still-running CLI mode. Whenever the
 // authoring run's settled cost is unavailable — whether we recovered a

@@ -2,7 +2,7 @@ package domain
 
 import "testing"
 
-func TestRunStatusClassification(t *testing.T) {
+func TestConversationStatusClassification(t *testing.T) {
 	for _, s := range AllTerminalConversationStatuses() {
 		if !IsTerminalConversationStatus(s) {
 			t.Errorf("%q should be terminal", s)
@@ -42,7 +42,7 @@ func TestRunStatusClassification(t *testing.T) {
 // the vocabulary — a typo, a status this build predates, or a raw NULL that
 // escaped the display ladder — must classify as not-active rather than
 // silently counting as a live executor slot.
-func TestIsActiveRunStatus_ClosedWorld(t *testing.T) {
+func TestIsActiveConversationStatus_ClosedWorld(t *testing.T) {
 	for _, s := range []string{
 		"",
 		"initializing",     // never existed backend-side
@@ -62,7 +62,7 @@ func TestIsActiveRunStatus_ClosedWorld(t *testing.T) {
 // AllConversationStatuses is the union the frontend mirror is checked against, so it
 // must stay exactly the three non-phase non-terminal names plus both sets,
 // with no duplicates.
-func TestAllRunStatuses_IsTheWholeVocabulary(t *testing.T) {
+func TestAllConversationStatuses_IsTheWholeVocabulary(t *testing.T) {
 	seen := map[string]bool{}
 	for _, s := range AllConversationStatuses() {
 		if seen[s] {

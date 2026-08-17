@@ -231,9 +231,9 @@ type reviewPostureArgs struct {
 	Repo  string `json:"repo"`
 }
 
-// listRunArtifactsResult / orgJiraBaseResult / recordExternalWriteArgs are the
+// listConversationArtifactsResult / orgJiraBaseResult / recordExternalWriteArgs are the
 // relay payloads that don't already exist as an IPC arg/result in protocol.go.
-type listRunArtifactsResult struct {
+type listConversationArtifactsResult struct {
 	Artifacts []domain.Artifact `json:"artifacts"`
 }
 
@@ -620,7 +620,7 @@ func newRelayRuntime(conn relayConn, info ConversationInfo, providerCreds provid
 func (r *relayRuntime) Info() ConversationInfo { return r.info }
 
 func (r *relayRuntime) ListConversationArtifacts(ctx context.Context) ([]domain.Artifact, error) {
-	var res listRunArtifactsResult
+	var res listConversationArtifactsResult
 	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opListConversationArtifacts, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}
@@ -632,7 +632,7 @@ func (r *relayRuntime) GetConversation(ctx context.Context) (*domain.Conversatio
 	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetConversation, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}
-	return res.Run, nil
+	return res.Conversation, nil
 }
 
 func (r *relayRuntime) GetTask(ctx context.Context, taskID string) (*domain.Task, error) {
