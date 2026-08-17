@@ -469,8 +469,8 @@ func resolveTeamBind(ctx context.Context, q queryer, orgID, teamID string) (stri
 }
 
 // entityTaskCreationLockSalt is the hashtextextended salt for the
-// per-entity advisory lock findOrCreateTaskAt and
-// FindOrCreateAtUnlessEntityActiveSystem takes before touching tasks for an
+// per-entity advisory lock that findOrCreateTaskAt and
+// FindOrCreateAtUnlessEntityActiveSystem take before touching tasks for an
 // entity (TFAC-579). Both MUST use this same salt — they only close the
 // became_atomic cross-event-type race (see the interface doc on
 // FindOrCreateAtUnlessEntityActiveSystem) if every task-creation path for
