@@ -187,6 +187,23 @@ type OrgSettings struct {
 	// OrgsStore.SetGitHubCredentialClass, called from the credential
 	// transitions inside their own transaction.
 	GitHubCredentialClass GitHubCredentialClass
+
+	// Version is the row's optimistic-concurrency token. The settings save is a
+	// read-modify-write over the whole struct, so two admins editing different
+	// sections of one page would otherwise silently overwrite each other; the
+	// API hands this out on the read and requires it on the write, refusing a
+	// write whose token is stale.
+	//
+	// READ-ONLY THROUGH THIS STRUCT, like GitHubCredentialClass above but for a
+	// different reason: the counter belongs to the store, not the caller.
+	// UpdateSettings ignores the field and bumps the stored value; the only way
+	// to assert a version is UpdateSettingsVersioned's explicit argument, which
+	// is what makes the assertion visible at the call site rather than smuggled
+	// in a struct field a caller could forget to carry.
+	//
+	// 0 means "no row" — the value DefaultOrgSettings() carries, and what a
+	// missing-row read hands back. A materialized row is always >= 1.
+	Version int
 }
 
 // GitHubCredentialClass names which credential system an org's GitHub access

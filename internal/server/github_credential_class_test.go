@@ -342,7 +342,7 @@ func TestCredentialClass_BulkSettingsSaveIsNoBackDoor(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := doJSON(t, s, http.MethodPost, "/api/settings/org", tc.body)
+			rec := patchOrgSettings(t, s, tc.body)
 			want := tc.wantStatus
 			if want == 0 {
 				want = http.StatusOK

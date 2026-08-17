@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sort"
 	"testing"
@@ -71,6 +72,10 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			// the read hands it back. Stated as the expected value rather than
 			// left zero, because "" is not something the store can return.
 			GitHubCredentialClass: domain.GitHubCredentialClassPAT,
+			// Read-only through this struct too, and set by the write rather
+			// than carried into it: the first save materializes the row at
+			// version 1.
+			Version: 1,
 		}
 		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
@@ -392,6 +397,10 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		second.MaxLLMModelTier = "opus"
 		second.MaxDailyCostUSD = 10
 		second.MaxConcurrentRuns = 20
+		// Two saves, so the row's concurrency token has been bumped twice. The
+		// struct's own Version is ignored on the way in — stating it here
+		// describes what the read must hand back.
+		second.Version = 2
 		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, second); err != nil {
 			t.Fatalf("second UpdateSettings: %v", err)
 		}
@@ -401,6 +410,165 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if !reflect.DeepEqual(got, second) {
 			t.Errorf("after re-Update, GetSettings = %+v; want %+v", got, second)
+		}
+	})
+
+	// The optimistic-concurrency contract behind PATCH /api/orgs/{id}/settings.
+	// The settings save is a read-modify-write over the whole row, so two
+	// admins editing different sections of one page would otherwise silently
+	// overwrite each other. The guard has to live in the statement: both
+	// dialects run READ COMMITTED, so a re-read inside the loser's own
+	// transaction cannot see the winner's commit and a Go-side comparison
+	// would pass for both.
+	t.Run("OrgSettings_Versioned_GuardsTheLoser", func(t *testing.T) {
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+
+		// No row yet: version 0 is the "materialize it" assertion, and it
+		// lands at 1.
+		first := base
+		first.GitHubBaseURL = "https://first.example.com"
+		if err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, first, 0); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (insert): %v", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if got.Version != 1 {
+			t.Fatalf("version after insert = %d; want 1", got.Version)
+		}
+
+		// The winner reads 1, writes at 1, lands at 2.
+		winner := base
+		winner.GitHubBaseURL = "https://winner.example.com"
+		if err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, winner, 1); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (winner): %v", err)
+		}
+
+		// The loser read 1 too — its write is refused, and refused WITHOUT
+		// writing: the winner's field is still what a refetch shows.
+		loser := base
+		loser.GitHubBaseURL = "https://loser.example.com"
+		err = stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, loser, 1)
+		if !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Fatalf("stale UpdateSettingsVersioned err = %v; want ErrOrgSettingsVersion", err)
+		}
+		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (after loser): %v", err)
+		}
+		if got.GitHubBaseURL != "https://winner.example.com" {
+			t.Errorf("after the refused write, base URL = %q; want the winner's value preserved", got.GitHubBaseURL)
+		}
+		if got.Version != 2 {
+			t.Errorf("version after one winner = %d; want 2 (the refused write must not bump it)", got.Version)
+		}
+
+		// A version assertion must never CREATE. Asserting version 0 against a
+		// row that now exists is the create-vs-create race, and it loses.
+		err = stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, loser, 0)
+		if !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Errorf("asserting version 0 against an existing row = %v; want ErrOrgSettingsVersion", err)
+		}
+
+		// Re-reading and re-applying is the loser's whole remedy, so it has to
+		// work on the next attempt.
+		if err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, loser, got.Version); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (loser retry): %v", err)
+		}
+		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (after retry): %v", err)
+		}
+		if got.GitHubBaseURL != "https://loser.example.com" || got.Version != 3 {
+			t.Errorf("after retry: base=%q version=%d; want the loser's value at version 3", got.GitHubBaseURL, got.Version)
+		}
+	})
+
+	// A version assertion is an assertion about a row that EXISTS, and it must
+	// never quietly become a create. The guard can only ride an upsert's
+	// conflict arm, so a single guarded upsert lets a caller asserting a stale
+	// non-zero version against a since-deleted row fall through to the INSERT
+	// and materialize it at version 1 — a create reported as a successful
+	// update, with the caller's whole form written over a row it never read.
+	t.Run("OrgSettings_Versioned_NonZeroExpectedNeverCreates", func(t *testing.T) {
+		stores, ids := factory(t)
+		row := domain.OrgSettings{
+			GitHubBaseURL:       "https://ghost.example.com",
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+
+		// No row yet, and the caller claims to have read one at version 3.
+		err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, row, 3)
+		if !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Fatalf("asserting version 3 against a missing row = %v; want ErrOrgSettingsVersion", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if got.Version != 0 || got.GitHubBaseURL != "" {
+			t.Errorf("the refused assertion created a row: %+v", got)
+		}
+	})
+
+	// The unguarded writer is the credential transitions' path and stays
+	// last-writer-wins — but it must still move the token, or an admin's stale
+	// settings edit would land on top of a credential change it never saw.
+	t.Run("OrgSettings_UnversionedWrite_StillBumpsTheToken", func(t *testing.T) {
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+			t.Fatalf("UpdateSettings (first): %v", err)
+		}
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+			t.Fatalf("UpdateSettings (second): %v", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if got.Version != 2 {
+			t.Errorf("version after two unguarded saves = %d; want 2", got.Version)
+		}
+		if err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, base, 1); !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Errorf("a settings write at the pre-transition version = %v; want ErrOrgSettingsVersion", err)
+		}
+	})
+
+	// SetGitHubCredentialClass is the counter-example: a surgical single-column
+	// write that does NOT move the token, so a credential transition can't
+	// invalidate an admin's in-flight settings edit.
+	t.Run("OrgSettings_CredentialClassWrite_LeavesTheTokenAlone", func(t *testing.T) {
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+			t.Fatalf("UpdateSettings: %v", err)
+		}
+		if err := stores.Orgs.SetGitHubCredentialClass(ctx, ids.OrgID, domain.GitHubCredentialClassBYOApp); err != nil {
+			t.Fatalf("SetGitHubCredentialClass: %v", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if got.Version != 1 {
+			t.Errorf("version after a class write = %d; want 1 (unchanged)", got.Version)
 		}
 	})
 

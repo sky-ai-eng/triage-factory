@@ -13,7 +13,6 @@ import (
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -22,9 +21,10 @@ import (
 // Bedrock role mode (TFAC-616): the short-lived-credential Bedrock method.
 // The org stores no Bedrock secret — only the customer role ARN and a
 // TF-generated External ID — and the brain mints STS session creds per run.
-// This file owns role mode's two live-AWS endpoints (both absent from the
-// other Bedrock methods, which are shape-only): the role-setup endpoint (caller
-// ARN + trust-policy snippet) and the connect probe (a real AssumeRole).
+// This file owns the role-setup endpoint (caller ARN + trust-policy snippet)
+// and the External-ID machinery both it and the bind depend on. The bind
+// itself — including the live AssumeRole probe, the only such probe on any
+// Bedrock method — lives with its sibling flavors in llm_credentials.go.
 
 // bedrockRoleARNRe matches an IAM role ARN: arn:<partition>:iam::<12-digit
 // account>:role/<path+name>. Covers aws, aws-us-gov, aws-cn partitions.
@@ -81,139 +81,6 @@ func (se *settingsHandler) handleBedrockRoleSetup(w http.ResponseWriter, r *http
 		"external_id":         externalID,
 		"trust_policy":        bedrockTrustPolicyJSON(callerARN, externalID),
 	})
-}
-
-// handleBedrockRoleConnect performs the live AssumeRole probe and, on
-// success, stores the role config (no secret credential). It is the SINGLE
-// write path into role mode: switching in requires a valid ARN + probe
-// success, and the "leave blank to keep current" masking never applies (role
-// mode holds no secret to keep). Called from handleBedrockConnect after the
-// shared region / base-url validation.
-func (se *settingsHandler) handleBedrockRoleConnect(w http.ResponseWriter, r *http.Request, orgID, userID string, req bedrockConnectRequest) {
-	if req.RoleARN == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonMissingField, Message: "role ARN is required", Field: "role_arn",
-		})
-		return
-	}
-	if !bedrockRoleARNRe.MatchString(req.RoleARN) {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonInvalidField,
-			Message: fmt.Sprintf("%q does not look like an IAM role ARN (e.g. arn:aws:iam::123456789012:role/tf-bedrock)", req.RoleARN),
-			Field:   "role_arn",
-		})
-		return
-	}
-	resolver := se.bedrockRoleResolver()
-	if resolver == nil {
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
-			Reason:  httpx.ReasonNotConfigured,
-			Message: "Bedrock role mode requires the multi-mode control service (this deployment has no ambient AWS identity to assume roles with)",
-		})
-		return
-	}
-
-	// Ensure the External ID exists (generate + persist if the admin skipped
-	// the role-setup fetch) BEFORE the probe — the probe must present the same
-	// value the customer's trust policy references. It is stable thereafter.
-	externalID, err := se.resolveExternalID(r.Context(), orgID, userID)
-	if err != nil {
-		internalError(w, "settings", fmt.Errorf("prepare bedrock external id: %w", err))
-		return
-	}
-
-	// Live probe — the real AssumeRole round-trip. The two failure classes
-	// have different audiences (see below), so they surface distinct messages.
-	if err := resolver.ProbeRole(r.Context(), req.RoleARN, externalID); err != nil {
-		switch {
-		case errors.Is(err, llmcred.ErrNoAmbientIdentity):
-			// Operator problem — the org admin can't fix it from the UI.
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
-				Reason: httpx.ReasonNotConfigured, Message: operatorRemediationMsg,
-			})
-		case errors.Is(err, llmcred.ErrAssumeRoleDenied):
-			// Org-admin problem — trust policy or External ID mismatch.
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
-				Reason:  httpx.ReasonUpstreamRejected,
-				Message: fmt.Sprintf("AssumeRole was denied — check the role's trust policy allows the control service and the External ID matches %q (re-open the setup to copy the trust-policy snippet)", externalID),
-				Field:   "role_arn",
-			})
-		case errors.Is(err, llmcred.ErrRoleMisconfigured):
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
-				Reason: httpx.ReasonUpstreamRejected, Message: err.Error(), Field: "role_arn",
-			})
-		default:
-			// The raw AWS error stays in the log; only local mode sees it in
-			// the body (LocalDetail), because an SDK error can carry account
-			// ids, ARNs and request ids that belong to the operator, not to
-			// another tenant's browser.
-			settingsLog.Error("bedrock role connect probe failed", "error", err)
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
-				Reason:  httpx.ReasonUpstreamRejected,
-				Message: "AssumeRole failed" + httpx.LocalDetail(err),
-				Field:   "role_arn",
-			})
-		}
-		return
-	}
-
-	// Probe passed — persist the role config. No secret is stored; role mode's
-	// whole point is that the org's stored config contains no credential.
-	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return fmt.Errorf("load org settings: %w", err)
-		}
-		if err := tx.Secrets.Put(r.Context(), orgID, integrations.KeyAWSRoleARN, req.RoleARN, "Org's Bedrock IAM role ARN"); err != nil {
-			return fmt.Errorf("store role ARN: %w", err)
-		}
-		if err := tx.Secrets.Put(r.Context(), orgID, integrations.KeyAWSRegion, req.Region, "Org's Bedrock region"); err != nil {
-			return fmt.Errorf("store Bedrock region: %w", err)
-		}
-		if err := putOrClearSecret(r, tx, orgID, integrations.KeyBedrockModelID, req.ModelID, "Org's Bedrock model ID"); err != nil {
-			return err
-		}
-		if err := putOrClearSecret(r, tx, orgID, integrations.KeyBedrockBaseURL, req.BaseURL, "Org's Bedrock endpoint override"); err != nil {
-			return err
-		}
-		// Provider exclusivity: role mode holds the credential trust; every
-		// other provider's stored material must go, or the resolver could pick
-		// a stale key over the mint.
-		for _, k := range []string{
-			integrations.KeyAWSBearerTokenBedrock,
-			integrations.KeyAWSAccessKeyID, integrations.KeyAWSSecretAccessKey, integrations.KeyAWSSessionToken,
-			secretKeyAnthropicAPIKey,
-		} {
-			if _, err := tx.Secrets.Delete(r.Context(), orgID, k); err != nil {
-				return fmt.Errorf("clear stale %s: %w", k, err)
-			}
-		}
-		droppedAnthropic := orgSet.AnthropicAPIKeyRef != ""
-		orgSet.AnthropicAPIKeyRef = ""
-		orgSet.BedrockCredentialsRef = integrations.KeyAWSRoleARN
-		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
-			return err
-		}
-		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
-			ActorUserID: userID,
-			Action:      domain.AccessActionCredentialSet,
-			DetailJSON:  accessDetailCredential(domain.CredentialKindBedrock, req.BaseURL),
-		}); err != nil {
-			return err
-		}
-		// The exclusivity sweep above revoked the org's Anthropic key; record
-		// that as its own removal (same stance as the static-Bedrock arm).
-		if !droppedAnthropic {
-			return nil
-		}
-		return recordCredentialRemovals(r.Context(), tx, orgID, userID,
-			[]string{domain.CredentialKindAnthropicKey})
-	}); err != nil {
-		internalError(w, "settings", fmt.Errorf("persist bedrock role configuration: %w", err))
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "connected"})
 }
 
 // bedrockRoleResolver returns the wired resolver, or nil (local mode / not

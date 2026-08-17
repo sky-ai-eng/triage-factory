@@ -216,7 +216,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 
 	// Resolve the clone protocol once for the whole run rather than
 	// re-reading per-org settings inside the per-repo loop. The setting
-	// can't change mid-run — handleOrgSettingsPost serializes the org-
+	// can't change mid-run — handleOrgSettingsPatch serializes the org-
 	// settings write behind the same `onGitHubChanged` callback that
 	// owns this goroutine — so capturing it here matches actual
 	// semantics and avoids N redundant DB reads.

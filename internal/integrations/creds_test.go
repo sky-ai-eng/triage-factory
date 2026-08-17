@@ -266,31 +266,6 @@ func TestClearJiraOtherScheme(t *testing.T) {
 	})
 }
 
-func TestClear_WipesEverything(t *testing.T) {
-	stores := openStores(t)
-	ctx := context.Background()
-	org := runmode.LocalDefaultOrgID
-
-	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
-		GitHubURL: "https://github.example.com",
-		GitHubPAT: "ghp-test",
-		JiraURL:   "https://jira.example.com",
-		JiraPAT:   "jira-test",
-	}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	if err := integrations.Clear(ctx, stores.Secrets, org); err != nil {
-		t.Fatalf("Clear: %v", err)
-	}
-	got, err := integrations.Load(ctx, stores.Secrets, org)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if (got != auth.Credentials{}) {
-		t.Errorf("Clear left residue: %+v", got)
-	}
-}
-
 // TestJiraSystemConfig pins the request-path creds→config builder: the marker
 // routes Cloud (Basic, REST v3) vs DC (Bearer, REST v2); an empty marker falls
 // back to host-shape detection; and ok=false when the URL or the scheme's
@@ -488,24 +463,24 @@ func TestAllKeys_IncludesLegacyKeychainKeys(t *testing.T) {
 }
 
 // TestStaticOrgSecretsExcludedFromAllKeys pins the TFAC-405 design decision: the
-// org-level Anthropic / Atlassian-OAuth secrets must NOT ride the per-org Clear
-// path. AllKeys feeds integrations.Clear ("Clear All Tokens"), which doesn't
-// reconcile their companion DB refs (org_settings.anthropic_api_key_ref / the
-// org_jira_apps row) — sweeping them there would dangle the ref. They belong
-// only in AllLocalSweepKeys (the full uninstall wipe, where the DB is gone too).
+// org-level Anthropic / Atlassian-OAuth secrets must NOT ride the integration-
+// credential key set. Nothing on that path reconciles their companion DB refs
+// (org_settings.anthropic_api_key_ref / the org_jira_apps row) — sweeping them
+// there would dangle the ref. They belong only in AllLocalSweepKeys (the full
+// uninstall wipe, where the DB is gone too).
 func TestStaticOrgSecretsExcludedFromAllKeys(t *testing.T) {
 	for _, k := range []string{integrations.KeyAnthropicAPIKey, integrations.KeyJiraOAuthClientSecret} {
 		if slices.Contains(integrations.AllKeys(), k) {
-			t.Errorf("%q must NOT be in AllKeys: it would ride the per-org Clear path, which can't reconcile its companion DB ref", k)
+			t.Errorf("%q must NOT be in AllKeys: nothing on that path reconciles its companion DB ref", k)
 		}
 	}
 }
 
 // TestAllLocalSweepKeys_IsAllKeysPlusStaticOrgSecrets pins that the uninstall
 // sweep set is exactly AllKeys plus the org-level secrets (the Anthropic key,
-// the Atlassian OAuth client secret, and the Bedrock set managed by
-// POST /api/bedrock/connect) — a superset that covers everything Clear covers
-// and nothing it can't reconcile.
+// the Atlassian OAuth client secret, and the Bedrock set managed by the
+// per-flavor bind routes) — a superset of the integration-credential keys plus
+// the org-level secrets no per-credential route reconciles.
 func TestAllLocalSweepKeys_IsAllKeysPlusStaticOrgSecrets(t *testing.T) {
 	sweep := integrations.AllLocalSweepKeys()
 	for _, k := range integrations.AllKeys() {

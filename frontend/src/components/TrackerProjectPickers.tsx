@@ -14,7 +14,7 @@ interface Props {
   onLinearChange: (key: string) => void
   // The team whose configured Jira projects populate the picker. A UUID
   // (the acting team in the multi-team create modal) or the literal
-  // "default" — the backend's /api/settings/team/{team_id} accepts both.
+  // "default" — the backend's /api/teams/{team_id}/settings accepts both.
   // Empty/undefined falls back to "default": the single-team detail view
   // and solo/local, where the sole team's config is the right source.
   // Must match the team the create POST validates jira_project_key
@@ -62,7 +62,7 @@ export default function TrackerProjectPickers({
     const load = async () => {
       try {
         const data = await apiJSON<TeamSettingsResponse>(
-          `/api/settings/team/${encodeURIComponent(settingsTeam)}`,
+          `/api/teams/${encodeURIComponent(settingsTeam)}/settings`,
           { signal: controller.signal },
         )
         if (controller.signal.aborted) return

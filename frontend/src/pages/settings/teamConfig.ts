@@ -5,12 +5,12 @@
 // no surface grows its own parallel persistence path.
 //
 // Key difference from org: team config spans MULTIPLE endpoints, not the
-// single POST /api/settings/org. The team-settings + Jira rules ride one
-// POST; tracked repos and GitHub-team mappings each have their own PUT.
-// saveTeamConfig sequences all three and surfaces partial failure (so the
-// user never silently lands on a half-saved team), while the per-slice
-// savers let a surface that only touched one slice (e.g. Settings'
-// change-aware save) write just that one.
+// single org-settings PATCH. The team settings row has its own PATCH; the
+// Jira project rules, the tracked repos and the GitHub-team mappings are each
+// a child collection with its own replace-set PUT. saveTeamConfig sequences
+// all four and surfaces partial failure (so the user never silently lands on a
+// half-saved team), while the per-slice savers let a surface that only touched
+// one slice (e.g. Settings' change-aware save) write just that one.
 
 import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
 import type { JiraStatusRuleValue } from '../../components/JiraStatusRule'
@@ -77,7 +77,7 @@ export interface TeamConfigForm {
   github_groups?: GitHubGroup[]
 }
 
-// TeamSettingsData mirrors the GET /api/settings/team/{id} response.
+// TeamSettingsData mirrors the GET /api/teams/{id}/settings response.
 // MemberCount + Role describe the caller's relationship to the team so the
 // frontend can collapse to the flat N=1 layout and gate write-side fields
 // without a second round trip.
@@ -194,10 +194,14 @@ export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
   }
 }
 
-const teamPath = (teamId: string) => `/api/settings/team/${encodeURIComponent(teamId)}`
+// The team resource. Its settings row and its Jira project rules hang off it;
+// the tracked repos and the GitHub-team mappings still live under the older
+// /api/settings/team/{id} prefix, which this ticket didn't move.
+const teamPath = (teamId: string) => `/api/teams/${encodeURIComponent(teamId)}`
+const legacyTeamPath = (teamId: string) => `/api/settings/team/${encodeURIComponent(teamId)}`
 
 export async function fetchTeamSettings(teamId: string): Promise<TeamSettingsData | null> {
-  return apiJSON<TeamSettingsData>(teamPath(teamId)).catch(() => null)
+  return apiJSON<TeamSettingsData>(`${teamPath(teamId)}/settings`).catch(() => null)
 }
 
 // fetchTeamRepos returns the team's tracked-repo slugs, or null on failure.
@@ -205,7 +209,7 @@ export async function fetchTeamSettings(teamId: string): Promise<TeamSettingsDat
 // from this must not treat a failed load as "tracks nothing" and then write
 // [] back, wiping the team's repos (the Repos page guards the same way).
 export async function fetchTeamRepos(teamId: string): Promise<string[] | null> {
-  return apiJSON<TeamReposData>(`${teamPath(teamId)}/repos`)
+  return apiJSON<TeamReposData>(`${legacyTeamPath(teamId)}/repos`)
     .then((data) => data.repos ?? [])
     .catch(() => null)
 }
@@ -217,24 +221,25 @@ export async function fetchTeamRepos(teamId: string): Promise<string[] | null> {
 // as fetchTeamRepos: a failed load must not read as "maps nothing." (The GET
 // also re-triggers the server's deletion reconcile, same as the group's fetch.)
 export async function fetchTeamGitHubGroups(teamId: string): Promise<GitHubGroup[] | null> {
-  return apiJSON<TeamGitHubGroupsData>(`${teamPath(teamId)}/github-groups`)
+  return apiJSON<TeamGitHubGroupsData>(`${legacyTeamPath(teamId)}/github-groups`)
     .then((data) => data.groups ?? [])
     .catch(() => null)
 }
 
 export type SaveResult = { ok: true; warning?: string } | { ok: false; error: string }
 
-// saveTeamSettings persists the team-settings + Jira-rules slice via POST
-// /api/settings/team/{id}. Empty-keyed projects are dropped (a blank row the
-// user added but never filled). `warning` carries the backend's model-cap
+// saveTeamSettings persists the team settings row via
+// PATCH /api/teams/{id}/settings. `warning` carries the backend's model-cap
 // clamp notice on an otherwise-successful save.
+//
+// Every field is sent because every field is edited somewhere on this form and
+// the caller passes the whole live form; a surface that edits one field can
+// still send only that key, since absent means keep. The Jira project rules are
+// NOT part of this body — they have their own replace-set write below.
 export async function saveTeamSettings(teamId: string, form: TeamConfigForm): Promise<SaveResult> {
-  const projects = form.jira_projects
-    .map((p) => ({ ...p, key: p.key.trim() }))
-    .filter((p) => p.key !== '')
   try {
-    const body = await apiJSON<{ warning?: string } | null>(teamPath(teamId), {
-      method: 'POST',
+    const body = await apiJSON<{ warning?: string } | null>(`${teamPath(teamId)}/settings`, {
+      method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ai_model: form.default_model,
@@ -246,7 +251,6 @@ export async function saveTeamSettings(teamId: string, form: TeamConfigForm): Pr
         ai_preference_update_interval: form.ai_preference_update_interval,
         permission_absent_autodeny_enabled: form.permission_absent_autodeny_enabled,
         permission_absent_grace_seconds: form.permission_absent_grace_seconds,
-        jira_projects: projects,
       }),
     })
     return { ok: true, warning: body?.warning }
@@ -255,12 +259,35 @@ export async function saveTeamSettings(teamId: string, form: TeamConfigForm): Pr
   }
 }
 
+// saveTeamJiraProjects persists the tracked Jira projects + their status rules
+// via PUT /api/teams/{id}/jira-projects — a full replace-set, like the repos
+// and github-groups siblings. Empty-keyed projects are dropped first (a blank
+// row the user added but never filled).
+export async function saveTeamJiraProjects(
+  teamId: string,
+  projects: JiraProjectConfig[],
+): Promise<SaveResult> {
+  const jira_projects = projects
+    .map((p) => ({ ...p, key: p.key.trim() }))
+    .filter((p) => p.key !== '')
+  try {
+    await apiFetch(`${teamPath(teamId)}/jira-projects`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jira_projects }),
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the Jira projects.') }
+  }
+}
+
 // saveTeamRepos persists the tracked-repo set via PUT /api/settings/team/
 // {id}/repos. Re-PUTting the same set re-triggers profiling, so callers that
 // save unconditionally (vs. only-on-change) should be aware.
 export async function saveTeamRepos(teamId: string, repos: string[]): Promise<SaveResult> {
   try {
-    await apiFetch(`${teamPath(teamId)}/repos`, {
+    await apiFetch(`${legacyTeamPath(teamId)}/repos`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ repos }),
@@ -278,7 +305,7 @@ export async function saveTeamGitHubGroups(
   groups: GitHubGroup[],
 ): Promise<SaveResult> {
   try {
-    await apiFetch(`${teamPath(teamId)}/github-groups`, {
+    await apiFetch(`${legacyTeamPath(teamId)}/github-groups`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groups }),
@@ -290,7 +317,7 @@ export async function saveTeamGitHubGroups(
 }
 
 // slackChannelsPath is the ee/slack channel-tracking route — deliberately
-// under /api/slack/* rather than teamPath()'s /api/settings/team/... (see
+// under /api/slack/* rather than teamPath()'s /api/teams/... (see
 // ee/slack/channels_handler.go's package doc: ee-owned routes stay in the
 // slack namespace).
 const slackChannelsPath = (teamId: string) =>
@@ -361,10 +388,10 @@ function partialFailure(saved: string[], failed: string, err: string): string {
 }
 
 // saveTeamConfig orchestrates the team save across the endpoints, the
-// create-step's "Finish" path. Order is deliberate: team settings first
-// (pure server-side validation — project rules, dup keys — with no external
-// calls, so a bad rule fails before the repos PUT does any reachability work
-// or profiling), then repos, then GitHub-team mappings.
+// create-step's "Finish" path. Order is deliberate: team settings and the Jira
+// rules first (pure server-side validation — project rules, dup keys — with no
+// external calls, so a bad rule fails before the repos PUT does any
+// reachability work or profiling), then repos, then GitHub-team mappings.
 //
 // A slice left `undefined` (never loaded / load failed) is skipped, not
 // written — that's the no-wipe guarantee. On a mid-sequence failure the
@@ -376,6 +403,12 @@ export async function saveTeamConfig(teamId: string, form: TeamConfigForm): Prom
   const settings = await saveTeamSettings(teamId, form)
   if (!settings.ok) return settings
   saved.push('Team settings')
+
+  const projects = await saveTeamJiraProjects(teamId, form.jira_projects)
+  if (!projects.ok) {
+    return { ok: false, error: partialFailure(saved, 'Jira projects', projects.error) }
+  }
+  saved.push('Jira projects')
 
   if (form.repos !== undefined) {
     const repos = await saveTeamRepos(teamId, form.repos)

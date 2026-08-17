@@ -4,228 +4,23 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
-	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
-
-type setupRequest struct {
-	GitHubURL string `json:"github_url"`
-	GitHubPAT string `json:"github_pat"`
-	JiraURL   string `json:"jira_url"`
-	JiraPAT   string `json:"jira_pat"`
-	// CloneProtocol is the user's choice on the Setup wizard: "ssh"
-	// (default) or "https". Empty means "use the existing config
-	// value" — important because the wizard runs preflight separately
-	// and may post setup multiple times during reconfiguration.
-	CloneProtocol string `json:"clone_protocol"`
-}
-
-type setupResponse struct {
-	GitHub *auth.GitHubUser `json:"github,omitempty"`
-	Jira   *auth.JiraUser   `json:"jira,omitempty"`
-}
-
-func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request) {
-	userID := ClaimsFrom(r.Context()).Subject
-	// Setup writes credentials through the SecretStore, which is
-	// org-scoped — see handleOrgSettingsPost for the multi-mode rationale.
-	orgID, ok := s.requireOrg(w, r)
-	if !ok {
-		return
-	}
-	var req setupRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return
-	}
-
-	if req.GitHubURL == "" || req.GitHubPAT == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidBody, Message: "GitHub URL and token are required"})
-		return
-	}
-
-	// Multi-mode is HTTPS-only: reject an ssh selection rather than
-	// store a value the clone path will ignore. SSH would need a per-org key
-	// the hosted runtime has no machinery to provision, and PreflightSSH
-	// (below) must never run in a container — it writes ~/.ssh/known_hosts.
-	if req.CloneProtocol == "ssh" && runmode.Current() != runmode.ModeLocal {
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "ssh clone protocol is not available in this deployment; use https", Field: "clone_protocol"})
-		return
-	}
-
-	// Hard-block setup with SSH selected if our preflight against the
-	// configured GitHub host can't authenticate. Run BEFORE the PAT
-	// check so the user gets the SSH error first rather than entering
-	// a valid PAT just to find out their SSH is broken on the next
-	// step. The HTTPS path skips this entirely. The probe target is
-	// derived from the URL the user just submitted so GHE deployments
-	// see hints with their hostname, not "github.com". Local-mode only —
-	// the multi-mode ssh rejection above guarantees we never reach here
-	// with ssh selected outside local.
-	if req.CloneProtocol == "ssh" {
-		sshHost := worktree.SSHHostFromBaseURL(req.GitHubURL)
-		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-		err := worktree.PreflightSSH(ctx, sshHost)
-		cancel()
-		if err != nil {
-			// The probe's stderr is already the tail of the message and the
-			// whole of the log line above; it used to ride along in a
-			// private third key only this route spoke.
-			authLog.Warn("blocked ssh setup, preflight failed", "ssh_host", sshHost, "error", err)
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
-				Reason:  httpx.ReasonInvalidField,
-				Message: fmt.Sprintf("SSH preflight against %s failed — set up your SSH key or pick HTTPS. %s", sshHost, err.Error()),
-				Field:   "clone_protocol",
-			})
-			return
-		}
-	}
-
-	resp := setupResponse{}
-
-	// Validate GitHub if provided
-	if req.GitHubURL != "" && req.GitHubPAT != "" {
-		ghUser, err := auth.ValidateGitHub(r.Context(), req.GitHubURL, req.GitHubPAT)
-		if err != nil {
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub: " + err.Error(), Field: "github"})
-			return
-		}
-		resp.GitHub = ghUser
-	}
-
-	// Validate Jira if provided
-	if req.JiraURL != "" && req.JiraPAT != "" {
-		jiraUser, err := auth.ValidateJira(r.Context(), jira.DataCenterPAT(req.JiraURL, req.JiraPAT))
-		if err != nil {
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "Jira: " + err.Error(), Field: "jira"})
-			return
-		}
-		resp.Jira = jiraUser
-	}
-
-	// One WithTx for the full persist: SecretStore (Postgres vault
-	// writes need claims), org_settings (org_settings_update RLS),
-	// and user_github_identities (its own user-scoped RLS) all share the
-	// same claims tx so they either all commit or all roll back.
-	// Local mode collapses to one SQLite tx with the same shape.
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if err := integrations.Save(r.Context(), tx.Secrets, orgID, auth.Credentials{
-			GitHubURL: req.GitHubURL,
-			GitHubPAT: req.GitHubPAT,
-			JiraURL:   req.JiraURL,
-			JiraPAT:   req.JiraPAT,
-		}); err != nil {
-			return fmt.Errorf("store credentials: %w", err)
-		}
-
-		// NOTE: this is the ORG credential (PAT_1) — the bot token TF
-		// authenticates to GitHub with. It is deliberately NOT bound to the
-		// configuring user's GitHub identity. Per-user identity (PAT_2 / "this
-		// TF user is @login") is captured by its own surface — the setup
-		// wizard's User step / the Connect gate page, writing
-		// user_github_identities directly — so access and identity never get
-		// conflated. The two may carry the same token value, but they are set
-		// and stored independently.
-
-		// Persist the org credential's OWN GitHub login (the login the PAT
-		// authenticates as) so the resolver's OrgIdentityFor can stamp the org
-		// commit-author identity on delegated-agent commits (TFAC-452). This is
-		// org ACCESS metadata on the agents row, NOT user_github_identities.
-		if resp.GitHub != nil {
-			if err := persistOrgGitHubLogin(r.Context(), tx, orgID, resp.GitHub.Login); err != nil {
-				return fmt.Errorf("persist org github login: %w", err)
-			}
-		}
-
-		// Persist base URLs + clone protocol in org_settings so they
-		// survive without keychain access. Read-modify-write inside
-		// the same tx; the store returns DefaultOrgSettings() on a
-		// missing row, so first-time setup lands a fully-populated
-		// upsert rather than a partially-filled one.
-		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return fmt.Errorf("load org settings: %w", err)
-		}
-		if req.GitHubURL != "" {
-			orgSet.GitHubBaseURL = req.GitHubURL
-		}
-		if req.JiraURL != "" {
-			orgSet.JiraBaseURL = req.JiraURL
-		}
-		if req.CloneProtocol == "ssh" || req.CloneProtocol == "https" {
-			orgSet.GitHubCloneProtocol = req.CloneProtocol
-		}
-		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
-			return fmt.Errorf("save org settings: %w", err)
-		}
-		// Audit the org credential binds in the same tx. The setup
-		// wizard requires a GitHub PAT (guarded above) and optionally carries a
-		// Jira one; each records its own row with the configured host, so the
-		// change-log shows the same two binds a later Settings rotation would.
-		if req.GitHubPAT != "" {
-			if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
-				ActorUserID: userID,
-				Action:      domain.AccessActionCredentialSet,
-				DetailJSON: accessDetailCredentialNamed(
-					domain.CredentialKindGitHubPAT, req.GitHubURL, githubLoginOf(resp.GitHub)),
-			}); err != nil {
-				return fmt.Errorf("audit credential set: %w", err)
-			}
-		}
-		if req.JiraPAT != "" {
-			if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
-				ActorUserID: userID,
-				Action:      domain.AccessActionCredentialSet,
-				DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditJiraHost(req.JiraURL)),
-			}); err != nil {
-				return fmt.Errorf("audit credential set: %w", err)
-			}
-		}
-		return nil
-	}); err != nil {
-		// Log the underlying wrap-chain (SQL / vault / FK errors) for
-		// operator debugging, but return a stable user-facing message
-		// so we don't leak Postgres internals to API clients. Mirrors
-		// the pattern handleJiraConnect now uses.
-		internalError(w, "setup", fmt.Errorf("persist integration credentials: %w", err))
-		return
-	}
-
-	// Setup always includes GitHub — trigger full restart. Mark Jira restarted
-	// synchronously so jiraPollReady flips false before the async callback
-	// starts, closing a race where carry-over reads stale snapshots.
-	if s.onGitHubChanged != nil {
-		s.MarkJiraRestarted(r.Context(), orgID)
-		go s.onGitHubChanged(orgID)
-	}
-
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// githubLoginOf returns the login a validated GitHub user resolved to, or ""
-// when no validation ran (nil) — the audit detail's optional "name".
-func githubLoginOf(u *auth.GitHubUser) string {
-	if u == nil {
-		return ""
-	}
-	return u.Login
-}
 
 // persistOrgGitHubLogin records the org credential's OWN GitHub login on the
 // agents row so the credential resolver's OrgIdentityFor PAT tier can stamp the
 // org commit-author identity on delegated-agent commits. Called
 // inside the same WithTx that saves the org PAT, by every org-PAT writer that
-// already validated the login (handleIntegrationsSetup, the App→PAT switch, the
-// settings PAT update). This is org ACCESS metadata — it deliberately does NOT
-// touch user_github_identities (the per-user PAT_2 identity surface).
+// already validated the login (the PAT bind, the App→PAT switch). This is org
+// ACCESS metadata — it deliberately does NOT touch user_github_identities (the
+// per-user PAT_2 identity surface).
 //
 // An empty login is a no-op (the caller had no GitHub PAT in this write). A
 // missing agents row (not yet bootstrapped) is skipped rather than erroring —
@@ -520,44 +315,4 @@ func (s *Server) localOrgProvisioned(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("agent probe: %w", err)
 	}
 	return agent != nil, nil
-}
-
-// DELETE /api/integrations — clears all integration credentials (GitHub
-// + Jira) via SecretStore. Used by the Settings "Clear All Tokens"
-// flow when the user wants a fresh slate. Unbinding ONE credential goes
-// through that credential's own resource (DELETE
-// /api/orgs/{org_id}/github/access/pat, .../jira/access/credential).
-//
-// Env-overlay UX: if any of the four well-known integration secrets
-// are supplied by TRIAGE_FACTORY_* env vars (local mode only —
-// multi-mode has no env overlay), SecretStore.Delete returns ok=false
-// and the value continues to surface on the next Get. Surface that to
-// the user instead of silently lying that the clear succeeded.
-func (s *Server) handleIntegrationsClear(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
-	if !ok {
-		return
-	}
-	userID := ClaimsFrom(r.Context()).Subject
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		// Read before clearing so the audit rows name only what was really
-		// bound — the vault deletes are idempotent and can't report it, and a
-		// revocation the log invents is worse than one it omits.
-		creds, _ := integrations.Load(r.Context(), tx.Secrets, orgID)
-		if err := integrations.Clear(r.Context(), tx.Secrets, orgID); err != nil {
-			return err
-		}
-		return recordOrgCredentialClear(r.Context(), tx, orgID, userID, creds)
-	}); err != nil {
-		internalError(w, "auth", err)
-		return
-	}
-	resp := map[string]any{"status": "cleared"}
-	if runmode.Current() == runmode.ModeLocal {
-		if envs := auth.EnvProvided(); len(envs) > 0 {
-			resp["warning"] = fmt.Sprintf("env vars (%v) still supply credentials — unset them in your shell to fully clear", envs)
-			resp["env_provided"] = envs
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
 }

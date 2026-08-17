@@ -1,15 +1,18 @@
-// The Bedrock connect action — the AWS sibling of connectAnthropic
-// (anthropicConnect.ts): the wizard's Continue and the Settings section's
-// Save both drive this one helper, so Bedrock credentials are captured
-// through the single validated POST /api/bedrock/connect path (the bulk org
-// POST accepts none of these fields). Validation is shape-only server-side
-// — there is no cheap, permission-agnostic live probe for IAM credentials —
-// so a bad credential surfaces on the first run rather than at connect time.
+// The Bedrock connect actions — the AWS sibling of connectAnthropic
+// (anthropicConnect.ts): the wizard's Continue and the Settings section's Save
+// both drive these helpers, so Bedrock credentials are captured through one
+// validated path per shape (the org settings PATCH accepts none of these
+// fields). Validation is shape-only server-side for the two static shapes —
+// there is no cheap, permission-agnostic live probe for IAM credentials — so a
+// bad credential surfaces on the first run rather than at connect time. Role
+// mode is the exception: its bind performs a real AssumeRole.
 //
-// "Leave blank to keep current": posting the same auth method with every
-// secret field blank keeps the stored credential and updates only the
-// non-secret config (region / model / endpoint). The backend owns that rule;
-// this module just forwards the form verbatim.
+// One route per shape, and no "leave blank to keep current". Each PUT carries
+// exactly its own shape's fields and replaces the resource, so the secret is
+// always required — a save that only means to change the region still re-enters
+// the credential. That is the cost of the ambiguity going away: a blank field
+// used to mean "keep" here and "delete everything" on the Anthropic sibling,
+// and nothing on the wire distinguished the two intents.
 
 import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
 import type { BedrockAuthMethod, OrgConfigForm } from './orgConfig'
@@ -40,43 +43,65 @@ export const BEDROCK_AUTH_OPTIONS: {
   },
 ]
 
-// bedrockPayloadFromForm maps the shared org form to the connect endpoint's
-// wire shape. Trimming happens server-side; only the selected method's
-// secret fields are sent so a leftover value from the other method's inputs
-// can't leak into the request.
-export function bedrockPayloadFromForm(form: OrgConfigForm): Record<string, string> {
-  const payload: Record<string, string> = {
-    auth_method: form.bedrock_auth_method,
+// bedrockPayloadFromForm maps the shared org form to the selected shape's route
+// and body. Only that shape's fields are sent — the server decodes strictly
+// against the shape named in the path, so a leftover value from another
+// method's input isn't merely tidied away here, it would be a 400.
+export function bedrockPayloadFromForm(form: OrgConfigForm): {
+  path: string
+  body: Record<string, string>
+} {
+  const config: Record<string, string> = {
     region: form.bedrock_region,
     model_id: form.bedrock_model_id,
     base_url: form.bedrock_base_url,
   }
   if (form.bedrock_auth_method === 'role') {
-    // Role mode carries no secret — the ARN is the only method-specific field;
+    // Role mode carries no secret — the ARN is the only shape-specific field;
     // the server mints short-lived session credentials by assuming it.
-    payload.role_arn = form.bedrock_role_arn
-  } else if (form.bedrock_auth_method === 'bearer') {
-    payload.bearer_token = form.bedrock_bearer_token
-  } else {
-    payload.access_key_id = form.aws_access_key_id
-    payload.secret_access_key = form.aws_secret_access_key
-    payload.session_token = form.aws_session_token
+    return { path: 'role', body: { ...config, role_arn: form.bedrock_role_arn } }
   }
-  return payload
+  if (form.bedrock_auth_method === 'bearer') {
+    return { path: 'bearer', body: { ...config, bearer_token: form.bedrock_bearer_token } }
+  }
+  return {
+    path: 'access-keys',
+    body: {
+      ...config,
+      access_key_id: form.aws_access_key_id,
+      secret_access_key: form.aws_secret_access_key,
+      session_token: form.aws_session_token,
+    },
+  }
 }
 
 export async function connectBedrock(
-  payload: Record<string, string>,
+  orgId: string,
+  payload: { path: string; body: Record<string, string> },
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    await apiFetch('/api/bedrock/connect', {
-      method: 'POST',
+    await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/llm/bedrock/${payload.path}`, {
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(payload.body),
     })
     return { ok: true }
   } catch (e) {
     return { ok: false, error: httpErrorMessage(e, 'Could not save the Bedrock credentials.') }
+  }
+}
+
+// disconnectBedrock removes every piece of Bedrock material the org holds —
+// credential, region, model, endpoint override, role ARN and External ID.
+// Idempotent.
+export async function disconnectBedrock(
+  orgId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/llm/bedrock`, { method: 'DELETE' })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not remove the Bedrock credentials.') }
   }
 }
 
