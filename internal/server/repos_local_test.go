@@ -4,12 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// sameRepoJSON reports whether two serialized rows say the same thing.
+//
+// Deliberately not `==`. repoJSON carries ProfiledAt as a *string, and each
+// decode allocates its own, so a struct compare of two independently
+// unmarshalled copies of one row is false whenever that field is set — and true
+// only while it is nil, which passes for the wrong reason and turns into a
+// spurious failure the moment a fixture stamps a profiled_at. DeepEqual follows
+// the pointer, and keeps covering fields added to repoJSON later without this
+// helper having to name them.
+func sameRepoJSON(a, b repoJSON) bool { return reflect.DeepEqual(a, b) }
 
 // TestHandleRepoUpdate_LocalMode pins that tightening the repo-mutation gate
 // to admins leaves local mode alone. N=1 has one implicit owner and no team
@@ -20,6 +33,15 @@ func TestHandleRepoUpdate_LocalMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	repoID := seedConfiguredRepo(t, s, "acme", "api")
+	// Stamp profiled_at, because repoJSON's ProfiledAt is its one pointer field
+	// and the row comparisons below are only about a pointer field when it is
+	// set. Bound as a time.Time, the way the store binds it, so the stored
+	// representation is the one the reads actually decode.
+	if _, err := s.db.ExecContext(t.Context(),
+		`UPDATE repositories SET profiled_at = ? WHERE id = ?`,
+		time.Now().UTC().Truncate(time.Second), repoID); err != nil {
+		t.Fatalf("stamp profiled_at: %v", err)
+	}
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/repos/"+repoID, map[string]string{"base_branch": "develop"})
 	if rec.Code != http.StatusOK {
@@ -70,7 +92,7 @@ func TestHandleRepoUpdate_LocalMode(t *testing.T) {
 	}
 	// …and it is the row the write already handed back, which is what lets a
 	// client render the save's answer instead of refetching to learn it.
-	if patched != got {
+	if !sameRepoJSON(patched, got) {
 		t.Errorf("PATCH response %+v differs from the follow-up read %+v", patched, got)
 	}
 
@@ -83,7 +105,7 @@ func TestHandleRepoUpdate_LocalMode(t *testing.T) {
 	if err := json.Unmarshal(byName.Body.Bytes(), &named); err != nil {
 		t.Fatalf("decode by-name read: %v", err)
 	}
-	if named != got {
+	if !sameRepoJSON(named, got) {
 		t.Errorf("by-name read = %+v, want the same row as the id read %+v", named, got)
 	}
 

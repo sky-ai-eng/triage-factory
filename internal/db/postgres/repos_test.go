@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -291,12 +292,18 @@ func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 		}
 	}
 
+	// ProfiledAt is set so the comparisons follow the row's one pointer field:
+	// a timestamptz decoded differently on the write's RETURNING than on the
+	// read's SELECT is exactly the drift this test is here to catch, and a nil
+	// pointer on both sides would hide it.
+	profiled := time.Now().UTC().Truncate(time.Second)
 	var created, updated, branched, seeded domain.Repository
 	write("Upsert (insert arm)", func(tx db.TxStores) error {
 		var e error
 		created, e = tx.Repos.Upsert(ctx, orgID, domain.Repository{
 			Owner: "Acme", Repo: "Api",
 			ProfileText: "v1", DefaultBranch: "main", ExternalID: "1296269",
+			ProfiledAt: &profiled,
 		})
 		return e
 	})
@@ -307,6 +314,7 @@ func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 		updated, e = tx.Repos.Upsert(ctx, orgID, domain.Repository{
 			Owner: "acme", Repo: "api",
 			ProfileText: "v2", DefaultBranch: "main",
+			ProfiledAt: &profiled,
 		})
 		return e
 	})

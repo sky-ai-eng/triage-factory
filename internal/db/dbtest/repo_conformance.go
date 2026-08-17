@@ -67,11 +67,17 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			return func() (*domain.Repository, error) { return s.Get(ctx, orgID, id) }
 		}
 
+		// ProfiledAt is set throughout, and that is not decoration. It is the
+		// row's only pointer field, so with it nil the comparison never has to
+		// follow one — and a driver that decoded a timestamp differently on the
+		// write's RETURNING than on the read's SELECT would sail past every
+		// assertion below.
+		profiled := time.Now().UTC().Truncate(time.Second)
 		created, err := s.Upsert(ctx, orgID, domain.Repository{
 			Owner: "Acme", Repo: "Api",
 			Description: "v1", ProfileText: "v1",
 			CloneURL: "git@github.com:Acme/Api.git", DefaultBranch: "main",
-			ExternalID: "1296269",
+			ExternalID: "1296269", ProfiledAt: &profiled,
 		})
 		if err != nil {
 			t.Fatalf("Upsert (insert arm): %v", err)
@@ -95,9 +101,11 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// the repository with, the id it does not carry, the base branch it
 		// says nothing about, and the row id itself — and the returned row is
 		// right about all four.
+		reprofiled := profiled.Add(time.Hour)
 		updated, err := s.UpsertSystem(ctx, orgID, domain.Repository{
 			Owner: "acme", Repo: "api",
 			Description: "v2", ProfileText: "v2", DefaultBranch: "main",
+			ProfiledAt: &reprofiled,
 		})
 		if err != nil {
 			t.Fatalf("UpsertSystem (update arm): %v", err)
@@ -126,9 +134,11 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// Both halves of the seed, because they differ in what the row ends up
 		// saying and agree on it being the row that comes back: the first fills
 		// an empty column, the second is outranked by what the first stored.
-		bare, err := s.GetOrCreateSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "bare"})
-		if err != nil || bare == nil {
-			t.Fatalf("GetOrCreateSystem: got=%v err=%v", bare, err)
+		bare, err := s.Upsert(ctx, orgID, domain.Repository{
+			Owner: "octo", Repo: "bare", DefaultBranch: "main", ProfiledAt: &profiled,
+		})
+		if err != nil {
+			t.Fatalf("seed a repository with no clone url: %v", err)
 		}
 		seeded, err := s.SeedCloneURL(ctx, orgID, bare.ID, "https://example.test/octo/bare.git")
 		if err != nil {
