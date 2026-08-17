@@ -9,6 +9,7 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -159,7 +160,40 @@ func DecodeJSONStrict(w http.ResponseWriter, r *http.Request, v any) bool {
 // the few routes whose legitimate payloads exceed the default.
 func DecodeJSONStrictLimit(w http.ResponseWriter, r *http.Request, v any, maxBytes int64) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
-	dec := json.NewDecoder(r.Body)
+	return decodeStrict(w, r.Body, v)
+}
+
+// BodyBytes reads the request body under the default cap and hands back the
+// raw bytes, writing the error response and returning ok=false on failure.
+//
+// It exists for a body whose schema depends on a discriminator inside itself:
+// the strict decode can only run once the flavor is known, and the flavor can
+// only be read by decoding. Reading the bytes first lets a handler take a
+// lenient look at the discriminator alone and then decode STRICTLY into that
+// flavor's struct — so the other flavor's fields come back as UNKNOWN_FIELD
+// rather than being silently accepted and dropped, which is what a
+// one-struct-for-both body does.
+func BodyBytes(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, DefaultMaxBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeDecodeError(w, err)
+		return nil, false
+	}
+	return body, true
+}
+
+// DecodeJSONStrictBytes is DecodeJSONStrict against bytes already read (see
+// BodyBytes) — same strictness, same error mapping, so the second pass of a
+// discriminated decode answers exactly as a single-pass route would.
+func DecodeJSONStrictBytes(w http.ResponseWriter, body []byte, v any) bool {
+	return decodeStrict(w, bytes.NewReader(body), v)
+}
+
+// decodeStrict is the shared decode: unknown fields rejected, exactly one
+// top-level JSON value, every failure already written to w.
+func decodeStrict(w http.ResponseWriter, src io.Reader, v any) bool {
+	dec := json.NewDecoder(src)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		writeDecodeError(w, err)

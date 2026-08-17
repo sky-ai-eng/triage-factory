@@ -68,11 +68,14 @@ export interface JiraConnectCreds {
   jira_api_token: string
 }
 
-// connectJira binds the org-level Jira service credential. The deployment
-// (chosen upstream) selects which credential shape is sent — Cloud sends
-// {url, email, token}; Data Center sends {url, pat}. Returns a discriminated
-// result mirroring saveOrgConfig — the caller surfaces the error inline
-// (wizard error line) or as a toast (Settings).
+// connectJira binds the org-level Jira service credential. The deployment is
+// sent EXPLICITLY and selects which credential shape rides with it — Cloud
+// sends {url, email, token}; Data Center sends {url, pat}. The server decodes
+// against that deployment's struct alone, so the other one's fields are a 400
+// rather than something quietly dropped; sending only the chosen pair is
+// therefore a requirement, not a tidiness. Returns a discriminated result
+// mirroring saveOrgConfig — the caller surfaces the error inline (wizard error
+// line) or as a toast (Settings).
 export async function connectJira(
   orgId: string,
   url: string,
@@ -81,8 +84,13 @@ export async function connectJira(
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const body =
     deployment === 'cloud'
-      ? { url: url.trim(), email: creds.jira_email.trim(), token: creds.jira_api_token.trim() }
-      : { url: url.trim(), pat: creds.jira_pat.trim() }
+      ? {
+          deployment,
+          url: url.trim(),
+          email: creds.jira_email.trim(),
+          token: creds.jira_api_token.trim(),
+        }
+      : { deployment, url: url.trim(), pat: creds.jira_pat.trim() }
   try {
     await apiFetch(`/api/orgs/${orgId}/jira/access/credential`, {
       method: 'PUT',

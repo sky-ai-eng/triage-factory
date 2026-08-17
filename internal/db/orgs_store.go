@@ -2,9 +2,17 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrOrgSettingsVersion means a versioned settings write lost the race: the
+// row's stored version no longer matches the one the caller read, so another
+// writer committed in between and nothing was written. The caller refetches
+// and re-applies its edit — there is no server-side merge, because the two
+// writers disagree about fields neither of them named.
+var ErrOrgSettingsVersion = errors.New("org settings version conflict")
 
 // OrgsStore owns the orgs + org_settings tables — the tenancy root
 // every other resource hangs off via FK plus its sibling settings row.
@@ -90,7 +98,23 @@ type OrgsStore interface {
 	// credential transitions, not by the settings writer, so
 	// updates.GitHubCredentialClass is ignored and an existing value survives
 	// every settings save. See SetGitHubCredentialClass.
+	//
+	// It bumps the row's version unconditionally — an unguarded save is
+	// deliberately a last-writer-wins write, which is what every credential
+	// transition wants (it owns the fields it touches). The settings API uses
+	// UpdateSettingsVersioned instead.
 	UpdateSettings(ctx context.Context, orgID string, updates domain.OrgSettings) error
+
+	// UpdateSettingsVersioned is UpdateSettings guarded by the row's
+	// optimistic-concurrency token: the write lands only if the stored version
+	// still equals expected, and otherwise fails with ErrOrgSettingsVersion —
+	// nothing is written. expected 0 asserts "no row yet", so two callers
+	// racing to materialize a settings row also resolve to exactly one winner.
+	//
+	// The guard is in the statement, not in a preceding read: READ COMMITTED
+	// means a re-read inside the caller's own transaction cannot see a
+	// concurrent commit, so a Go-side comparison would pass for both racers.
+	UpdateSettingsVersioned(ctx context.Context, orgID string, updates domain.OrgSettings, expected int) error
 
 	// SetGitHubCredentialClass writes ONLY org_settings.github_credential_class
 	// — which credential system the org's GitHub access belongs to. Surgical by

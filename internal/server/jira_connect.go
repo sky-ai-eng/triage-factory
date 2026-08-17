@@ -199,14 +199,21 @@ func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// jiraIdentityPATRequest carries the user-supplied Jira credential for the
-// capture-and-STORE access path. Which fields are populated depends on the org's
-// deployment: a Data Center org sends a personal access token (PAT, Bearer); a
-// Cloud org sends the Atlassian account Email + API Token (Basic). Unlike the
-// GitHub sibling, the credential is retained (per-user vault scope) — the user
-// acts as themselves on board claims, so it must outlive the request.
-type jiraIdentityPATRequest struct {
-	PAT   string `json:"pat"`
+// The user-supplied Jira credential for the capture-and-STORE access path, one
+// struct per deployment. Which shape applies is the ORG's deployment, not the
+// caller's choice — a user cannot bind a Cloud API token against a Data Center
+// site — so unlike the org-credential bind there is no discriminator in the
+// body. The struct is still picked before the decode rather than after, so the
+// other deployment's fields are rejected by name instead of being accepted and
+// silently ignored, which is what a single both-shapes struct did.
+//
+// Unlike the GitHub sibling, the credential is retained (per-user vault scope):
+// the user acts as themselves on board claims, so it must outlive the request.
+type jiraIdentityDataCenterPAT struct {
+	PAT string `json:"pat"`
+}
+
+type jiraIdentityCloudToken struct {
 	Email string `json:"email"`
 	Token string `json:"token"`
 }
@@ -243,8 +250,10 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var req jiraIdentityPATRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
+	// The body is read but not yet decoded: which struct it has to satisfy is
+	// the ORG's deployment, which the read below resolves.
+	body, ok := httpx.BodyBytes(w, r)
+	if !ok {
 		return
 	}
 
@@ -287,6 +296,13 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 		field    string
 	)
 	if cloud {
+		// Strict decode against the Cloud struct: a `pat` in the body is a 400
+		// naming the field, not a value quietly dropped on the floor because
+		// this org happens to be Cloud.
+		var req jiraIdentityCloudToken
+		if !httpx.DecodeJSONStrictBytes(w, body, &req) {
+			return
+		}
 		email := strings.TrimSpace(req.Email)
 		token := strings.TrimSpace(req.Token)
 		field = "jira_api_token"
@@ -307,6 +323,12 @@ func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 		envelope = env
 		source = string(jira.AuthMethodCloudAPIToken)
 	} else {
+		// The Data Center mirror: an `email`/`token` pair here is rejected by
+		// name rather than ignored.
+		var req jiraIdentityDataCenterPAT
+		if !httpx.DecodeJSONStrictBytes(w, body, &req) {
+			return
+		}
 		pat := strings.TrimSpace(req.PAT)
 		field = "jira_pat"
 		if pat == "" {

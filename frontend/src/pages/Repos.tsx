@@ -4,6 +4,7 @@ import { ChevronDown, GitBranch, Plus, RotateCw, AlertTriangle } from 'lucide-re
 import { Link } from 'react-router'
 import RepoPickerModal from '../components/RepoPickerModal'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { useApiOrgId } from '../hooks/useApiOrgId'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
 import { apiFetch, apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
@@ -673,6 +674,7 @@ function formatAge(iso: string): string {
 // --- Page ------------------------------------------------------------------
 
 export default function Repos() {
+  const apiOrgId = useApiOrgId()
   const [profiles, setProfiles] = useState<Repository[]>([])
   const [loading, setLoading] = useState(true)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -723,7 +725,8 @@ export default function Repos() {
 
   useEffect(() => {
     fetchData()
-    apiJSON<{ github_base_url?: string }>('/api/settings/org')
+    if (!apiOrgId) return
+    apiJSON<{ github_base_url?: string }>(`/api/orgs/${encodeURIComponent(apiOrgId)}/settings`)
       .then((data) => {
         const url = data?.github_base_url
         if (typeof url === 'string' && url) {
@@ -734,7 +737,7 @@ export default function Repos() {
         // If settings fetch fails, webBaseURL stays undefined and doc
         // chips render as non-clickable — no silent wrong-destination links.
       })
-  }, [])
+  }, [apiOrgId])
 
   // Live updates from the profiling pipeline + clone-result hook. All
   // three producers (doc scan, AI profiler, clone status) share one

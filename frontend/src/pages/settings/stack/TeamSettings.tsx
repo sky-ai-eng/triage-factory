@@ -11,7 +11,8 @@
 // JiraProjectRulesGroup, ModelTierSelector) — no carded field groups.
 //
 // Two couplings to honour:
-//   • Jira-projects + Team-defaults both ride POST /api/settings/team/{id}, so
+//   • Team-defaults ride PATCH /api/teams/{id}/settings and Jira-projects their
+//     own PUT /api/teams/{id}/jira-projects, so
 //     each saves {...baseline, ...ownSlice} (the org-group pattern).
 //   • The GitHub-teams candidate list is built live from the team's tracked
 //     repo owners with no server cache, so saving the Repos section bumps a
@@ -38,6 +39,7 @@ import {
   fetchTeamSettings,
   saveTeamGitHubGroups,
   saveTeamRepos,
+  saveTeamJiraProjects,
   saveTeamSettings,
   teamConfigFromSettings,
   teamProjectsBlocked,
@@ -312,14 +314,14 @@ export default function TeamSettings({
     }
   }
 
-  // ── Jira projects (rides team-settings POST) ──
+  // ── Jira projects (their own replace-set PUT) ──
   const projectsDirty =
     JSON.stringify(normProjects(projects)) !== JSON.stringify(baseline.jira_projects ?? [])
   const projectsBlocked = teamProjectsBlocked(projects, jiraConnected)
   const saveProjects = async (): Promise<boolean> => {
     setSavingProjects(true)
     try {
-      const res = await saveTeamSettings(endpointTeamId, { ...baseline, jira_projects: projects })
+      const res = await saveTeamJiraProjects(endpointTeamId, projects)
       if (!res.ok) {
         toast.error(res.error)
         return false
@@ -327,7 +329,6 @@ export default function TeamSettings({
       const normalized = normProjects(projects)
       setBaseline((b) => ({ ...b, jira_projects: normalized }))
       setProjects(normalized)
-      if (res.warning) toast.info(res.warning)
       toast.success('Jira projects saved')
       return true
     } finally {
@@ -335,7 +336,7 @@ export default function TeamSettings({
     }
   }
 
-  // ── Team defaults (rides team-settings POST) ──
+  // ── Team defaults (ride the team-settings PATCH) ──
   const defaultsDirty =
     defaultModel !== baseline.default_model ||
     autoDelegate !== baseline.auto_delegate_enabled ||
@@ -373,7 +374,7 @@ export default function TeamSettings({
     }
   }
 
-  // ── Unattended prompts: absent auto-deny (rides team-settings POST) ──
+  // ── Unattended prompts: absent auto-deny (rides the team-settings PATCH) ──
   const promptsDirty =
     absentAutodeny !== baseline.permission_absent_autodeny_enabled ||
     absentGraceSeconds !== baseline.permission_absent_grace_seconds

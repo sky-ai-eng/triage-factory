@@ -421,9 +421,10 @@ function BedrockRoleFields({
 // method's inputs, and the shared non-secret config (region, optional model ID,
 // optional endpoint override for VPC endpoints / GovCloud). `hasStored` is
 // true when a credential for the CURRENTLY SELECTED method is already in the
-// vault — it arms the "leave blank to keep current" masking; switching
-// methods always requires the new method's secrets. Shared by the wizard key
-// step and the Settings section.
+// vault — it only changes the wording, because each method's bind REPLACES the
+// credential: a blank field no longer means "keep the stored one", so a save
+// that changes only the region still re-enters the secret. Shared by the wizard
+// key step and the Settings section.
 export function BedrockFields({
   form,
   onChange,
@@ -435,7 +436,7 @@ export function BedrockFields({
   hasStored: boolean
   invalid?: boolean
 }) {
-  const keep = hasStored ? ' (leave blank to keep current)' : ''
+  const keep = hasStored ? ' (re-enter to save)' : ''
   return (
     <div className="space-y-4">
       <ChoiceCards
@@ -451,7 +452,7 @@ export function BedrockFields({
           label={`Bedrock API key${keep}`}
           value={form.bedrock_bearer_token}
           onChange={(v) => onChange({ bedrock_bearer_token: v })}
-          placeholder={hasStored ? '••••••••' : 'bedrock-api-key-…'}
+          placeholder="bedrock-api-key-…"
           secret
           invalid={invalid}
         />
@@ -461,7 +462,7 @@ export function BedrockFields({
             label={`Access key ID${keep}`}
             value={form.aws_access_key_id}
             onChange={(v) => onChange({ aws_access_key_id: v })}
-            placeholder={hasStored ? '••••••••' : 'AKIA…'}
+            placeholder="AKIA…"
             secret
             invalid={invalid}
           />
@@ -477,7 +478,7 @@ export function BedrockFields({
             label="Session token (only for temporary credentials)"
             value={form.aws_session_token}
             onChange={(v) => onChange({ aws_session_token: v })}
-            placeholder={hasStored ? '••••••••' : 'FwoG…'}
+            placeholder="FwoG…"
             secret
           />
         </div>

@@ -22,9 +22,9 @@
 // GitHubAppPanel via the GitHub bodies, JiraAccessGroup via the Jira bodies,
 // PollerTimingGroup, ModelGroup, the RepoPickerModal, GitHubTeamGroup,
 // JiraProjectRulesGroup, and the shared ModelTierSelector) — no parallel field
-// UIs. Org persistence rides the single session-scoped POST /api/settings/org;
-// team persistence rides the existing per-team repos / github-groups PUTs and
-// the team-settings POST — no wizard-only persistence path to drift. The URL
+// UIs. Org persistence rides the single PATCH /api/orgs/{org}/settings; team
+// persistence rides the existing per-team repos / github-groups / jira-projects
+// PUTs and the team-settings PATCH — no wizard-only persistence path to drift. The URL
 // steps persist on Continue (reachability probe + base-URL save); the access
 // steps connect on Continue (PAT) or via an external launch (App register), so
 // their per-step persist either performs the connect or is a no-op advance.
@@ -79,7 +79,7 @@ import {
 } from '../settings/orgConfig'
 import { connectJira, type JiraDeployment } from '../settings/jiraConnect'
 import { connectGitHubPAT } from '../settings/orgCredentials'
-import { connectAnthropic } from '../settings/anthropicConnect'
+import { connectAnthropic, disconnectLLM } from '../settings/anthropicConnect'
 import { connectBedrock, bedrockPayloadFromForm } from '../settings/bedrockConnect'
 import {
   emptyTeamConfig,
@@ -87,6 +87,7 @@ import {
   fetchTeamSettings,
   saveTeamGitHubGroups,
   saveTeamRepos,
+  saveTeamJiraProjects,
   saveTeamSettings,
   teamConfigFromSettings,
   teamProjectsBlocked,
@@ -208,7 +209,11 @@ async function fetchIntegrationsState(): Promise<{
 // previously-confirmed URL and access, so it resumes past those steps; the
 // access tab defaults to PAT for an org with a stored token, else App.
 export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
-  const [org, integrations] = await Promise.all([fetchOrgSettings(), fetchIntegrationsState()])
+  if (!ctx.orgId) throw new Error('Could not load organization settings')
+  const [org, integrations] = await Promise.all([
+    fetchOrgSettings(ctx.orgId),
+    fetchIntegrationsState(),
+  ])
   if (!org) throw new Error('Could not load organization settings')
   const orgForm = orgConfigFromSettings(org)
   if (!orgForm.github_url) orgForm.github_url = DEFAULT_GITHUB_URL
@@ -280,12 +285,21 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
 // reach the backend and can't trip the App-XOR-PAT guard on a later
 // poll-interval / model step — which is what this function used to have to
 // scrub around.
-export async function persistOrg(state: WizardState): Promise<void> {
-  if (!state.orgLoaded) {
+//
+// The save carries the row's concurrency token and the response returns the
+// next one, so the version is patched back into wizard state: without that, the
+// second org step's save would conflict with the first step's own write.
+export async function persistOrg(ctx: {
+  state: WizardState
+  patch: (p: Partial<WizardState>) => void
+  orgId: string | null
+}): Promise<void> {
+  if (!ctx.state.orgLoaded || !ctx.orgId) {
     throw new Error('Settings didn’t load — reopen the GitHub step and retry before saving.')
   }
-  const result = await saveOrgConfig(state.org)
+  const result = await saveOrgConfig(ctx.orgId, ctx.state.org)
   if (!result.ok) throw new Error(result.error)
+  ctx.patch({ org: { ...ctx.state.org, version: result.settings.version } })
 }
 
 // loadTeam seeds the team form (default model, Jira project rules, thresholds)
@@ -309,13 +323,13 @@ export async function loadTeam(teamId: string): Promise<Partial<WizardState>> {
 }
 
 // persistTeamSettings is the shared save for the team steps that round-trip the
-// whole team form via POST /api/settings/team/{id} (Jira projects, default
-// model). It refuses to write when the team load (the Repositories step's)
+// settings row via PATCH /api/teams/{id}/settings (the team's default model).
+// It refuses to write when the team load (the Repositories step's)
 // failed — `state.team` would be the empty default form, and saving it would
-// clobber the stored model / project rules. Returns the backend's model-cap
-// clamp notice (if any) so the caller can surface it. The repos and
-// GitHub-team mappings ride their own PUT endpoints, persisted by their own
-// steps; this writes only the team-settings payload.
+// clobber the stored model / thresholds. Returns the backend's model-cap clamp
+// notice (if any) so the caller can surface it. The Jira project rules, the
+// repos and the GitHub-team mappings each ride their own replace-set PUT,
+// persisted by their own steps; this writes only the settings row.
 async function persistTeamSettings(
   teamId: string,
   state: WizardState,
@@ -353,7 +367,7 @@ const githubUrlStep: WizardStep = {
     if (!isHttpUrl(url)) return 'Enter a valid URL, including https://.'
     return null
   },
-  persist: async ({ state, patch }) => {
+  persist: async ({ state, patch, orgId }) => {
     // Always probe on Continue (the step's whole job) unless already connected —
     // a stored/previously-confirmed URL must not let an edited value through
     // unchecked.
@@ -369,10 +383,11 @@ const githubUrlStep: WizardStep = {
     // path reads the stored host, and the PAT path re-saves URL+creds together
     // at the access step. Round-trips the same org form loadOrg seeded, so the
     // intervals / model cap / stored PAT are untouched.
+    if (!orgId) throw new Error('Settings didn’t load — retry before saving.')
     const nextOrg = { ...state.org, github_url: url }
-    const save = await saveOrgConfig(nextOrg)
+    const save = await saveOrgConfig(orgId, nextOrg)
     if (!save.ok) throw new Error(save.error)
-    patch({ org: nextOrg, githubUrlConfirmed: true })
+    patch({ org: { ...nextOrg, version: save.settings.version }, githubUrlConfirmed: true })
   },
   collapsedSummary: (s) => `GitHub URL: ${hostOf(s.org.github_url || DEFAULT_GITHUB_URL)}`,
   render: (ctx) => <GitHubUrlStep {...ctx} />,
@@ -757,7 +772,7 @@ const githubCloneStep: WizardStep = {
   visible: (s) => s.githubAccessTab === 'pat' && s.isLocal,
   selfAdvancing: true,
   isComplete: () => true,
-  persist: ({ state }) => persistOrg(state),
+  persist: persistOrg,
   collapsedSummary: (s) => `Clone via ${s.org.github_clone_protocol.toUpperCase()}`,
   render: (ctx) => <GitHubCloneStep {...ctx} />,
 }
@@ -771,7 +786,7 @@ const githubPollerStep: WizardStep = {
   section: 'org',
   title: 'GitHub poll interval',
   isComplete: () => true,
-  persist: ({ state }) => persistOrg(state),
+  persist: persistOrg,
   collapsedSummary: (s) => `GitHub every ${intervalLabel(s.org.github_poll_interval)}`,
   render: ({ state, patch }) => (
     <div className="space-y-5">
@@ -982,7 +997,7 @@ const jiraPollerStep: WizardStep = {
   title: 'Jira poll interval',
   visible: (s) => jiraActive(s),
   isComplete: () => true,
-  persist: ({ state }) => persistOrg(state),
+  persist: persistOrg,
   collapsedSummary: (s) => `Jira every ${intervalLabel(s.org.jira_poll_interval)}`,
   render: ({ state, patch }) => (
     <div className="space-y-5">
@@ -1017,7 +1032,7 @@ const orgModelStep: WizardStep = {
   section: 'org',
   title: 'Max model tier',
   isComplete: () => true,
-  persist: ({ state }) => persistOrg(state),
+  persist: persistOrg,
   collapsedSummary: (s) =>
     s.org.max_llm_model_tier
       ? `Capped at ${TIER_LABELS[s.org.max_llm_model_tier] ?? s.org.max_llm_model_tier}`
@@ -1040,13 +1055,14 @@ const orgClaudeSourceStep: WizardStep = {
   selfAdvancing: true,
   visible: (s) => s.isLocal,
   isComplete: (s) => s.anthropicKeySource !== null,
-  persist: async ({ state, patch }) => {
-    // Selecting "system" ensures no credential is stored: POST an empty key to
-    // clear any prior BYOK key — the backend wipes the Bedrock set in the same
-    // call (system = no org-level LLM credential of any provider). Idempotent
-    // when nothing is stored. "byok" defers the write to the key step.
+  persist: async ({ state, patch, orgId }) => {
+    // Selecting "system" means no org-level LLM credential of ANY provider, so
+    // it removes both — two DELETEs, because they are two credentials and no
+    // single write wipes both any more. Idempotent when nothing is stored.
+    // "byok" defers the write to the key step.
     if (state.anthropicKeySource === 'system') {
-      const r = await connectAnthropic('')
+      if (!orgId) throw new Error('Settings didn’t load — retry before saving.')
+      const r = await disconnectLLM(orgId)
       if (!r.ok) throw new Error(r.error)
       patch({
         anthropicConnected: false,
@@ -1067,16 +1083,20 @@ const orgClaudeSourceStep: WizardStep = {
 
 // bedrockFormError is the input-layer validation for the Bedrock credential
 // form, shared by the wizard step's validate and the Settings section's Save
-// gate so both surfaces block on the same rules (mirroring the backend's 422
-// shapes): region always required; the selected method's secrets required
-// unless a credential for that same method is already stored ("leave blank
-// to keep current" — switching methods always needs the new secrets).
+// gate so both surfaces block on the same rules (mirroring the backend's 400
+// shapes): the region is always required, and so is the selected shape's own
+// credential.
+//
+// There is no "leave blank to keep current" any more. Each shape's bind route
+// REPLACES the credential resource, so a save that only means to change the
+// region still re-enters the secret — the price of a blank field no longer
+// meaning two different things on two neighbouring routes.
 export function bedrockFormError(s: WizardState): string | null {
   const f = s.org
   if (f.bedrock_region.trim() === '') return 'Enter the AWS region (e.g. us-east-1).'
-  // Role mode carries no secret, so "keep current" never applies — the ARN is
-  // always required and must look like an IAM role ARN. (The server does the
-  // real assume-role check on connect; this is the cheap shape gate.)
+  // Role mode carries no secret — the ARN is its credential, and it must look
+  // like an IAM role ARN. (The server does the real assume-role check on bind;
+  // this is the cheap shape gate.)
   if (f.bedrock_auth_method === 'role') {
     const arn = f.bedrock_role_arn.trim()
     if (arn === '') return 'Enter the IAM role ARN Triage Factory should assume.'
@@ -1085,9 +1105,8 @@ export function bedrockFormError(s: WizardState): string | null {
     }
     return null
   }
-  const keep = s.bedrockConnected && s.bedrockStoredMethod === f.bedrock_auth_method
   if (f.bedrock_auth_method === 'bearer') {
-    if (f.bedrock_bearer_token.trim() === '' && !keep) {
+    if (f.bedrock_bearer_token.trim() === '') {
       return 'Paste your Bedrock API key to continue.'
     }
     return null
@@ -1097,7 +1116,7 @@ export function bedrockFormError(s: WizardState): string | null {
   if ((id === '') !== (secret === '')) {
     return 'Enter both the access key ID and the secret access key.'
   }
-  if (id === '' && !keep) {
+  if (id === '') {
     return 'Enter your AWS access key ID and secret access key.'
   }
   return null
@@ -1128,9 +1147,10 @@ const orgClaudeKeyStep: WizardStep = {
       ? 'Paste your Anthropic API key to continue.'
       : null
   },
-  persist: async ({ state, patch }) => {
+  persist: async ({ state, patch, orgId }) => {
+    if (!orgId) throw new Error('Settings didn’t load — retry before saving.')
     if (state.claudeProvider === 'bedrock') {
-      const r = await connectBedrock(bedrockPayloadFromForm(state.org))
+      const r = await connectBedrock(orgId, bedrockPayloadFromForm(state.org))
       if (!r.ok) throw new Error(r.error)
       patch({
         bedrockConnected: true,
@@ -1148,10 +1168,10 @@ const orgClaudeKeyStep: WizardStep = {
       return
     }
     const typed = state.org.anthropic_api_key.trim()
-    // Resuming with a stored key and no new entry: nothing to do — don't re-POST
-    // an empty key, which would CLEAR the stored one.
+    // Resuming with a stored key and no new entry: nothing to do. The bind
+    // requires a key, so there is no blank call to accidentally make.
     if (state.anthropicConnected && typed === '') return
-    const r = await connectAnthropic(typed)
+    const r = await connectAnthropic(orgId, typed)
     if (!r.ok) throw new Error(r.error)
     patch({
       anthropicConnected: true,
@@ -1268,7 +1288,16 @@ const jiraProjectsStep: WizardStep = {
       ? 'Finish or remove the partially-configured Jira project before continuing.'
       : null,
   persist: async ({ state, teamId }) => {
-    await persistTeamSettings(teamId, state)
+    // The rules are their own replace-set resource now, not a key inside the
+    // team-settings body — so this step writes only what it owns, and a Jira
+    // rule edit no longer re-saves the team's model and thresholds alongside it.
+    if (!state.teamLoaded) {
+      throw new Error(
+        'Team settings didn’t load — reopen the Repositories step and retry before saving.',
+      )
+    }
+    const result = await saveTeamJiraProjects(teamId, state.team.jira_projects)
+    if (!result.ok) throw new Error(result.error)
   },
   collapsedSummary: (s) =>
     `Tracked Jira projects: ${s.team.jira_projects.filter((p) => p.key.trim() !== '').length}`,

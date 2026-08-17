@@ -735,7 +735,6 @@ func (s *Server) routes() {
 	// a cleanup so /api/auth/* unambiguously means
 	// "session authentication." Wrapped via s.api/apiMutating since you
 	// need to be logged in to manage your integration credentials.
-	s.apiMutating("POST /api/integrations/setup", s.handleIntegrationsSetup)
 	s.api("GET /api/integrations/status", s.handleIntegrationsStatus)
 	// Placement explainer (TFAC-587): the computed rendezvous candidate order
 	// for a key. Org-admin gated inside the handler on ?org= (the fleet
@@ -750,13 +749,6 @@ func (s *Server) routes() {
 	// the synthetic tenant + materializes shipped defaults via the shared
 	// bootstrap chain. Idempotent; no-op once a tenant exists.
 	s.apiMutating("POST /api/setup/start", s.handleSetupStart)
-	// DELETE on the collection = nuke every integration credential at once (the
-	// Settings danger zone). Unbinding ONE credential goes through that
-	// credential's own resource — DELETE /api/orgs/{org_id}/github/access/pat or
-	// .../jira/access/credential — which is why there's no per-integration
-	// subpath here any more.
-	s.apiMutating("DELETE /api/integrations", s.handleIntegrationsClear)
-
 	// Logout-everywhere: must be authenticated to use it (you can only
 	// nuke your own sessions).
 	s.apiMutating("POST /api/auth/logout/all", s.handleLogoutAll)
@@ -807,6 +799,14 @@ func (s *Server) routes() {
 	// curator sessions and blocks further writes; restore flips it back (dead
 	// runs stay dead). The preview + archived-list back the confirm modal and the
 	// org-admin restore surface.
+	// The team's settings row and its Jira project rules, under the team
+	// resource so the path segment the caller asserts is the one the
+	// authorization check is about. The rules are their own replace-set write
+	// rather than a key inside the settings body — a child collection, like the
+	// tracked repos and the github-group mappings, not a field.
+	s.api("GET /api/teams/{team_id}/settings", s.handleTeamSettingsGet)
+	s.apiMutating("PATCH /api/teams/{team_id}/settings", s.handleTeamSettingsPatch)
+	s.apiMutating("PUT /api/teams/{team_id}/jira-projects", s.handleTeamJiraProjectsPut)
 	s.apiMutating("POST /api/teams/archived/list", th.handleTeamArchivedList)
 	s.api("GET /api/teams/{team_id}/archive/preview", th.handleTeamArchivePreview)
 	s.apiMutating("POST /api/teams/{team_id}/archive", th.handleTeamArchive)
@@ -1050,14 +1050,10 @@ func (s *Server) routes() {
 
 	s.api("GET /api/settings/user", s.handleUserSettingsGet)
 	s.apiMutating("POST /api/settings/user", s.handleUserSettingsPost)
-	s.api("GET /api/settings/team/{team_id}", s.handleTeamSettingsGet)
-	s.apiMutating("POST /api/settings/team/{team_id}", s.handleTeamSettingsPost)
 	s.api("GET /api/settings/team/{team_id}/github-groups", s.handleTeamGitHubGroupsGet)
 	s.apiMutating("PUT /api/settings/team/{team_id}/github-groups", s.handleTeamGitHubGroupsPut)
 	s.api("GET /api/settings/team/{team_id}/repos", s.handleTeamReposGet)
 	s.apiMutating("PUT /api/settings/team/{team_id}/repos", s.handleTeamReposPut)
-	s.api("GET /api/settings/org", s.handleOrgSettingsGet)
-	s.apiMutating("POST /api/settings/org", s.handleOrgSettingsPost)
 
 	// Team roster for the predicate editor. Fetched fresh on
 	// every consumer mount (the FE dedups concurrent in-flight calls
@@ -1073,7 +1069,11 @@ func (s *Server) routes() {
 	// read, so total_count is null and page_token wraps the upstream cursor.
 	s.apiMutating("POST /api/github/repos/list", s.handleGitHubRepos)
 	s.apiMutating("POST /api/github/repos/refresh", s.handleGitHubReposRefresh)
-	se := &settingsHandler{tx: s.tx, az: s.az, bedrockRole: func() bedrockRoleResolver { return s.bedrockRole }}
+	se := &settingsHandler{
+		tx: s.tx, az: s.az,
+		bedrockRole: func() bedrockRoleResolver { return s.bedrockRole },
+		kickJira:    s.kickJiraChanged,
+	}
 	s.apiMutating("POST /api/github/preflight-ssh", se.handleGitHubPreflightSSH)
 	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
 	// distinct from the creds stage (auth.ValidateGitHub / /api/jira/connect).
@@ -1088,12 +1088,6 @@ func (s *Server) routes() {
 	s.apiMutating("PATCH /api/repos/{id}", s.handleRepoUpdate)
 	s.apiMutating("POST /api/repos/{id}/branches/list", s.handleRepoBranches)
 	s.apiMutating("POST /api/jira/reachability", handleJiraReachability)
-	// Validated org Anthropic-key capture — the single write path for the
-	// anthropic_api_key vault secret (an empty key clears it for "system creds").
-	s.apiMutating("POST /api/anthropic/connect", se.handleAnthropicConnect)
-	// Validated org Bedrock-credential capture — the single write path for
-	// the aws_* / bedrock_* vault secrets (auth_method "none" clears them).
-	s.apiMutating("POST /api/bedrock/connect", se.handleBedrockConnect)
 	// Bedrock role-mode setup (TFAC-616): returns the control service's caller
 	// ARN + the TF-generated External ID so the UI can render a filled
 	// trust-policy snippet. POST (not GET) because first entry generates +
@@ -1281,6 +1275,27 @@ func (s *Server) routes() {
 	// surface below; the rationale above covers both.
 	s.apiMutating("PUT /api/orgs/{org_id}/github/access/pat", s.handleGitHubPATPut)
 	s.apiMutating("DELETE /api/orgs/{org_id}/github/access/pat", s.handleGitHubPATDelete)
+
+	// The org's pure CONFIG — hosts, poller cadence, clone transport, spend
+	// governance. Path-scoped like the credential resources beside it because
+	// the write is admin-gated, and PATCH rather than POST because it is a
+	// partial update: absent keeps, null clears, and the caller's `version`
+	// makes a concurrent save a 409 instead of a silent overwrite.
+	s.api("GET /api/orgs/{org_id}/settings", s.handleOrgSettingsGet)
+	s.apiMutating("PATCH /api/orgs/{org_id}/settings", s.handleOrgSettingsPatch)
+
+	// The org's LLM provider credential — one resource per credential SHAPE, so
+	// a route's required fields are fixed and a blank secret never selects a
+	// second behaviour. Rotation is the PUT with a new value; removal is the
+	// DELETE. Binding one provider clears the other's stored material (the
+	// resolver can only use one) and says so in the response. See
+	// llm_credentials.go.
+	s.apiMutating("PUT /api/orgs/{org_id}/llm/anthropic", se.handleAnthropicPut)
+	s.apiMutating("DELETE /api/orgs/{org_id}/llm/anthropic", se.handleAnthropicDelete)
+	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/access-keys", se.handleBedrockAccessKeysPut)
+	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/bearer", se.handleBedrockBearerPut)
+	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/role", se.handleBedrockRolePut)
+	s.apiMutating("DELETE /api/orgs/{org_id}/llm/bedrock", se.handleBedrockDelete)
 
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
 	// login to the signed-in user (identity, not access, not login).

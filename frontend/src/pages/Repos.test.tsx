@@ -45,7 +45,7 @@ function stubFetch(rows: unknown[]) {
     if (url.includes('/repos') && url.startsWith('/api/settings/team/')) {
       return { ok: true, ...jsonBody({ repos: ['acme/api'], role: 'admin' }) }
     }
-    if (url.startsWith('/api/settings/org')) {
+    if (/^\/api\/orgs\/[^/]+\/settings/.test(url)) {
       return { ok: true, ...jsonBody({ github_base_url: 'https://github.com' }) }
     }
     return { ok: true, ...jsonBody({}) }

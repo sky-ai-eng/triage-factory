@@ -35,8 +35,11 @@ describe('concurrentRunsError', () => {
     expect(concurrentRunsError('   ')).toBeNull()
   })
 
-  it('accepts 0 — the explicit "unlimited" value (blank or 0)', () => {
-    expect(concurrentRunsError('0')).toBeNull()
+  // "Unlimited" has exactly one spelling now, and it is the blank field. An
+  // explicit 0 is refused rather than quietly read as unlimited: capping at 0
+  // and having no cap are different intents, and the API 422s the former.
+  it('rejects an explicit 0 — blank is the one way to say "unlimited"', () => {
+    expect(concurrentRunsError('0')).not.toBeNull()
   })
 
   it('accepts a positive whole number', () => {
@@ -51,7 +54,6 @@ describe('concurrentRunsError', () => {
 
   it('rejects fractional values (the column is an integer)', () => {
     expect(concurrentRunsError('2.5')).not.toBeNull()
-    expect(concurrentRunsError('0.5')).not.toBeNull()
   })
 
   it('accepts the ceiling but rejects anything above it', () => {

@@ -114,7 +114,7 @@ export default function PromptDrawer({
     let cancelled = false
     const settingsTeam = effectiveTeam || 'default'
     apiJSON<{ team_settings?: { DefaultModel?: string } }>(
-      `/api/settings/team/${encodeURIComponent(settingsTeam)}`,
+      `/api/teams/${encodeURIComponent(settingsTeam)}/settings`,
     )
       .then((data) => {
         if (!cancelled && data?.team_settings?.DefaultModel)

@@ -77,7 +77,7 @@ function IntervalScale({
 /**
  * PollerTimingGroup is the org-level poller-cadence field group — how often
  * the GitHub and Jira pollers run. Both intervals are org_settings columns,
- * so they round-trip via POST /api/settings/org like the rest of the org
+ * so they round-trip via PATCH /api/orgs/{org}/settings like the rest of the org
  * config. The Jira interval is suppressed (showJira false) on surfaces where
  * Jira isn't connected yet, since the cadence is meaningless without it.
  *

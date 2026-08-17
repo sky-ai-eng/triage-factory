@@ -22,17 +22,27 @@ function loadedStateWithStalePat(over: Partial<WizardState> = {}): WizardState {
   }
 }
 
-// Stub fetch and capture each request's parsed JSON body.
+const ORG_ID = '00000000-0000-0000-0000-000000000001'
+
+// Stub fetch and capture each request's parsed JSON body. The settings PATCH
+// answers with the settings resource, so the stub returns a version — persistOrg
+// folds it back into wizard state, and a stub that omitted it would let a
+// version-dropping regression pass.
 function captureSaveBodies(): () => Record<string, unknown>[] {
   const bodies: Record<string, unknown>[] = []
   vi.stubGlobal(
     'fetch',
     vi.fn(async (_url: string, init?: RequestInit) => {
       bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
-      return new Response(JSON.stringify({}), { status: 200 })
+      return new Response(JSON.stringify({ version: 8 }), { status: 200 })
     }),
   )
   return () => bodies
+}
+
+// persistOrg's context: the state plus the patcher and the org the path names.
+function orgCtx(state: WizardState, patch: (p: Partial<WizardState>) => void = () => {}) {
+  return { state, patch, orgId: ORG_ID }
 }
 
 describe('persistOrg — the org save carries no credentials', () => {
@@ -55,7 +65,7 @@ describe('persistOrg — the org save carries no credentials', () => {
   for (const { name, over } of cases) {
     it(`omits the typed org PAT when ${name}`, async () => {
       const bodies = captureSaveBodies()
-      await persistOrg(loadedStateWithStalePat(over))
+      await persistOrg(orgCtx(loadedStateWithStalePat(over)))
       const sent = bodies()
       expect(sent).toHaveLength(1)
       expect(sent[0]).not.toHaveProperty('github_pat')
@@ -68,17 +78,36 @@ describe('persistOrg — the org save carries no credentials', () => {
   it('refuses to save (and makes no request) when the org load failed', async () => {
     const bodies = captureSaveBodies()
     await expect(
-      persistOrg(loadedStateWithStalePat({ orgLoaded: false, githubAppRegistered: true })),
+      persistOrg(orgCtx(loadedStateWithStalePat({ orgLoaded: false, githubAppRegistered: true }))),
     ).rejects.toThrow(/reopen the GitHub step/)
     expect(bodies()).toHaveLength(0)
+  })
+
+  // The settings row's concurrency token has to survive a save, or the wizard's
+  // SECOND org step would assert the version it loaded with and 409 against its
+  // own earlier write.
+  it('folds the post-save version back into wizard state', async () => {
+    captureSaveBodies()
+    const patched: Partial<WizardState>[] = []
+    await persistOrg(orgCtx(loadedStateWithStalePat(), (p) => patched.push(p)))
+    expect(patched.at(-1)?.org?.version).toBe(8)
+  })
+
+  it('sends the loaded version so a concurrent admin save is a conflict, not a clobber', async () => {
+    const bodies = captureSaveBodies()
+    const state = loadedStateWithStalePat()
+    state.org.version = 3
+    await persistOrg(orgCtx(state))
+    expect(bodies()[0]).toMatchObject({ version: 3 })
   })
 })
 
 // TFAC-68: the Bedrock credential form's input-layer validation, shared by
 // the wizard key step's validate and the Settings section's Save gate. The
-// rules mirror the backend's 422 shapes: region always required; the selected
-// method's secrets required unless a credential for that SAME method is
-// already stored (switching methods always needs the new secrets).
+// rules mirror the backend's 400 shapes: the region and the selected shape's
+// own credential are both always required — each shape's bind route REPLACES
+// the credential, so there is no "leave blank to keep current" arm left on
+// either side of the wire.
 describe('bedrockFormError — Bedrock form validation (TFAC-68)', () => {
   function bedrockState(over: Partial<WizardState> = {}, org: Partial<WizardState['org']> = {}) {
     const base = initialWizardState()
@@ -100,12 +129,12 @@ describe('bedrockFormError — Bedrock form validation (TFAC-68)', () => {
     expect(bedrockFormError(s)).toMatch(/Bedrock API key/)
   })
 
-  it('accepts a blank bearer token when a bearer credential is stored (keep current)', () => {
+  it('still requires the bearer token when one is already stored (no keep-current)', () => {
     const s = bedrockState(
       { bedrockConnected: true, bedrockStoredMethod: 'bearer' },
       { bedrock_auth_method: 'bearer' },
     )
-    expect(bedrockFormError(s)).toBeNull()
+    expect(bedrockFormError(s)).toMatch(/Bedrock API key/)
   })
 
   it('requires the key pair when switching methods, even though a bearer is stored', () => {

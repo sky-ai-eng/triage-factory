@@ -105,6 +105,7 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		maxConcurrentRuns                        sql.NullInt64
 		marketplaceEnabled                       bool
 		credentialClass                          string
+		version                                  int
 	)
 	// EXTRACT(EPOCH FROM interval) returns numeric in PG13+; the
 	// ::double precision cast pins the row-out type so pgx can scan
@@ -119,14 +120,14 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		       EXTRACT(EPOCH FROM jira_poll_interval)::double precision,
 		       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
 		       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
-		       github_credential_class
+		       github_credential_class, version
 		FROM org_settings WHERE org_id = $1
 	`, orgID).Scan(
 		&ghURL, &ghSecs, &cloneProto,
 		&jiraURL, &jiraSecs,
 		&anthRef, &bedRef, &maxTier,
 		&maxDailyCost, &maxConcurrentRuns, &marketplaceEnabled,
-		&credentialClass,
+		&credentialClass, &version,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Provisioning seeds org_settings rows at org-create time
@@ -163,6 +164,7 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		// it and refuse what they don't recognise, which is the whole point of
 		// storing the class instead of inferring it.
 		GitHubCredentialClass: domain.GitHubCredentialClass(credentialClass),
+		Version:               version,
 	}, nil
 }
 
@@ -177,26 +179,86 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 // struct's zero value on every bulk settings save, silently converting a
 // BYO-App org to PAT. u.GitHubCredentialClass is read-only; it is ignored here.
 func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.OrgSettings) error {
+	// No version guard: an unguarded save is last-writer-wins on purpose. Its
+	// callers are the credential transitions, which own the specific fields
+	// they touch and have nothing to lose a race about.
+	_, err := s.upsertSettings(ctx, orgID, u, nil)
+	if err != nil {
+		return fmt.Errorf("upsert org_settings: %w", err)
+	}
+	return nil
+}
+
+// UpdateSettingsVersioned is UpdateSettings under the row's concurrency token.
+// The guard rides the ON CONFLICT DO UPDATE's WHERE, so a losing writer updates
+// zero rows rather than overwriting the winner; expected 0 (no row) resolves
+// through the INSERT arm, where the unique index does the same job.
+func (s *orgsStore) UpdateSettingsVersioned(ctx context.Context, orgID string, u domain.OrgSettings, expected int) error {
+	res, err := s.upsertSettings(ctx, orgID, u, &expected)
+	if err != nil {
+		// A racing INSERT commits between our conflict probe and ours only in
+		// the expected==0 arm, where there is no row for the WHERE to guard;
+		// the primary key catches it, and it is the same conflict.
+		if isUniqueViolation(err) {
+			return db.ErrOrgSettingsVersion
+		}
+		return fmt.Errorf("upsert org_settings: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("upsert org_settings: %w", err)
+	}
+	if n == 0 {
+		return db.ErrOrgSettingsVersion
+	}
+	return nil
+}
+
+// upsertSettings writes every org_settings column this writer owns and bumps
+// the row's version. A non-nil expected adds the concurrency guard to the
+// ON CONFLICT arm — the one difference between the guarded and unguarded
+// writers, kept as a parameter so the two can never drift in which columns
+// they write.
+func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.OrgSettings, expected *int) (sql.Result, error) {
 	cloneProto := u.GitHubCloneProtocol
 	if cloneProto == "" {
 		cloneProto = "ssh"
 	}
+	args := []any{
+		orgID,
+		nullString(u.GitHubBaseURL),
+		u.GitHubPollInterval.Seconds(),
+		cloneProto,
+		nullString(u.JiraBaseURL),
+		u.JiraPollInterval.Seconds(),
+		nullString(u.AnthropicAPIKeyRef),
+		nullString(u.BedrockCredentialsRef),
+		nullString(u.MaxLLMModelTier),
+		nullFloat(u.MaxDailyCostUSD),
+		nullInt(u.MaxConcurrentRuns),
+		u.MarketplaceEnabled,
+	}
+	guard := ""
+	if expected != nil {
+		guard = "WHERE org_settings.version = $13"
+		args = append(args, *expected)
+	}
 	// make_interval(secs => $N) takes a numeric second count and
 	// returns a properly-typed interval — avoids hand-rolling the
 	// "X seconds"::interval string concat.
-	_, err := s.app.ExecContext(ctx, `
+	return s.app.ExecContext(ctx, `
 		INSERT INTO org_settings (
 			org_id, github_base_url, github_poll_interval, github_clone_protocol,
 			jira_base_url, jira_poll_interval,
 			anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
 			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
-			updated_at
+			version, updated_at
 		) VALUES (
 			$1, $2, make_interval(secs => $3), $4,
 			$5, make_interval(secs => $6),
 			$7, $8, $9,
 			$10, $11, $12,
-			now()
+			1, now()
 		)
 		ON CONFLICT (org_id) DO UPDATE SET
 			github_base_url = EXCLUDED.github_base_url,
@@ -210,25 +272,9 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 			max_daily_cost_usd = EXCLUDED.max_daily_cost_usd,
 			max_concurrent_runs = EXCLUDED.max_concurrent_runs,
 			marketplace_enabled = EXCLUDED.marketplace_enabled,
+			version = org_settings.version + 1,
 			updated_at = now()
-	`,
-		orgID,
-		nullString(u.GitHubBaseURL),
-		u.GitHubPollInterval.Seconds(),
-		cloneProto,
-		nullString(u.JiraBaseURL),
-		u.JiraPollInterval.Seconds(),
-		nullString(u.AnthropicAPIKeyRef),
-		nullString(u.BedrockCredentialsRef),
-		nullString(u.MaxLLMModelTier),
-		nullFloat(u.MaxDailyCostUSD),
-		nullInt(u.MaxConcurrentRuns),
-		u.MarketplaceEnabled,
-	)
-	if err != nil {
-		return fmt.Errorf("upsert org_settings: %w", err)
-	}
-	return nil
+		`+guard, args...)
 }
 
 // SetGitHubCredentialClass upserts ONLY org_settings.github_credential_class —

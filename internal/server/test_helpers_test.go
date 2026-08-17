@@ -75,6 +75,62 @@ func fixtureUUID(seed string) string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(seed)).String()
 }
 
+// The settings resources, addressed the way the routes are: the org's under
+// its org, the team's under its team. Tests run in local mode, so the org id is
+// the sentinel tenant and the team segment takes the "default" alias.
+func orgSettingsPath() string { return "/api/orgs/" + runmode.LocalDefaultOrgID + "/settings" }
+
+func teamSettingsPath(teamID string) string { return "/api/teams/" + teamID + "/settings" }
+
+func teamJiraProjectsPath(teamID string) string { return "/api/teams/" + teamID + "/jira-projects" }
+
+// orgSettingsVersion reads the settings row's current concurrency token.
+func orgSettingsVersion(t *testing.T, s *Server) int {
+	t.Helper()
+	rec := doJSON(t, s, "GET", orgSettingsPath(), nil)
+	if rec.Code != 200 {
+		t.Fatalf("GET %s: %d: %s", orgSettingsPath(), rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode org settings: %v", err)
+	}
+	return out.Version
+}
+
+// patchOrgSettings sends an org-settings PATCH with the row's LIVE version
+// folded in, which is what a client that just read the form would do. A test
+// asserting the conflict behaviour itself passes the version explicitly instead
+// (see the concurrency case), so this helper never hides the token from a test
+// that is about it.
+func patchOrgSettings(t *testing.T, s *Server, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	withVersion := map[string]any{"version": orgSettingsVersion(t, s)}
+	for k, v := range body {
+		withVersion[k] = v
+	}
+	return doJSON(t, s, "PATCH", orgSettingsPath(), withVersion)
+}
+
+// patchOrgSettingsOK is patchOrgSettings for the happy path: it fails the test
+// on any non-200 and hands back the decoded settings resource, which is what
+// the PATCH answers with (including the next version and any advisory
+// `warning`).
+func patchOrgSettingsOK(t *testing.T, s *Server, body map[string]any) map[string]any {
+	t.Helper()
+	rec := patchOrgSettings(t, s, body)
+	if rec.Code != 200 {
+		t.Fatalf("PATCH %s: %d: %s", orgSettingsPath(), rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode org settings response: %v", err)
+	}
+	return resp
+}
+
 // doJSON performs a JSON request against the server's mux and returns
 // the response. Body may be nil.
 func doJSON(t *testing.T, s *Server, method, path string, body any) *httptest.ResponseRecorder {

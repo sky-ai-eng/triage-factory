@@ -971,6 +971,20 @@ CREATE TABLE public.org_settings (
     -- can never reset it; the credential transitions write it via
     -- SetGitHubCredentialClass inside their own transaction.
     github_credential_class text DEFAULT 'pat'::text NOT NULL,
+    -- Optimistic-concurrency token for the settings save. That save is a
+    -- read-modify-write over the whole row, so two admins editing different
+    -- sections of the same page would otherwise overwrite each other silently —
+    -- the later save carries the earlier's fields as its client last read them,
+    -- and the first admin's change is undone with a 200 and nothing to notice.
+    -- The read hands the client this token, the write requires it, and a write
+    -- against a stale token is refused (409) so the loser refetches and
+    -- re-applies. There is no server-side merge.
+    --
+    -- Owned by the settings writer alone: OrgsStore.UpdateSettings bumps it,
+    -- SetGitHubCredentialClass — the surgical single-column write the
+    -- credential transitions use — deliberately does not, so a credential
+    -- transition never invalidates an admin's in-flight settings edit.
+    version integer DEFAULT 1 NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT org_settings_github_clone_protocol_check CHECK ((github_clone_protocol = ANY (ARRAY['https'::text, 'ssh'::text])))
 );
