@@ -37,6 +37,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Snapshot tar member names. The blob is one gzip-compressed tar holding the
@@ -100,11 +102,18 @@ func snapshotKey(orgID, keyID string) string {
 // runs identically in both modes: local writes the same blob through fsStorage
 // under the state-root, multi through the object store.
 //
+// runtime is the conversation's engine (domain.ConversationRuntimeSDK |
+// ConversationRuntimeNative), carried onto the span family because the blob's
+// members are not runtime-agnostic: only a delegated SDK run snapshots a
+// session transcript, so transcript sizes read without the attribute would
+// look like a property of all snapshots. Empty is a caller that doesn't know
+// (a fixture), and simply omits the attribute.
+//
 // Best-effort by contract: callers log and proceed on error, because the warm
 // worktree (preserved on dormancy by the per-run guards) is the primary resume
 // path and the snapshot is the durable backstop, only read when that cache is
 // gone.
-func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, runID, keyID, wtPath, sessionID string) (err error) {
+func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, runID, keyID, wtPath, sessionID, runtime string) (err error) {
 	blobs := s.Storage()
 	if blobs == nil {
 		return nil // no store wired (tests / a configuration without the seam)
@@ -114,8 +123,14 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, runID, keyID, wt
 	// arbitrarily long after the engagement's setup span ended. It is also
 	// the one piece of run teardown with an unbounded cost — a git bundle, a
 	// tar of the whole scratch tree, and a blob PUT — so a park that took a
-	// minute is answerable here rather than only in the log.
-	ctx, span := s.startPunctual(ctx, runID, "workspace.snapshot", telemetry.OrgID(orgID))
+	// minute is answerable here rather than only in the log. The three phase
+	// children below split that answer: whether the time went to the capture,
+	// the compression, or the upload decides three different fixes.
+	attrs := []attribute.KeyValue{telemetry.OrgID(orgID)}
+	if runtime != "" {
+		attrs = append(attrs, telemetry.Runtime(runtime))
+	}
+	ctx, span := s.startPunctual(ctx, runID, "workspace.snapshot", attrs...)
 	defer func() {
 		recordSpanError(span, err)
 		span.End()
@@ -134,53 +149,133 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, runID, keyID, wt
 	// uid: the git capture's filter-honoring commands never execute
 	// agent-planted drivers as root, and the SDK's owner-only transcript is
 	// readable there when it is not to the orchestrator (see captureWorkspaceGit).
-	delta, transcript, err := captureWorkspaceGit(ctx, wtPath, sessionID)
+	// That child is one of the privileged operations that never trace
+	// themselves, so this executor-side span IS its measurement; in local mode
+	// the same span covers the in-process capture.
+	capCtx, capSpan := snapshotPhase(ctx, "workspace.snapshot.capture", runtime)
+	delta, transcript, err := captureWorkspaceGit(capCtx, wtPath, sessionID)
 	if err != nil {
+		recordSpanError(capSpan, err)
+		capSpan.End()
 		return fmt.Errorf("snapshot: capture: %w", err)
 	}
-
-	// Stage the tar on disk, then stream it into Put. A large workspace (the
-	// _tfac tree especially) never buffers whole in memory: scratch files
-	// are copied into the tar file by file, and Put reads the staged tar back
-	// incrementally rather than from a single in-RAM buffer. The stream is
-	// gzipped on its way to the staging file — the transcript and ci-logs
-	// members that dominate the blob are highly compressible text — without
-	// touching the member-by-member streaming inside writeSnapshotTar.
-	f, err := os.CreateTemp("", "tf-snapshot-*.tar.gz")
-	if err != nil {
-		return fmt.Errorf("snapshot: tempfile: %w", err)
+	var bundleBytes, patchBytes int64
+	if delta != nil {
+		bundleBytes = int64(len(delta.Bundle))
+		patchBytes = int64(len(delta.Patch))
 	}
-	name := f.Name()
-	defer func() { _ = os.Remove(name) }()
-	gzw := gzip.NewWriter(f)
-	if err := writeSnapshotTar(gzw, delta, wtPath, sessionID, transcript); err != nil {
-		_ = f.Close()
+	capSpan.SetAttributes(
+		telemetry.SnapshotBundleBytes(bundleBytes),
+		telemetry.SnapshotPatchBytes(patchBytes),
+		telemetry.SnapshotTranscriptBytes(int64(len(transcript))),
+	)
+	capSpan.End()
+
+	_, archSpan := snapshotPhase(ctx, "workspace.snapshot.archive", runtime)
+	f, rawBytes, gzBytes, err := stageSnapshotArchive(delta, wtPath, sessionID, transcript)
+	if err != nil {
+		recordSpanError(archSpan, err)
+		archSpan.End()
 		return err
 	}
-	if err := gzw.Close(); err != nil {
+	defer func() {
 		_ = f.Close()
-		return fmt.Errorf("snapshot: close gzip: %w", err)
-	}
-	fi, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return fmt.Errorf("snapshot: stat staged tar: %w", err)
-	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("snapshot: rewind tar: %w", err)
-	}
-	putErr := blobs.Put(ctx, snapshotKey(orgID, keyID), f)
-	_ = f.Close()
+		_ = os.Remove(f.Name())
+	}()
+	// Raw bytes in against compressed bytes out: the pair is the codec's
+	// report card — ratio from the two sizes, throughput from either against
+	// the phase duration — so a compression change can prove itself from the
+	// field rather than a benchmark.
+	archSpan.SetAttributes(telemetry.SnapshotRawBytes(rawBytes), telemetry.SizeBytes(gzBytes))
+	archSpan.End()
+
+	putCtx, putSpan := snapshotPhase(ctx, "workspace.snapshot.put", runtime)
+	putSpan.SetAttributes(telemetry.SizeBytes(gzBytes))
+	putErr := blobs.Put(putCtx, snapshotKey(orgID, keyID), f)
+	recordSpanError(putSpan, putErr)
+	putSpan.End()
 	if putErr != nil {
 		return fmt.Errorf("snapshot: put: %w", putErr)
 	}
 	// Parked-window storage cost is a live sizing question; log every
 	// snapshot's real compressed footprint so it's answerable from the field.
 	// On the span too, where it explains the duration beside it.
-	span.SetAttributes(telemetry.SizeBytes(fi.Size()))
-	delegateLog.Info("snapshot written", "key", snapshotKey(orgID, keyID), "bytes_gzipped", fi.Size())
+	span.SetAttributes(telemetry.SizeBytes(gzBytes))
+	delegateLog.Info("snapshot written", "key", snapshotKey(orgID, keyID), "bytes_gzipped", gzBytes)
 	return nil
+}
+
+// snapshotPhase opens one phase child under the workspace.snapshot span in
+// ctx. An ordinary child, unlike the punctual parent: the snapshot is bounded
+// work inside one function frame, so nothing here risks the unbounded-trace
+// problem the punctual/link pattern exists for. runtime repeats on every
+// phase (not just the parent) so a phase queried on its own — which is how
+// the dashboard reads the sizes — still says which engine's snapshot it was.
+func snapshotPhase(ctx context.Context, name, runtime string) (context.Context, trace.Span) {
+	ctx, span := tracer.Start(ctx, name)
+	if runtime != "" {
+		span.SetAttributes(telemetry.Runtime(runtime))
+	}
+	return ctx, span
+}
+
+// stageSnapshotArchive writes the snapshot members to a gzipped tar staged on
+// disk, returning the open staging file positioned at the start — ready to
+// stream into Put — with its pre-compression and compressed byte counts. On
+// error the staging file is already cleaned up; on success it is the caller's
+// to close and remove.
+//
+// Staged, not buffered: a large workspace (the _tfac tree especially) never
+// sits whole in memory — scratch files are copied into the tar file by file,
+// and Put reads the staged tar back incrementally rather than from a single
+// in-RAM buffer. The stream is gzipped on its way to the staging file — the
+// transcript and ci-logs members that dominate the blob are highly
+// compressible text — without touching the member-by-member streaming inside
+// writeSnapshotTar.
+func stageSnapshotArchive(delta *worktree.GitDelta, wtPath, sessionID string, transcript []byte) (_ *os.File, rawBytes, gzippedBytes int64, err error) {
+	f, err := os.CreateTemp("", "tf-snapshot-*.tar.gz")
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("snapshot: tempfile: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = f.Close()
+			_ = os.Remove(f.Name())
+		}
+	}()
+	gzw := gzip.NewWriter(f)
+	cw := countingWriter{w: gzw}
+	if err = writeSnapshotTar(&cw, delta, wtPath, sessionID, transcript); err != nil {
+		return nil, 0, 0, err
+	}
+	if err = gzw.Close(); err != nil {
+		return nil, 0, 0, fmt.Errorf("snapshot: close gzip: %w", err)
+	}
+	fi, statErr := f.Stat()
+	if statErr != nil {
+		err = fmt.Errorf("snapshot: stat staged tar: %w", statErr)
+		return nil, 0, 0, err
+	}
+	if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
+		err = fmt.Errorf("snapshot: rewind tar: %w", seekErr)
+		return nil, 0, 0, err
+	}
+	return f, cw.n, fi.Size(), nil
+}
+
+// countingWriter counts what passes through it — the archive's raw
+// (pre-compression) size, which nothing else can see: the tar stream goes
+// straight into the gzip writer, and the staging file only ever holds the
+// compressed result.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // writeSnapshotTar streams the snapshot members into w as one tar: the git

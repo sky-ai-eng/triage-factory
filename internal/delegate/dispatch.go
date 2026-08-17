@@ -937,6 +937,7 @@ func resumeParkContext(orgID string, run *domain.Conversation, task *domain.Task
 		creatorUserID: userID,
 		claimID:       run.ClaimID,
 		reason:        db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+		runtime:       run.Runtime,
 	}
 }
 
