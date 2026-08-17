@@ -117,7 +117,7 @@ func TestGrantOrgMembership_Idempotent(t *testing.T) {
 
 // ---------- accept state machine (POST /api/invites/accept) ----------
 
-// TestInviteAccept_Valid_MintsMembershipAndStamps: a clean redeem mints the
+// TestInviteAccept_Valid_OrgOnly: a clean redeem mints the
 // org membership, leaves the user team-less (target NULL), stamps
 // accepted_at/accepted_by, and points the session at the org.
 func TestInviteAccept_Valid_OrgOnly(t *testing.T) {

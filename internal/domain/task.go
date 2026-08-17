@@ -56,7 +56,7 @@ type Task struct {
 	CreatedAt time.Time `json:"created_at"`
 
 	// Join-populated display fields — from entities, NOT stored on tasks row.
-	// Populated by GetTask / QueuedTasks / TasksByStatus via entity JOIN.
+	// Populated by Tasks.Get / Tasks.List via entity JOIN.
 	Title          string `json:"title"`
 	SourceURL      string `json:"source_url"`
 	EntitySourceID string `json:"entity_source_id"` // e.g. "owner/repo#42", a Jira issue key

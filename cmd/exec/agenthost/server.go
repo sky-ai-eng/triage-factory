@@ -36,7 +36,7 @@ func strictlyWithin(root, path string) bool {
 
 // sandboxAgentRoot is the sandbox's view of the run root — the bind-mount
 // destination agentproc's sandbox spec puts the run's Cwd at. Mirrors
-// agentproc's sandboxWorkRoot (which itself mirrors sandbox/spec.go). The
+// agentproc's sandboxAgentRoot (which itself mirrors sandbox/spec.go). The
 // daemon only ever serves sandboxed callers, so this is unconditionally the
 // agent view its WorkspaceRoots dispatch reports.
 const sandboxAgentRoot = "/work"

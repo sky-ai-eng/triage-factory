@@ -28,7 +28,7 @@ type FactoryEntityRow struct {
 
 // FactoryRecentEvent is a single entry in an entity's recent event
 // history. Ordered chronologically ascending by caller
-// (db.ListRecentEventsByEntity).
+// (db.FactoryReadStore.RecentEventsByEntity).
 //
 // Two timestamps because we need both for the factory animation:
 //   - CreatedAt is the "event time" used for chain ordering:

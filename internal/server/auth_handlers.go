@@ -177,7 +177,7 @@ func (s *Server) SetAuthDeps(
 // access logs, and browser history.
 //
 //   - github → browser-redirect to gotrue's /authorize (the OAuth dance).
-//   - saml   → handleSAMLStart: server-side POST to gotrue's public /sso,
+//   - saml   → StartSSO: server-side POST to gotrue's public /sso,
 //     forwarding the 303 to the IdP (the SP-initiated SAML dance).
 //
 // GET /api/auth/oauth/{provider}?return_to=/some/path
@@ -325,7 +325,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// Test in TF's signed state, so this round-trip is a not-yet-enabled
 	// connection's "does my IdP actually work?" check, NOT a login. Complete the
 	// exchange + verify to prove the assertion is valid and readable, then render
-	// pass/fail — completeSAMLConnectionTest short-circuits before any writes (no
+	// pass/fail — OnTestCallback short-circuits before any writes (no
 	// principal, no JIT, no session), so a test mints nothing. Branch here, before
 	// authCode is even read, because the test path handles a GoTrue ?error= ACS
 	// rejection as a fail result rather than the plain 400 a real login returns.
@@ -403,7 +403,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The provider_id in TF's OWN signed state (set by handleSAMLStart) is the
+	// The provider_id in TF's OWN signed state (set by StartSSO) is the
 	// authoritative "this login is SSO" signal. We deliberately do NOT read the
 	// GoTrue JWT's provider / app_metadata / amr to detect SSO or recover the
 	// provider — those are GoTrue-internal and version-fragile.
@@ -749,7 +749,7 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleMe returns the authenticated user's identity + org list.
-// Wrapped in SessionMiddleware at mount time. Response wire shape is
+// Wrapped in withSession at mount time. Response wire shape is
 // mirrored in the frontend as the canonical `MeResponse` type — the
 // sole identity endpoint in both modes.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
@@ -1326,7 +1326,7 @@ func (s *Server) gotrueExchangeFunc(cfg *authConfig) func(context.Context, strin
 // same /token?grant_type=pkce exchange the GitHub flow uses completes the
 // callback (TFAC-423 spike: PKCE composes with SP-initiated SAML). GoTrue
 // answers 303 with the IdP redirect in Location; this returns that Location for
-// handleSAMLStart to forward to the browser.
+// StartSSO to forward to the browser.
 func (s *Server) gotrueSSOFunc(cfg *authConfig) func(context.Context, string, string, string) (string, error) {
 	return func(ctx context.Context, providerID, redirectTo, codeChallenge string) (string, error) {
 		// JSON body (GoTrue's /sso decodes SingleSignOnParams from JSON).
@@ -1459,16 +1459,16 @@ type stateClaims struct {
 	// server-side and never leaves the cookie.
 	CodeVerifier string `json:"cv"`
 	// ProviderID is the GoTrue SSO provider_id when this is a SAML
-	// SP-initiated flow (set by handleSAMLStart), empty for the GitHub
+	// SP-initiated flow (set by StartSSO), empty for the GitHub
 	// OAuth flow. It rides in TF's OWN signed state — NOT read back from
 	// the GoTrue JWT — so the callback's JIT step resolves the org binding
 	// from a value TF chose, never from anything the assertion carries
-	// (the GoTrue provider claims are version-fragile; see handleSAMLStart).
+	// (the GoTrue provider claims are version-fragile; see StartSSO).
 	// Its non-empty presence at the callback is the authoritative "this
 	// login is SSO" signal.
 	ProviderID string `json:"pid,omitempty"`
 	// Test marks a verify-before-enforce SSO test round-trip (TFAC-431), set
-	// only by the admin-gated test-start endpoint (handleSAMLConnectionTestStart).
+	// only by the admin-gated test-start endpoint (the login extension's handleTestStart).
 	// When true the callback completes the code exchange + JWT verify — proving
 	// the assertion is valid and readable — then SHORT-CIRCUITS before any
 	// writes: no resolveOrCreatePrincipal, no JIT, no session. It renders a

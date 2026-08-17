@@ -22,7 +22,7 @@ import (
 //     ResumeBlueprintAfter* paths) runs here.
 //
 //   - admin: admin pool (supabase_admin, BYPASSRLS). The blueprint
-//     orchestrator goroutine — delegateBlueprint / runBlueprint /
+//     orchestrator goroutine — enqueueBlueprintStep / reactToStepTerminal /
 //     terminateBlueprint — detaches from the kicking-off handler's context
 //     the moment it spawns, so it has no JWT-claims in scope and routes
 //     through admin via the `...System` variants. org_id stays in the WHERE

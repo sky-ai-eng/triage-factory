@@ -410,7 +410,7 @@ func TestMarketplacePublish_UnknownEventTypeIs400(t *testing.T) {
 	}
 }
 
-// TestMarketplacePublish_UnknownKindIs400 and missing-field validation.
+// TestMarketplacePublish_ValidationErrors covers unknown-kind and missing-field validation.
 func TestMarketplacePublish_ValidationErrors(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "validate-me", "mission", "", "")

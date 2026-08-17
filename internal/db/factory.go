@@ -63,8 +63,8 @@ type FactoryReadStore interface {
 	// belt. Local mode (SQLite) is unscoped.
 	TaskCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error)
 
-	// ActiveRuns returns every run currently in-flight (status in
-	// factoryActiveRunStatuses, defined per-backend) joined with its
+	// ActiveRuns returns every run currently in-flight (exactly those an
+	// unreleased claim is driving) joined with its
 	// task and entity. Ordered by started_at DESC so the overlay can
 	// render most-recent-first without client-side sorting.
 	//

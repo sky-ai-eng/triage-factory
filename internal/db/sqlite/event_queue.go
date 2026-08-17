@@ -235,7 +235,7 @@ func (s *eventQueueStore) PruneDone(ctx context.Context, before time.Time) (int,
 	return int(n), nil
 }
 
-// sqliteFailedEventColumns is the projection both the list and the single read
+// sqliteFailedEventSelect is the projection both the list and the single read
 // answer with, so a row read one way is byte-identical to the same row read
 // the other. LEFT JOIN for the same reason as the Postgres impl: entity_id is
 // nullable and a parked row must list whether or not its entity is still

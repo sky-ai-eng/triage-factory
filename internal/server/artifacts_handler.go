@@ -24,7 +24,7 @@ import (
 //
 // ghResolver picks the right GitHub client (org App installation token → PAT)
 // per repo at call time, so App-only orgs work identically to PAT orgs. Mirrors
-// pendingPRsHandler's deps.
+// dashboardHandler's deps.
 type artifactsHandler struct {
 	tx         db.TxRunner
 	ws         *websocket.Hub
@@ -491,7 +491,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// click on an already-open or closed artifact would otherwise re-run the
 	// GitHub mutations — a spurious footer rewrite (new timestamp/cost) and a
 	// no-op MarkPRReady — so reject it as a conflict. The state transition is
-	// gated here rather than in resolvePR, which the read paths (GET/diff) share
+	// gated here rather than in ghForArtifact, which the read paths (GET/diff) share
 	// and must keep serving non-draft PRs.
 	if art.State != domain.ArtifactStatePRDraft {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{

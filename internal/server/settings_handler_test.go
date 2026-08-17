@@ -365,7 +365,7 @@ func TestSettingsPost_PerProjectRules_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSettingsPost_DuplicateProjectKey_Rejected verifies that the
+// TestTeamSettingsPost_DuplicateProjectKey_Rejected verifies that the
 // handler rejects two entries with the same key — the rules table
 // keys on (team_id, project_key) and a duplicate would silently
 // last-write-win.

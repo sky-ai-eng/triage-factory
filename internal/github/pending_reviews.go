@@ -28,16 +28,16 @@ type PendingReviewComment struct {
 }
 
 // SubmittedReview is a review's content fetched by its GraphQL node id,
-// regardless of state — unlike GetPendingReview, which filters to PENDING and so
-// returns nothing once a review is submitted. Comments carry their GraphQL node
+// regardless of state — a PENDING-only fetch returns nothing once a review is
+// submitted. Comments carry their GraphQL node
 // ids (not the REST integer ids GetReviewDetail returns) so a proposed-vs-final
 // diff can join on the same key the pending-review editor used. TFAC-464.
 type SubmittedReview struct {
 	State string // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
 	Body  string //
 	// Comments are the node-id-keyed RIGHT-side inline comments, capped at the
-	// first 100 (same correctness boundary as GetPendingReview — a review with
-	// >100 comments truncates here, and GetReview logs a warning so the
+	// first 100 — a review with >100 comments truncates here, and GetReview
+	// logs a warning so the
 	// proposed-vs-final diff silently omitting the tail stays visible).
 	Comments []PendingReviewComment
 }
@@ -103,7 +103,7 @@ func (c *Client) GetReview(ctx context.Context, reviewNodeID string) (*Submitted
 	if resp.Data.Node == nil || resp.Data.Node.State == "" {
 		return nil, nil
 	}
-	// Comment-count truncation watchdog, mirroring GetPendingReview: a review
+	// Comment-count truncation watchdog: a review
 	// with >100 inline comments returns only the first 100, so the
 	// proposed-vs-final diff would silently omit the tail. Log it rather than let
 	// truncation read as deletions.

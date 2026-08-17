@@ -62,7 +62,7 @@ const secretKeyAnthropicAPIKey = "anthropic_api_key"
 var jiraProjectKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*$`)
 
 // normalizeJiraProjectKey trims whitespace and uppercases. Used at
-// the HTTP boundary in handleSettingsPost (the write path) and in
+// the HTTP boundary in handleTeamSettingsPost (the write path) and in
 // validateTrackerKeys (the read/compare path) so lookups match
 // regardless of how the user typed the key.
 func normalizeJiraProjectKey(s string) string {
@@ -186,7 +186,7 @@ func jiraProjectsEqual(a, b []jiraProjectConfig) bool {
 }
 
 // projectConfigsToRules is the inverse of rulesToProjectConfigsOrdered. Used
-// by handleSettingsPost when persisting the team's project list back
+// by handleTeamSettingsPost when persisting the team's project list back
 // to jira_project_status_rules via JiraStatusRulesStore.ReplaceForTeam.
 func projectConfigsToRules(projects []jiraProjectConfig) []domain.JiraProjectStatusRules {
 	out := make([]domain.JiraProjectStatusRules, 0, len(projects))
@@ -492,7 +492,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 // first; a rejected or unreachable key returns 422 and nothing is written.
 //
 // Requires an active org because the write goes through the SecretStore — same
-// multi-mode rationale as handleJiraConnect / handleSettingsPost.
+// multi-mode rationale as handleJiraConnect / handleOrgSettingsPost.
 func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	orgID, ok := requireOrg(w, r)
@@ -562,7 +562,7 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 	// a non-admin member's call is rejected there. Because the Secrets.Put and
 	// UpdateSettings share one transaction, that rejection rolls back the vault
 	// write too — the key can never land for a non-admin. (Same rationale as
-	// handleJiraConnect / handleSettingsPost; no handler-level RequireOrgAdmin,
+	// handleJiraConnect / handleOrgSettingsPost; no handler-level RequireOrgAdmin,
 	// matching the Jira sibling.)
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)

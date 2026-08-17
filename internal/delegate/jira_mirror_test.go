@@ -51,7 +51,7 @@ type recordingJiraServer struct {
 	claimStateRead chan struct{}
 }
 
-// idToStatus maps the transition ids the fake serves back to their target
+// jiraFakeIDToStatus maps the transition ids the fake serves back to their target
 // status, so a POST can record (and apply) which bucket the ticket moved to.
 var jiraFakeIDToStatus = map[string]string{"31": "In Progress", "41": "Done"}
 

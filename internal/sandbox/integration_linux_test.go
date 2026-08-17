@@ -552,7 +552,7 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 
 	// Per-run socket on the host. Mode 0700 on the parent dir; the
 	// listener inherits from umask, then we chown + chmod to the
-	// sandbox UID exactly as the production startHostAgentHost does.
+	// sandbox UID exactly as the production agenthost.StartWithServer does.
 	sockDir := t.TempDir()
 	if err := os.Chmod(sockDir, 0o700); err != nil {
 		t.Fatalf("chmod sock dir: %v", err)

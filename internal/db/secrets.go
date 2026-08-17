@@ -77,7 +77,7 @@ type SecretStore interface {
 
 	// Delete removes a secret. Returns ok=false when no row
 	// matched, matching the pattern of other "did the write land"
-	// helpers on Stores (RequeueTask, MarkConversationCancelledIfActive).
+	// helpers on Stores (RequeueTask, SnoozeTask).
 	Delete(ctx context.Context, orgID, key string) (ok bool, err error)
 
 	// PutUser writes (or rotates) a per-user secret — a credential
@@ -108,7 +108,7 @@ type SecretStore interface {
 
 	// GetUserSystem reads a per-user secret WITHOUT a request JWT, for
 	// system code acting as a user — the write-actor resolver building
-	// a JiraClientForUser on a background run path is the motivating
+	// a jira.Resolver.ForUser client on a background run path is the motivating
 	// caller. Takes orgID + userID explicitly: in multi mode it runs on
 	// the admin pool (supabase_admin bypasses RLS), which trusts the
 	// passed args and performs no current_org_id() / current_user_id()

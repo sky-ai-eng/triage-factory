@@ -369,7 +369,7 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 // credentials configured means checked=false, so the save proceeds.
 func TestTeamReposPut_FailsOpenWithoutCredentials(t *testing.T) {
 	srv := newTestServer(t)
-	// No credentials seeded → reachableRepoSet returns checked=false.
+	// No credentials seeded → fanOutUnreachableRepo returns checked=false.
 	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
 		"repos": []string{"anyone/anything"},
 	})

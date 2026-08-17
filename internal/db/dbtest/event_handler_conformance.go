@@ -34,7 +34,7 @@ type BlueprintSeeder func(t *testing.T, slugs ...string) map[string]string
 //     resolving each trigger's blueprint slug through the seeded map;
 //     re-seed is idempotent (ON CONFLICT on (org_id, team_id, system_slug)).
 //   - Create rejects mis-shaped writes per kind (rule with blueprint_id,
-//     trigger missing blueprint_id, etc.) — validateForCreate catches
+//     trigger missing blueprint_id, etc.) — ValidateEventHandlerForCreate catches
 //     before the CHECK constraint does.
 //   - List with kind filter returns only matching rows; kind="" returns
 //     both.
@@ -318,7 +318,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 
 	t.Run("Create_RejectsTriggerWithName", func(t *testing.T) {
 		// Defense-in-depth: the per-kind CHECK constraint forbids
-		// kind='trigger' with a non-NULL name. validateForCreate
+		// kind='trigger' with a non-NULL name. ValidateEventHandlerForCreate
 		// rejects the same shape earlier so the user gets a clearer
 		// error than the SQL integrity-violation surface.
 		store, orgID, teamID, seedBlueprints := factory(t)

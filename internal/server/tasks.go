@@ -47,7 +47,7 @@ type taskJSON struct {
 	// transition wakes the task atomically (clears snooze_until +
 	// flips status='snoozed' → 'queued'), so claimed cards on the
 	// Board never carry a snooze. The Cards triage view renders
-	// future-snoozed entries hidden via the QueuedTasks filter;
+	// future-snoozed entries hidden via the TaskListFilter status filter;
 	// the Board's Queue lane could optionally render them at the
 	// tail with a "wakes Mar 5" badge (deferred UI follow-up).
 	SnoozeUntil string `json:"snooze_until,omitempty"`

@@ -19,7 +19,7 @@ import (
 // team). Restore flips the tombstone back but deliberately does NOT resurrect
 // the runs / curator sessions that archive force-stopped.
 
-// teamArchiveCountsJSON is the shared count shape: the preview reports the work
+// teamArchivePreviewJSON is the shared count shape: the preview reports the work
 // an archive WOULD stop; the archive response reports what it DID stop. Field
 // names differ between the two responses (active_* vs cancelled_*) so the two
 // shapes below embed concrete fields rather than this struct.
