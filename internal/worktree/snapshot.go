@@ -224,6 +224,103 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 	return os.ReadFile(name)
 }
 
+// changeScopedPathspecLimit caps how many changed paths the scoped stage in
+// captureUncommitted will name before falling back to the full `add -A`.
+// Pathspec matching is a per-index-entry scan over the pathspec set, so a
+// change set in the thousands against a large index turns the scoped stage
+// quadratic — and a tree where thousands of paths changed is one where the
+// full re-hash was never the wasteful part. A var, not a const, so the
+// fallback arm is testable without minting a thousand files.
+var changeScopedPathspecLimit = 1000
+
+// changedPathsVsHEAD is the read-only pre-pass that makes captureUncommitted
+// change-scoped: `git status` against the worktree's REAL index, whose stat
+// cache answers "what differs?" from lstat alone — the throwaway index below
+// has no stat cache, so staging through it re-reads and re-hashes every file
+// in the tree, a fixed O(tree) cost per park even when nothing changed.
+//
+// Returns the union of paths from both status columns (index-vs-HEAD and
+// worktree-vs-index, both sides of a rename record, untracked entries). That
+// union is a superset of every path where the worktree differs from HEAD:
+// worktree≠HEAD implies worktree≠index or index≠HEAD, so a path in neither
+// column cannot contribute to the patch. Staging only these paths into the
+// HEAD-seeded temp index therefore yields the same diff the full stage
+// would.
+//
+// ok=false means the pre-pass is unusable — status failed, produced a record
+// this parser does not recognize, or the change set is past
+// changeScopedPathspecLimit — and the caller takes the full `add -A` path,
+// which remains the semantics of record. ok=true with no paths means the
+// tree matches HEAD exactly: nothing uncommitted to capture.
+//
+// Two flags keep the read honest. --no-optional-locks stops status from
+// opportunistically refreshing the real index, so the agent's staging (which
+// a warm resume reads back) is untouched even at the stat-cache level. An
+// explicit --untracked-files=normal overrides any status.showUntrackedFiles
+// config in the run root — the repo's (or agent's) display preference must
+// not hide untracked files from the capture.
+func changedPathsVsHEAD(ctx context.Context, wtPath string) (paths []string, ok bool) {
+	out, err := gitCapture(ctx, wtPath, nil, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=normal")
+	if err != nil {
+		return nil, false
+	}
+	tokens := strings.Split(string(out), "\x00")
+	for i := 0; i < len(tokens); i++ {
+		tok := tokens[i]
+		if tok == "" {
+			continue // the trailing terminator
+		}
+		if len(tok) < 4 || tok[2] != ' ' {
+			// Not a record this parser recognizes — refuse to guess what a
+			// future porcelain emits and take the full path instead.
+			return nil, false
+		}
+		xy := tok[:2]
+		paths = append(paths, tok[3:])
+		// A rename/copy record carries its second pathname as the following
+		// token. Both sides belong in the set (one holds the content, the
+		// other the deletion), which also makes the parse indifferent to
+		// which of the two git printed first.
+		if strings.ContainsAny(xy, "RC") && i+1 < len(tokens) {
+			i++
+			if other := tokens[i]; other != "" {
+				paths = append(paths, other)
+			}
+		}
+		if len(paths) > changeScopedPathspecLimit {
+			return nil, false
+		}
+	}
+	return paths, true
+}
+
+// stageChangedPaths stages the pre-pass's changed paths into the temp index.
+// The pathspecs travel by file, NUL-separated — never argv, so the set can't
+// hit a command-length limit and a path is arbitrary bytes — and under
+// --literal-pathspecs, because these are filenames, not patterns: a name
+// containing a glob metacharacter must match itself, and must not be
+// re-interpreted into a wildcard that could explicitly name an ignored file
+// (which `git add` refuses outright, where recursing past one is silent).
+func stageChangedPaths(ctx context.Context, wtPath string, env []string, paths []string) error {
+	f, err := os.CreateTemp("", "tf-pathspec-*")
+	if err != nil {
+		return fmt.Errorf("pathspec tempfile: %w", err)
+	}
+	name := f.Name()
+	defer func() { _ = os.Remove(name) }()
+	for _, p := range paths {
+		if _, err := f.WriteString(p + "\x00"); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("write pathspec: %w", err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("flush pathspec: %w", err)
+	}
+	_, err = gitCapture(ctx, wtPath, env, "--literal-pathspecs", "add", "-A", "--pathspec-from-file="+name, "--pathspec-file-nul")
+	return err
+}
+
 // captureUncommitted produces one binary patch of every uncommitted change in
 // wtPath via a throwaway index seeded from HEAD: stage everything (add -A
 // records modifications, deletions, and untracked additions alike), drop the
@@ -231,6 +328,13 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 // GIT_INDEX_FILE keeps the worktree's real index untouched so a warm-path
 // resume still sees the agent's staging exactly as it left it. Returns
 // (nil, nil) for a clean tree.
+//
+// The stage is change-scoped when changedPathsVsHEAD can say what changed: a
+// clean tree skips the temp index entirely (the common idle-park case), and a
+// dirty one stages only the changed paths, so the capture's cost follows the
+// size of the delta rather than the size of the repository. The full `add -A`
+// survives as the fallback and the semantics of record — the scoped stage
+// must produce a byte-identical patch or not run at all.
 //
 // _tfac is removed from the staged set explicitly rather than left to the
 // worktree's excludes: snapshot owns the _tfac capture separately (skipping
@@ -250,6 +354,13 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 // either way, but carries them so no diff here reads as license for a flag-less
 // one.
 func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
+	changed, scoped := changedPathsVsHEAD(ctx, wtPath)
+	if scoped && len(changed) == 0 {
+		// The real index's stat cache says the tree matches HEAD exactly —
+		// nothing uncommitted to carry, and no temp index to build.
+		return nil, nil
+	}
+
 	idx, err := os.CreateTemp("", "tf-index-*")
 	if err != nil {
 		return nil, fmt.Errorf("temp index: %w", err)
@@ -265,8 +376,25 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 	if _, err := gitCapture(ctx, wtPath, env, "read-tree", "HEAD"); err != nil {
 		return nil, fmt.Errorf("seed temp index: %w", err)
 	}
-	if _, err := gitCapture(ctx, wtPath, env, "add", "-A"); err != nil {
-		return nil, fmt.Errorf("stage worktree: %w", err)
+	if scoped {
+		// A scoped stage can fail legitimately: a pathspec can match nothing
+		// in the temp-index world — a file staged in the REAL index and then
+		// deleted from the worktree exists in neither HEAD nor the tree — and
+		// `git add` treats an unmatched pathspec as fatal. Any failure here
+		// demotes to the full stage rather than failing the capture, after
+		// re-seeding the index: the failed add may have staged part of the
+		// set before it stopped.
+		if sErr := stageChangedPaths(ctx, wtPath, env, changed); sErr != nil {
+			scoped = false
+			if _, err := gitCapture(ctx, wtPath, env, "read-tree", "HEAD"); err != nil {
+				return nil, fmt.Errorf("re-seed temp index: %w", err)
+			}
+		}
+	}
+	if !scoped {
+		if _, err := gitCapture(ctx, wtPath, env, "add", "-A"); err != nil {
+			return nil, fmt.Errorf("stage worktree: %w", err)
+		}
 	}
 	// `reset` rather than `rm --cached`, for the reason spelled out at the
 	// `.claude/skills` drop below: reset restores HEAD's entry for the path, so a
@@ -521,12 +649,14 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 // gitOutputCtx, which combines the two. env, when non-nil, replaces the
 // child's environment (used to point GIT_INDEX_FILE at a throwaway index).
 //
-// captureUncommitted's `git add -A` / `git diff` go through here. Unlike the
-// push-gate's metadata reads (a byte read of HEAD, and config read from OUTSIDE
-// any repository — neither of which lets an agent-writable config run
-// anything), add/diff DO consult the repository's own (agent-writable, once
-// chowned to the sandbox uid) `.gitattributes` + `.git/config` to decide
-// whether to invoke an external clean/smudge filter or diff driver.
+// captureUncommitted's `git status` / `git add -A` / `git diff` go through
+// here. Unlike the push-gate's metadata reads (a byte read of HEAD, and config
+// read from OUTSIDE any repository — neither of which lets an agent-writable
+// config run anything), status/add/diff DO consult the repository's own
+// (agent-writable, once chowned to the sandbox uid) `.gitattributes` +
+// `.git/config` to decide whether to invoke an external clean/smudge filter
+// or diff driver (status runs clean filters when a racy-stat file forces a
+// content compare).
 //
 // In multi mode this no longer runs as host root: captureWorkspaceGit's
 // dispatcher (internal/delegate/capture_isolated.go) routes every multi-mode
