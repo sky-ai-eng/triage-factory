@@ -9,12 +9,12 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/convident"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/gh"
 	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/memory"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
-	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/workspace"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -45,11 +45,11 @@ func Handle(args []string) {
 	dispatch(args, func() agenthost.Client {
 		client, derr := agenthost.NewLocalFromEnv(context.Background(), stores)
 		if derr != nil {
-			// runident-derived errors (env unset, unknown run) are already
+			// convident-derived errors (env unset, unknown run) are already
 			// written for the reader; they get a clean stderr message rather
 			// than the wrapping the constructor would otherwise apply.
-			if errors.Is(derr, runident.ErrRunIdentityMissing) ||
-				errors.Is(derr, runident.ErrRunIdentityNotFound) {
+			if errors.Is(derr, convident.ErrConversationIdentityMissing) ||
+				errors.Is(derr, convident.ErrConversationIdentityNotFound) {
 				fmt.Fprintln(os.Stderr, derr.Error())
 			} else {
 				fmt.Fprintf(os.Stderr, "agenthost: %v\n", derr)

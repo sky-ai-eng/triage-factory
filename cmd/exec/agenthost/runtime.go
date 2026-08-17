@@ -145,26 +145,26 @@ type ExtensionRuntime interface {
 // relayRuntime (producer) and the orchestrator's RelayServer (consumer) live
 // in this package, so these are package-local.
 const (
-	opGetConversation         = "get_conversation"
-	opGetTask                 = "get_task"
-	opListRepos               = "list_repos"
-	opGetRepo                 = "get_repo"
-	opTeamTracksRepo          = "team_tracks_repo"
-	opGetRunWorktreeByRepoRef = "get_run_worktree_by_repo_ref"
-	opListRunWorktrees        = "list_conversation_worktrees"
-	opInsertRunWorktree       = "insert_run_worktree"
-	opDeleteRunWorktree       = "delete_run_worktree"
-	opListRunArtifacts        = "list_run_artifacts"
-	opOrgJiraBase             = "org_jira_base"
-	opBuildAgentFooter        = "build_agent_run_footer"
-	opUpsertArtifact          = "upsert_artifact"
-	opUpdateReviewDetails     = "update_review_details_if_pending"
-	opTransitionReviewState   = "transition_review_state"
-	opRecordExternalWrite     = "record_external_write"
-	opRecordReadTouch         = "record_read_touch"
-	opMemoryLoad              = "memory_load"
-	opCheckEntitlement        = "check_entitlement"
-	opReviewPosture           = "review_posture"
+	opGetConversation           = "get_conversation"
+	opGetTask                   = "get_task"
+	opListRepos                 = "list_repos"
+	opGetRepo                   = "get_repo"
+	opTeamTracksRepo            = "team_tracks_repo"
+	opGetRunWorktreeByRepoRef   = "get_run_worktree_by_repo_ref"
+	opListConversationWorktrees = "list_conversation_worktrees"
+	opInsertRunWorktree         = "insert_run_worktree"
+	opDeleteRunWorktree         = "delete_run_worktree"
+	opListRunArtifacts          = "list_run_artifacts"
+	opOrgJiraBase               = "org_jira_base"
+	opBuildAgentFooter          = "build_agent_run_footer"
+	opUpsertArtifact            = "upsert_artifact"
+	opUpdateReviewDetails       = "update_review_details_if_pending"
+	opTransitionReviewState     = "transition_review_state"
+	opRecordExternalWrite       = "record_external_write"
+	opRecordReadTouch           = "record_read_touch"
+	opMemoryLoad                = "memory_load"
+	opCheckEntitlement          = "check_entitlement"
+	opReviewPosture             = "review_posture"
 	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
 	// the other core ops it is FS-bearing: the sidecar relays it because it owns
 	// neither the shared bare cache nor the run-root; the orchestrator serves it.
@@ -674,7 +674,7 @@ func (r *relayRuntime) GetConversationWorktreeByRepoRef(ctx context.Context, rep
 
 func (r *relayRuntime) ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error) {
 	var res conversationWorktreesResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opListRunWorktrees, emptyArgs{}, &res); err != nil {
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opListConversationWorktrees, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}
 	return res.Worktrees, nil

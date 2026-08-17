@@ -63,7 +63,7 @@ func runCheckPush(host agenthost.Client, stores db.Stores, args []string, refsIn
 	}
 	repoRef := domain.RepoRef{Owner: owner, Repo: repo}
 
-	info, err := host.LookupRun(ctx)
+	info, err := host.LookupConversation(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hook check-push: no run context (%v); allowing push\n", err)
 		return 0

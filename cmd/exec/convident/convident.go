@@ -1,7 +1,9 @@
-// Package runident holds the shared run-identity helper used at the
-// entry point of every `triagefactory exec ...` subcommand to resolve
-// the (orgID, userID, conversationID) triple from the TRIAGE_FACTORY_CONVERSATION_ID
-// env var the delegate spawner sets.
+// Package convident (conversation identity) holds the shared identity
+// helper used at the entry point of every `triagefactory exec ...`
+// subcommand to resolve the (orgID, userID, conversationID) triple from
+// the TRIAGE_FACTORY_CONVERSATION_ID env var the delegate spawner sets.
+// Every field it returns is read off the conversations row that env var
+// names, which is what the package and its type are named for.
 //
 // Lives in its own package (not in cmd/exec) so subcommand packages —
 // chain, gh, workspace — can import the helper without forming an
@@ -18,7 +20,7 @@
 // calling here directly. It is host-side only: the jailed CLI never
 // resolves identity itself — it talks to a host daemon over IPC
 // (agenthost.IPCClient), which owns identity and the DB.
-package runident
+package convident
 
 import (
 	"context"
@@ -30,30 +32,30 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// RunIdentityEnvVar is the env var name the delegate spawner sets on
+// ConversationIDEnvVar is the env var name the delegate spawner sets on
 // the agent subprocess and `triagefactory exec ...` reads at startup.
 // Hardcoded to match internal/delegate/run.go's runAgent, which
 // handles the spawner-side injection.
-const RunIdentityEnvVar = "TRIAGE_FACTORY_CONVERSATION_ID"
+const ConversationIDEnvVar = "TRIAGE_FACTORY_CONVERSATION_ID"
 
-// ErrRunIdentityMissing is returned by ResolveRunIdentity when the
+// ErrConversationIdentityMissing is returned by ResolveConversationIdentity when the
 // TRIAGE_FACTORY_CONVERSATION_ID env var is unset. Surfaces as a clear
 // "spawner bug" message — an agent invoking these commands without
 // the env var present means the spawner failed to inject it.
-var ErrRunIdentityMissing = errors.New("TRIAGE_FACTORY_CONVERSATION_ID not set; this command must be invoked by the delegated agent spawner")
+var ErrConversationIdentityMissing = errors.New("TRIAGE_FACTORY_CONVERSATION_ID not set; this command must be invoked by the delegated agent spawner")
 
-// ErrRunIdentityNotFound is returned by ResolveRunIdentity when the
+// ErrConversationIdentityNotFound is returned by ResolveConversationIdentity when the
 // supplied conversationID doesn't match a row in the conversations table. Surfaces
 // as a clear "stale env var / spawner bug" message in subcommand
 // stderr. Subcommands errors.Is against this sentinel when they want
 // to remap to their own package-level "not found" sentinels.
-var ErrRunIdentityNotFound = errors.New("TRIAGE_FACTORY_CONVERSATION_ID points at a run that does not exist; check spawner injection")
+var ErrConversationIdentityNotFound = errors.New("TRIAGE_FACTORY_CONVERSATION_ID points at a run that does not exist; check spawner injection")
 
-// RunIdentity is the resolved (orgID, userID, conversationID) triple for a
-// cmd/exec subcommand invocation. Returned by ResolveRunIdentity at
+// ConversationIdentity is the resolved (orgID, userID, conversationID) triple for a
+// cmd/exec subcommand invocation. Returned by ResolveConversationIdentity at
 // every subcommand's entry point so the body can branch on
 // IsEventTriggered to pick its store-routing strategy.
-type RunIdentity struct {
+type ConversationIdentity struct {
 	// OrgID is the run's owning org, read from the conversations row
 	// keyed by TRIAGE_FACTORY_CONVERSATION_ID. In local mode this collapses
 	// to runmode.LocalDefaultOrgID (the single seeded tenant); in
@@ -89,18 +91,18 @@ type RunIdentity struct {
 	IsEventTriggered bool
 }
 
-// ResolveRunIdentityFromEnv is the CLI entry-point helper that reads
+// ResolveConversationIdentityFromEnv is the CLI entry-point helper that reads
 // TRIAGE_FACTORY_CONVERSATION_ID from the process env and delegates to
-// ResolveRunIdentity. Subcommands' top-level functions use this; the
+// ResolveConversationIdentity. Subcommands' top-level functions use this; the
 // lower-level orchestration body of each subcommand takes the conversationID
 // as a parameter so tests can drive routing without poking at env.
-func ResolveRunIdentityFromEnv(ctx context.Context, stores db.Stores) (RunIdentity, error) {
-	return ResolveRunIdentity(ctx, stores, os.Getenv(RunIdentityEnvVar))
+func ResolveConversationIdentityFromEnv(ctx context.Context, stores db.Stores) (ConversationIdentity, error) {
+	return ResolveConversationIdentity(ctx, stores, os.Getenv(ConversationIDEnvVar))
 }
 
-// ResolveRunIdentity looks up the run via the admin pool (we don't
+// ResolveConversationIdentity looks up the run via the admin pool (we don't
 // have user claims yet) and returns the routing-relevant identity
-// fields. Empty conversationID surfaces as ErrRunIdentityMissing — callers
+// fields. Empty conversationID surfaces as ErrConversationIdentityMissing — callers
 // reading from env should validate up front and not pass "".
 //
 // Two admin-pool reads: first resolve the run's owning org by
@@ -109,25 +111,25 @@ func ResolveRunIdentityFromEnv(ctx context.Context, stores db.Stores) (RunIdenti
 // that org. Both reads bypass RLS because the subprocess hasn't
 // entered a claims-bound tx — we don't know who to claim AS until
 // after the lookup tells us run.CreatorUserID.
-func ResolveRunIdentity(ctx context.Context, stores db.Stores, conversationID string) (RunIdentity, error) {
+func ResolveConversationIdentity(ctx context.Context, stores db.Stores, conversationID string) (ConversationIdentity, error) {
 	if conversationID == "" {
-		return RunIdentity{}, ErrRunIdentityMissing
+		return ConversationIdentity{}, ErrConversationIdentityMissing
 	}
 	orgID, err := stores.Conversations.LookupOrgForConversationSystem(ctx, conversationID)
 	if err != nil {
-		return RunIdentity{}, fmt.Errorf("lookup org for run %s: %w", conversationID, err)
+		return ConversationIdentity{}, fmt.Errorf("lookup org for run %s: %w", conversationID, err)
 	}
 	if orgID == "" {
-		return RunIdentity{}, fmt.Errorf("%w: %s", ErrRunIdentityNotFound, conversationID)
+		return ConversationIdentity{}, fmt.Errorf("%w: %s", ErrConversationIdentityNotFound, conversationID)
 	}
 	run, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
-		return RunIdentity{}, fmt.Errorf("lookup run %s: %w", conversationID, err)
+		return ConversationIdentity{}, fmt.Errorf("lookup run %s: %w", conversationID, err)
 	}
 	if run == nil {
-		return RunIdentity{}, fmt.Errorf("%w: %s", ErrRunIdentityNotFound, conversationID)
+		return ConversationIdentity{}, fmt.Errorf("%w: %s", ErrConversationIdentityNotFound, conversationID)
 	}
-	return RunIdentity{
+	return ConversationIdentity{
 		OrgID:            orgID,
 		UserID:           run.CreatorUserID,
 		ConversationID:   conversationID,

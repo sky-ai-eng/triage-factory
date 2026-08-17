@@ -521,7 +521,7 @@ func (e *configureProxyError) Error() string { return e.msg }
 // it into the sandbox at /usr/local/bin/triagefactory, starts a
 // listener on a temp socket the sandbox can reach via bind mount at
 // /run/tf.sock, and exec's the stub. The stub dials /run/tf.sock,
-// sends a LookupRun probe RPC, and prints the result on stdout. The
+// sends a LookupConversation probe RPC, and prints the result on stdout. The
 // test asserts the round-trip succeeded and the response carries the
 // run id the host registered.
 //
@@ -575,7 +575,7 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 	}
 
 	// Minimal echo daemon: accept one connection, read one frame,
-	// send back a synthetic LookupRun result. We don't want to drag
+	// send back a synthetic LookupConversation result. We don't want to drag
 	// the full agenthost.Server (and its db.Stores dep) into the
 	// sandbox-package test — the IPC pipe round-trip is what we're
 	// proving, and the frame format is identical to what the real
@@ -608,7 +608,7 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 		}
 		var r req
 		_ = json.Unmarshal(body, &r)
-		// Echo back a LookupRun-shaped response with our sentinel run id.
+		// Echo back a LookupConversation-shaped response with our sentinel run id.
 		result := []byte(`{"info":{"org_id":"00000000-0000-0000-0000-000000000001","user_id":"","run_id":"` + sentinelConversationID + `","is_event_triggered":false}}`)
 		respBody, _ := json.Marshal(resp{R: result})
 		var outHeader [4]byte

@@ -30,7 +30,7 @@ func (fuzzRelayConn) call(_ context.Context, namespace, op string, _, out any) e
 	switch op {
 	case opTeamTracksRepo:
 		return fuzzRelayResult(out, teamTracksRepoResult{Tracks: true})
-	case opListRunWorktrees:
+	case opListConversationWorktrees:
 		return fuzzRelayResult(out, conversationWorktreesResult{Worktrees: []domain.ConversationWorktree{
 			{ConversationID: "run-fuzz", RepoID: "o/r", Ref: "refs/heads/topic", Path: "/work/o-r"},
 		}})

@@ -82,7 +82,7 @@ func TestFrontendMirrorsAllFeatures(t *testing.T) {
 }
 
 // TestFrontendMirrorsRunStatusVocabulary asserts that the frontend's copy of
-// the conversation status vocabulary matches internal/domain/run_status.go
+// the conversation status vocabulary matches internal/domain/conversation_status.go
 // EXACTLY, in both directions.
 //
 // The mirror is hand-maintained by choice — codegen buys a build step and a
@@ -109,7 +109,7 @@ func TestFrontendMirrorsRunStatusVocabulary(t *testing.T) {
 	compare := func(decl string, want []string) {
 		got, _ := tsArrayDecl(t, content, decl)
 		if diff := vocabularyDiff(want, got); diff != "" {
-			t.Errorf("frontend %s has drifted from internal/domain/run_status.go:\n%s", decl, diff)
+			t.Errorf("frontend %s has drifted from internal/domain/conversation_status.go:\n%s", decl, diff)
 		}
 	}
 	compare("CLAIM_PHASES", domain.AllClaimPhases())
@@ -159,7 +159,7 @@ func TestFrontendMirrorsParkReasonVocabulary(t *testing.T) {
 		want = append(want, string(r))
 	}
 	if diff := vocabularyDiff(want, got); diff != "" {
-		t.Errorf("frontend PARK_REASON_LABELS has drifted from internal/domain/run_status.go:\n%s", diff)
+		t.Errorf("frontend PARK_REASON_LABELS has drifted from internal/domain/conversation_status.go:\n%s", diff)
 	}
 }
 

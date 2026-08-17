@@ -99,9 +99,9 @@ func TestNewLocalFromEnv(t *testing.T) {
 	if _, ok := c.(*LocalClient); !ok {
 		t.Fatalf("got %T, want *LocalClient", c)
 	}
-	got, err := c.LookupRun(context.Background())
+	got, err := c.LookupConversation(context.Background())
 	if err != nil {
-		t.Fatalf("LookupRun: %v", err)
+		t.Fatalf("LookupConversation: %v", err)
 	}
 	if got.ConversationID != "run-local-env" {
 		t.Errorf("ConversationID: got %q, want run-local-env", got.ConversationID)

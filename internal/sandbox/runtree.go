@@ -7,7 +7,7 @@ import (
 )
 
 // runTreeBasename is the directory ephemeral per-run worktrees live under
-// inside os.TempDir(): os.TempDir()/triagefactory-runs/<conversationID>. This is the
+// inside os.TempDir(): os.TempDir()/triagefactory-runs/<rootKey>. This is the
 // GitHub-PR / Jira / Slack task-run shape of Config.Worktree — org-blind by
 // construction, since these trees don't outlive their own run.
 // internal/worktree is the historical owner of this path (its

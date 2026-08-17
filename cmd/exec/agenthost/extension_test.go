@@ -147,7 +147,7 @@ func TestLocalClient_CallExtension_Entitled_InvokesHandlerWithRunInfo(t *testing
 }
 
 // startExtensionTestDaemon spins up a real Server + unix listener for info,
-// mirroring the harness in agenthost_test.go (TestServer_LookupRun_RoundTrip
+// mirroring the harness in agenthost_test.go (TestServer_LookupConversation_RoundTrip
 // et al.). Returns a connected IPCClient; cleanup is registered via t.Cleanup.
 func startExtensionTestDaemon(t *testing.T, info ConversationInfo) *IPCClient {
 	t.Helper()

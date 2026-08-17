@@ -60,7 +60,7 @@ const DefaultSocketPath = "/run/tf.sock"
 // silently misbehaving.
 const ProtocolVersion = 1
 
-// ConversationInfo is what LookupRun returns. Carries the routing-relevant
+// ConversationInfo is what LookupConversation returns. Carries the routing-relevant
 // fields a subcommand needs to know about its own run — orgID for
 // every per-row read, userID for the synthetic-claims tx path, ConversationID
 // for the foreign-key columns on writes, TeamID for the artifact
@@ -74,11 +74,11 @@ const ProtocolVersion = 1
 // artifacts.team_id off it (NOT NULL per TFAC-455 F1), so it must be
 // populated on every construction path: the spawner reads it off the run
 // row (no task hop), and the local resolver carries it from
-// RunIdentity. Empty only on synthetic RunInfos that don't back a real
+// ConversationIdentity. Empty only on synthetic RunInfos that don't back a real
 // run (test seams).
 //
-// Mirrors runident.RunIdentity but lives in this package so the IPC
-// wire shape doesn't depend on runident's import graph (runident
+// Mirrors convident.ConversationIdentity but lives in this package so the IPC
+// wire shape doesn't depend on convident's import graph (convident
 // imports db, which we don't want every IPC consumer dragging in).
 type ConversationInfo struct {
 	OrgID            string `json:"org_id"`
@@ -187,12 +187,12 @@ type MemoryLoadEntry struct {
 // across both implementations and avoids the trap of "works in local,
 // dies in sandbox."
 type Client interface {
-	// LookupRun returns the run identity the client is acting on
+	// LookupConversation returns the run identity the client is acting on
 	// behalf of. The daemon resolves identity from the socket's per-
 	// run map; LocalClient resolves from TRIAGE_FACTORY_CONVERSATION_ID at
 	// construction time. Idempotent and cheap — the LocalClient
 	// returns its cached value, the IPCClient does one round-trip.
-	LookupRun(ctx context.Context) (ConversationInfo, error)
+	LookupConversation(ctx context.Context) (ConversationInfo, error)
 
 	// --- review draft finalization (gh pr finalize-review) ---
 	//

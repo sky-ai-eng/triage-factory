@@ -96,7 +96,7 @@ func TestLaunchSidecarProcess_DropsToRequestedUID(t *testing.T) {
 }
 
 // TestLaunchSidecarProcess_KillTerminatesAndWaitReturns pins the
-// Kill/Wait lifecycle the broker's conversationEntry machinery drives generically
+// Kill/Wait lifecycle the broker's runEntry machinery drives generically
 // (the same shape a runsc SupervisedRuntime satisfies): Kill SIGKILLs a
 // still-running sidecar and Wait then returns promptly with a non-nil exit
 // error. Root-gated like the uid-drop test above: even a same-uid

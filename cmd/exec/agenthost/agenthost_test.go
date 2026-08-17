@@ -167,9 +167,9 @@ func TestIPCClient_MultiCall_PerCallDial(t *testing.T) {
 	defer client.Close()
 
 	for i := 0; i < 3; i++ {
-		got, err := client.LookupRun(context.Background())
+		got, err := client.LookupConversation(context.Background())
 		if err != nil {
-			t.Fatalf("LookupRun call %d: %v", i, err)
+			t.Fatalf("LookupConversation call %d: %v", i, err)
 		}
 		if !reflect.DeepEqual(got, info) {
 			t.Errorf("call %d: identity mismatch: got %+v, want %+v", i, got, info)
@@ -177,14 +177,14 @@ func TestIPCClient_MultiCall_PerCallDial(t *testing.T) {
 	}
 }
 
-// TestServer_LookupRun_RoundTrip exercises the full
-// Server.Serve → IPCClient.LookupRun loop over a real (temporary)
+// TestServer_LookupConversation_RoundTrip exercises the full
+// Server.Serve → IPCClient.LookupConversation loop over a real (temporary)
 // unix socket. The probe RPC matches what the integration test +
 // the test stub send. info carries a non-empty TeamID so the assertion
 // pins the multi-mode construction path (TFAC-458): the ConversationInfo the
 // spawner builds off the run row — TeamID included — survives the IPC
 // wire intact to the sandboxed agent, where the capture writers read it.
-func TestServer_LookupRun_RoundTrip(t *testing.T) {
+func TestServer_LookupConversation_RoundTrip(t *testing.T) {
 	stores, _ := newTestDB(t)
 	info := ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
@@ -208,12 +208,12 @@ func TestServer_LookupRun_RoundTrip(t *testing.T) {
 	client := Dial(sockPath)
 	defer client.Close()
 
-	got, err := client.LookupRun(context.Background())
+	got, err := client.LookupConversation(context.Background())
 	if err != nil {
-		t.Fatalf("LookupRun: %v", err)
+		t.Fatalf("LookupConversation: %v", err)
 	}
 	if !reflect.DeepEqual(got, info) {
-		t.Errorf("LookupRun mismatch: got %+v, want %+v", got, info)
+		t.Errorf("LookupConversation mismatch: got %+v, want %+v", got, info)
 	}
 	if got.TeamID != info.TeamID {
 		t.Errorf("TeamID dropped over IPC: got %q, want %q", got.TeamID, info.TeamID)
@@ -246,7 +246,7 @@ func TestServer_VersionMismatch_RejectsCleanly(t *testing.T) {
 	defer conn.Close()
 
 	// Send a frame claiming version 999.
-	bogus := request{Version: 999, Method: "LookupRun", Args: json.RawMessage("{}")}
+	bogus := request{Version: 999, Method: "LookupConversation", Args: json.RawMessage("{}")}
 	if err := writeFrame(conn, bogus); err != nil {
 		t.Fatalf("writeFrame: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestServer_LegacyMethodNames_StillAnswered(t *testing.T) {
 
 // TestServer_ConcurrentSockets_NoCrossContamination pins the
 // per-run identity isolation: two daemons serving two different
-// RunInfos, two clients connecting in parallel — LookupRun on
+// RunInfos, two clients connecting in parallel — LookupConversation on
 // client A returns A's identity, not B's. The test simulates two
 // sandboxed runs operating in parallel.
 func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
@@ -383,9 +383,9 @@ func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 		defer wg.Done()
 		c := Dial(path)
 		defer c.Close()
-		got, err := c.LookupRun(context.Background())
+		got, err := c.LookupConversation(context.Background())
 		if err != nil {
-			t.Errorf("LookupRun(%s): %v", path, err)
+			t.Errorf("LookupConversation(%s): %v", path, err)
 			return
 		}
 		if !reflect.DeepEqual(got, want) {
@@ -486,8 +486,8 @@ func TestServer_GracefulShutdown_CompletesInFlight(t *testing.T) {
 	client := Dial(sockPath)
 	defer client.Close()
 	// Round-trip once to confirm baseline.
-	if _, err := client.LookupRun(context.Background()); err != nil {
-		t.Fatalf("baseline LookupRun: %v", err)
+	if _, err := client.LookupConversation(context.Background()); err != nil {
+		t.Fatalf("baseline LookupConversation: %v", err)
 	}
 
 	// Close listener; Shutdown should drain cleanly.

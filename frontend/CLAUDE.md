@@ -137,4 +137,4 @@ test file and registered in `eslint.config.js`:
   where it points; none exists today.
 - `run-status/no-ghost-run-status` — fails the lint when component code compares
   a conversation status against a name outside the vocabulary in `src/types.ts`
-  (mirrored from `internal/domain/run_status.go`).
+  (mirrored from `internal/domain/conversation_status.go`).

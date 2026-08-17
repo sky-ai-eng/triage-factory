@@ -189,7 +189,7 @@ const (
 // AllClaimPhases: SQL cannot import a Go const, so the dual-dialect
 // conformance suite derives its coverage from this set and a reason added
 // here but never taught to a store fails on both backends. The frontend
-// mirror is PARK_REASON_LABELS in frontend/src/lib/runStatus.ts, pinned by
+// mirror is PARK_REASON_LABELS in frontend/src/lib/conversationStatus.ts, pinned by
 // TestFrontendMirrorsParkReasonVocabulary — a park reason with no gloss is
 // printed to a human as a raw identifier, which is what this vocabulary
 // exists to stop.

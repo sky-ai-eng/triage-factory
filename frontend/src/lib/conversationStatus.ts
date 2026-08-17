@@ -2,7 +2,7 @@ import { CLAIM_PHASES, TERMINAL_RUN_STATUSES } from '../types'
 import type { ClaimPhase, Conversation, ConversationStatusValue, TerminalRunStatus } from '../types'
 
 // Every set here is derived from the vocabulary in types.ts, which is checked
-// against internal/domain/run_status.go by a Go test. Adding a claim phase in
+// against internal/domain/conversation_status.go by a Go test. Adding a claim phase in
 // one place therefore lands in every predicate below at once.
 
 // ACTIVE_STATUSES — the run is claimed and occupying an executor slot: setting
@@ -165,7 +165,7 @@ export function completionGloss(run: Conversation): string {
 // to say that.
 //
 // This is the frontend mirror of domain.AllParkReasons() (internal/domain/
-// run_status.go), hand-maintained under the same rule as the status arrays in
+// conversation_status.go), hand-maintained under the same rule as the status arrays in
 // types.ts and pinned in both directions by
 // TestFrontendMirrorsParkReasonVocabulary — a reason the backend can write with
 // no entry here is printed to a person as a raw identifier, and an entry the

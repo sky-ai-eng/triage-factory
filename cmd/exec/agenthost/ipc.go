@@ -164,7 +164,7 @@ func (c *IPCClient) callWithin(ctx context.Context, timeout time.Duration, metho
 
 // --- Client interface implementation ---
 
-func (c *IPCClient) LookupRun(ctx context.Context) (ConversationInfo, error) {
+func (c *IPCClient) LookupConversation(ctx context.Context) (ConversationInfo, error) {
 	var res lookupConversationResult
 	if err := c.call(ctx, methodLookupConversation, emptyArgs{}, &res); err != nil {
 		return ConversationInfo{}, err

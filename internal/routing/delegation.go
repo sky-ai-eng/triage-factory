@@ -528,7 +528,7 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 	// The handoff point, and the last thing this trace can see: what the
 	// spawner enqueues is claimed minutes later, by another process, and up
 	// to five times — so the engagement gets its own root and the
-	// conversation.id stamped below is what joins the two. A link would
+	// blueprint_run.id stamped below is what joins the two. A link would
 	// promise a 1:1 relationship that does not exist.
 	ctx, span := tracer.Start(ctx, "route.delegate", trace.WithAttributes(telemetry.TaskID(task.ID)))
 	defer span.End()

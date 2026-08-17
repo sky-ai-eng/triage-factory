@@ -606,7 +606,7 @@ type callExtensionResult struct {
 }
 
 // emptyArgs is the args type for methods that take no parameters
-// (LookupRun, GetConversation, ListConversationWorktrees, ListRepos). Using an empty
+// (LookupConversation, GetConversation, ListConversationWorktrees, ListRepos). Using an empty
 // struct rather than json.RawMessage(nil)
 // lets the daemon-side dispatch use the same json.Unmarshal call shape
 // for every method without a nil-check.

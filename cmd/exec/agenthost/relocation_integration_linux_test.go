@@ -21,7 +21,7 @@ import (
 // channel. A real IPCClient (the same client the jailed agent's `exec` verbs
 // use) then dials that socket and drives:
 //
-//  1. LookupRun — proves the relocated Server reports the run identity the
+//  1. LookupConversation — proves the relocated Server reports the run identity the
 //     orchestrator handed it (AgentHostInfo), served entirely in the sidecar
 //     half with no db.Stores.
 //  2. TeamTracksRepo — proves a DB-backed verb RELAYS across the supervision
@@ -93,13 +93,13 @@ func TestIntegration_RelocatedAgentHost_ExecVerbRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// (1) LookupRun — the relocated Server reports the run's own identity.
-	got, err := client.LookupRun(ctx)
+	// (1) LookupConversation — the relocated Server reports the run's own identity.
+	got, err := client.LookupConversation(ctx)
 	if err != nil {
-		t.Fatalf("LookupRun over the relocated socket: %v", err)
+		t.Fatalf("LookupConversation over the relocated socket: %v", err)
 	}
 	if got.ConversationID != info.ConversationID || got.OrgID != info.OrgID {
-		t.Fatalf("LookupRun = %+v, want run %s / org %s", got, info.ConversationID, info.OrgID)
+		t.Fatalf("LookupConversation = %+v, want run %s / org %s", got, info.ConversationID, info.OrgID)
 	}
 
 	// (2) TeamTracksRepo — a DB verb relays to the orchestrator's RelayServer and

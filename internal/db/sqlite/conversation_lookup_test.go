@@ -11,7 +11,7 @@ import (
 
 // TestConversationStore_SQLite_LookupOrgForRunSystem_ReturnsSentinelOrgID
 // pins the local-mode behavior of the cold-start identity probe used
-// by cmd/exec/runident — every locally-seeded run resolves back to
+// by cmd/exec/convident — every locally-seeded run resolves back to
 // the LocalDefaultOrgID sentinel.
 func TestConversationStore_SQLite_LookupOrgForRunSystem_ReturnsSentinelOrgID(t *testing.T) {
 	conn := newSQLiteForConversationTest(t)
@@ -37,8 +37,8 @@ func TestConversationStore_SQLite_LookupOrgForRunSystem_ReturnsSentinelOrgID(t *
 }
 
 // TestConversationStore_SQLite_LookupOrgForRunSystem_UnknownReturnsEmpty
-// — an unknown conversationID returns ("", nil). Callers (runident) map that
-// to ErrRunIdentityNotFound rather than a SQL error.
+// — an unknown conversationID returns ("", nil). Callers (convident) map that
+// to ErrConversationIdentityNotFound rather than a SQL error.
 func TestConversationStore_SQLite_LookupOrgForRunSystem_UnknownReturnsEmpty(t *testing.T) {
 	conn := newSQLiteForConversationTest(t)
 	stores := sqlitestore.New(conn)

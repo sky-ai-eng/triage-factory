@@ -213,7 +213,7 @@ func TestLocalClient_MemoryLoad_NonPositiveLimit_DefaultsBounded(t *testing.T) {
 
 // TestServer_MemoryLoad_RoundTrip exercises the full Server.Serve →
 // IPCClient.MemoryLoad loop over a real unix socket (mirrors
-// TestServer_LookupRun_RoundTrip): the composed result survives the wire intact.
+// TestServer_LookupConversation_RoundTrip): the composed result survives the wire intact.
 func TestServer_MemoryLoad_RoundTrip(t *testing.T) {
 	stores, conn := newTestDB(t)
 	orgID := runmode.LocalDefaultOrgID

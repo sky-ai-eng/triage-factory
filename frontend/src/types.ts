@@ -100,7 +100,7 @@ export interface TeamBot {
 // spells a status name as a bare literal in a list.
 //
 // How this stays in sync with Go: by hand, plus a test. The names are owned by
-// internal/domain/run_status.go, and TestFrontendMirrorsRunStatusVocabulary
+// internal/domain/conversation_status.go, and TestFrontendMirrorsRunStatusVocabulary
 // (feature_parity_test.go) parses the arrays below and fails when the two sets
 // diverge in EITHER direction — a phase added in Go and not here, or a name
 // here that Go never emits. Codegen was considered and rejected: it buys a

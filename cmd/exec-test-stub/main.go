@@ -14,7 +14,7 @@
 // What it does:
 //  1. Connects to /run/tf.sock (the canonical in-sandbox bind-mount
 //     destination, matching agenthost.DefaultSocketPath).
-//  2. Sends a single LookupRun RPC using the exact wire format
+//  2. Sends a single LookupConversation RPC using the exact wire format
 //     cmd/exec/agenthost's IPCClient emits.
 //  3. Prints the response as a JSON line on stdout and exits 0 on
 //     success, non-zero with a stderr message on any failure.
@@ -37,7 +37,7 @@ import (
 const (
 	socketPath      = "/run/tf.sock"
 	protocolVersion = 1
-	method          = "LookupRun"
+	method          = "LookupConversation"
 	dialTimeout     = 5 * time.Second
 	rpcTimeout      = 10 * time.Second
 )

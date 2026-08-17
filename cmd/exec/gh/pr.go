@@ -28,11 +28,11 @@ import (
 //
 // On the host CLI this resolves identity from TRIAGE_FACTORY_CONVERSATION_ID at
 // client-construction time; in the sandbox the daemon's per-socket map
-// determines identity and LookupRun just round-trips. Either way the
+// determines identity and LookupConversation just round-trips. Either way the
 // subcommand body reads the routing-relevant fields from a single
 // in-process value.
 func lookupRun(host agenthost.Client) agenthost.ConversationInfo {
-	info, err := host.LookupRun(context.Background())
+	info, err := host.LookupConversation(context.Background())
 	if err != nil {
 		exitErr(err.Error())
 	}

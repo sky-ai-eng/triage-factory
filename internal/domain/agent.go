@@ -201,7 +201,7 @@ type Conversation struct {
 	PromptID string // FK to prompts.id — which prompt was used for this run
 	// Status is the DISPLAYED lifecycle: the stored column with the live
 	// claim's phase coalesced over it, so a hydrated DTO may carry a phase
-	// name here. The vocabulary and its classifiers live in run_status.go;
+	// name here. The vocabulary and its classifiers live in conversation_status.go;
 	// don't restate the names anywhere else. Approval is a derived view over
 	// the unresolved-artifact set, never a stored status.
 	Status    string
@@ -667,7 +667,7 @@ type Claim struct {
 	// key (multi-mode only; empty locally).
 	CredPubKey string `json:"-"`
 	// Phase is the setup/parked sub-state of a LIVE engagement — one of the
-	// ClaimPhase* names in run_status.go. Empty = the agent process is live
+	// ClaimPhase* names in conversation_status.go. Empty = the agent process is live
 	// (or the claim is released — a released claim's phase is inert history).
 	// Display reads coalesce it over the conversation's stored status.
 	Phase     string    `json:"phase,omitempty"`

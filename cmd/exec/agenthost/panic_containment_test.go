@@ -47,12 +47,12 @@ func TestServer_PanickingVerb_FailsRPCAndKeepsServing(t *testing.T) {
 	// The daemon is still serving: a fresh connection gets a real answer. This
 	// is the half that matters — the panic cost one call, not the process and
 	// not the proxies sharing it.
-	got, err := client.LookupRun(context.Background())
+	got, err := client.LookupConversation(context.Background())
 	if err != nil {
 		t.Fatalf("next RPC after the panic: %v", err)
 	}
 	if got.ConversationID != info.ConversationID {
-		t.Errorf("LookupRun after the panic returned %+v, want run %q", got, info.ConversationID)
+		t.Errorf("LookupConversation after the panic returned %+v, want run %q", got, info.ConversationID)
 	}
 }
 
@@ -93,7 +93,7 @@ func TestHandleConn_NilMethodSeenServesNormally(t *testing.T) {
 		t.Fatalf("decode result: %v", err)
 	}
 	if res.Info.ConversationID != info.ConversationID {
-		t.Errorf("LookupRun returned %+v, want run %q", res.Info, info.ConversationID)
+		t.Errorf("LookupConversation returned %+v, want run %q", res.Info, info.ConversationID)
 	}
 	_ = cliSide.Close()
 	<-served

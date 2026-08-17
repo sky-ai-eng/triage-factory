@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/convident"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
@@ -139,15 +139,15 @@ func (c *LocalClient) SetGitHubResolver(r ghclient.Resolver) {
 	}
 }
 
-func (c *LocalClient) LookupRun(_ context.Context) (ConversationInfo, error) {
+func (c *LocalClient) LookupConversation(_ context.Context) (ConversationInfo, error) {
 	// Empty ConversationID at this stage means the env-resolving constructor was
 	// bypassed (test seam) or the caller constructed a LocalClient
 	// directly with a zero-value ConversationInfo. Surface the same sentinel
-	// the runident path does so subcommand helpers can translate it
+	// the convident path does so subcommand helpers can translate it
 	// to their package-local "missing run id" sentinel without
 	// having to distinguish callers.
 	if c.info.ConversationID == "" {
-		return ConversationInfo{}, runident.ErrRunIdentityMissing
+		return ConversationInfo{}, convident.ErrConversationIdentityMissing
 	}
 	return c.info, nil
 }

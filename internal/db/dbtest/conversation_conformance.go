@@ -2293,7 +2293,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 
 		// Add an active event-trigger run on the same task — gate flips true.
-		eventBlueprintRunID := seed.Run(t, domain.Conversation{
+		eventConversationID := seed.Run(t, domain.Conversation{
 			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
@@ -2313,7 +2313,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Terminate the event run; only terminal event-trigger rows
 		// remain plus the still-running manual — gate flips back to
 		// false.
-		if err := store.Complete(ctx, orgID, eventBlueprintRunID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if has, _ := store.HasActiveAutoConversationForTask(ctx, orgID, taskID); has {
@@ -2345,13 +2345,13 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Active event-trigger run → resolves to its run ID.
 		eventBR := seed.BlueprintRun(t, taskID)
-		eventBlueprintRunID := seed.Run(t, domain.Conversation{
+		eventConversationID := seed.Run(t, domain.Conversation{
 			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: eventBR,
 		})
-		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != eventBlueprintRunID {
-			t.Errorf("ActiveAutoConversationIDForTaskSystem = %q err=%v, want %q", id, err, eventBlueprintRunID)
+		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != eventConversationID {
+			t.Errorf("ActiveAutoConversationIDForTaskSystem = %q err=%v, want %q", id, err, eventConversationID)
 		}
 
 		// A sibling task on the same entity still resolves to nothing.
@@ -2366,17 +2366,17 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// as a live auto run again — for its own task, and only its own. A
 		// human-paced follow-up on one card must never hold up automated
 		// triage of a different card on the same entity.
-		if err := store.Complete(ctx, orgID, eventBlueprintRunID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("conclude before resume: %v", err)
 		}
 		// The blueprint settles first: a resume fixture that skipped this would
 		// be staging a state the CAS refuses.
 		seed.SetBlueprintRunStatus(t, eventBR, "completed")
-		if flipped, err := store.MarkQueuedForResume(ctx, orgID, eventBlueprintRunID); err != nil || !flipped {
+		if flipped, err := store.MarkQueuedForResume(ctx, orgID, eventConversationID); err != nil || !flipped {
 			t.Fatalf("MarkQueuedForResume: ok=%v err=%v", flipped, err)
 		}
-		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != eventBlueprintRunID {
-			t.Errorf("resumed conversation, own task: id=%q err=%v, want %q", id, err, eventBlueprintRunID)
+		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != eventConversationID {
+			t.Errorf("resumed conversation, own task: id=%q err=%v, want %q", id, err, eventConversationID)
 		}
 		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, sibling); err != nil || id != "" {
 			t.Errorf("resumed conversation, sibling task on the same entity: id=%q err=%v, want empty", id, err)
@@ -2384,7 +2384,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Terminate it — terminal-only, plus the still-active manual run,
 		// resolves back to "".
-		if err := store.Complete(ctx, orgID, eventBlueprintRunID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {

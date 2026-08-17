@@ -209,10 +209,10 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	ref := refForSpec(spec)
 
 	ctx := context.Background()
-	info, err := host.LookupRun(ctx)
+	info, err := host.LookupConversation(ctx)
 	if err != nil {
-		// conversationID is empty at this point — LookupRun is what would have
-		// produced it. Only the ErrRunIdentityMissing branch fires here, and
+		// conversationID is empty at this point — LookupConversation is what would have
+		// produced it. Only the ErrConversationIdentityMissing branch fires here, and
 		// it ignores the conversationID argument.
 		return "", translateLookupErr("workspace add", "", err)
 	}

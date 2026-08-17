@@ -102,12 +102,12 @@ func WithRepoLock(owner, repo string, fn func() error) error {
 }
 
 // runsDir is the basename for ephemeral run worktrees under
-// os.TempDir() (/tmp/triagefactory-runs/{run-id}). Ephemeral and
-// unique-by-conversationID, so it is deliberately NOT routed through
+// os.TempDir() (/tmp/triagefactory-runs/{rootKey}). Ephemeral and
+// unique-by-rootKey, so it is deliberately NOT routed through
 // internal/paths — there is no persistence and no cross-tenant
 // collision risk. The persistent bare clone cache, by contrast, lives
 // under paths.BareCacheDir / paths.BareCacheRoot.
-const runsDir = "triagefactory-runs" // worktrees: /tmp/triagefactory-runs/{run-id}
+const runsDir = "triagefactory-runs" // worktrees: /tmp/triagefactory-runs/{rootKey}
 
 // CloneAuth is an optional HTTPS credential for a host-side `git clone` /
 // `git fetch`. The zero value injects nothing — the git subprocess
@@ -450,25 +450,6 @@ func RemoveRunRoot(rootKey string) {
 	_ = sandbox.RemoveRunTree(context.Background(), runDir(rootKey))
 }
 
-// MakeRunCwd creates a throwaway cwd for delegated runs that have no worktree.
-// Vestigial — superseded by MakeRunRoot now that Jira runs always populate
-// the run-root and materialize worktrees as subdirs. Kept temporarily so
-// future cleanup callers don't break; remove in a follow-up once no callers
-// remain.
-func MakeRunCwd(conversationID string) (string, error) {
-	dir := filepath.Join(os.TempDir(), runsDir, conversationID+"-nocwd")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", fmt.Errorf("mkdir run cwd: %w", err)
-	}
-	return dir, nil
-}
-
-// RemoveRunCwd removes the throwaway cwd created by MakeRunCwd. Safe if missing.
-// Vestigial — see MakeRunCwd.
-func RemoveRunCwd(conversationID string) {
-	_ = sandbox.RemoveRunTree(context.Background(), filepath.Join(os.TempDir(), runsDir, conversationID+"-nocwd"))
-}
-
 // EnsureBareClone is the exported entry point for callers that want a
 // bare clone of owner/repo materialized. It's idempotent: if the bare
 // already exists, it only repairs a drifted origin URL; otherwise it
@@ -606,9 +587,10 @@ func repairOriginURL(ctx context.Context, bareDir, wantURL string) error {
 	return gitRunCtx(ctx, bareDir, "remote", "set-url", "origin", wantURL)
 }
 
-// makeWorktreeDir creates the run directory for a worktree.
-func makeWorktreeDir(conversationID string) (string, error) {
-	wtDir := runDir(conversationID)
+// makeWorktreeDir creates the run directory for a worktree. rootKey keys
+// the tree under the same contract as RunRoot / MakeRunRoot — see RunRoot.
+func makeWorktreeDir(rootKey string) (string, error) {
+	wtDir := runDir(rootKey)
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
 		return "", fmt.Errorf("mkdir runs: %w", err)
 	}

@@ -542,7 +542,7 @@ type ConversationStore interface {
 	CompleteSystem(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error
 	// LookupOrgForConversationSystem returns the owning orgID for the given
 	// conversationID, or the empty string with a nil error if no such run
-	// exists. Used by the cmd/exec runident helper to discover the
+	// exists. Used by the cmd/exec convident helper to discover the
 	// run's tenant before any other read — at agent-subprocess cold
 	// start the orgID isn't yet known, only TRIAGE_FACTORY_CONVERSATION_ID
 	// has been passed in. Routes through the admin pool because the

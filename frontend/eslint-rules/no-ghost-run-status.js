@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 // conversation status the backend cannot emit.
 //
 // Why this exists on top of the Go mirror test: that test pins the three
-// exported arrays in src/types.ts against internal/domain/run_status.go, and
+// exported arrays in src/types.ts against internal/domain/conversation_status.go, and
 // component code never reads those arrays. It compares a status against a bare
 // literal — `run.Status === 'cancelled'`, `case 'task_unsolvable':` — and no
 // amount of array-pinning can see a literal in a switch arm. Three retired
@@ -102,9 +102,9 @@ export default {
     schema: [],
     messages: {
       ghost:
-        "'{{status}}' is not a conversation status, so this branch can never be taken. The vocabulary is owned by internal/domain/run_status.go and mirrored in src/types.ts (CLAIM_PHASES / TERMINAL_RUN_STATUSES / RUN_STATUSES): {{vocabulary}}.",
+        "'{{status}}' is not a conversation status, so this branch can never be taken. The vocabulary is owned by internal/domain/conversation_status.go and mirrored in src/types.ts (CLAIM_PHASES / TERMINAL_RUN_STATUSES / RUN_STATUSES): {{vocabulary}}.",
       ghostAlias:
-        "{{alias}} is '{{status}}', which is not a conversation status, so this branch can never be taken. The vocabulary is owned by internal/domain/run_status.go and mirrored in src/types.ts (CLAIM_PHASES / TERMINAL_RUN_STATUSES / RUN_STATUSES): {{vocabulary}}.",
+        "{{alias}} is '{{status}}', which is not a conversation status, so this branch can never be taken. The vocabulary is owned by internal/domain/conversation_status.go and mirrored in src/types.ts (CLAIM_PHASES / TERMINAL_RUN_STATUSES / RUN_STATUSES): {{vocabulary}}.",
     },
   },
 

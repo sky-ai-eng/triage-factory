@@ -67,10 +67,10 @@ type listMaterialized struct {
 // All reads route through the agenthost client — in local mode the
 // LocalClient hits the SQLite store directly, in sandbox mode the
 // IPCClient round-trips to the host daemon. The TRIAGE_FACTORY_CONVERSATION_ID
-// validation happens inside host.LookupRun.
+// validation happens inside host.LookupConversation.
 func listWorkspaces(host agenthost.Client) (listOutput, error) {
 	ctx := context.Background()
-	info, err := host.LookupRun(ctx)
+	info, err := host.LookupConversation(ctx)
 	if err != nil {
 		return listOutput{}, translateLookupErr("workspace list", "", err)
 	}

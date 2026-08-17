@@ -12,7 +12,7 @@ import (
 )
 
 // TestConversationStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID
-// pins the cold-start identity probe that cmd/exec runident depends
+// pins the cold-start identity probe that cmd/exec convident depends
 // on: a delegated agent subprocess only has TRIAGE_FACTORY_CONVERSATION_ID in
 // its env, so the lookup has to discover the run's owning org by
 // conversationID alone. Returns the real Postgres org UUID, NOT the local-mode
@@ -69,8 +69,8 @@ func TestConversationStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID(t *te
 }
 
 // TestConversationStore_Postgres_LookupOrgForRunSystem_UnknownReturnsEmpty
-// — an unknown conversationID returns ("", nil). The runident helper maps this
-// to ErrRunIdentityNotFound so the agent subprocess surfaces a clear
+// — an unknown conversationID returns ("", nil). The convident helper maps this
+// to ErrConversationIdentityNotFound so the agent subprocess surfaces a clear
 // "stale env var / spawner bug" message in stderr rather than reading
 // nil-dereference-style panics.
 func TestConversationStore_Postgres_LookupOrgForRunSystem_UnknownReturnsEmpty(t *testing.T) {

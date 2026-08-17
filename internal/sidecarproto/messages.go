@@ -92,7 +92,7 @@ type StartProxiesBody struct {
 }
 
 // AgentHostInfo is the run's non-secret identity the sidecar-hosted agenthost
-// reports to the agent (LookupRun) and stamps on the verbs' relay calls. It is
+// reports to the agent (LookupConversation) and stamps on the verbs' relay calls. It is
 // NOT the authority for org-scoping — the orchestrator binds that from its own
 // ConversationInfo on every relayed op — so a sidecar cannot escalate by lying here.
 type AgentHostInfo struct {

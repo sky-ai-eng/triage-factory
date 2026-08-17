@@ -285,7 +285,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(conversationWorktreeResult{Worktree: w})
 
-	case opListRunWorktrees:
+	case opListConversationWorktrees:
 		w, err := s.rt.ListConversationWorktrees(ctx)
 		if err != nil {
 			return nil, err

@@ -1,4 +1,4 @@
-package runident
+package convident
 
 import (
 	"context"
@@ -90,29 +90,29 @@ func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, conversation
 	})
 }
 
-func TestResolveRunIdentity_EmptyRunID(t *testing.T) {
+func TestResolveConversationIdentity_EmptyRunID(t *testing.T) {
 	stores, _ := newStores(t)
-	_, err := ResolveRunIdentity(context.Background(), stores, "")
-	if !errors.Is(err, ErrRunIdentityMissing) {
-		t.Errorf("err = %v, want ErrRunIdentityMissing", err)
+	_, err := ResolveConversationIdentity(context.Background(), stores, "")
+	if !errors.Is(err, ErrConversationIdentityMissing) {
+		t.Errorf("err = %v, want ErrConversationIdentityMissing", err)
 	}
 }
 
-func TestResolveRunIdentity_RunNotFound(t *testing.T) {
+func TestResolveConversationIdentity_RunNotFound(t *testing.T) {
 	stores, _ := newStores(t)
-	_, err := ResolveRunIdentity(context.Background(), stores, "ghost")
-	if !errors.Is(err, ErrRunIdentityNotFound) {
-		t.Errorf("err = %v, want ErrRunIdentityNotFound", err)
+	_, err := ResolveConversationIdentity(context.Background(), stores, "ghost")
+	if !errors.Is(err, ErrConversationIdentityNotFound) {
+		t.Errorf("err = %v, want ErrConversationIdentityNotFound", err)
 	}
 }
 
-func TestResolveRunIdentity_ManualRun(t *testing.T) {
+func TestResolveConversationIdentity_ManualRun(t *testing.T) {
 	stores, conn := newStores(t)
 	seedConversation(t, stores, conn, "m1", "manual")
 
-	ident, err := ResolveRunIdentity(context.Background(), stores, "m1")
+	ident, err := ResolveConversationIdentity(context.Background(), stores, "m1")
 	if err != nil {
-		t.Fatalf("ResolveRunIdentity: %v", err)
+		t.Fatalf("ResolveConversationIdentity: %v", err)
 	}
 	if ident.IsEventTriggered {
 		t.Errorf("manual run resolved as event-triggered: %+v", ident)
@@ -131,13 +131,13 @@ func TestResolveRunIdentity_ManualRun(t *testing.T) {
 	}
 }
 
-func TestResolveRunIdentity_EventTriggeredRun(t *testing.T) {
+func TestResolveConversationIdentity_EventTriggeredRun(t *testing.T) {
 	stores, conn := newStores(t)
 	seedConversation(t, stores, conn, "e1", "event")
 
-	ident, err := ResolveRunIdentity(context.Background(), stores, "e1")
+	ident, err := ResolveConversationIdentity(context.Background(), stores, "e1")
 	if err != nil {
-		t.Fatalf("ResolveRunIdentity: %v", err)
+		t.Fatalf("ResolveConversationIdentity: %v", err)
 	}
 	if !ident.IsEventTriggered {
 		t.Errorf("event-triggered run resolved as manual: %+v", ident)
@@ -152,12 +152,12 @@ func TestResolveRunIdentity_EventTriggeredRun(t *testing.T) {
 	}
 }
 
-// TestResolveRunIdentity_TeamIDFromRow pins that TeamID is read straight
+// TestResolveConversationIdentity_TeamIDFromRow pins that TeamID is read straight
 // off the run's row (conversations.team_id), not synthesized from a
 // constant: a run whose team_id has been moved off the local sentinel
 // resolves to that exact value. This is the local-resolver half of the
 // TFAC-458 "ConversationInfo carries TeamID" contract the capture writers depend on.
-func TestResolveRunIdentity_TeamIDFromRow(t *testing.T) {
+func TestResolveConversationIdentity_TeamIDFromRow(t *testing.T) {
 	stores, conn := newStores(t)
 	seedConversation(t, stores, conn, "t1", "manual")
 
@@ -166,9 +166,9 @@ func TestResolveRunIdentity_TeamIDFromRow(t *testing.T) {
 		t.Fatalf("override team_id: %v", err)
 	}
 
-	ident, err := ResolveRunIdentity(context.Background(), stores, "t1")
+	ident, err := ResolveConversationIdentity(context.Background(), stores, "t1")
 	if err != nil {
-		t.Fatalf("ResolveRunIdentity: %v", err)
+		t.Fatalf("ResolveConversationIdentity: %v", err)
 	}
 	if ident.TeamID != customTeam {
 		t.Errorf("TeamID = %q, want %q (must reflect conversations.team_id, not a constant)", ident.TeamID, customTeam)
