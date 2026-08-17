@@ -181,32 +181,50 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.OrgSettings) error {
 	// No version guard: an unguarded save is last-writer-wins on purpose. Its
 	// callers are the credential transitions, which own the specific fields
-	// they touch and have nothing to lose a race about.
-	_, err := s.upsertSettings(ctx, orgID, u, nil)
-	if err != nil {
+	// they touch and have nothing to lose a race about. It still bumps the
+	// token, so an admin's in-flight settings edit conflicts rather than
+	// landing on top of a credential change it never saw.
+	if _, err := s.upsertSettings(ctx, orgID, u, orgSettingsConflictUpdate); err != nil {
 		return fmt.Errorf("upsert org_settings: %w", err)
 	}
 	return nil
 }
 
 // UpdateSettingsVersioned is UpdateSettings under the row's concurrency token.
-// The guard rides the ON CONFLICT DO UPDATE's WHERE, so a losing writer updates
-// zero rows rather than overwriting the winner; expected 0 (no row) resolves
-// through the INSERT arm, where the unique index does the same job.
+//
+// The two assertions it can be handed are two different statements, because
+// they are two different questions:
+//
+//   - expected 0 says "there is no row yet", which is a create. It is an
+//     INSERT that does nothing on conflict, so a racing creator makes this
+//     caller the loser rather than the second writer of a row it believed it
+//     was the first to touch.
+//   - any other expected says "the row is at this version", which is an
+//     update. It is a plain guarded UPDATE, so an absent row and a moved
+//     version give the same answer — nothing matched — which is exactly right:
+//     both mean the caller's read no longer describes the world.
+//
+// Folding the two into one guarded upsert is the shape this started as, and it
+// is wrong in a way that is easy to miss: the guard can only ride the conflict
+// arm, so a caller asserting a stale non-zero version against a row that had
+// since been deleted would fall through to the INSERT arm and silently CREATE
+// the row at version 1 — a create reported as a successful update.
 func (s *orgsStore) UpdateSettingsVersioned(ctx context.Context, orgID string, u domain.OrgSettings, expected int) error {
-	res, err := s.upsertSettings(ctx, orgID, u, &expected)
+	var (
+		res sql.Result
+		err error
+	)
+	if expected == 0 {
+		res, err = s.upsertSettings(ctx, orgID, u, `ON CONFLICT (org_id) DO NOTHING`)
+	} else {
+		res, err = s.updateSettingsAtVersion(ctx, orgID, u, expected)
+	}
 	if err != nil {
-		// A racing INSERT commits between our conflict probe and ours only in
-		// the expected==0 arm, where there is no row for the WHERE to guard;
-		// the primary key catches it, and it is the same conflict.
-		if isUniqueViolation(err) {
-			return db.ErrOrgSettingsVersion
-		}
-		return fmt.Errorf("upsert org_settings: %w", err)
+		return fmt.Errorf("write org_settings: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("upsert org_settings: %w", err)
+		return fmt.Errorf("write org_settings: %w", err)
 	}
 	if n == 0 {
 		return db.ErrOrgSettingsVersion
@@ -214,52 +232,11 @@ func (s *orgsStore) UpdateSettingsVersioned(ctx context.Context, orgID string, u
 	return nil
 }
 
-// upsertSettings writes every org_settings column this writer owns and bumps
-// the row's version. A non-nil expected adds the concurrency guard to the
-// ON CONFLICT arm — the one difference between the guarded and unguarded
-// writers, kept as a parameter so the two can never drift in which columns
-// they write.
-func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.OrgSettings, expected *int) (sql.Result, error) {
-	cloneProto := u.GitHubCloneProtocol
-	if cloneProto == "" {
-		cloneProto = "ssh"
-	}
-	args := []any{
-		orgID,
-		nullString(u.GitHubBaseURL),
-		u.GitHubPollInterval.Seconds(),
-		cloneProto,
-		nullString(u.JiraBaseURL),
-		u.JiraPollInterval.Seconds(),
-		nullString(u.AnthropicAPIKeyRef),
-		nullString(u.BedrockCredentialsRef),
-		nullString(u.MaxLLMModelTier),
-		nullFloat(u.MaxDailyCostUSD),
-		nullInt(u.MaxConcurrentRuns),
-		u.MarketplaceEnabled,
-	}
-	guard := ""
-	if expected != nil {
-		guard = "WHERE org_settings.version = $13"
-		args = append(args, *expected)
-	}
-	// make_interval(secs => $N) takes a numeric second count and
-	// returns a properly-typed interval — avoids hand-rolling the
-	// "X seconds"::interval string concat.
-	return s.app.ExecContext(ctx, `
-		INSERT INTO org_settings (
-			org_id, github_base_url, github_poll_interval, github_clone_protocol,
-			jira_base_url, jira_poll_interval,
-			anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
-			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
-			version, updated_at
-		) VALUES (
-			$1, $2, make_interval(secs => $3), $4,
-			$5, make_interval(secs => $6),
-			$7, $8, $9,
-			$10, $11, $12,
-			1, now()
-		)
+// orgSettingsConflictUpdate is the unguarded writer's conflict action: replace
+// every column this writer owns and bump the token. It is a constant rather
+// than inline so the INSERT half of the statement has exactly one spelling —
+// see upsertSettings.
+const orgSettingsConflictUpdate = `
 		ON CONFLICT (org_id) DO UPDATE SET
 			github_base_url = EXCLUDED.github_base_url,
 			github_poll_interval = EXCLUDED.github_poll_interval,
@@ -273,8 +250,84 @@ func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.O
 			max_concurrent_runs = EXCLUDED.max_concurrent_runs,
 			marketplace_enabled = EXCLUDED.marketplace_enabled,
 			version = org_settings.version + 1,
+			updated_at = now()`
+
+// orgSettingsWriteArgs is the ordered argument list every statement in this
+// writer takes — $1 the org, $2..$12 the columns it owns — so the INSERT and
+// the guarded UPDATE below can never disagree about which value is which.
+func orgSettingsWriteArgs(orgID string, u domain.OrgSettings) []any {
+	cloneProto := u.GitHubCloneProtocol
+	if cloneProto == "" {
+		cloneProto = "ssh"
+	}
+	return []any{
+		orgID,
+		nullString(u.GitHubBaseURL),
+		u.GitHubPollInterval.Seconds(),
+		cloneProto,
+		nullString(u.JiraBaseURL),
+		u.JiraPollInterval.Seconds(),
+		nullString(u.AnthropicAPIKeyRef),
+		nullString(u.BedrockCredentialsRef),
+		nullString(u.MaxLLMModelTier),
+		nullFloat(u.MaxDailyCostUSD),
+		nullInt(u.MaxConcurrentRuns),
+		u.MarketplaceEnabled,
+	}
+}
+
+// upsertSettings writes every org_settings column this writer owns, with the
+// caller's conflict action deciding what an existing row means: replace it
+// (the unguarded save) or leave it alone and report nothing written (the
+// create assertion).
+//
+// make_interval(secs => $N) takes a numeric second count and returns a
+// properly-typed interval — avoids hand-rolling the "X seconds"::interval
+// string concat.
+func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.OrgSettings, conflict string) (sql.Result, error) {
+	return s.app.ExecContext(ctx, `
+		INSERT INTO org_settings (
+			org_id, github_base_url, github_poll_interval, github_clone_protocol,
+			jira_base_url, jira_poll_interval,
+			anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
+			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
+			version, updated_at
+		) VALUES (
+			$1, $2, make_interval(secs => $3), $4,
+			$5, make_interval(secs => $6),
+			$7, $8, $9,
+			$10, $11, $12,
+			1, now()
+		)`+conflict, orgSettingsWriteArgs(orgID, u)...)
+}
+
+// updateSettingsAtVersion writes the same columns as an ordinary UPDATE under
+// the row's concurrency token. It never creates a row: a caller that asserted a
+// version read one, and if that row is gone the honest answer is the same
+// conflict a moved version gets.
+//
+// Its SET list must stay in step with orgSettingsConflictUpdate above — same
+// columns, same exclusions. github_credential_class is absent from both for the
+// reason UpdateSettings' doc gives.
+func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u domain.OrgSettings, expected int) (sql.Result, error) {
+	args := append(orgSettingsWriteArgs(orgID, u), expected)
+	return s.app.ExecContext(ctx, `
+		UPDATE org_settings SET
+			github_base_url = $2,
+			github_poll_interval = make_interval(secs => $3),
+			github_clone_protocol = $4,
+			jira_base_url = $5,
+			jira_poll_interval = make_interval(secs => $6),
+			anthropic_api_key_ref = $7,
+			bedrock_credentials_ref = $8,
+			max_llm_model_tier = $9,
+			max_daily_cost_usd = $10,
+			max_concurrent_runs = $11,
+			marketplace_enabled = $12,
+			version = version + 1,
 			updated_at = now()
-		`+guard, args...)
+		WHERE org_id = $1 AND version = $13
+	`, args...)
 }
 
 // SetGitHubCredentialClass upserts ONLY org_settings.github_credential_class —

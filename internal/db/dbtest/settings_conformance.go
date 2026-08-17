@@ -469,6 +469,13 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			t.Errorf("version after one winner = %d; want 2 (the refused write must not bump it)", got.Version)
 		}
 
+		// A version assertion must never CREATE. Asserting version 0 against a
+		// row that now exists is the create-vs-create race, and it loses.
+		err = stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, loser, 0)
+		if !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Errorf("asserting version 0 against an existing row = %v; want ErrOrgSettingsVersion", err)
+		}
+
 		// Re-reading and re-applying is the loser's whole remedy, so it has to
 		// work on the next attempt.
 		if err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, loser, got.Version); err != nil {
@@ -480,6 +487,35 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if got.GitHubBaseURL != "https://loser.example.com" || got.Version != 3 {
 			t.Errorf("after retry: base=%q version=%d; want the loser's value at version 3", got.GitHubBaseURL, got.Version)
+		}
+	})
+
+	// A version assertion is an assertion about a row that EXISTS, and it must
+	// never quietly become a create. The guard can only ride an upsert's
+	// conflict arm, so a single guarded upsert lets a caller asserting a stale
+	// non-zero version against a since-deleted row fall through to the INSERT
+	// and materialize it at version 1 — a create reported as a successful
+	// update, with the caller's whole form written over a row it never read.
+	t.Run("OrgSettings_Versioned_NonZeroExpectedNeverCreates", func(t *testing.T) {
+		stores, ids := factory(t)
+		row := domain.OrgSettings{
+			GitHubBaseURL:       "https://ghost.example.com",
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+
+		// No row yet, and the caller claims to have read one at version 3.
+		err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, row, 3)
+		if !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Fatalf("asserting version 3 against a missing row = %v; want ErrOrgSettingsVersion", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if got.Version != 0 || got.GitHubBaseURL != "" {
+			t.Errorf("the refused assertion created a row: %+v", got)
 		}
 	})
 

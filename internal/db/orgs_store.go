@@ -108,8 +108,13 @@ type OrgsStore interface {
 	// UpdateSettingsVersioned is UpdateSettings guarded by the row's
 	// optimistic-concurrency token: the write lands only if the stored version
 	// still equals expected, and otherwise fails with ErrOrgSettingsVersion —
-	// nothing is written. expected 0 asserts "no row yet", so two callers
-	// racing to materialize a settings row also resolve to exactly one winner.
+	// nothing is written.
+	//
+	// expected 0 asserts "no row yet" and is the ONLY value that may create
+	// one, so two callers racing to materialize a settings row resolve to
+	// exactly one winner. Any other expected asserts a stored version and never
+	// creates: if the row is absent, that is the same conflict a moved version
+	// gets, because either way the caller's read no longer describes the world.
 	//
 	// The guard is in the statement, not in a preceding read: READ COMMITTED
 	// means a re-read inside the caller's own transaction cannot see a
