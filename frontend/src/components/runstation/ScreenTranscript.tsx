@@ -10,7 +10,7 @@ import { stationState } from './stationStyle'
 
 interface Props {
   messages: Message[]
-  run: Conversation
+  conversation: Conversation
   /** History remains before the held transcript's first row. The transcript
    *  read is bounded, so a long run opens on its tail; without this control
    *  everything before that page is unreachable and nothing on screen says so. */
@@ -38,7 +38,7 @@ const MemoMarkdown = memo(Markdown)
 // Memoized (default export below): RunDetail re-renders once per second for
 // its elapsed-time tick, and the transcript — the most expensive subtree on
 // the page — doesn't depend on the clock at all.
-function ScreenTranscript({ messages, run, hasOlder, loadingOlder, onLoadOlder }: Props) {
+function ScreenTranscript({ messages, conversation, hasOlder, loadingOlder, onLoadOlder }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
@@ -57,7 +57,7 @@ function ScreenTranscript({ messages, run, hasOlder, loadingOlder, onLoadOlder }
     if (!pinnedRef.current) return
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [messages, run])
+  }, [messages, conversation])
 
   // Loading earlier history grows the content ABOVE the viewport, which would
   // otherwise slide whatever the reader was looking at down the screen by the
@@ -103,17 +103,23 @@ function ScreenTranscript({ messages, run, hasOlder, loadingOlder, onLoadOlder }
     if (top < prev) setPinned(false)
   }, [])
 
-  // Key the rows off run.WorktreePath — the only run field they read — rather
+  // Key the rows off conversation.WorktreePath — the only run field they read — rather
   // than the run object itself, whose identity churns on every status refetch
   // and artifact poll. Rebuilding here is cheap element creation; the heavy
   // work (markdown parsing, tool panes) bails out per-row via the memoized
   // leaf components when a row's inputs are unchanged.
-  const rows = useMemo(() => buildRows(messages, run.WorktreePath), [messages, run.WorktreePath])
+  const rows = useMemo(
+    () => buildRows(messages, conversation.WorktreePath),
+    [messages, conversation.WorktreePath],
+  )
 
   // The settled-run verdict renders outside buildRows so the row list doesn't
   // depend on the full run object (see above). Same visibility rule as before:
   // present once the run is settled and carries a summary.
-  const verdict = run.ResultSummary && !isActiveConversation(run) ? <Verdict run={run} /> : null
+  const verdict =
+    conversation.ResultSummary && !isActiveConversation(conversation) ? (
+      <Verdict conversation={conversation} />
+    ) : null
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden rounded-[5px]">
@@ -186,7 +192,7 @@ function ScreenTranscript({ messages, run, hasOlder, loadingOlder, onLoadOlder }
             </div>
           )}
           {rows.length === 0 && !verdict ? (
-            <EmptyReadout active={isActiveConversation(run)} />
+            <EmptyReadout active={isActiveConversation(conversation)} />
           ) : (
             <>
               {rows}
@@ -595,8 +601,8 @@ function Pane({
 }
 
 // Verdict — the settled run's outcome, stamped on the screen in the state tone.
-function Verdict({ run }: { run: Conversation }) {
-  const st = stationState(run)
+function Verdict({ conversation }: { conversation: Conversation }) {
+  const st = stationState(conversation)
   return (
     <div className="mb-2 mt-5">
       <div className="mb-2 flex items-center gap-2">
@@ -615,7 +621,7 @@ function Verdict({ run }: { run: Conversation }) {
         className="max-w-none text-[12.5px] leading-relaxed [&_code]:rounded-[3px] [&_code]:bg-[color:var(--hmi-code-bg)] [&_code]:px-1 [&_code]:font-mono [&_code]:text-[11px] [&_li]:my-0.5 [&_p]:my-1.5 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
         style={{ color: 'var(--hmi-ink)' }}
       >
-        <MemoMarkdown>{run.ResultSummary}</MemoMarkdown>
+        <MemoMarkdown>{conversation.ResultSummary}</MemoMarkdown>
       </div>
     </div>
   )

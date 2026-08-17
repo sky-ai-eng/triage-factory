@@ -39,13 +39,13 @@ export default function ActionList({ conversationId, refreshKey }: Props) {
   // new run's land, so one run's actions never render under another's heading;
   // a soft refetch (refreshKey) deliberately does not clear, because those rows
   // were true a moment ago and this is an audit surface.
-  const shownRun = useRef('')
+  const shownConversation = useRef('')
 
   useEffect(() => {
     if (!conversationId) return
     let cancelled = false
-    if (shownRun.current !== conversationId) {
-      shownRun.current = conversationId
+    if (shownConversation.current !== conversationId) {
+      shownConversation.current = conversationId
       // The clear must land before the new run's rows do, so it is synchronous
       // by design — the alternative renders one run's actions under another
       // run's heading for a frame.

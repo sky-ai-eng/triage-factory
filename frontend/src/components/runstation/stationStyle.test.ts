@@ -4,7 +4,7 @@ import { CONVERSATION_STATUSES } from '../../types'
 import { isActiveStatus } from '../../lib/conversationStatus'
 import { HMI_CYAN, stationState, type StationKey } from './stationStyle'
 
-const run = (over: Partial<Conversation>): Conversation =>
+const conversation = (over: Partial<Conversation>): Conversation =>
   ({
     ID: 'r1',
     TaskID: 't1',
@@ -19,7 +19,7 @@ describe('stationState', () => {
   // The station's answer is that the machine is powered and waiting, not dark:
   // the run is resumable, and the dock's composer says so right below this.
   it('lights a parked run as IDLE — powered and waiting, not concluded', () => {
-    const state = stationState(run({ Status: 'open' }))
+    const state = stationState(conversation({ Status: 'open' }))
     expect(state.key).toBe('open')
     expect(state.label).toBe('IDLE')
     expect(state.live).toBe(false)
@@ -30,7 +30,7 @@ describe('stationState', () => {
 
   it('gives every claim phase the one working light', () => {
     for (const status of ['fetching', 'cloning', 'agent_starting', 'awaiting_credentials']) {
-      const state = stationState(run({ Status: status }))
+      const state = stationState(conversation({ Status: status }))
       expect(state.key, `${status} should read as working`).toBe('working')
       expect(state.live).toBe(true)
     }
@@ -50,12 +50,12 @@ describe('stationState', () => {
     for (const status of CONVERSATION_STATUSES) {
       const want = isActiveStatus(status) ? 'working' : expected[status]
       expect(want, `${status} has no decided station light`).toBeDefined()
-      expect(stationState(run({ Status: status })).key, status).toBe(want)
+      expect(stationState(conversation({ Status: status })).key, status).toBe(want)
     }
   })
 
   it('echoes a status this build predates rather than guessing a light', () => {
-    expect(stationState(run({ Status: 'from_the_future' })).label).toBe('FROM_THE_FUTURE')
+    expect(stationState(conversation({ Status: 'from_the_future' })).label).toBe('FROM_THE_FUTURE')
   })
 
   // The machine wears ONE light, so a mid-chain step wearing the same green
@@ -63,7 +63,7 @@ describe('stationState', () => {
   // biggest thing on the page and concludes the work stopped.
   describe('a completed run is three endings, not one', () => {
     const step = (index: number, total: number, outcome: string) =>
-      run({
+      conversation({
         Status: 'completed',
         blueprint_run_id: 'br1',
         blueprint_step_index: index,
@@ -89,7 +89,7 @@ describe('stationState', () => {
     })
 
     it('lights an abort amber — the agent gave up and the task is still open', () => {
-      const state = stationState(run({ Status: 'completed', Outcome: 'abort' }))
+      const state = stationState(conversation({ Status: 'completed', Outcome: 'abort' }))
       expect(state.key).toBe('stopped')
       expect(state.label).toBe('STOPPED')
       expect(state.light).toBe('var(--color-snooze)')

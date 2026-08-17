@@ -9,7 +9,7 @@ import { jsonBody } from '../test/apiResponse'
 // disappear from the UI, because a prompt nobody can see is the exact failure
 // this endpoint exists to close.
 
-const RUN = 'run-1'
+const CONVERSATION = 'run-1'
 
 function prompt(toolCallID: string, extra: Record<string, unknown> = {}) {
   return {
@@ -48,9 +48,9 @@ describe('usePermissionQueues', () => {
     stubPermissions([{ ok: true, body: [prompt('toolu_1')] }])
     const { result } = renderHook(() => usePermissionQueues())
 
-    act(() => result.current.refresh(RUN))
-    await waitFor(() => expect(result.current.queues[RUN]).toHaveLength(1))
-    expect(result.current.queues[RUN][0].tool_call_id).toBe('toolu_1')
+    act(() => result.current.refresh(CONVERSATION))
+    await waitFor(() => expect(result.current.queues[CONVERSATION]).toHaveLength(1))
+    expect(result.current.queues[CONVERSATION][0].tool_call_id).toBe('toolu_1')
   })
 
   it('clears a run’s queue when the server says nothing is pending', async () => {
@@ -60,11 +60,11 @@ describe('usePermissionQueues', () => {
     ])
     const { result } = renderHook(() => usePermissionQueues())
 
-    act(() => result.current.refresh(RUN))
-    await waitFor(() => expect(result.current.queues[RUN]).toHaveLength(1))
+    act(() => result.current.refresh(CONVERSATION))
+    await waitFor(() => expect(result.current.queues[CONVERSATION]).toHaveLength(1))
 
-    act(() => result.current.refresh(RUN))
-    await waitFor(() => expect(result.current.queues[RUN]).toBeUndefined())
+    act(() => result.current.refresh(CONVERSATION))
+    await waitFor(() => expect(result.current.queues[CONVERSATION]).toBeUndefined())
   })
 
   it('keeps a live prompt visible when the read fails', async () => {
@@ -79,23 +79,25 @@ describe('usePermissionQueues', () => {
     ])
     const { result } = renderHook(() => usePermissionQueues())
 
-    act(() => result.current.refresh(RUN))
-    await waitFor(() => expect(result.current.queues[RUN]).toHaveLength(1))
+    act(() => result.current.refresh(CONVERSATION))
+    await waitFor(() => expect(result.current.queues[CONVERSATION]).toHaveLength(1))
 
-    act(() => result.current.refresh(RUN)) // 500
+    act(() => result.current.refresh(CONVERSATION)) // 500
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
-    expect(result.current.queues[RUN]).toHaveLength(1)
+    expect(result.current.queues[CONVERSATION]).toHaveLength(1)
 
-    act(() => result.current.refresh(RUN)) // network failure
+    act(() => result.current.refresh(CONVERSATION)) // network failure
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3))
-    expect(result.current.queues[RUN]).toHaveLength(1)
+    expect(result.current.queues[CONVERSATION]).toHaveLength(1)
 
     // A later successful read must still reconcile — and it returns a DIFFERENT
     // set so this can't pass by the hook having wedged. "Queue unchanged"
     // is what a skipped failure and a thrown one both look like; only a
     // subsequent update distinguishes them.
-    act(() => result.current.refresh(RUN))
-    await waitFor(() => expect(result.current.queues[RUN]?.[0].tool_call_id).toBe('toolu_2'))
+    act(() => result.current.refresh(CONVERSATION))
+    await waitFor(() =>
+      expect(result.current.queues[CONVERSATION]?.[0].tool_call_id).toBe('toolu_2'),
+    )
   })
 
   it('tolerates a payload with no input rather than throwing', async () => {
@@ -105,28 +107,28 @@ describe('usePermissionQueues', () => {
     stubPermissions([{ ok: true, body: [{ tool_call_id: 'toolu_1', tool_name: 'Bash' }] }])
     const { result } = renderHook(() => usePermissionQueues())
 
-    act(() => result.current.refresh(RUN))
-    await waitFor(() => expect(result.current.queues[RUN]).toHaveLength(1))
-    expect(result.current.queues[RUN][0].input).toEqual({})
+    act(() => result.current.refresh(CONVERSATION))
+    await waitFor(() => expect(result.current.queues[CONVERSATION]).toHaveLength(1))
+    expect(result.current.queues[CONVERSATION][0].input).toEqual({})
   })
 
   it('ignores a body that is not a list', async () => {
     stubPermissions([{ ok: true, body: { error: 'nope' } }])
     const { result } = renderHook(() => usePermissionQueues())
 
-    act(() => result.current.refresh(RUN))
+    act(() => result.current.refresh(CONVERSATION))
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
-    expect(result.current.queues[RUN]).toBeUndefined()
+    expect(result.current.queues[CONVERSATION]).toBeUndefined()
   })
 
   it('drops a run’s queue on dropConversation', async () => {
     stubPermissions([{ ok: true, body: [prompt('toolu_1')] }])
     const { result } = renderHook(() => usePermissionQueues())
 
-    act(() => result.current.refresh(RUN))
-    await waitFor(() => expect(result.current.queues[RUN]).toHaveLength(1))
+    act(() => result.current.refresh(CONVERSATION))
+    await waitFor(() => expect(result.current.queues[CONVERSATION]).toHaveLength(1))
 
-    act(() => result.current.dropConversation(RUN))
-    expect(result.current.queues[RUN]).toBeUndefined()
+    act(() => result.current.dropConversation(CONVERSATION))
+    expect(result.current.queues[CONVERSATION]).toBeUndefined()
   })
 })

@@ -8,7 +8,7 @@ import type { Conversation, Message } from '../../types'
 const T0 = new Date('2026-06-25T00:00:00Z').getTime()
 const iso = (offsetMs: number) => new Date(T0 + offsetMs).toISOString()
 
-const run = (over: Partial<Conversation>): Conversation =>
+const conversation = (over: Partial<Conversation>): Conversation =>
   ({
     ID: 'r1',
     TaskID: 't1',
@@ -20,8 +20,8 @@ const run = (over: Partial<Conversation>): Conversation =>
   }) as Conversation
 
 function renderRail(over: Partial<Conversation>, now: number = T0 + 60_000) {
-  const r = run(over)
-  render(<TelemetryRail run={r} messages={[]} state={stationState(r)} now={now} />)
+  const r = conversation(over)
+  render(<TelemetryRail conversation={r} messages={[]} state={stationState(r)} now={now} />)
 }
 
 // The rail's settled queued readout must share AgentCard's visibility
@@ -72,8 +72,10 @@ describe('TelemetryRail token readouts', () => {
   ]
 
   function renderTokens(over: Partial<Conversation>) {
-    const r = run(over)
-    render(<TelemetryRail run={r} messages={held} state={stationState(r)} now={T0 + 60_000} />)
+    const r = conversation(over)
+    render(
+      <TelemetryRail conversation={r} messages={held} state={stationState(r)} now={T0 + 60_000} />,
+    )
   }
 
   it('reads the run row’s sums', () => {

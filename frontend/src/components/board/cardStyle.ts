@@ -48,8 +48,8 @@ export interface Glow {
 // colored glow on a settled/cancelled/waiting card just reads as a tinted
 // drop-shadow under the card (and those states already announce themselves via
 // the attention row / result verdict).
-export function runGlow(run: Conversation): Glow | null {
-  if (isActiveConversation(run)) return { tone: 'active', breathing: true }
+export function runGlow(conversation: Conversation): Glow | null {
+  if (isActiveConversation(conversation)) return { tone: 'active', breathing: true }
   return null
 }
 

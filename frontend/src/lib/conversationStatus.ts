@@ -42,8 +42,8 @@ export function isClaimPhase(status: ConversationStatusValue): status is ClaimPh
   return (CLAIM_PHASES as readonly string[]).includes(status)
 }
 
-export function isActiveConversation(run: Conversation): boolean {
-  return isActiveStatus(run.Status)
+export function isActiveConversation(conversation: Conversation): boolean {
+  return isActiveStatus(conversation.Status)
 }
 
 export function isActiveStatus(status: ConversationStatusValue): boolean {
@@ -72,9 +72,9 @@ export interface ChainPosition {
   isFinal: boolean
 }
 
-export function chainPosition(run: Conversation): ChainPosition | null {
-  const total = run.blueprint_step_count ?? 0
-  const index = run.blueprint_step_index
+export function chainPosition(conversation: Conversation): ChainPosition | null {
+  const total = conversation.blueprint_step_count ?? 0
+  const index = conversation.blueprint_step_index
   if (total <= 1 || index == null || index < 0) return null
   return { step: index + 1, total, isFinal: index >= total - 1 }
 }
@@ -118,11 +118,11 @@ export function chainPosition(run: Conversation): ChainPosition | null {
 // that don't.
 export type CompletionKind = 'done' | 'handoff' | 'stopped'
 
-export function completionKind(run: Conversation): CompletionKind | null {
-  if (run.Status !== 'completed') return null
-  const pos = chainPosition(run)
+export function completionKind(conversation: Conversation): CompletionKind | null {
+  if (conversation.Status !== 'completed') return null
+  const pos = chainPosition(conversation)
   const isFinal = pos ? pos.isFinal : true
-  switch (run.Outcome) {
+  switch (conversation.Outcome) {
     case 'continue':
       return isFinal ? 'done' : 'handoff'
     case 'finish':
@@ -140,16 +140,16 @@ export function completionKind(run: Conversation): CompletionKind | null {
 // completionGloss — the plain-language line for a settled conversation, in one
 // place so the run dock and the telemetry rail can't tell the viewer two
 // different stories about the same row. Empty for a run that hasn't completed.
-export function completionGloss(run: Conversation): string {
-  const kind = completionKind(run)
+export function completionGloss(conversation: Conversation): string {
+  const kind = completionKind(conversation)
   if (!kind) return ''
-  const pos = chainPosition(run)
+  const pos = chainPosition(conversation)
   if (kind === 'stopped') {
     // Two ways to stop, and they are different news: the agent decided to,
     // or it ended on nothing the workflow could act on (no outcome recorded,
     // or one this build doesn't know). The rail prints the raw token beside
     // this, so the second line doesn't repeat it.
-    return run.Outcome === 'abort'
+    return conversation.Outcome === 'abort'
       ? 'stopped without finishing — the task stays open for a human'
       : 'ended without a usable outcome — the workflow stopped here for a human'
   }
@@ -208,8 +208,8 @@ export function parkReasonLabel(reason: string): string {
 // the workspace survived and whether anything would drive it are server-side
 // facts. So this is never the whole answer — use canResumeConversation, which folds in
 // the server's own verdict.
-export function isResumableConversation(run: Conversation): boolean {
-  return run.Status === 'open' || run.Status === 'completed'
+export function isResumableConversation(conversation: Conversation): boolean {
+  return conversation.Status === 'open' || conversation.Status === 'completed'
 }
 
 // canResumeConversation is the composer's gate for a run with no live turn: the cheap
@@ -220,8 +220,8 @@ export function isResumableConversation(run: Conversation): boolean {
 // for (active, failed) and any response that predates the field carries none.
 // Absent means "the server didn't answer" — fall back to the status reading —
 // while an explicit false is a real refusal with a reason attached.
-export function canResumeConversation(run: Conversation): boolean {
-  return isResumableConversation(run) && run.resumable !== false
+export function canResumeConversation(conversation: Conversation): boolean {
+  return isResumableConversation(conversation) && conversation.resumable !== false
 }
 
 // resumeBlockedCopy — what to tell someone whose conversation looks resumable
@@ -229,8 +229,8 @@ export function canResumeConversation(run: Conversation): boolean {
 // from the server (internal/delegate's ResumeBlocked* rungs); an unrecognized
 // one falls through to the generic sentence, since a build that predates a new
 // rung still has to say something true.
-export function resumeBlockedCopy(run: Conversation): string {
-  switch (run.resume_blocked_reason) {
+export function resumeBlockedCopy(conversation: Conversation): string {
+  switch (conversation.resume_blocked_reason) {
     case 'workspace_expired':
       return 'Workspace expired — this conversation can’t be resumed.'
     case 'blueprint_concluded':
@@ -250,8 +250,8 @@ export function resumeBlockedCopy(run: Conversation): string {
 // claim stamp, falling back to the mint stamp for legacy rows that predate the
 // queue columns. Live elapsed readouts tick from here so queue dwell never
 // inflates working time.
-export function workStartedAt(run: Conversation): string {
-  return run.ClaimedAt ?? run.StartedAt
+export function workStartedAt(conversation: Conversation): string {
+  return conversation.ClaimedAt ?? conversation.StartedAt
 }
 
 // Settled queue dwell below this stays off the run surfaces (card footer,
@@ -264,12 +264,13 @@ export const QUEUE_DWELL_VISIBLE_MS = 5000
 // while it is still queued, else the latest episode's settled dwell
 // (ClaimedAt − QueuedAt). null when the row predates the queue columns and the
 // dwell is unknowable.
-export function queueDwellMs(run: Conversation, now: number = Date.now()): number | null {
-  const queuedAt = run.QueuedAt ?? (run.Status === 'queued' ? run.StartedAt : null)
+export function queueDwellMs(conversation: Conversation, now: number = Date.now()): number | null {
+  const queuedAt =
+    conversation.QueuedAt ?? (conversation.Status === 'queued' ? conversation.StartedAt : null)
   if (!queuedAt) return null
-  if (run.Status === 'queued') return Math.max(0, now - new Date(queuedAt).getTime())
-  if (!run.ClaimedAt) return null
-  return Math.max(0, new Date(run.ClaimedAt).getTime() - new Date(queuedAt).getTime())
+  if (conversation.Status === 'queued') return Math.max(0, now - new Date(queuedAt).getTime())
+  if (!conversation.ClaimedAt) return null
+  return Math.max(0, new Date(conversation.ClaimedAt).getTime() - new Date(queuedAt).getTime())
 }
 
 export function formatDurationMs(ms: number): string {

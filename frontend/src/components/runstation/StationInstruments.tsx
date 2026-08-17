@@ -15,7 +15,7 @@ import ArtifactList from '../ArtifactList'
 import ActionList from '../ActionList'
 
 interface Props {
-  run: Conversation
+  conversation: Conversation
   messages: Message[]
   state: StationState
   now: number
@@ -32,7 +32,7 @@ interface Props {
 // quiet, all monospace readouts and thin gauges. It carries only data the run
 // actually has — no faked context meter (that arrives with P4's telemetry).
 export function TelemetryRail({
-  run,
+  conversation,
   messages,
   state,
   now,
@@ -43,10 +43,10 @@ export function TelemetryRail({
   // conversation), so the rail shows the same authoritative numbers the usage
   // dashboard does rather than re-summing the transcript — useConversationDetail keeps
   // them advancing mid-engagement by folding each streamed row's usage on top.
-  const inputTokens = run.input_tokens ?? 0
-  const outputTokens = run.output_tokens ?? 0
-  const cacheRead = run.cache_read_tokens ?? 0
-  const cacheWrite = run.cache_creation_tokens ?? 0
+  const inputTokens = conversation.input_tokens ?? 0
+  const outputTokens = conversation.output_tokens ?? 0
+  const cacheRead = conversation.cache_read_tokens ?? 0
+  const cacheWrite = conversation.cache_creation_tokens ?? 0
   // The context scan does walk the transcript — it wants the last
   // usage-bearing row, not a sum — and the rail re-renders every second for
   // the elapsed readout (`now`), so memoize it on the message array.
@@ -54,16 +54,16 @@ export function TelemetryRail({
   // Working time and queue dwell are separate gauges: elapsed/running tick
   // from the claim stamp (queue time never inflates them), the queued readout
   // carries the wait — live while the run is in line, settled once it ran.
-  const isQueued = run.Status === 'queued'
-  const workStart = workStartedAt(run)
+  const isQueued = conversation.Status === 'queued'
+  const workStart = workStartedAt(conversation)
   const started = !isQueued && workStart ? new Date(workStart) : null
   const duration =
-    run.DurationMs != null && run.DurationMs > 0
-      ? formatDurationMs(run.DurationMs)
+    conversation.DurationMs != null && conversation.DurationMs > 0
+      ? formatDurationMs(conversation.DurationMs)
       : workStart
         ? formatElapsed(workStart, now)
         : null
-  const dwellMs = queueDwellMs(run, now)
+  const dwellMs = queueDwellMs(conversation, now)
 
   return (
     <aside className="hidden w-[256px] shrink-0 overflow-y-auto border-l border-border-subtle bg-black/[0.012] px-4 py-4 lg:block">
@@ -84,19 +84,30 @@ export function TelemetryRail({
           the rail never shows a faked bar. */}
       {contextUsed != null && (
         <Section label="Context">
-          <ContextGauge used={contextUsed} limit={contextLimit(run.Model)} light={state.light} />
+          <ContextGauge
+            used={contextUsed}
+            limit={contextLimit(conversation.Model)}
+            light={state.light}
+          />
         </Section>
       )}
 
       {/* Run figures */}
       <Section label="Run">
-        {run.NumTurns != null && run.NumTurns > 0 && <Readout k="turns" v={String(run.NumTurns)} />}
-        {run.TotalCostUSD != null && run.TotalCostUSD > 0 && (
-          <Readout k="cost" v={`$${run.TotalCostUSD.toFixed(run.TotalCostUSD < 1 ? 4 : 2)}`} />
+        {conversation.NumTurns != null && conversation.NumTurns > 0 && (
+          <Readout k="turns" v={String(conversation.NumTurns)} />
         )}
-        {run.Model && <Readout k="model" v={shortModel(run.Model)} title={run.Model} />}
-        {duration && (run.DurationMs != null || !isQueued) && (
-          <Readout k={run.DurationMs != null ? 'elapsed' : 'running'} v={duration} />
+        {conversation.TotalCostUSD != null && conversation.TotalCostUSD > 0 && (
+          <Readout
+            k="cost"
+            v={`$${conversation.TotalCostUSD.toFixed(conversation.TotalCostUSD < 1 ? 4 : 2)}`}
+          />
+        )}
+        {conversation.Model && (
+          <Readout k="model" v={shortModel(conversation.Model)} title={conversation.Model} />
+        )}
+        {duration && (conversation.DurationMs != null || !isQueued) && (
+          <Readout k={conversation.DurationMs != null ? 'elapsed' : 'running'} v={duration} />
         )}
         {dwellMs != null && (isQueued || dwellMs >= QUEUE_DWELL_VISIBLE_MS) && (
           <Readout
@@ -112,12 +123,19 @@ export function TelemetryRail({
         {started && (
           <Readout k="started" v={clockStamp(started)} title={started.toLocaleString()} />
         )}
-        {run.ParkReason && <Readout k="stop" v={parkReasonLabel(run.ParkReason)} />}
+        {conversation.ParkReason && (
+          <Readout k="stop" v={parkReasonLabel(conversation.ParkReason)} />
+        )}
         {/* The stored token, plus what it meant for the task. On its own
             `continue` is an orchestration term the viewer has no way to read —
             and the one that decides whether anything runs after this. */}
-        {run.Outcome && (
-          <Readout k="outcome" v={run.Outcome} accent={state.light} note={completionGloss(run)} />
+        {conversation.Outcome && (
+          <Readout
+            k="outcome"
+            v={conversation.Outcome}
+            accent={state.light}
+            note={completionGloss(conversation)}
+          />
         )}
       </Section>
 
@@ -127,12 +145,12 @@ export function TelemetryRail({
           out. Gated on artifact_count (free on the run) so a run that produced
           nothing skips both the section and its fetch — matching the board
           card's affordance, which hides at 0. */}
-      {(run.artifact_count ?? 0) > 0 && (
+      {(conversation.artifact_count ?? 0) > 0 && (
         <Section label="Artifacts">
           <ArtifactList
-            conversationId={run.ID}
-            pendingArtifactIds={run.pending_artifact_ids}
-            refreshKey={artifactSetKey(run)}
+            conversationId={conversation.ID}
+            pendingArtifactIds={conversation.pending_artifact_ids}
+            refreshKey={artifactSetKey(conversation)}
             onOpenApproval={onOpenArtifact}
             onResolved={onArtifactResolved}
           />
@@ -147,20 +165,25 @@ export function TelemetryRail({
           Refetched when the run's status or turn count moves, so a live run's
           list fills in without a request per streamed row. */}
       <Section label="Actions">
-        <ActionList conversationId={run.ID} refreshKey={`${run.Status}:${run.NumTurns ?? 0}`} />
+        <ActionList
+          conversationId={conversation.ID}
+          refreshKey={`${conversation.Status}:${conversation.NumTurns ?? 0}`}
+        />
       </Section>
 
-      {run.Status === 'completed' && run.ResultSummary && (
+      {conversation.Status === 'completed' && conversation.ResultSummary && (
         <Section label="Summary" last>
           <p className="whitespace-pre-line text-[11.5px] leading-relaxed text-text-secondary">
-            {run.ResultSummary}
+            {conversation.ResultSummary}
           </p>
         </Section>
       )}
 
-      {run.OutcomeReason && (
+      {conversation.OutcomeReason && (
         <Section label="Reason" last>
-          <p className="text-[11.5px] leading-relaxed text-text-secondary">{run.OutcomeReason}</p>
+          <p className="text-[11.5px] leading-relaxed text-text-secondary">
+            {conversation.OutcomeReason}
+          </p>
         </Section>
       )}
     </aside>

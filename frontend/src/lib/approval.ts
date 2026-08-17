@@ -17,17 +17,17 @@ export interface ApprovalCounts {
 // projections that ride the run row (websocket-fresh), so an always-mounted
 // ArtifactList can refetch when the set changes shape — a live run minting a
 // new PR, a resolve landing from another surface or tab — without polling.
-export function artifactSetKey(run: Conversation): string {
-  return `${run.artifact_count ?? 0}:${(run.pending_artifact_ids ?? []).join(',')}`
+export function artifactSetKey(conversation: Conversation): string {
+  return `${conversation.artifact_count ?? 0}:${(conversation.pending_artifact_ids ?? []).join(',')}`
 }
 
 // approvalCounts reads the run projection's per-kind unresolved counts. Absent
 // fields (the server's transient-failure guard, or a run with no artifacts) read
 // as 0 — a card only surfaces approval affordances when has_unresolved_artifacts
 // is true, where the counts are guaranteed present.
-export function approvalCounts(run: Conversation): ApprovalCounts {
-  const pr = run.unresolved_pr_count ?? 0
-  const review = run.unresolved_review_count ?? 0
+export function approvalCounts(conversation: Conversation): ApprovalCounts {
+  const pr = conversation.unresolved_pr_count ?? 0
+  const review = conversation.unresolved_review_count ?? 0
   return { pr, review, total: pr + review }
 }
 
@@ -38,13 +38,13 @@ export function approvalCounts(run: Conversation): ApprovalCounts {
 // guard. So honor the authoritative boolean directly when present — a definitive
 // `false` means "none", full stop — and fall back to the id set / counts only
 // when it's undefined (older projections / the transient window).
-export function hasUnresolvedArtifacts(run: Conversation | null | undefined): boolean {
-  if (!run) return false
-  if (run.has_unresolved_artifacts === false) return false
-  if (run.has_unresolved_artifacts === true) return true
+export function hasUnresolvedArtifacts(conversation: Conversation | null | undefined): boolean {
+  if (!conversation) return false
+  if (conversation.has_unresolved_artifacts === false) return false
+  if (conversation.has_unresolved_artifacts === true) return true
   // undefined → re-derive from whatever the projection did carry.
-  if ((run.pending_artifact_ids?.length ?? 0) > 0) return true
-  const { total } = approvalCounts(run)
+  if ((conversation.pending_artifact_ids?.length ?? 0) > 0) return true
+  const { total } = approvalCounts(conversation)
   return total > 0
 }
 

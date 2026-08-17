@@ -96,7 +96,7 @@ function tokenDelta(msg: Message): TokenDelta | null {
 // Conversation only carries TaskID, and the detail page wants the title +
 // source badge in its header.
 export function useConversationDetail(conversationID: string | undefined): RunDetailState {
-  const [run, setRun] = useState<Conversation | null>(null)
+  const [conversation, setConversation] = useState<Conversation | null>(null)
   const [task, setTask] = useState<Task | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [artifacts, setArtifacts] = useState<Artifact[]>([])
@@ -126,12 +126,12 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
   const lastConversationIDRef = useRef<string | undefined>(conversationID)
 
   // Mirrors of the two states the reconcile tick reads. That interval is
-  // created once per run, so it cannot close over `run` / `messages` directly:
-  // a dep on either would tear the timer down and rebuild it on every streamed
-  // row (foldMessageUsage writes `run` per stamped message), and on a busy run
+  // created once per run, so it cannot close over `conversation` / `messages`
+  // directly: a dep on either would tear the timer down and rebuild it on every
+  // streamed row (foldMessageUsage writes `conversation` per stamped message), and on a busy run
   // the 5s tick would never come due. Written after commit, so by the time a
   // tick fires they hold what the view is showing.
-  const runRef = useRef<Conversation | null>(null)
+  const conversationRef = useRef<Conversation | null>(null)
   const messagesRef = useRef<Message[]>([])
 
   // Whether this run has been seen live since the last repair, which is what
@@ -146,9 +146,9 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
   // still leaves the flag up for the tick that follows.
   const sawActiveRef = useRef(false)
   useEffect(() => {
-    runRef.current = run
-    if (run && isActiveConversation(run)) sawActiveRef.current = true
-  }, [run])
+    conversationRef.current = conversation
+    if (conversation && isActiveConversation(conversation)) sawActiveRef.current = true
+  }, [conversation])
   useEffect(() => {
     messagesRef.current = messages
   }, [messages])
@@ -214,13 +214,15 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
     const costSeen = costBaseline.current
     if (cost != null && costSeen !== null && !costSeen.has(msg.id)) {
       costSeen.add(msg.id)
-      setRun((prev) => (prev ? { ...prev, TotalCostUSD: (prev.TotalCostUSD ?? 0) + cost } : prev))
+      setConversation((prev) =>
+        prev ? { ...prev, TotalCostUSD: (prev.TotalCostUSD ?? 0) + cost } : prev,
+      )
     }
     const usage = tokenDelta(msg)
     const tokensSeen = tokenBaseline.current
     if (usage !== null && tokensSeen !== null && !tokensSeen.has(msg.id)) {
       tokensSeen.add(msg.id)
-      setRun((prev) =>
+      setConversation((prev) =>
         prev
           ? {
               ...prev,
@@ -257,7 +259,7 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
     const id = conversationID
     apiJSON<Conversation>(`/api/agent/conversations/${id}`)
       .then((data) => {
-        if (id === lastConversationIDRef.current) setRun(data)
+        if (id === lastConversationIDRef.current) setConversation(data)
       })
       .catch(() => {})
     refetchArtifacts(id)
@@ -336,7 +338,7 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
     const prevConversationID = lastConversationIDRef.current
     if (prevConversationID !== conversationID) {
       lastConversationIDRef.current = conversationID
-      setRun(null)
+      setConversation(null)
       setTask(null)
       setMessages([])
       setArtifacts([])
@@ -372,9 +374,11 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
     setError(null)
     ;(async () => {
       try {
-        const runData = await apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
+        const conversationData = await apiJSON<Conversation>(
+          `/api/agent/conversations/${conversationID}`,
+        )
         if (cancelled) return
-        setRun(runData)
+        setConversation(conversationData)
         // The artifact set drives the approval list; pull it in the same load so
         // the cards are ready when the run paints (best-effort, non-blocking).
         refetchArtifacts(conversationID)
@@ -385,8 +389,8 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
         // task 404 reject the pair would blank it.
         const [transcript, taskRow] = await Promise.all([
           apiJSON<TranscriptPage>(`/api/agent/conversations/${conversationID}/messages`),
-          runData.TaskID
-            ? apiJSON<Task>(`/api/tasks/${runData.TaskID}`).catch((err: unknown) => ({
+          conversationData.TaskID
+            ? apiJSON<Task>(`/api/tasks/${conversationData.TaskID}`).catch((err: unknown) => ({
                 taskError: httpErrorMessage(err, 'Could not load the task.'),
               }))
             : null,
@@ -476,7 +480,7 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
     if (!conversationID) return
     let cancelled = false
     const reconcileMessages = () => {
-      const current = runRef.current
+      const current = conversationRef.current
       if (!current) return
       // A live run is repaired every tick. A settled one is repaired once —
       // its transcript is final, so a single read closes it out and there is
@@ -528,8 +532,8 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
           // case the websocket broadcast was missed (the WS handler does the same
           // on its event), so the derived approval surface can't go stale.
           apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
-            .then((run) => {
-              if (!cancelled) setRun(run)
+            .then((data) => {
+              if (!cancelled) setConversation(data)
             })
             .catch(() => {})
           if (!cancelled) refetchArtifacts(conversationID)
@@ -575,14 +579,14 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
           // authority and overwrites this.
           const resumable = event.data.resumable
           if (resumable !== undefined) {
-            setRun((prev) => (prev ? { ...prev, resumable } : prev))
+            setConversation((prev) => (prev ? { ...prev, resumable } : prev))
           }
           apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
             .then((data) => {
               // Guard the async write against a navigation that landed while the
               // fetch was in flight (same guard refetchArtifacts uses), so an
               // old run's row can't clobber the new run's state.
-              if (conversationID === lastConversationIDRef.current) setRun(data)
+              if (conversationID === lastConversationIDRef.current) setConversation(data)
             })
             .catch(() => {})
           // A status flip can resolve the last artifact (terminal-on-last) or
@@ -597,7 +601,7 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
           // run's own status is unchanged, so no permission-queue drop here.
           apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
             .then((data) => {
-              if (conversationID === lastConversationIDRef.current) setRun(data)
+              if (conversationID === lastConversationIDRef.current) setConversation(data)
             })
             .catch(() => {})
           refetchArtifacts(conversationID)
@@ -617,7 +621,7 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
   )
 
   return {
-    run,
+    run: conversation,
     task,
     messages,
     artifacts,

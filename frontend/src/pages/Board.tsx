@@ -202,13 +202,13 @@ export default function Board() {
   // ID. Bounded by construction — the board used to accumulate every run's
   // full message array here, growing without limit for the lifetime of the
   // page while each card re-derived its stats from scratch per render.
-  const [runFeeds, setRunFeeds] = useState<Record<string, RunCardFeed>>({})
+  const [conversationFeeds, setConversationFeeds] = useState<Record<string, RunCardFeed>>({})
   const [chainStepConversations, setChainStepConversations] = useState<
     Record<string, Conversation[]>
   >({})
-  const chainStepRunsRef = useRef(chainStepConversations)
+  const chainStepConversationsRef = useRef(chainStepConversations)
   useEffect(() => {
-    chainStepRunsRef.current = chainStepConversations
+    chainStepConversationsRef.current = chainStepConversations
   }, [chainStepConversations])
 
   // Tool-permission prompts for every run on the board, keyed by run ID. The
@@ -222,7 +222,7 @@ export default function Board() {
     queues: permQueueMap,
     refresh: refreshPermissions,
     resolve: resolvePermission,
-    dropConversation: dropPermissionRun,
+    dropConversation: dropPermissionConversation,
   } = usePermissionQueues()
   const queuesRef = useRef(permQueueMap)
   useEffect(() => {
@@ -456,13 +456,13 @@ export default function Board() {
       // cleared = no active run). ONE aggregated call returns every task's runs
       // plus each task's primary-run transcript, replacing the old per-task
       // serial loop of 2–3 round-trips each (TFAC-98).
-      const withRuns: Task[] = [
+      const withConversations: Task[] = [
         ...(claimedRes?.items ?? []),
         ...(inProgressRes?.items ?? []),
         ...(inReviewRes?.items ?? []),
         ...(doneRes?.items ?? []),
       ]
-      if (withRuns.length === 0) return
+      if (withConversations.length === 0) return
       // The window is over CONVERSATIONS, ordered so a task's runs stay
       // contiguous — so a board page's worth of tasks needs a page large
       // enough to hold all their runs. The board reads the first page and
@@ -475,40 +475,41 @@ export default function Board() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          task_ids: withRuns.map((t) => t.id),
+          task_ids: withConversations.map((t) => t.id),
           include_messages: true,
           page_size: 200,
         }),
       })
-      const runsByTask = agg.runs ?? {}
-      const messagesByRun = agg.messages ?? {}
+      const conversationsByTask = agg.runs ?? {}
+      const messagesByConversation = agg.messages ?? {}
 
       // Accumulate into plain objects, then commit each map in ONE setState
       // (the old loop fired up to three setState calls per task — a render per
       // iteration). Chains need a second per-chain fetch for their blueprint
       // step structure; resolve those concurrently rather than serially.
-      const nextRuns: Record<string, Conversation> = {}
+      const nextConversations: Record<string, Conversation> = {}
       const nextFeeds: Record<string, RunCardFeed> = {}
       const chainSeeds: Array<Promise<{ taskID: string; steps: Conversation[] } | null>> = []
 
-      for (const task of withRuns) {
-        const runs = runsByTask[task.id]
-        if (!runs || runs.length === 0) continue
-        const latestRun = runs[0]
-        const blueprintRunID = latestRun.blueprint_run_id
+      for (const task of withConversations) {
+        const taskConversations = conversationsByTask[task.id]
+        if (!taskConversations || taskConversations.length === 0) continue
+        const latestConversation = taskConversations[0]
+        const blueprintRunID = latestConversation.blueprint_run_id
         if (blueprintRunID) {
-          const stepRuns = runs
+          const stepConversations = taskConversations
             .filter((r) => r.blueprint_run_id === blueprintRunID)
             .sort((a, b) => (a.blueprint_step_index ?? 0) - (b.blueprint_step_index ?? 0))
           const activeStep =
-            stepRuns.find((r) => isActiveStatus(r.Status)) ?? stepRuns[stepRuns.length - 1]
-          nextRuns[task.id] = activeStep
-          // messagesByRun is keyed by each task's PRIMARY (newest-started) run.
+            stepConversations.find((r) => isActiveStatus(r.Status)) ??
+            stepConversations[stepConversations.length - 1]
+          nextConversations[task.id] = activeStep
+          // messagesByConversation is keyed by each task's PRIMARY (newest-started) run.
           // For a sequential chain the most recently started step IS the active
-          // step, so activeStep.ID === runs[0].ID and this lookup hits. If they
+          // step, so activeStep.ID === taskConversations[0].ID and this lookup hits. If they
           // ever differ, the WS `message` handler seeds the active step
           // shortly — keep this keyed by activeStep.ID so it stays aligned.
-          const msgs = messagesByRun[activeStep.ID]
+          const msgs = messagesByConversation[activeStep.ID]
           if (msgs) nextFeeds[activeStep.ID] = feedFromMessages(msgs)
           chainSeeds.push(
             fetchChainStepConversations(blueprintRunID).then((steps) =>
@@ -516,17 +517,17 @@ export default function Board() {
             ),
           )
         } else {
-          nextRuns[task.id] = latestRun
-          const msgs = messagesByRun[latestRun.ID]
-          if (msgs) nextFeeds[latestRun.ID] = feedFromMessages(msgs)
+          nextConversations[task.id] = latestConversation
+          const msgs = messagesByConversation[latestConversation.ID]
+          if (msgs) nextFeeds[latestConversation.ID] = feedFromMessages(msgs)
         }
       }
 
-      setConversations((prev) => ({ ...prev, ...nextRuns }))
+      setConversations((prev) => ({ ...prev, ...nextConversations }))
       // A fetched feed replaces the incrementally-built one wholesale — the
       // server transcript is authoritative, so any WS/fetch race drift
       // self-corrects here.
-      setRunFeeds((prev) => ({ ...prev, ...nextFeeds }))
+      setConversationFeeds((prev) => ({ ...prev, ...nextFeeds }))
 
       // Apply all chain step rails in one batch once their blueprint fetches
       // settle (concurrent above), so the whole refresh costs ~3 renders, not
@@ -625,14 +626,14 @@ export default function Board() {
           let matched = false
           setConversations((prev) => {
             const updated = { ...prev }
-            for (const [taskId, run] of Object.entries(updated)) {
-              if (run.ID === conversationID) {
+            for (const [taskId, conversation] of Object.entries(updated)) {
+              if (conversation.ID === conversationID) {
                 matched = true
                 // failure_kind rides the failed-status event so the card's
                 // kind-specific copy lands with the flip, not only after the
                 // full-run refetch below settles.
                 updated[taskId] = {
-                  ...run,
+                  ...conversation,
                   Status: status,
                   ...(event.data.failure_kind ? { FailureKind: event.data.failure_kind } : {}),
                 }
@@ -673,7 +674,7 @@ export default function Board() {
             // The run is no longer running a turn, so any prompt parked on it is
             // stale — drop its queue so a finished card doesn't keep an
             // unanswerable Allow/Deny control.
-            dropPermissionRun(conversationID)
+            dropPermissionConversation(conversationID)
             scheduleFetchTasks()
           }
 
@@ -683,7 +684,7 @@ export default function Board() {
             // so auto-delegation / cross-tab / swipe responses we
             // haven't tracked yet render immediately.
             let isChainStep = false
-            for (const steps of Object.values(chainStepRunsRef.current)) {
+            for (const steps of Object.values(chainStepConversationsRef.current)) {
               if (steps.some((r) => r.blueprint_run_id && r.ID === conversationID)) {
                 isChainStep = true
                 break
@@ -737,7 +738,7 @@ export default function Board() {
           // return prev in that case so React skips the board re-render. A
           // curator `message` (project_id, no conversation_id) is ignored here.
           const conversationID = event.conversation_id
-          setRunFeeds((prev) => {
+          setConversationFeeds((prev) => {
             const cur = prev[conversationID]
             const next = appendToFeed(cur, event.data)
             if (next === (cur ?? EMPTY_FEED)) return prev
@@ -767,7 +768,12 @@ export default function Board() {
           refreshPermissions(event.conversation_id)
         }
       },
-      [scheduleFetchTasks, seedChainStepConversations, refreshPermissions, dropPermissionRun],
+      [
+        scheduleFetchTasks,
+        seedChainStepConversations,
+        refreshPermissions,
+        dropPermissionConversation,
+      ],
     ),
   )
 
@@ -781,11 +787,11 @@ export default function Board() {
   // every event doesn't turn into a request per card per event.
   const permissionsAskedRef = useRef<Set<string>>(new Set())
   useEffect(() => {
-    for (const run of Object.values(conversations)) {
-      if (!run?.ID || isPermissionTerminalStatus(run.Status)) continue
-      if (permissionsAskedRef.current.has(run.ID)) continue
-      permissionsAskedRef.current.add(run.ID)
-      refreshPermissions(run.ID)
+    for (const conversation of Object.values(conversations)) {
+      if (!conversation?.ID || isPermissionTerminalStatus(conversation.Status)) continue
+      if (permissionsAskedRef.current.has(conversation.ID)) continue
+      permissionsAskedRef.current.add(conversation.ID)
+      refreshPermissions(conversation.ID)
     }
   }, [conversations, refreshPermissions])
 
@@ -797,25 +803,25 @@ export default function Board() {
   useEffect(() => {
     const live = new Set(Object.values(conversations).map((r) => r.ID))
     for (const conversationID of Object.keys(queuesRef.current)) {
-      if (!live.has(conversationID)) dropPermissionRun(conversationID)
+      if (!live.has(conversationID)) dropPermissionConversation(conversationID)
     }
-  }, [conversations, dropPermissionRun])
+  }, [conversations, dropPermissionConversation])
 
   // Sort tasks with active runs in a meaningful order. Used for
   // In Progress and In Review where the run state matters for
   // attention. Needs-you (a parked permission prompt or an unresolved
   // artifact) > failed > everything in flight > completed.
-  const sortByRunAttention = useCallback(
+  const sortByConversationAttention = useCallback(
     (tasks: Task[]) => {
       const weight = (t: Task) => {
-        const run = conversations[t.id]
-        if (!run) return 2
+        const conversation = conversations[t.id]
+        if (!conversation) return 2
         // A live tool-permission prompt or an unresolved artifact set is the most
         // urgent "needs you" — top weight — so it can't be missed in the column.
-        if ((permQueueMap[run.ID]?.length ?? 0) > 0) return 0
-        if (hasUnresolvedArtifacts(run)) return 0
-        if (isFailedStatus(run.Status)) return 1
-        if (run.Status === 'completed') return 3
+        if ((permQueueMap[conversation.ID]?.length ?? 0) > 0) return 0
+        if (hasUnresolvedArtifacts(conversation)) return 0
+        if (isFailedStatus(conversation.Status)) return 1
+        if (conversation.Status === 'completed') return 3
         return 2
       }
       return [...tasks].sort((a, b) => weight(a) - weight(b))
@@ -844,11 +850,24 @@ export default function Board() {
     return {
       queued: applyColumnFilter(queued, filters.queued, opts),
       claimed: applyColumnFilter(claimed, filters.claimed, opts),
-      in_progress: applyColumnFilter(sortByRunAttention(inProgress), filters.in_progress, opts),
-      in_review: applyColumnFilter(sortByRunAttention(inReview), filters.in_review, opts),
+      in_progress: applyColumnFilter(
+        sortByConversationAttention(inProgress),
+        filters.in_progress,
+        opts,
+      ),
+      in_review: applyColumnFilter(sortByConversationAttention(inReview), filters.in_review, opts),
       done: applyColumnFilter(done, filters.done, opts),
     }
-  }, [queued, claimed, inProgress, inReview, done, filters, sortByRunAttention, resolveClaimee])
+  }, [
+    queued,
+    claimed,
+    inProgress,
+    inReview,
+    done,
+    filters,
+    sortByConversationAttention,
+    resolveClaimee,
+  ])
 
   // Each column's paging state, so a lane deeper than one page can say so and
   // fetch the rest. Rebuilt per render (the lists change every load) and read
@@ -937,14 +956,14 @@ export default function Board() {
   // nothing to resolve and the caller should proceed directly.
   const requestResolveAll = useCallback(
     (taskId: string, action: 'complete' | 'requeue'): boolean => {
-      const run = conversations[taskId]
-      if (!run || !hasUnresolvedArtifacts(run)) return false
-      const c = approvalCounts(run)
+      const conversation = conversations[taskId]
+      if (!conversation || !hasUnresolvedArtifacts(conversation)) return false
+      const c = approvalCounts(conversation)
       setConfirmResolve({
         taskId,
         prCount: c.pr,
         reviewCount: c.review,
-        isLive: isActiveConversation(run),
+        isLive: isActiveConversation(conversation),
         action,
       })
       return true
@@ -1408,7 +1427,7 @@ export default function Board() {
                     colId={colId}
                     tasks={filtered[colId]}
                     conversations={conversations}
-                    runFeeds={runFeeds}
+                    conversationFeeds={conversationFeeds}
                     chainStepConversations={chainStepConversations}
                     permQueues={permQueueMap}
                     onResolvePermission={resolvePermission}
@@ -1533,7 +1552,7 @@ function ColumnContents({
   colId,
   tasks,
   conversations,
-  runFeeds,
+  conversationFeeds,
   chainStepConversations,
   permQueues,
   onResolvePermission,
@@ -1553,7 +1572,7 @@ function ColumnContents({
   colId: ColumnId
   tasks: Task[]
   conversations: Record<string, Conversation>
-  runFeeds: Record<string, RunCardFeed>
+  conversationFeeds: Record<string, RunCardFeed>
   chainStepConversations: Record<string, Conversation[]>
   permQueues: Record<string, PendingPermission[]>
   onResolvePermission: (
@@ -1592,16 +1611,16 @@ function ColumnContents({
         // showing an AgentCard there would lie about who's working
         // on it. The map is cleaned up on the next WS update; this
         // gate covers the window before that lands.
-        const run = colId === 'queued' ? undefined : conversations[task.id]
-        if (run) {
+        const conversation = colId === 'queued' ? undefined : conversations[task.id]
+        if (conversation) {
           return (
             <SortableAgentCard
               key={task.id}
               task={task}
-              run={run}
+              conversation={conversation}
               chainSteps={chainStepConversations[task.id]}
-              feed={runFeeds[run.ID]}
-              pendingPermissions={permQueues[run.ID]}
+              feed={conversationFeeds[conversation.ID]}
+              pendingPermissions={permQueues[conversation.ID]}
               onResolvePermission={onResolvePermission}
               onRequeue={onRequeue}
               onOpenApproval={onOpenApproval}
@@ -1711,7 +1730,7 @@ const draggableConversationStatuses: ReadonlySet<string> = new Set(TERMINAL_CONV
 
 const SortableAgentCard = memo(function SortableAgentCard({
   task,
-  run,
+  conversation,
   chainSteps,
   feed,
   pendingPermissions,
@@ -1722,7 +1741,7 @@ const SortableAgentCard = memo(function SortableAgentCard({
   ...picker
 }: {
   task: Task
-  run: Conversation
+  conversation: Conversation
   chainSteps?: Conversation[]
   feed?: RunCardFeed
   pendingPermissions?: PendingPermission[]
@@ -1748,8 +1767,8 @@ const SortableAgentCard = memo(function SortableAgentCard({
   // (behind the confirmation). An actively-executing turn stays anchored (cancel
   // is the right intent; dragging mid-run races the spawner).
   const draggable =
-    (draggableConversationStatuses.has(run.Status) ||
-      (hasUnresolvedArtifacts(run) && !isActiveConversation(run))) &&
+    (draggableConversationStatuses.has(conversation.Status) ||
+      (hasUnresolvedArtifacts(conversation) && !isActiveConversation(conversation))) &&
     !botManaged
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
@@ -1774,15 +1793,15 @@ const SortableAgentCard = memo(function SortableAgentCard({
     >
       <AgentCard
         task={task}
-        run={run}
+        conversation={conversation}
         chainSteps={chainSteps}
         feed={feed}
         pendingPermissions={pendingPermissions}
         onResolvePermission={(toolCallID, decision) =>
-          onResolvePermission(run.ID, toolCallID, decision)
+          onResolvePermission(conversation.ID, toolCallID, decision)
         }
         onRequeue={() => onRequeue(task.id)}
-        onOpenArtifact={(kind, artifactId) => onOpenApproval(run.ID, kind, artifactId)}
+        onOpenArtifact={(kind, artifactId) => onOpenApproval(conversation.ID, kind, artifactId)}
         onArtifactResolved={onArtifactResolved}
         assigneeSlot={<CardAssigneePicker task={task} picker={picker} />}
       />

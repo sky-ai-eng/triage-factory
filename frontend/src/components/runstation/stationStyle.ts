@@ -47,8 +47,8 @@ export const HMI_CYAN = 'var(--hmi-cyan)'
 // stationState collapses the run lifecycle into the machine's lit state. Every
 // active status — each setup phase and running alike — reads as one thing: the
 // machine is hot and scanning.
-export function stationState(run: Conversation): StationState {
-  if (isActiveConversation(run)) {
+export function stationState(conversation: Conversation): StationState {
+  if (isActiveConversation(conversation)) {
     return {
       key: 'working',
       light: 'var(--color-delegate)',
@@ -64,7 +64,7 @@ export function stationState(run: Conversation): StationState {
   // wears the amber "your move" light, regardless of its run status. A live run
   // keeps WORKING (handled above) — the dock surfaces the approval affordance
   // without recoloring the whole machine mid-turn.
-  if (hasUnresolvedArtifacts(run)) {
+  if (hasUnresolvedArtifacts(conversation)) {
     return {
       key: 'attention',
       light: 'var(--color-snooze)',
@@ -75,7 +75,7 @@ export function stationState(run: Conversation): StationState {
       belt: 0.16,
     }
   }
-  switch (run.Status) {
+  switch (conversation.Status) {
     case 'open':
       // Honest idle: not executing, not concluded. Powered, waiting — the
       // machine glows its baseline cyan, belt idling, vents barely warm.
@@ -103,13 +103,13 @@ export function stationState(run: Conversation): StationState {
       // wears a different light for each, because "this step is done" and "the
       // task is done" are not the same news, and the green DONE plate was
       // telling a viewer mid-chain that the whole thing had stopped.
-      switch (completionKind(run)) {
+      switch (completionKind(conversation)) {
         case 'handoff': {
           // Cyan, not green: the powered-and-waiting trim. This step concluded
           // and the line moved on, so the belt keeps idling — green here reads
           // as "nothing follows", which is exactly the wrong conclusion. The
           // position rides the label so the plate itself says where you are.
-          const pos = chainPosition(run)
+          const pos = chainPosition(conversation)
           return {
             key: 'handoff',
             light: HMI_CYAN,
@@ -158,7 +158,7 @@ export function stationState(run: Conversation): StationState {
       return {
         key: 'open',
         light: HMI_CYAN,
-        label: run.Status.toUpperCase(),
+        label: conversation.Status.toUpperCase(),
         live: false,
         scanner: false,
         heat: 0.2,

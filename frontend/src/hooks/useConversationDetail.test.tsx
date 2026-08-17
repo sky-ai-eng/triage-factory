@@ -18,7 +18,7 @@ vi.mock('./useWebSocket', () => ({
   setPresenceView: vi.fn(),
 }))
 
-const RUN_ID = 'r1'
+const CONVERSATION_ID = 'r1'
 const T0 = new Date('2026-07-30T00:00:00Z').getTime()
 
 // serverConversation is what GET /api/agent/conversations/r1 answers with — mutable so a
@@ -27,7 +27,7 @@ let serverConversation: Conversation
 
 function conversation(over: Partial<Conversation>): Conversation {
   return {
-    ID: RUN_ID,
+    ID: CONVERSATION_ID,
     // Empty so the hook skips the parent-task fetch: this suite is about the
     // run row's readouts.
     TaskID: '',
@@ -44,7 +44,7 @@ function conversation(over: Partial<Conversation>): Conversation {
 function message(over: Partial<Message>): Message {
   return {
     id: 1,
-    conversation_id: RUN_ID,
+    conversation_id: CONVERSATION_ID,
     role: 'assistant',
     content: 'working',
     subtype: '',
@@ -133,9 +133,16 @@ function deferred<T>() {
 // Harness renders the station's instrument rail off the hook, so the assertions
 // read the rendered cost the way the user sees it rather than hook internals.
 function Harness() {
-  const { run, messages } = useConversationDetail(RUN_ID)
-  if (!run) return <div>loading</div>
-  return <TelemetryRail run={run} messages={messages} state={stationState(run)} now={T0 + 60_000} />
+  const { run: conversation, messages } = useConversationDetail(CONVERSATION_ID)
+  if (!conversation) return <div>loading</div>
+  return (
+    <TelemetryRail
+      conversation={conversation}
+      messages={messages}
+      state={stationState(conversation)}
+      now={T0 + 60_000}
+    />
+  )
 }
 
 function send(event: WSEvent) {
@@ -161,10 +168,18 @@ describe('useConversationDetail live cost accumulation', () => {
     render(<Harness />)
     expect(await screen.findByText('$0.2000')).toBeInTheDocument()
 
-    send({ type: 'message', conversation_id: RUN_ID, data: message({ id: 11, cost_usd: 0.05 }) })
+    send({
+      type: 'message',
+      conversation_id: CONVERSATION_ID,
+      data: message({ id: 11, cost_usd: 0.05 }),
+    })
     expect(screen.getByText('$0.2500')).toBeInTheDocument()
 
-    send({ type: 'message', conversation_id: RUN_ID, data: message({ id: 12, cost_usd: 0.05 }) })
+    send({
+      type: 'message',
+      conversation_id: CONVERSATION_ID,
+      data: message({ id: 12, cost_usd: 0.05 }),
+    })
     expect(screen.getByText('$0.3000')).toBeInTheDocument()
   })
 
@@ -173,8 +188,8 @@ describe('useConversationDetail live cost accumulation', () => {
     await screen.findByText('$0.2000')
 
     const row = message({ id: 11, cost_usd: 0.05 })
-    send({ type: 'message', conversation_id: RUN_ID, data: row })
-    send({ type: 'message', conversation_id: RUN_ID, data: row })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: row })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: row })
     expect(screen.getByText('$0.2500')).toBeInTheDocument()
   })
 
@@ -182,13 +197,21 @@ describe('useConversationDetail live cost accumulation', () => {
     render(<Harness />)
     await screen.findByText('$0.2000')
 
-    send({ type: 'message', conversation_id: RUN_ID, data: message({ id: 11, cost_usd: 0.05 }) })
+    send({
+      type: 'message',
+      conversation_id: CONVERSATION_ID,
+      data: message({ id: 11, cost_usd: 0.05 }),
+    })
     expect(screen.getByText('$0.2500')).toBeInTheDocument()
 
     // The server's SUM is the authority: it lands whether or not it agrees with
     // what the client accumulated, so drift can't compound across a run.
     serverConversation = conversation({ TotalCostUSD: 2.64, Status: 'completed' })
-    send({ type: 'conversation_update', conversation_id: RUN_ID, data: { status: 'completed' } })
+    send({
+      type: 'conversation_update',
+      conversation_id: CONVERSATION_ID,
+      data: { status: 'completed' },
+    })
     expect(await screen.findByText('$2.64')).toBeInTheDocument()
   })
 
@@ -200,12 +223,12 @@ describe('useConversationDetail live cost accumulation', () => {
     // fold into. The readout settling on the server's SUM (rather than on
     // 0.20 + 0.05) is what pins that this event landed in that window.
     const row = message({ id: 11, cost_usd: 0.05 })
-    send({ type: 'message', conversation_id: RUN_ID, data: row })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: row })
     expect(await screen.findByText('$0.2000')).toBeInTheDocument()
 
     // Nothing was recorded as counted, so the row's dollars are still foldable
     // rather than stranded — marking it would have lost them for the whole run.
-    send({ type: 'message', conversation_id: RUN_ID, data: row })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: row })
     expect(screen.getByText('$0.2500')).toBeInTheDocument()
   })
 
@@ -220,7 +243,7 @@ describe('useConversationDetail live cost accumulation', () => {
     expect(await screen.findByText('$0.2000')).toBeInTheDocument()
 
     const counted = message({ id: 11, cost_usd: 0.05 })
-    send({ type: 'message', conversation_id: RUN_ID, data: counted })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: counted })
     expect(screen.getByText('$0.2000')).toBeInTheDocument()
 
     // Once the transcript lands, that row is the baseline — still not folded,
@@ -230,11 +253,15 @@ describe('useConversationDetail live cost accumulation', () => {
     })
     expect(screen.getByText('$0.2000')).toBeInTheDocument()
 
-    send({ type: 'message', conversation_id: RUN_ID, data: counted })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: counted })
     expect(screen.getByText('$0.2000')).toBeInTheDocument()
 
     // Folding resumes from that baseline for rows the SUM does not cover.
-    send({ type: 'message', conversation_id: RUN_ID, data: message({ id: 12, cost_usd: 0.05 }) })
+    send({
+      type: 'message',
+      conversation_id: CONVERSATION_ID,
+      data: message({ id: 12, cost_usd: 0.05 }),
+    })
     expect(screen.getByText('$0.2500')).toBeInTheDocument()
   })
 
@@ -242,10 +269,10 @@ describe('useConversationDetail live cost accumulation', () => {
     render(<Harness />)
     await screen.findByText('$0.2000')
 
-    send({ type: 'message', conversation_id: RUN_ID, data: message({ id: 11 }) })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: message({ id: 11 }) })
     send({
       type: 'message',
-      conversation_id: RUN_ID,
+      conversation_id: CONVERSATION_ID,
       data: message({ id: 12, output_tokens: 400 }),
     })
     expect(screen.getByText('$0.2000')).toBeInTheDocument()
@@ -292,7 +319,7 @@ describe('useConversationDetail live token accumulation', () => {
 
     send({
       type: 'message',
-      conversation_id: RUN_ID,
+      conversation_id: CONVERSATION_ID,
       data: message({ id: 11, input_tokens: 500, output_tokens: 50, cache_read_tokens: 1000 }),
     })
     expect(screen.getByText('1.5k')).toBeInTheDocument()
@@ -307,8 +334,8 @@ describe('useConversationDetail live token accumulation', () => {
     await screen.findByText('1k')
 
     const row = message({ id: 11, input_tokens: 500, output_tokens: 50 })
-    send({ type: 'message', conversation_id: RUN_ID, data: row })
-    send({ type: 'message', conversation_id: RUN_ID, data: row })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: row })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: row })
     expect(screen.getByText('1.5k')).toBeInTheDocument()
     expect(screen.getByText('150')).toBeInTheDocument()
   })
@@ -323,19 +350,19 @@ describe('useConversationDetail live token accumulation', () => {
     await screen.findByText('1k')
 
     const counted = message({ id: 11, input_tokens: 500, output_tokens: 50 })
-    send({ type: 'message', conversation_id: RUN_ID, data: counted })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: counted })
     expect(screen.getByText('1k')).toBeInTheDocument()
 
     await act(async () => {
       transcriptRead.settle([counted])
     })
-    send({ type: 'message', conversation_id: RUN_ID, data: counted })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: counted })
     expect(screen.getByText('1k')).toBeInTheDocument()
 
     // Folding resumes from that baseline for rows the SUM does not cover.
     send({
       type: 'message',
-      conversation_id: RUN_ID,
+      conversation_id: CONVERSATION_ID,
       data: message({ id: 12, input_tokens: 500, output_tokens: 50 }),
     })
     expect(screen.getByText('1.5k')).toBeInTheDocument()
@@ -347,7 +374,7 @@ describe('useConversationDetail live token accumulation', () => {
 
     send({
       type: 'message',
-      conversation_id: RUN_ID,
+      conversation_id: CONVERSATION_ID,
       data: message({ id: 11, input_tokens: 500, output_tokens: 50 }),
     })
     expect(screen.getByText('1.5k')).toBeInTheDocument()
@@ -359,7 +386,11 @@ describe('useConversationDetail live token accumulation', () => {
       cache_read_tokens: 5000,
       cache_creation_tokens: 200,
     })
-    send({ type: 'conversation_update', conversation_id: RUN_ID, data: { status: 'completed' } })
+    send({
+      type: 'conversation_update',
+      conversation_id: CONVERSATION_ID,
+      data: { status: 'completed' },
+    })
     expect(await screen.findByText('9k')).toBeInTheDocument()
     expect(screen.getByText('800')).toBeInTheDocument()
   })
@@ -368,8 +399,12 @@ describe('useConversationDetail live token accumulation', () => {
     render(<Harness />)
     await screen.findByText('1k')
 
-    send({ type: 'message', conversation_id: RUN_ID, data: message({ id: 11 }) })
-    send({ type: 'message', conversation_id: RUN_ID, data: message({ id: 12, cost_usd: 0.05 }) })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: message({ id: 11 }) })
+    send({
+      type: 'message',
+      conversation_id: CONVERSATION_ID,
+      data: message({ id: 12, cost_usd: 0.05 }),
+    })
     expect(screen.getByText('1k')).toBeInTheDocument()
     expect(screen.getByText('100')).toBeInTheDocument()
   })
@@ -378,12 +413,12 @@ describe('useConversationDetail live token accumulation', () => {
 // TranscriptHarness renders the held transcript as a joined string plus the
 // cost readout, so a repaired row shows up both as content and as dollars.
 function TranscriptHarness() {
-  const { run, messages } = useConversationDetail(RUN_ID)
+  const { run: conversation, messages } = useConversationDetail(CONVERSATION_ID)
   return (
     <>
       <div data-testid="transcript">{messages.map((m) => m.content).join('|')}</div>
-      <div data-testid="cost">{run ? String(run.TotalCostUSD ?? '') : ''}</div>
-      <div data-testid="status">{run?.Status ?? ''}</div>
+      <div data-testid="cost">{conversation ? String(conversation.TotalCostUSD ?? '') : ''}</div>
+      <div data-testid="status">{conversation?.Status ?? ''}</div>
     </>
   )
 }
@@ -394,9 +429,13 @@ function transcript(): string {
 
 // Settle the run and wait for the refetch it triggers to actually land, so a
 // following tick sees the settled row rather than racing it.
-async function settleRun() {
+async function settleConversation() {
   serverConversation = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
-  send({ type: 'conversation_update', conversation_id: RUN_ID, data: { status: 'completed' } })
+  send({
+    type: 'conversation_update',
+    conversation_id: CONVERSATION_ID,
+    data: { status: 'completed' },
+  })
   await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('completed'))
 }
 
@@ -449,10 +488,14 @@ describe('useConversationDetail transcript reconciliation', () => {
     // A frame arrives, so the client holds row 12 — but nothing has verified
     // the span between 11 and 12, so the watermark stays at what was read.
     serverMessages.push(message({ id: 12, content: 'second' }))
-    send({ type: 'message', conversation_id: RUN_ID, data: message({ id: 12, content: 'second' }) })
+    send({
+      type: 'message',
+      conversation_id: CONVERSATION_ID,
+      data: message({ id: 12, content: 'second' }),
+    })
     await tick()
     expect(sinceRequests(fetchMock)).toEqual([
-      `/api/agent/conversations/${RUN_ID}/messages?since_id=11`,
+      `/api/agent/conversations/${CONVERSATION_ID}/messages?since_id=11`,
     ])
     expect(transcript()).toBe('first|second')
 
@@ -460,8 +503,8 @@ describe('useConversationDetail transcript reconciliation', () => {
     // the watermark only ever advances on a whole read.
     await tick()
     expect(sinceRequests(fetchMock)).toEqual([
-      `/api/agent/conversations/${RUN_ID}/messages?since_id=11`,
-      `/api/agent/conversations/${RUN_ID}/messages?since_id=12`,
+      `/api/agent/conversations/${CONVERSATION_ID}/messages?since_id=11`,
+      `/api/agent/conversations/${CONVERSATION_ID}/messages?since_id=12`,
     ])
     expect(transcript()).toBe('first|second')
   })
@@ -478,7 +521,11 @@ describe('useConversationDetail transcript reconciliation', () => {
       message({ id: 12, content: 'second' }),
       message({ id: 13, content: 'third' }),
     )
-    send({ type: 'message', conversation_id: RUN_ID, data: message({ id: 13, content: 'third' }) })
+    send({
+      type: 'message',
+      conversation_id: CONVERSATION_ID,
+      data: message({ id: 13, content: 'third' }),
+    })
     expect(transcript()).toBe('first|third')
 
     await tick()
@@ -496,7 +543,7 @@ describe('useConversationDetail transcript reconciliation', () => {
     const row = message({ id: 12, content: 'second' })
     serverMessages.push(row)
     await tick()
-    send({ type: 'message', conversation_id: RUN_ID, data: row })
+    send({ type: 'message', conversation_id: CONVERSATION_ID, data: row })
     expect(transcript()).toBe('first|second')
 
     await act(async () => {
@@ -517,7 +564,7 @@ describe('useConversationDetail transcript reconciliation', () => {
     // The row is held now, so a replay of it over the socket can't fold twice.
     send({
       type: 'message',
-      conversation_id: RUN_ID,
+      conversation_id: CONVERSATION_ID,
       data: message({ id: 12, content: 'second', cost_usd: 0.05 }),
     })
     expect(screen.getByTestId('cost').textContent).toBe('0.25')
@@ -552,7 +599,7 @@ describe('useConversationDetail transcript reconciliation', () => {
     await waitFor(() => expect(transcript()).toBe('first'))
 
     serverMessages.push(message({ id: 12, content: 'last' }))
-    await settleRun()
+    await settleConversation()
 
     await tick()
     expect(transcript()).toBe('first|last')
@@ -563,7 +610,7 @@ describe('useConversationDetail transcript reconciliation', () => {
     render(<TranscriptHarness />)
     await waitFor(() => expect(transcript()).toBe('first'))
 
-    await settleRun()
+    await settleConversation()
 
     // The run is settled, so its transcript is final: one read closes it out.
     await tick()
@@ -581,7 +628,7 @@ describe('useConversationDetail transcript reconciliation', () => {
     render(<TranscriptHarness />)
     await waitFor(() => expect(transcript()).toBe('first'))
 
-    await settleRun()
+    await settleConversation()
 
     // A transient failure has not closed the transcript out, so the flag has
     // to stay up — otherwise one bad response costs the last row for good.
@@ -606,9 +653,13 @@ describe('useConversationDetail transcript reconciliation', () => {
 // hadn't landed yet renders the blocked copy, and the announcement that it has
 // landed turns the input back on with no reload.
 function ComposerHarness() {
-  const { run } = useConversationDetail(RUN_ID)
-  if (!run) return <div>loading</div>
-  return <div>{canResumeConversation(run) ? 'composer live' : resumeBlockedCopy(run)}</div>
+  const { run: conversation } = useConversationDetail(CONVERSATION_ID)
+  if (!conversation) return <div>loading</div>
+  return (
+    <div>
+      {canResumeConversation(conversation) ? 'composer live' : resumeBlockedCopy(conversation)}
+    </div>
+  )
 }
 
 describe('useConversationDetail resumability', () => {
@@ -619,18 +670,19 @@ describe('useConversationDetail resumability', () => {
 
   function mockResumableFetch() {
     parkedRefetch = deferred<Conversation>()
-    let runReads = 0
+    let conversationReads = 0
     const fetchMock = vi.fn((url: string) => {
       const [path] = url.split('?')
-      if (path !== `/api/agent/conversations/${RUN_ID}`) {
+      if (path !== `/api/agent/conversations/${CONVERSATION_ID}`) {
         // Everything else this mount pulls — transcript, artifacts, pending
         // permissions — is empty here; the run row is the whole subject.
         return Promise.resolve({ ok: true, status: 200, ...jsonBody([]) })
       }
-      runReads++
+      conversationReads++
       // The run row goes through apiJSON now, so the stub has to answer text()
       // as well — jsonBody awaits the promise, which is what parks the refetch.
-      const body = runReads === 1 ? Promise.resolve(serverConversation) : parkedRefetch.promise
+      const body =
+        conversationReads === 1 ? Promise.resolve(serverConversation) : parkedRefetch.promise
       return Promise.resolve({ ok: true, status: 200, ...jsonBody(body) })
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -663,7 +715,7 @@ describe('useConversationDetail resumability', () => {
     // already has, one extra field.
     send({
       type: 'conversation_update',
-      conversation_id: RUN_ID,
+      conversation_id: CONVERSATION_ID,
       data: { status: 'open', resumable: true },
     })
 
@@ -678,7 +730,11 @@ describe('useConversationDetail resumability', () => {
 
     // Absent is "unchanged", not false — every other status flip on the wire
     // carries no resumable field and must not close a live composer.
-    send({ type: 'conversation_update', conversation_id: RUN_ID, data: { status: 'open' } })
+    send({
+      type: 'conversation_update',
+      conversation_id: CONVERSATION_ID,
+      data: { status: 'open' },
+    })
     await waitFor(() => expect(screen.getByText('composer live')).toBeInTheDocument())
   })
 })
@@ -687,7 +743,7 @@ describe('useConversationDetail resumability', () => {
 // so a test can drive "load earlier" and read the result without the station.
 function PagingProbe() {
   const { messages, hasOlderMessages, loadingOlderMessages, loadOlderMessages } =
-    useConversationDetail(RUN_ID)
+    useConversationDetail(CONVERSATION_ID)
   return (
     <div>
       <div data-testid="ids">{messages.map((m) => m.id).join(',')}</div>

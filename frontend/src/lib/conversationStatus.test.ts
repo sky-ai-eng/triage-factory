@@ -266,8 +266,8 @@ describe('resumeBlockedCopy', () => {
 
 describe('workStartedAt', () => {
   it('prefers the claim stamp so queue dwell never inflates working elapsed', () => {
-    const run = base({ ClaimedAt: '2026-07-16T10:06:00Z' })
-    expect(workStartedAt(run)).toBe('2026-07-16T10:06:00Z')
+    const conversation = base({ ClaimedAt: '2026-07-16T10:06:00Z' })
+    expect(workStartedAt(conversation)).toBe('2026-07-16T10:06:00Z')
   })
 
   it('falls back to the mint stamp for legacy rows without queue columns', () => {
@@ -277,21 +277,21 @@ describe('workStartedAt', () => {
 
 describe('queueDwellMs', () => {
   it('ticks live from QueuedAt while the run is still queued', () => {
-    const run = base({ Status: 'queued', QueuedAt: '2026-07-16T10:00:00Z' })
-    expect(queueDwellMs(run, T('2026-07-16T10:06:00Z'))).toBe(6 * 60_000)
+    const conversation = base({ Status: 'queued', QueuedAt: '2026-07-16T10:00:00Z' })
+    expect(queueDwellMs(conversation, T('2026-07-16T10:06:00Z'))).toBe(6 * 60_000)
   })
 
   it('falls back to StartedAt for a queued legacy row', () => {
-    const run = base({ Status: 'queued' })
-    expect(queueDwellMs(run, T('2026-07-16T10:01:00Z'))).toBe(60_000)
+    const conversation = base({ Status: 'queued' })
+    expect(queueDwellMs(conversation, T('2026-07-16T10:01:00Z'))).toBe(60_000)
   })
 
   it('settles to ClaimedAt − QueuedAt once the run started', () => {
-    const run = base({
+    const conversation = base({
       QueuedAt: '2026-07-16T10:00:00Z',
       ClaimedAt: '2026-07-16T10:06:00Z',
     })
-    expect(queueDwellMs(run, T('2026-07-16T11:00:00Z'))).toBe(6 * 60_000)
+    expect(queueDwellMs(conversation, T('2026-07-16T11:00:00Z'))).toBe(6 * 60_000)
   })
 
   it('is unknowable (null) for a started legacy row', () => {
@@ -299,7 +299,7 @@ describe('queueDwellMs', () => {
   })
 
   it('clamps clock skew to zero rather than going negative', () => {
-    const run = base({ Status: 'queued', QueuedAt: '2026-07-16T10:00:05Z' })
-    expect(queueDwellMs(run, T('2026-07-16T10:00:00Z'))).toBe(0)
+    const conversation = base({ Status: 'queued', QueuedAt: '2026-07-16T10:00:05Z' })
+    expect(queueDwellMs(conversation, T('2026-07-16T10:00:00Z'))).toBe(0)
   })
 })

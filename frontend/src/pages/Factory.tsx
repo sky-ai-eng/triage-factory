@@ -553,7 +553,7 @@ function StationChassis({ info }: { info: ClickedStationInfo | null }) {
         items={runs.map((r) => ({
           key: r.run.ID,
           dot: conversationStatusColor(r.run.Status),
-          body: <RunRow run={r.run} task={r.task} />,
+          body: <RunRow conversation={r.run} task={r.task} />,
           // Clicking a run opens its full-screen station page in a new tab.
           href: orgHref(`/runs/${r.run.ID}`),
         }))}
@@ -797,15 +797,15 @@ function EntityTooltip({ entity }: { entity: FactoryEntity }) {
   )
 }
 
-function RunRow({ run, task }: { run: Conversation; task: Task }) {
+function RunRow({ conversation, task }: { conversation: Conversation; task: Task }) {
   const ref = task.source_id || task.entity_id
-  const isOpen = run.Status === 'open'
+  const isOpen = conversation.Status === 'open'
   return (
     <div className="flex min-w-0 flex-1 items-baseline gap-2">
       {isOpen && (
         <span
           className="inline-flex items-center text-[12px] leading-none"
-          style={{ color: conversationStatusColor(run.Status) }}
+          style={{ color: conversationStatusColor(conversation.Status) }}
           title="Run is open — not concluded, not currently executing"
         >
           ◌
@@ -814,11 +814,13 @@ function RunRow({ run, task }: { run: Conversation; task: Task }) {
       <span className="font-mono text-[11px] text-text-primary">{ref}</span>
       <span
         className="text-[10px] uppercase tracking-wider"
-        style={{ color: conversationStatusColor(run.Status) }}
+        style={{ color: conversationStatusColor(conversation.Status) }}
       >
-        {conversationStatusLabel(run.Status)}
+        {conversationStatusLabel(conversation.Status)}
       </span>
-      <span className="ml-auto font-mono text-[10px] text-text-tertiary">{formatRunMeta(run)}</span>
+      <span className="ml-auto font-mono text-[10px] text-text-tertiary">
+        {formatConversationMeta(conversation)}
+      </span>
     </div>
   )
 }
@@ -862,15 +864,15 @@ function conversationStatusLabel(status: ConversationStatusValue): string {
   }
 }
 
-function formatRunMeta(run: Conversation): string {
+function formatConversationMeta(conversation: Conversation): string {
   const parts: string[] = []
-  if (run.DurationMs && run.DurationMs > 0) {
-    const sec = Math.round(run.DurationMs / 1000)
+  if (conversation.DurationMs && conversation.DurationMs > 0) {
+    const sec = Math.round(conversation.DurationMs / 1000)
     if (sec < 60) parts.push(`${sec}s`)
     else parts.push(`${Math.floor(sec / 60)}m ${sec % 60}s`)
   }
-  if (run.TotalCostUSD && run.TotalCostUSD > 0) {
-    parts.push(`$${run.TotalCostUSD.toFixed(2)}`)
+  if (conversation.TotalCostUSD && conversation.TotalCostUSD > 0) {
+    parts.push(`$${conversation.TotalCostUSD.toFixed(2)}`)
   }
   return parts.join(' · ')
 }

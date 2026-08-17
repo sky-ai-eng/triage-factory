@@ -9,7 +9,7 @@ import { jsonBody } from '../../test/apiResponse'
 // offered (and what stands in its place when it isn't), and how the approval
 // affordance routes over the unresolved artifact set.
 function station(over: Partial<Conversation>, actions: Partial<StationActions> = {}) {
-  const run = {
+  const conversation = {
     ID: 'r1',
     TaskID: '',
     Status: 'open',
@@ -22,7 +22,7 @@ function station(over: Partial<Conversation>, actions: Partial<StationActions> =
   return render(
     <MemoryRouter>
       <RunStation
-        run={run}
+        conversation={conversation}
         task={null}
         messages={[]}
         now={new Date('2026-07-30T00:01:00Z').getTime()}

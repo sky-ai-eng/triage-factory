@@ -42,7 +42,7 @@ import {
 
 interface Props {
   task: Task
-  run: Conversation
+  conversation: Conversation
   chainSteps?: Conversation[]
   // Bounded live-feed projection for this run (running stats + last few ticker
   // lines) — see lib/conversationFeed. The board maintains it incrementally instead of
@@ -73,7 +73,7 @@ interface Props {
 // summary (terminal outcome) — the header stays clean.
 export default function AgentCard({
   task,
-  run,
+  conversation,
   chainSteps,
   feed,
   pendingPermissions,
@@ -90,11 +90,11 @@ export default function AgentCard({
   // (unresolved rows sort to the top of the list).
   const [artifactsOpen, setArtifactsOpen] = useState(false)
 
-  const isActive = isActiveConversation(run)
+  const isActive = isActiveConversation(conversation)
   // Waiting for a dispatcher slot (the process-wide concurrency cap), not
   // executing. Without an explicit state the card reads as broken — a frozen
   // elapsed readout and an empty feed — when the run is just in line.
-  const isQueued = run.Status === 'queued'
+  const isQueued = conversation.Status === 'queued'
 
   // Tick once per second while active (elapsed) or queued (wait time) so the
   // readout updates live.
@@ -108,24 +108,24 @@ export default function AgentCard({
   // a started run's footer shows the settled dwell. Working elapsed ticks
   // from the claim stamp so queue time never inflates it.
   const elapsed = isQueued
-    ? formatElapsed(run.QueuedAt ?? run.StartedAt, now)
-    : !isActive && run.DurationMs != null
-      ? formatDurationMs(run.DurationMs)
-      : formatElapsed(workStartedAt(run), now)
-  const dwellMs = queueDwellMs(run, now)
+    ? formatElapsed(conversation.QueuedAt ?? conversation.StartedAt, now)
+    : !isActive && conversation.DurationMs != null
+      ? formatDurationMs(conversation.DurationMs)
+      : formatElapsed(workStartedAt(conversation), now)
+  const dwellMs = queueDwellMs(conversation, now)
   // Approval is derived from the unresolved-artifact set (draft PRs + ready
   // reviews), never a run status — a card needs the user
   // whenever has_unresolved_artifacts is true, live or terminal.
-  const needsApproval = hasUnresolvedArtifacts(run)
-  const approval = approvalCounts(run)
-  const isFailed = isFailedStatus(run.Status)
+  const needsApproval = hasUnresolvedArtifacts(conversation)
+  const approval = approvalCounts(conversation)
+  const isFailed = isFailedStatus(conversation.Status)
   // Parked: the turn ended without concluding — stopped from this card's own ✕,
   // or ended mid-thought — so the run is neither working nor settled. Its
   // workspace stays warm and it is resumable from the run view, which is why it
   // is NOT a terminal and gets its own block rather than a stale ticker.
-  const isParked = run.Status === 'open'
+  const isParked = conversation.Status === 'open'
   // A terminal run is settled — show its outcome, not a live feed.
-  const isTerminal = isTerminalStatus(run.Status)
+  const isTerminal = isTerminalStatus(conversation.Status)
 
   // A parked tool-permission prompt OR an unresolved artifact set is the card's
   // "needs you" moment — it takes the steady amber attention glow so it can't be
@@ -133,14 +133,20 @@ export default function AgentCard({
   const pending = pendingPermissions ?? []
   const hasPending = pending.length > 0
   const glow: Glow | null =
-    hasPending || needsApproval ? { tone: 'attention', breathing: false } : runGlow(run)
+    hasPending || needsApproval ? { tone: 'attention', breathing: false } : runGlow(conversation)
   const stats = feed ?? EMPTY_FEED
 
   const hasChain = !!chainSteps && chainSteps.length > 1
   const stepStates: StepState[] = useMemo(
     () =>
-      hasChain ? chainStepStates(chainSteps!, run.ID, run.blueprint_step_index ?? undefined) : [],
-    [hasChain, chainSteps, run.ID, run.blueprint_step_index],
+      hasChain
+        ? chainStepStates(
+            chainSteps!,
+            conversation.ID,
+            conversation.blueprint_step_index ?? undefined,
+          )
+        : [],
+    [hasChain, chainSteps, conversation.ID, conversation.blueprint_step_index],
   )
   return (
     <div className="relative">
@@ -170,7 +176,7 @@ export default function AgentCard({
               </span>
               <HeaderDivider />
               <Link
-                to={orgHref(`/runs/${run.ID}`)}
+                to={orgHref(`/runs/${conversation.ID}`)}
                 target="_blank"
                 rel="noopener noreferrer"
                 aria-label="Expand run details"
@@ -194,7 +200,7 @@ export default function AgentCard({
                     type="button"
                     onClick={async () => {
                       try {
-                        await apiFetch(`/api/agent/conversations/${run.ID}/stop`, {
+                        await apiFetch(`/api/agent/conversations/${conversation.ID}/stop`, {
                           method: 'POST',
                         })
                       } catch (err) {
@@ -241,8 +247,9 @@ export default function AgentCard({
           <QueuedBlock />
         ) : isParked ? (
           <ParkedBlock />
-        ) : isTerminal && (run.ResultSummary || run.FailureKind === 'memory_limit') ? (
-          <ResultBlock run={run} />
+        ) : isTerminal &&
+          (conversation.ResultSummary || conversation.FailureKind === 'memory_limit') ? (
+          <ResultBlock conversation={conversation} />
         ) : (
           <LiveFeed lines={stats.lines} isActive={isActive} />
         )}
@@ -255,7 +262,7 @@ export default function AgentCard({
               key={pending[0].tool_call_id}
               prompt={pending[0]}
               remaining={pending.length - 1}
-              worktree={run.WorktreePath}
+              worktree={conversation.WorktreePath}
               onResolve={onResolvePermission}
               compact
             />
@@ -274,9 +281,12 @@ export default function AgentCard({
               kicker={approvalKicker(approval)}
               action={approvalAction(approval)}
               onClick={() => {
-                const ids = run.pending_artifact_ids ?? []
+                const ids = conversation.pending_artifact_ids ?? []
                 if (approval.total === 1 && ids.length > 0) {
-                  onOpenArtifact((run.unresolved_pr_count ?? 0) > 0 ? 'pr' : 'review', ids[0])
+                  onOpenArtifact(
+                    (conversation.unresolved_pr_count ?? 0) > 0 ? 'pr' : 'review',
+                    ids[0],
+                  )
                 } else {
                   setArtifactsOpen(true)
                 }
@@ -294,22 +304,23 @@ export default function AgentCard({
                 takeover, a reassign, or a requeue that clears it outright — the
                 run's actor stays frozen, and this line becomes the only record
                 of who actually did the work. */}
-            {run.actor_agent_name && run.actor_agent_id !== task.claimed_by_agent_id && (
-              <span title="The bot that executed this run; the task is no longer claimed by it">
-                Ran as {run.actor_agent_name}
-              </span>
-            )}
+            {conversation.actor_agent_name &&
+              conversation.actor_agent_id !== task.claimed_by_agent_id && (
+                <span title="The bot that executed this run; the task is no longer claimed by it">
+                  Ran as {conversation.actor_agent_name}
+                </span>
+              )}
             {!isQueued && dwellMs != null && dwellMs >= QUEUE_DWELL_VISIBLE_MS && (
               <span title="Time this run waited in the queue for a free slot before starting">
                 queued {formatDurationMs(dwellMs)}
               </span>
             )}
             {stats.tokens > 0 && <span>{compactNum(stats.tokens)} tokens</span>}
-            {run.TotalCostUSD != null && run.TotalCostUSD > 0 && (
-              <span>${run.TotalCostUSD.toFixed(3)}</span>
+            {conversation.TotalCostUSD != null && conversation.TotalCostUSD > 0 && (
+              <span>${conversation.TotalCostUSD.toFixed(3)}</span>
             )}
             <ArtifactsAffordance
-              run={run}
+              conversation={conversation}
               onOpenArtifact={onOpenArtifact}
               onArtifactResolved={onArtifactResolved}
               open={artifactsOpen}
@@ -357,19 +368,19 @@ function HeaderDivider() {
 // dismissable in place; PR/review rows reuse the board's approval overlays via
 // onOpenArtifact, the rest link out.
 function ArtifactsAffordance({
-  run,
+  conversation,
   onOpenArtifact,
   onArtifactResolved,
   open,
   onOpenChange,
 }: {
-  run: Conversation
+  conversation: Conversation
   onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
   onArtifactResolved?: () => void
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
-  const count = run.artifact_count ?? 0
+  const count = conversation.artifact_count ?? 0
   // `open` keeps a forced-open popover alive through a transiently absent
   // count (the projections travel together, but the guard keeps the attention
   // row's raise from ever landing on an unmounted trigger).
@@ -396,9 +407,9 @@ function ArtifactsAffordance({
             Artifacts
           </div>
           <ArtifactList
-            conversationId={run.ID}
-            pendingArtifactIds={run.pending_artifact_ids}
-            refreshKey={artifactSetKey(run)}
+            conversationId={conversation.ID}
+            pendingArtifactIds={conversation.pending_artifact_ids}
+            refreshKey={artifactSetKey(conversation)}
             onOpenApproval={(kind, id) => {
               onOpenChange(false)
               onOpenArtifact?.(kind, id)
@@ -514,16 +525,16 @@ function LiveFeed({ lines, isActive }: { lines: FeedLine[]; isActive: boolean })
 // the card says which: a mid-chain step that handed off is not the task being
 // over, and an abort is not a success at all. Same derivation the run station's
 // state light uses, so the board card and the run page agree.
-function ResultBlock({ run }: { run: Conversation }) {
-  const status = run.Status
-  const summary = run.ResultSummary
-  const memoryKilled = status === 'failed' && run.FailureKind === 'memory_limit'
+function ResultBlock({ conversation }: { conversation: Conversation }) {
+  const status = conversation.Status
+  const summary = conversation.ResultSummary
+  const memoryKilled = status === 'failed' && conversation.FailureKind === 'memory_limit'
   // Tone and heading come off the shared failed-terminal predicate rather than
   // a list of names, so a future terminal styles as a failure by default —
   // the safe direction, and the same reasoning as FAILED_STATUSES itself.
   const failed = isFailedStatus(status)
-  const completion = completionKind(run)
-  const pos = chainPosition(run)
+  const completion = completionKind(conversation)
+  const pos = chainPosition(conversation)
   const tone: Tone = failed
     ? 'problem'
     : completion === 'stopped'

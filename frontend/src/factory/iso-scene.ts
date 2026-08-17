@@ -2515,8 +2515,8 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   const lastFiredHash = new Map<string, string>()
   const hashStationData = (data: ClickedStationInfo): string => {
     const queuedIds = data.queued.map((e) => e.id).join(',')
-    const runIds = data.runs.map((r) => `${r.run.ID}:${r.run.Status}`).join(',')
-    return `${data.queuedCount}|${data.conversationCount}|${queuedIds}|${runIds}`
+    const conversationIds = data.runs.map((r) => `${r.run.ID}:${r.run.Status}`).join(',')
+    return `${data.queuedCount}|${data.conversationCount}|${queuedIds}|${conversationIds}`
   }
 
   const reconcile = (): void => {
@@ -2550,9 +2550,9 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
     for (const [eventType, row] of stationsByEvent) {
       const fs = latestSnapshot.stations[eventType]
       const runs = fs?.runs ?? []
-      const runEntityIds = new Set(runs.map((r) => r.task.entity_id))
+      const conversationEntityIds = new Set(runs.map((r) => r.task.entity_id))
       const allParked = parkedByStation.get(eventType) ?? []
-      const queued = allParked.filter((e) => !runEntityIds.has(e.id))
+      const queued = allParked.filter((e) => !conversationEntityIds.has(e.id))
       const queuedCount = queued.length
       const conversationCount = runs.length
 

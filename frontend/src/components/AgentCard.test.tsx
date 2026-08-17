@@ -20,7 +20,7 @@ const task: Task = {
   event_type: 'ci_check_failed',
 } as unknown as Task
 
-const run = (over: Partial<Conversation>): Conversation =>
+const conversation = (over: Partial<Conversation>): Conversation =>
   ({
     ID: 'r1',
     TaskID: 't1',
@@ -34,7 +34,7 @@ const run = (over: Partial<Conversation>): Conversation =>
 function renderCard(over: Partial<Conversation>, onOpenArtifact = vi.fn()) {
   render(
     <MemoryRouter>
-      <AgentCard task={task} run={run(over)} onOpenArtifact={onOpenArtifact} />
+      <AgentCard task={task} conversation={conversation(over)} onOpenArtifact={onOpenArtifact} />
     </MemoryRouter>,
   )
   return onOpenArtifact
@@ -264,7 +264,11 @@ describe('AgentCard parked rendering', () => {
     const onRequeue = vi.fn()
     render(
       <MemoryRouter>
-        <AgentCard task={task} run={run({ Status: 'open' })} onRequeue={onRequeue} />
+        <AgentCard
+          task={task}
+          conversation={conversation({ Status: 'open' })}
+          onRequeue={onRequeue}
+        />
       </MemoryRouter>,
     )
     expect(screen.getByText(/idle — stopped without concluding, resumable/)).toBeInTheDocument()

@@ -73,7 +73,7 @@ func TestHandleConversations_Batched(t *testing.T) {
 
 	// Messages: only the primary run per task, keyed by run id (the older run's
 	// transcript is deliberately excluded — bounded payload, matches the
-	// single-task path's latestRun).
+	// single-task path's latestConversation in Board.tsx).
 	if _, ok := resp.Messages[olderA]; ok {
 		t.Errorf("messages included older run %s; want only primary runs", olderA)
 	}

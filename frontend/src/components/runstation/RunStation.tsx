@@ -76,7 +76,7 @@ interface ChainStep {
 }
 
 interface Props {
-  run: Conversation
+  conversation: Conversation
   task: Task | null
   messages: Message[]
   /** History remains behind the held transcript — the screen offers the way
@@ -101,7 +101,7 @@ interface Props {
 // the work running hot through it — vent heat across the top, a conveyor idling
 // at the intake edge. All flat; the depth is light, motion, and texture.
 export default function RunStation({
-  run,
+  conversation,
   task,
   messages,
   hasOlderMessages,
@@ -115,8 +115,8 @@ export default function RunStation({
 }: Props) {
   const reduce = !!useReducedMotion()
   const orgHref = useOrgHref()
-  const st = stationState(run)
-  const active = isActiveConversation(run)
+  const st = stationState(conversation)
+  const active = isActiveConversation(conversation)
 
   const lastMessageAt = useMemo(() => {
     if (messages.length === 0) return null
@@ -129,27 +129,27 @@ export default function RunStation({
   // the live wait, everything else ticks/settles on working time from the
   // claim stamp (queue dwell never inflates it).
   const elapsed =
-    run.Status === 'queued'
-      ? formatElapsed(run.QueuedAt ?? run.StartedAt, now)
-      : !active && run.DurationMs != null
-        ? formatDurationMs(run.DurationMs)
-        : formatElapsed(workStartedAt(run), now)
+    conversation.Status === 'queued'
+      ? formatElapsed(conversation.QueuedAt ?? conversation.StartedAt, now)
+      : !active && conversation.DurationMs != null
+        ? formatDurationMs(conversation.DurationMs)
+        : formatElapsed(workStartedAt(conversation), now)
 
   const chain = useMemo<ChainStep[]>(() => {
     if (!chainSteps || chainSteps.length <= 1) return []
-    const currentStep = run.blueprint_step_index ?? undefined
+    const currentStep = conversation.blueprint_step_index ?? undefined
     return chainSteps.map((s, i) => {
       // A synthetic placeholder (step not spawned yet) or the run you're already
       // viewing isn't a navigable trace.
-      const navigable = !s.ID.startsWith('__pending-') && s.ID !== run.ID
+      const navigable = !s.ID.startsWith('__pending-') && s.ID !== conversation.ID
       const label = chainStepLabels?.[i]
       return {
-        state: stepStateOf(s, i, run.ID, currentStep),
+        state: stepStateOf(s, i, conversation.ID, currentStep),
         label: label?.name || label?.brief ? label! : null,
         href: navigable ? orgHref(`/runs/${s.ID}`) : null,
       }
     })
-  }, [chainSteps, chainStepLabels, run.ID, run.blueprint_step_index, orgHref])
+  }, [chainSteps, chainStepLabels, conversation.ID, conversation.blueprint_step_index, orgHref])
 
   return (
     <motion.div
@@ -176,7 +176,7 @@ export default function RunStation({
         <div className="relative flex min-h-0 flex-1 flex-col p-3">
           <ScreenTranscript
             messages={messages}
-            run={run}
+            conversation={conversation}
             hasOlder={hasOlderMessages}
             loadingOlder={loadingOlderMessages}
             onLoadOlder={onLoadOlderMessages}
@@ -184,7 +184,7 @@ export default function RunStation({
           <VentHeat heat={heat} light={st.light} live={st.live} />
         </div>
         <TelemetryRail
-          run={run}
+          conversation={conversation}
           messages={messages}
           state={st}
           now={now}
@@ -194,7 +194,7 @@ export default function RunStation({
       </div>
 
       <IntakeDock
-        run={run}
+        conversation={conversation}
         state={st}
         active={active}
         actions={actions}
@@ -496,13 +496,13 @@ function VentHeat({ heat, light, live }: { heat: number; light: string; live: bo
 // mounted throughout (just visually/functionally hidden) so an in-progress
 // draft survives a prompt appearing and resolving.
 function IntakeDock({
-  run,
+  conversation,
   state,
   active,
   actions,
   pending,
 }: {
-  run: Conversation
+  conversation: Conversation
   state: ReturnType<typeof stationState>
   active: boolean
   actions: StationActions
@@ -511,25 +511,26 @@ function IntakeDock({
   // Approval is derived from the unresolved-artifact set, not a run status: a
   // card surfaces "your move" whenever has_unresolved_artifacts is true, whether
   // the run is live or terminal (TFAC-382/TFAC-492).
-  const counts = approvalCounts(run)
-  const hasUnresolved = hasUnresolvedArtifacts(run)
-  const isTerminal = isTerminalStatus(run.Status)
+  const counts = approvalCounts(conversation)
+  const hasUnresolved = hasUnresolvedArtifacts(conversation)
+  const isTerminal = isTerminalStatus(conversation.Status)
   // Parked: stopped without concluding. Not terminal — the composer below
   // offers to resume it — but the run is over unless the user picks it up, so
   // it takes the same Return-to-queue exit a terminal gets. That exit used to
   // arrive via the retired `cancelled` terminal, and a stop leaves the run
   // here now.
-  const isParked = run.Status === 'open'
+  const isParked = conversation.Status === 'open'
   // A run takes steering when a turn is executing, or when a follow-up would
   // actually be accepted. Status is the cheap first cut and the server's
   // `resumable` is the authority: whether the workspace survived and whether
   // anything would drive it are facts only it can see, and a run that looks
   // parked-and-warm from here may answer every message with a 409/410.
-  const steerable = active || canResumeConversation(run)
+  const steerable = active || canResumeConversation(conversation)
   // The honest other half: a run whose status says "resumable" but whose
   // server verdict says otherwise gets the reason where the input would have
   // been, rather than a live composer that fails on send.
-  const resumeBlocked = !active && isResumableConversation(run) && run.resumable === false
+  const resumeBlocked =
+    !active && isResumableConversation(conversation) && conversation.resumable === false
   const hasPrompt = pending.length > 0
 
   const sublabel = hasUnresolved
@@ -540,18 +541,18 @@ function IntakeDock({
       : `${counts.total} artifacts await your approval`
     : active
       ? 'agent is executing — streaming live'
-      : run.Status === 'open'
+      : conversation.Status === 'open'
         ? 'open — idle, resumable'
-        : run.Status === 'completed'
+        : conversation.Status === 'completed'
           ? // The state word above says which ending; this says what it means
             // for the task, in words. Shared with the rail so the two surfaces
             // can't drift.
-            completionGloss(run)
-          : run.Status === 'failed'
-            ? run.FailureKind === 'memory_limit'
+            completionGloss(conversation)
+          : conversation.Status === 'failed'
+            ? conversation.FailureKind === 'memory_limit'
               ? 'killed — exceeded its memory limit (raise TF_RUN_MEMORY_LIMIT_MB if needed)'
               : 'run failed'
-            : run.Status
+            : conversation.Status
 
   return (
     <div className="relative z-10 shrink-0 border-t border-border-subtle px-4 py-2.5">
@@ -563,7 +564,7 @@ function IntakeDock({
           key={pending[0].tool_call_id}
           prompt={pending[0]}
           remaining={pending.length - 1}
-          worktree={run.WorktreePath}
+          worktree={conversation.WorktreePath}
           onResolve={actions.onResolvePermission}
         />
       )}
@@ -590,7 +591,7 @@ function IntakeDock({
 
         <div className="flex shrink-0 items-center gap-2">
           {hasUnresolved && actions.onOpenArtifact && (
-            <ApprovalAffordance run={run} counts={counts} actions={actions} />
+            <ApprovalAffordance conversation={conversation} counts={counts} actions={actions} />
           )}
           {/* Pause and Cancel are one operation now — both stop the run and
               park it open, resumable. Merging them into a single control is UI
@@ -641,7 +642,7 @@ function IntakeDock({
           role="status"
           className="mt-2.5 rounded-[5px] border border-border-subtle bg-black/[0.02] px-2.5 py-2 text-[12px] leading-relaxed text-text-tertiary"
         >
-          {resumeBlockedCopy(run)}
+          {resumeBlockedCopy(conversation)}
         </p>
       )}
     </div>
@@ -656,16 +657,16 @@ function IntakeDock({
 // unresolved rows sorted first: the same list the board card and the telemetry
 // rail use, so there is one approval surface, not a separate roster.
 function ApprovalAffordance({
-  run,
+  conversation,
   counts,
   actions,
 }: {
-  run: Conversation
+  conversation: Conversation
   counts: ReturnType<typeof approvalCounts>
   actions: StationActions
 }) {
   const [open, setOpen] = useState(false)
-  const ids = run.pending_artifact_ids ?? []
+  const ids = conversation.pending_artifact_ids ?? []
 
   if (counts.total === 1 && ids.length > 0) {
     return (
@@ -673,7 +674,10 @@ function ApprovalAffordance({
         tone="var(--color-snooze)"
         solid
         onClick={() =>
-          actions.onOpenArtifact?.((run.unresolved_pr_count ?? 0) > 0 ? 'pr' : 'review', ids[0])
+          actions.onOpenArtifact?.(
+            (conversation.unresolved_pr_count ?? 0) > 0 ? 'pr' : 'review',
+            ids[0],
+          )
         }
       >
         {approvalAction(counts)} →
@@ -699,9 +703,9 @@ function ApprovalAffordance({
             Artifacts
           </div>
           <ArtifactList
-            conversationId={run.ID}
-            pendingArtifactIds={run.pending_artifact_ids}
-            refreshKey={artifactSetKey(run)}
+            conversationId={conversation.ID}
+            pendingArtifactIds={conversation.pending_artifact_ids}
+            refreshKey={artifactSetKey(conversation)}
             onOpenApproval={(kind, id) => {
               setOpen(false)
               actions.onOpenArtifact?.(kind, id)
