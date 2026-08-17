@@ -95,7 +95,7 @@ func TestBootstrapSchemaForTest_MatchesMigrate(t *testing.T) {
 
 func openMem(t *testing.T) *sql.DB {
 	t.Helper()
-	d, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	d, err := sql.Open("sqlite", TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

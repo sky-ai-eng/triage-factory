@@ -76,7 +76,7 @@ func cachedSchemaImage() ([]byte, error) {
 }
 
 func buildSchemaImage() ([]byte, error) {
-	template, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	template, err := sql.Open("sqlite", TestDSNMemory)
 	if err != nil {
 		return nil, fmt.Errorf("open template: %w", err)
 	}

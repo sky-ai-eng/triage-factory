@@ -23,7 +23,7 @@ import (
 func TestFactoryReadStore_SQLite(t *testing.T) {
 	dbtest.RunFactoryReadStoreConformance(t, func(t *testing.T) (db.FactoryReadStore, string, dbtest.FactorySeeder) {
 		t.Helper()
-		conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+		conn, err := sql.Open("sqlite", db.TestDSNMemory)
 		if err != nil {
 			t.Fatalf("open in-memory db: %v", err)
 		}
@@ -142,7 +142,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			t.Helper()
 			if _, err := conn.Exec(
 				`UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ?`,
-				closedAt, entityID,
+				closedAt.UTC(), entityID,
 			); err != nil {
 				t.Fatalf("close entity %s: %v", entityID, err)
 			}
@@ -175,7 +175,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 // The conformance suite exercises the happy path; this test pins
 // the SQLite-specific rejection.
 func TestFactoryReadStore_SQLite_AssertLocalOrg(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestFactoryReadStore_SQLite_AssertLocalOrg(t *testing.T) {
 // hide untriaged-but-relevant PRs the user expects to see. The
 // converse (multi-mode membership exclusion) is Postgres-only.
 func TestFactoryReadStore_SQLite_ShowsUntaskedEntities(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestFactoryReadStore_SQLite_ShowsUntaskedEntities(t *testing.T) {
 // keeps the station header consistent with the unfiltered local belt
 // (every polled entity is the user's own).
 func TestFactoryReadStore_SQLite_CountersUnscoped(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

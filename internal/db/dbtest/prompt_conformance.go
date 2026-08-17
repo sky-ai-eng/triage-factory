@@ -218,6 +218,55 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 	})
 
+	t.Run("Stats_RunsPerDayBucketsInUTCDaysNotLocalOnes", func(t *testing.T) {
+		// The prompt sparkline's half of the same defect as the dashboard's:
+		// the store groups conversations by the database's own day — SQLite's
+		// DATE(), Postgres's ::date — and looks the counts up through a 30-day
+		// skeleton built from the process's local clock. The database's day is
+		// UTC; the skeleton's was not.
+		//
+		// Both ends of the skeleton are asserted, because the two directions
+		// lose different data: a skeleton a day behind drops today's runs off
+		// the end, one a day ahead drops the oldest day off the front. And the
+		// cutoff the query filters on is built the same way, so a local
+		// skeleton also asks the database for a window it isn't rendering.
+		forceDayBoundaryLocalZone(t)
+		store, orgID, teamID, seedRuns := factory(t)
+		ctx := context.Background()
+
+		id := "day-bucket-p"
+		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "DB", Body: "x", Source: "user"}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		seedRuns(t, id, []string{"completed", "completed", "failed"})
+
+		stats, err := store.Stats(ctx, orgID, id)
+		if err != nil {
+			t.Fatalf("stats: %v", err)
+		}
+		if len(stats.RunsPerDay) != 30 {
+			t.Fatalf("runs_per_day len=%d want 30", len(stats.RunsPerDay))
+		}
+		keys := make([]string, len(stats.RunsPerDay))
+		for i, d := range stats.RunsPerDay {
+			keys[i] = d.Date
+		}
+		assertUTCDayKeys(t, "RunsPerDay", keys)
+
+		// Every seeded run reachable through the skeleton. The seeder staggers
+		// runs a day apart starting from now, so all three are inside the
+		// window — a bucket key that misses shows up here as a short sum while
+		// TotalRuns still reads 3.
+		var bucketed int
+		for _, d := range stats.RunsPerDay {
+			bucketed += d.Count
+		}
+		if bucketed != 3 {
+			t.Errorf("runs_per_day sums to %d, want 3 (TotalRuns=%d) — runs the query counted are "+
+				"filed under days the skeleton never asks for", bucketed, stats.TotalRuns)
+		}
+	})
+
 	t.Run("Stats_NoRuns_ReturnsZeros", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()

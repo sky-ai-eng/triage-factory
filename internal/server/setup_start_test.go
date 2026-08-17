@@ -23,7 +23,7 @@ import (
 // paths. Returns the raw DB so tests can assert row state.
 func newTenantlessServer(t *testing.T) (*Server, *sql.DB) {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

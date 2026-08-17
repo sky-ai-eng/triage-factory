@@ -113,3 +113,19 @@ func readSQLiteTask(t *testing.T, conn *sql.DB, taskID string) (string, time.Tim
 	}
 	return status, time.Time{}
 }
+
+// TestSnoozeVisibility_SQLite runs the snooze-visibility conformance suite —
+// the seam between "SwipeStore wrote a wake time" and "TaskStore.List hides
+// the row until it arrives" — against the SQLite stores.
+func TestSnoozeVisibility_SQLite(t *testing.T) {
+	dbtest.RunSnoozeVisibilityConformance(t, func(t *testing.T) (db.SwipeStore, db.TaskStore, string, dbtest.TaskSeederForSwipes) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		seed := func(t *testing.T) string {
+			t.Helper()
+			return seedSQLiteTaskForSwipes(t, conn)
+		}
+		return stores.Swipes, stores.Tasks, runmode.LocalDefaultOrgID, seed
+	})
+}

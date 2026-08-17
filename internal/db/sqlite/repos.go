@@ -645,7 +645,7 @@ func (s *repoStore) SetPullsPollStateByRefSystem(ctx context.Context, orgID stri
 		UPDATE repositories
 		   SET pulls_etag = ?, pulls_polled_at = ?
 		 WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, nullIfEmpty(etag), polledAt, source, ref.Owner, ref.Repo)
+	`, nullIfEmpty(etag), polledAt.UTC(), source, ref.Owner, ref.Repo)
 	return err
 }
 

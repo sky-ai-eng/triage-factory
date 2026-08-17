@@ -205,7 +205,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	since := time.Now().Add(-24 * time.Hour)
+	since := time.Now().UTC().Add(-24 * time.Hour)
 	// Optional per-page team filter. Empty = the union of the
 	// viewer's teams; a team id narrows the entity belt to that team.
 	// Only the belt narrows here — the throughput counters stay at the

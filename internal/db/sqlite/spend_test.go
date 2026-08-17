@@ -99,7 +99,7 @@ func TestSpendStore_SQLite(t *testing.T) {
 // time.String() serialization (unparseable) and silently drop every row.
 func openSQLiteSpendConn(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)&_time_format=sqlite")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
@@ -224,7 +224,7 @@ func costArg(c *float64) any {
 // the shipped baseline chain via a real goose Migrate (not the cached test
 // bundle) and that the view is queryable. Empty DB → empty view, no error.
 func TestSpendView_SQLite_MigrationApplies(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

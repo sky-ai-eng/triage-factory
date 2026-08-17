@@ -413,7 +413,7 @@ func floatEq(a, b float64) bool {
 // would silently drop every spend row from the windowed reads.
 func newUsageTestServer(t *testing.T) *Server {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)&_time_format=sqlite")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

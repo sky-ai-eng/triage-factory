@@ -136,7 +136,7 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 		    outcome_reason = NULLIF($5, ''),
 		    failure_kind = NULLIF($6, '')
 		WHERE org_id = $7 AND id = $8
-	`, status, time.Now(), resultSummary, outcome, outcomeReason, failureKind, orgID, runID)
+	`, status, time.Now().UTC(), resultSummary, outcome, outcomeReason, failureKind, orgID, runID)
 	if err != nil {
 		return err
 	}

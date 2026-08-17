@@ -24,7 +24,7 @@ import (
 func TestTaskStore_SQLite(t *testing.T) {
 	dbtest.RunTaskStoreConformance(t, func(t *testing.T) (db.TaskStore, string, string, string, string, dbtest.TaskSeeder, dbtest.TeamSeeder) {
 		t.Helper()
-		conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+		conn, err := sql.Open("sqlite", db.TestDSNMemory)
 		if err != nil {
 			t.Fatalf("open in-memory db: %v", err)
 		}
@@ -113,7 +113,7 @@ func seedSQLiteTaskChain(t *testing.T, conn *sql.DB, suffix string) (entityID, e
 // conformance suite already exercises the happy path; this test
 // pins the SQLite-specific rejection.
 func TestTaskStore_SQLite_AssertLocalOrg(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestTaskStore_SQLite_AssertLocalOrg(t *testing.T) {
 // of slack:message events on its entity, and the source gate keeps it zero for
 // non-Slack tasks.
 func TestTaskStore_SQLite_SlackMessageCount(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestTaskStore_SQLite_SlackMessageCount(t *testing.T) {
 // refuses on a stale expectation, an unrelated target, an unclaimed/bot-
 // claimed task, or a terminal row.
 func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 // IGNORE no-op the way calling RecordEventSystem(..., "injected") a second
 // time on the same PK silently did.
 func TestTaskStore_SQLite_MarkEventInjectedSystem(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

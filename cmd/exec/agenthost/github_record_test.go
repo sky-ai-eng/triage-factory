@@ -63,7 +63,7 @@ func newGithubRecordingClient(t *testing.T, ghURL string, eventTriggered bool) (
 // recording path.
 func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered bool) (*sql.DB, db.Stores, RunInfo, *LocalClient) {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}

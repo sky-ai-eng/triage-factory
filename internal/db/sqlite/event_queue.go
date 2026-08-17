@@ -135,7 +135,7 @@ func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, boot
 		RETURNING id, org_id, event_id, COALESCE(entity_id, ''), event_type,
 		          status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at,
 		          COALESCE(traceparent, '')
-	`, time.Now(), executorID, executorID, bootEpoch)
+	`, time.Now().UTC(), executorID, executorID, bootEpoch)
 	return scanSqliteQueuedEvent(row)
 }
 
@@ -146,7 +146,7 @@ func (s *eventQueueStore) MarkDone(ctx context.Context, orgID string, id int64) 
 	_, err := s.conn.ExecContext(ctx, `
 		UPDATE event_queue SET status = 'done', processed_at = ?
 		WHERE id = ? AND status = 'processing'
-	`, time.Now(), id)
+	`, time.Now().UTC(), id)
 	return err
 }
 
@@ -157,7 +157,7 @@ func (s *eventQueueStore) MarkFailed(ctx context.Context, orgID string, id int64
 	_, err := s.conn.ExecContext(ctx, `
 		UPDATE event_queue SET status = 'failed', processed_at = ?, last_error = ?
 		WHERE id = ? AND status = 'processing'
-	`, time.Now(), lastErr, id)
+	`, time.Now().UTC(), lastErr, id)
 	return err
 }
 
@@ -216,7 +216,7 @@ func (s *eventQueueStore) RequeueStaleProcessing(ctx context.Context, olderThan 
 			executor_id = NULL, boot_epoch = NULL
 		WHERE status = 'processing'
 		  AND (claimed_at IS NULL OR claimed_at < ?)
-	`, db.StaleProcessingReclaimReason, time.Now().Add(-olderThan))
+	`, db.StaleProcessingReclaimReason, time.Now().UTC().Add(-olderThan))
 	if err != nil {
 		return 0, err
 	}
@@ -227,7 +227,7 @@ func (s *eventQueueStore) RequeueStaleProcessing(ctx context.Context, olderThan 
 func (s *eventQueueStore) PruneDone(ctx context.Context, before time.Time) (int, error) {
 	res, err := s.conn.ExecContext(ctx, `
 		DELETE FROM event_queue WHERE status = 'done' AND processed_at < ?
-	`, before)
+	`, before.UTC())
 	if err != nil {
 		return 0, err
 	}

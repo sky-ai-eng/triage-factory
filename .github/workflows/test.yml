@@ -145,6 +145,73 @@ jobs:
         if: steps.docs.outputs.only == 'true'
         run: echo "All changed files are documentation (docs/** or *.md) or harness/ (tested by the harness job); skipping Go/frontend build and test steps."
 
+  # The same Go suite again, in zones that are not UTC.
+  #
+  # GitHub runners are UTC and nothing in the repo pinned a zone, so every
+  # timestamp offset was zero and a whole class of defect was structurally
+  # invisible here: timestamps written in the process's zone and compared
+  # against SQLite's UTC clock, and per-day buckets keyed from a local clock
+  # against days the database produced in UTC. Both shipped, and neither could
+  # fail a check on a UTC runner.
+  #
+  # Two zones, not one, because one fixed offset cannot tell a sign error from
+  # a fix — a bug that subtracts where it should add passes in one direction.
+  # New York is negative and crosses DST; Kolkata is +05:30, so a half-hour
+  # offset catches anything that assumes whole hours. UTC itself stays in the
+  # `test` job above.
+  #
+  # A separate job rather than a matrix on `test`: this needs Go and nothing
+  # else, so it skips the frontend build and the vitest run, and it runs
+  # alongside `test` instead of tripling it. frontend/dist is stubbed for the
+  # same reason — package main embeds it, and a placeholder satisfies the
+  # embed without a pnpm build, since no test here renders the SPA.
+  test-timezones:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tz:
+          - America/New_York
+          - Asia/Kolkata
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect docs-only change
+        id: docs
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only HEAD^1 HEAD)
+          if [ -z "$changed" ] || echo "$changed" | grep -qvE '(^docs/|^harness/|\.md$)'; then
+            echo "only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "only=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@v5
+        if: steps.docs.outputs.only != 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Stub frontend/dist for go:embed
+        if: steps.docs.outputs.only != 'true'
+        run: mkdir -p frontend/dist && echo "not built for the timezone job" > frontend/dist/index.html
+
+      - name: Go test (TZ=${{ matrix.tz }})
+        if: steps.docs.outputs.only != 'true'
+        env:
+          TZ: ${{ matrix.tz }}
+        run: go run gotest.tools/gotestsum@v1.13.0 --format standard-quiet --rerun-fails=2 --rerun-fails-max-failures=15 --packages=./... -- -race -timeout 20m
+
+      - name: Docs-only change, timezone tests skipped
+        if: steps.docs.outputs.only == 'true'
+        run: echo "All changed files are documentation or harness/; skipping the timezone matrix."
+
   # Rust workspace under harness/ (the in-sandbox agent tools). Mirrors the
   # skip pattern above: the job always runs and reports success so it can be
   # a required check, but the toolchain/test steps only fire when harness/

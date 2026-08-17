@@ -85,7 +85,7 @@ func TestRepositoryStore_SQLite_ListTeamScoped_MirrorsList(t *testing.T) {
 
 func newSQLiteForRepoTest(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
