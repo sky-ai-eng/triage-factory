@@ -22,7 +22,7 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "draftpr-nopark")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
 	seedDraftPRArtifact(t, s, conversationID)
 
@@ -33,7 +33,7 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 	if parked {
 		t.Fatal("processCompletion(draft PR) = true; want parked=false (a draft PR is a sidecar; the step never parks)")
 	}
-	if conv := loadRun(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "continue" {
+	if conv := loadConversation(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "continue" {
 		t.Fatalf("run = {status:%q outcome:%q}, want {completed continue}", conv.Status, conv.Outcome)
 	}
 	assertSnapshotPresent(t, s, bpr, true)
@@ -47,7 +47,7 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "ab-snap")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
 	task := loadTask(t, s, taskID)
 	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
@@ -57,7 +57,7 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	if parked {
 		t.Error("processCompletion(plain abort) = true; want parked=false (worktree torn down, snapshot is the resume path)")
 	}
-	if conv := loadRun(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "abort" {
+	if conv := loadConversation(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "abort" {
 		t.Fatalf("run = {status:%q outcome:%q}, want {completed abort}", conv.Status, conv.Outcome)
 	}
 	assertSnapshotPresent(t, s, bpr, true)
@@ -71,7 +71,7 @@ func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "fin-snap")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
 	task := loadTask(t, s, taskID)
 	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
@@ -80,7 +80,7 @@ func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 	if parked {
 		t.Error("processCompletion(clean finish) = true; want parked=false (a finish is terminal; the snapshot is the resume path, not a warm tree)")
 	}
-	if conv := loadRun(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "finish" {
+	if conv := loadConversation(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "finish" {
 		t.Fatalf("run = {status:%q outcome:%q}, want {completed finish}", conv.Status, conv.Outcome)
 	}
 	assertSnapshotPresent(t, s, bpr, true)
@@ -93,7 +93,7 @@ func TestProcessCompletion_FailedWritesNoSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "fail-nosnap")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
 	task := loadTask(t, s, taskID)
 	errored := res(`the agent runtime blew up`)
@@ -101,7 +101,7 @@ func TestProcessCompletion_FailedWritesNoSnapshot(t *testing.T) {
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		errored, t.TempDir(), nil, "", "event", "")
 
-	if conv := loadRun(t, s, conversationID); conv.Status != "failed" {
+	if conv := loadConversation(t, s, conversationID); conv.Status != "failed" {
 		t.Fatalf("run status = %q, want failed", conv.Status)
 	}
 	assertSnapshotPresent(t, s, bpr, false)
@@ -114,7 +114,7 @@ func TestTerminateBlueprint_AbortRetainsSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-abort-keep")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	putTestSnapshot(t, s, bpr)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
@@ -132,7 +132,7 @@ func TestTerminateBlueprint_CancelRetainsSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-cancel-keep")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	putTestSnapshot(t, s, bpr)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
@@ -149,7 +149,7 @@ func TestTerminateBlueprint_CompletedRetainsSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-finish-keep")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	putTestSnapshot(t, s, bpr)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
@@ -166,7 +166,7 @@ func TestTerminateBlueprint_FailedDiscardsSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-failed-drop")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	putTestSnapshot(t, s, bpr)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
@@ -183,14 +183,14 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 	s, database, oldConversationID, _ := setupAdvanceFixture(t, "reap-old")
 	wireBlobStore(t, s)
 
-	oldBpr := blueprintRunIDForRun(t, database, oldConversationID)
+	oldBpr := blueprintRunIDForConversation(t, database, oldConversationID)
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-20 days') WHERE id=?`, oldConversationID); err != nil {
 		t.Fatalf("age old run: %v", err)
 	}
 	putTestSnapshot(t, s, oldBpr)
 
 	seedConversation(t, database, "r-fresh", "sess-fresh", "/tmp/wt-fresh")
-	freshBpr := blueprintRunIDForRun(t, database, "r-fresh")
+	freshBpr := blueprintRunIDForConversation(t, database, "r-fresh")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='r-fresh'`); err != nil {
 		t.Fatalf("complete fresh run: %v", err)
 	}
@@ -210,23 +210,23 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 // within-TTL open run is not yet eligible.
 func TestListReapableSnapshotKeys_CoversEveryCompletedExcludesFailedAndInTTL(t *testing.T) {
 	s, database, abortConversationID, _ := setupAdvanceFixture(t, "reap-rules")
-	abortBpr := blueprintRunIDForRun(t, database, abortConversationID)
+	abortBpr := blueprintRunIDForConversation(t, database, abortConversationID)
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, abortConversationID); err != nil {
 		t.Fatalf("age abort run: %v", err)
 	}
 
 	seedConversation(t, database, "r-fin2", "s", "/tmp/wt")
-	finishBpr := blueprintRunIDForRun(t, database, "r-fin2")
+	finishBpr := blueprintRunIDForConversation(t, database, "r-fin2")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish', completed_at=datetime('now','-30 days') WHERE id='r-fin2'`); err != nil {
 		t.Fatalf("finish run: %v", err)
 	}
 	seedConversation(t, database, "r-failed2", "s", "/tmp/wt")
-	failedBpr := blueprintRunIDForRun(t, database, "r-failed2")
+	failedBpr := blueprintRunIDForConversation(t, database, "r-failed2")
 	if _, err := database.Exec(`UPDATE conversations SET status='failed', completed_at=datetime('now','-30 days') WHERE id='r-failed2'`); err != nil {
 		t.Fatalf("failed run: %v", err)
 	}
 	seedConversation(t, database, "r-open2", "s", "/tmp/wt")
-	openBpr := blueprintRunIDForRun(t, database, "r-open2")
+	openBpr := blueprintRunIDForConversation(t, database, "r-open2")
 	if _, err := database.Exec(`UPDATE conversations SET status='open', completed_at=NULL, started_at=datetime('now') WHERE id='r-open2'`); err != nil {
 		t.Fatalf("open run: %v", err)
 	}
@@ -258,12 +258,12 @@ func TestListReapableSnapshotKeys_CoversEveryCompletedExcludesFailedAndInTTL(t *
 // is past the TTL.
 func TestListReapableSnapshotKeys_SharedBlueprintNeedsAllPastTTL(t *testing.T) {
 	s, database, conversationID1, taskID := setupAdvanceFixture(t, "reap-shared")
-	bpr := blueprintRunIDForRun(t, database, conversationID1)
+	bpr := blueprintRunIDForConversation(t, database, conversationID1)
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, conversationID1); err != nil {
 		t.Fatalf("age step 1: %v", err)
 	}
 	// A second step on the SAME blueprint_run, also completed+abort but fresh.
-	addStepRun(t, database, bpr, taskID, "run2-shared", 1, "running")
+	addStepConversation(t, database, bpr, taskID, "run2-shared", 1, "running")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='run2-shared'`); err != nil {
 		t.Fatalf("complete step 2: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestParkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
 // the TTL it becomes reapable.
 func TestListReapableSnapshotKeys_OpenRunKeysOffParkedAt(t *testing.T) {
 	s, database, conversationID, _ := setupAdvanceFixture(t, "reap-parked")
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	cutoff := time.Now().Add(-14 * 24 * time.Hour)
 
 	// Started 30 days ago, last re-parked just now → must survive.

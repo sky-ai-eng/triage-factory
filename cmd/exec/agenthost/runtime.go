@@ -628,7 +628,7 @@ func (r *relayRuntime) ListConversationArtifacts(ctx context.Context) ([]domain.
 }
 
 func (r *relayRuntime) GetConversation(ctx context.Context) (*domain.Conversation, error) {
-	var res agentRunResult
+	var res getConversationResult
 	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetConversation, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}

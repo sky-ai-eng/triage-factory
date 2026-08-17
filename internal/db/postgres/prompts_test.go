@@ -57,7 +57,7 @@ func TestPromptStore_Postgres(t *testing.T) {
 
 		seeder := func(t *testing.T, promptID string, statusByOffset []string) []string {
 			t.Helper()
-			return seedPgRunsForStats(t, h.AdminDB, orgID, userID, promptID, statusByOffset)
+			return seedPgConversationsForStats(t, h.AdminDB, orgID, userID, promptID, statusByOffset)
 		}
 		_ = userID
 		return stores.Prompts, orgID, teamID, seeder
@@ -178,13 +178,13 @@ func seedPgOrgAndUserForPrompts(t *testing.T, h *pgtest.Harness) (orgID, userID 
 	return orgID, userID
 }
 
-// seedPgRunsForStats inserts entity + task + run rows so Stats has
+// seedPgConversationsForStats inserts entity + task + run rows so Stats has
 // data to aggregate. All rows hold the conformance org_id so RLS-aware
 // reads (when the test uses the app pool) see them.
 //
-// Mirrors seedSQLiteRunsForStats but with Postgres column shape and
+// Mirrors seedSQLiteConversationsForStats but with Postgres column shape and
 // org_id/creator_user_id columns populated.
-func seedPgRunsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID string, statusByOffset []string) []string {
+func seedPgConversationsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID string, statusByOffset []string) []string {
 	t.Helper()
 	now := time.Now().UTC()
 	entityID := uuid.New().String()

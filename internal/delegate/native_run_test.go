@@ -147,7 +147,7 @@ func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
 			}
 			// The fingerprint's whole purpose is what termination then does with
 			// it, so assert through that rather than on the digest itself.
-			content, _ := readRunMemory(cwd, got)
+			content, _ := readConversationMemory(cwd, got)
 			if content != tc.wantContent {
 				t.Errorf("memory ingested at termination = %q, want %q", content, tc.wantContent)
 			}

@@ -48,7 +48,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 )
 
-// ErrNoActiveRun is the answer when there is nothing to stop: the conversation
+// ErrNoActiveConversation is the answer when there is nothing to stop: the conversation
 // is not visible to the caller, it already concluded, or a racing terminal
 // reached the row first. It is deliberately one error for all three — telling
 // an unauthorized caller which of them applies would confirm the id exists.
@@ -57,7 +57,7 @@ import (
 // failed": everything else this returns wraps an internal fault (a failed
 // read, a failed park) and must not be reported as a missing run, nor echoed
 // to a client.
-var ErrNoActiveRun = errors.New("no active run")
+var ErrNoActiveConversation = errors.New("no active run")
 
 // StopCause names the lifecycle event a teardown caller is acting on — the
 // thing that caller knows and the conversation itself does not. It exists so
@@ -176,7 +176,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 		return fmt.Errorf("load run: %w", preflightErr)
 	}
 	if conv == nil {
-		return fmt.Errorf("%w %s", ErrNoActiveRun, conversationID)
+		return fmt.Errorf("%w %s", ErrNoActiveConversation, conversationID)
 	}
 	// A run that already concluded has nothing to stop, and saying so here —
 	// rather than letting the park write below discover it — is what keeps a
@@ -185,7 +185,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// its NEXT step cancelled by a click aimed at work that had already
 	// finished.
 	if domain.IsTerminalConversationStatus(conv.Status) {
-		return fmt.Errorf("%w %s", ErrNoActiveRun, conversationID)
+		return fmt.Errorf("%w %s", ErrNoActiveConversation, conversationID)
 	}
 
 	// The stop's record is a transcript row, not a verdict on the
@@ -319,7 +319,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 		return fmt.Errorf("park stopped run: %w", err)
 	}
 	if !flipped {
-		return fmt.Errorf("%w %s", ErrNoActiveRun, conversationID)
+		return fmt.Errorf("%w %s", ErrNoActiveConversation, conversationID)
 	}
 	s.broadcastConversationUpdate(orgID, conversationID, "open")
 	if cancelBlueprint {

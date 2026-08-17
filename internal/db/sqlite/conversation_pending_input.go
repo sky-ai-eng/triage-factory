@@ -7,19 +7,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-// runPendingInputStore is the SQLite impl of db.ConversationPendingInputStore — the
+// conversationPendingInputStore is the SQLite impl of db.ConversationPendingInputStore — the
 // read half of resume-by-enqueue over the undelivered plain user messages
 // (role='user', blank subtype, delivered=0) the ordinary transcript insert
 // leaves on the conversation. SQLite is N=1, no RLS; org_id exists for parity
 // with the Postgres baseline and every caller passes LocalDefaultOrgID
 // (asserted at each entry).
-type runPendingInputStore struct{ q queryer }
+type conversationPendingInputStore struct{ q queryer }
 
 func newConversationPendingInputStore(q queryer) db.ConversationPendingInputStore {
-	return &runPendingInputStore{q: q}
+	return &conversationPendingInputStore{q: q}
 }
 
-var _ db.ConversationPendingInputStore = (*runPendingInputStore)(nil)
+var _ db.ConversationPendingInputStore = (*conversationPendingInputStore)(nil)
 
 // pendingInputPredicate scopes this store's reads to the row shape it owns:
 // the conversation's undelivered plain user messages. The subtype filter
@@ -27,7 +27,7 @@ var _ db.ConversationPendingInputStore = (*runPendingInputStore)(nil)
 // undelivered user rows.
 const pendingInputPredicate = `org_id = ? AND conversation_id = ? AND role = 'user' AND subtype = '' AND delivered = 0`
 
-func (s *runPendingInputStore) Peek(ctx context.Context, orgID, conversationID string) (string, string, bool, error) {
+func (s *conversationPendingInputStore) Peek(ctx context.Context, orgID, conversationID string) (string, string, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", "", false, err
 	}
@@ -63,7 +63,7 @@ func (s *runPendingInputStore) Peek(ctx context.Context, orgID, conversationID s
 	return message, userID, ok, nil
 }
 
-func (s *runPendingInputStore) Consume(ctx context.Context, orgID, conversationID string) (string, string, bool, error) {
+func (s *conversationPendingInputStore) Consume(ctx context.Context, orgID, conversationID string) (string, string, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", "", false, err
 	}

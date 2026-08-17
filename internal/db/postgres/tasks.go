@@ -654,7 +654,7 @@ func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context,
 		rows, err := q.QueryContext(ctx, `
 			SELECT id FROM conversations
 			WHERE org_id = $1 AND task_id = $2
-			  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
+			  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 		`, orgID, taskID)
 		if err != nil {
 			return fmt.Errorf("list active runs: %w", err)
@@ -683,7 +683,7 @@ func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context,
 			      WHERE c.org_id = br.org_id
 			        AND c.task_id = $2
 			        AND c.blueprint_run_id = br.id
-			        AND (c.status IS NULL OR c.status NOT IN (`+runTerminalStatusesSQL+`))
+			        AND (c.status IS NULL OR c.status NOT IN (`+conversationTerminalStatusesSQL+`))
 			  )
 		`, orgID, taskID); err != nil {
 			return fmt.Errorf("stamp run cancel intent: %w", err)
@@ -1088,14 +1088,14 @@ func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUser
 // --- Breaker ---
 
 func (s *taskStore) CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error) {
-	return countConsecutiveFailedRuns(ctx, s.q, orgID, entityID, promptID)
+	return countConsecutiveFailedConversations(ctx, s.q, orgID, entityID, promptID)
 }
 
 func (s *taskStore) CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
-	return countConsecutiveFailedRuns(ctx, s.admin, orgID, entityID, promptID)
+	return countConsecutiveFailedConversations(ctx, s.admin, orgID, entityID, promptID)
 }
 
-func countConsecutiveFailedRuns(ctx context.Context, q queryer, orgID, entityID, promptID string) (int, error) {
+func countConsecutiveFailedConversations(ctx context.Context, q queryer, orgID, entityID, promptID string) (int, error) {
 	// Same shape as SQLite. Postgres' ROW_NUMBER / OVER / CTEs are
 	// identical syntax-wise; the only difference is the started_at
 	// fallback literal (Postgres requires a typed cast on the

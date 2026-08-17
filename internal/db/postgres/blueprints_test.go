@@ -218,7 +218,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	childID := seedPgRun(t, h, orgID, userID, taskID, stepPromptID, brID, 0)
+	childID := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, brID, 0)
 	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, childID); err != nil {
 		t.Fatalf("set child running: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	if !changed {
 		t.Fatal("MarkRunStatusSystem reported no change")
 	}
-	if st, parked := pgRunParked(t, h, childID); st != "open" || !parked {
+	if st, parked := pgConversationParked(t, h, childID); st != "open" || !parked {
 		t.Errorf("child = (%q, parked=%v), want (open, true) — a terminal parent must not strand a live child", st, parked)
 	}
 	assertClaimReleased(childID)
@@ -272,7 +272,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	if err != nil {
 		t.Fatalf("CreateRun 2: %v", err)
 	}
-	childID2 := seedPgRun(t, h, orgID, userID, taskID, stepPromptID, brID2, 0)
+	childID2 := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, brID2, 0)
 	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, childID2); err != nil {
 		t.Fatalf("set child 2 running: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	if !changed {
 		t.Fatal("MarkRunStatus reported no change")
 	}
-	if st, parked := pgRunParked(t, h, childID2); st != "open" || !parked {
+	if st, parked := pgConversationParked(t, h, childID2); st != "open" || !parked {
 		t.Errorf("child 2 = (%q, parked=%v), want (open, true)", st, parked)
 	}
 	assertClaimReleased(childID2)
@@ -345,7 +345,7 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	// Seed a step run, persist a terminal outcome the way processCompletion
 	// does, and confirm ConversationsForBlueprint surfaces it — the channel the
 	// orchestrator advances on (the successor to the old per-step verdict).
-	stepConversationID := seedPgRun(t, h, orgID, userID, taskID, stepPromptID, blueprintRunID, 0)
+	stepConversationID := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, blueprintRunID, 0)
 	if err := stores.Conversations.CompleteSystem(ctx, orgID, stepConversationID, "completed", 0, 0, 0, "did the thing", "finish", "", ""); err != nil {
 		t.Fatalf("complete step run: %v", err)
 	}
@@ -636,8 +636,8 @@ func TestBlueprintStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 	// Seed a step run under each blueprint so the cross-org
 	// ConversationsForBlueprintSystem check below has rows to (not) leak.
-	seedPgRun(t, h, orgA, userA, taskA, stepIDA, crA, 0)
-	seedPgRun(t, h, orgB, userB, taskB, stepIDB, crB, 0)
+	seedPgStepConversation(t, h, orgA, userA, taskA, stepIDA, crA, 0)
+	seedPgStepConversation(t, h, orgB, userB, taskB, stepIDB, crB, 0)
 
 	// ListStepsSystem on org A must not see blueprint B's step.
 	stepsA, err := blueprints.ListStepsSystem(ctx, orgA, blueprintIDB)
@@ -981,9 +981,9 @@ func seedPgTask(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
 	return taskID
 }
 
-// seedPgRun inserts a conversations row linked to a blueprint_run for verdict /
+// seedPgStepConversation inserts a conversations row linked to a blueprint_run for verdict /
 // step-to-blueprint resolution tests.
-func seedPgRun(t *testing.T, h *pgtest.Harness, orgID, userID, taskID, promptID, blueprintRunID string, stepIdx int) string {
+func seedPgStepConversation(t *testing.T, h *pgtest.Harness, orgID, userID, taskID, promptID, blueprintRunID string, stepIdx int) string {
 	t.Helper()
 	conversationID := uuid.New().String()
 	teamID := firstTeamForOrg(t, h, orgID)

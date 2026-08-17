@@ -24,7 +24,7 @@ import {
 import { AttentionRow, CardPlane, EventTag, HudHeader, SourceTag } from './board/cardChrome'
 import {
   compactNum,
-  runGlow,
+  conversationGlow,
   TONE_TEXT,
   type Glow,
   type StepState,
@@ -133,7 +133,9 @@ export default function AgentCard({
   const pending = pendingPermissions ?? []
   const hasPending = pending.length > 0
   const glow: Glow | null =
-    hasPending || needsApproval ? { tone: 'attention', breathing: false } : runGlow(conversation)
+    hasPending || needsApproval
+      ? { tone: 'attention', breathing: false }
+      : conversationGlow(conversation)
   const stats = feed ?? EMPTY_FEED
 
   const hasChain = !!chainSteps && chainSteps.length > 1

@@ -82,7 +82,7 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 					seedConversation(t, database, conversationID, "sess-"+conversationID, wt)
 					setRunStatus(t, database, conversationID, "open")
 					if _, err := database.Exec(`UPDATE blueprint_runs SET status=?, current_step_index=? WHERE id=?`,
-						tc.blueprintStatus, tc.currentStep, blueprintRunIDForRun(t, database, conversationID)); err != nil {
+						tc.blueprintStatus, tc.currentStep, blueprintRunIDForConversation(t, database, conversationID)); err != nil {
 						t.Fatalf("set blueprint status: %v", err)
 					}
 					s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
@@ -146,8 +146,8 @@ func TestResumabilityFor_FailedRunIsNotSteerable(t *testing.T) {
 	if ok || reason != ResumeBlockedNotSteerable {
 		t.Errorf("ResumabilityFor = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedNotSteerable)
 	}
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "hello"); !errors.Is(err, ErrRunNotSteerable) {
-		t.Errorf("SendMessage err = %v, want ErrRunNotSteerable", err)
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "hello"); !errors.Is(err, ErrConversationNotSteerable) {
+		t.Errorf("SendMessage err = %v, want ErrConversationNotSteerable", err)
 	}
 }
 
@@ -177,7 +177,7 @@ func TestParkRunOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "half-finished work")
-	namespace := blueprintRunIDForRun(t, database, conversationID)
+	namespace := blueprintRunIDForConversation(t, database, conversationID)
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = stub
 
@@ -280,7 +280,7 @@ func TestParkRunOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
 
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "half-finished work")
-	namespace := blueprintRunIDForRun(t, database, conversationID)
+	namespace := blueprintRunIDForConversation(t, database, conversationID)
 	s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
 
 	fenced := s.parkConversationOpen(context.Background(), liveParkContext{

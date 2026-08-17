@@ -707,7 +707,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 //
 // Decoupled from run lifecycle (TFAC-379): this never flips
 // conversations.status. A live run is cancelled by the caller
-// (swipeTeardownRuns' spawner.Cancel pass) — the process teardown owns that
+// (swipeTeardownConversations' spawner.Cancel pass) — the process teardown owns that
 // transition; a terminal run simply stays terminal. Keyed on the task's
 // runs (ListForTask spans the blueprint's step runs and any standalone run)
 // rather than on a run status.

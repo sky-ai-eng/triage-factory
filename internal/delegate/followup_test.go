@@ -61,7 +61,7 @@ func taskStatus(t *testing.T, database *sql.DB, taskID string) string {
 //
 // The failure it guards is two-sided. Before the claim gate widened, the claim
 // itself returned nothing. After it widened but before the dispatch guard did,
-// the claim succeeded and dispatchClaimedRun immediately parked the
+// the claim succeeded and dispatchClaimedConversation immediately parked the
 // conversation as "Blueprint cancelled by user" — a worse outcome than the
 // refusal, because it looks like it worked.
 //
@@ -76,7 +76,7 @@ func TestFollowUpOnFinishedBlueprint_IsClaimedAndDriven(t *testing.T) {
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-followup'`); err != nil {
 		t.Fatalf("finish conversation: %v", err)
 	}
-	bpr := blueprintRunIDForRun(t, database, "r-followup")
+	bpr := blueprintRunIDForConversation(t, database, "r-followup")
 	finishBlueprint(t, database, bpr, "completed", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
@@ -120,7 +120,7 @@ func TestFollowUpOnFinishedBlueprint_LeavesTheBlueprintAndTaskAlone(t *testing.T
 	if _, err := database.Exec(`UPDATE tasks SET status='done' WHERE id=?`, taskID); err != nil {
 		t.Fatalf("close task: %v", err)
 	}
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	finishBlueprint(t, database, bpr, "completed", 0)
 
 	wantStatus, wantStep := blueprintState(t, database, bpr)
@@ -174,7 +174,7 @@ func TestFollowUpOnANonFinalStepIsRefused(t *testing.T) {
 				); err != nil {
 					t.Fatalf("conclude conversation: %v", err)
 				}
-				bpr := blueprintRunIDForRun(t, database, "r-earlier")
+				bpr := blueprintRunIDForConversation(t, database, "r-earlier")
 				// The blueprint came to rest on step 1; this conversation is step 0.
 				finishBlueprint(t, database, bpr, tc.blueprint, 1)
 				s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
@@ -208,7 +208,7 @@ func TestFollowUpOnTheAbortedStepItselfIsAccepted(t *testing.T) {
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-aborted'`); err != nil {
 		t.Fatalf("abort conversation: %v", err)
 	}
-	bpr := blueprintRunIDForRun(t, database, "r-aborted")
+	bpr := blueprintRunIDForConversation(t, database, "r-aborted")
 	finishBlueprint(t, database, bpr, "aborted", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
@@ -263,7 +263,7 @@ func TestFollowUpRecordsTaskEvent(t *testing.T) {
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-timeline'`); err != nil {
 		t.Fatalf("finish conversation: %v", err)
 	}
-	bpr := blueprintRunIDForRun(t, database, "r-timeline")
+	bpr := blueprintRunIDForConversation(t, database, "r-timeline")
 	finishBlueprint(t, database, bpr, "completed", 0)
 	var taskID string
 	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id='r-timeline'`).Scan(&taskID); err != nil {
@@ -311,7 +311,7 @@ func TestDispatchClaimedRun_FinishedBlueprintWithoutAMessageParks(t *testing.T) 
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-nomsg", "sess-nomsg", t.TempDir())
-	bpr := blueprintRunIDForRun(t, database, "r-nomsg")
+	bpr := blueprintRunIDForConversation(t, database, "r-nomsg")
 	finishBlueprint(t, database, bpr, "completed", 0)
 	// Mid-flight with no staged message: what a crash between the resume
 	// message's consume and the turn's conclusion leaves behind.

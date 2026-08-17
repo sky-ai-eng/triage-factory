@@ -46,7 +46,7 @@ func mintBlueprintRunForTest(t *testing.T, database *sql.DB, taskID string) stri
 	return bpRunID
 }
 
-// createRunForTest inserts a conversations row directly via raw SQL so
+// createConversationForTest inserts a conversations row directly via raw SQL so
 // package-db CRUD tests (pending_firings, conversation_worktrees, ...) have
 // a run to FK-point to without reaching for the ConversationStore impl
 // (which lives in internal/db/sqlite and would form a circular
@@ -61,7 +61,7 @@ func mintBlueprintRunForTest(t *testing.T, database *sql.DB, taskID string) stri
 // pre-D2 CreateConversation also tolerated via nullIfEmpty. Tests
 // that need a real prompt FK should seed one first and pass the
 // id explicitly.
-func createRunForTest(t *testing.T, database *sql.DB, conv domain.Conversation) error {
+func createConversationForTest(t *testing.T, database *sql.DB, conv domain.Conversation) error {
 	t.Helper()
 	triggerType := conv.TriggerType
 	if triggerType == "" {

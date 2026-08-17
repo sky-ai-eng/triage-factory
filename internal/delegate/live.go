@@ -28,7 +28,7 @@ import (
 )
 
 // liveProc is the slice of *agentproc.LiveRun the driver loop needs. Pulled
-// out as an interface so driveLiveRun is unit-testable with a fake process
+// out as an interface so driveLiveConversation is unit-testable with a fake process
 // (no subprocess) — the real *agentproc.LiveRun satisfies it. Send delivers a
 // follow-up message into the same warm process (used by the invalid-envelope
 // re-prompt-to-fix).
@@ -151,7 +151,7 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	// the lease layer horizontal scaling adds builds on this column).
 	s.stampExecutor(spec.park.orgID, spec.park.conversationID, spec.park.claimID)
 
-	out := s.driveLiveRun(ctx, spec.park, lr, results, activity, spec.idleTimeout)
+	out := s.driveLiveConversation(ctx, spec.park, lr, results, activity, spec.idleTimeout)
 	// Capture the final session id / stderr off the (now-closed) process for
 	// the caller's completion + failure paths.
 	out.sessionID = lr.SessionID()
@@ -184,7 +184,7 @@ func foldAccounting(classified, merged *agentproc.Result) *agentproc.Result {
 	return &r
 }
 
-// driveLiveRun is the select loop that resolves a live process into a
+// driveLiveConversation is the select loop that resolves a live process into a
 // disposition by classifying each turn-end into one of three buckets:
 //
 //   - valid conclusion → close the process and hand the result back for
@@ -212,7 +212,7 @@ func foldAccounting(classified, merged *agentproc.Result) *agentproc.Result {
 //
 // Pulled out from runLiveAndDrive so it can be driven with a fake proc +
 // hand-fed channels in tests, without spawning a subprocess.
-func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc liveProc, results <-chan *agentproc.Result, activity <-chan struct{}, idleTimeout time.Duration) liveOutcome {
+func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContext, proc liveProc, results <-chan *agentproc.Result, activity <-chan struct{}, idleTimeout time.Duration) liveOutcome {
 	idle, idleC := newIdleTimer(idleTimeout)
 	if idle != nil {
 		defer idle.Stop()

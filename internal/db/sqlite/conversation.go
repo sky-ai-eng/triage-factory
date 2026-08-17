@@ -29,7 +29,7 @@ import (
 // SQLite side never grew the second arg. The
 // `...System` admin-pool variants are thin wrappers around their
 // non-System counterparts on the SQLite side.
-var agentRunLog = logging.Component("db/agentrun")
+var conversationLog = logging.Component("db/conversation")
 
 type conversationStore struct{ q queryer }
 
@@ -182,7 +182,7 @@ func (s *conversationStore) Complete(ctx context.Context, orgID, conversationID,
 				// No message rows at all: the spend has no ledger row to
 				// live on. Loud, so the dropped dollars are at least
 				// observable.
-				agentRunLog.Warn("run cost has no message row to settle on; spend unrecorded",
+				conversationLog.Warn("run cost has no message row to settle on; spend unrecorded",
 					"conversation_id", conversationID, "cost_usd", costUSD)
 			}
 		}
@@ -235,7 +235,7 @@ func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Par
 		    result_summary = COALESCE(NULLIF(?, ''), result_summary)
 		WHERE id = ?
 		  AND (status IS NULL
-		       OR status NOT IN (`+runTerminalStatusesSQL+reparkGuard+`))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+reparkGuard+`))
 	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, conversationID)
 	if err != nil {
 		return false, err
@@ -415,7 +415,7 @@ func (s *conversationStore) MarkFailedIfActive(ctx context.Context, orgID, conve
 			    failure_kind = ?
 			WHERE id = ?
 			  AND (status IS NULL
-			       OR status NOT IN (`+runTerminalStatusesSQL+`))
+			       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 		`, time.Now().UTC(), nullIfEmpty(failureKind), conversationID)
 		if err != nil {
 			return err
@@ -435,8 +435,8 @@ func (s *conversationStore) MarkFailedIfActive(ctx context.Context, orgID, conve
 
 // --- Queries ---
 
-// sqliteRunColumns is the SELECT list scanned into a domain.Conversation
-// via scanConversation. Same shape as Postgres' pgRunColumns; the
+// sqliteConversationColumns is the SELECT list scanned into a domain.Conversation
+// via scanConversation. Same shape as Postgres' pgConversationColumns; the
 // memory_missing derivation uses SQLite's TRIM(...) variant with the
 // explicit whitespace charset (Postgres uses BTRIM with an E'...'
 // escape string). The claim-derived columns (claimed_at / executor_id /
@@ -453,7 +453,7 @@ func (s *conversationStore) MarkFailedIfActive(ctx context.Context, orgID, conve
 // budget's current-episode counter (episodeAttemptsSQL, run_queue.go). Two
 // questions, one field; see domain.Conversation.Attempts before carrying
 // either one somewhere new.
-const sqliteRunColumns = `
+const sqliteConversationColumns = `
 	r.id, COALESCE(r.task_id, ''), COALESCE(r.runtime, ''),
 	` + sqliteDisplayStatusSQL + `,
 	r.model, r.started_at, r.queued_at,
@@ -500,7 +500,7 @@ func (s *conversationStore) Get(ctx context.Context, orgID, conversationID strin
 		return nil, err
 	}
 	row := s.q.QueryRowContext(ctx, `
-		SELECT `+sqliteRunColumns+`
+		SELECT `+sqliteConversationColumns+`
 		FROM conversations r
 		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id
@@ -522,7 +522,7 @@ func (s *conversationStore) ListForTask(ctx context.Context, orgID, taskID strin
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT `+sqliteRunColumns+`
+		SELECT `+sqliteConversationColumns+`
 		FROM conversations r
 		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id
@@ -583,7 +583,7 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 	for _, chunk := range chunkIDs(taskIDs) {
 		placeholders, args := inListArgs(chunk)
 		query := `
-			SELECT ` + sqliteRunColumns + `
+			SELECT ` + sqliteConversationColumns + `
 			FROM conversations r
 			LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id
 			LEFT JOIN agents a ON a.id = r.actor_agent_id
@@ -639,7 +639,7 @@ func (s *conversationStore) HasActiveAutoConversationForTask(ctx context.Context
 		WHERE r.task_id = ?
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
-		       OR r.status NOT IN (`+runTerminalStatusesSQL+`))
+		       OR r.status NOT IN (`+conversationTerminalStatusesSQL+`))
 	`, taskID).Scan(&count)
 	return count > 0, err
 }
@@ -652,7 +652,7 @@ func (s *conversationStore) ActiveIDsForTask(ctx context.Context, orgID, taskID 
 		SELECT id FROM conversations
 		WHERE task_id = ?
 		  AND (status IS NULL
-		       OR status NOT IN (`+runTerminalStatusesSQL+`))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 	`, taskID)
 	if err != nil {
 		return nil, err
@@ -695,7 +695,7 @@ func (s *conversationStore) ActiveAutoConversationIDForTaskSystem(ctx context.Co
 		WHERE r.task_id = ?
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
-		       OR r.status NOT IN (`+runTerminalStatusesSQL+`))
+		       OR r.status NOT IN (`+conversationTerminalStatusesSQL+`))
 		ORDER BY r.started_at DESC
 		LIMIT 1
 	`, taskID).Scan(&id)
@@ -713,7 +713,7 @@ func (s *conversationStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, t
 		SELECT id FROM conversations
 		WHERE team_id = ?
 		  AND (status IS NULL
-		       OR status NOT IN (`+runTerminalStatusesSQL+`))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 	`, teamID)
 	if err != nil {
 		return nil, err

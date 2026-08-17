@@ -43,12 +43,12 @@ export interface Glow {
   breathing: boolean
 }
 
-// runGlow decides whether the card itself lights up. Only a LIVE run glows — a
+// conversationGlow decides whether the card itself lights up. Only a LIVE run glows — a
 // breathing "work is alive here" bloom. Everything else returns null: a steady
 // colored glow on a settled/cancelled/waiting card just reads as a tinted
 // drop-shadow under the card (and those states already announce themselves via
 // the attention row / result verdict).
-export function runGlow(conversation: Conversation): Glow | null {
+export function conversationGlow(conversation: Conversation): Glow | null {
   if (isActiveConversation(conversation)) return { tone: 'active', breathing: true }
   return null
 }

@@ -125,7 +125,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	// active delegated run (if the frozen actor is somehow still running
 	// against a now-reassigned task) keeps executing untouched.
 	if req.Action == "dismiss" || req.Action == "complete" || req.Action == "claim" || req.Action == "delegate" {
-		s.swipeTeardownRuns(r, orgID, userID, id, req.Action)
+		s.swipeTeardownConversations(r, orgID, userID, id, req.Action)
 	}
 
 	response := map[string]any{"status": newStatus}
@@ -630,14 +630,14 @@ func (s *Server) swipeLifecycle(w http.ResponseWriter, r *http.Request, orgID, u
 	return newStatus, true
 }
 
-// swipeTeardownRuns stops any run a task is handed off from. It resolves every
+// swipeTeardownConversations stops any run a task is handed off from. It resolves every
 // unresolved artifact the task holds (teardownTaskArtifacts — closes all draft
 // PRs, dismisses all pending reviews, a no-op when none exist) and cancels
 // in-flight runs. The discard memory note differs per action so the next agent
 // reading conversation_memory can tell apart "human walked away" (dismiss) from "human
 // resolved it" (complete) from "human took over" (claim) from "re-delegate".
 // Best-effort.
-func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action string) {
+func (s *Server) swipeTeardownConversations(r *http.Request, orgID, userID, id, action string) {
 	outcome := discardOutcomeDismissed
 	switch action {
 	case "complete":

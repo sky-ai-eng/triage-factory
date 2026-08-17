@@ -328,7 +328,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		st := ensureStation(ar.Task.EventType)
 		st.ActiveRuns++
 		st.Runs = append(st.Runs, factoryRunJSON{
-			Run:  toFactoryRunSummary(ar.Run),
+			Run:  toFactoryRunSummary(ar.Conversation),
 			Task: taskToJSON(ar.Task),
 			Mine: ghUsername != "" && runAuthors[ar.Task.EntityID] == ghUsername,
 		})

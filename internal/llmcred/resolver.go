@@ -107,7 +107,7 @@ type mintOptions struct {
 // attribution on the customer's side). Passthrough modes ignore conversationID and
 // return the stored material unchanged.
 func (r *Resolver) ResolveForBundle(ctx context.Context, orgID, conversationID string) (Material, error) {
-	return r.resolve(ctx, orgID, mintOptions{sessionName: sessionNameForRun(conversationID), networkBound: true})
+	return r.resolve(ctx, orgID, mintOptions{sessionName: sessionNameForConversation(conversationID), networkBound: true})
 }
 
 // ResolveForSystem resolves brain-bound Material for a system consumer

@@ -8,19 +8,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-// runCredentialsStore is the Postgres impl of db.ClaimCredentialsStore — the
+// claimCredentialsStore is the Postgres impl of db.ClaimCredentialsStore — the
 // sealed per-claim credential bundle channel. Admin-pool only:
 // claim_credentials carries no app-pool grant at all (see the table's RLS
 // comment in the baseline migration), so both the brain's write and the
 // executor's read route through the superuser pool. Rows key on the run's
 // ACTIVE claim, resolved here from the conversation id the caller holds.
-type runCredentialsStore struct{ admin queryer }
+type claimCredentialsStore struct{ admin queryer }
 
 func newClaimCredentialsStore(admin queryer) db.ClaimCredentialsStore {
-	return &runCredentialsStore{admin: admin}
+	return &claimCredentialsStore{admin: admin}
 }
 
-var _ db.ClaimCredentialsStore = (*runCredentialsStore)(nil)
+var _ db.ClaimCredentialsStore = (*claimCredentialsStore)(nil)
 
 // Put is guarded on boot_epoch so a slow provision can never clobber a
 // fresher one: if run X times out under executor A (boot_epoch 1) and is
@@ -33,7 +33,7 @@ var _ db.ClaimCredentialsStore = (*runCredentialsStore)(nil)
 // layer: a reclaimed run has a NEW active claim, so the stale write keys a
 // different row entirely and the fresh claim's bundle is untouched either
 // way. A run with no active claim inserts nothing (silent no-op).
-func (s *runCredentialsStore) Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte) error {
+func (s *claimCredentialsStore) Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte) error {
 	_, err := s.admin.ExecContext(ctx, `
 		INSERT INTO claim_credentials (claim_id, org_id, executor_id, boot_epoch, sealed, created_at)
 		SELECT cl.id, $2::uuid, $3, $4, $5, now()
@@ -50,7 +50,7 @@ func (s *runCredentialsStore) Put(ctx context.Context, orgID, conversationID, ex
 	return err
 }
 
-func (s *runCredentialsStore) Get(ctx context.Context, orgID, conversationID string) (db.SealedBundle, bool, error) {
+func (s *claimCredentialsStore) Get(ctx context.Context, orgID, conversationID string) (db.SealedBundle, bool, error) {
 	var b db.SealedBundle
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT cc.executor_id, cc.boot_epoch, cc.sealed, cc.created_at

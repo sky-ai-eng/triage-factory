@@ -32,7 +32,7 @@ import (
 // contract real chances to correct without spending unbounded turns on one
 // that's ignoring it. Not a config knob because no one needs to tune it
 // per-run. A turn that ends with NO envelope attempt is not retried — the run
-// is left open (see driveLiveRun). The live driver's results-channel buffer is
+// is left open (see driveLiveConversation). The live driver's results-channel buffer is
 // sized off this (resultsBufferDepth in live.go); keep that in mind if you bump
 // it.
 const maxCompletionRetries = 3
@@ -188,14 +188,14 @@ func (f *memoryFingerprint) covers(content string) bool {
 	return f != nil && sha256.Sum256([]byte(content)) == f.sum
 }
 
-// readRunMemory returns what THIS run wrote at the fixed path. Content identical
+// readConversationMemory returns what THIS run wrote at the fixed path. Content identical
 // to what the run inherited is not this run's work: it reads as "wrote nothing",
 // so the conversation_memory row lands with agent_content NULL rather than
 // adopting a predecessor's narrative.
 //
 // prior is nil on every path with no inherited file to distrust — a resume,
 // whose own file is its work, and a fresh tree.
-func readRunMemory(cwd string, prior *memoryFingerprint) (string, memoryFileState) {
+func readConversationMemory(cwd string, prior *memoryFingerprint) (string, memoryFileState) {
 	content, state := readAgentMemoryFile(cwd)
 	if state == memoryFilePresent && prior.covers(content) {
 		return "", memoryFileStale
@@ -508,7 +508,7 @@ func lookupEntityProjectID(entities db.EntityStore, orgID, entityID string) *str
 	return entity.ProjectID
 }
 
-// attachRunMemoryEntities makes a terminated run's memory reachable from every
+// attachConversationMemoryEntities makes a terminated run's memory reachable from every
 // entity the run materially engaged: the primary (task) entity, plus every
 // entity it produced (derived from the run's artifacts). Touched entities are
 // recorded durably at verb time by the exec funnel; role precedence in
@@ -528,7 +528,7 @@ func lookupEntityProjectID(entities db.EntityStore, orgID, entityID string) *str
 // attach mints the create-minimal stub the poller/enrichment path later fills
 // (the artifact URL links it out). A repo-level artifact target (a branch
 // push, or owner/repo with no '#N') maps to no entity and is skipped.
-func (s *Spawner) attachRunMemoryEntities(ctx context.Context, orgID, conversationID, primaryEntityID string) {
+func (s *Spawner) attachConversationMemoryEntities(ctx context.Context, orgID, conversationID, primaryEntityID string) {
 	if s.taskMemory == nil {
 		return
 	}

@@ -22,9 +22,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 )
 
-// giveRunResumeState fills in the fields an SDK resume re-invokes a session
+// giveConversationResumeState fills in the fields an SDK resume re-invokes a session
 // with, so the refusal ladder reaches the blueprint rungs under test.
-func giveRunResumeState(t *testing.T, database *sql.DB, conversationID string) {
+func giveConversationResumeState(t *testing.T, database *sql.DB, conversationID string) {
 	t.Helper()
 	if _, err := database.Exec(
 		`UPDATE conversations SET sdk_session_id = ?, worktree_path = ? WHERE id = ?`,
@@ -43,11 +43,11 @@ func TestFollowUp_ConcludedStepOfARunningBlueprintIsRefused(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 	s, database, brID, _, step0ConversationID := reactorFixture(t, "handoff", 2, "completed", "continue")
-	giveRunResumeState(t, database, step0ConversationID)
+	giveConversationResumeState(t, database, step0ConversationID)
 
 	// The composer's half: the run detail read says no, with the rung the
 	// frontend renders as "this step just handed off".
-	if ok, reason := s.ResumabilityFor(ctx, org, loadRun(t, s, step0ConversationID)); ok || reason != ResumeBlockedStepHandedOff {
+	if ok, reason := s.ResumabilityFor(ctx, org, loadConversation(t, s, step0ConversationID)); ok || reason != ResumeBlockedStepHandedOff {
 		t.Errorf("ResumabilityFor = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedStepHandedOff)
 	}
 
@@ -65,12 +65,12 @@ func TestFollowUp_ConcludedStepOfARunningBlueprintIsRefused(t *testing.T) {
 
 	// The reactor, a beat later, finds exactly the terminal this engagement
 	// wrote — so the blueprint advances and step 1 is enqueued.
-	stepConversation := loadRun(t, s, step0ConversationID)
+	stepConversation := loadConversation(t, s, step0ConversationID)
 	stepConversation.TriggerType = "manual"
 	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
 	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-	if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
+	if q := queuedStepConversations(t, database, brID); len(q) != 1 || q[0] != 1 {
 		t.Fatalf("queued step runs = %v, want [1] — the next step must run", q)
 	}
 	br := mustGetRun(t, s, org, brID)
@@ -83,7 +83,7 @@ func TestFollowUp_ConcludedStepOfARunningBlueprintIsRefused(t *testing.T) {
 
 	// Past the advance the answer changes to the permanent one: step 0 is
 	// behind the blueprint for good, and the moved-past refusal takes over.
-	if ok, reason := s.ResumabilityFor(ctx, org, loadRun(t, s, step0ConversationID)); ok || reason != ResumeBlockedBlueprintConcluded {
+	if ok, reason := s.ResumabilityFor(ctx, org, loadConversation(t, s, step0ConversationID)); ok || reason != ResumeBlockedBlueprintConcluded {
 		t.Errorf("after the advance: ResumabilityFor = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedBlueprintConcluded)
 	}
 }
@@ -95,9 +95,9 @@ func TestFollowUp_FinalStepAfterTheBlueprintFinishesStillLands(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 	s, database, brID, _, step0ConversationID := reactorFixture(t, "handoff-final", 1, "completed", "finish")
-	giveRunResumeState(t, database, step0ConversationID)
+	giveConversationResumeState(t, database, step0ConversationID)
 
-	stepConversation := loadRun(t, s, step0ConversationID)
+	stepConversation := loadConversation(t, s, step0ConversationID)
 	stepConversation.TriggerType = "manual"
 	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
 	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
@@ -105,7 +105,7 @@ func TestFollowUp_FinalStepAfterTheBlueprintFinishesStillLands(t *testing.T) {
 		t.Fatalf("blueprint status = %q, want completed before the follow-up", br.Status)
 	}
 
-	if ok, reason := s.ResumabilityFor(ctx, org, loadRun(t, s, step0ConversationID)); !ok {
+	if ok, reason := s.ResumabilityFor(ctx, org, loadConversation(t, s, step0ConversationID)); !ok {
 		t.Errorf("ResumabilityFor = (false, %q), want resumable once the blueprint finished", reason)
 	}
 	if err := s.SendMessage(ctx, org, step0ConversationID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
@@ -127,7 +127,7 @@ func TestFollowUp_StopResumeOfAMidBlueprintStepStillLands(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 	s, database, brID, _, step0ConversationID := reactorFixture(t, "handoff-stop", 2, "open", "")
-	giveRunResumeState(t, database, step0ConversationID)
+	giveConversationResumeState(t, database, step0ConversationID)
 
 	if err := s.SendMessage(ctx, org, step0ConversationID, runmode.LocalDefaultUserID, "keep going"); err != nil {
 		t.Fatalf("stop→resume of a mid-blueprint step: %v", err)
@@ -142,12 +142,12 @@ func TestFollowUp_StopResumeOfAMidBlueprintStepStillLands(t *testing.T) {
 		`UPDATE conversations SET status = 'completed', outcome = 'continue' WHERE id = ?`, step0ConversationID); err != nil {
 		t.Fatalf("conclude the resumed step: %v", err)
 	}
-	stepConversation := loadRun(t, s, step0ConversationID)
+	stepConversation := loadConversation(t, s, step0ConversationID)
 	stepConversation.TriggerType = "manual"
 	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
 	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-	if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
+	if q := queuedStepConversations(t, database, brID); len(q) != 1 || q[0] != 1 {
 		t.Fatalf("queued step runs = %v, want [1] — a resumed step's conclusion still advances", q)
 	}
 	if br := mustGetRun(t, s, org, brID); br.CurrentStepIndex != 1 {
@@ -219,7 +219,7 @@ func TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot(t *testing.T
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "snap-wake")
 	// A blueprint that already finished — the follow-up-on-concluded-work
 	// shape, where a turn's conclusion advances nothing.
-	settleRunBlueprint(t, database, conversationID, "completed")
+	settleConversationBlueprint(t, database, conversationID, "completed")
 
 	blobs, err := storage.New()
 	if err != nil {

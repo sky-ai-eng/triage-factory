@@ -549,7 +549,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		SystemPrompt:    cfg.appendSysPrompt,
 		OrgID:           orgID,
 		Secrets:         s.getRunSecrets(),
-		LLMResolver:     s.llmResolverForRun(orgID, conversationID),
+		LLMResolver:     s.llmResolverForConversation(orgID, conversationID),
 		// Measured sandbox cost lands on the engagement that paid for it, at
 		// teardown. Empty claim id (a path with no claimed run in scope)
 		// records nothing.
@@ -579,7 +579,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		GitUserName:  commitIdentity.Name,
 		GitUserEmail: commitIdentity.Email,
 	}
-	sink := newRunSink(s, orgID, conversationID, cfg.claimID, triggerType, creatorUserID)
+	sink := newConversationSink(s, orgID, conversationID, cfg.claimID, triggerType, creatorUserID)
 
 	// Off-allowlist tool calls route to one of two dispositions, chosen once
 	// per run:
@@ -799,7 +799,7 @@ func (s *Spawner) processCompletion(
 	// to NULL on the way in). blueprint_run_id is denormalized onto the row so
 	// the next run's materializer can tell this workflow run's own steps from
 	// history.
-	agentContent, fileState := readRunMemory(claudeCwd, priorMemory)
+	agentContent, fileState := readConversationMemory(claudeCwd, priorMemory)
 	if err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID, blueprintRunID, agentContent); err != nil {
 		delegateLog.Warn("upsert memory for run failed", "conversation", conversationID, "error", err)
 	}
@@ -820,7 +820,7 @@ func (s *Spawner) processCompletion(
 	// conversation_memory.entity_id. Cancellation-detached for the same reason
 	// the upsert above is: a cancelled turn still owns its terminal
 	// bookkeeping.
-	s.attachRunMemoryEntities(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID)
+	s.attachConversationMemoryEntities(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID)
 
 	// Every run is a step of a blueprint_run now (a single prompt is a 1-step
 	// blueprint), so this helper never owns task disposition: it persists

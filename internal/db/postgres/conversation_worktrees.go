@@ -11,7 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// runWorktreeStore is the Postgres impl of db.ConversationWorktreeStore. SQL
+// conversationWorktreeStore is the Postgres impl of db.ConversationWorktreeStore. SQL
 // is written fresh against D3's schema: $N placeholders, explicit
 // org_id bind (column NOT NULL with no default), and org_id in every
 // WHERE clause as defense in depth alongside the conversation_worktrees_all
@@ -35,22 +35,22 @@ import (
 // (`tfac exec workspace add owner/repo`), so every method resolves the slug
 // here: a write get-or-creates the registry row, a read or a delete resolves it
 // and matches nothing when there is none.
-type runWorktreeStore struct {
+type conversationWorktreeStore struct {
 	q     queryer
 	admin queryer
 }
 
 func newConversationWorktreeStore(q, admin queryer) db.ConversationWorktreeStore {
-	return &runWorktreeStore{q: q, admin: admin}
+	return &conversationWorktreeStore{q: q, admin: admin}
 }
 
-var _ db.ConversationWorktreeStore = (*runWorktreeStore)(nil)
+var _ db.ConversationWorktreeStore = (*conversationWorktreeStore)(nil)
 
-func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.ConversationWorktree) (bool, string, error) {
+func (s *conversationWorktreeStore) Insert(ctx context.Context, orgID string, w domain.ConversationWorktree) (bool, string, error) {
 	return insertRunWorktree(ctx, s.q, orgID, w, s.GetByRepoRef)
 }
 
-func (s *runWorktreeStore) InsertSystem(ctx context.Context, orgID string, w domain.ConversationWorktree) (bool, string, error) {
+func (s *conversationWorktreeStore) InsertSystem(ctx context.Context, orgID string, w domain.ConversationWorktree) (bool, string, error) {
 	return insertRunWorktree(ctx, s.admin, orgID, w, s.GetByRepoRefSystem)
 }
 
@@ -164,11 +164,11 @@ func insertRunWorktree(
 	return false, existing.Path, nil
 }
 
-func (s *runWorktreeStore) GetByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
+func (s *conversationWorktreeStore) GetByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
 	return getConversationWorktreeByRepoRef(ctx, s.q, orgID, conversationID, repoID, ref)
 }
 
-func (s *runWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
+func (s *conversationWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
 	return getConversationWorktreeByRepoRef(ctx, s.admin, orgID, conversationID, repoID, ref)
 }
 
@@ -194,11 +194,11 @@ func getConversationWorktreeByRepoRef(ctx context.Context, q queryer, orgID, con
 	return &w, nil
 }
 
-func (s *runWorktreeStore) List(ctx context.Context, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
+func (s *conversationWorktreeStore) List(ctx context.Context, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
 	return listConversationWorktrees(ctx, s.q, orgID, conversationID)
 }
 
-func (s *runWorktreeStore) ListSystem(ctx context.Context, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
+func (s *conversationWorktreeStore) ListSystem(ctx context.Context, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
 	return listConversationWorktrees(ctx, s.admin, orgID, conversationID)
 }
 
@@ -225,11 +225,11 @@ func listConversationWorktrees(ctx context.Context, q queryer, orgID, conversati
 	return out, rows.Err()
 }
 
-func (s *runWorktreeStore) DeleteByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) error {
+func (s *conversationWorktreeStore) DeleteByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) error {
 	return deleteConversationWorktreeByRepoRef(ctx, s.q, orgID, conversationID, repoID, ref)
 }
 
-func (s *runWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) error {
+func (s *conversationWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) error {
 	return deleteConversationWorktreeByRepoRef(ctx, s.admin, orgID, conversationID, repoID, ref)
 }
 
@@ -249,7 +249,7 @@ func deleteConversationWorktreeByRepoRef(ctx context.Context, q queryer, orgID, 
 	return err
 }
 
-func (s *runWorktreeStore) DeleteByPathSystem(ctx context.Context, orgID, conversationID, path string) error {
+func (s *conversationWorktreeStore) DeleteByPathSystem(ctx context.Context, orgID, conversationID, path string) error {
 	_, err := s.admin.ExecContext(ctx, `
 		DELETE FROM conversation_worktrees
 		WHERE org_id = $1 AND conversation_id = $2 AND path = $3

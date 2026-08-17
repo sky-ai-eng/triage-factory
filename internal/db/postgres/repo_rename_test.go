@@ -28,7 +28,7 @@ func TestRepoRename_Postgres(t *testing.T) {
 			TeamID: teamID,
 			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()
-				return seedPgArtifactRun(t, h, orgID, teamID, userID)
+				return seedPgArtifactConversation(t, h, orgID, teamID, userID)
 			},
 			Task: func(t *testing.T, entityID, suffix string) string {
 				t.Helper()

@@ -463,7 +463,7 @@ func TestParkRunOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	// A workspace with something in it that only the snapshot can carry.
 	wtPath := t.TempDir()
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "work in progress")
-	namespace := blueprintRunIDForRun(t, database, conversationID)
+	namespace := blueprintRunIDForConversation(t, database, conversationID)
 
 	if fenced := s.parkConversationOpen(context.Background(), liveParkContext{
 		orgID:          runmode.LocalDefaultOrgID,
@@ -543,7 +543,7 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 	); err != nil {
 		t.Fatalf("point the row at an off-pod worktree: %v", err)
 	}
-	namespace := blueprintRunIDForRun(t, database, conversationID)
+	namespace := blueprintRunIDForConversation(t, database, conversationID)
 
 	// 1. Control's half: park, release the claim, signal the executor. It
 	// takes no snapshot — the workspace is on a machine it cannot reach.
@@ -640,7 +640,7 @@ func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 
 	wtPath := t.TempDir()
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "work the failure discards")
-	namespace := blueprintRunIDForRun(t, database, conversationID)
+	namespace := blueprintRunIDForConversation(t, database, conversationID)
 
 	if fenced := s.recordNativeResult(context.Background(), runmode.LocalDefaultOrgID, conversationID,
 		loadTask(t, s, taskID),

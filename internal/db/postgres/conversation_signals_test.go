@@ -19,7 +19,7 @@ func TestRunSignalStore_Postgres(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	conversationID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 
 	const target = "executor-1"
 

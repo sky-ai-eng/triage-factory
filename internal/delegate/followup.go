@@ -29,22 +29,22 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// ErrRunNotSteerable is returned by SendMessage when a conversation can take no
+// ErrConversationNotSteerable is returned by SendMessage when a conversation can take no
 // message: nothing is driving it, nothing will be, and it is not resting
 // somewhere a wake can reach — so a queued row would sit undelivered forever.
 // Callers map it to 409 Conflict so the client refreshes and re-reads the run's
 // state.
-var ErrRunNotSteerable = errors.New("run is not steerable")
+var ErrConversationNotSteerable = errors.New("run is not steerable")
 
-// ErrRunNotFound is returned by SendMessage when the conversation does not
+// ErrConversationNotFound is returned by SendMessage when the conversation does not
 // exist under the caller's org at routing time. Distinct from
-// ErrRunNotSteerable because the two ask for different client reactions: a
+// ErrConversationNotSteerable because the two ask for different client reactions: a
 // missing run is a 404 (nothing left to re-read), while an unsteerable one is
 // a 409 (refresh and re-read). The message endpoint authorizes visibility
 // before routing, so reaching this normally means the run was deleted between
 // that read and this one — answering "conflict" would send the client chasing
 // state that no longer exists.
-var ErrRunNotFound = errors.New("run not found")
+var ErrConversationNotFound = errors.New("run not found")
 
 // The SDK-only resume preconditions, as errors rather than formatted strings so
 // the one ladder can hand them back by name. Each is a row that cannot be
@@ -291,7 +291,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 		return fmt.Errorf("load run: %w", err)
 	}
 	if conv == nil {
-		return ErrRunNotFound
+		return ErrConversationNotFound
 	}
 	// The one case a queued row cannot serve, and the reason the split exists at
 	// all: an SDK conversation in flight (claimed, setting up or running) holds
@@ -523,7 +523,7 @@ func blockedFollowUpError(block string) error {
 	case ResumeBlockedStepHandedOff:
 		return ErrStepHandedOff
 	default:
-		return ErrRunNotSteerable
+		return ErrConversationNotSteerable
 	}
 }
 

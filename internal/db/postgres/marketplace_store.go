@@ -619,7 +619,7 @@ func (s *marketplaceStore) MaterializeListing(ctx context.Context, orgID, teamID
 }
 
 // blueprintRunTerminalStatusesSQL is the blueprint_runs.status counterpart
-// to runTerminalStatusesSQL (run_queue.go) — the terminal set per
+// to conversationTerminalStatusesSQL (run_queue.go) — the terminal set per
 // domain.BlueprintRunStatus.Terminal(). No shared constant exists for this
 // table today; defined here since this is the first blueprint_runs query
 // that needs to distinguish terminal from in-flight.
@@ -629,7 +629,7 @@ const blueprintRunTerminalStatusesSQL = `'completed','aborted','failed','cancell
 // kind=prompt listing in $1. teams distinct-counts installing teams whose
 // copy (a prompts row) still exists and isn't soft-deleted.
 //
-// runs_agg counts only TERMINAL runs (runTerminalStatusesSQL, run_queue.go)
+// runs_agg counts only TERMINAL runs (conversationTerminalStatusesSQL, run_queue.go)
 // against any copy this listing has ever produced — a queued/cloning/running
 // run hasn't resolved yet, so it must count toward neither total_runs nor
 // success_rate until it does. Counting it as a not-yet-completed run would
@@ -674,7 +674,7 @@ const recomputePromptListingStatsPG = `
 			MAX(r.started_at) AS last_run_at
 		FROM (SELECT DISTINCT listing_id, root_object_id FROM marketplace_installs WHERE org_id = $1 AND root_object_id IS NOT NULL) mi
 		JOIN conversations r ON r.prompt_id = mi.root_object_id::text AND r.org_id = $1
-		WHERE r.status IN (` + runTerminalStatusesSQL + `)
+		WHERE r.status IN (` + conversationTerminalStatusesSQL + `)
 		GROUP BY mi.listing_id
 	) runs_agg ON runs_agg.listing_id = l.id
 	WHERE l.org_id = $1 AND l.kind = 'prompt'
@@ -690,7 +690,7 @@ const recomputePromptListingStatsPG = `
 // recomputeBlueprintListingStatsPG mirrors recomputePromptListingStatsPG for
 // kind=blueprint listings: copies live in blueprints (not prompts), runs
 // live in blueprint_runs.blueprint_id (not conversations.prompt_id) filtered to
-// blueprintRunTerminalStatusesSQL instead of runTerminalStatusesSQL —
+// blueprintRunTerminalStatusesSQL instead of conversationTerminalStatusesSQL —
 // everything else, including the terminal-only rationale, is identical.
 const recomputeBlueprintListingStatsPG = `
 	INSERT INTO marketplace_listing_stats (listing_id, org_id, teams_using, total_runs, success_rate, last_run_at, computed_at)

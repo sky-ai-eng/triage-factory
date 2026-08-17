@@ -6,20 +6,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-// runPendingInputStore is the Postgres impl of db.ConversationPendingInputStore — the
+// conversationPendingInputStore is the Postgres impl of db.ConversationPendingInputStore — the
 // read half of resume-by-enqueue over the undelivered plain user messages
 // (role='user', blank subtype, delivered=false) the ordinary transcript insert
 // leaves on the conversation. Peek and Consume run off the admin pool from the
 // dispatcher's claim path, a goroutine with no request context; the write they
 // read is the follow-up path's InsertMessage through the claims tx, under the
 // sending user's claims.
-type runPendingInputStore struct{ admin queryer }
+type conversationPendingInputStore struct{ admin queryer }
 
 func newConversationPendingInputStore(admin queryer) db.ConversationPendingInputStore {
-	return &runPendingInputStore{admin: admin}
+	return &conversationPendingInputStore{admin: admin}
 }
 
-var _ db.ConversationPendingInputStore = (*runPendingInputStore)(nil)
+var _ db.ConversationPendingInputStore = (*conversationPendingInputStore)(nil)
 
 // pendingInputPredicate scopes this store's reads to the row shape it owns:
 // the conversation's undelivered plain user messages. The subtype filter
@@ -27,7 +27,7 @@ var _ db.ConversationPendingInputStore = (*runPendingInputStore)(nil)
 // undelivered user rows.
 const pendingInputPredicate = `org_id = $1::uuid AND conversation_id = $2::uuid AND role = 'user' AND subtype = '' AND delivered = false`
 
-func (s *runPendingInputStore) Peek(ctx context.Context, orgID, conversationID string) (string, string, bool, error) {
+func (s *conversationPendingInputStore) Peek(ctx context.Context, orgID, conversationID string) (string, string, bool, error) {
 	// window_state='active' is not in the shared predicate but belongs in
 	// every read of it: a withdrawn row (undelivered + inactive) never
 	// happened, and the flush skips it. Without this the routing decision
@@ -56,6 +56,6 @@ func (s *runPendingInputStore) Peek(ctx context.Context, orgID, conversationID s
 	return message, userID, ok, nil
 }
 
-func (s *runPendingInputStore) Consume(ctx context.Context, orgID, conversationID string) (string, string, bool, error) {
+func (s *conversationPendingInputStore) Consume(ctx context.Context, orgID, conversationID string) (string, string, bool, error) {
 	return consumePendingInput(ctx, s.admin, orgID, conversationID)
 }

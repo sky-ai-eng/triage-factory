@@ -198,7 +198,7 @@ func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string
 		}
 		r.FailureKind = domain.ConversationFailureKind(failureKind)
 		r.ParkReason = domain.ParkReason(parkReason)
-		out = append(out, domain.FactoryActiveConversation{Run: r, Task: t, EntityEventTyp: t.EventType})
+		out = append(out, domain.FactoryActiveConversation{Conversation: r, Task: t, EntityEventTyp: t.EventType})
 	}
 	return out, rows.Err()
 }

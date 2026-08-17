@@ -24,9 +24,9 @@ type StagedInjectionSeeder struct {
 	// seeds so unique indexes don't collide.
 	Run func(t *testing.T, suffix string) (conversationID string)
 
-	// DeleteRun removes the run row so the FK ON DELETE CASCADE subtest can
+	// DeleteConversation removes the run row so the FK ON DELETE CASCADE subtest can
 	// verify a purged run takes its undelivered injections with it.
-	DeleteRun func(t *testing.T, conversationID string)
+	DeleteConversation func(t *testing.T, conversationID string)
 }
 
 // RunStagedInjectionStoreConformance covers the StagedInjectionStore contract every
@@ -163,7 +163,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{ConversationID: conversationID, Producer: "p", Body: "doomed"}); err != nil {
 			t.Fatalf("append: %v", err)
 		}
-		seed.DeleteRun(t, conversationID)
+		seed.DeleteConversation(t, conversationID)
 		// FlushPending filters only by (org_id, run_id), so a non-empty result here
 		// would mean the rows survived the run deletion — i.e. the cascade didn't
 		// fire. Empty proves the FK ON DELETE CASCADE took them.

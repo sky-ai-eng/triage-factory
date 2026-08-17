@@ -8,12 +8,12 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
-// seedRunOnTeam inserts a minimal non-blueprint run owned by teamID with the
+// seedConversationOnTeam inserts a minimal non-blueprint run owned by teamID with the
 // given status, via the admin pool. origin='manual' sidesteps the
 // conversations_origin_requires_parents CHECK (no blueprint_run/task/prompt needed);
 // trigger_type='manual' pairs with a non-NULL creator per
 // conversations_creator_matches_trigger_type.
-func seedRunOnTeam(t *testing.T, h *Harness, orgID, creatorID, teamID, status string) string {
+func seedConversationOnTeam(t *testing.T, h *Harness, orgID, creatorID, teamID, status string) string {
 	t.Helper()
 	var id string
 	if err := h.AdminDB.QueryRow(`
@@ -36,10 +36,10 @@ func TestConversationStore_Postgres_ActiveIDsForTeamSystem(t *testing.T) {
 	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
 	teamB := SeedTeam(t, h, orgA, "teamB")
 
-	running := seedRunOnTeam(t, h, orgA, alice, teamA, "running")
-	open := seedRunOnTeam(t, h, orgA, alice, teamA, "open")
-	seedRunOnTeam(t, h, orgA, alice, teamA, "completed")
-	seedRunOnTeam(t, h, orgA, alice, teamB, "running") // sibling team — excluded
+	running := seedConversationOnTeam(t, h, orgA, alice, teamA, "running")
+	open := seedConversationOnTeam(t, h, orgA, alice, teamA, "open")
+	seedConversationOnTeam(t, h, orgA, alice, teamA, "completed")
+	seedConversationOnTeam(t, h, orgA, alice, teamB, "running") // sibling team — excluded
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, SecretKey)
 	ids, err := stores.Conversations.ActiveIDsForTeamSystem(context.Background(), orgA, teamA)

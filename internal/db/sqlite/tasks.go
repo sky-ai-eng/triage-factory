@@ -555,7 +555,7 @@ func scanActiveConversationIDs(ctx context.Context, q queryer, taskID string) ([
 	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE task_id = ?
-		  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
+		  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 	`, taskID)
 	if err != nil {
 		return nil, err
@@ -619,7 +619,7 @@ func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context,
 			      SELECT c.blueprint_run_id FROM conversations c
 			      WHERE c.task_id = ?
 			        AND c.blueprint_run_id IS NOT NULL
-			        AND (c.status IS NULL OR c.status NOT IN (`+runTerminalStatusesSQL+`))
+			        AND (c.status IS NULL OR c.status NOT IN (`+conversationTerminalStatusesSQL+`))
 			  )
 		`, taskID); err != nil {
 			return fmt.Errorf("stamp run cancel intent: %w", err)

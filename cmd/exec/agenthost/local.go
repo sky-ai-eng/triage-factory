@@ -156,14 +156,14 @@ func (c *LocalClient) Close() error { return nil }
 
 // --- review draft finalization ---
 
-// runReviewArtifact locates the pending review draft this run's add/finalize op
+// conversationReviewArtifact locates the pending review draft this run's add/finalize op
 // is acting on. A run can hold several review drafts at once (run-scoped dedup,
 // one per PR — TFAC-494), so it resolves by the handle the agent passes (the
 // artifact id) rather than just the first pending review, which could be a
 // different PR's draft. An empty handle (defensive — exec always passes one)
 // falls back to the run's sole pending review. Returns an actionable error when
 // no matching pending review exists.
-func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*domain.Artifact, error) {
+func (c *LocalClient) conversationReviewArtifact(ctx context.Context, reviewID string) (*domain.Artifact, error) {
 	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
 		return nil, err
@@ -214,7 +214,7 @@ func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*
 // comment shares the current head, so approval pins that single commit_id.
 func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) (ReviewFinalizeResult, error) {
 	staged := ReviewFinalizeResult{}
-	art, err := c.runReviewArtifact(ctx, reviewID)
+	art, err := c.conversationReviewArtifact(ctx, reviewID)
 	if err != nil {
 		return staged, err
 	}
@@ -487,7 +487,7 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 
 // claimedReviewDetails re-reads a review draft this caller has already claimed
 // and returns its details. It goes through the run's artifact list — the same
-// read runReviewArtifact uses — rather than a by-id fetch, because that read is
+// read conversationReviewArtifact uses — rather than a by-id fetch, because that read is
 // already on the runtime in both placements; a claimed draft is one of a
 // handful of rows, so the difference is a slice scan.
 //
@@ -1648,7 +1648,7 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 // anchors to and validates against the live PR head instead — the pre-TFAC-494
 // behavior, internally consistent on its own.
 func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int, commitSHA string) (string, error) {
-	art, err := c.runReviewArtifact(ctx, reviewID)
+	art, err := c.conversationReviewArtifact(ctx, reviewID)
 	if err != nil {
 		return "", err
 	}
@@ -1769,7 +1769,7 @@ func intPtrEq(a, b *int) bool {
 // add-review-comment — so the comment submits verbatim at approval. Pure local
 // write, no GitHub call. An unknown id is an error.
 func (c *LocalClient) UpdateStagedReviewComment(ctx context.Context, commentID, body string) error {
-	art, details, idx, err := c.runStagedComment(ctx, commentID)
+	art, details, idx, err := c.conversationStagedComment(ctx, commentID)
 	if err != nil {
 		return err
 	}
@@ -1788,7 +1788,7 @@ func (c *LocalClient) UpdateStagedReviewComment(ctx context.Context, commentID, 
 // draft by its TF-local id. Pure local write, no GitHub call. An unknown id is an
 // error.
 func (c *LocalClient) DeleteStagedReviewComment(ctx context.Context, commentID string) error {
-	art, details, idx, err := c.runStagedComment(ctx, commentID)
+	art, details, idx, err := c.conversationStagedComment(ctx, commentID)
 	if err != nil {
 		return err
 	}
@@ -1819,14 +1819,14 @@ func errIfFinalized(details domain.ReviewArtifactDetails) error {
 	return nil
 }
 
-// runStagedComment locates this run's pending review draft that holds the staged
+// conversationStagedComment locates this run's pending review draft that holds the staged
 // comment with the given TF-local id, returning the artifact, its parsed details,
 // and the comment's index in details.StagedComments. The id is a UUID minted at
 // add-review-comment, unique within the run, so scanning every pending review
 // draft (a run can hold one per PR) finds the owning draft. Returns an actionable
 // error when no draft carries it — the most likely cause is the agent passing a
 // numeric (live GitHub) comment id, which belongs on the REST update/delete path.
-func (c *LocalClient) runStagedComment(ctx context.Context, commentID string) (*domain.Artifact, domain.ReviewArtifactDetails, int, error) {
+func (c *LocalClient) conversationStagedComment(ctx context.Context, commentID string) (*domain.Artifact, domain.ReviewArtifactDetails, int, error) {
 	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
 		return nil, domain.ReviewArtifactDetails{}, 0, err

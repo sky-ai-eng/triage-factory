@@ -83,7 +83,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 	return s, database, brID, task.ID, step0ConversationID
 }
 
-func queuedStepRuns(t *testing.T, database *sql.DB, brID string) []int {
+func queuedStepConversations(t *testing.T, database *sql.DB, brID string) []int {
 	t.Helper()
 	rows, err := database.Query(`SELECT blueprint_step_index FROM conversations WHERE blueprint_run_id = ? AND status IS NULL ORDER BY blueprint_step_index`, brID)
 	if err != nil {
@@ -230,7 +230,7 @@ func TestReactor_AdvanceEnqueuesNextStep(t *testing.T) {
 	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
 	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-	if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
+	if q := queuedStepConversations(t, database, brID); len(q) != 1 || q[0] != 1 {
 		t.Fatalf("queued step runs = %v, want [1]", q)
 	}
 	br := mustGetRun(t, s, org, brID)
@@ -338,7 +338,7 @@ func TestReactor_FinalStepFinishCompletes(t *testing.T) {
 	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
 	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
+	if q := queuedStepConversations(t, database, brID); len(q) != 0 {
 		t.Fatalf("queued step runs = %v, want none", q)
 	}
 	br := mustGetRun(t, s, org, brID)
@@ -364,7 +364,7 @@ func TestReactor_CancelRequestedTerminates(t *testing.T) {
 	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
 	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
+	if q := queuedStepConversations(t, database, brID); len(q) != 0 {
 		t.Fatalf("queued step runs = %v, want none (cancel must not advance)", q)
 	}
 	br := mustGetRun(t, s, org, brID)
@@ -384,7 +384,7 @@ func TestReactor_ParkedStepLeavesRunning(t *testing.T) {
 	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
 	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
+	if q := queuedStepConversations(t, database, brID); len(q) != 0 {
 		t.Fatalf("queued step runs = %v, want none (parked step waits for resume)", q)
 	}
 	if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusRunning {
@@ -411,7 +411,7 @@ func TestReactor_CancelledStepParksAndTerminatesBlueprint(t *testing.T) {
 	// reactor's own refresh is what must find the signal.
 	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
+	if q := queuedStepConversations(t, database, brID); len(q) != 0 {
 		t.Fatalf("queued step runs = %v, want none (cancel must not advance)", q)
 	}
 	if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusCancelled {
@@ -475,7 +475,7 @@ func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
 
 		s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), stale, runConfig{orgID: org}, time.Now())
 
-		if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
+		if q := queuedStepConversations(t, database, brID); len(q) != 1 || q[0] != 1 {
 			t.Fatalf("queued step runs = %v, want [1] — the live step must not be enqueued a second time", q)
 		}
 		br := mustGetRun(t, s, org, brID)
@@ -556,13 +556,13 @@ func TestReactor_LeavesASuccessorsConversationAlone(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			s, database, brID, taskID, step0ConversationID := reactorFixture(t, "successor-"+status, 2, "completed", "continue")
 
-			stepConversation := loadRun(t, s, step0ConversationID)
+			stepConversation := loadConversation(t, s, step0ConversationID)
 			stepConversation.Status = status
 			stepConversation.TriggerType = "manual"
 			stepConversation.CreatorUserID = runmode.LocalDefaultUserID
 			s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-			if q := queuedStepRuns(t, database, brID); len(q) != 0 {
+			if q := queuedStepConversations(t, database, brID); len(q) != 0 {
 				t.Errorf("queued step runs = %v, want none — nothing about a successor's state says to advance", q)
 			}
 			br := mustGetRun(t, s, org, brID)

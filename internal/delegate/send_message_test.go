@@ -154,8 +154,8 @@ func TestSendMessage_QueuedSDKNotSteerable(t *testing.T) {
 	s.controller = fc
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-q", runmode.LocalDefaultUserID, "hi")
-	if !errors.Is(err, ErrRunNotSteerable) {
-		t.Errorf("err = %v, want ErrRunNotSteerable for a queued SDK conversation", err)
+	if !errors.Is(err, ErrConversationNotSteerable) {
+		t.Errorf("err = %v, want ErrConversationNotSteerable for a queued SDK conversation", err)
 	}
 	if fc.steerCalls != 0 {
 		t.Errorf("steer calls = %d, want 0 — a queued run has no owner to steer", fc.steerCalls)
@@ -319,11 +319,11 @@ func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	}
 	// The blueprint an abort terminates, as the reactor leaves it — without
 	// this the fixture is staging the hand-off window, not a stopped run.
-	settleRunBlueprint(t, database, "r-ab", "aborted")
+	settleConversationBlueprint(t, database, "r-ab", "aborted")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-ab", runmode.LocalDefaultUserID, "pick it back up")
-	if errors.Is(err, ErrRunNotSteerable) {
+	if errors.Is(err, ErrConversationNotSteerable) {
 		t.Errorf("completed+abort run rejected at the steerable gate: %v", err)
 	}
 	if st := storedStatus(t, database, "r-ab"); st != "" {
@@ -372,8 +372,8 @@ func TestSendMessage_MissingRunNotFound(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "ghost", runmode.LocalDefaultUserID, "hi")
-	if !errors.Is(err, ErrRunNotFound) {
-		t.Errorf("err = %v, want ErrRunNotFound", err)
+	if !errors.Is(err, ErrConversationNotFound) {
+		t.Errorf("err = %v, want ErrConversationNotFound", err)
 	}
 }
 

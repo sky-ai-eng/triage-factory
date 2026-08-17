@@ -18,7 +18,7 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	conversationID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
@@ -188,7 +188,7 @@ func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
 	h.Reset(t)
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	orgB, bob, _ := pgtest.SeedOrgWithUser(t, h, "bob")
-	convA := seedPgArtifactRun(t, h, orgA, teamA, alice)
+	convA := seedPgArtifactConversation(t, h, orgA, teamA, alice)
 	ctx := context.Background()
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)

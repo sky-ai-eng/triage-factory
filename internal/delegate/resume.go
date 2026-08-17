@@ -22,7 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// ErrRunNotResumable is returned when a wake's compare-and-swap found the
+// ErrConversationNotResumable is returned when a wake's compare-and-swap found the
 // conversation no longer in a resumable state (MarkQueuedForResume only flips
 // open / completed) — a concurrent failure or terminal moved it out from under
 // the caller. Callers map this to 409 Conflict so the client can refresh and
@@ -34,7 +34,7 @@ import (
 // claim to deliver — nothing about that is a conflict to report. A flip lost
 // to a conversation that went terminal instead IS one: nothing will claim it,
 // so the queued message is never delivered.
-var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
+var ErrConversationNotResumable = errors.New("resume: run not in a resumable state")
 
 // ErrConversationConcluded is returned when a conversation's workspace is
 // intact but its blueprint will never drive it again, so a wake would strand it
@@ -57,7 +57,7 @@ var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 // freezes its blueprint 'running' with the pointer on that step, precisely so
 // the parked step stays claimable.
 //
-// Its own sentinel rather than ErrRunNotResumable, because the two say
+// Its own sentinel rather than ErrConversationNotResumable, because the two say
 // different things to a person. "Not resumable" means the state moved under
 // you: refresh and look again. This means refreshing will never change it.
 var ErrConversationConcluded = errors.New("resume: this conversation can no longer be continued — its blueprint has moved past this step, or was cancelled (only the step a blueprint is currently on takes follow-ups)")
@@ -113,17 +113,17 @@ func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, conversationID str
 	if err != nil {
 		delegateLog.Warn("resume: lost the wake race and could not re-read the conversation; reporting a conflict",
 			"conversation", conversationID, "org_id", orgID, "error", err)
-		return ErrRunNotResumable
+		return ErrConversationNotResumable
 	}
 	if conv == nil {
-		return ErrRunNotResumable
+		return ErrConversationNotResumable
 	}
 	if conv.Status == domain.StatusQueued || domain.IsActiveConversationStatus(conv.Status) {
 		return nil
 	}
 	delegateLog.Warn("resume: lost the wake race to a conversation that went terminal; the queued message will not be delivered",
 		"conversation", conversationID, "org_id", orgID, "status", conv.Status)
-	return ErrRunNotResumable
+	return ErrConversationNotResumable
 }
 
 // recordResumeTaskEvent puts a follow-up on its task's timeline.
@@ -283,7 +283,7 @@ type ResumeOutcome struct {
 // open run when the warm process is gone.
 //
 // Callers pass the sessionID captured during the initial run (read
-// from conversations.sdk_session_id, populated on the runSink during the original
+// from conversations.sdk_session_id, populated on the conversationSink during the original
 // invocation), the cwd the original run used so the resumed
 // subprocess sees the same worktree, and the user message to append
 // to the conversation. The conversationID is reused so resumed messages append
@@ -404,7 +404,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		MemoryNamespace: opts.Namespace,
 		OrgID:           orgID,
 		Secrets:         s.getRunSecrets(),
-		LLMResolver:     s.llmResolverForRun(orgID, conversationID),
+		LLMResolver:     s.llmResolverForConversation(orgID, conversationID),
 		// This turn's own engagement pays for this turn's jail.
 		ClaimID:              opts.claimID,
 		RecordSandboxActuals: s.recordSandboxActuals,
@@ -422,7 +422,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		// reads the same handoff it started with rather than a freshly rendered one.
 		MemorySourcePath: stagedEntityMemorySource(conversationID),
 	}
-	sink := newRunSink(s, orgID, conversationID, opts.claimID, triggerType, creatorUserID)
+	sink := newConversationSink(s, orgID, conversationID, opts.claimID, triggerType, creatorUserID)
 
 	// Off-allowlist tool calls route the same way the initial run does:
 	// gVisor-sandboxed delegated runs auto-approve (the sandbox + the static

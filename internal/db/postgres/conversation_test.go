@@ -233,7 +233,7 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 				t.Fatalf("set blueprint_run status: %v", err)
 			}
 		},
-		SetRunMemory: func(t *testing.T, conversationID, entityID, content string) {
+		SetConversationMemory: func(t *testing.T, conversationID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {

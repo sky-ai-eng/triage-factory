@@ -33,7 +33,7 @@ func TestTaskMemoryStore_Postgres(t *testing.T) {
 		seed := dbtest.TaskMemorySeeder{
 			Run: func(t *testing.T, suffix string) (string, string) {
 				t.Helper()
-				return seedPgRunForTaskMemory(t, h, orgID, userID, promptID, suffix)
+				return seedPgConversationForTaskMemory(t, h, orgID, userID, promptID, suffix)
 			},
 			BlueprintRun: func(t *testing.T, suffix string) string {
 				t.Helper()
@@ -80,8 +80,8 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	promptA := seedPgTaskMemoryPrompt(t, h, orgA, userA)
 	promptB := seedPgTaskMemoryPrompt(t, h, orgB, userB)
 
-	convA, entA := seedPgRunForTaskMemory(t, h, orgA, userA, promptA, "cross-A")
-	_, entB := seedPgRunForTaskMemory(t, h, orgB, userB, promptB, "cross-B")
+	convA, entA := seedPgConversationForTaskMemory(t, h, orgA, userA, promptA, "cross-A")
+	_, entB := seedPgConversationForTaskMemory(t, h, orgB, userB, promptB, "cross-B")
 	ctx := context.Background()
 
 	// Write the memory in orgA via the admin-pool variant (the
@@ -118,7 +118,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// nothing — the same org_id filter GetMemoriesForEntity/System apply,
 	// pinned here at the raw-row level since GetRunMemory (which used to
 	// carry this check) is gone.
-	if content, ok := queryRunMemoryAgentContent(t, h, orgB, convA); ok {
+	if content, ok := queryConversationMemoryAgentContent(t, h, orgB, convA); ok {
 		t.Errorf("orgB read orgA run memory: %q", content)
 	}
 
@@ -130,7 +130,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("UpdateConversationMemoryHumanContent orgB on orgA run errored: %v", err)
 	}
 	// Confirm orgA's row is unchanged.
-	contentA, ok := queryRunMemoryAgentContent(t, h, orgA, convA)
+	contentA, ok := queryConversationMemoryAgentContent(t, h, orgA, convA)
 	if !ok {
 		t.Fatalf("orgA conversation_memory row missing")
 	}
@@ -140,13 +140,13 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	_ = entB
 }
 
-// queryRunMemoryAgentContent reads conversation_memory.agent_content directly via
+// queryConversationMemoryAgentContent reads conversation_memory.agent_content directly via
 // the admin pool for a (orgID, conversationID) pair — a raw-row escape hatch for
 // tests that need to pin the org_id filter independent of the
 // entity-scoped read path (GetMemoriesForEntity), now that GetRunMemory
 // (a direct conversation_id lookup) has been removed. Returns ("", false) when no
 // row matches.
-func queryRunMemoryAgentContent(t *testing.T, h *pgtest.Harness, orgID, conversationID string) (string, bool) {
+func queryConversationMemoryAgentContent(t *testing.T, h *pgtest.Harness, orgID, conversationID string) (string, bool) {
 	t.Helper()
 	var content sql.NullString
 	err := h.AdminDB.QueryRow(`SELECT agent_content FROM conversation_memory WHERE org_id = $1 AND conversation_id = $2`, orgID, conversationID).Scan(&content)
@@ -176,8 +176,8 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	promptA := seedPgTaskMemoryPrompt(t, h, orgA, alice)
 	promptB := seedPgTaskMemoryPrompt(t, h, orgB, bob)
 
-	convA, entA := seedPgRunForTaskMemory(t, h, orgA, alice, promptA, "rls-A")
-	_, _ = seedPgRunForTaskMemory(t, h, orgB, bob, promptB, "rls-B")
+	convA, entA := seedPgConversationForTaskMemory(t, h, orgA, alice, promptA, "rls-A")
+	_, _ = seedPgConversationForTaskMemory(t, h, orgB, bob, promptB, "rls-B")
 
 	// Seed a memory row in orgA via admin so the row exists, plus its
 	// primary join row (the run-end attach a sibling ticket wires up —
@@ -233,7 +233,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// (USING) — runA above already has a seeded memory row from
 		// line 141 above, which would route through ON CONFLICT and
 		// hit USING instead.
-		freshConversation, freshEnt := seedPgRunForTaskMemory(t, h, orgA, alice, promptA, "rls-write")
+		freshConversation, freshEnt := seedPgConversationForTaskMemory(t, h, orgA, alice, promptA, "rls-write")
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
 			return pgstore.NewForTx(tx, pgtest.SecretKey).TaskMemory.UpsertAgentMemory(ctx, orgA, freshConversation, freshEnt, "", "cross-org write")
 		})
@@ -259,7 +259,7 @@ func TestTaskMemoryStore_Postgres_BlueprintRunCrossOrgFKRejected(t *testing.T) {
 	orgB, userB := seedPgTaskMemoryOrg(t, h)
 	promptA := seedPgTaskMemoryPrompt(t, h, orgA, userA)
 
-	convA, entA := seedPgRunForTaskMemory(t, h, orgA, userA, promptA, "fk-A")
+	convA, entA := seedPgConversationForTaskMemory(t, h, orgA, userA, promptA, "fk-A")
 	blueprintRunB := seedPgBlueprintRunForTaskMemory(t, h, orgB, userB, "fk-B")
 
 	// orgA memory referencing orgB's blueprint_run → FK violation. The
@@ -319,14 +319,14 @@ func TestTaskMemoryStore_Postgres_SystemReadTeamScoped(t *testing.T) {
 	// Each write is paired with the primary join row a real run's completion
 	// will carry once the run-end attach ticket lands — GetMemoriesForEntitySystem's
 	// join-based read needs it to find anything.
-	conv1 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team1, entityID, "t1")
+	conv1 := seedPgTeamConversationOnEntity(t, h, orgID, userID, promptID, team1, entityID, "t1")
 	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conv1, entityID, "", "team1 narrative"); err != nil {
 		t.Fatalf("UpsertAgentMemorySystem team1: %v", err)
 	}
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conv1, entityID, domain.MemoryRolePrimary); err != nil {
 		t.Fatalf("RecordEntityTouchSystem team1: %v", err)
 	}
-	conv2 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team2, entityID, "t2")
+	conv2 := seedPgTeamConversationOnEntity(t, h, orgID, userID, promptID, team2, entityID, "t2")
 	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conv2, entityID, "", "team2 narrative"); err != nil {
 		t.Fatalf("UpsertAgentMemorySystem team2: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestTaskMemoryStore_Postgres_BackfillProducesPrimaryJoinRows(t *testing.T) 
 
 	orgID, userID := seedPgTaskMemoryOrg(t, h)
 	promptID := seedPgTaskMemoryPrompt(t, h, orgID, userID)
-	conversationID, entityID := seedPgRunForTaskMemory(t, h, orgID, userID, promptID, "backfill")
+	conversationID, entityID := seedPgConversationForTaskMemory(t, h, orgID, userID, promptID, "backfill")
 
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content, created_at)
@@ -464,8 +464,8 @@ func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
 	// original motivating grain (source 'slack', kind 'thread'); both produce entB.
 	entA1 := seedPgSharedEntity(t, h, orgID, "slack", domain.SlackSourceID("C0125", "1700000000.000100"), "thread")
 	entA2 := seedPgSharedEntity(t, h, orgID, "slack", domain.SlackSourceID("C0999", "1700000000.000200"), "thread")
-	conv1 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team1, entA1, "attach-t1")
-	conv2 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team2, entA2, "attach-t2")
+	conv1 := seedPgTeamConversationOnEntity(t, h, orgID, userID, promptID, team1, entA1, "attach-t1")
+	conv2 := seedPgTeamConversationOnEntity(t, h, orgID, userID, promptID, team2, entA2, "attach-t2")
 
 	// The attach sequence run-end runs for each: memory upsert, then primary +
 	// produced (+ touched for run1) join rows.
@@ -540,13 +540,13 @@ func seedPgSharedEntity(t *testing.T, h *pgtest.Harness, orgID, source, sourceID
 	return id
 }
 
-// seedPgTeamRunOnEntity seeds the event + task + blueprint + blueprint_run +
+// seedPgTeamConversationOnEntity seeds the event + task + blueprint + blueprint_run +
 // run FK chain for a run owned by teamID on a PRE-EXISTING entity, returning
-// the conversationID. Unlike seedPgRunForTaskMemory (which mints a fresh entity and
+// the conversationID. Unlike seedPgConversationForTaskMemory (which mints a fresh entity and
 // defaults to the org's first team), this takes the entity + team explicitly
 // so two teams can own runs on the same shared entity. suffix discriminates
 // the task's dedup_key so the active-task partial unique index never collides.
-func seedPgTeamRunOnEntity(t *testing.T, h *pgtest.Harness, orgID, userID, promptID, teamID, entityID, suffix string) string {
+func seedPgTeamConversationOnEntity(t *testing.T, h *pgtest.Harness, orgID, userID, promptID, teamID, entityID, suffix string) string {
 	t.Helper()
 	conn := h.AdminDB
 	now := time.Now().UTC()
@@ -642,9 +642,9 @@ func seedPgTaskMemoryPrompt(t *testing.T, h *pgtest.Harness, orgID, userID strin
 	return promptID
 }
 
-// seedPgRunForTaskMemory seeds the entity + event + task + run FK
+// seedPgConversationForTaskMemory seeds the entity + event + task + run FK
 // chain conversation_memory needs. Returns (conversationID, entityID).
-func seedPgRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, promptID, suffix string) (string, string) {
+func seedPgConversationForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, promptID, suffix string) (string, string) {
 	t.Helper()
 	conn := h.AdminDB
 	now := time.Now().UTC()

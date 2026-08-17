@@ -197,8 +197,8 @@ func TestSendMessage_NativeCancelledNotSteerable(t *testing.T) {
 	markNative(t, database, "r-term")
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-term", runmode.LocalDefaultUserID, "hello?")
-	if !errors.Is(err, ErrRunNotSteerable) {
-		t.Fatalf("err = %v, want ErrRunNotSteerable", err)
+	if !errors.Is(err, ErrConversationNotSteerable) {
+		t.Fatalf("err = %v, want ErrConversationNotSteerable", err)
 	}
 	if got := pendingRows(t, s, "r-term"); len(got) != 0 {
 		t.Errorf("a refused message must not leave a row behind: %+v", got)
@@ -225,7 +225,7 @@ func TestSendMessage_NativeCompletedIsResumable(t *testing.T) {
 			if outcome == "abort" {
 				blueprintTerminal = "aborted"
 			}
-			settleRunBlueprint(t, database, "r-done", blueprintTerminal)
+			settleConversationBlueprint(t, database, "r-done", blueprintTerminal)
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 			markNative(t, database, "r-done")
 

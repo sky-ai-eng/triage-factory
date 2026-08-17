@@ -17,7 +17,7 @@ import (
 // invoking the recompute, without spawning a real agent.
 //
 // setupAdvanceFixture seeds an entity + event + task + a 1-step blueprint_run
-// whose single run starts 'running' (see seedConversation → seedRunBlueprint).
+// whose single run starts 'running' (see seedConversation → seedConversationBlueprint).
 
 func TestRecomputeBoard_RunningSetsInProgress(t *testing.T) {
 	s, database, _, taskID := setupAdvanceFixture(t, "ip")
@@ -95,10 +95,10 @@ func TestRecomputeBoard_BouncesAcrossInteractionPoints(t *testing.T) {
 func TestRecomputeBoard_MultiStepAggregate(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "multi")
 	stampBotClaim(t, database, taskID)
-	brID := blueprintRunIDForRun(t, database, conversationID)
+	brID := blueprintRunIDForConversation(t, database, conversationID)
 	// Step 0 (the seeded run) completed; add step 1, currently running.
 	setRunStatus(t, database, conversationID, "completed")
-	addStepRun(t, database, brID, taskID, "step1-multi", 1, "running")
+	addStepConversation(t, database, brID, taskID, "step1-multi", 1, "running")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
@@ -164,7 +164,7 @@ func TestRecomputeBoard_NoActiveBlueprintRunNeutral(t *testing.T) {
 		t.Fatalf("park: %v", err)
 	}
 	// Terminate the blueprint_run so there is no active run for the task.
-	brID := blueprintRunIDForRun(t, database, conversationID)
+	brID := blueprintRunIDForConversation(t, database, conversationID)
 	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE id = ?`, brID); err != nil {
 		t.Fatalf("complete blueprint_run: %v", err)
 	}
@@ -249,7 +249,7 @@ func setRunStatus(t *testing.T, database *sql.DB, conversationID, status string)
 	}
 }
 
-func blueprintRunIDForRun(t *testing.T, database *sql.DB, conversationID string) string {
+func blueprintRunIDForConversation(t *testing.T, database *sql.DB, conversationID string) string {
 	t.Helper()
 	var brID string
 	if err := database.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, conversationID).Scan(&brID); err != nil {
@@ -258,9 +258,9 @@ func blueprintRunIDForRun(t *testing.T, database *sql.DB, conversationID string)
 	return brID
 }
 
-// addStepRun appends another step run to an existing blueprint_run so the
+// addStepConversation appends another step run to an existing blueprint_run so the
 // multi-step aggregate can be exercised.
-func addStepRun(t *testing.T, database *sql.DB, blueprintRunID, taskID, conversationID string, stepIndex int, status string) {
+func addStepConversation(t *testing.T, database *sql.DB, blueprintRunID, taskID, conversationID string, stepIndex int, status string) {
 	t.Helper()
 	if _, err := database.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, team_id, visibility,

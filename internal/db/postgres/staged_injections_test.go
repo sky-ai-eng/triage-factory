@@ -26,9 +26,9 @@ func TestStagedInjectionStore_Postgres(t *testing.T) {
 		seed := dbtest.StagedInjectionSeeder{
 			Run: func(t *testing.T, suffix string) string {
 				t.Helper()
-				return seedPgArtifactRun(t, h, orgID, teamID, userID)
+				return seedPgArtifactConversation(t, h, orgID, teamID, userID)
 			},
-			DeleteRun: func(t *testing.T, conversationID string) {
+			DeleteConversation: func(t *testing.T, conversationID string) {
 				t.Helper()
 				if _, err := h.AdminDB.Exec(`DELETE FROM conversations WHERE id = $1`, conversationID); err != nil {
 					t.Fatalf("delete run: %v", err)
@@ -50,7 +50,7 @@ func TestStagedInjectionStore_Postgres_OrgScoped(t *testing.T) {
 
 	orgA, userA, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	otherOrg, _, _ := pgtest.SeedOrgWithUser(t, h, "bob")
-	convA := seedPgArtifactRun(t, h, orgA, teamA, userA)
+	convA := seedPgArtifactConversation(t, h, orgA, teamA, userA)
 
 	if err := stores.StagedInjections.AppendSystem(ctx, orgA, &domain.StagedInjection{
 		ConversationID: convA, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "for org A",

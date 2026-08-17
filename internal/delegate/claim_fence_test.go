@@ -79,7 +79,7 @@ func TestRunSink_FenceTripKillsTheRunAndRecordsIt(t *testing.T) {
 	s.cancels[conversationID] = func() { killed = true }
 	s.mu.Unlock()
 
-	sink := newRunSink(s, runmode.LocalDefaultOrgID, conversationID, "claim-1", "event", "")
+	sink := newConversationSink(s, runmode.LocalDefaultOrgID, conversationID, "claim-1", "event", "")
 	err := sink.OnMessage(&domain.Message{ConversationID: conversationID, Role: "assistant", Content: "hello"})
 	if !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("OnMessage = %v, want ErrClaimReleased surfaced to the runtime", err)
@@ -99,7 +99,7 @@ func TestRunSink_UnfencedWithoutAClaim(t *testing.T) {
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = stub
 
-	sink := newRunSink(s, runmode.LocalDefaultOrgID, conversationID, "", "event", "")
+	sink := newConversationSink(s, runmode.LocalDefaultOrgID, conversationID, "", "event", "")
 	if err := sink.OnMessage(&domain.Message{ConversationID: conversationID, Role: "assistant", Content: "hello"}); err != nil {
 		t.Fatalf("OnMessage: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestRunSink_SessionFenceTripDiscardsTheSessionID(t *testing.T) {
 	s.cancels[conversationID] = func() { killed = true }
 	s.mu.Unlock()
 
-	sink := newRunSink(s, runmode.LocalDefaultOrgID, conversationID, "claim-1", "event", "")
+	sink := newConversationSink(s, runmode.LocalDefaultOrgID, conversationID, "claim-1", "event", "")
 	err := sink.OnSession("sess-zombie")
 	if !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("OnSession = %v, want ErrClaimReleased surfaced to the runtime", err)
@@ -164,7 +164,7 @@ func TestRunSink_SessionWithoutAClaim(t *testing.T) {
 	stub := &fencedConversationStore{ConversationStore: s.conversations}
 	s.conversations = stub
 
-	sink := newRunSink(s, runmode.LocalDefaultOrgID, conversationID, "", "event", "")
+	sink := newConversationSink(s, runmode.LocalDefaultOrgID, conversationID, "", "event", "")
 	if err := sink.OnSession("sess-plain"); err != nil {
 		t.Fatalf("OnSession: %v", err)
 	}

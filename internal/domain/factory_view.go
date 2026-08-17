@@ -10,7 +10,7 @@ import "time"
 // and EntityEventTyp are pre-copied so the renderer doesn't have to
 // re-derive them per row.
 type FactoryActiveConversation struct {
-	Run            Conversation
+	Conversation   Conversation
 	Task           Task
 	EntityAuthor   string // PR author login (github) or assignee (jira); "" if unknown
 	EntityEventTyp string // task.event_type; pre-copied for keyed lookup

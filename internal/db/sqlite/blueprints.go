@@ -1033,7 +1033,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 		// paths the triggering step is already terminal, so this is a guard that
 		// fires only on the race.
 		if changed && status.Terminal() {
-			return parkOrphanedChildRuns(ctx, q, id)
+			return parkOrphanedChildConversations(ctx, q, id)
 		}
 		return nil
 	})
@@ -1043,9 +1043,9 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	return changed, nil
 }
 
-// parkOrphanedChildRuns parks every still-mid-flight child run of
+// parkOrphanedChildConversations parks every still-mid-flight child run of
 // blueprintRunID `open` and releases those children's active claims. Called by
-// MarkRunStatus's atomic flip; ConversationQueueStore.ReconcileOrphanedRuns applies the
+// MarkRunStatus's atomic flip; ConversationQueueStore.ReconcileOrphanedConversations applies the
 // same predicate in its own boot sweep (it can't share this body — different
 // store, different scope).
 //
@@ -1055,7 +1055,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 // refuses it. Scoped to status IS NULL: a child that already parked itself
 // keeps its own parked_at and park_reason, and one that already reached a
 // terminal is left alone.
-func parkOrphanedChildRuns(ctx context.Context, q queryer, blueprintRunID string) error {
+func parkOrphanedChildConversations(ctx context.Context, q queryer, blueprintRunID string) error {
 	// Claims first: the subquery's mid-flight predicate matches exactly the
 	// rows the park below is about to retire, and both statements share the
 	// caller's transaction, so the pair lands atomically either way.
@@ -1217,7 +1217,7 @@ func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, b
 		SELECT id FROM conversations
 		WHERE blueprint_run_id = ?
 		  AND (status IS NULL
-		       OR status NOT IN (`+runTerminalStatusesSQL+`,'open'))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+`,'open'))
 	`, blueprintRunID)
 	if err != nil {
 		return nil, err

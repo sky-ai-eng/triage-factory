@@ -26,7 +26,7 @@ export default function RunDetail() {
   const navigate = useNavigate()
   const orgHref = useOrgHref()
   const {
-    run: conversation,
+    conversation,
     task,
     messages,
     loading,

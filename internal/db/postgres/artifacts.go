@@ -38,7 +38,7 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 // pgArtifactColumns is the SELECT/RETURNING list scanned into a
 // domain.Artifact via scanArtifact. Nullable text columns are coalesced to
 // an empty string so the scan targets are plain strings, the same shape
-// pgRunColumns uses.
+// pgConversationColumns uses.
 const pgArtifactColumns = `
 	id, COALESCE(conversation_id::text, ''), org_id, team_id, provider, kind, target,
 	COALESCE(external_id, ''), COALESCE(url, ''), state, dedup_key,

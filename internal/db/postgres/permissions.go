@@ -36,7 +36,7 @@ var _ db.PermissionStore = (*permissionStore)(nil)
 
 // pgPermissionColumns is the SELECT list scanned by scanPGPermissions. uuids
 // are cast to text so the scan targets stay plain strings, matching
-// pgRunColumns.
+// pgConversationColumns.
 const pgPermissionColumns = `
 	id::text, org_id::text, conversation_id::text, COALESCE(claim_id::text, ''),
 	message_id, tool_call_id, tool_name, input_json, COALESCE(title, ''), state,

@@ -21,7 +21,7 @@ func TestArtifactStore_SQLite_RoundTrip(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	in := domain.Artifact{
 		ConversationID: conversationID,
@@ -84,7 +84,7 @@ func TestArtifactStore_SQLite_UpsertDedup(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo", "refs/heads/feat")
 	first, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
@@ -133,7 +133,7 @@ func TestArtifactStore_SQLite_InsertIfAbsent(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo#7", "")
 	base := domain.Artifact{
@@ -188,7 +188,7 @@ func TestArtifactStore_SQLite_PendingToReal(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	// The branch ref is the stable anchor across the transition.
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo", "refs/heads/feat")
@@ -240,7 +240,7 @@ func TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	key := domain.ArtifactDedupKey("jira", "issue", "SKY-1", "")
 	if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
@@ -292,7 +292,7 @@ func TestArtifactStore_SQLite_UpsertPreservesTargetOnEmpty(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	key := domain.ArtifactDedupKey("github", "comment", "555", "")
 	if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
@@ -340,7 +340,7 @@ func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	for i, k := range []string{"a", "b", "c"} {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
@@ -385,9 +385,9 @@ func TestArtifactStore_SQLite_CountByRun(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	convA := seedArtifactRun(t, conn)
-	convB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
-	convC := seedArtifactRunWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
+	convA := seedArtifactConversation(t, conn)
+	convB := seedArtifactConversationWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	convC := seedArtifactConversationWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
 
 	seed := func(conversationID, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
@@ -438,9 +438,9 @@ func TestArtifactStore_SQLite_ListByRuns(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	convA := seedArtifactRun(t, conn)
-	convB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
-	convC := seedArtifactRunWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
+	convA := seedArtifactConversation(t, conn)
+	convB := seedArtifactConversationWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	convC := seedArtifactConversationWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
 
 	seed := func(conversationID, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
@@ -490,7 +490,7 @@ func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	art, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
@@ -559,7 +559,7 @@ func TestArtifactStore_SQLite_ListNonTerminal(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	// (kind, state) across the whole lifecycle space.
 	seeds := []struct{ kind, state string }{
@@ -623,7 +623,7 @@ func TestArtifactStore_SQLite_ListByOrgSystem(t *testing.T) {
 	conn := newSQLiteForArtifactTestTimed(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	// (provider, kind, state, created_at) across the lifecycle, including
 	// terminal rows the reconciler set would hide.
@@ -741,7 +741,7 @@ func TestArtifactStore_SQLite_ListByTeam_Filters(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	seed := func(provider, kind, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
@@ -801,7 +801,7 @@ func TestArtifactStore_SQLite_ListPendingReviewsByTarget(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 	org := runmode.LocalDefaultOrgID
 
 	mk := func(kind, state, target, dedup string) {
@@ -844,7 +844,7 @@ func TestArtifactStore_SQLite_TransitionReviewState(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 	org := runmode.LocalDefaultOrgID
 
 	rev, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
@@ -918,7 +918,7 @@ func TestArtifactStore_SQLite_UpdateReviewDetailsIfPending(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 	org := runmode.LocalDefaultOrgID
 
 	rev, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
@@ -975,18 +975,18 @@ func newSQLiteForArtifactTest(t *testing.T) *sql.DB {
 	return conn
 }
 
-// seedArtifactRun inserts a minimal run the artifacts FK (conversation_id →
+// seedArtifactConversation inserts a minimal run the artifacts FK (conversation_id →
 // conversations(id)) can point at. origin is set non-'blueprint' so the
 // conversations_origin_requires_parents CHECK doesn't demand a parent chain; the
 // org/team/creator columns default to the local sentinels.
-func seedArtifactRun(t *testing.T, conn *sql.DB) string {
+func seedArtifactConversation(t *testing.T, conn *sql.DB) string {
 	t.Helper()
-	return seedArtifactRunWithID(t, conn, "99999999-9999-9999-9999-999999999999")
+	return seedArtifactConversationWithID(t, conn, "99999999-9999-9999-9999-999999999999")
 }
 
-// seedArtifactRunWithID is seedArtifactRun parameterized on the run id, for
+// seedArtifactConversationWithID is seedArtifactConversation parameterized on the run id, for
 // tests that need more than one run (CountByConversation batches across runs).
-func seedArtifactRunWithID(t *testing.T, conn *sql.DB, id string) string {
+func seedArtifactConversationWithID(t *testing.T, conn *sql.DB, id string) string {
 	t.Helper()
 	if _, err := conn.Exec(
 		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, id,
@@ -1006,7 +1006,7 @@ func TestArtifactStore_SQLite_TransitionReviewStateSystem(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	draft, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
 		ConversationID: conversationID,

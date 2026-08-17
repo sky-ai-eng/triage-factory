@@ -185,7 +185,7 @@ type finalizeReviewDraftResult struct {
 	URL    string `json:"url,omitempty"`
 }
 
-type agentRunResult struct {
+type getConversationResult struct {
 	Run *domain.Conversation `json:"run,omitempty"`
 }
 

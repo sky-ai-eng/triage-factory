@@ -83,7 +83,7 @@ func TestNonterminalFragmentFramesContinueAsDefault(t *testing.T) {
 // and the invalid-envelope re-prompt. These tests feed processCompletion
 // directly (the one-shot / resume shape) to pin how it records each outcome.
 
-func loadRun(t *testing.T, s *Spawner, conversationID string) *domain.Conversation {
+func loadConversation(t *testing.T, s *Spawner, conversationID string) *domain.Conversation {
 	t.Helper()
 	r, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil || r == nil {
@@ -107,14 +107,14 @@ func loadTask(t *testing.T, s *Spawner, taskID string) domain.Task {
 func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "finish")
 	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, nil, "", "event", "")
 
-	conv := loadRun(t, s, conversationID)
+	conv := loadConversation(t, s, conversationID)
 	if conv.Status != "completed" {
 		t.Errorf("run.status = %q, want completed", conv.Status)
 	}
@@ -132,7 +132,7 @@ func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
 func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "abort")
 	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	task := loadTask(t, s, taskID)
 	before := readTaskStatus(t, database, taskID)
 	cwd := t.TempDir()
@@ -141,7 +141,7 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 		res(`{"outcome":"abort","summary":"investigated the failure","reason":"needs a human to rotate the token"}`),
 		cwd, nil, "", "event", "")
 
-	conv := loadRun(t, s, conversationID)
+	conv := loadConversation(t, s, conversationID)
 	if conv.Status != "completed" {
 		t.Errorf("run.status = %q, want completed (abort is run-completed, task-open)", conv.Status)
 	}
@@ -168,14 +168,14 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 func TestProcessCompletion_AbortMissingReasonFails(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "abort-noreason")
 	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`), cwd, nil, "", "event", "")
 
-	conv := loadRun(t, s, conversationID)
+	conv := loadConversation(t, s, conversationID)
 	if conv.Status != "failed" {
 		t.Errorf("run.status = %q, want failed (an abort with no reason is an invalid envelope)", conv.Status)
 	}
@@ -191,7 +191,7 @@ func TestProcessCompletion_AbortMissingReasonFails(t *testing.T) {
 // without concluding (the live driver consumes this in its loop instead).
 func TestProcessCompletion_NoConclusionParksOpen(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "open-noconcl")
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
@@ -201,7 +201,7 @@ func TestProcessCompletion_NoConclusionParksOpen(t *testing.T) {
 	if !parked {
 		t.Error("processCompletion(no-conclusion) = false; want true (open, not terminal)")
 	}
-	conv := loadRun(t, s, conversationID)
+	conv := loadConversation(t, s, conversationID)
 	if conv.Status != "open" {
 		t.Errorf("run.status = %q, want open (a no-conclusion turn parks open, not completed)", conv.Status)
 	}
@@ -217,7 +217,7 @@ func TestProcessCompletion_NoConclusionParksOpen(t *testing.T) {
 // lands here and fails (TestDriveLiveRun_InvalidRepromptsToBoundThenHandsBack).
 func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "invalid-fails")
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
@@ -227,7 +227,7 @@ func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
 	if parked {
 		t.Error("processCompletion(invalid) = true; want false (terminal failure, not parked)")
 	}
-	conv := loadRun(t, s, conversationID)
+	conv := loadConversation(t, s, conversationID)
 	if conv.Status != "failed" {
 		t.Errorf("run.status = %q, want failed (an invalid envelope is a knowable error)", conv.Status)
 	}
@@ -255,7 +255,7 @@ func TestProcessCompletion_FinishReturnsNotParked(t *testing.T) {
 func TestTerminateBlueprint_CompletedClosesTask(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "terminate-done")
 	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "manual", runmode.LocalDefaultUserID,
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
@@ -280,7 +280,7 @@ func TestTerminateBlueprint_AbortLeavesTaskOpen(t *testing.T) {
 	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
 		t.Fatalf("park: %v", err)
 	}
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "manual", runmode.LocalDefaultUserID,
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)

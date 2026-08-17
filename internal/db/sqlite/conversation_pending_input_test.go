@@ -19,16 +19,16 @@ import (
 // the SQLite ConversationPendingInputStore impl. Each subtest opens a fresh
 // in-memory DB so state doesn't leak between assertions.
 func TestRunPendingInputStore_SQLite(t *testing.T) {
-	dbtest.RunRunPendingInputStoreConformance(t, func(t *testing.T) (db.ConversationPendingInputStore, string, string, dbtest.RunPendingInputSeeder) {
+	dbtest.RunConversationPendingInputStoreConformance(t, func(t *testing.T) (db.ConversationPendingInputStore, string, string, dbtest.ConversationPendingInputSeeder) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
-		seed := dbtest.RunPendingInputSeeder{
+		seed := dbtest.ConversationPendingInputSeeder{
 			Run: func(t *testing.T, suffix string) string {
 				t.Helper()
-				return seedSQLiteRunForPendingInput(t, conn, suffix)
+				return seedSQLiteConversationForPendingInput(t, conn, suffix)
 			},
-			DeleteRun: func(t *testing.T, conversationID string) {
+			DeleteConversation: func(t *testing.T, conversationID string) {
 				t.Helper()
 				if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
 					t.Fatalf("delete run: %v", err)
@@ -66,9 +66,9 @@ func TestRunPendingInputStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	}
 }
 
-// seedSQLiteRunForPendingInput inserts a bare run row (origin='interactive',
+// seedSQLiteConversationForPendingInput inserts a bare run row (origin='interactive',
 // so no blueprint_run FK chain is required) the run_pending_input FK needs.
-func seedSQLiteRunForPendingInput(t *testing.T, conn *sql.DB, suffix string) string {
+func seedSQLiteConversationForPendingInput(t *testing.T, conn *sql.DB, suffix string) string {
 	t.Helper()
 	id := uuid.New().String()
 	if _, err := conn.Exec(

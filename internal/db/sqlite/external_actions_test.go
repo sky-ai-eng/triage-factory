@@ -21,7 +21,7 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	in := domain.ExternalAction{
 		OrgID:          runmode.LocalDefaultOrgID,
@@ -93,7 +93,7 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	key := domain.BranchPushDedupKey(conversationID, "refs/heads/feat", "abc123")
 	twin := func(url string) domain.ExternalAction {
@@ -198,7 +198,7 @@ func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
 	conn := newSQLiteForArtifactTestTimed(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	conversationID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	seeds := []struct {
 		provider, action, actor, when string
@@ -288,8 +288,8 @@ func TestExternalActionStore_SQLite_EgressDenialDedupPerConversation(t *testing.
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	convA := seedArtifactRun(t, conn)
-	convB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	convA := seedArtifactConversation(t, conn)
+	convB := seedArtifactConversationWithID(t, conn, "88888888-8888-8888-8888-888888888888")
 
 	const target = "api.github.com:443"
 	denial := func(conversationID string) domain.ExternalAction {
@@ -336,8 +336,8 @@ func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	convA := seedArtifactRun(t, conn)
-	convB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	convA := seedArtifactConversation(t, conn)
+	convB := seedArtifactConversationWithID(t, conn, "88888888-8888-8888-8888-888888888888")
 
 	// Each row carries a caller-supplied id (the store honors one) so the two
 	// UPDATEs below address exactly the row they mean. Keying them on `action`

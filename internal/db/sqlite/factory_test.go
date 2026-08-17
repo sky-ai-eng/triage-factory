@@ -115,7 +115,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 		Run: func(t *testing.T, taskID, status string) string {
 			t.Helper()
 			id := uuid.New().String()
-			blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
+			blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)
 			// "running" is an engagement, not a stored value — mint the
 			// claim the real claim path would and leave the column NULL.
 			stored := any(status)
@@ -147,7 +147,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 				t.Fatalf("close entity %s: %v", entityID, err)
 			}
 		},
-		SetRunMemory: func(t *testing.T, conversationID, entityID, content string) {
+		SetConversationMemory: func(t *testing.T, conversationID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {

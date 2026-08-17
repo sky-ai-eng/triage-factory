@@ -713,7 +713,7 @@ func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID 
 			}
 		}
 		for i := range msgs {
-			if _, err := insertRunMessage(ctx, q, orgID, &msgs[i]); err != nil {
+			if _, err := insertConversationMessage(ctx, q, orgID, &msgs[i]); err != nil {
 				return fmt.Errorf("import curator message: %w", err)
 			}
 		}

@@ -10,13 +10,13 @@ import (
 )
 
 // ReconcileOrphanFactory is what a per-backend test file hands to
-// RunReconcileOrphanedRunsConformance. Returns the wired ConversationQueueStore impl and
+// RunReconcileOrphanedConversationsConformance. Returns the wired ConversationQueueStore impl and
 // a seeder staging the fixture shapes. Each call must hand back a clean
 // database: the suite asserts exact healed counts, so a leftover orphan from a
 // sibling subtest would show up as this one's.
 type ReconcileOrphanFactory func(t *testing.T) (store db.ConversationQueueStore, seed ReconcileOrphanSeeder)
 
-// ReconcileOrphanSeeder stages the states ReconcileOrphanedRuns recovers from.
+// ReconcileOrphanSeeder stages the states ReconcileOrphanedConversations recovers from.
 // Every one of them is a shape a crash produces and no store method can, so the
 // callbacks write them directly against the backend's own schema.
 type ReconcileOrphanSeeder struct {
@@ -45,7 +45,7 @@ type ReconcileOrphanSeeder struct {
 	ConversationStatus func(t *testing.T, convID string) string
 }
 
-// RunReconcileOrphanedRunsConformance is the shared suite for the boot
+// RunReconcileOrphanedConversationsConformance is the shared suite for the boot
 // self-heal, covering both directions of the parent↔child desync and the
 // negative space around each.
 //
@@ -56,7 +56,7 @@ type ReconcileOrphanSeeder struct {
 // to misfire — sweeping a healthy parent whose child simply hasn't been claimed
 // yet, sweeping one whose mint is still in flight, and re-stamping a run that
 // already reached a terminal — each get their own subtest.
-func RunReconcileOrphanedRunsConformance(t *testing.T, mk ReconcileOrphanFactory) {
+func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrphanFactory) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -68,9 +68,9 @@ func RunReconcileOrphanedRunsConformance(t *testing.T, mk ReconcileOrphanFactory
 		store, seed := mk(t)
 		brID := seed.BlueprintRun(t, pastGrace)
 
-		n, err := store.ReconcileOrphanedRuns(ctx)
+		n, err := store.ReconcileOrphanedConversations(ctx)
 		if err != nil {
-			t.Fatalf("ReconcileOrphanedRuns: %v", err)
+			t.Fatalf("ReconcileOrphanedConversations: %v", err)
 		}
 		if n != 1 {
 			t.Fatalf("healed count = %d, want 1 (the childless orphan)", n)
@@ -87,7 +87,7 @@ func RunReconcileOrphanedRunsConformance(t *testing.T, mk ReconcileOrphanFactory
 		}
 
 		// Idempotent: the row is terminal now, so a second sweep finds nothing.
-		if n2, err := store.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
+		if n2, err := store.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
 			t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
 		}
 	})
@@ -99,9 +99,9 @@ func RunReconcileOrphanedRunsConformance(t *testing.T, mk ReconcileOrphanFactory
 		store, seed := mk(t)
 		brID := seed.BlueprintRun(t, 0)
 
-		n, err := store.ReconcileOrphanedRuns(ctx)
+		n, err := store.ReconcileOrphanedConversations(ctx)
 		if err != nil {
-			t.Fatalf("ReconcileOrphanedRuns: %v", err)
+			t.Fatalf("ReconcileOrphanedConversations: %v", err)
 		}
 		if n != 0 {
 			t.Errorf("healed count = %d, want 0 (a mint still inside the grace)", n)
@@ -119,9 +119,9 @@ func RunReconcileOrphanedRunsConformance(t *testing.T, mk ReconcileOrphanFactory
 		brID := seed.BlueprintRun(t, 30*24*time.Hour)
 		convID := seed.EnqueueChild(t, brID)
 
-		n, err := store.ReconcileOrphanedRuns(ctx)
+		n, err := store.ReconcileOrphanedConversations(ctx)
 		if err != nil {
-			t.Fatalf("ReconcileOrphanedRuns: %v", err)
+			t.Fatalf("ReconcileOrphanedConversations: %v", err)
 		}
 		if n != 0 {
 			t.Errorf("healed count = %d, want 0 (a parent with a child is not an orphan)", n)
@@ -142,9 +142,9 @@ func RunReconcileOrphanedRunsConformance(t *testing.T, mk ReconcileOrphanFactory
 		brID := seed.BlueprintRun(t, pastGrace)
 		seed.ForceBlueprintStatus(t, brID, string(domain.BlueprintRunStatusCancelled), "user_cancelled")
 
-		n, err := store.ReconcileOrphanedRuns(ctx)
+		n, err := store.ReconcileOrphanedConversations(ctx)
 		if err != nil {
-			t.Fatalf("ReconcileOrphanedRuns: %v", err)
+			t.Fatalf("ReconcileOrphanedConversations: %v", err)
 		}
 		if n != 0 {
 			t.Errorf("healed count = %d, want 0 (terminal runs are settled)", n)
@@ -165,9 +165,9 @@ func RunReconcileOrphanedRunsConformance(t *testing.T, mk ReconcileOrphanFactory
 		convID := seed.EnqueueChild(t, brID)
 		seed.ForceBlueprintStatus(t, brID, string(domain.BlueprintRunStatusFailed), "step_failed")
 
-		n, err := store.ReconcileOrphanedRuns(ctx)
+		n, err := store.ReconcileOrphanedConversations(ctx)
 		if err != nil {
-			t.Fatalf("ReconcileOrphanedRuns: %v", err)
+			t.Fatalf("ReconcileOrphanedConversations: %v", err)
 		}
 		if n != 1 {
 			t.Fatalf("healed count = %d, want 1 (the parked child)", n)

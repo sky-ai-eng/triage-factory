@@ -262,11 +262,11 @@ func TestSessionPolicy_ResourceScoping(t *testing.T) {
 }
 
 func TestSessionNameForRun_Sanitizes(t *testing.T) {
-	if got := sessionNameForRun("abc/def ghi"); got != "tf-abc-def-ghi" {
+	if got := sessionNameForConversation("abc/def ghi"); got != "tf-abc-def-ghi" {
 		t.Errorf("got %q", got)
 	}
 	long := strings.Repeat("x", 100)
-	if got := sessionNameForRun(long); len(got) != 64 {
+	if got := sessionNameForConversation(long); len(got) != 64 {
 		t.Errorf("session name not clamped to 64: len=%d", len(got))
 	}
 }

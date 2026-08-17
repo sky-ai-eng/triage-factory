@@ -139,7 +139,7 @@ func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string)
 		return strconv.FormatInt(id, 10)
 	}
 	return dbtest.SpendSeeder{
-		Run: func(t *testing.T, f dbtest.RunSpendFixture) string {
+		Run: func(t *testing.T, f dbtest.ConversationSpendFixture) string {
 			t.Helper()
 			id := uuid.New().String()
 			if _, err := conn.Exec(`

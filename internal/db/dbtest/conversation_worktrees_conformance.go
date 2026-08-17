@@ -8,28 +8,28 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// RunWorktreeStoreFactory is what a per-backend test file hands to
-// RunRunWorktreeStoreConformance. Returns:
+// ConversationWorktreeStoreFactory is what a per-backend test file hands to
+// RunConversationWorktreeStoreConformance. Returns:
 //   - the wired ConversationWorktreeStore impl,
 //   - the orgID to pass to every call,
-//   - a RunWorktreeSeeder the harness uses to stage the run FK
+//   - a ConversationWorktreeSeeder the harness uses to stage the run FK
 //     chain (conversation_worktrees FKs to conversations; backends seed those rows
 //     differently and the conformance harness shouldn't bake one
 //     shape's schema into the assertions).
-type RunWorktreeStoreFactory func(t *testing.T) (store db.ConversationWorktreeStore, orgID string, seed RunWorktreeSeeder)
+type ConversationWorktreeStoreFactory func(t *testing.T) (store db.ConversationWorktreeStore, orgID string, seed ConversationWorktreeSeeder)
 
-// RunWorktreeSeeder is a bag of callbacks the conformance suite uses
+// ConversationWorktreeSeeder is a bag of callbacks the conformance suite uses
 // to stage fixture rows the ConversationWorktreeStore doesn't own.
-type RunWorktreeSeeder struct {
+type ConversationWorktreeSeeder struct {
 	// Run inserts the entity + event + prompt + task + run FK chain
 	// needed to attach a conversation_worktrees row, and returns the conversationID.
 	// suffix discriminates per-subtest seeds so the unique indexes on
 	// entities/runs don't collide.
 	Run func(t *testing.T, suffix string) (conversationID string)
 
-	// DeleteRun removes the run row so the cascade-on-delete subtest
+	// DeleteConversation removes the run row so the cascade-on-delete subtest
 	// can verify the FK ON DELETE CASCADE.
-	DeleteRun func(t *testing.T, conversationID string)
+	DeleteConversation func(t *testing.T, conversationID string)
 
 	// Repo ensures a registry row exists for an "owner/repo" slug.
 	// conversation_worktrees references the repository by that row's id, and
@@ -43,19 +43,19 @@ type RunWorktreeSeeder struct {
 // insertWorktree reserves a worktree through the store, ensuring the
 // repository it names has a registry row first — the production ordering
 // (a repository is tracked, then a run checks it out) expressed as a fixture.
-func insertWorktree(t *testing.T, store db.ConversationWorktreeStore, seed RunWorktreeSeeder, orgID string, w domain.ConversationWorktree) (bool, string, error) {
+func insertWorktree(t *testing.T, store db.ConversationWorktreeStore, seed ConversationWorktreeSeeder, orgID string, w domain.ConversationWorktree) (bool, string, error) {
 	t.Helper()
 	seed.Repo(t, w.RepoID)
 	return store.Insert(context.Background(), orgID, w)
 }
 
-// RunRunWorktreeStoreConformance covers the ConversationWorktreeStore
+// RunConversationWorktreeStoreConformance covers the ConversationWorktreeStore
 // contract every backend impl must hold. System variants are NOT
 // covered by parallel cases — their behavior is documented as
 // identical to the non-System counterparts (the per-method
 // passthrough tests were intentionally pruned across the wave so
 // the conformance suite tracks contract, not pool plumbing).
-func RunRunWorktreeStoreConformance(t *testing.T, mk RunWorktreeStoreFactory) {
+func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktreeStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -254,7 +254,7 @@ func RunRunWorktreeStoreConformance(t *testing.T, mk RunWorktreeStoreFactory) {
 		}); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
-		seed.DeleteRun(t, conversationID)
+		seed.DeleteConversation(t, conversationID)
 		rows, err := store.List(ctx, orgID, conversationID)
 		if err != nil {
 			t.Fatalf("list after cascade: %v", err)

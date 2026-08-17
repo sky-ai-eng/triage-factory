@@ -11,8 +11,8 @@ import type { PendingPermission, PermissionDecisionInput } from '../lib/permissi
 // importers of useConversationDetail keep working.
 export type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 
-export interface RunDetailState {
-  run: Conversation | null
+export interface ConversationDetailState {
+  conversation: Conversation | null
   task: Task | null
   messages: Message[]
   /** Every artifact this run produced (branch / PR / review / issue / comment),
@@ -95,7 +95,7 @@ function tokenDelta(msg: Message): TokenDelta | null {
 // fresh while the agent works. We fetch the task separately because
 // Conversation only carries TaskID, and the detail page wants the title +
 // source badge in its header.
-export function useConversationDetail(conversationID: string | undefined): RunDetailState {
+export function useConversationDetail(conversationID: string | undefined): ConversationDetailState {
   const [conversation, setConversation] = useState<Conversation | null>(null)
   const [task, setTask] = useState<Task | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
@@ -621,7 +621,7 @@ export function useConversationDetail(conversationID: string | undefined): RunDe
   )
 
   return {
-    run: conversation,
+    conversation,
     task,
     messages,
     artifacts,

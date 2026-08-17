@@ -58,7 +58,7 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 	}
 	// The claim writes no status: mid-flight is the absence of an outcome,
 	// and the claim row itself is the ownership.
-	if st, _ := pgRunStatus(t, h, conversationID); st != "" {
+	if st, _ := pgConversationStatus(t, h, conversationID); st != "" {
 		t.Fatalf("stored status after claim = %q, want none", st)
 	}
 	// team_id rides back on the claim (TFAC-458) and matches the value
@@ -127,7 +127,7 @@ func TestRunQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner(t *testing.T) 
 	if n != 0 {
 		t.Errorf("process-b's boot reset %d rows, want 0 (must not touch process-a's live claim)", n)
 	}
-	if st, _ := pgRunStatus(t, h, conversationID); st != "" {
+	if st, _ := pgConversationStatus(t, h, conversationID); st != "" {
 		t.Errorf("run status = %q, want none (untouched by process-b's boot reset)", st)
 	}
 	if !pgHasActiveClaim(t, h, conversationID) {
@@ -143,7 +143,7 @@ func TestRunQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner(t *testing.T) 
 	if n2 != 1 {
 		t.Errorf("process-a's restart reset %d rows, want 1 (its own prior-boot orphan)", n2)
 	}
-	if st, _ := pgRunStatus(t, h, conversationID); st != "" {
+	if st, _ := pgConversationStatus(t, h, conversationID); st != "" {
 		t.Errorf("run status = %q, want none after process-a's own restart swept it", st)
 	}
 	if pgHasActiveClaim(t, h, conversationID) {
@@ -344,23 +344,23 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 		t.Fatalf("seed healthy claim: %v", err)
 	}
 
-	n, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx)
+	n, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil || n != 2 {
-		t.Fatalf("ReconcileOrphanedRuns = (%d, %v), want (2, nil)", n, err)
+		t.Fatalf("ReconcileOrphanedConversations = (%d, %v), want (2, nil)", n, err)
 	}
-	if st, parked := pgRunParked(t, h, orphanID); st != "open" || !parked {
+	if st, parked := pgConversationParked(t, h, orphanID); st != "open" || !parked {
 		t.Errorf("orphan = (%q, parked=%v), want (open, true)", st, parked)
 	}
-	if st, parked := pgRunParked(t, h, queuedOrphanID); st != "open" || !parked {
+	if st, parked := pgConversationParked(t, h, queuedOrphanID); st != "open" || !parked {
 		t.Errorf("unclaimed orphan = (%q, parked=%v), want (open, true)", st, parked)
 	}
-	if st, _ := pgRunStatus(t, h, healthyID); st != "" {
+	if st, _ := pgConversationStatus(t, h, healthyID); st != "" {
 		t.Errorf("healthy run status = %q, want none (must not touch a mid-flight child under a running parent)", st)
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
-		t.Errorf("second ReconcileOrphanedRuns = (%d, %v), want (0, nil)", n2, err)
+	if n2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
+		t.Errorf("second ReconcileOrphanedConversations = (%d, %v), want (0, nil)", n2, err)
 	}
 }
 
@@ -420,9 +420,9 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 	healthyClaim := activeClaim(healthyID)
 	queuedID := seedChild("")
 
-	n, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx)
+	n, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil {
-		t.Fatalf("ReconcileOrphanedRuns: %v", err)
+		t.Fatalf("ReconcileOrphanedConversations: %v", err)
 	}
 	if n != 2 {
 		t.Errorf("healed count = %d, want 2 (two released claims)", n)
@@ -456,15 +456,15 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 	if rel, _ := claimState(healthyClaim); rel {
 		t.Error("healthy engaged row's live claim was released")
 	}
-	if st, _ := pgRunStatus(t, h, healthyID); st != "" {
+	if st, _ := pgConversationStatus(t, h, healthyID); st != "" {
 		t.Errorf("healthy engaged row status = %q, want none", st)
 	}
-	if st, _ := pgRunStatus(t, h, queuedID); st != "" {
+	if st, _ := pgConversationStatus(t, h, queuedID); st != "" {
 		t.Errorf("claimless row status = %q, want none (already claimable, nothing to heal)", st)
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
+	if n2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
 		t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
 	}
 }
@@ -612,7 +612,7 @@ func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
 	h := pgtest.Shared(t)
 	ctx := context.Background()
 
-	dbtest.RunRunQueueCredentialsConformance(t, func(t *testing.T) (db.ConversationQueueStore, string, dbtest.RunQueueCredentialsSeeder) {
+	dbtest.RunClaimCredentialsConformance(t, func(t *testing.T) (db.ConversationQueueStore, string, dbtest.ClaimCredentialsSeeder) {
 		t.Helper()
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -620,7 +620,7 @@ func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
 		brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
 
 		nextStep := 0
-		seed := dbtest.RunQueueCredentialsSeeder{
+		seed := dbtest.ClaimCredentialsSeeder{
 			EnqueueConversation: func(t *testing.T) string {
 				t.Helper()
 				idx := nextStep
@@ -708,9 +708,9 @@ func TestRunQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 	})
 }
 
-// pgRunStatus reads a run's STORED status (SQL NULL — the mid-flight state
+// pgConversationStatus reads a run's STORED status (SQL NULL — the mid-flight state
 // — as "") and whether completed_at is stamped.
-func pgRunStatus(t *testing.T, h *pgtest.Harness, conversationID string) (status string, completed bool) {
+func pgConversationStatus(t *testing.T, h *pgtest.Harness, conversationID string) (status string, completed bool) {
 	t.Helper()
 	var stored sql.NullString
 	var completedAt *string
@@ -721,10 +721,10 @@ func pgRunStatus(t *testing.T, h *pgtest.Harness, conversationID string) (status
 	return stored.String, completedAt != nil
 }
 
-// pgRunParked is pgRunStatus's park-side sibling: the stored status plus
+// pgConversationParked is pgConversationStatus's park-side sibling: the stored status plus
 // whether parked_at is stamped, which is what the snapshot-retention sweep
 // keys a parked run off.
-func pgRunParked(t *testing.T, h *pgtest.Harness, conversationID string) (status string, parked bool) {
+func pgConversationParked(t *testing.T, h *pgtest.Harness, conversationID string) (status string, parked bool) {
 	t.Helper()
 	var stored sql.NullString
 	var parkedAt *string
@@ -1084,7 +1084,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRunsConformance(t *testing.T) {
 	h := pgtest.Shared(t)
 	ctx := context.Background()
 
-	dbtest.RunReconcileOrphanedRunsConformance(t, func(t *testing.T) (db.ConversationQueueStore, dbtest.ReconcileOrphanSeeder) {
+	dbtest.RunReconcileOrphanedConversationsConformance(t, func(t *testing.T) (db.ConversationQueueStore, dbtest.ReconcileOrphanSeeder) {
 		t.Helper()
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)

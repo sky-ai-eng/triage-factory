@@ -29,12 +29,12 @@ func seedDraftPRArtifact(t *testing.T, s *Spawner, conversationID string) {
 
 // --- blueprintDecisionForStepConversation: the advancement decision matrix -----------
 
-// TestBlueprintDecisionForStepRun pins the position-gated mapping from a
+// TestBlueprintDecisionForStepConversation pins the position-gated mapping from a
 // completed step run's conversations.outcome to the orchestrator's next move —
 // the logic that replaced the chain-verdict switch. It is the single place
 // advancement / finish / abort flow through conversations.outcome, so the whole
 // matrix is covered here without spawning an agent.
-func TestBlueprintDecisionForStepRun(t *testing.T) {
+func TestBlueprintDecisionForStepConversation(t *testing.T) {
 	cases := []struct {
 		name       string
 		outcome    string
@@ -97,7 +97,7 @@ func TestBlueprintDecisionForStepRun(t *testing.T) {
 // for approval, freezing the blueprint.)
 func TestProcessCompletion_BlueprintStepDraftPRDoesNotPark(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "bp-nopark")
-	makeRunBlueprintStep(t, database, conversationID, taskID)
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	// Queue a draft PR — the legacy "pending external action" — and confirm it no
 	// longer parks the step.
 	seedDraftPRArtifact(t, s, conversationID)
@@ -107,7 +107,7 @@ func TestProcessCompletion_BlueprintStepDraftPRDoesNotPark(t *testing.T) {
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, "bpr-"+conversationID, "", task,
 		res(`{"outcome":"continue","summary":"opened a PR"}`), cwd, nil, "", "event", "")
 
-	conv := loadRun(t, s, conversationID)
+	conv := loadConversation(t, s, conversationID)
 	if conv.Outcome != "continue" {
 		t.Errorf("run.outcome = %q, want continue (a queued draft PR no longer coerces the outcome)", conv.Outcome)
 	}
@@ -122,14 +122,14 @@ func TestProcessCompletion_BlueprintStepDraftPRDoesNotPark(t *testing.T) {
 // orchestrator to advance to the next step.
 func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "bp-continue")
-	makeRunBlueprintStep(t, database, conversationID, taskID)
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, "bpr-"+conversationID, "", task,
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, nil, "", "event", "")
 
-	conv := loadRun(t, s, conversationID)
+	conv := loadConversation(t, s, conversationID)
 	if conv.Outcome != "continue" {
 		t.Errorf("run.outcome = %q, want continue (no pending action → no coercion)", conv.Outcome)
 	}
@@ -150,7 +150,7 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 // workflow run's own handoff rather than as history.
 func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "bp-memrow")
-	makeRunBlueprintStep(t, database, conversationID, taskID) // sets blueprint_run_id = "bpr-<conversationID>"
+	makeConversationBlueprintStep(t, database, conversationID, taskID) // sets blueprint_run_id = "bpr-<conversationID>"
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
@@ -197,14 +197,14 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 func TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-unresolved")
 	stampBotClaim(t, database, taskID)
-	makeRunBlueprintStep(t, database, conversationID, taskID)
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	blueprintRunID := "bpr-" + conversationID
 	// The step completed and left a draft PR unresolved.
 	setRunStatus(t, database, conversationID, "completed")
 	seedDraftPRArtifact(t, s, conversationID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
-		loadRun(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
+		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
 
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
@@ -218,12 +218,12 @@ func TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen(t *tes
 func TestTerminateBlueprint_CompletedWithNoUnresolvedArtifactClosesTask(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-clean")
 	stampBotClaim(t, database, taskID)
-	makeRunBlueprintStep(t, database, conversationID, taskID)
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	blueprintRunID := "bpr-" + conversationID
 	setRunStatus(t, database, conversationID, "completed")
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
-		loadRun(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
+		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
 		domain.BlueprintRunStatusCompleted, "", nil, true)
 
 	if got := readTaskStatus(t, database, taskID); got != "done" {
@@ -231,11 +231,11 @@ func TestTerminateBlueprint_CompletedWithNoUnresolvedArtifactClosesTask(t *testi
 	}
 }
 
-// makeRunBlueprintStep turns the fixture's run into a blueprint step: it seeds
+// makeConversationBlueprintStep turns the fixture's run into a blueprint step: it seeds
 // a blueprint + blueprint_runs row and points the run at it so
 // processCompletion's isBlueprintStep branch trips. Mirrors the setup the
 // advance-task chain-step guard test uses.
-func makeRunBlueprintStep(t *testing.T, database *sql.DB, conversationID, taskID string) {
+func makeConversationBlueprintStep(t *testing.T, database *sql.DB, conversationID, taskID string) {
 	t.Helper()
 	if err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: "bp-" + conversationID, Name: "bp-" + conversationID, Source: "user", TeamID: runmode.LocalDefaultTeamID,

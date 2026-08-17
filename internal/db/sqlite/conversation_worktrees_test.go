@@ -21,16 +21,16 @@ import (
 // fresh in-memory DB so conversation_worktrees state doesn't leak between
 // assertions.
 func TestRunWorktreeStore_SQLite(t *testing.T) {
-	dbtest.RunRunWorktreeStoreConformance(t, func(t *testing.T) (db.ConversationWorktreeStore, string, dbtest.RunWorktreeSeeder) {
+	dbtest.RunConversationWorktreeStoreConformance(t, func(t *testing.T) (db.ConversationWorktreeStore, string, dbtest.ConversationWorktreeSeeder) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
-		seed := dbtest.RunWorktreeSeeder{
+		seed := dbtest.ConversationWorktreeSeeder{
 			Run: func(t *testing.T, suffix string) string {
 				t.Helper()
-				return seedSQLiteRunForWorktree(t, conn, suffix)
+				return seedSQLiteConversationForWorktree(t, conn, suffix)
 			},
-			DeleteRun: func(t *testing.T, conversationID string) {
+			DeleteConversation: func(t *testing.T, conversationID string) {
 				t.Helper()
 				if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
 					t.Fatalf("delete run: %v", err)
@@ -75,10 +75,10 @@ func TestRunWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	}
 }
 
-// seedSQLiteRunForWorktree seeds the entity + event + prompt + task
+// seedSQLiteConversationForWorktree seeds the entity + event + prompt + task
 // + run FK chain conversation_worktrees needs. Mirrors the seedSQLiteRunFor
 // TaskMemory shape so both stores' tests stay reading like siblings.
-func seedSQLiteRunForWorktree(t *testing.T, conn *sql.DB, suffix string) string {
+func seedSQLiteConversationForWorktree(t *testing.T, conn *sql.DB, suffix string) string {
 	t.Helper()
 	now := time.Now().UTC()
 	entityID := uuid.New().String()
@@ -111,7 +111,7 @@ func seedSQLiteRunForWorktree(t *testing.T, conn *sql.DB, suffix string) string 
 		t.Fatalf("seed task: %v", err)
 	}
 	conversationID := uuid.New().String()
-	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
+	blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model, blueprint_run_id) VALUES (?, ?, 'p_run_worktree', 'running', 'm', ?)
 	`, conversationID, taskID, blueprintRunID); err != nil {

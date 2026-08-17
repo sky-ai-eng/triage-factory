@@ -46,7 +46,7 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
-	if h.runQueue == nil {
+	if h.conversationQueue == nil {
 		// This pod holds no run-queue reader — deployment shape, not an outage.
 		writeNotConfigured(w, "the run queue reader is not configured on this deployment")
 		return
@@ -59,12 +59,12 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	timings, err := h.runQueue.RecentConversationTimingsForOrgSystem(r.Context(), orgID, since, until, 0)
+	timings, err := h.conversationQueue.RecentConversationTimingsForOrgSystem(r.Context(), orgID, since, until, 0)
 	if err != nil {
 		internalError(w, "usage-ops-timings", err)
 		return
 	}
-	queued, err := h.runQueue.QueuedConversationAgesForOrgSystem(r.Context(), orgID)
+	queued, err := h.conversationQueue.QueuedConversationAgesForOrgSystem(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "usage-ops-queue", err)
 		return

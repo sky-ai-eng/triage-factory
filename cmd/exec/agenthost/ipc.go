@@ -199,7 +199,7 @@ func (c *IPCClient) DeleteStagedReviewComment(ctx context.Context, commentID str
 }
 
 func (c *IPCClient) GetConversation(ctx context.Context) (*domain.Conversation, error) {
-	var res agentRunResult
+	var res getConversationResult
 	if err := c.call(ctx, methodGetConversation, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}

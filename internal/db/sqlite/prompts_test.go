@@ -25,7 +25,7 @@ func TestPromptStore_SQLite(t *testing.T) {
 		stores := sqlitestore.New(conn)
 		seeder := func(t *testing.T, promptID string, statusByOffset []string) []string {
 			t.Helper()
-			return seedSQLiteRunsForStats(t, conn, promptID, statusByOffset)
+			return seedSQLiteConversationsForStats(t, conn, promptID, statusByOffset)
 		}
 		return stores.Prompts, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seeder
 	})
@@ -49,14 +49,14 @@ func openSQLiteForTest(t *testing.T) *sql.DB {
 	return conn
 }
 
-// seedSQLiteRunsForStats inserts entity+task+run rows for each entry
+// seedSQLiteConversationsForStats inserts entity+task+run rows for each entry
 // in statusByOffset so PromptStore.Stats has data to aggregate.
 // started_at is staggered by `i` days back so the per-day grouping
 // has variation.
 //
 // RunStore hasn't migrated yet (wave 3b), so the seeder owns raw SQL
 // — the conformance harness is intentionally schema-blind.
-func seedSQLiteRunsForStats(t *testing.T, conn *sql.DB, promptID string, statusByOffset []string) []string {
+func seedSQLiteConversationsForStats(t *testing.T, conn *sql.DB, promptID string, statusByOffset []string) []string {
 	t.Helper()
 	now := time.Now().UTC()
 
@@ -85,7 +85,7 @@ func seedSQLiteRunsForStats(t *testing.T, conn *sql.DB, promptID string, statusB
 		t.Fatalf("seed task: %v", err)
 	}
 
-	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
+	blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)
 	ids := make([]string, 0, len(statusByOffset))
 	for i, status := range statusByOffset {
 		conversationID := uuid.New().String()

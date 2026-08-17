@@ -133,7 +133,7 @@ function deferred<T>() {
 // Harness renders the station's instrument rail off the hook, so the assertions
 // read the rendered cost the way the user sees it rather than hook internals.
 function Harness() {
-  const { run: conversation, messages } = useConversationDetail(CONVERSATION_ID)
+  const { conversation, messages } = useConversationDetail(CONVERSATION_ID)
   if (!conversation) return <div>loading</div>
   return (
     <TelemetryRail
@@ -413,7 +413,7 @@ describe('useConversationDetail live token accumulation', () => {
 // TranscriptHarness renders the held transcript as a joined string plus the
 // cost readout, so a repaired row shows up both as content and as dollars.
 function TranscriptHarness() {
-  const { run: conversation, messages } = useConversationDetail(CONVERSATION_ID)
+  const { conversation, messages } = useConversationDetail(CONVERSATION_ID)
   return (
     <>
       <div data-testid="transcript">{messages.map((m) => m.content).join('|')}</div>
@@ -653,7 +653,7 @@ describe('useConversationDetail transcript reconciliation', () => {
 // hadn't landed yet renders the blocked copy, and the announcement that it has
 // landed turns the input back on with no reload.
 function ComposerHarness() {
-  const { run: conversation } = useConversationDetail(CONVERSATION_ID)
+  const { conversation } = useConversationDetail(CONVERSATION_ID)
   if (!conversation) return <div>loading</div>
   return (
     <div>

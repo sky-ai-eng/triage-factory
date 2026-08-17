@@ -236,7 +236,7 @@ type ConversationQueueStore interface {
 	// same posture as ClaimNextConversation (SQLite is N=1 — at most the one local org).
 	FleetQueueShares(ctx context.Context) ([]OrgQueueShare, error)
 
-	// ReconcileOrphanedRuns is the boot self-heal mirror of
+	// ReconcileOrphanedConversations is the boot self-heal mirror of
 	// ResetProcessingConversations: every child conversation left non-terminal under a
 	// blueprint_run that is already terminal (completed/aborted/failed/
 	// cancelled) is flipped to 'cancelled' with a completed_at stamp. Such a
@@ -269,7 +269,7 @@ type ConversationQueueStore interface {
 	//
 	// Cross-org system sweep; returns the total count of rows healed across
 	// all arms.
-	ReconcileOrphanedRuns(ctx context.Context) (int, error)
+	ReconcileOrphanedConversations(ctx context.Context) (int, error)
 
 	// CountQueuedSystem returns how many conversations currently match the
 	// needs-driving predicate across the whole deployment — the fleet-wide

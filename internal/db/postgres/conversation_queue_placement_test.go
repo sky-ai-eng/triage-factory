@@ -19,9 +19,9 @@ import (
 // these to cross the thresholds deterministically (no sleeping).
 var placementClaimCfg = db.ClaimPlacement{Enabled: true, AgingInterval: 20 * time.Second, Liveness: 12 * time.Second}
 
-// enqueuePgRunPreferred mints a fresh blueprint_run + task + prompt and
+// enqueuePgConversationPreferred mints a fresh blueprint_run + task + prompt and
 // enqueues one queued run stamped with preferred. Returns the run id.
-func enqueuePgRunPreferred(t *testing.T, h *pgtest.Harness, stores db.Stores, orgID, userID, preferred string) string {
+func enqueuePgConversationPreferred(t *testing.T, h *pgtest.Harness, stores db.Stores, orgID, userID, preferred string) string {
 	t.Helper()
 	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
 	conversationID := uuid.New().String()
@@ -44,7 +44,7 @@ func registerLiveExecutor(t *testing.T, stores db.Stores, id string) {
 	}
 }
 
-func backdatePgRunStarted(t *testing.T, h *pgtest.Harness, conversationID string, age time.Duration) {
+func backdatePgConversationStarted(t *testing.T, h *pgtest.Harness, conversationID string, age time.Duration) {
 	t.Helper()
 	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET started_at = now() - $2::interval WHERE id = $1`,
 		conversationID, age.String())
@@ -80,7 +80,7 @@ func TestPlacementClaim_TierOneExclusiveToOwner(t *testing.T) {
 
 	registerLiveExecutor(t, stores, "exec-a")
 	registerLiveExecutor(t, stores, "exec-b")
-	conversationID := enqueuePgRunPreferred(t, h, stores, orgID, userID, "exec-a")
+	conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 
 	// The enqueue actually persisted the stamp.
 	if got, ok := readPreferred(t, h, conversationID); !ok || got != "exec-a" {
@@ -113,8 +113,8 @@ func TestPlacementClaim_AgesToSpillover(t *testing.T) {
 	orgID, userID := seedPgOrgForBlueprints(t, h)
 
 	registerLiveExecutor(t, stores, "exec-a") // owner, live (so it's only aging, not death, that spills)
-	conversationID := enqueuePgRunPreferred(t, h, stores, orgID, userID, "exec-a")
-	backdatePgRunStarted(t, h, conversationID, 45*time.Second) // > 20s aging window
+	conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
+	backdatePgConversationStarted(t, h, conversationID, 45*time.Second) // > 20s aging window
 
 	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
 	if err != nil || got == nil || got.ID != conversationID {
@@ -133,7 +133,7 @@ func TestPlacementClaim_DeadPreferredSpillsImmediately(t *testing.T) {
 	orgID, userID := seedPgOrgForBlueprints(t, h)
 
 	registerLiveExecutor(t, stores, "exec-a")
-	conversationID := enqueuePgRunPreferred(t, h, stores, orgID, userID, "exec-a")
+	conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 	// Run is FRESH (not aged), but the owner is dead.
 	backdatePgHeartbeat(t, h, "exec-a", time.Hour)
 
@@ -157,7 +157,7 @@ func TestPlacementClaim_DrainingAndGatedPreferredSpill(t *testing.T) {
 		if _, err := stores.Instances.SetDraining(ctx, "exec-drain", true); err != nil {
 			t.Fatalf("SetDraining: %v", err)
 		}
-		conversationID := enqueuePgRunPreferred(t, h, stores, orgID, userID, "exec-drain")
+		conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-drain")
 		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-helper", 1, placementClaimCfg)
 		if err != nil || got == nil || got.ID != conversationID {
 			t.Fatalf("draining owner's run should spill: got=(%+v, %v)", got, err)
@@ -167,7 +167,7 @@ func TestPlacementClaim_DrainingAndGatedPreferredSpill(t *testing.T) {
 	t.Run("gated", func(t *testing.T) {
 		registerLiveExecutor(t, stores, "exec-gated")
 		pgtest.MustExec(t, h.AdminDB, `UPDATE instances SET dispatch_gated = true WHERE id = $1`, "exec-gated")
-		conversationID := enqueuePgRunPreferred(t, h, stores, orgID, userID, "exec-gated")
+		conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-gated")
 		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-helper", 1, placementClaimCfg)
 		if err != nil || got == nil || got.ID != conversationID {
 			t.Fatalf("gated owner's run should spill: got=(%+v, %v)", got, err)
@@ -186,7 +186,7 @@ func TestPlacementClaim_NullPreferredClaimableImmediately(t *testing.T) {
 	orgID, userID := seedPgOrgForBlueprints(t, h)
 
 	registerLiveExecutor(t, stores, "exec-a")
-	conversationID := enqueuePgRunPreferred(t, h, stores, orgID, userID, "") // NULL preferred
+	conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "") // NULL preferred
 
 	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
 	if err != nil || got == nil || got.ID != conversationID {
@@ -208,10 +208,10 @@ func TestPlacementClaim_OwnerPrefersOwnFirst(t *testing.T) {
 	registerLiveExecutor(t, stores, "exec-b")
 
 	// An OLDER foreign run (preferred=B), aged so exec-a may claim it via tier 2.
-	foreign := enqueuePgRunPreferred(t, h, stores, orgID, userID, "exec-b")
-	backdatePgRunStarted(t, h, foreign, 2*time.Minute)
+	foreign := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-b")
+	backdatePgConversationStarted(t, h, foreign, 2*time.Minute)
 	// A NEWER own run (preferred=A), fresh.
-	own := enqueuePgRunPreferred(t, h, stores, orgID, userID, "exec-a")
+	own := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 
 	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
 	if err != nil || got == nil {
@@ -236,7 +236,7 @@ func TestPlacementClaim_DisabledIgnoresPreferred(t *testing.T) {
 	registerLiveExecutor(t, stores, "exec-a")
 	// Fresh run stamped to exec-a; a DIFFERENT executor claims with placement
 	// OFF and must still get it (global-oldest, stamp ignored).
-	conversationID := enqueuePgRunPreferred(t, h, stores, orgID, userID, "exec-a")
+	conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 
 	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-other", 1, db.ClaimPlacement{})
 	if err != nil || got == nil || got.ID != conversationID {
@@ -255,7 +255,7 @@ func TestPlacementClaim_RequeueClearsPreferred(t *testing.T) {
 	orgID, userID := seedPgOrgForBlueprints(t, h)
 
 	registerLiveExecutor(t, stores, "exec-a")
-	conversationID := enqueuePgRunPreferred(t, h, stores, orgID, userID, "exec-a")
+	conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 
 	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
 	if err != nil || claimed == nil {

@@ -227,9 +227,9 @@ func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 	return eventID, meta
 }
 
-// slackRunFixture is what seedSlackMessageConversation returns: the ids a
+// slackConversationFixture is what seedSlackMessageConversation returns: the ids a
 // run-status test needs to fire synthetic sentinels against.
-type slackRunFixture struct {
+type slackConversationFixture struct {
 	EventID, TaskID, ConversationID string
 	Meta                            SlackMessageMetadata
 }
@@ -239,7 +239,7 @@ type slackRunFixture struct {
 // -> task (event_type=slack:message, primary_event_id=event) -> run
 // (task_id=task). Mirrors exec_host_pg_test.go's seedNonSlackTask/seedConversation
 // shape, but for the Slack-sourced case those tests deliberately avoid.
-func seedSlackMessageConversation(t *testing.T, h *pgtest.Harness, orgID, creatorID, teamID, workspaceID, apiAppID, channel, ts, threadTS string) slackRunFixture {
+func seedSlackMessageConversation(t *testing.T, h *pgtest.Harness, orgID, creatorID, teamID, workspaceID, apiAppID, channel, ts, threadTS string) slackConversationFixture {
 	t.Helper()
 	// A run exists because the bot was engaged; the run-status tests that use
 	// this fixture don't depend on the mention flag, so seed the explicit-
@@ -269,7 +269,7 @@ func seedSlackMessageConversation(t *testing.T, h *pgtest.Harness, orgID, creato
 		t.Fatalf("seed run: %v", err)
 	}
 
-	return slackRunFixture{EventID: eventID, TaskID: taskID, ConversationID: conversationID, Meta: meta}
+	return slackConversationFixture{EventID: eventID, TaskID: taskID, ConversationID: conversationID, Meta: meta}
 }
 
 // seedGitHubTaskAndConversation seeds a plain GitHub-sourced task + run — the

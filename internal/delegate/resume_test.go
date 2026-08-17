@@ -108,8 +108,8 @@ func TestFollowUp_TerminalRefused(t *testing.T) {
 			}
 
 			err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-term", runmode.LocalDefaultUserID, "msg")
-			if !errors.Is(err, ErrRunNotSteerable) {
-				t.Errorf("err = %v, want ErrRunNotSteerable", err)
+			if !errors.Is(err, ErrConversationNotSteerable) {
+				t.Errorf("err = %v, want ErrConversationNotSteerable", err)
 			}
 			if got := pendingRows(t, s, "r-term"); len(got) != 0 {
 				t.Errorf("a refused message must not leave a row behind: %+v", got)
@@ -364,8 +364,8 @@ func TestFollowUp_LostToTerminalIsAConflict(t *testing.T) {
 	s := NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-died", runmode.LocalDefaultUserID, "one more thing")
-	if !errors.Is(err, ErrRunNotResumable) {
-		t.Fatalf("err = %v, want ErrRunNotResumable — nothing claims a terminal conversation, so the message is not delivered", err)
+	if !errors.Is(err, ErrConversationNotResumable) {
+		t.Fatalf("err = %v, want ErrConversationNotResumable — nothing claims a terminal conversation, so the message is not delivered", err)
 	}
 	if st := storedStatus(t, database, "r-died"); st != "failed" {
 		t.Errorf("stored status = %q, want failed — a lost flip must not move the row", st)
@@ -383,7 +383,7 @@ func TestFollowUp_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-ab'`); err != nil {
 		t.Fatalf("completed+abort: %v", err)
 	}
-	bpr := blueprintRunIDForRun(t, database, "r-ab")
+	bpr := blueprintRunIDForConversation(t, database, "r-ab")
 	if _, err := database.Exec(`UPDATE blueprint_runs SET status='aborted' WHERE id=?`, bpr); err != nil {
 		t.Fatalf("abort blueprint_run: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestFollowUp_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 
 // claimAndDispatch claims the globally-oldest queued run (mirroring the
 // dispatcher's own ClaimNextConversation call) and drives it synchronously through
-// dispatchClaimedRun — the same entry a real drainRunQueue goroutine would
+// dispatchClaimedConversation — the same entry a real drainRunQueue goroutine would
 // call, minus the goroutine wrapper, so resume-claim tests don't need to
 // poll for completion.
 func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {
@@ -418,7 +418,7 @@ func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {
 		t.Fatal("claim next run: nothing claimable (is the row queued under a running blueprint_run?)")
 	}
 	conv.OrgID = runmode.LocalDefaultOrgID
-	s.dispatchClaimedRun(ctx, conv)
+	s.dispatchClaimedConversation(ctx, conv)
 }
 
 // TestDispatchResumeClaim_DeliversRecordedInput proves the delivery half of
@@ -484,7 +484,7 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, _ := setupAdvanceFixture(t, "open-strand")
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	wireBlobStore(t, s)
 	putTestSnapshot(t, s, bpr) // garbage blob: passes Exists, fails rehydrate
 	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-open-strand' WHERE id=?`, conversationID); err != nil {
@@ -529,7 +529,7 @@ func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 func TestFollowUp_ExpiredWorkspaceRefusedAtEnqueue(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, conversationID, _ := setupAdvanceFixture(t, "expired")
-	bpr := blueprintRunIDForRun(t, database, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	wireBlobStore(t, s) // storage present but empty: no snapshot to recover from
 	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-expired' WHERE id=?`, conversationID); err != nil {
 		t.Fatalf("park open: %v", err)

@@ -7,17 +7,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-// RunPendingInputStoreFactory is what a per-backend test file hands to
-// RunRunPendingInputStoreConformance. Returns:
+// ConversationPendingInputStoreFactory is what a per-backend test file hands to
+// RunConversationPendingInputStoreConformance. Returns:
 //   - the wired ConversationPendingInputStore impl,
 //   - the orgID and a userID to pass to every call,
-//   - a RunPendingInputSeeder the harness uses to stage the run FK chain.
-type RunPendingInputStoreFactory func(t *testing.T) (store db.ConversationPendingInputStore, orgID, userID string, seed RunPendingInputSeeder)
+//   - a ConversationPendingInputSeeder the harness uses to stage the run FK chain.
+type ConversationPendingInputStoreFactory func(t *testing.T) (store db.ConversationPendingInputStore, orgID, userID string, seed ConversationPendingInputSeeder)
 
-// RunPendingInputSeeder is a bag of callbacks the conformance suite uses to
+// ConversationPendingInputSeeder is a bag of callbacks the conformance suite uses to
 // stage fixture rows ConversationPendingInputStore doesn't own — which now includes the
 // queued rows themselves, since the store reads a queue it does not write.
-type RunPendingInputSeeder struct {
+type ConversationPendingInputSeeder struct {
 	// Run inserts a run row and returns its id. suffix discriminates
 	// per-subtest seeds so unique indexes don't collide.
 	Run func(t *testing.T, suffix string) (conversationID string)
@@ -29,9 +29,9 @@ type RunPendingInputSeeder struct {
 	// column the writer stops setting fails here rather than in production.
 	StagePending func(t *testing.T, conversationID, userID, message string)
 
-	// DeleteRun removes the run row so the FK ON DELETE CASCADE subtest can
+	// DeleteConversation removes the run row so the FK ON DELETE CASCADE subtest can
 	// verify a purged run takes its pending input with it.
-	DeleteRun func(t *testing.T, conversationID string)
+	DeleteConversation func(t *testing.T, conversationID string)
 
 	// SecondUser returns a second user id valid for the same org, so the
 	// multi-author subtests can queue rows from two people. The store's
@@ -39,14 +39,14 @@ type RunPendingInputSeeder struct {
 	SecondUser func(t *testing.T) string
 }
 
-// RunRunPendingInputStoreConformance covers the ConversationPendingInputStore
+// RunConversationPendingInputStoreConformance covers the ConversationPendingInputStore
 // contract every backend impl must hold (TFAC-585): consume is destructive and
 // exactly once, the append-and-join queue contract, Peek and Consume agreeing
 // on what is pending, per-run isolation, absence reads as ok=false (never an
 // error), and FK cascade. Rows are staged through the production writer (see
-// RunPendingInputSeeder.StagePending), because a reader that only agrees with
+// ConversationPendingInputSeeder.StagePending), because a reader that only agrees with
 // its own test-local INSERT proves nothing.
-func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFactory) {
+func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPendingInputStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -217,7 +217,7 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 		store, orgID, userID, seed := mk(t)
 		conversationID := seed.Run(t, "cascade")
 		seed.StagePending(t, conversationID, userID, "doomed")
-		seed.DeleteRun(t, conversationID)
+		seed.DeleteConversation(t, conversationID)
 		_, _, ok, err := store.Consume(ctx, orgID, conversationID)
 		if err != nil {
 			t.Fatalf("consume after delete: %v", err)

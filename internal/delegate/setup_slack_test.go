@@ -101,7 +101,7 @@ func TestSetupSlack_PersistsWorktreePath(t *testing.T) {
 
 	// Seed a minimal conversations row for SetWorktreePathSystem's UPDATE to hit.
 	ensureTestPrompt(t, database, domain.Prompt{ID: "persist-prompt", Name: "T", Body: "x", Source: "user"})
-	brID := seedRunBlueprint(t, database, "persist", task.ID)
+	brID := seedConversationBlueprint(t, database, "persist", task.ID)
 	stepIdx := 0
 	conversationID := "slack-run-persist"
 	rootKey := brID // the run-root keys by the blueprint run id

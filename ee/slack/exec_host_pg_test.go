@@ -263,10 +263,10 @@ func (r *slackExecRig) trackChannel(orgID, userID, teamID, channelID string) {
 // seedNonSlackTask seeds a minimal entity + event + task chain with a
 // GitHub (not slack:message) event type, and returns the task id. Every run
 // this rig seeds carries one: ConversationStore.GetSystem's column list
-// (pgRunColumns) selects task_id with no COALESCE, so scanning a run whose
+// (pgConversationColumns) selects task_id with no COALESCE, so scanning a run whose
 // task_id is genuinely NULL errors — harmless in production (every run
 // today is blueprint-origin, which requires a non-NULL task_id) but hit
-// immediately here since workspaceFromRunTaskMetadata unconditionally reads
+// immediately here since workspaceFromConversationTaskMetadata unconditionally reads
 // the run first. Giving every seeded run a real, non-slack-mention task
 // keeps that read clean while still exercising the intended "no Slack
 // context" fallback path (task.EventType != domain.EventSlackMessage) these
@@ -329,7 +329,7 @@ func (r *slackExecRig) seedConversation(orgID, teamID, userID string, eventTrigg
 	return id
 }
 
-func (r *slackExecRig) artifactsForRun(orgID, conversationID string) []domain.Artifact {
+func (r *slackExecRig) artifactsForConversation(orgID, conversationID string) []domain.Artifact {
 	r.t.Helper()
 	arts, err := r.stor.Artifacts.ListByConversationSystem(r.t.Context(), orgID, conversationID)
 	if err != nil {
@@ -338,7 +338,7 @@ func (r *slackExecRig) artifactsForRun(orgID, conversationID string) []domain.Ar
 	return arts
 }
 
-func (r *slackExecRig) actionsForRun(orgID, conversationID string) []domain.ExternalAction {
+func (r *slackExecRig) actionsForConversation(orgID, conversationID string) []domain.ExternalAction {
 	r.t.Helper()
 	all, _, err := r.stor.ExternalActions.ListByOrgSystem(r.t.Context(), orgID, domain.ExternalActionListOpts{})
 	if err != nil {
@@ -409,7 +409,7 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 				t.Errorf("chat.postMessage not called as expected: channel=%q markdown=%q", r.fake.lastPostChannel, r.fake.lastPostMarkdown)
 			}
 
-			arts := r.artifactsForRun(orgID, conversationID)
+			arts := r.artifactsForConversation(orgID, conversationID)
 			if len(arts) != 1 {
 				t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 			}
@@ -424,7 +424,7 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 				t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
 			}
 
-			acts := r.actionsForRun(orgID, conversationID)
+			acts := r.actionsForConversation(orgID, conversationID)
 			if len(acts) != 1 {
 				t.Fatalf("want 1 external_action, got %d: %+v", len(acts), acts)
 			}
@@ -609,7 +609,7 @@ func TestSlackExecHandler_Edit_UpsertsSameArtifactRow(t *testing.T) {
 		t.Errorf("chat.update not called as expected: %+v", r.fake)
 	}
 
-	arts := r.artifactsForRun(orgID, conversationID)
+	arts := r.artifactsForConversation(orgID, conversationID)
 	if len(arts) != 1 {
 		t.Fatalf("edit should upsert the same row, got %d artifacts: %+v", len(arts), arts)
 	}
@@ -620,7 +620,7 @@ func TestSlackExecHandler_Edit_UpsertsSameArtifactRow(t *testing.T) {
 		t.Errorf("edit must not reassign run_id away from the creating run: got %q, want %q", arts[0].ConversationID, conversationID)
 	}
 
-	acts := r.actionsForRun(orgID, conversationID)
+	acts := r.actionsForConversation(orgID, conversationID)
 	if len(acts) != 2 {
 		t.Fatalf("want 2 external_actions (post + edit), got %d: %+v", len(acts), acts)
 	}
@@ -671,22 +671,22 @@ func TestSlackExecHandler_Edit_PreservesCreatingRunAndTeam_AcrossDifferentTeams(
 		t.Fatalf("edit: %v", err)
 	}
 
-	artsA := r.artifactsForRun(orgID, convA)
+	artsA := r.artifactsForConversation(orgID, convA)
 	if len(artsA) != 1 {
 		t.Fatalf("want 1 artifact still attributed to the creating run A, got %d: %+v", len(artsA), artsA)
 	}
 	if artsA[0].ConversationID != convA || artsA[0].TeamID != teamA {
 		t.Errorf("artifact attribution drifted: run=%q team=%q, want run=%q team=%q", artsA[0].ConversationID, artsA[0].TeamID, convA, teamA)
 	}
-	if artsB := r.artifactsForRun(orgID, convB); len(artsB) != 0 {
+	if artsB := r.artifactsForConversation(orgID, convB); len(artsB) != 0 {
 		t.Errorf("editing run B must not have reassigned the artifact to itself, got %+v", artsB)
 	}
 
-	actsA := r.actionsForRun(orgID, convA)
+	actsA := r.actionsForConversation(orgID, convA)
 	if len(actsA) != 1 || actsA[0].Action != domain.ActionSlackMessagePosted {
 		t.Errorf("run A's external_actions = %+v, want exactly one slack_message_posted", actsA)
 	}
-	actsB := r.actionsForRun(orgID, convB)
+	actsB := r.actionsForConversation(orgID, convB)
 	if len(actsB) != 1 || actsB[0].Action != domain.ActionSlackMessageEdited {
 		t.Errorf("run B's external_actions = %+v, want exactly one slack_message_edited (the audit trail still credits the editing run)", actsB)
 	}
@@ -714,10 +714,10 @@ func TestSlackExecHandler_React_RecordsActionOnly(t *testing.T) {
 				t.Errorf("reactions.add not called as expected: %+v", r.fake)
 			}
 
-			if arts := r.artifactsForRun(orgID, conversationID); len(arts) != 0 {
+			if arts := r.artifactsForConversation(orgID, conversationID); len(arts) != 0 {
 				t.Errorf("react must not write an artifact, got %+v", arts)
 			}
-			acts := r.actionsForRun(orgID, conversationID)
+			acts := r.actionsForConversation(orgID, conversationID)
 			if len(acts) != 1 {
 				t.Fatalf("want 1 external_action, got %d: %+v", len(acts), acts)
 			}
@@ -774,7 +774,7 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies(t *testing.T) {
 				if out.TS != replyTS {
 					t.Errorf("edit TS = %q, want %q (the message's own ts, not the root)", out.TS, replyTS)
 				}
-				arts := r.artifactsForRun(orgID, conversationID)
+				arts := r.artifactsForConversation(orgID, conversationID)
 				if len(arts) != 1 || arts[0].Target != wantTarget {
 					t.Fatalf("artifacts = %+v, want one artifact targeting %q", arts, wantTarget)
 				}
@@ -783,7 +783,7 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies(t *testing.T) {
 					t.Fatalf("react: %v", err)
 				}
 			}
-			acts := r.actionsForRun(orgID, conversationID)
+			acts := r.actionsForConversation(orgID, conversationID)
 			if len(acts) != 1 || acts[0].Target != wantTarget {
 				t.Fatalf("external_actions = %+v, want one action targeting %q", acts, wantTarget)
 			}
@@ -820,7 +820,7 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies_ChannelRootFallback(t *te
 		t.Fatalf("react: %v", err)
 	}
 	wantTarget := domain.SlackSourceID("C1", ts)
-	acts := r.actionsForRun(orgID, conversationID)
+	acts := r.actionsForConversation(orgID, conversationID)
 	if len(acts) != 1 || acts[0].Target != wantTarget {
 		t.Fatalf("external_actions = %+v, want one action targeting %q", acts, wantTarget)
 	}
@@ -859,7 +859,7 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies_NeverFollowsCursor(t *tes
 		t.Errorf("conversations.replies was called %d time(s), want exactly 1 (must not follow next_cursor)", r.fake.repliesCalls)
 	}
 	wantTarget := domain.SlackSourceID("C1", rootTS)
-	acts := r.actionsForRun(orgID, conversationID)
+	acts := r.actionsForConversation(orgID, conversationID)
 	if len(acts) != 1 || acts[0].Target != wantTarget {
 		t.Fatalf("external_actions = %+v, want one action targeting %q", acts, wantTarget)
 	}
@@ -897,14 +897,14 @@ func TestSlackExecHandler_Send_AttachFailure_StillRecordsPostedMessage(t *testin
 		t.Errorf("result = %+v, want the posted message's channel/ts even on attach failure", out)
 	}
 
-	arts := r.artifactsForRun(orgID, conversationID)
+	arts := r.artifactsForConversation(orgID, conversationID)
 	if len(arts) != 1 {
 		t.Fatalf("want 1 artifact for the message that DID post, got %d: %+v", len(arts), arts)
 	}
 	if arts[0].ExternalID != out.TS || arts[0].State != domain.ArtifactStateMessagePosted {
 		t.Errorf("artifact mismatch: %+v", arts[0])
 	}
-	acts := r.actionsForRun(orgID, conversationID)
+	acts := r.actionsForConversation(orgID, conversationID)
 	if len(acts) != 1 || acts[0].Action != domain.ActionSlackMessagePosted {
 		t.Fatalf("external_actions = %+v, want one slack_message_posted row despite the attach failure", acts)
 	}

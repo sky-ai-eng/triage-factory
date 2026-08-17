@@ -866,7 +866,7 @@ func (s *Server) routes() {
 	// Scope is role-gated: /me is any org member, /teams/{id} is team-admin OR
 	// org-admin, /org is org-admin. The team/org reads use the admin-pool
 	// ListSpendSystem (the role gate is the authorization for crossing RLS).
-	uh := &usageHandler{tx: s.tx, az: s.az, runQueue: s.allStores.ConversationQueue}
+	uh := &usageHandler{tx: s.tx, az: s.az, conversationQueue: s.allStores.ConversationQueue}
 	s.api("GET /api/usage/me", uh.handleUsageMe)
 	s.api("GET /api/usage/teams/{team_id}", uh.handleUsageTeam)
 	s.api("GET /api/usage/org", uh.handleUsageOrg)

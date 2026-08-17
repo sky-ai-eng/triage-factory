@@ -640,14 +640,14 @@ func (s *Spawner) recordNativeResult(
 	// Concluded. Record the run's memory exactly as processCompletion does —
 	// row presence means "the run terminated", NULL content means the agent
 	// wrote no usable memory file.
-	agentContent, fileState := readRunMemory(claudeCwd, priorMemory)
+	agentContent, fileState := readConversationMemory(claudeCwd, priorMemory)
 	if err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID, cfg.blueprintRunID, agentContent); err != nil {
 		delegateLog.Warn("upsert memory for run failed", "conversation", conversationID, "error", err)
 	}
 	if fileState != memoryFilePresent {
 		delegateLog.Debug("no usable memory file at termination", "conversation", conversationID, "state", fileState)
 	}
-	s.attachRunMemoryEntities(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID)
+	s.attachConversationMemoryEntities(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID)
 
 	// Snapshot before the terminal write. A `continue` hands the shared
 	// workspace to the next step and an `abort` leaves a message-resumable

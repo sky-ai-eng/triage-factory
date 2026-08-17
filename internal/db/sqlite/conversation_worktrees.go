@@ -10,7 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// runWorktreeStore is the SQLite impl of db.ConversationWorktreeStore. The
+// conversationWorktreeStore is the SQLite impl of db.ConversationWorktreeStore. The
 // constructor accepts two queryers for signature parity with the
 // Postgres impl; SQLite has one connection so the second arg is
 // discarded. ...System variants are thin wrappers around their
@@ -21,15 +21,15 @@ import (
 // (`tfac exec workspace add owner/repo`), so every method resolves the slug
 // here: a write get-or-creates the registry row, a read or a delete resolves
 // it and matches nothing when there is none.
-type runWorktreeStore struct{ q queryer }
+type conversationWorktreeStore struct{ q queryer }
 
 func newConversationWorktreeStore(q, _ queryer) db.ConversationWorktreeStore {
-	return &runWorktreeStore{q: q}
+	return &conversationWorktreeStore{q: q}
 }
 
-var _ db.ConversationWorktreeStore = (*runWorktreeStore)(nil)
+var _ db.ConversationWorktreeStore = (*conversationWorktreeStore)(nil)
 
-func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.ConversationWorktree) (bool, string, error) {
+func (s *conversationWorktreeStore) Insert(ctx context.Context, orgID string, w domain.ConversationWorktree) (bool, string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, "", err
 	}
@@ -75,7 +75,7 @@ func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.Co
 	return false, existing.Path, nil
 }
 
-func (s *runWorktreeStore) GetByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
+func (s *conversationWorktreeStore) GetByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -99,7 +99,7 @@ func (s *runWorktreeStore) GetByRepoRef(ctx context.Context, orgID, conversation
 	return &w, nil
 }
 
-func (s *runWorktreeStore) List(ctx context.Context, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
+func (s *conversationWorktreeStore) List(ctx context.Context, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -125,11 +125,11 @@ func (s *runWorktreeStore) List(ctx context.Context, orgID, conversationID strin
 	return out, rows.Err()
 }
 
-func (s *runWorktreeStore) ListSystem(ctx context.Context, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
+func (s *conversationWorktreeStore) ListSystem(ctx context.Context, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
 	return s.List(ctx, orgID, conversationID)
 }
 
-func (s *runWorktreeStore) DeleteByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) error {
+func (s *conversationWorktreeStore) DeleteByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -147,7 +147,7 @@ func (s *runWorktreeStore) DeleteByRepoRef(ctx context.Context, orgID, conversat
 	return err
 }
 
-func (s *runWorktreeStore) DeleteByPathSystem(ctx context.Context, orgID, conversationID, path string) error {
+func (s *conversationWorktreeStore) DeleteByPathSystem(ctx context.Context, orgID, conversationID, path string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -159,14 +159,14 @@ func (s *runWorktreeStore) DeleteByPathSystem(ctx context.Context, orgID, conver
 
 // --- admin-pool variants — SQLite collapses to non-System ---
 
-func (s *runWorktreeStore) InsertSystem(ctx context.Context, orgID string, w domain.ConversationWorktree) (bool, string, error) {
+func (s *conversationWorktreeStore) InsertSystem(ctx context.Context, orgID string, w domain.ConversationWorktree) (bool, string, error) {
 	return s.Insert(ctx, orgID, w)
 }
 
-func (s *runWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
+func (s *conversationWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
 	return s.GetByRepoRef(ctx, orgID, conversationID, repoID, ref)
 }
 
-func (s *runWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) error {
+func (s *conversationWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) error {
 	return s.DeleteByRepoRef(ctx, orgID, conversationID, repoID, ref)
 }

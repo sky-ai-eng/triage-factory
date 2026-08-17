@@ -29,7 +29,7 @@ func TestListWorkspaces_RunNotFound(t *testing.T) {
 // reject one), mirroring `workspace add`.
 func TestListWorkspaces_GitHubRunAllowed(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedGitHubRun(t, database, "gh-run")
+	seedGitHubConversation(t, database, "gh-run")
 	seedRepository(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
 
 	out, err := listWorkspaces(hostFor(stores, "gh-run"))
@@ -50,7 +50,7 @@ func TestListWorkspaces_GitHubRunAllowed(t *testing.T) {
 
 func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "owner", "alpha", "https://x", "main")
 	seedRepository(t, database, "owner", "beta", "https://x", "main")
 	seedRepository(t, database, "owner", "gamma", "https://x", "main")
@@ -93,7 +93,7 @@ func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 
 func TestListWorkspaces_NoConfiguredRepos(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 
 	out, err := listWorkspaces(hostFor(stores, "r1"))
 	if err != nil {
@@ -110,8 +110,8 @@ func TestListWorkspaces_NoConfiguredRepos(t *testing.T) {
 func TestListWorkspaces_ScopedToRun(t *testing.T) {
 	// Materialized worktrees from a sibling run must NOT leak into r1's list.
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
-	seedJiraRun(t, database, "r2", "SKY-2")
+	seedJiraConversation(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r2", "SKY-2")
 	seedRepository(t, database, "owner", "shared", "https://x", "main")
 
 	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
@@ -142,7 +142,7 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	// deliberately NOT exposed — too verbose for a per-call discovery
 	// surface.
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 
 	if _, err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		Owner: "owner", Repo: "alpha",

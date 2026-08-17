@@ -135,8 +135,8 @@ func (f *fakeInstanceStore) SetDraining(context.Context, string, bool) (bool, er
 	return false, nil
 }
 
-// taskIDForRun reads the task_id a seedConversation fixture's run row belongs to.
-func taskIDForRun(t *testing.T, database *sql.DB, conversationID string) string {
+// taskIDForConversation reads the task_id a seedConversation fixture's run row belongs to.
+func taskIDForConversation(t *testing.T, database *sql.DB, conversationID string) string {
 	t.Helper()
 	var taskID string
 	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, conversationID).Scan(&taskID); err != nil {
@@ -145,8 +145,8 @@ func taskIDForRun(t *testing.T, database *sql.DB, conversationID string) string 
 	return taskID
 }
 
-// entityIDForRun reads the entity_id of a seedConversation fixture's run's task.
-func entityIDForRun(t *testing.T, database *sql.DB, conversationID string) string {
+// entityIDForConversation reads the entity_id of a seedConversation fixture's run's task.
+func entityIDForConversation(t *testing.T, database *sql.DB, conversationID string) string {
 	t.Helper()
 	var entityID string
 	if err := database.QueryRow(
@@ -178,7 +178,7 @@ func seedFakeEvent(t *testing.T, database *sql.DB) string {
 // pending_firings.trigger_id's FK is satisfiable.
 func seedFakeTrigger(t *testing.T, database *sql.DB, conversationID string) string {
 	t.Helper()
-	blueprintRunID := blueprintRunIDForRun(t, database, conversationID)
+	blueprintRunID := blueprintRunIDForConversation(t, database, conversationID)
 	var blueprintID string
 	if err := database.QueryRow(`SELECT blueprint_id FROM blueprint_runs WHERE id = ?`, blueprintRunID).Scan(&blueprintID); err != nil {
 		t.Fatalf("resolve blueprint id: %v", err)
@@ -580,7 +580,7 @@ func TestApplySignal_Inject_LiveDeliversAndRecords(t *testing.T) {
 	s.SetConversationSignals(fakeSignals, nil)
 	s.registerProc(runmode.LocalDefaultOrgID, "r-owner-inj", &agentproc.LiveRun{})
 
-	taskID := taskIDForRun(t, database, "r-owner-inj")
+	taskID := taskIDForConversation(t, database, "r-owner-inj")
 	// A fake triggering event row: task_events FKs to events(id).
 	evID := seedFakeEvent(t, database)
 	if err := s.tasks.RecordEventSystem(context.Background(), runmode.LocalDefaultOrgID, taskID, evID, "bumped"); err != nil {
@@ -623,8 +623,8 @@ func TestApplySignal_Inject_GoneCompensatesWithPendingFiring(t *testing.T) {
 	s.SetConversationSignals(fakeSignals, nil)
 	// Deliberately no registerProc — the run isn't live here.
 
-	entityID := entityIDForRun(t, database, "r-owner-gone")
-	taskID := taskIDForRun(t, database, "r-owner-gone")
+	entityID := entityIDForConversation(t, database, "r-owner-gone")
+	taskID := taskIDForConversation(t, database, "r-owner-gone")
 	triggerID := seedFakeTrigger(t, database, "r-owner-gone")
 	evID := seedFakeEvent(t, database)
 

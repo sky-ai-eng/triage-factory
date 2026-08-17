@@ -45,7 +45,7 @@ type ConversationPendingInputStore interface {
 	// Peek reads the queued input for a run WITHOUT flipping it, or
 	// ok=false when none exists. It returns exactly the text Consume would
 	// — every queued row, oldest first, joined by a blank line — so the
-	// routing decision (dispatchClaimedRun) and the delivery
+	// routing decision (dispatchClaimedConversation) and the delivery
 	// (dispatchResumeClaim) cannot disagree about what is pending.
 	//
 	// Rows are flipped delivered only by Consume, called right before the

@@ -38,7 +38,7 @@ import (
 // consecutive failures with nothing ever started mean a deterministic fault,
 // and stopping there is what keeps the dispatcher from spinning one row while
 // the rest of the queue waits. What "giving up" means then is not one thing —
-// see disposeOfExhaustedRun.
+// see disposeOfExhaustedConversation.
 //
 // At the scan interval this is about ten seconds of automatic retry, which is
 // the shape of the transient infrastructure faults it exists for. A fault that
@@ -114,7 +114,7 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 // through their own paths, not the queue.
 func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	// No step-plan handling needed: a re-queued mid-flight run is re-claimed by
-	// dispatchClaimedRun, which reads the plan frozen on its blueprint_run (off
+	// dispatchClaimedConversation, which reads the plan frozen on its blueprint_run (off
 	// br.StepPlan), so the resumed step runs the same program it was minted with.
 	//
 	// Ownership-scoped (TFAC-578): this only sweeps rows this instance itself
@@ -139,7 +139,7 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	// worktree.Cleanup sweep already reclaimed the on-disk dir for non-parked
 	// runs). The atomic cancel in MarkRunStatus prevents new desyncs; this heals
 	// rows broken before that landed.
-	c, err := s.runQueue.ReconcileOrphanedRuns(ctx)
+	c, err := s.runQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil {
 		dispatchLog.Error("boot reconcile: cancel orphaned child runs failed", "error", err)
 		return
@@ -240,12 +240,12 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 				s.driveClaimedCuratorTurn(conv)
 				return
 			}
-			s.dispatchClaimedRun(ctx, conv)
+			s.dispatchClaimedConversation(ctx, conv)
 		}()
 	}
 }
 
-// dispatchClaimedRun runs one claimed blueprint step: load its context,
+// dispatchClaimedConversation runs one claimed blueprint step: load its context,
 // rehydrate the shared workspace, materialize the step skill, run the agent,
 // then hand the terminal state to the reactor. Nothing that fails before the
 // agent's first turn ends the conversation — it goes back on the queue for
@@ -261,7 +261,7 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 // or finalized to avoid stranding it, so those must not be abortable by a
 // shutdown mid-finalize (the same detached-terminal-write convention the rest of
 // the spawner follows).
-func (s *Spawner) dispatchClaimedRun(ctx context.Context, conv *domain.Conversation) {
+func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.Conversation) {
 	orgID := conv.OrgID
 	startTime := time.Now()
 
@@ -301,7 +301,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, conv *domain.Conversat
 		// run so it leaves the queue rather than re-claiming forever.
 		closeGate("blueprint_missing", err)
 		s.failEngagement(conv.ID, fmt.Errorf("load blueprint_run: %v", err))
-		s.failClaimedRun(orgID, conv, fmt.Sprintf("load blueprint_run: %v", err))
+		s.failClaimedConversation(orgID, conv, fmt.Sprintf("load blueprint_run: %v", err))
 		return
 	}
 	task, err := s.tasks.GetSystem(gateCtx, orgID, conv.TaskID)
@@ -723,7 +723,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	}
 	namespace := memoryNamespace(blueprintRunID)
 
-	// Per-run cancel handle, mirroring dispatchClaimedRun's own — a
+	// Per-run cancel handle, mirroring dispatchClaimedConversation's own — a
 	// Cancel() arriving in the narrow window before this registers falls
 	// to the DB-only path (the same pre-existing accepted race a fresh
 	// step claim has).
@@ -745,7 +745,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 
-	// Flush the queued input: routing only peeked it (dispatchClaimedRun), so
+	// Flush the queued input: routing only peeked it (dispatchClaimedConversation), so
 	// the rows are still there and the delivery has to claim them.
 	//
 	// Deliver what the flush claimed, not what routing peeked: the queue
@@ -948,7 +948,7 @@ func resumeParkContext(orgID string, conv *domain.Conversation, task *domain.Tas
 // goroutine stack. It calls recomputeTaskBoardColumn on every transition so the
 // board stays live under the queue model.
 func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *domain.BlueprintRun, stepConversation domain.Conversation, cfg runConfig, startTime time.Time) {
-	// The reactor's writes are detached on purpose (see dispatchClaimedRun's
+	// The reactor's writes are detached on purpose (see dispatchClaimedConversation's
 	// context split): the agent has run, so the blueprint MUST be advanced or
 	// finalized even if the dispatcher is shutting down. WithoutCancel is that
 	// same detachment with the caller's values kept, so the advance lands in
@@ -1234,7 +1234,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// exactly what this step needs to see.
 		cfg.prSkeleton = renderPRSkeleton(ctx, prReadClient(gh, sidecar), owner, repo, prNumber)
 		// The rehydrate's git runs through this claim's own sidecar proxy — the
-		// sandbox is already up (dispatchClaimedRun brings it up before calling
+		// sandbox is already up (dispatchClaimedConversation brings it up before calling
 		// here), so the proxy is live by the time the rebuild fetches.
 		wt, prov, err := s.ensureWorkspace(ctx, orgID, convForWS, s.gitSeedFor(ctx, orgID, owner, repo, sidecar))
 		if err != nil {
@@ -1389,7 +1389,7 @@ type engagementDisposition struct {
 // the next claim's to re-mount; false is the poison pill, and the step is over.
 func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
 	if conv.Attempts >= maxRunAttempts {
-		return s.disposeOfExhaustedRun(orgID, br, conv, cause)
+		return s.disposeOfExhaustedConversation(orgID, br, conv, cause)
 	}
 	dispatchLog.Warn("engagement failed before the agent ran, requeuing", "conversation", conv.ID, "attempt", conv.Attempts, "error", cause)
 	if err := s.runQueue.RequeueConversation(context.Background(), orgID, conv.ID, cause.Error()); err != nil {
@@ -1398,7 +1398,7 @@ func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, c
 	return true
 }
 
-// disposeOfExhaustedRun answers for a run that failed the same way
+// disposeOfExhaustedConversation answers for a run that failed the same way
 // maxRunAttempts times over. What that means depends entirely on whether
 // anything has been said yet, and the two answers are opposites.
 //
@@ -1418,7 +1418,7 @@ func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, c
 // A nil br is the resume path, which has no blueprint in scope and needs
 // none: a resume continues a conversation that has already been driven, so
 // it is the first case by construction.
-func (s *Spawner) disposeOfExhaustedRun(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
+func (s *Spawner) disposeOfExhaustedConversation(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
 	if br == nil || s.conversationHasTranscript(orgID, conv.ID) {
 		dispatchLog.Error("the runtime failed to start on every attempt; parking the conversation instead of failing it",
 			"conversation", conv.ID, "attempts", conv.Attempts, "error", cause)
@@ -1506,11 +1506,11 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversati
 	toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s could not start: %s", shortConversationID(conv.ID), truncateToastMsg(cause.Error(), 160)))
 }
 
-// failClaimedRun marks an orphaned claimed run failed (its blueprint_run
+// failClaimedConversation marks an orphaned claimed run failed (its blueprint_run
 // vanished, so there is nothing to drive). Best-effort, and fenced on this
 // claim like every other terminal an engagement writes: if the claim is gone,
 // a successor holds the run and reaches this same branch itself.
-func (s *Spawner) failClaimedRun(orgID string, conv *domain.Conversation, reason string) {
+func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversation, reason string) {
 	dispatchLog.Error("marking run failed", "conversation", conv.ID, "reason", reason)
 	_, err := s.conversations.MarkFailedIfActiveForClaimSystem(context.Background(), orgID, conv.ID, conv.ClaimID, "")
 	if errors.Is(err, db.ErrClaimReleased) {

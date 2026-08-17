@@ -14,7 +14,7 @@ import (
 // package-db CRUD tests (pending_firings, conversation_worktrees, projects, ...)
 // have an entity to FK-point to without reaching for the EntityStore
 // impl (which lives in internal/db/sqlite and would form a circular
-// import if pulled into package db). Mirrors createRunForTest in
+// import if pulled into package db). Mirrors createConversationForTest in
 // agentrun_seed_helper_test.go — see that helper's doc for the
 // rationale.
 //

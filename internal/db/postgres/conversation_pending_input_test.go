@@ -18,17 +18,17 @@ import (
 func TestRunPendingInputStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunRunPendingInputStoreConformance(t, func(t *testing.T) (db.ConversationPendingInputStore, string, string, dbtest.RunPendingInputSeeder) {
+	dbtest.RunConversationPendingInputStoreConformance(t, func(t *testing.T) (db.ConversationPendingInputStore, string, string, dbtest.ConversationPendingInputSeeder) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-		seed := dbtest.RunPendingInputSeeder{
+		seed := dbtest.ConversationPendingInputSeeder{
 			Run: func(t *testing.T, suffix string) string {
 				t.Helper()
-				return seedPgArtifactRun(t, h, orgID, teamID, userID)
+				return seedPgArtifactConversation(t, h, orgID, teamID, userID)
 			},
-			DeleteRun: func(t *testing.T, conversationID string) {
+			DeleteConversation: func(t *testing.T, conversationID string) {
 				t.Helper()
 				if _, err := h.AdminDB.Exec(`DELETE FROM conversations WHERE id = $1`, conversationID); err != nil {
 					t.Fatalf("delete run: %v", err)

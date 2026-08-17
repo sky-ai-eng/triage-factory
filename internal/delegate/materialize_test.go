@@ -151,7 +151,7 @@ func TestMaterializePriorMemories_HistoryNameCollision(t *testing.T) {
 // never be the reason a later step loses its predecessor's handoff.
 func TestBlueprintHandoff_MemorySurvivesTheFixedPathClear(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "handoff")
-	makeRunBlueprintStep(t, database, conversationID, taskID)
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 	blueprintRunID := "bpr-" + conversationID

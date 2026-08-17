@@ -232,7 +232,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(agentRunResult{Run: conv})
+		return json.Marshal(getConversationResult{Run: conv})
 
 	case opGetTask:
 		var a getTaskArgs

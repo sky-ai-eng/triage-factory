@@ -136,7 +136,7 @@ func (f stepFixture) blueprintRun(t *testing.T) *domain.BlueprintRun {
 }
 
 // claimStep runs one step's claim through buildStepConfig's later-step arm,
-// exactly as dispatchClaimedRun does, and returns the config it resolved.
+// exactly as dispatchClaimedConversation does, and returns the config it resolved.
 func (f stepFixture) claimStep(t *testing.T, br *domain.BlueprintRun, step int) runConfig {
 	t.Helper()
 	conv := domain.Conversation{ID: f.conversationIDs[step], TaskID: f.task.ID, BlueprintRunID: f.brID}

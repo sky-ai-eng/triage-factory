@@ -26,9 +26,9 @@ func TestStagedInjectionStore_SQLite(t *testing.T) {
 		seed := dbtest.StagedInjectionSeeder{
 			Run: func(t *testing.T, suffix string) string {
 				t.Helper()
-				return seedSQLiteRunForStagedInjection(t, conn, suffix)
+				return seedSQLiteConversationForStagedInjection(t, conn, suffix)
 			},
-			DeleteRun: func(t *testing.T, conversationID string) {
+			DeleteConversation: func(t *testing.T, conversationID string) {
 				t.Helper()
 				if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
 					t.Fatalf("delete run: %v", err)
@@ -54,9 +54,9 @@ func TestStagedInjectionStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	}
 }
 
-// seedSQLiteRunForStagedInjection inserts a bare run row (origin='interactive', so no
+// seedSQLiteConversationForStagedInjection inserts a bare run row (origin='interactive', so no
 // blueprint_run FK chain is required) the staged_agent_injections FK needs.
-func seedSQLiteRunForStagedInjection(t *testing.T, conn *sql.DB, suffix string) string {
+func seedSQLiteConversationForStagedInjection(t *testing.T, conn *sql.DB, suffix string) string {
 	t.Helper()
 	id := uuid.New().String()
 	if _, err := conn.Exec(

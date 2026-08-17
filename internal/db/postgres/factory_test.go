@@ -230,7 +230,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("close entity: %v", err)
 			}
 		},
-		SetRunMemory: func(t *testing.T, conversationID, entityID, content string) {
+		SetConversationMemory: func(t *testing.T, conversationID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {

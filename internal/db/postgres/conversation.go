@@ -30,7 +30,7 @@ import (
 // WHERE clause as defense in depth alongside RLS, $N placeholders, JSONB
 // extraction for tool_calls / metadata, RETURNING id for the
 // messages auto-increment (Postgres has a sequence, not AUTOINCREMENT).
-var agentRunLog = logging.Component("db/agentrun")
+var conversationLog = logging.Component("db/conversation")
 
 type conversationStore struct {
 	q     queryer
@@ -72,7 +72,7 @@ func claimOutcomeForStatus(status string) string {
 // without each other — a rolled-back outer tx leaves an in-flight
 // conversation with no active claim, a crash between the commits leaves a
 // terminal conversation with a dangling one — and both shapes are healed by
-// the claim-desync janitor arms (ConversationQueueStore.ReconcileOrphanedRuns at
+// the claim-desync janitor arms (ConversationQueueStore.ReconcileOrphanedConversations at
 // boot in both modes; the leader reaper's HealClaimDesyncs every tick), so
 // neither can strand a row past a sweep.
 func releaseActiveClaim(ctx context.Context, q queryer, orgID, conversationID, outcome string) error {
@@ -235,7 +235,7 @@ func completeConversation(ctx context.Context, q queryer, orgID, conversationID,
 	if n == 0 {
 		// No message rows at all: the spend has no ledger row to live on.
 		// Loud, so the dropped dollars are at least observable.
-		agentRunLog.Warn("run cost has no message row to settle on; spend unrecorded",
+		conversationLog.Warn("run cost has no message row to settle on; spend unrecorded",
 			"conversation_id", conversationID, "org_id", orgID, "cost_usd", costUSD)
 	}
 	return nil
@@ -324,7 +324,7 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 		    result_summary = COALESCE(NULLIF($3, ''), result_summary)
 		WHERE org_id = $4 AND id = $5
 		  AND (status IS NULL
-		       OR status NOT IN (`+runTerminalStatusesSQL+reparkGuard+`))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+reparkGuard+`))
 	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, orgID, conversationID)
 	if err != nil {
 		return false, err
@@ -647,7 +647,7 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, f
 		    failure_kind = NULLIF($2, '')
 		WHERE org_id = $3 AND id = $4
 		  AND (status IS NULL
-		       OR status NOT IN (`+runTerminalStatusesSQL+`))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 	`, time.Now().UTC(), failureKind, orgID, conversationID)
 	if err != nil {
 		return false, err
@@ -658,7 +658,7 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, f
 
 // --- Queries ---
 
-// pgRunColumns is the SELECT list scanned into a domain.Conversation
+// pgConversationColumns is the SELECT list scanned into a domain.Conversation
 // via scanConversation. Owned here on ConversationStore; sibling Postgres
 // stores that need to project a run (e.g. factoryReadStore.ActiveConversations)
 // already use their own copy because they also project task+entity
@@ -667,9 +667,9 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, f
 // non-delegation conversation may carry NULLs there; the claim-derived
 // fields (incl. duration/turns telemetry) come from the `cl` lateral and
 // the ledger-derived accounting (cost + tokens) from the `msum` lateral
-// (see runClaimLateral / runLedgerLateral). Status is the derived display
+// (see conversationClaimLateral / conversationLedgerLateral). Status is the derived display
 // ladder (pgDisplayStatusSQL) rather than the stored column.
-const pgRunColumns = `
+const pgConversationColumns = `
 	r.id, COALESCE(r.task_id::text, ''), COALESCE(r.runtime, ''), ` + pgDisplayStatusSQL + `, COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
 	msum.total_cost_usd, cl.duration_ms, cl.num_turns,
 	COALESCE(r.park_reason, ''), COALESCE(r.worktree_path, ''),
@@ -714,7 +714,7 @@ const pgDisplayStatusSQL = `COALESCE(
 		r.status,
 		'')`
 
-// runClaimLateral derives the claim-facing Conversation fields from claims:
+// conversationClaimLateral derives the claim-facing Conversation fields from claims:
 // ClaimedAt is the latest claim's claimed_at, Attempts the count of
 // engagements, ExecutorID and phase the active (unreleased) claim's, and
 // duration_ms/num_turns the SUM of the per-engagement telemetry. The
@@ -727,7 +727,7 @@ const pgDisplayStatusSQL = `COALESCE(
 // budget's current-episode counter (EpisodeAttemptsSQL, run_queue.go). Two
 // questions, one field; see domain.Conversation.Attempts before carrying
 // either one somewhere new.
-const runClaimLateral = `
+const conversationClaimLateral = `
 	LEFT JOIN LATERAL (
 		SELECT MAX(c2.claimed_at) AS claimed_at,
 		       COUNT(*)::int      AS attempts,
@@ -740,12 +740,12 @@ const runClaimLateral = `
 	) cl ON true
 `
 
-// runLedgerLateral derives the money/token accounting from the messages
+// conversationLedgerLateral derives the money/token accounting from the messages
 // ledger: total_cost_usd is the SUM of the settlement stamps (NULL until
 // anything settles — the frozen wire semantics of the former stored
 // column), the token columns the SUM over every row. Always exactly one
 // row, so a message-less conversation reads (NULL, 0, 0, 0, 0).
-const runLedgerLateral = `
+const conversationLedgerLateral = `
 	LEFT JOIN LATERAL (
 		SELECT SUM(m2.cost_usd)                            AS total_cost_usd,
 		       COALESCE(SUM(m2.input_tokens), 0)::bigint          AS input_tokens,
@@ -776,12 +776,12 @@ func (s *conversationStore) LookupOrgForConversationSystem(ctx context.Context, 
 
 func getConversation(ctx context.Context, q queryer, orgID, conversationID string) (*domain.Conversation, error) {
 	row := q.QueryRowContext(ctx, `
-		SELECT `+pgRunColumns+`
+		SELECT `+pgConversationColumns+`
 		FROM conversations r
 		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
-		`+runClaimLateral+`
-		`+runLedgerLateral+`
+		`+conversationClaimLateral+`
+		`+conversationLedgerLateral+`
 		WHERE r.org_id = $1 AND r.id = $2
 	`, orgID, conversationID)
 
@@ -797,12 +797,12 @@ func getConversation(ctx context.Context, q queryer, orgID, conversationID strin
 
 func (s *conversationStore) ListForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error) {
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT `+pgRunColumns+`
+		SELECT `+pgConversationColumns+`
 		FROM conversations r
 		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
-		`+runClaimLateral+`
-		`+runLedgerLateral+`
+		`+conversationClaimLateral+`
+		`+conversationLedgerLateral+`
 		WHERE r.org_id = $1 AND r.task_id = $2
 		ORDER BY r.started_at DESC
 	`, orgID, taskID)
@@ -843,12 +843,12 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 	// raw []string. Same projection as ListForTask; the caller groups the
 	// flat result by run.TaskID.
 	query := `
-		SELECT ` + pgRunColumns + `
+		SELECT ` + pgConversationColumns + `
 		FROM conversations r
 		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
-		` + runClaimLateral + `
-		` + runLedgerLateral + `
+		` + conversationClaimLateral + `
+		` + conversationLedgerLateral + `
 		WHERE r.org_id = $1 AND r.task_id = ANY($2)
 		ORDER BY r.task_id, r.started_at DESC, r.id`
 	args := []any{orgID, pgUUIDArray(taskIDs)}
@@ -895,7 +895,7 @@ func hasActiveAutoConversationForTask(ctx context.Context, q queryer, orgID, tas
 		  AND r.task_id = $2
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
-		       OR r.status NOT IN (`+runTerminalStatusesSQL+`))
+		       OR r.status NOT IN (`+conversationTerminalStatusesSQL+`))
 	`, orgID, taskID).Scan(&count)
 	return count > 0, err
 }
@@ -919,7 +919,7 @@ func (s *conversationStore) ActiveAutoConversationIDForTaskSystem(ctx context.Co
 		  AND r.task_id = $2
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
-		       OR r.status NOT IN (`+runTerminalStatusesSQL+`))
+		       OR r.status NOT IN (`+conversationTerminalStatusesSQL+`))
 		ORDER BY r.started_at DESC
 		LIMIT 1
 	`, orgID, taskID).Scan(&id)
@@ -934,7 +934,7 @@ func activeConversationIDsForTask(ctx context.Context, q queryer, orgID, taskID 
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND task_id = $2
 		  AND (status IS NULL
-		       OR status NOT IN (`+runTerminalStatusesSQL+`))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 	`, orgID, taskID)
 	if err != nil {
 		return nil, err
@@ -956,7 +956,7 @@ func (s *conversationStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, t
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND team_id = $2
 		  AND (status IS NULL
-		       OR status NOT IN (`+runTerminalStatusesSQL+`))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 	`, orgID, teamID)
 	if err != nil {
 		return nil, err
@@ -1035,11 +1035,11 @@ func (s *conversationStore) EntitiesWithOpenConversations(ctx context.Context, o
 // --- Transcript / messages ---
 
 func (s *conversationStore) InsertMessage(ctx context.Context, orgID string, msg *domain.Message) (int64, error) {
-	return insertRunMessage(ctx, s.q, orgID, msg)
+	return insertConversationMessage(ctx, s.q, orgID, msg)
 }
 
 func (s *conversationStore) InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error) {
-	return insertRunMessage(ctx, s.admin, orgID, msg)
+	return insertConversationMessage(ctx, s.admin, orgID, msg)
 }
 
 // InsertMessageForClaimSystem is the transcript write an engagement makes
@@ -1058,7 +1058,7 @@ func (s *conversationStore) InsertMessageForClaimSystem(ctx context.Context, org
 		}
 		msg.ClaimID = claimID
 		var err error
-		id, err = insertRunMessage(ctx, q, orgID, msg)
+		id, err = insertConversationMessage(ctx, q, orgID, msg)
 		return err
 	})
 	if err != nil {
@@ -1088,7 +1088,7 @@ func (s *conversationStore) LastAgentActivityAtSystem(ctx context.Context, orgID
 	return at, true, nil
 }
 
-// insertRunMessage attributes the row to an engagement: an explicit
+// insertConversationMessage attributes the row to an engagement: an explicit
 // non-empty msg.ClaimID always wins (the curator sink names its own
 // claim), otherwise claim_id resolves server-side to the conversation's
 // active claim. Rows written during an engagement belong to it; rows
@@ -1096,7 +1096,7 @@ func (s *conversationStore) LastAgentActivityAtSystem(ctx context.Context, orgID
 // correctly resolve NULL. A message racing its claim's release lands
 // NULL — harmless, the terminal settle's newest-row fallback still
 // reaches it.
-func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.Message) (int64, error) {
+func insertConversationMessage(ctx context.Context, q queryer, orgID string, msg *domain.Message) (int64, error) {
 	var toolCallsJSON, metadataJSON, reasoningJSON, contentBlocksJSON []byte
 
 	if len(msg.ToolCalls) > 0 {
@@ -1487,7 +1487,7 @@ func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, co
 			replyRow.ConversationID = conversationID
 			replyRow.ClaimID = claimID
 			replyRow.WindowState = domain.MessageWindowInactive
-			id, err := insertRunMessage(ctx, q, orgID, replyRow)
+			id, err := insertConversationMessage(ctx, q, orgID, replyRow)
 			if err != nil {
 				return fmt.Errorf("insert compaction reply row: %w", err)
 			}
@@ -1495,7 +1495,7 @@ func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, co
 		}
 		resultRow.ConversationID = conversationID
 		resultRow.ClaimID = claimID
-		resultID, err := insertRunMessage(ctx, q, orgID, resultRow)
+		resultID, err := insertConversationMessage(ctx, q, orgID, resultRow)
 		if err != nil {
 			return fmt.Errorf("insert compaction result row: %w", err)
 		}

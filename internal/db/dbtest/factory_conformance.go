@@ -57,7 +57,7 @@ type FactorySeeder struct {
 	// stored status and mints an active claim, exactly as a real claim
 	// would. Every other value is written to the column verbatim. Returns
 	// the run ID. Tests covering memory_missing pair this with
-	// SetRunMemory; tests covering status filtering do not.
+	// SetConversationMemory; tests covering status filtering do not.
 	Run func(t *testing.T, taskID, status string) string
 
 	// CloseEntity transitions an entity to state='closed' at the
@@ -65,16 +65,16 @@ type FactorySeeder struct {
 	// backdate closures into / out of the grace window.
 	CloseEntity func(t *testing.T, entityID string, closedAt time.Time)
 
-	// SetRunMemory upserts a conversation_memory row with the given
+	// SetConversationMemory upserts a conversation_memory row with the given
 	// agent_content. content="" inserts a literal empty string;
 	// content with whitespace exercises the BTRIM/TRIM derivation
 	// for memory_missing. To insert a row with NULL agent_content,
 	// pass a sentinel (we use "<NULL>" by convention — the seeder
 	// implementation maps it to NULL).
-	SetRunMemory func(t *testing.T, conversationID, entityID, content string)
+	SetConversationMemory func(t *testing.T, conversationID, entityID, content string)
 }
 
-// nullSentinel is the content string callers pass to SetRunMemory
+// nullSentinel is the content string callers pass to SetConversationMemory
 // when they want agent_content stored as SQL NULL rather than as the
 // empty string. The seeder impls translate this sentinel back to a
 // NULL bind.
@@ -221,7 +221,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		}
 	})
 
-	t.Run("ActiveRuns_FiltersByStatusAndDerivesMemoryMissing", func(t *testing.T) {
+	t.Run("ActiveConversations_FiltersByStatusAndDerivesMemoryMissing", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		ctx := context.Background()
 		now := time.Now().UTC()
@@ -237,10 +237,10 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		conversationPopulated := seed.Run(t, taskID, "running")
 		conversationTerminal := seed.Run(t, taskID, "completed") // must NOT appear
 
-		seed.SetRunMemory(t, conversationNullContent, ent, nullSentinel)
-		seed.SetRunMemory(t, conversationEmptyContent, ent, "")
-		seed.SetRunMemory(t, conversationWhitespace, ent, "  \t\n ")
-		seed.SetRunMemory(t, conversationPopulated, ent, "agent wrote real reasoning")
+		seed.SetConversationMemory(t, conversationNullContent, ent, nullSentinel)
+		seed.SetConversationMemory(t, conversationEmptyContent, ent, "")
+		seed.SetConversationMemory(t, conversationWhitespace, ent, "  \t\n ")
+		seed.SetConversationMemory(t, conversationPopulated, ent, "agent wrote real reasoning")
 
 		convs, err := store.ActiveConversations(ctx, orgID)
 		if err != nil {
@@ -250,8 +250,8 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		gotMem := map[string]bool{}
 		gotIDs := map[string]bool{}
 		for _, fr := range convs {
-			gotIDs[fr.Run.ID] = true
-			gotMem[fr.Run.ID] = fr.Run.MemoryMissing
+			gotIDs[fr.Conversation.ID] = true
+			gotMem[fr.Conversation.ID] = fr.Conversation.MemoryMissing
 		}
 
 		if gotIDs[conversationTerminal] {
@@ -445,7 +445,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 	})
 }
 
-// NullMemorySentinel exposes the SetRunMemory convention to backend
+// NullMemorySentinel exposes the SetConversationMemory convention to backend
 // test files so their seeder implementations can recognize the
 // "store NULL not empty string" intent.
 const NullMemorySentinel = nullSentinel

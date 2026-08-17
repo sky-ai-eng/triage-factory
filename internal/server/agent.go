@@ -98,7 +98,7 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 				stepCount = lens[conv.BlueprintRunID]
 			}
 		}
-		resp = runResponse(conv, counts[conv.ID], arts, stepCount)
+		resp = conversationResponse(conv, counts[conv.ID], arts, stepCount)
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -312,10 +312,10 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, out)
 }
 
-// runActionListRequest is the body of
+// conversationActionListRequest is the body of
 // POST /api/agent/conversations/{conversationID}/actions/list. The run is the
 // path id and the read has no filters of its own, so the body is paging alone.
-type runActionListRequest struct {
+type conversationActionListRequest struct {
 	httpx.PageRequest
 }
 
@@ -351,7 +351,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var req runActionListRequest
+	var req conversationActionListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
@@ -394,7 +394,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 	httpx.WriteList(w, page, out, total)
 }
 
-// runResponse projects a Conversation into the wire shape the frontend consumes,
+// conversationResponse projects a Conversation into the wire shape the frontend consumes,
 // augmented with `artifact_count` (so the Board card can show how many artifacts
 // a run produced without a per-card fetch) and the derived approval signal:
 // `has_unresolved_artifacts` (bool), `unresolved_pr_count` /
@@ -434,7 +434,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // OMITTED rather than reported as a misleading false, so a transient DB/RLS hiccup
 // can't hide approval-required work; the client treats their absence as "unknown"
 // and re-derives on the next refresh.
-func runResponse(conv *domain.Conversation, artifactCount int, arts []domain.Artifact, stepCount int) map[string]any {
+func conversationResponse(conv *domain.Conversation, artifactCount int, arts []domain.Artifact, stepCount int) map[string]any {
 	out := map[string]any{
 		"ID":            conv.ID,
 		"TaskID":        conv.TaskID,
@@ -648,7 +648,7 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := spawner.Stop(orgID, conversationID, userID); err != nil {
-		if errors.Is(err, delegate.ErrNoActiveRun) {
+		if errors.Is(err, delegate.ErrNoActiveConversation) {
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason:  httpx.ReasonAlreadyTerminal,
 				Message: "this conversation has already concluded; there is nothing to stop",
@@ -737,8 +737,8 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		// A run deleted between the visibility read above and the routing read
 		// is a 404 like any other absent run — same body as the gate's own 404,
 		// not a 409 that would send the client re-reading state that no longer
-		// exists. Mirrors handleAgentStop's ErrNoActiveRun mapping.
-		if errors.Is(err, delegate.ErrRunNotFound) {
+		// exists. Mirrors handleAgentStop's ErrNoActiveConversation mapping.
+		if errors.Is(err, delegate.ErrConversationNotFound) {
 			notFound(w, "run")
 			return
 		}
@@ -761,8 +761,8 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 // steerErrorStatus maps a SendMessage error to an HTTP status. A
 // run that can't take the op right now — no live process (ErrNoLiveProcess),
-// not steerable (ErrRunNotSteerable), or moved out of a resumable state
-// (ErrRunNotResumable) — is 409 Conflict so the client refreshes and re-reads
+// not steerable (ErrConversationNotSteerable), or moved out of a resumable state
+// (ErrConversationNotResumable) — is 409 Conflict so the client refreshes and re-reads
 // the run's state. Two wakes racing is NOT among them: the loser's message is
 // queued alongside the winner's and delivered by the winner's claim, so it
 // returns nil and the client is told "sent", which is what happened. A wake
@@ -796,8 +796,8 @@ func steerErrorStatus(err error) (int, string) {
 	case errors.Is(err, delegate.ErrConversationConcluded):
 		return http.StatusConflict, httpx.ReasonAlreadyTerminal
 	case errors.Is(err, delegate.ErrNoLiveProcess),
-		errors.Is(err, delegate.ErrRunNotSteerable),
-		errors.Is(err, delegate.ErrRunNotResumable),
+		errors.Is(err, delegate.ErrConversationNotSteerable),
+		errors.Is(err, delegate.ErrConversationNotResumable),
 		errors.Is(err, delegate.ErrStepHandedOff):
 		return http.StatusConflict, httpx.ReasonConflict
 	default:
@@ -993,7 +993,7 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 	}
 	out := make([]map[string]any, len(convs))
 	for i := range convs {
-		out[i] = runResponse(&convs[i], counts[convs[i].ID], artsByConv[convs[i].ID], stepCounts[convs[i].BlueprintRunID])
+		out[i] = conversationResponse(&convs[i], counts[convs[i].ID], artsByConv[convs[i].ID], stepCounts[convs[i].BlueprintRunID])
 	}
 	return out, nil
 }
@@ -1132,13 +1132,13 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		internalError(w, "agent", err)
 		return
 	}
-	resp.NextPageToken = httpx.NextPageToken(page, len(flattenRunGroups(resp.Runs)), resp.TotalCount)
+	resp.NextPageToken = httpx.NextPageToken(page, len(flattenConversationGroups(resp.Runs)), resp.TotalCount)
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// flattenRunGroups counts the rows a grouped page carries, so the next-token
+// flattenConversationGroups counts the rows a grouped page carries, so the next-token
 // arithmetic sees the same number a flat `items` array would have.
-func flattenRunGroups(groups map[string][]map[string]any) []map[string]any {
+func flattenConversationGroups(groups map[string][]map[string]any) []map[string]any {
 	var out []map[string]any
 	for _, rows := range groups {
 		out = append(out, rows...)

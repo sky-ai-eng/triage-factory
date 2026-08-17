@@ -125,7 +125,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 // Decoupled-lifecycle invariant (TFAC-379): teardown NEVER flips
 // conversations.status — the completed run stays completed. The live-run
 // cancellation that the old park model folded in here is now the spawner's
-// job (only a still-running run is cancelled, by swipeTeardownRuns), so a
+// job (only a still-running run is cancelled, by swipeTeardownConversations), so a
 // terminal run is left untouched.
 func assertPendingApprovalCleanedUp(
 	t *testing.T,

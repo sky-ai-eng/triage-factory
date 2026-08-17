@@ -11,9 +11,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// childRunStatusDB reads a single conversations row's STORED status, with
+// childConversationStatusDB reads a single conversations row's STORED status, with
 // SQL NULL (the mid-flight state) as "".
-func childRunStatusDB(t *testing.T, conn *sql.DB, id string) string {
+func childConversationStatusDB(t *testing.T, conn *sql.DB, id string) string {
 	t.Helper()
 	var s sql.NullString
 	if err := conn.QueryRow(`SELECT status FROM conversations WHERE id = ?`, id).Scan(&s); err != nil {
@@ -72,7 +72,7 @@ func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
 		t.Fatal("MarkRunStatus reported no change")
 	}
 
-	if got := childRunStatusDB(t, conn, "oa-child"); got != "open" {
+	if got := childConversationStatusDB(t, conn, "oa-child"); got != "open" {
 		t.Errorf("child run status = %q, want open (must not strand a child under a terminal parent)", got)
 	}
 	var parkedAt any
@@ -128,7 +128,7 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 		t.Fatalf("MarkRunStatus: %v", err)
 	}
 
-	if got := childRunStatusDB(t, conn, "of-child"); got != "completed" {
+	if got := childConversationStatusDB(t, conn, "of-child"); got != "completed" {
 		t.Errorf("child run status = %q, want completed (a terminal child must not be re-cancelled)", got)
 	}
 	var outcome string
@@ -228,17 +228,17 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 		t.Fatalf("seed rb-child claim: %v", err)
 	}
 
-	n, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx)
+	n, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil {
-		t.Fatalf("ReconcileOrphanedRuns: %v", err)
+		t.Fatalf("ReconcileOrphanedConversations: %v", err)
 	}
 	if n != 2 {
 		t.Errorf("reconciled count = %d, want 2 (both mid-flight orphans under the terminal parent)", n)
 	}
-	if got := childRunStatusDB(t, conn, "ra-child"); got != "open" {
+	if got := childConversationStatusDB(t, conn, "ra-child"); got != "open" {
 		t.Errorf("orphan child status = %q, want open", got)
 	}
-	if got := childRunStatusDB(t, conn, "ra-child-queued"); got != "open" {
+	if got := childConversationStatusDB(t, conn, "ra-child-queued"); got != "open" {
 		t.Errorf("unclaimed orphan child status = %q, want open", got)
 	}
 	// The running orphan's streamed tokens still read through the ledger —
@@ -256,13 +256,13 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 			t.Errorf("orphan child ledger tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
 		}
 	}
-	if got := childRunStatusDB(t, conn, "rb-child"); got != "" {
+	if got := childConversationStatusDB(t, conn, "rb-child"); got != "" {
 		t.Errorf("healthy child status = %q, want none (must not touch mid-flight children under a running parent)", got)
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
-		t.Errorf("second ReconcileOrphanedRuns = (%d, %v), want (0, nil)", n2, err)
+	if n2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
+		t.Errorf("second ReconcileOrphanedConversations = (%d, %v), want (0, nil)", n2, err)
 	}
 }
 
@@ -328,9 +328,9 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	activeClaim("ds-healthy-cl", "ds-healthy")
 	seedChild("ds-queued", "")
 
-	n, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx)
+	n, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil {
-		t.Fatalf("ReconcileOrphanedRuns: %v", err)
+		t.Fatalf("ReconcileOrphanedConversations: %v", err)
 	}
 	if n != 2 {
 		t.Errorf("healed count = %d, want 2 (two released claims)", n)
@@ -350,21 +350,21 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	if rel, out := claimState("ds-failed-cl"); !rel || out != "failed" {
 		t.Errorf("failed row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
 	}
-	if got := childRunStatusDB(t, conn, "ds-stranded"); got != "" {
+	if got := childConversationStatusDB(t, conn, "ds-stranded"); got != "" {
 		t.Errorf("mid-flight claimless row status = %q, want no stored status (already claimable)", got)
 	}
 	if rel, _ := claimState("ds-healthy-cl"); rel {
 		t.Error("healthy engaged row's live claim was released")
 	}
-	if got := childRunStatusDB(t, conn, "ds-healthy"); got != "" {
+	if got := childConversationStatusDB(t, conn, "ds-healthy"); got != "" {
 		t.Errorf("healthy engaged row status = %q, want no stored status", got)
 	}
-	if got := childRunStatusDB(t, conn, "ds-queued"); got != "" {
+	if got := childConversationStatusDB(t, conn, "ds-queued"); got != "" {
 		t.Errorf("claimless row status = %q, want no stored status (already claimable, nothing to heal)", got)
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
+	if n2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
 		t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
 	}
 }
@@ -447,8 +447,8 @@ func TestReconcileOrphanedRuns_MintCrashStampMatchesMarkRunStatus(t *testing.T) 
 	if _, err := conn.Exec(`UPDATE blueprint_runs SET started_at = datetime('now', '-1 hour') WHERE id = ?`, swept); err != nil {
 		t.Fatalf("backdate started_at: %v", err)
 	}
-	if _, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx); err != nil {
-		t.Fatalf("ReconcileOrphanedRuns: %v", err)
+	if _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil {
+		t.Fatalf("ReconcileOrphanedConversations: %v", err)
 	}
 	if got, _, _ := blueprintRunStatusDB(t, conn, swept); got != string(domain.BlueprintRunStatusFailed) {
 		t.Fatalf("swept run status = %q, want failed (fixture didn't reach the arm)", got)

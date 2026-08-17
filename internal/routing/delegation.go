@@ -693,7 +693,7 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				// TODO(TFAC-840): this teardown never fires. StopAndCancelBlueprint
 				// resolves its id against conversations, and what Delegate returned
 				// is the blueprint_run — so the call always comes back
-				// ErrNoActiveRun and the spawned run keeps executing while its task
+				// ErrNoActiveConversation and the spawned run keeps executing while its task
 				// reverts to queued.
 				if r.spawner != nil {
 					if cerr := r.spawner.StopAndCancelBlueprint(orgID, blueprintRunID, "", delegate.StopCauseFiringReverted); cerr != nil {

@@ -34,7 +34,7 @@ func newConversationQueueStore(conn *sql.DB) db.ConversationQueueStore {
 
 var _ db.ConversationQueueStore = (*conversationQueueStore)(nil)
 
-// runTerminalStatusesSQL is the terminal conversation statuses as a SQL
+// conversationTerminalStatusesSQL is the terminal conversation statuses as a SQL
 // IN-list body — two names, one owner each: the agent concluded, or the
 // infrastructure died. It describes stored rows as faithfully as new writes,
 // because every retired status was rewritten by migration rather than carried
@@ -47,7 +47,7 @@ var _ db.ConversationQueueStore = (*conversationQueueStore)(nil)
 // doesn't fail closed — it readmits a finished run to parking, cancelling, or
 // the active-work counters. Sixteen hand-copied copies is how the set drifted
 // a value at a time.
-const runTerminalStatusesSQL = `'completed','failed'`
+const conversationTerminalStatusesSQL = `'completed','failed'`
 
 // EnqueueConversation mints a delegation conversation with NO status — the absence of
 // an outcome is what makes it claimable, so the mint writes nothing to the
@@ -249,10 +249,10 @@ const curatorTurnMessageSQL = `(SELECT MIN(m_t.id) FROM messages m_t
 		WHERE m_t.conversation_id = r.id AND m_t.delivered = false
 		  AND m_t.role = 'user' AND m_t.subtype = '' AND m_t.window_state = 'active')`
 
-// runQueueClaimSelect is the candidate CTE's projection — everything the
+// conversationQueueClaimSelect is the candidate CTE's projection — everything the
 // dispatcher needs to branch on and drive the claimed conversation,
 // including the type and (curator) the queued turn the claim is minted to.
-const runQueueClaimSelect = `r.id, r.org_id,
+const conversationQueueClaimSelect = `r.id, r.org_id,
 	COALESCE(r.type, '')                  AS type,
 	COALESCE(r.task_id::text, '')         AS task_id,
 	COALESCE(r.prompt_id, '')             AS prompt_id,
@@ -332,14 +332,14 @@ func EpisodeAttemptsSQL(convAlias string) string {
 	        AND c3.claimed_at >= COALESCE(c2.released_at, c2.claimed_at)))::int`
 }
 
-// runQueueClaimReturning is the outer-SELECT projection of ClaimNextConversation. The
+// conversationQueueClaimReturning is the outer-SELECT projection of ClaimNextConversation. The
 // claim identity (executor/claim id/claimed_at/attempts) rides the same
 // statement: the id + claimed_at come from the freshly inserted claims row,
 // attempts from the current queue episode (see EpisodeAttemptsSQL). The
 // claim id is returned because the executor needs to name this engagement
 // later — at teardown, once it has been released and can no longer be found
 // by looking for the conversation's active claim.
-var runQueueClaimReturning = `candidate.id::text, candidate.org_id::text, candidate.type, candidate.task_id, candidate.prompt_id,
+var conversationQueueClaimReturning = `candidate.id::text, candidate.org_id::text, candidate.type, candidate.task_id, candidate.prompt_id,
 	candidate.model, candidate.runtime, candidate.worktree_path, candidate.sdk_session_id,
 	candidate.trigger_type, candidate.trigger_id, candidate.creator_user_id,
 	candidate.team_id, candidate.project_id,
@@ -434,7 +434,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			GROUP BY org_id
 		),
 		candidate AS (
-			SELECT ` + runQueueClaimSelect + `
+			SELECT ` + conversationQueueClaimSelect + `
 			FROM conversations r
 			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 			LEFT JOIN org_active oa ON oa.org_id = r.org_id
@@ -464,7 +464,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			SELECT candidate.org_id, candidate.id, $1, $2::bigint, now(), candidate.turn_message_id FROM candidate
 			RETURNING claims.id, claims.conversation_id, claims.claimed_at
 		)
-		SELECT ` + runQueueClaimReturning + `
+		SELECT ` + conversationQueueClaimReturning + `
 		FROM candidate JOIN minted ON minted.conversation_id = candidate.id
 	`
 	// A concurrent claimer that read its snapshot before our claim committed
@@ -737,8 +737,8 @@ func (s *conversationQueueStore) FleetQueueShares(ctx context.Context) ([]db.Org
 	return scanOrgQueueShares(rows)
 }
 
-func (s *conversationQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) {
-	// Boot self-heal — see ConversationQueueStore.ReconcileOrphanedRuns and the
+func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Context) (int, error) {
+	// Boot self-heal — see ConversationQueueStore.ReconcileOrphanedConversations and the
 	// SQLite mirror. Admin pool (BYPASSRLS): a cross-org system sweep with no
 	// per-user identity, the same posture as ResetProcessingConversations.
 	//
@@ -826,7 +826,7 @@ func healClaimDesyncs(ctx context.Context, q queryer) (released int, err error) 
 		    END
 		FROM conversations c
 		WHERE claims.conversation_id = c.id AND claims.released_at IS NULL
-		  AND c.status IN (`+runTerminalStatusesSQL+`)
+		  AND c.status IN (`+conversationTerminalStatusesSQL+`)
 	`)
 	if err != nil {
 		return 0, err
@@ -906,11 +906,11 @@ func (s *conversationQueueStore) CountQueuedSystem(ctx context.Context) (int, er
 	return n, nil
 }
 
-// runTimingClaimLateral derives the timing projection's claim fields — the
+// conversationTimingClaimLateral derives the timing projection's claim fields — the
 // LATEST claim's executor + claimed_at (the engagement that most recently
 // drove the conversation, released or not), whether one is still live, plus
 // the SUM of the per-engagement duration telemetry.
-const runTimingClaimLateral = `
+const conversationTimingClaimLateral = `
 	LEFT JOIN LATERAL (
 		SELECT MAX(c2.claimed_at) AS claimed_at,
 		       (ARRAY_AGG(c2.executor_id ORDER BY c2.claimed_at DESC))[1] AS executor_id,
@@ -920,21 +920,21 @@ const runTimingClaimLateral = `
 		WHERE c2.conversation_id = r.id
 	) cl ON true`
 
-// runTimingStatusSQL is the timing projection's status: the stored outcome
+// conversationTimingStatusSQL is the timing projection's status: the stored outcome
 // when there is one, else the derived in-flight state. The percentile read
 // buckets by failure kind, so a mid-flight row must still name itself
 // rather than scan as NULL.
-const runTimingStatusSQL = `COALESCE(r.status, CASE WHEN cl.has_active THEN 'running' ELSE 'queued' END)`
+const conversationTimingStatusSQL = `COALESCE(r.status, CASE WHEN cl.has_active THEN 'running' ELSE 'queued' END)`
 
 func (s *conversationQueueStore) RecentConversationTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.ConversationTiming, error) {
 	if limit <= 0 {
 		limit = 5000
 	}
 	rows, err := s.conn.QueryContext(ctx, `
-		SELECT r.org_id::text, COALESCE(cl.executor_id, ''), `+runTimingStatusSQL+`, COALESCE(r.failure_kind, ''),
+		SELECT r.org_id::text, COALESCE(cl.executor_id, ''), `+conversationTimingStatusSQL+`, COALESCE(r.failure_kind, ''),
 		       r.started_at, cl.claimed_at, r.completed_at, cl.duration_ms
 		FROM conversations r
-		`+runTimingClaimLateral+`
+		`+conversationTimingClaimLateral+`
 		WHERE r.type = 'delegation' AND r.started_at >= $1
 		ORDER BY r.started_at DESC
 		LIMIT $2
@@ -984,10 +984,10 @@ func (s *conversationQueueStore) RecentConversationTimingsForOrgSystem(ctx conte
 	if limit <= 0 {
 		limit = 5000
 	}
-	q := `SELECT r.org_id::text, COALESCE(cl.executor_id, ''), ` + runTimingStatusSQL + `, COALESCE(r.failure_kind, ''),
+	q := `SELECT r.org_id::text, COALESCE(cl.executor_id, ''), ` + conversationTimingStatusSQL + `, COALESCE(r.failure_kind, ''),
 	             r.started_at, cl.claimed_at, r.completed_at, cl.duration_ms
 	      FROM conversations r
-	      ` + runTimingClaimLateral + `
+	      ` + conversationTimingClaimLateral + `
 	      WHERE r.type = 'delegation' AND r.org_id = $1 AND r.started_at >= $2`
 	args := []any{orgID, since.UTC()}
 	if !until.IsZero() {

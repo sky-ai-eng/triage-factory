@@ -10,7 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedBlueprintRunForRun mints a blueprint + blueprint_run pointed at the
+// seedBlueprintRunForConversation mints a blueprint + blueprint_run pointed at the
 // given task so a `conversations` row can reference blueprint_runs(id). The
 // column is nullable, but the conversations_origin_requires_parents CHECK
 // requires it (plus task_id/prompt_id) to be set when origin='blueprint'
@@ -20,7 +20,7 @@ import (
 // Shared across the package-sqlite CRUD test files (factory, prompts,
 // conversation_worktrees, task_memory) whose `conversations` fixtures are
 // not the system under test — they just need a valid FK target.
-func seedBlueprintRunForRun(t *testing.T, conn *sql.DB, taskID string) string {
+func seedBlueprintRunForConversation(t *testing.T, conn *sql.DB, taskID string) string {
 	t.Helper()
 	blueprintID := "bp_" + uuid.New().String()
 	if _, err := conn.Exec(`

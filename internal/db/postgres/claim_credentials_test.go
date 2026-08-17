@@ -30,7 +30,7 @@ func TestRunCredentialsStore_Postgres_PutGet(t *testing.T) {
 	h.Reset(t)
 	ctx := context.Background()
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	conversationID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	// No active claim yet: Put is a silent no-op and Get finds nothing —
@@ -79,7 +79,7 @@ func TestRunCredentialsStore_Postgres_PutNeverRegressesBootEpoch(t *testing.T) {
 	h.Reset(t)
 	ctx := context.Background()
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	conversationID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 	seedPgActiveClaim(t, h, orgID, conversationID, "executor-b", 2)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 

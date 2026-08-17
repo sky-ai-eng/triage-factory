@@ -114,7 +114,7 @@ func TestTaskStore_CloseWithRunCancelIntent_SQLite(t *testing.T) {
 }
 
 // seedSQLiteBlueprintRun mints a blueprint + blueprint_run on the task in the
-// named status. seedBlueprintRunForRun (the shared FK-target fixture) always
+// named status. seedBlueprintRunForConversation (the shared FK-target fixture) always
 // writes 'running'; this suite needs a finished one too, since "a blueprint
 // that already ended is never stamped" is half of what it asserts.
 func seedSQLiteBlueprintRun(t *testing.T, conn *sql.DB, taskID, status string) string {

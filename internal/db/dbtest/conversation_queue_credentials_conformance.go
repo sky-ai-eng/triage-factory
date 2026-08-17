@@ -8,17 +8,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// RunQueueCredentialsFactory is what a per-backend test file hands to
-// RunRunQueueCredentialsConformance. Returns:
+// ClaimCredentialsFactory is what a per-backend test file hands to
+// RunClaimCredentialsConformance. Returns:
 //   - the wired ConversationQueueStore impl,
 //   - the orgID to pass to every call,
-//   - a RunQueueCredentialsSeeder the harness uses to stage fixture rows.
-type RunQueueCredentialsFactory func(t *testing.T) (store db.ConversationQueueStore, orgID string, seed RunQueueCredentialsSeeder)
+//   - a ClaimCredentialsSeeder the harness uses to stage fixture rows.
+type ClaimCredentialsFactory func(t *testing.T) (store db.ConversationQueueStore, orgID string, seed ClaimCredentialsSeeder)
 
-// RunQueueCredentialsSeeder is a bag of callbacks the conformance suite uses
+// ClaimCredentialsSeeder is a bag of callbacks the conformance suite uses
 // to stage and observe states the store's own guarded flips can't produce
 // on demand.
-type RunQueueCredentialsSeeder struct {
+type ClaimCredentialsSeeder struct {
 	// EnqueueConversation stages one claimable queued run (under a running
 	// blueprint_run) and returns its id.
 	EnqueueConversation func(t *testing.T) (conversationID string)
@@ -38,7 +38,7 @@ type RunQueueCredentialsSeeder struct {
 	SetActivePhase func(t *testing.T, conversationID, phase string)
 }
 
-// RunRunQueueCredentialsConformance covers the per-run credential-pubkey
+// RunClaimCredentialsConformance covers the per-run credential-pubkey
 // contract every backend impl must hold: MarkAwaitingCredentials parks the
 // ACTIVE claim (phase='awaiting_credentials') with the sidecar pubkey in one
 // write while the conversation row stays 'running', GetClaim / the sweep
@@ -47,7 +47,7 @@ type RunQueueCredentialsSeeder struct {
 // and every path that releases a claim clears the key with the rest of the
 // ownership stamp — a claimless row has no owner and no key, so the brain
 // can never seal a fresh claim's bundle to a stale sidecar.
-func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFactory) {
+func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 	t.Helper()
 	ctx := context.Background()
 

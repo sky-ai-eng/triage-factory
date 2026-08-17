@@ -107,10 +107,10 @@ type ConversationSeeder struct {
 	// assertions.
 	StampAgentClaim func(t *testing.T, taskID, agentID string)
 
-	// SetRunMemory upserts a conversation_memory row with the given
+	// SetConversationMemory upserts a conversation_memory row with the given
 	// agent_content. content="" inserts an empty string;
 	// NullMemorySentinel inserts SQL NULL.
-	SetRunMemory func(t *testing.T, conversationID, entityID, content string)
+	SetConversationMemory func(t *testing.T, conversationID, entityID, content string)
 
 	// SeedRawMessage inserts a messages row with rawJSON written
 	// directly into the given column ("reasoning" or "content_blocks"),
@@ -921,7 +921,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// The CAS loser: a second flip on the now-queued row finds no
 		// resumable state and refuses — this is the guard that makes two
 		// concurrent wakes resolve to exactly one requeue
-		// (the loser surfaces ErrRunNotResumable at the delegate layer).
+		// (the loser surfaces ErrConversationNotResumable at the delegate layer).
 		if ok, _ := store.MarkQueuedForResume(ctx, orgID, conversationID); ok {
 			t.Errorf("second flip on a queued row succeeded; want refused (CAS loser)")
 		}
@@ -1178,7 +1178,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		bpr := seed.BlueprintRun(t, taskID)
 		mkStep := func() string {
 			return seed.Run(t, domain.Conversation{
-				TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running",
+				TaskID: taskID, PromptID: conversationTestPrompt(t), Status: "running",
 				Model: "m", BlueprintRunID: bpr,
 			})
 		}
@@ -2151,12 +2151,12 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 		manualID := seed.Run(t, domain.Conversation{
-			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "manual",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})
 		eventID := seed.Run(t, domain.Conversation{
-			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})
@@ -2294,7 +2294,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Add an active event-trigger run on the same task — gate flips true.
 		eventConversationID := seed.Run(t, domain.Conversation{
-			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})
@@ -2346,7 +2346,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Active event-trigger run → resolves to its run ID.
 		eventBR := seed.BlueprintRun(t, taskID)
 		eventConversationID := seed.Run(t, domain.Conversation{
-			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: eventBR,
 		})
@@ -2423,7 +2423,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			seed.Event(t, seed.Entity(t, "parked-orphan-ev"), domain.EventGitHubPROpened))
 		orphanBR := seed.BlueprintRun(t, orphanTaskID)
 		orphan := seed.Run(t, domain.Conversation{
-			TaskID: orphanTaskID, PromptID: agentRunTestPrompt(t), Status: "open", Model: "m",
+			TaskID: orphanTaskID, PromptID: conversationTestPrompt(t), Status: "open", Model: "m",
 			BlueprintRunID: orphanBR,
 		})
 		if err := store.SetWorktreePath(ctx, orgID, orphan, "/tmp/triagefactory-runs/orphan"); err != nil {
@@ -2456,7 +2456,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("EntitiesWithOpenRuns_EmptyInputFastPath", func(t *testing.T) {
+	t.Run("EntitiesWithOpenConversations_EmptyInputFastPath", func(t *testing.T) {
 		store, orgID, _, _ := mk(t)
 		got, err := store.EntitiesWithOpenConversations(context.Background(), orgID, nil)
 		if err != nil {
@@ -2474,7 +2474,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("EntitiesWithOpenRuns_FiltersByStatus", func(t *testing.T) {
+	t.Run("EntitiesWithOpenConversations_FiltersByStatus", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		entA := seed.Entity(t, "ewa-a")
@@ -3326,7 +3326,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("MessagesForRuns_BatchedAcrossRuns", func(t *testing.T) {
+	t.Run("MessagesForConversations_BatchedAcrossConversations", func(t *testing.T) {
 		// The batched twin of Messages: one query returns every message
 		// for many runs, grouped by ConversationID with each run's messages still
 		// in insertion (id ASC) order. Empty input is a no-op. Backs the
@@ -3473,11 +3473,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// mints a fresh blueprint_run per call, so we reuse brID directly
 		// to stage the multi-step shape the footer aggregates over.)
 		step1 := seed.Run(t, domain.Conversation{
-			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
 		step2 := seed.Run(t, domain.Conversation{
-			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
 		// Each step streams a row and settles its cost lump on it — the
@@ -3526,7 +3526,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// never-completed step and re-query for step2 — the settled total
 		// is unchanged (step1's 0.01 only).
 		_ = seed.Run(t, domain.Conversation{
-			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
 		sib, err = store.BlueprintSiblingCostUSDSystem(ctx, orgID, brID, step2)
@@ -3550,11 +3550,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// on the claim Complete releases, so each step goes live (minting a
 		// claim) before it completes.
 		step1 := seed.Run(t, domain.Conversation{
-			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
 		step2 := seed.Run(t, domain.Conversation{
-			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
 		settle := func(stepID string, durationMs int) {
@@ -3596,7 +3596,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// An unsettled sibling (seeded, never claimed nor completed → no
 		// claim telemetry) contributes 0: SUM skips it, COALESCE floors at 0.
 		_ = seed.Run(t, domain.Conversation{
-			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
 		ms, err = store.BlueprintSiblingDurationMsSystem(ctx, orgID, brID, step2)
@@ -3622,10 +3622,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		conversationEmpty := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
 		conversationWhitespace := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
 		conversationPopulated := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		seed.SetRunMemory(t, conversationNullContent, ent, NullMemorySentinel)
-		seed.SetRunMemory(t, conversationEmpty, ent, "")
-		seed.SetRunMemory(t, conversationWhitespace, ent, "  \t\n ")
-		seed.SetRunMemory(t, conversationPopulated, ent, "real reasoning text")
+		seed.SetConversationMemory(t, conversationNullContent, ent, NullMemorySentinel)
+		seed.SetConversationMemory(t, conversationEmpty, ent, "")
+		seed.SetConversationMemory(t, conversationWhitespace, ent, "  \t\n ")
+		seed.SetConversationMemory(t, conversationPopulated, ent, "real reasoning text")
 
 		want := map[string]bool{
 			conversationNoRow:       true,
@@ -3681,7 +3681,7 @@ func seedConversationWithBlueprintForTest(t *testing.T, orgID string, seed Conve
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 	brID := seed.BlueprintRun(t, taskID)
 	return seed.Run(t, domain.Conversation{
-		TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: status, Model: "m",
+		TaskID: taskID, PromptID: conversationTestPrompt(t), Status: status, Model: "m",
 		BlueprintRunID: brID,
 	}), brID
 }
@@ -3694,16 +3694,16 @@ func seedConversationForTaskTest(t *testing.T, orgID, taskID, status string, see
 	t.Helper()
 	_ = orgID
 	return seed.Run(t, domain.Conversation{
-		TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: status, Model: "m",
+		TaskID: taskID, PromptID: conversationTestPrompt(t), Status: status, Model: "m",
 		BlueprintRunID: seed.BlueprintRun(t, taskID),
 	})
 }
 
-// agentRunTestPromptID is the prompt-row id the backend test files
+// conversationTestPromptID is the prompt-row id the backend test files
 // seed once per test factory call. Conformance subtests reference
 // it by this constant when creating runs; the seeder doesn't surface
 // it as a field because every call uses the same value within one
 // subtest.
-const agentRunTestPromptID = "p_agentrun_test"
+const conversationTestPromptID = "p_agentrun_test"
 
-func agentRunTestPrompt(_ *testing.T) string { return agentRunTestPromptID }
+func conversationTestPrompt(_ *testing.T) string { return conversationTestPromptID }

@@ -453,7 +453,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err != nil {
 			return nil, err
 		}
-		return agentRunResult{Run: conv}, nil
+		return getConversationResult{Run: conv}, nil
 
 	case methodGetTask:
 		var a getTaskArgs

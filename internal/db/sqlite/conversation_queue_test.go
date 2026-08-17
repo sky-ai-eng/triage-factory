@@ -533,7 +533,7 @@ func TestRunQueueStore_SQLite_EnqueueStampsTheSDKEngine(t *testing.T) {
 // pubkey conformance suite against the SQLite impl. Each factory call opens
 // a fresh in-memory DB so subtests don't share state.
 func TestRunQueueStore_SQLite_Credentials(t *testing.T) {
-	dbtest.RunRunQueueCredentialsConformance(t, func(t *testing.T) (db.ConversationQueueStore, string, dbtest.RunQueueCredentialsSeeder) {
+	dbtest.RunClaimCredentialsConformance(t, func(t *testing.T) (db.ConversationQueueStore, string, dbtest.ClaimCredentialsSeeder) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
@@ -556,7 +556,7 @@ func TestRunQueueStore_SQLite_Credentials(t *testing.T) {
 		}
 
 		nextStep := 0
-		seed := dbtest.RunQueueCredentialsSeeder{
+		seed := dbtest.ClaimCredentialsSeeder{
 			EnqueueConversation: func(t *testing.T) string {
 				t.Helper()
 				idx := nextStep
@@ -953,7 +953,7 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 // conformance against the SQLite impl. Each factory call opens a fresh
 // in-memory DB, so the suite's exact healed counts are this subtest's alone.
 func TestRunQueueStore_SQLite_ReconcileOrphanedRuns(t *testing.T) {
-	dbtest.RunReconcileOrphanedRunsConformance(t, func(t *testing.T) (db.ConversationQueueStore, dbtest.ReconcileOrphanSeeder) {
+	dbtest.RunReconcileOrphanedConversationsConformance(t, func(t *testing.T) (db.ConversationQueueStore, dbtest.ReconcileOrphanSeeder) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)

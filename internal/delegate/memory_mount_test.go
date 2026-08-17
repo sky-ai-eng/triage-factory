@@ -64,7 +64,7 @@ func TestEntityMemoryTarget_LocalRendersInTheTree(t *testing.T) {
 func TestBlueprintHandoff_WarmStepReadsItsPredecessorFromTheMount(t *testing.T) {
 	sandboxingMode(t)
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "warm-handoff")
-	makeRunBlueprintStep(t, database, conversationID, taskID)
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	task := loadTask(t, s, taskID)
 	blueprintRunID := "bpr-" + conversationID
 	cwd := t.TempDir()
@@ -149,7 +149,7 @@ func TestStagedEntityMemorySource_ResumeReusesWhatTheClaimStaged(t *testing.T) {
 // derivation reads the second.
 func TestProcessCompletion_RefusesThePredecessorsMemory(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "stale-memory")
-	makeRunBlueprintStep(t, database, conversationID, taskID)
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 	blueprintRunID := "bpr-" + conversationID
@@ -182,7 +182,7 @@ func TestProcessCompletion_RefusesThePredecessorsMemory(t *testing.T) {
 // a step's write lands in the same quantum as the pre-launch read.
 func TestProcessCompletion_IngestsWhatThisStepWrote(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "fresh-memory")
-	makeRunBlueprintStep(t, database, conversationID, taskID)
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 	blueprintRunID := "bpr-" + conversationID
@@ -320,15 +320,15 @@ func TestMemoryFingerprint_IdentifiesByContent(t *testing.T) {
 	if fp.covers(rewritten) {
 		t.Fatal("a same-length, same-mtime rewrite read as inherited; this step's memory would be dropped")
 	}
-	content, state := readRunMemory(cwd, fp)
+	content, state := readConversationMemory(cwd, fp)
 	if state != memoryFilePresent || content != rewritten {
-		t.Errorf("readRunMemory = (%q, %v), want this step's own rewrite", content, state)
+		t.Errorf("readConversationMemory = (%q, %v), want this step's own rewrite", content, state)
 	}
 
 	// And the file it did inherit, untouched, is still refused.
 	writeFileT(t, path, inherited)
-	if content, state := readRunMemory(cwd, fp); state != memoryFileStale || content != "" {
-		t.Errorf("readRunMemory on the inherited file = (%q, %v), want ('', memoryFileStale)", content, state)
+	if content, state := readConversationMemory(cwd, fp); state != memoryFileStale || content != "" {
+		t.Errorf("readConversationMemory on the inherited file = (%q, %v), want ('', memoryFileStale)", content, state)
 	}
 
 	// Nothing to inherit is not the same as inheriting nothing readable.

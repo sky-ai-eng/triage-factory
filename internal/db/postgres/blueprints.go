@@ -1107,9 +1107,9 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 		// Only on a real transition to a terminal target.
 		if changed && status.Terminal() {
 			if adjacentClaims == nil {
-				return parkOrphanedChildRunsWithClaims(ctx, tx, orgID, id)
+				return parkOrphanedChildConversationsWithClaims(ctx, tx, orgID, id)
 			}
-			parkedChildIDs, err = parkOrphanedChildRuns(ctx, tx, orgID, id)
+			parkedChildIDs, err = parkOrphanedChildConversations(ctx, tx, orgID, id)
 			return err
 		}
 		return nil
@@ -1128,10 +1128,10 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 	return changed, nil
 }
 
-// parkOrphanedChildRunsWithClaims parks every still-mid-flight child run of
+// parkOrphanedChildConversationsWithClaims parks every still-mid-flight child run of
 // blueprintRunID `open` and releases those children's active claims in the
 // same statement — q must hold claims-write privilege. Called by
-// markBlueprintRunStatus's atomic flip; ConversationQueueStore.ReconcileOrphanedRuns
+// markBlueprintRunStatus's atomic flip; ConversationQueueStore.ReconcileOrphanedConversations
 // applies the same predicate in its own boot sweep (it can't share this body —
 // different store, different scope).
 //
@@ -1141,7 +1141,7 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 // refuses it. Scoped to status IS NULL: a child that already parked itself
 // keeps its own parked_at and park_reason, and one that already reached a
 // terminal is left alone.
-func parkOrphanedChildRunsWithClaims(ctx context.Context, q queryer, orgID, blueprintRunID string) error {
+func parkOrphanedChildConversationsWithClaims(ctx context.Context, q queryer, orgID, blueprintRunID string) error {
 	_, err := q.ExecContext(ctx, `
 		WITH parked AS (
 			UPDATE conversations
@@ -1159,10 +1159,10 @@ func parkOrphanedChildRunsWithClaims(ctx context.Context, q queryer, orgID, blue
 	return err
 }
 
-// parkOrphanedChildRuns is the app-pool (claims-SELECT-only) variant of the
+// parkOrphanedChildConversations is the app-pool (claims-SELECT-only) variant of the
 // same child park: it returns the parked ids so the caller can release their
 // claims on an admin-backed queryer.
-func parkOrphanedChildRuns(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
+func parkOrphanedChildConversations(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		UPDATE conversations
 		SET status = 'open',
@@ -1255,11 +1255,11 @@ func (s *blueprintStore) ConversationsForBlueprintSystem(ctx context.Context, or
 }
 
 func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
-	return blueprintActiveStepRunIDs(ctx, s.app, orgID, blueprintRunID)
+	return blueprintActiveStepConversationIDs(ctx, s.app, orgID, blueprintRunID)
 }
 
 func (s *blueprintStore) ActiveStepConversationIDsSystem(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
-	return blueprintActiveStepRunIDs(ctx, s.admin, orgID, blueprintRunID)
+	return blueprintActiveStepConversationIDs(ctx, s.admin, orgID, blueprintRunID)
 }
 
 func (s *blueprintStore) StepPlanLengths(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]int, error) {
@@ -1292,7 +1292,7 @@ func (s *blueprintStore) StepPlanLengths(ctx context.Context, orgID string, blue
 	return out, rows.Err()
 }
 
-func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
+func blueprintActiveStepConversationIDs(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
 	if !isValidUUID(blueprintRunID) {
 		return nil, nil
 	}
@@ -1300,7 +1300,7 @@ func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintR
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND blueprint_run_id = $2
 		  AND (status IS NULL
-		       OR status NOT IN (`+runTerminalStatusesSQL+`,'open'))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+`,'open'))
 	`, orgID, blueprintRunID)
 	if err != nil {
 		return nil, err

@@ -62,7 +62,7 @@ func spanAttr(t *testing.T, s sdktrace.ReadOnlySpan, key string) attribute.Value
 	return attribute.Value{}
 }
 
-func traceTestRun(id string) *domain.Conversation {
+func traceTestConversation(id string) *domain.Conversation {
 	return &domain.Conversation{
 		ID:       id,
 		OrgID:    runmode.LocalDefaultOrgID,
@@ -80,7 +80,7 @@ func traceTestRun(id string) *domain.Conversation {
 func TestEngagementRootEndsAtAgentLive(t *testing.T) {
 	read := recordSpans(t)
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	conv := traceTestRun("run-live")
+	conv := traceTestConversation("run-live")
 
 	_, done := s.beginEngagement(context.Background(), conv)
 	if got := spansNamed(read(), "engagement.setup"); len(got) != 0 {
@@ -131,7 +131,7 @@ func TestEngagementRootEndsAtAgentLive(t *testing.T) {
 func TestEngagementRootRecordsSetupFailure(t *testing.T) {
 	read := recordSpans(t)
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	conv := traceTestRun("run-fail")
+	conv := traceTestConversation("run-fail")
 
 	_, done := s.beginEngagement(context.Background(), conv)
 	s.failEngagement(conv.ID, errors.New("bring up credential sidecar: broker refused"))
@@ -162,7 +162,7 @@ func TestEngagementDispositionsAreNotErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			read := recordSpans(t)
 			s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-			conv := traceTestRun("run-" + tc.name)
+			conv := traceTestConversation("run-" + tc.name)
 
 			_, done := s.beginEngagement(context.Background(), conv)
 			if tc.outcome != engagementNotStarted {
@@ -228,7 +228,7 @@ func TestStoppedEngagementNamesWhichCancellation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			read := recordSpans(t)
 			s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-			conv := traceTestRun("run-stop-" + tc.name)
+			conv := traceTestConversation("run-stop-" + tc.name)
 			parent, step := tc.ctxs()
 
 			_, done := s.beginEngagement(context.Background(), conv)
@@ -269,7 +269,7 @@ func TestRequeuedRunProducesSeparateTracesSharingConversationID(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 
 	for attempt := 1; attempt <= maxRunAttempts; attempt++ {
-		conv := traceTestRun("run-requeued")
+		conv := traceTestConversation("run-requeued")
 		conv.Attempts = attempt
 		_, done := s.beginEngagement(context.Background(), conv)
 		s.failEngagement(conv.ID, errors.New("transient"))
@@ -304,7 +304,7 @@ func TestRequeuedRunProducesSeparateTracesSharingConversationID(t *testing.T) {
 func TestPunctualSpansLinkToTheEngagementRoot(t *testing.T) {
 	read := recordSpans(t)
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	conv := traceTestRun("run-punctual")
+	conv := traceTestConversation("run-punctual")
 
 	_, done := s.beginEngagement(context.Background(), conv)
 	rootSC := s.engagementSpanContext(conv.ID)
@@ -369,7 +369,7 @@ func TestPunctualSpanWithoutAnEngagementIsUnlinked(t *testing.T) {
 func TestEngagementTeardownIsIdentityChecked(t *testing.T) {
 	recordSpans(t)
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	conv := traceTestRun("run-reclaim")
+	conv := traceTestConversation("run-reclaim")
 
 	_, firstDone := s.beginEngagement(context.Background(), conv)
 	first := s.engagementSpanContext(conv.ID)

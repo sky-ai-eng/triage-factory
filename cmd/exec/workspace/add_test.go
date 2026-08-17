@@ -158,7 +158,7 @@ func seedBlueprintRun(t *testing.T, conn *sql.DB, taskID string) string {
 	return brID
 }
 
-func seedJiraRun(t *testing.T, database *db.DB, conversationID, issueKey string) {
+func seedJiraConversation(t *testing.T, database *db.DB, conversationID, issueKey string) {
 	t.Helper()
 	entity, _, err := sqlitestore.New(database.Conn).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", issueKey, "issue", "T-"+issueKey, "https://x/"+issueKey)
 	if err != nil {
@@ -186,7 +186,7 @@ func seedJiraRun(t *testing.T, database *db.DB, conversationID, issueKey string)
 	})
 }
 
-func seedGitHubRun(t *testing.T, database *db.DB, conversationID string) {
+func seedGitHubConversation(t *testing.T, database *db.DB, conversationID string) {
 	t.Helper()
 	entity, _, err := sqlitestore.New(database.Conn).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#"+conversationID, "pr", "T", "https://x/"+conversationID)
 	if err != nil {
@@ -370,7 +370,7 @@ func TestMaterializeWorkspace_RunNotFound(t *testing.T) {
 // a GitHub run can now materialize a workspace, where it used to be rejected.
 func TestMaterializeWorkspace_GitHubRunCanAdd(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedGitHubRun(t, database, "gh-run")
+	seedGitHubConversation(t, database, "gh-run")
 	seedRepository(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
 	stub := &stubCalls{conversationID: "gh-run"}
 
@@ -429,7 +429,7 @@ func TestValidateGitRef(t *testing.T) {
 
 func TestMaterializeWorkspace_RejectsInjectionRef(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 	stub := &stubCalls{}
 
@@ -444,7 +444,7 @@ func TestMaterializeWorkspace_RejectsInjectionRef(t *testing.T) {
 
 func TestMaterializeWorkspace_RepoNotConfigured(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	stub := &stubCalls{}
 
 	_, err := materializeWorkspace(hostFor(stores, "r1"), "owner/repo", checkoutSpec{}, stub.deps())
@@ -458,7 +458,7 @@ func TestMaterializeWorkspace_RepoNotConfigured(t *testing.T) {
 
 func TestMaterializeWorkspace_RepoMissingCloneURL(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "owner", "repo", "" /*cloneURL*/, "main")
 	stub := &stubCalls{}
 
@@ -473,7 +473,7 @@ func TestMaterializeWorkspace_RepoMissingCloneURL(t *testing.T) {
 
 func TestMaterializeWorkspace_DefaultBranchCheckout(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-220")
+	seedJiraConversation(t, database, "r1", "SKY-220")
 	seedRepository(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
 	stub := &stubCalls{}
 
@@ -514,7 +514,7 @@ func TestMaterializeWorkspace_DefaultBranchCheckout(t *testing.T) {
 
 func TestMaterializeWorkspace_RefCheckout(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 	stub := &stubCalls{}
 
@@ -537,7 +537,7 @@ func TestMaterializeWorkspace_RefCheckout(t *testing.T) {
 
 func TestMaterializeWorkspace_PRCheckout(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
 	stub := &stubCalls{}
 
@@ -567,7 +567,7 @@ func TestMaterializeWorkspace_PRCheckout(t *testing.T) {
 
 func TestMaterializeWorkspace_PRCreateFailureReleasesReservation(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
 	stub := &stubCalls{createErr: errors.New("github said no")}
 
@@ -589,7 +589,7 @@ func TestMaterializeWorkspace_PRCreateFailureReleasesReservation(t *testing.T) {
 // the host seam is the production create path.
 func TestMaterializeWorkspace_CreateWiredFromHost(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
 	d := defaultAddDeps() // create left nil → host wiring
 
@@ -605,7 +605,7 @@ func TestMaterializeWorkspace_CreateWiredFromHost(t *testing.T) {
 // TestMaterializeWorkspace_RejectsUntrackedRepo pins the team-tracking gate.
 func TestMaterializeWorkspace_RejectsUntrackedRepo(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-9")
+	seedJiraConversation(t, database, "r1", "SKY-9")
 	// Org-configured but team-untracked: seed only the profile.
 	if _, err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		Owner: "sky", Repo: "untracked",
@@ -625,7 +625,7 @@ func TestMaterializeWorkspace_RejectsUntrackedRepo(t *testing.T) {
 
 func TestMaterializeWorkspace_IdempotentSecondAdd(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 	wantPath := expectedPath("r1", "sky", "core", "@default")
 
@@ -652,7 +652,7 @@ func TestMaterializeWorkspace_IdempotentSecondAdd(t *testing.T) {
 
 func TestMaterializeWorkspace_RaceLossAtReservation(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 
 	winnerPath := "/tmp/somewhere-else/winner"
@@ -679,7 +679,7 @@ func TestMaterializeWorkspace_RaceLossAtReservation(t *testing.T) {
 
 func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 
 	winnerPath := expectedPath("r1", "sky", "core", "@default")
@@ -712,7 +712,7 @@ func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) 
 
 func TestMaterializeWorkspace_LiveDirShortCircuitsAgeCheck(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 	wantPath := expectedPath("r1", "sky", "core", "@default")
 
@@ -742,7 +742,7 @@ func TestMaterializeWorkspace_LiveDirShortCircuitsAgeCheck(t *testing.T) {
 
 func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 	wantPath := expectedPath("r1", "sky", "core", "@default")
 
@@ -775,7 +775,7 @@ func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
 
 func TestMaterializeWorkspace_FreshRowMissingDirIsInFlight(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 	wantPath := expectedPath("r1", "sky", "core", "@default")
 
@@ -808,7 +808,7 @@ func TestMaterializeWorkspace_FreshRowMissingDirIsInFlight(t *testing.T) {
 
 func TestMaterializeWorkspace_CreateFailureReleasesReservation(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 
 	stub := &stubCalls{createErr: errors.New("simulated git failure")}
@@ -835,7 +835,7 @@ func TestMaterializeWorkspace_CreateFailureReleasesReservation(t *testing.T) {
 
 func TestMaterializeWorkspace_CreateFailureRetryable(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 	wantPath := expectedPath("r1", "sky", "core", "@default")
 
@@ -859,7 +859,7 @@ func TestMaterializeWorkspace_CreateFailureRetryable(t *testing.T) {
 
 func TestMaterializeWorkspace_TooManySlashesRejected(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	stub := &stubCalls{}
 
 	_, err := materializeWorkspace(hostFor(stores, "r1"), "too/many/slashes", checkoutSpec{}, stub.deps())
@@ -893,7 +893,7 @@ func (d dualViewHost) WorkspaceRoots(context.Context) (string, string, error) {
 // captured nothing.
 func TestMaterializeWorkspace_DualView(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-546")
+	seedJiraConversation(t, database, "r1", "SKY-546")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 
 	const hostRoot = "/data/runs/r1"
@@ -985,10 +985,10 @@ func TestRefForSpec(t *testing.T) {
 	}
 }
 
-// seedEventTriggeredJiraRun mirrors seedJiraRun but stamps the agent
+// seedEventTriggeredJiraConversation mirrors seedJiraConversation but stamps the agent
 // run with trigger_type='event' and a NULL creator_user_id — the
 // shape the schema CHECK requires for auto-delegated runs.
-func seedEventTriggeredJiraRun(t *testing.T, database *db.DB, conversationID, issueKey string) {
+func seedEventTriggeredJiraConversation(t *testing.T, database *db.DB, conversationID, issueKey string) {
 	t.Helper()
 	entity, _, err := sqlitestore.New(database.Conn).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", issueKey, "issue", "T-"+issueKey, "https://x/"+issueKey)
 	if err != nil {
@@ -1021,7 +1021,7 @@ func seedEventTriggeredJiraRun(t *testing.T, database *db.DB, conversationID, is
 // event-triggered run materializes through the admin-pool branch.
 func TestMaterializeWorkspace_EventTriggeredRunRouting(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedEventTriggeredJiraRun(t, database, "e1", "SKY-1")
+	seedEventTriggeredJiraConversation(t, database, "e1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 	stub := &stubCalls{}
 
@@ -1045,7 +1045,7 @@ func TestMaterializeWorkspace_EventTriggeredRunRouting(t *testing.T) {
 // event-triggered counterpart of the release-on-failure path.
 func TestMaterializeWorkspace_EventTriggeredCreateFailureReleases(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedEventTriggeredJiraRun(t, database, "e2", "SKY-2")
+	seedEventTriggeredJiraConversation(t, database, "e2", "SKY-2")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 	stub := &stubCalls{createErr: errors.New("simulated git failure")}
 

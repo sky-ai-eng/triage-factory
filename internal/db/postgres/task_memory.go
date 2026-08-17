@@ -89,20 +89,20 @@ func upsertAgentMemory(ctx context.Context, q queryer, orgID, conversationID, en
 }
 
 func (s *taskMemoryStore) UpdateConversationMemoryHumanContent(ctx context.Context, orgID, conversationID, content string) error {
-	return updateRunMemoryHumanContent(ctx, s.q, orgID, conversationID, content)
+	return updateConversationMemoryHumanContent(ctx, s.q, orgID, conversationID, content)
 }
 
 // UpdateConversationMemoryHumanContentSystem overwrites human_content on the admin pool
 // (BYPASSRLS) for the artifact reconciler, which has no JWT-claims context. Same
 // body as the app-pool variant, different pool. See the interface doc + TFAC-464.
 func (s *taskMemoryStore) UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) error {
-	return updateRunMemoryHumanContent(ctx, s.admin, orgID, conversationID, content)
+	return updateConversationMemoryHumanContent(ctx, s.admin, orgID, conversationID, content)
 }
 
-// updateRunMemoryHumanContent is the shared body for the app- and admin-pool
+// updateConversationMemoryHumanContent is the shared body for the app- and admin-pool
 // variants: a plain overwrite of human_content (empty/whitespace → NULL),
 // logged-not-fatal on a missing row.
-func updateRunMemoryHumanContent(ctx context.Context, q queryer, orgID, conversationID, content string) error {
+func updateConversationMemoryHumanContent(ctx context.Context, q queryer, orgID, conversationID, content string) error {
 	var humanContent any
 	if strings.TrimSpace(content) != "" {
 		humanContent = content

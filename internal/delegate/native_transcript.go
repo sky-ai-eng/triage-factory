@@ -9,7 +9,7 @@ import (
 )
 
 // nativeTranscript adapts the conversations store to the native loop's
-// Transcript surface. It is the runSink of this runtime: every row the loop
+// Transcript surface. It is the conversationSink of this runtime: every row the loop
 // writes lands through here and fans out to the websocket, so a native
 // conversation streams to the UI in the same shapes an SDK one does.
 //

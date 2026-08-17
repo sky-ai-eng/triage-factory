@@ -11,7 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// runSink adapts an agentproc invocation to the delegate's storage:
+// conversationSink adapts an agentproc invocation to the delegate's storage:
 // session ids land on conversations.sdk_session_id, parsed messages land in
 // messages, and both fan out to the websocket so the UI can
 // react in real time.
@@ -29,7 +29,7 @@ import (
 // tx — SyntheticClaimsWithTx scopes JWT claims to one Postgres
 // connection's transaction, which the agent subprocess would stream
 // past on the next OnMessage.
-type runSink struct {
+type conversationSink struct {
 	spawner        *Spawner
 	orgID          string
 	conversationID string
@@ -44,7 +44,7 @@ type runSink struct {
 	fenced atomic.Bool
 
 	// sessionDelivered suppresses repeated OnSession handling within
-	// this runSink instance. Some streams can emit system/init more
+	// this conversationSink instance. Some streams can emit system/init more
 	// than once for the same session_id; while SetSession is
 	// idempotent at the DB layer, skipping duplicate handling also
 	// avoids an extra running-status broadcast from the same stream.
@@ -53,8 +53,8 @@ type runSink struct {
 	sessionDelivered bool
 }
 
-func newRunSink(s *Spawner, orgID, conversationID, claimID, triggerType, creatorUserID string) *runSink {
-	return &runSink{
+func newConversationSink(s *Spawner, orgID, conversationID, claimID, triggerType, creatorUserID string) *conversationSink {
+	return &conversationSink{
 		spawner:        s,
 		orgID:          orgID,
 		conversationID: conversationID,
@@ -78,7 +78,7 @@ func newRunSink(s *Spawner, orgID, conversationID, claimID, triggerType, creator
 // resume tries to reconnect to a session that died with this process. A
 // refusal therefore DISCARDS this id — there is no unfenced retry, because
 // the write succeeding is precisely the harm.
-func (k *runSink) OnSession(sessionID string) error {
+func (k *conversationSink) OnSession(sessionID string) error {
 	if k.sessionDelivered {
 		return nil
 	}
@@ -116,7 +116,7 @@ func (k *runSink) OnSession(sessionID string) error {
 // The one failure that is not per-row is the fence: a refused write means
 // this engagement no longer owns the conversation, and every row after it
 // would interleave with a successor's. That one abandons the run.
-func (k *runSink) OnMessage(msg *domain.Message) error {
+func (k *conversationSink) OnMessage(msg *domain.Message) error {
 	bgCtx := context.Background()
 	var id int64
 	switch {
@@ -166,7 +166,7 @@ func (k *runSink) OnMessage(msg *domain.Message) error {
 // Logged at error level on purpose: reaching here means the cooperative
 // self-fence did not stop this executor in time, which is a fleet incident
 // worth waking someone for, not a per-row hiccup.
-func (k *runSink) tripFence(err error) {
+func (k *conversationSink) tripFence(err error) {
 	if k.fenced.Swap(true) {
 		return
 	}
@@ -178,8 +178,8 @@ func (k *runSink) tripFence(err error) {
 }
 
 // fenceTripped reports whether this engagement was fenced out mid-stream.
-func (k *runSink) fenceTripped() bool { return k.fenced.Load() }
+func (k *conversationSink) fenceTripped() bool { return k.fenced.Load() }
 
-// Compile-time check that runSink satisfies the agentproc.Sink
+// Compile-time check that conversationSink satisfies the agentproc.Sink
 // contract.
-var _ agentproc.Sink = (*runSink)(nil)
+var _ agentproc.Sink = (*conversationSink)(nil)

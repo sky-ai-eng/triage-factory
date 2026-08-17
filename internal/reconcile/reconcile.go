@@ -243,7 +243,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	// Pass 3 — apply each transition, then recompute run-memory once per run
 	// that had a TERMINAL transition this cycle. The memory recompute is
 	// deferred out of the per-artifact loop and composed over the run's whole
-	// artifact set (recordRunOutcome) so a run that produced several artifacts —
+	// artifact set (recordConversationOutcome) so a run that produced several artifacts —
 	// commonly a branch AND a PR — accumulates one outcome rather than each
 	// terminal write clobbering the last.
 	//
@@ -276,13 +276,13 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		}
 	}
 	for conversationID := range terminalRuns {
-		rc.recordRunOutcome(writeCtx, orgID, conversationID)
+		rc.recordConversationOutcome(writeCtx, orgID, conversationID)
 	}
 	return transitioned, nil
 }
 
 // applyTransition writes the new state (admin pool) and broadcasts the change.
-// Memory capture is deferred to recordRunOutcome (a per-run recompute) so a run
+// Memory capture is deferred to recordConversationOutcome (a per-run recompute) so a run
 // with several artifacts gets one composed outcome, not one clobbering write per
 // artifact. Best-effort WS: a dropped broadcast must not undo the transition.
 func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domain.Artifact, newState string) (domain.Artifact, error) {
@@ -298,7 +298,7 @@ func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domai
 	return updated, nil
 }
 
-// recordRunOutcome recomputes a run's post-run memory note over its WHOLE
+// recordConversationOutcome recomputes a run's post-run memory note over its WHOLE
 // artifact set and OVERWRITES human_content with it. Called once per run that
 // had a terminal transition this cycle, after the artifact writes commit (so it
 // reads the fresh terminal states). Composing over the full set — not just this
@@ -309,8 +309,8 @@ func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domai
 // is the authoritative account of how reality diverged from the agent's draft.
 // Best-effort — the external state already moved, so a failed note must not
 // undo the transition.
-func (rc *Reconciler) recordRunOutcome(ctx context.Context, orgID, conversationID string) {
-	note := rc.composeRunOutcome(ctx, orgID, conversationID)
+func (rc *Reconciler) recordConversationOutcome(ctx context.Context, orgID, conversationID string) {
+	note := rc.composeConversationOutcome(ctx, orgID, conversationID)
 	if note == "" {
 		return
 	}
@@ -438,13 +438,13 @@ func isTerminalState(kind, state string) bool {
 // next agent reads the per-artifact outcome blocks under.
 const runOutcomeHeader = "**Post-run outcome** — how your work resolved on GitHub versus what you drafted:\n\n"
 
-// composeRunOutcome builds the run's post-run memory note from every TERMINAL
+// composeConversationOutcome builds the run's post-run memory note from every TERMINAL
 // artifact it produced. It reads the run's whole artifact set (admin pool — the
 // reconciler has no claims), so the note is the complete picture regardless of
 // which cycle each artifact resolved in. Returns "" when nothing is terminal yet
-// (still in flight — no outcome to report), which recordRunOutcome treats as
+// (still in flight — no outcome to report), which recordConversationOutcome treats as
 // "don't touch the row."
-func (rc *Reconciler) composeRunOutcome(ctx context.Context, orgID, conversationID string) string {
+func (rc *Reconciler) composeConversationOutcome(ctx context.Context, orgID, conversationID string) string {
 	arts, err := rc.artifacts.ListByConversationSystem(ctx, orgID, conversationID)
 	if err != nil {
 		reconcileLog.Warn("list run artifacts for outcome note failed", "org", orgID, "conversation", conversationID, "error", err)

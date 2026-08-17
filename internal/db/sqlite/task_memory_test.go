@@ -28,7 +28,7 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 		seed := dbtest.TaskMemorySeeder{
 			Run: func(t *testing.T, suffix string) (conversationID, entityID string) {
 				t.Helper()
-				return seedSQLiteRunForTaskMemory(t, conn, suffix)
+				return seedSQLiteConversationForTaskMemory(t, conn, suffix)
 			},
 			BlueprintRun: func(t *testing.T, suffix string) (blueprintRunID string) {
 				t.Helper()
@@ -103,7 +103,7 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
-	conv1, entityID := seedSQLiteRunForTaskMemory(t, conn, "count-1")
+	conv1, entityID := seedSQLiteConversationForTaskMemory(t, conn, "count-1")
 	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv1, entityID, "", "first"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 		t.Errorf("Count = %d, want 1", n)
 	}
 
-	conv2, _ := seedSQLiteRunForTaskMemory(t, conn, "count-2")
+	conv2, _ := seedSQLiteConversationForTaskMemory(t, conn, "count-2")
 	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv2, entityID, "", "second"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 	}
 
 	// Unrelated entity has none.
-	_, otherEntity := seedSQLiteRunForTaskMemory(t, conn, "count-unrelated")
+	_, otherEntity := seedSQLiteConversationForTaskMemory(t, conn, "count-unrelated")
 	if n, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, runmode.LocalDefaultOrgID, otherEntity, runmode.LocalDefaultTeamID); err != nil {
 		t.Fatalf("CountMemoriesForEntitySystem: %v", err)
 	} else if n != 0 {
@@ -151,7 +151,7 @@ func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
-	conversationID, entityID := seedSQLiteRunForTaskMemory(t, conn, "backfill")
+	conversationID, entityID := seedSQLiteConversationForTaskMemory(t, conn, "backfill")
 	now := time.Now().UTC()
 	if _, err := conn.Exec(
 		`INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content, created_at) VALUES (?, ?, ?, 'pre-migration note', ?)`,
@@ -188,11 +188,11 @@ func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
 	}
 }
 
-// seedSQLiteRunForTaskMemory seeds the entity + event + prompt +
+// seedSQLiteConversationForTaskMemory seeds the entity + event + prompt +
 // task + run FK chain conversation_memory needs. Direct INSERTs keep the
 // fixture path schema-coupled and short — matches the SwipeStore
 // / EventStore conformance seed pattern.
-func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (conversationID, entityID string) {
+func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (conversationID, entityID string) {
 	t.Helper()
 	entityID = uuid.New().String()
 	now := time.Now().UTC()
@@ -228,7 +228,7 @@ func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (conv
 	}
 	// conversations.blueprint_run_id is NOT NULL — mint a blueprint + blueprint_run
 	// for this task so the run row satisfies the FK.
-	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
+	blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)
 	conversationID = uuid.New().String()
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, blueprint_run_id, blueprint_step_index)
@@ -242,7 +242,7 @@ func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (conv
 // seedSQLiteBlueprintRunForTaskMemory seeds the entity + event + task +
 // blueprint + blueprint_run FK chain a conversation_memory.blueprint_run_id can point
 // at (the column FKs blueprint_runs(id) ON DELETE SET NULL). Returns the
-// blueprint_run id. Independent of seedSQLiteRunForTaskMemory's run — the
+// blueprint_run id. Independent of seedSQLiteConversationForTaskMemory's run — the
 // round-trip test only needs a valid FK target.
 func seedSQLiteBlueprintRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (blueprintRunID string) {
 	t.Helper()

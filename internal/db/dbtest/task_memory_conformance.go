@@ -75,12 +75,12 @@ type TaskMemorySeeder struct {
 	Role func(t *testing.T, conversationID, entityID string) string
 }
 
-// memoryForRun finds the memory row belonging to conversationID in the slice
+// memoryForConversation finds the memory row belonging to conversationID in the slice
 // GetMemoriesForEntity(entityID) returns — the replacement for the
 // removed GetRunMemory now that reads are join-based
 // (conversation_memory_entities) rather than a direct run_id lookup. Returns nil
 // if no row matches.
-func memoryForRun(t *testing.T, ctx context.Context, s db.TaskMemoryStore, orgID, entityID, conversationID string) *domain.TaskMemory {
+func memoryForConversation(t *testing.T, ctx context.Context, s db.TaskMemoryStore, orgID, entityID, conversationID string) *domain.TaskMemory {
 	t.Helper()
 	mems, err := s.GetMemoriesForEntity(ctx, orgID, entityID)
 	if err != nil {
@@ -144,9 +144,9 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
 		seedPrimary(t, s, orgID, conversationID, entityID)
-		mem := memoryForRun(t, ctx, s, orgID, entityID, conversationID)
+		mem := memoryForConversation(t, ctx, s, orgID, entityID, conversationID)
 		if mem == nil {
-			t.Fatalf("memoryForRun returned nil")
+			t.Fatalf("memoryForConversation returned nil")
 		}
 		if mem.Content != "agent wrote this" {
 			t.Errorf("Content = %q, want %q", mem.Content, "agent wrote this")
@@ -173,9 +173,9 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 					t.Fatalf("UpsertAgentMemory: %v", err)
 				}
 				seedPrimary(t, s, orgID, conversationID, entityID)
-				mem := memoryForRun(t, ctx, s, orgID, entityID, conversationID)
+				mem := memoryForConversation(t, ctx, s, orgID, entityID, conversationID)
 				if mem == nil {
-					t.Fatalf("memoryForRun returned nil")
+					t.Fatalf("memoryForConversation returned nil")
 				}
 				// Materialized Content is the empty agent_content
 				// fallback (no human content). The store still wrote
@@ -206,9 +206,9 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, "", "second attempt"); err != nil {
 			t.Fatalf("second upsert: %v", err)
 		}
-		mem := memoryForRun(t, ctx, s, orgID, entityID, conversationID)
+		mem := memoryForConversation(t, ctx, s, orgID, entityID, conversationID)
 		if mem == nil {
-			t.Fatalf("memoryForRun returned nil")
+			t.Fatalf("memoryForConversation returned nil")
 		}
 		if !strings.HasPrefix(mem.Content, "second attempt") {
 			t.Errorf("Content prefix = %q, want to start with %q", mem.Content, "second attempt")
@@ -218,7 +218,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		}
 	})
 
-	t.Run("UpdateRunMemoryHumanContent_lands_on_existing_row", func(t *testing.T) {
+	t.Run("UpdateConversationMemoryHumanContent_lands_on_existing_row", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		conversationID, entityID := seed.Run(t, "update-human")
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, "", "agent self-report"); err != nil {
@@ -228,9 +228,9 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpdateConversationMemoryHumanContent(ctx, orgID, conversationID, "Looks good."); err != nil {
 			t.Fatalf("UpdateConversationMemoryHumanContent: %v", err)
 		}
-		mem := memoryForRun(t, ctx, s, orgID, entityID, conversationID)
+		mem := memoryForConversation(t, ctx, s, orgID, entityID, conversationID)
 		if mem == nil {
-			t.Fatalf("memoryForRun returned nil")
+			t.Fatalf("memoryForConversation returned nil")
 		}
 		if !strings.HasPrefix(mem.Content, "agent self-report") {
 			t.Errorf("Content prefix = %q, want to start with %q", mem.Content, "agent self-report")
@@ -243,7 +243,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		}
 	})
 
-	t.Run("UpdateRunMemoryHumanContent_empty_canonicalizes_to_null", func(t *testing.T) {
+	t.Run("UpdateConversationMemoryHumanContent_empty_canonicalizes_to_null", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		conversationID, entityID := seed.Run(t, "update-blank")
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, "", "agent text"); err != nil {
@@ -253,9 +253,9 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpdateConversationMemoryHumanContent(ctx, orgID, conversationID, "   \t  \n  "); err != nil {
 			t.Fatalf("UpdateConversationMemoryHumanContent: %v", err)
 		}
-		mem := memoryForRun(t, ctx, s, orgID, entityID, conversationID)
+		mem := memoryForConversation(t, ctx, s, orgID, entityID, conversationID)
 		if mem == nil {
-			t.Fatalf("memoryForRun returned nil")
+			t.Fatalf("memoryForConversation returned nil")
 		}
 		// Whitespace-only canonicalizes to NULL → materialized Content
 		// is just the agent half with no separator.
@@ -264,7 +264,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		}
 	})
 
-	t.Run("UpdateRunMemoryHumanContent_missing_row_logged_not_fatal", func(t *testing.T) {
+	t.Run("UpdateConversationMemoryHumanContent_missing_row_logged_not_fatal", func(t *testing.T) {
 		// The handler skips this call when run_id is empty, but if
 		// some other caller hits it with a conversationID that has no row,
 		// returning an error would push a 5xx after the GitHub submit
@@ -275,7 +275,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		}
 	})
 
-	t.Run("UpdateRunMemoryHumanContentSystem_overwrites_prior_verdict", func(t *testing.T) {
+	t.Run("UpdateConversationMemoryHumanContentSystem_overwrites_prior_verdict", func(t *testing.T) {
 		// The reconciler's post-run outcome capture (TFAC-464 β). human_content
 		// is the single "how reality diverged from your draft" slot; the
 		// terminal outcome supersedes any approval-time verdict. The admin-pool
@@ -294,9 +294,9 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if err := s.UpdateConversationMemoryHumanContentSystem(ctx, orgID, conversationID, "**Post-run outcome** — PR merged on GitHub."); err != nil {
 			t.Fatalf("UpdateConversationMemoryHumanContentSystem: %v", err)
 		}
-		mem := memoryForRun(t, ctx, s, orgID, entityID, conversationID)
+		mem := memoryForConversation(t, ctx, s, orgID, entityID, conversationID)
 		if mem == nil {
-			t.Fatalf("memoryForRun returned nil")
+			t.Fatalf("memoryForConversation returned nil")
 		}
 		if strings.Contains(mem.Content, "approval-time verdict") {
 			t.Errorf("System overwrite did not supersede the prior verdict: %q", mem.Content)
@@ -309,7 +309,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		}
 	})
 
-	t.Run("UpdateRunMemoryHumanContentSystem_missing_row_logged_not_fatal", func(t *testing.T) {
+	t.Run("UpdateConversationMemoryHumanContentSystem_missing_row_logged_not_fatal", func(t *testing.T) {
 		// The external transition already landed on GitHub; a missing
 		// conversation_memory row (purged / detached run) must not error the cycle.
 		s, orgID, _ := mk(t)
@@ -450,12 +450,12 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
 		seedPrimary(t, s, orgID, conversationID, entityID)
-		mem := memoryForRun(t, ctx, s, orgID, entityID, conversationID)
+		mem := memoryForConversation(t, ctx, s, orgID, entityID, conversationID)
 		if mem == nil {
-			t.Fatalf("memoryForRun returned nil")
+			t.Fatalf("memoryForConversation returned nil")
 		}
 		if mem.BlueprintRunID != blueprintRunID {
-			t.Errorf("memoryForRun BlueprintRunID = %q, want %q", mem.BlueprintRunID, blueprintRunID)
+			t.Errorf("memoryForConversation BlueprintRunID = %q, want %q", mem.BlueprintRunID, blueprintRunID)
 		}
 		mems, err := s.GetMemoriesForEntity(ctx, orgID, entityID)
 		if err != nil {
@@ -475,9 +475,9 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 			t.Fatalf("UpsertAgentMemory standalone: %v", err)
 		}
 		seedPrimary(t, s, orgID, conv2, ent2)
-		mem2 := memoryForRun(t, ctx, s, orgID, ent2, conv2)
+		mem2 := memoryForConversation(t, ctx, s, orgID, ent2, conv2)
 		if mem2 == nil {
-			t.Fatalf("memoryForRun standalone returned nil")
+			t.Fatalf("memoryForConversation standalone returned nil")
 		}
 		if mem2.BlueprintRunID != "" {
 			t.Errorf("standalone BlueprintRunID = %q, want empty (NULL)", mem2.BlueprintRunID)

@@ -115,7 +115,7 @@ func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agentho
 		return nil, fmt.Errorf("slack: channel %s is not visible to Triage Factory", a.Channel)
 	}
 
-	if ws, metaChannel, ok, err := workspaceFromRunTaskMetadata(ctx, stores, info); err != nil {
+	if ws, metaChannel, ok, err := workspaceFromConversationTaskMetadata(ctx, stores, info); err != nil {
 		return nil, err
 	} else if ok && metaChannel == a.Channel {
 		return slackWorkspaceIdentity{WorkspaceID: ws.WorkspaceID, APIAppID: ws.APIAppID}, nil
@@ -149,7 +149,7 @@ func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agentho
 // zero or ambiguous). This picks an identity ONLY; the file's real channel
 // membership is authorized separately (slackOpAuthorizeFileChannels).
 func slackOpResolveWorkspaceForDownload(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, _ json.RawMessage) (any, error) {
-	if ws, _, ok, err := workspaceFromRunTaskMetadata(ctx, stores, info); err != nil {
+	if ws, _, ok, err := workspaceFromConversationTaskMetadata(ctx, stores, info); err != nil {
 		return nil, err
 	} else if ok {
 		return slackWorkspaceIdentity{WorkspaceID: ws.WorkspaceID, APIAppID: ws.APIAppID}, nil
@@ -236,13 +236,13 @@ func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agentho
 	return nil, nil
 }
 
-// workspaceFromRunTaskMetadata resolves the run's own Slack context — its task,
+// workspaceFromConversationTaskMetadata resolves the run's own Slack context — its task,
 // if a slack:message task, and that message's event metadata — via
 // Conversations.GetSystem → Task → PrimaryEventID → Events.GetMetadataSystem. Every
 // store call propagates its error; only a genuine "not found" maps to (ok=false,
 // nil), so a masked failure never silently falls through to the org-wide
 // fallback and replies as the wrong bot identity.
-func workspaceFromRunTaskMetadata(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo) (ws slackstore.Workspace, channel string, ok bool, err error) {
+func workspaceFromConversationTaskMetadata(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo) (ws slackstore.Workspace, channel string, ok bool, err error) {
 	conv, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
 	if err != nil {
 		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load run: %w", err)

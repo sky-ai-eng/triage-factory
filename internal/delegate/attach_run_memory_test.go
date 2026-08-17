@@ -51,9 +51,9 @@ func attachRoleFor(t *testing.T, database *sql.DB, conversationID, entityID stri
 	return role
 }
 
-// attachMemoryRunIDs returns the set of run ids whose memory the entity-scoped
+// attachMemoryConversationIDs returns the set of run ids whose memory the entity-scoped
 // read surfaces — the through-the-join reachability the attach pass creates.
-func attachMemoryRunIDs(t *testing.T, s *Spawner, entityID string) map[string]bool {
+func attachMemoryConversationIDs(t *testing.T, s *Spawner, entityID string) map[string]bool {
 	t.Helper()
 	mems, err := s.taskMemory.GetMemoriesForEntitySystem(context.Background(), runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID)
 	if err != nil {
@@ -74,10 +74,10 @@ func seedProducedPR(t *testing.T, s *Spawner, conversationID, repoPath string, n
 	seedResolvedArtifact(t, s, conversationID, a)
 }
 
-// TestAttachRunMemoryEntities_PrimaryAlwaysWritten: the primary join row is
+// TestAttachConversationMemoryEntities_PrimaryAlwaysWritten: the primary join row is
 // written unconditionally at termination, exactly like the conversation_memory upsert —
 // even when the agent wrote no memory file (agent_content NULL).
-func TestAttachRunMemoryEntities_PrimaryAlwaysWritten(t *testing.T) {
+func TestAttachConversationMemoryEntities_PrimaryAlwaysWritten(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-prim", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -90,20 +90,20 @@ func TestAttachRunMemoryEntities_PrimaryAlwaysWritten(t *testing.T) {
 		t.Fatalf("upsert memory: %v", err)
 	}
 
-	s.attachRunMemoryEntities(ctx, runmode.LocalDefaultOrgID, "r-prim", entA.ID)
+	s.attachConversationMemoryEntities(ctx, runmode.LocalDefaultOrgID, "r-prim", entA.ID)
 
 	if role := attachRoleFor(t, database, "r-prim", entA.ID); role != domain.MemoryRolePrimary {
 		t.Errorf("primary role = %q, want %q (attach is unconditional)", role, domain.MemoryRolePrimary)
 	}
-	if !attachMemoryRunIDs(t, s, entA.ID)["r-prim"] {
+	if !attachMemoryConversationIDs(t, s, entA.ID)["r-prim"] {
 		t.Error("primary entity does not reach the run's memory through the join")
 	}
 }
 
-// TestAttachRunMemoryEntities_ProducedStubForUnpolledPR: a produced-PR artifact
+// TestAttachConversationMemoryEntities_ProducedStubForUnpolledPR: a produced-PR artifact
 // whose entity hasn't been polled yet is create-minimal'd as a snapshot-less
 // stub (linked out by the artifact URL) and attached with role=produced.
-func TestAttachRunMemoryEntities_ProducedStubForUnpolledPR(t *testing.T) {
+func TestAttachConversationMemoryEntities_ProducedStubForUnpolledPR(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-prod", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -116,7 +116,7 @@ func TestAttachRunMemoryEntities_ProducedStubForUnpolledPR(t *testing.T) {
 	// A PR the run just opened — no entity exists for it yet.
 	seedProducedPR(t, s, "r-prod", "o/r", 4242, "https://github.com/o/r/pull/4242")
 
-	s.attachRunMemoryEntities(ctx, runmode.LocalDefaultOrgID, "r-prod", entA.ID)
+	s.attachConversationMemoryEntities(ctx, runmode.LocalDefaultOrgID, "r-prod", entA.ID)
 
 	entB := attachEntityBySource(t, database, "github", "o/r#4242")
 	if entB == nil {
@@ -134,16 +134,16 @@ func TestAttachRunMemoryEntities_ProducedStubForUnpolledPR(t *testing.T) {
 	if role := attachRoleFor(t, database, "r-prod", entB.ID); role != domain.MemoryRoleProduced {
 		t.Errorf("produced role = %q, want %q", role, domain.MemoryRoleProduced)
 	}
-	if !attachMemoryRunIDs(t, s, entB.ID)["r-prod"] {
+	if !attachMemoryConversationIDs(t, s, entB.ID)["r-prod"] {
 		t.Error("produced entity does not reach the run's memory through the join")
 	}
 }
 
-// TestAttachRunMemoryEntities_RepoLevelTargetsSkipped: artifacts that map to no
+// TestAttachConversationMemoryEntities_RepoLevelTargetsSkipped: artifacts that map to no
 // entity — a git branch push (unmapped provider) and a github repo-level target
 // with no '#N' — mint no entity and write no produced row. Only the primary
 // row lands.
-func TestAttachRunMemoryEntities_RepoLevelTargetsSkipped(t *testing.T) {
+func TestAttachConversationMemoryEntities_RepoLevelTargetsSkipped(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-skip", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -170,7 +170,7 @@ func TestAttachRunMemoryEntities_RepoLevelTargetsSkipped(t *testing.T) {
 	}
 	seedResolvedArtifact(t, s, "r-skip", repoLevel)
 
-	s.attachRunMemoryEntities(ctx, runmode.LocalDefaultOrgID, "r-skip", entA.ID)
+	s.attachConversationMemoryEntities(ctx, runmode.LocalDefaultOrgID, "r-skip", entA.ID)
 
 	if ent := attachEntityBySource(t, database, domain.ArtifactProviderGit, "o/r"); ent != nil {
 		t.Errorf("branch push should mint no entity, got %+v", ent)
@@ -188,10 +188,10 @@ func TestAttachRunMemoryEntities_RepoLevelTargetsSkipped(t *testing.T) {
 	}
 }
 
-// TestAttachRunMemoryEntities_ListFailureLeavesPrimaryIntact: when the artifact
+// TestAttachConversationMemoryEntities_ListFailureLeavesPrimaryIntact: when the artifact
 // listing fails, the produced pass is skipped but the memory upsert and the
 // primary row survive — the attach is best-effort and never aborts completion.
-func TestAttachRunMemoryEntities_ListFailureLeavesPrimaryIntact(t *testing.T) {
+func TestAttachConversationMemoryEntities_ListFailureLeavesPrimaryIntact(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-fail", "sess", "/tmp/wt")
 	stores := testSpawnerStores(database)
@@ -204,12 +204,12 @@ func TestAttachRunMemoryEntities_ListFailureLeavesPrimaryIntact(t *testing.T) {
 		t.Fatalf("upsert memory: %v", err)
 	}
 
-	s.attachRunMemoryEntities(ctx, runmode.LocalDefaultOrgID, "r-fail", entA.ID)
+	s.attachConversationMemoryEntities(ctx, runmode.LocalDefaultOrgID, "r-fail", entA.ID)
 
 	if role := attachRoleFor(t, database, "r-fail", entA.ID); role != domain.MemoryRolePrimary {
 		t.Errorf("primary role = %q, want %q despite the listing failure", role, domain.MemoryRolePrimary)
 	}
-	if !attachMemoryRunIDs(t, s, entA.ID)["r-fail"] {
+	if !attachMemoryConversationIDs(t, s, entA.ID)["r-fail"] {
 		t.Error("memory upsert lost when artifact listing failed")
 	}
 }
@@ -224,10 +224,10 @@ func (failingArtifactStore) ListByConversationSystem(context.Context, string, st
 	return nil, errors.New("artifact listing failed")
 }
 
-// TestAttachRunMemoryEntities_Precedence: a pre-existing touched row upgrades to
+// TestAttachConversationMemoryEntities_Precedence: a pre-existing touched row upgrades to
 // produced on the produced PR, and the primary entity wins over both a prior
 // touched row and a produced artifact pointing at it.
-func TestAttachRunMemoryEntities_Precedence(t *testing.T) {
+func TestAttachConversationMemoryEntities_Precedence(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-prec", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -253,7 +253,7 @@ func TestAttachRunMemoryEntities_Precedence(t *testing.T) {
 	seedProducedPR(t, s, "r-prec", "o/r", 100, "https://github.com/o/r/pull/100")
 	seedProducedPR(t, s, "r-prec", "o/r", 200, "https://github.com/o/r/pull/200")
 
-	s.attachRunMemoryEntities(ctx, org, "r-prec", entP.ID)
+	s.attachConversationMemoryEntities(ctx, org, "r-prec", entP.ID)
 
 	if role := attachRoleFor(t, database, "r-prec", entP.ID); role != domain.MemoryRolePrimary {
 		t.Errorf("P role = %q, want %q (primary wins over touched+produced)", role, domain.MemoryRolePrimary)
@@ -263,11 +263,11 @@ func TestAttachRunMemoryEntities_Precedence(t *testing.T) {
 	}
 }
 
-// TestAttachRunMemoryEntities_MotivatingCase is the read-path acceptance for
+// TestAttachConversationMemoryEntities_MotivatingCase is the read-path acceptance for
 // the motivating case: a Slack-thread-triggered run (primary A) that opens a
 // PR (produced B) and touches an issue (C) leaves its narrative reachable from
 // all three, with roles {A: primary, B: produced, C: touched}.
-func TestAttachRunMemoryEntities_MotivatingCase(t *testing.T) {
+func TestAttachConversationMemoryEntities_MotivatingCase(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-507", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -286,7 +286,7 @@ func TestAttachRunMemoryEntities_MotivatingCase(t *testing.T) {
 	}
 	seedProducedPR(t, s, "r-507", "o/r", 77, "https://github.com/o/r/pull/77")
 
-	s.attachRunMemoryEntities(ctx, org, "r-507", entA.ID)
+	s.attachConversationMemoryEntities(ctx, org, "r-507", entA.ID)
 
 	entB := attachEntityBySource(t, database, "github", "o/r#77")
 	if entB == nil {
@@ -317,10 +317,10 @@ func TestAttachRunMemoryEntities_MotivatingCase(t *testing.T) {
 	}
 }
 
-// TestAttachRunMemoryEntities_MultiStepPrimaryPerStep: two step-runs on one task
+// TestAttachConversationMemoryEntities_MultiStepPrimaryPerStep: two step-runs on one task
 // each write their own primary join row for the shared entity, so the entity's
 // memory read surfaces both runs.
-func TestAttachRunMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) {
+func TestAttachConversationMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-step1", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -333,7 +333,7 @@ func TestAttachRunMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) {
 	if err != nil || conv1 == nil {
 		t.Fatalf("GetSystem(r-step1): err=%v run=%v", err, conv1)
 	}
-	brID := seedRunBlueprint(t, database, "r-step2", conv1.TaskID)
+	brID := seedConversationBlueprint(t, database, "r-step2", conv1.TaskID)
 	stepIdx := 1
 	dbtest.SeedConversation(t, database, domain.Conversation{
 		ID: "r-step2", TaskID: conv1.TaskID, PromptID: "test-prompt",
@@ -345,7 +345,7 @@ func TestAttachRunMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) {
 		if err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, conversationID, entA.ID, "", conversationID+" narrative"); err != nil {
 			t.Fatalf("upsert memory %s: %v", conversationID, err)
 		}
-		s.attachRunMemoryEntities(ctx, org, conversationID, entA.ID)
+		s.attachConversationMemoryEntities(ctx, org, conversationID, entA.ID)
 	}
 
 	if role := attachRoleFor(t, database, "r-step1", entA.ID); role != domain.MemoryRolePrimary {
@@ -354,7 +354,7 @@ func TestAttachRunMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) {
 	if role := attachRoleFor(t, database, "r-step2", entA.ID); role != domain.MemoryRolePrimary {
 		t.Errorf("step2 role = %q, want primary", role)
 	}
-	conversationIDs := attachMemoryRunIDs(t, s, entA.ID)
+	conversationIDs := attachMemoryConversationIDs(t, s, entA.ID)
 	if !conversationIDs["r-step1"] || !conversationIDs["r-step2"] {
 		t.Errorf("entity should reach both step-runs, got %v", conversationIDs)
 	}

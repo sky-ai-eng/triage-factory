@@ -10,20 +10,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// runSignalStore is the Postgres impl of db.ConversationSignalStore — the cross-pod
+// conversationSignalStore is the Postgres impl of db.ConversationSignalStore — the cross-pod
 // run-control outbox (TFAC-585). Admin-pool only: conversation_signals carries no
 // app-pool policy (RLS enabled, REVOKE ALL from the app roles — see the
 // migration), so every statement here runs against the admin/BYPASSRLS
 // pool, mirroring InstanceStore's shape.
-type runSignalStore struct{ admin queryer }
+type conversationSignalStore struct{ admin queryer }
 
 func newConversationSignalStore(admin queryer) db.ConversationSignalStore {
-	return &runSignalStore{admin: admin}
+	return &conversationSignalStore{admin: admin}
 }
 
-var _ db.ConversationSignalStore = (*runSignalStore)(nil)
+var _ db.ConversationSignalStore = (*conversationSignalStore)(nil)
 
-func (s *runSignalStore) Insert(ctx context.Context, orgID, conversationID string, kind domain.ConversationSignalKind, payload, target string) (int64, error) {
+func (s *conversationSignalStore) Insert(ctx context.Context, orgID, conversationID string, kind domain.ConversationSignalKind, payload, target string) (int64, error) {
 	var payloadArg any
 	if payload != "" {
 		payloadArg = []byte(payload)
@@ -37,7 +37,7 @@ func (s *runSignalStore) Insert(ctx context.Context, orgID, conversationID strin
 	return id, err
 }
 
-func (s *runSignalStore) ListUnackedForTarget(ctx context.Context, target string) ([]domain.ConversationSignal, error) {
+func (s *conversationSignalStore) ListUnackedForTarget(ctx context.Context, target string) ([]domain.ConversationSignal, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT id, org_id::text, conversation_id::text, kind, COALESCE(payload::text, ''), target, created_at
 		FROM conversation_signals
@@ -61,7 +61,7 @@ func (s *runSignalStore) ListUnackedForTarget(ctx context.Context, target string
 	return out, rows.Err()
 }
 
-func (s *runSignalStore) Ack(ctx context.Context, id int64, result string) error {
+func (s *conversationSignalStore) Ack(ctx context.Context, id int64, result string) error {
 	_, err := s.admin.ExecContext(ctx, `
 		UPDATE conversation_signals SET acked_at = now(), ack_result = $2
 		WHERE id = $1 AND acked_at IS NULL
@@ -69,7 +69,7 @@ func (s *runSignalStore) Ack(ctx context.Context, id int64, result string) error
 	return err
 }
 
-func (s *runSignalStore) AckStatus(ctx context.Context, id int64) (bool, string, error) {
+func (s *conversationSignalStore) AckStatus(ctx context.Context, id int64) (bool, string, error) {
 	var ackedAt sql.NullTime
 	var result sql.NullString
 	err := s.admin.QueryRowContext(ctx, `SELECT acked_at, ack_result FROM conversation_signals WHERE id = $1`, id).Scan(&ackedAt, &result)
@@ -82,7 +82,7 @@ func (s *runSignalStore) AckStatus(ctx context.Context, id int64) (bool, string,
 	return ackedAt.Valid, result.String, nil
 }
 
-func (s *runSignalStore) PurgeAcked(ctx context.Context, olderThan time.Duration) (int, error) {
+func (s *conversationSignalStore) PurgeAcked(ctx context.Context, olderThan time.Duration) (int, error) {
 	res, err := s.admin.ExecContext(ctx, `
 		DELETE FROM conversation_signals WHERE acked_at IS NOT NULL AND acked_at < $1
 	`, time.Now().Add(-olderThan))

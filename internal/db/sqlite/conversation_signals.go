@@ -8,7 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// runSignalStore is the SQLite stub for db.ConversationSignalStore. conversation_signals is
+// conversationSignalStore is the SQLite stub for db.ConversationSignalStore. conversation_signals is
 // Postgres-only (see internal/db/postgres/conversation_signals.go's doc comment):
 // local mode is always its own run's owner (TF_ROLE=all is one process),
 // so no code path may ever reach this store — internal/delegate only
@@ -16,28 +16,28 @@ import (
 // returns ErrNotApplicableInLocal, mirroring
 // internal/db/sqlite/marketplace_store.go. Wired purely to keep db.Stores
 // fully populated in both modes.
-type runSignalStore struct{}
+type conversationSignalStore struct{}
 
-func newConversationSignalStore() db.ConversationSignalStore { return runSignalStore{} }
+func newConversationSignalStore() db.ConversationSignalStore { return conversationSignalStore{} }
 
-var _ db.ConversationSignalStore = runSignalStore{}
+var _ db.ConversationSignalStore = conversationSignalStore{}
 
-func (runSignalStore) Insert(context.Context, string, string, domain.ConversationSignalKind, string, string) (int64, error) {
+func (conversationSignalStore) Insert(context.Context, string, string, domain.ConversationSignalKind, string, string) (int64, error) {
 	return 0, db.ErrNotApplicableInLocal
 }
 
-func (runSignalStore) ListUnackedForTarget(context.Context, string) ([]domain.ConversationSignal, error) {
+func (conversationSignalStore) ListUnackedForTarget(context.Context, string) ([]domain.ConversationSignal, error) {
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (runSignalStore) Ack(context.Context, int64, string) error {
+func (conversationSignalStore) Ack(context.Context, int64, string) error {
 	return db.ErrNotApplicableInLocal
 }
 
-func (runSignalStore) AckStatus(context.Context, int64) (bool, string, error) {
+func (conversationSignalStore) AckStatus(context.Context, int64) (bool, string, error) {
 	return false, "", db.ErrNotApplicableInLocal
 }
 
-func (runSignalStore) PurgeAcked(context.Context, time.Duration) (int, error) {
+func (conversationSignalStore) PurgeAcked(context.Context, time.Duration) (int, error) {
 	return 0, db.ErrNotApplicableInLocal
 }
