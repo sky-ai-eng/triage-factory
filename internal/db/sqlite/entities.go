@@ -295,7 +295,7 @@ func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, sourceID,
 	}
 
 	id := uuid.New().String()
-	now := time.Now()
+	now := time.Now().UTC()
 	_, err = s.q.ExecContext(ctx, `
 		INSERT INTO entities (id, source, source_id, kind, title, url, state, created_at, last_polled_at)
 		VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
@@ -330,7 +330,7 @@ func (s *entityStore) UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSO
 	}
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE entities SET snapshot_json = ?, last_polled_at = ? WHERE id = ?
-	`, snapshotJSON, time.Now(), id)
+	`, snapshotJSON, time.Now().UTC(), id)
 	return err
 }
 
@@ -403,7 +403,7 @@ func (s *entityStore) MarkClosed(ctx context.Context, orgID, id string) error {
 	}
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ?
-	`, time.Now(), id)
+	`, time.Now().UTC(), id)
 	return err
 }
 
@@ -413,7 +413,7 @@ func (s *entityStore) Close(ctx context.Context, orgID, id string) error {
 	}
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ? AND state = 'active'
-	`, time.Now(), id)
+	`, time.Now().UTC(), id)
 	return err
 }
 
@@ -538,7 +538,7 @@ func updateSnapshotCAS(ctx context.Context, q queryer, id, snapshotJSON string, 
 		UPDATE entities
 		SET snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1
 		WHERE id = ? AND poll_seq = ?
-	`, snapshotJSON, time.Now(), id, expectedPollSeq)
+	`, snapshotJSON, time.Now().UTC(), id, expectedPollSeq)
 	if err != nil {
 		return false, err
 	}
@@ -557,7 +557,7 @@ func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) er
 		return err
 	}
 	_, err := s.q.ExecContext(ctx,
-		`UPDATE entities SET last_polled_at = ? WHERE id = ?`, time.Now(), id)
+		`UPDATE entities SET last_polled_at = ? WHERE id = ?`, time.Now().UTC(), id)
 	return err
 }
 

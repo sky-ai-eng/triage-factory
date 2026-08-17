@@ -340,7 +340,13 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	// Runs per day (last 30 days). Build the 30-day skeleton so
 	// the sparkline always renders 30 buckets even when several
 	// days have zero runs.
-	cutoff := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
+	//
+	// UTC days on both sides. SQLite's DATE() resolves started_at to a UTC
+	// day whatever offset the stored value carries, so a skeleton built in
+	// the process's local zone names a different day for every run within
+	// the offset of midnight — and every one of those lookups misses,
+	// dropping real runs out of the sparkline.
+	cutoff := time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02")
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT DATE(started_at) AS day, COUNT(*) AS cnt
 		FROM conversations
@@ -370,7 +376,7 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	}
 
 	for i := 29; i >= 0; i-- {
-		d := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
+		d := time.Now().UTC().AddDate(0, 0, -i).Format("2006-01-02")
 		stats.RunsPerDay = append(stats.RunsPerDay, domain.DayCount{Date: d, Count: dayMap[d]})
 	}
 	return stats, nil

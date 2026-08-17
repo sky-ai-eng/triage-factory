@@ -72,7 +72,7 @@ func newJiraRecordingStores(t *testing.T, jiraURL string, eventTriggered bool) (
 // touch tests that read conversation_memory_entities directly.
 func newJiraRecordingStoresConn(t *testing.T, jiraURL string, eventTriggered bool) (*sql.DB, db.Stores, ConversationInfo) {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}

@@ -100,10 +100,7 @@ func (s *permissionStore) Resolve(ctx context.Context, orgID, conversationID, to
 		return fmt.Errorf("sqlite permissions Resolve: unknown reason %q", reason)
 	}
 	now := time.Now().UTC()
-	// The wait is computed in Go rather than in the UPDATE because SQLite
-	// can't do the arithmetic here: the driver stores a time.Time in Go's own
-	// String() layout, which julianday()/strftime() don't parse — they'd
-	// silently yield NULL rather than erroring. Reading the stored
+	// The wait is computed in Go rather than in the UPDATE: reading the stored
 	// requested_at back and subtracting keeps the measurement anchored to the
 	// row's own timestamp, which is the property that matters.
 	requestedAt, ok, err := s.pendingRequestedAt(ctx, orgID, conversationID, toolCallID)

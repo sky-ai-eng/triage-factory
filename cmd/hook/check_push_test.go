@@ -19,7 +19,7 @@ import (
 // org/team rows), which is what the pre-push hook actually runs against.
 func newPolicyStores(t *testing.T) db.Stores {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

@@ -780,7 +780,7 @@ func TestArtifactStore_SQLite_ListByTeam_Filters(t *testing.T) {
 // the spend store's SQLite test uses it. Used by the time-window filter test.
 func newSQLiteForArtifactTestTimed(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)&_time_format=sqlite")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
@@ -962,7 +962,7 @@ func TestArtifactStore_SQLite_UpdateReviewDetailsIfPending(t *testing.T) {
 
 func newSQLiteForArtifactTest(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}

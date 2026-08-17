@@ -25,7 +25,7 @@ import (
 func TestScoreStore_SQLite(t *testing.T) {
 	dbtest.RunScoreStoreConformance(t, func(t *testing.T) (db.ScoreStore, string, dbtest.ScoreSeeder) {
 		t.Helper()
-		conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+		conn, err := sql.Open("sqlite", db.TestDSNMemory)
 		if err != nil {
 			t.Fatalf("open in-memory db: %v", err)
 		}
@@ -97,7 +97,7 @@ func seedSQLiteTasks(t *testing.T, conn *sql.DB, n int) []string {
 // at least two chunks) and the all-or-nothing tx around them must
 // hold so every row ends up scored.
 func TestScoreStore_SQLite_UpdateTaskScores_ChunksLargeBatch(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}

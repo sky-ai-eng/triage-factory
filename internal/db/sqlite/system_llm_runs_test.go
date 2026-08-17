@@ -208,7 +208,7 @@ func TestSystemLLMRunStore_SQLite_EmptyTraceIDNeverCollides(t *testing.T) {
 
 func newSQLiteForSystemLLMTest(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}

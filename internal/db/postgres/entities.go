@@ -473,7 +473,7 @@ func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, sourceID,
 	}
 
 	id := uuid.New().String()
-	now := time.Now()
+	now := time.Now().UTC()
 	_, err = q.ExecContext(ctx, `
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, state, created_at, last_polled_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, $9)
@@ -512,7 +512,7 @@ func (s *entityStore) UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSO
 		UPDATE entities
 		SET snapshot_json = $1::jsonb, last_polled_at = $2
 		WHERE org_id = $3 AND id = $4
-	`, snapshotJSON, time.Now(), orgID, id)
+	`, snapshotJSON, time.Now().UTC(), orgID, id)
 	return err
 }
 
@@ -536,7 +536,7 @@ func updateSnapshotCAS(ctx context.Context, q queryer, orgID, id, snapshotJSON s
 		UPDATE entities
 		SET snapshot_json = $1::jsonb, last_polled_at = $2, poll_seq = poll_seq + 1
 		WHERE org_id = $3 AND id = $4 AND poll_seq = $5
-	`, snapshotJSON, time.Now(), orgID, id, expectedPollSeq)
+	`, snapshotJSON, time.Now().UTC(), orgID, id, expectedPollSeq)
 	if err != nil {
 		return false, err
 	}
@@ -560,7 +560,7 @@ func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON
 func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) error {
 	_, err := s.admin.ExecContext(ctx,
 		`UPDATE entities SET last_polled_at = $1 WHERE org_id = $2 AND id = $3`,
-		time.Now(), orgID, id)
+		time.Now().UTC(), orgID, id)
 	return err
 }
 
@@ -654,7 +654,7 @@ func (s *entityStore) MarkClosedSystem(ctx context.Context, orgID, id string) er
 func markEntityClosed(ctx context.Context, q queryer, orgID, id string) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE entities SET state = 'closed', closed_at = $1 WHERE org_id = $2 AND id = $3
-	`, time.Now(), orgID, id)
+	`, time.Now().UTC(), orgID, id)
 	return err
 }
 
@@ -669,7 +669,7 @@ func (s *entityStore) CloseSystem(ctx context.Context, orgID, id string) error {
 func closeActiveEntity(ctx context.Context, q queryer, orgID, id string) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE entities SET state = 'closed', closed_at = $1 WHERE org_id = $2 AND id = $3 AND state = 'active'
-	`, time.Now(), orgID, id)
+	`, time.Now().UTC(), orgID, id)
 	return err
 }
 

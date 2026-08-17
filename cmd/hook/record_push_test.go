@@ -26,7 +26,7 @@ type pushDetails struct {
 // stores plus the run id to wire into ConversationInfo.
 func newTestStores(t *testing.T) (db.Stores, string) {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

@@ -30,7 +30,7 @@ func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, s
 		FROM events
 		WHERE created_at > ?
 		GROUP BY event_type
-	`, since)
+	`, since.UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 		FROM tasks
 		WHERE created_at > ?
 		GROUP BY event_type
-	`, since)
+	`, since.UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +347,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 		return nil, err
 	}
 
-	graceCutoff := time.Now().Add(-db.FactoryClosedGracePeriod)
+	graceCutoff := time.Now().UTC().Add(-db.FactoryClosedGracePeriod)
 	closed, err := queryFactoryEntities(ctx, s.q, `
 		SELECT `+sqliteFactoryEntitySelectColumns+`
 		FROM entities e

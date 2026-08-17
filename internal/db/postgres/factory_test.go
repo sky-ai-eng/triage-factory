@@ -225,7 +225,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			t.Helper()
 			if _, err := conn.Exec(
 				`UPDATE entities SET state = 'closed', closed_at = $1 WHERE id = $2 AND org_id = $3`,
-				closedAt, entityID, orgID,
+				closedAt.UTC(), entityID, orgID,
 			); err != nil {
 				t.Fatalf("close entity: %v", err)
 			}

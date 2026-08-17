@@ -85,7 +85,7 @@ func (s *conversationSignalStore) AckStatus(ctx context.Context, id int64) (bool
 func (s *conversationSignalStore) PurgeAcked(ctx context.Context, olderThan time.Duration) (int, error) {
 	res, err := s.admin.ExecContext(ctx, `
 		DELETE FROM conversation_signals WHERE acked_at IS NOT NULL AND acked_at < $1
-	`, time.Now().Add(-olderThan))
+	`, time.Now().UTC().Add(-olderThan))
 	if err != nil {
 		return 0, err
 	}

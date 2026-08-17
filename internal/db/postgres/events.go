@@ -80,9 +80,9 @@ func recordEvent(ctx context.Context, q queryer, orgID string, evt domain.Event)
 	}
 	var occurredAt any
 	if !evt.OccurredAt.IsZero() {
-		occurredAt = evt.OccurredAt
+		occurredAt = evt.OccurredAt.UTC()
 	}
-	createdAt := time.Now()
+	createdAt := time.Now().UTC()
 	if _, err := q.ExecContext(ctx, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, occurred_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)

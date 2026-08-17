@@ -445,7 +445,7 @@ func (f *fakeResolver) ClientFor(_ context.Context, _, target string) (*github.C
 
 func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID, content string), func(a domain.Artifact)) {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

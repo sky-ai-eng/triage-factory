@@ -332,11 +332,16 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 		stats.LastUsedAt = &formatted
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
+	// UTC days on both sides. A bare started_at::date casts the timestamptz
+	// through the session's TimeZone, so the day a run lands in depends on a
+	// connection setting — and the skeleton below, built in the process's own
+	// zone, is a third answer again. Pin both to UTC and the lookups line up.
+	cutoff := time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02")
 	rows, err := s.app.QueryContext(ctx, `
-		SELECT started_at::date AS day, COUNT(*) AS cnt
+		SELECT (started_at AT TIME ZONE 'UTC')::date AS day, COUNT(*) AS cnt
 		FROM conversations
-		WHERE org_id = $1 AND prompt_id = $2 AND started_at::date >= $3::date
+		WHERE org_id = $1 AND prompt_id = $2
+		  AND (started_at AT TIME ZONE 'UTC')::date >= $3::date
 		GROUP BY day ORDER BY day
 	`, orgID, promptID, cutoff)
 	if err != nil {
@@ -359,7 +364,7 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	}
 
 	for i := 29; i >= 0; i-- {
-		d := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
+		d := time.Now().UTC().AddDate(0, 0, -i).Format("2006-01-02")
 		stats.RunsPerDay = append(stats.RunsPerDay, domain.DayCount{Date: d, Count: dayMap[d]})
 	}
 	return stats, nil

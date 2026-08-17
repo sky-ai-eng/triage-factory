@@ -94,7 +94,7 @@ func (s *Spawner) ReapExpiredSnapshots(ctx context.Context) {
 	if blobs == nil || s.conversations == nil {
 		return
 	}
-	cutoff := time.Now().Add(-s.snapshotRetention())
+	cutoff := time.Now().UTC().Add(-s.snapshotRetention())
 	keys, err := s.conversations.ListReapableSnapshotKeysSystem(ctx, cutoff)
 	if err != nil {
 		delegateLog.Warn("snapshot reaper: list reapable keys failed", "error", err)

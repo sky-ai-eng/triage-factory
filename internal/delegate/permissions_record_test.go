@@ -35,7 +35,7 @@ type permRecordFixture struct {
 
 func newPermRecordFixture(t *testing.T) permRecordFixture {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)&_time_format=sqlite")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

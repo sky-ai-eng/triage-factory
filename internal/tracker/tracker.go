@@ -457,7 +457,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 						EntityID:     &eid,
 						DedupKey:     task.DedupKey,
 						MetadataJSON: string(meta),
-						OccurredAt:   time.Now(),
+						OccurredAt:   time.Now().UTC(),
 					})
 					trackerLog.Info("reconciled: emitting review_request_removed for skipped entity", "dedup_key", task.DedupKey, "entity", e.ID)
 				}
@@ -915,7 +915,7 @@ func (t *Tracker) recordPullsPoll(ctx context.Context, repoFull, etag string) {
 	}
 	// Ref-keyed: repoFull is one of the names ListTrackedNamesSystem handed
 	// this cycle, the same one that just went into the request path.
-	if err := t.repos.SetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRefFromSlug(repoFull), etag, time.Now()); err != nil {
+	if err := t.repos.SetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRefFromSlug(repoFull), etag, time.Now().UTC()); err != nil {
 		trackerLog.Error("write pulls poll state failed", "repo", repoFull, "error", err)
 	}
 }

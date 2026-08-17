@@ -45,7 +45,7 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 			INSERT INTO pending_firings (entity_id, task_id, trigger_id, triggering_event_id, status, queued_at)
 			VALUES (?, ?, ?, ?, 'pending', ?)
 			ON CONFLICT (task_id, trigger_id) WHERE status IN ('pending', 'draining') DO NOTHING
-		`, entityID, taskID, triggerID, triggeringEventID, time.Now())
+		`, entityID, taskID, triggerID, triggeringEventID, time.Now().UTC())
 		if err != nil {
 			return err
 		}
@@ -87,7 +87,7 @@ func (s *pendingFiringsStore) PopForTask(ctx context.Context, orgID, taskID stri
 		)
 		RETURNING id, entity_id, task_id, trigger_id, triggering_event_id,
 		          status, COALESCE(skip_reason, ''), queued_at, drained_at, fired_run_id
-	`, time.Now(), taskID)
+	`, time.Now().UTC(), taskID)
 	return scanSqlitePendingFiring(row)
 }
 
@@ -115,7 +115,7 @@ func (s *pendingFiringsStore) RequeueStaleDraining(ctx context.Context, orgID st
 		SET status = 'pending', claimed_at = NULL
 		WHERE status = 'draining'
 		  AND (claimed_at IS NULL OR claimed_at < ?)
-	`, before)
+	`, before.UTC())
 	if err != nil {
 		return 0, err
 	}
@@ -131,7 +131,7 @@ func (s *pendingFiringsStore) MarkFired(ctx context.Context, orgID string, firin
 		UPDATE pending_firings
 		SET status = 'fired', drained_at = ?, fired_run_id = ?
 		WHERE id = ? AND status = 'draining'
-	`, time.Now(), blueprintRunID, firingID)
+	`, time.Now().UTC(), blueprintRunID, firingID)
 	return err
 }
 
@@ -143,7 +143,7 @@ func (s *pendingFiringsStore) MarkSkipped(ctx context.Context, orgID string, fir
 		UPDATE pending_firings
 		SET status = 'skipped_stale', drained_at = ?, skip_reason = ?
 		WHERE id = ? AND status = 'draining'
-	`, time.Now(), reason, firingID)
+	`, time.Now().UTC(), reason, firingID)
 	return err
 }
 

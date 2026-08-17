@@ -143,3 +143,21 @@ func readPgSwipeAudit(t *testing.T, conn *sql.DB, taskID string) []string {
 	}
 	return actions
 }
+
+// TestSnoozeVisibility_Postgres is the Postgres half of the snooze-visibility
+// conformance suite — see the SQLite twin.
+func TestSnoozeVisibility_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+
+	dbtest.RunSnoozeVisibilityConformance(t, func(t *testing.T) (db.SwipeStore, db.TaskStore, string, dbtest.TaskSeederForSwipes) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID := seedPgOrgAndUserForSwipes(t, h)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		seed := func(t *testing.T) string {
+			t.Helper()
+			return seedPgTaskForSwipes(t, h.AdminDB, orgID, userID)
+		}
+		return stores.Swipes, stores.Tasks, orgID, seed
+	})
+}

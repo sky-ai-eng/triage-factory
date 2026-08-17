@@ -136,7 +136,7 @@ func completeConversation(ctx context.Context, q queryer, orgID, conversationID,
 		    outcome_reason = NULLIF($5, ''),
 		    failure_kind = NULLIF($6, '')
 		WHERE org_id = $7 AND id = $8
-	`, status, time.Now(), resultSummary, outcome, outcomeReason, failureKind, orgID, conversationID)
+	`, status, time.Now().UTC(), resultSummary, outcome, outcomeReason, failureKind, orgID, conversationID)
 	if err != nil {
 		return err
 	}

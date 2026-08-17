@@ -71,7 +71,7 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			return "", db.ErrSnoozeUntilRequired
 		}
 		newStatus = "snoozed"
-		snoozeVal = *snoozeUntil
+		snoozeVal = snoozeUntil.UTC()
 	default:
 		// Unknown action — same fallback as before, write 'queued'.
 		newStatus = "queued"
@@ -109,7 +109,7 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		var closedAt any
 		var reason any
 		if terminal {
-			closedAt = time.Now()
+			closedAt = time.Now().UTC()
 			reason = closeReason
 		}
 		_, err := q.ExecContext(ctx,
@@ -159,7 +159,7 @@ func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string
 			  WHERE id = ?
 			    AND claimed_by_agent_id IS NULL
 			    AND claimed_by_user_id  IS NULL`,
-			until, taskID,
+			until.UTC(), taskID,
 		)
 		if err != nil {
 			return err

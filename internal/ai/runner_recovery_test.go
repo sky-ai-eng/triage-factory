@@ -372,7 +372,7 @@ func (s *callOrderScoreStore) TasksOwedReDerive(ctx context.Context, orgID strin
 // newScoringTestDB opens an in-memory SQLite with the full schema.
 func newScoringTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

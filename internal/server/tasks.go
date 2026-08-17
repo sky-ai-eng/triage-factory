@@ -1095,19 +1095,32 @@ func validHesitationField(w http.ResponseWriter, ms int) bool {
 	return true
 }
 
+// parseSnoozeUntil resolves the "until" vocabulary to the instant the task
+// wakes. Every arm returns UTC, because the wake time is compared against
+// SQLite's own clock, which is UTC — a local-zone value there reads as its
+// wall clock and the snooze expires the moment it is written (west of UTC) or
+// outlasts its duration by the offset (east of it).
+//
+// "tomorrow" is still built as 9am in the server's location and converted:
+// the preset means a wall-clock morning, not an offset from now, so the zone
+// is load-bearing on the way in and irrelevant once it names an instant.
 func parseSnoozeUntil(s string) (time.Time, error) {
 	now := time.Now()
 	switch s {
 	case "1h":
-		return now.Add(1 * time.Hour), nil
+		return now.Add(1 * time.Hour).UTC(), nil
 	case "2h":
-		return now.Add(2 * time.Hour), nil
+		return now.Add(2 * time.Hour).UTC(), nil
 	case "4h":
-		return now.Add(4 * time.Hour), nil
+		return now.Add(4 * time.Hour).UTC(), nil
 	case "tomorrow":
 		tomorrow := now.AddDate(0, 0, 1)
-		return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 9, 0, 0, 0, tomorrow.Location()), nil
+		return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 9, 0, 0, 0, tomorrow.Location()).UTC(), nil
 	default:
-		return time.Parse(time.RFC3339, s)
+		t, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return t.UTC(), nil
 	}
 }

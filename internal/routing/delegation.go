@@ -787,7 +787,7 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 	// Crash recovery first: requeue firings stuck in 'draining' past the
 	// staleness cutoff (their drainer died between pop and resolve), so
 	// the pass below sees and drains them like any queued intent.
-	if n, err := r.firings.RequeueStaleDraining(ctx, orgID, time.Now().Add(-drainingStaleAfter)); err != nil {
+	if n, err := r.firings.RequeueStaleDraining(ctx, orgID, time.Now().UTC().Add(-drainingStaleAfter)); err != nil {
 		routerLog.Error("drain sweeper: requeue stale draining failed", "org", orgID, "error", err)
 	} else if n > 0 {
 		routerLog.Warn("drain sweeper: requeued firings orphaned in 'draining' (drainer died mid-drain?)",
