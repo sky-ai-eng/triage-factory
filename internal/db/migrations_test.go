@@ -233,8 +233,8 @@ func TestMigrate_MessagesAreTheOnlyAccountingLedger(t *testing.T) {
 // runs. Driven through goose directly so we can land the pre-migration
 // fixture between the prior migration and the new one.
 func TestMigrate_BackfillsRunTokensFromRunMessages(t *testing.T) {
-	// Foreign keys off (plain :memory:) so the fixture needs no entity /
-	// task / prompt / blueprint scaffolding — the backfill is pure SQL over
+	// TestDSNMemoryNoForeignKeys so the fixture needs no entity / task /
+	// prompt / blueprint scaffolding — the backfill is pure SQL over
 	// runs ⋈ run_messages and doesn't care about FK targets. The CHECK
 	// constraints still apply, so the run carries origin='blueprint' parents.
 	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
@@ -301,7 +301,7 @@ func TestMigrate_BackfillsRunTokensFromRunMessages(t *testing.T) {
 // was on disk all along, so historical curator spend is recovered, not just
 // going-forward.
 func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
-	// Foreign keys off (plain :memory:) so the fixture needs no projects
+	// TestDSNMemoryNoForeignKeys so the fixture needs no projects
 	// scaffolding — the backfill is pure SQL over
 	// curator_requests ⋈ curator_messages and doesn't care about FK targets.
 	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)

@@ -67,7 +67,12 @@ const TestDSNMemory = ":memory:?_pragma=foreign_keys(on)&" + SQLiteTimeFormatPar
 // migration tests that stage rows as an older schema held them — historical
 // data routinely does not satisfy constraints a later migration introduced,
 // and reproducing it is the whole point of those tests.
-const TestDSNMemoryNoForeignKeys = ":memory:?" + SQLiteTimeFormatParam
+//
+// foreign_keys(off) is spelled out rather than left to SQLite's default. The
+// default is off today, but "off" here is a requirement of these tests, not an
+// observation about the driver: a future default flip, or a driver that
+// enables it for you, would break them somewhere far from this line.
+const TestDSNMemoryNoForeignKeys = ":memory:?_pragma=foreign_keys(off)&" + SQLiteTimeFormatParam
 
 // OpenAt returns a connection to the SQLite database at the given path.
 // The directory must already exist.
