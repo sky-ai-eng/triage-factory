@@ -33,7 +33,7 @@ import (
 //
 // Security scope: host-uds is sandbox-wide, so the reachable set is exactly
 // the host sockets in the jail's mount tree — today the single per-run
-// daemon socket (a single-file bind of /run/tf/<run_id>.sock; the /run/tf
+// daemon socket (a single-file bind of /run/tf/<conversationID>.sock; the /run/tf
 // dir is not mounted, so runs can't reach each other), and nothing else
 // mounted is a socket. The flag is permissive-but-inert without a mount, so
 // it grants nothing a run wasn't already handed a socket for. Standing

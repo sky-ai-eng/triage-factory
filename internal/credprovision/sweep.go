@@ -76,7 +76,7 @@ func sweepAwaiting(ctx context.Context, mgr *Manager) {
 		if p.ConversationType == domain.ConversationTypeCurator {
 			perr = mgr.ProvisionForCuratorTurn(ctx, p.OrgID, p.ConversationID)
 		} else {
-			perr = mgr.ProvisionForRun(ctx, p.OrgID, p.ConversationID)
+			perr = mgr.ProvisionForConversation(ctx, p.OrgID, p.ConversationID)
 		}
 		if perr != nil {
 			log.Warn("backstop-sweep provision failed",
@@ -113,7 +113,7 @@ func sweepRefresh(ctx context.Context, mgr *Manager, refreshAfter time.Duration)
 		return
 	}
 	for _, r := range runs {
-		if err := mgr.ProvisionForRun(ctx, r.OrgID, r.ConversationID); err != nil {
+		if err := mgr.ProvisionForConversation(ctx, r.OrgID, r.ConversationID); err != nil {
 			log.Warn("refresh-sweep provision failed", "conversation", r.ConversationID, "error", err)
 		}
 	}

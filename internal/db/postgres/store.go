@@ -233,7 +233,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// ConversationQueue is admin-pool only: the dispatcher is a system worker with
 		// no JWT-claims context. The claim uses FOR UPDATE SKIP LOCKED so a
 		// future multi-worker dispatcher never double-claims a queued run.
-		ConversationQueue: newRunQueueStore(admin),
+		ConversationQueue: newConversationQueueStore(admin),
 		// TaskMemory wires both pools: app for request-handler
 		// equivalents (review/PR submit, swipe-discard cleanup,
 		// factory + run-summary reads) and admin for the delegate
@@ -249,7 +249,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// synthetic-claims wrap) and admin for the delegate spawner
 		// cleanup defers. org_id stays bound everywhere as defense
 		// in depth.
-		ConversationWorktrees: newRunWorktreeStore(app, admin),
+		ConversationWorktrees: newConversationWorktreeStore(app, admin),
 		// Orgs holds both pools: admin for ListActiveSystem +
 		// GetSettingsSystem (background services iterating the active
 		// org set / reading per-org settings without JWT claims) and
@@ -384,13 +384,13 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// ConversationSignals is admin-pool only, same posture as Instances: the
 		// cross-pod run-control outbox (TFAC-585), never read under a
 		// user's RLS context.
-		ConversationSignals: newRunSignalStore(admin),
+		ConversationSignals: newConversationSignalStore(admin),
 		// ConversationPendingInput on the top-level store is the admin-pool handle the
 		// dispatcher's claim path uses for Consume (a goroutine with no request
 		// context). Store is reached through the claims-tx handle
 		// (TxStores.ConversationPendingInput, see tx.go) so the resume write commits
 		// atomically with the status flip.
-		ConversationPendingInput: newRunPendingInputStore(admin),
+		ConversationPendingInput: newConversationPendingInputStore(admin),
 		// Permissions is split-pool like Artifacts: the pending read runs on
 		// the app pool under RLS (the policy composes through the
 		// conversation, mirroring claims), every write on the admin pool —
@@ -414,7 +414,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// ClaimCredentials is admin-pool only, same posture as Instances/
 		// ConversationSignals: the sealed per-run credential bundle channel
 		// (TFAC-614) never serves a request handler.
-		ClaimCredentials: newRunCredentialsStore(admin),
+		ClaimCredentials: newClaimCredentialsStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),
@@ -475,7 +475,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Projects:              newProjectStore(tx, tx),
 		Events:                newEventStore(tx, tx),
 		TaskMemory:            newTaskMemoryStore(tx, tx),
-		ConversationWorktrees: newRunWorktreeStore(tx, tx),
+		ConversationWorktrees: newConversationWorktreeStore(tx, tx),
 		Orgs:                  newOrgsStore(tx, tx),
 		OrgMemberships:        newOrgMembershipsStore(tx, tx),
 		Teams:                 newTeamsStore(tx, tx),
@@ -497,7 +497,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		AuthEvents:               newAuthEventStore(tx),
 		Marketplace:              newMarketplaceStore(tx, tx),
 		Instances:                newInstanceStore(tx),
-		ConversationPendingInput: newRunPendingInputStore(tx),
+		ConversationPendingInput: newConversationPendingInputStore(tx),
 		Ext:                      db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

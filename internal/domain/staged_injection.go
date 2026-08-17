@@ -20,7 +20,7 @@ import (
 type StagedInjection struct {
 	ID             string    `json:"id"`
 	OrgID          string    `json:"org_id"`
-	ConversationID string    `json:"run_id"`
+	ConversationID string    `json:"conversation_id"`
 	Producer       string    `json:"producer"`
 	Body           string    `json:"body"`
 	CreatedAt      time.Time `json:"created_at"`

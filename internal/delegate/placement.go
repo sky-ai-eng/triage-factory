@@ -64,5 +64,5 @@ func (s *Spawner) preferredExecutorFor(ctx context.Context, orgID string, task d
 			"org", orgID, "repo", owner+"/"+repo, "error", err)
 		return ""
 	}
-	return plan.PreferredForRun(conversationID)
+	return plan.PreferredForConversation(conversationID)
 }

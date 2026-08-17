@@ -250,7 +250,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		}
 
 		// --- Active runs ----------------------------------------------
-		activeRuns, e = tx.Factory.ActiveRuns(r.Context(), orgID)
+		activeRuns, e = tx.Factory.ActiveConversations(r.Context(), orgID)
 		if e != nil {
 			return e
 		}

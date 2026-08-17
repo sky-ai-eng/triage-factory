@@ -18,7 +18,7 @@ import (
 // fully populated in both modes.
 type runSignalStore struct{}
 
-func newRunSignalStore() db.ConversationSignalStore { return runSignalStore{} }
+func newConversationSignalStore() db.ConversationSignalStore { return runSignalStore{} }
 
 var _ db.ConversationSignalStore = runSignalStore{}
 

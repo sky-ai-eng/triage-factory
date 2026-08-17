@@ -866,12 +866,12 @@ function DockButton({
 function stepStateOf(
   s: Conversation,
   i: number,
-  currentRunID: string,
+  currentConversationID: string,
   currentStepIndex?: number,
 ): StepState {
   if (isActiveStatus(s.Status)) return 'active'
   if (s.Status === 'completed') return 'done'
   if (isFailedStatus(s.Status)) return 'failed'
-  if (s.ID === currentRunID || i === currentStepIndex) return 'current'
+  if (s.ID === currentConversationID || i === currentStepIndex) return 'current'
   return 'pending'
 }

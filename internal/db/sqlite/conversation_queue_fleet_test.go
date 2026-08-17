@@ -48,16 +48,16 @@ func TestRunQueueStore_SQLite_FleetReads(t *testing.T) {
 	if n, err := stores.ConversationQueue.CountQueuedSystem(ctx); err != nil || n != 2 {
 		t.Fatalf("CountQueuedSystem = (%d, %v), want 2", n, err)
 	}
-	queued, err := stores.ConversationQueue.QueuedRunAgesSystem(ctx)
+	queued, err := stores.ConversationQueue.QueuedConversationAgesSystem(ctx)
 	if err != nil || len(queued) != 2 {
-		t.Fatalf("QueuedRunAgesSystem = (%d, %v), want 2", len(queued), err)
+		t.Fatalf("QueuedConversationAgesSystem = (%d, %v), want 2", len(queued), err)
 	}
 	// Org filter: this org has both; a different org has none.
-	if q, _ := stores.ConversationQueue.QueuedRunAgesForOrgSystem(ctx, org); len(q) != 2 {
-		t.Fatalf("QueuedRunAgesForOrgSystem(self) = %d, want 2", len(q))
+	if q, _ := stores.ConversationQueue.QueuedConversationAgesForOrgSystem(ctx, org); len(q) != 2 {
+		t.Fatalf("QueuedConversationAgesForOrgSystem(self) = %d, want 2", len(q))
 	}
-	if q, _ := stores.ConversationQueue.QueuedRunAgesForOrgSystem(ctx, "00000000-0000-0000-0000-0000000000ff"); len(q) != 0 {
-		t.Fatalf("QueuedRunAgesForOrgSystem(other org) = %d, want 0", len(q))
+	if q, _ := stores.ConversationQueue.QueuedConversationAgesForOrgSystem(ctx, "00000000-0000-0000-0000-0000000000ff"); len(q) != 0 {
+		t.Fatalf("QueuedConversationAgesForOrgSystem(other org) = %d, want 0", len(q))
 	}
 
 	// Complete one run with a claim so the timing read has a terminal row
@@ -81,9 +81,9 @@ func TestRunQueueStore_SQLite_FleetReads(t *testing.T) {
 		t.Fatalf("CountQueuedSystem after completing one = %d, want 1", n)
 	}
 
-	timings, err := stores.ConversationQueue.RecentRunTimingsSystem(ctx, time.Unix(0, 0), 0)
+	timings, err := stores.ConversationQueue.RecentConversationTimingsSystem(ctx, time.Unix(0, 0), 0)
 	if err != nil || len(timings) != 2 {
-		t.Fatalf("RecentRunTimingsSystem = (%d, %v), want 2", len(timings), err)
+		t.Fatalf("RecentConversationTimingsSystem = (%d, %v), want 2", len(timings), err)
 	}
 	var completed *domain.ConversationTiming
 	for i := range timings {
@@ -102,21 +102,21 @@ func TestRunQueueStore_SQLite_FleetReads(t *testing.T) {
 	}
 
 	// Org filter on the timing read (no until bound).
-	if ts, _ := stores.ConversationQueue.RecentRunTimingsForOrgSystem(ctx, org, time.Unix(0, 0), time.Time{}, 0); len(ts) != 2 {
-		t.Fatalf("RecentRunTimingsForOrgSystem(self) = %d, want 2", len(ts))
+	if ts, _ := stores.ConversationQueue.RecentConversationTimingsForOrgSystem(ctx, org, time.Unix(0, 0), time.Time{}, 0); len(ts) != 2 {
+		t.Fatalf("RecentConversationTimingsForOrgSystem(self) = %d, want 2", len(ts))
 	}
-	if ts, _ := stores.ConversationQueue.RecentRunTimingsForOrgSystem(ctx, "00000000-0000-0000-0000-0000000000ff", time.Unix(0, 0), time.Time{}, 0); len(ts) != 0 {
-		t.Fatalf("RecentRunTimingsForOrgSystem(other org) = %d, want 0", len(ts))
+	if ts, _ := stores.ConversationQueue.RecentConversationTimingsForOrgSystem(ctx, "00000000-0000-0000-0000-0000000000ff", time.Unix(0, 0), time.Time{}, 0); len(ts) != 0 {
+		t.Fatalf("RecentConversationTimingsForOrgSystem(other org) = %d, want 0", len(ts))
 	}
 
 	// until bound is honored: an upper bound before both runs' started_at
 	// (which are ~now) excludes them; a bound in the future includes both.
 	past := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	if ts, _ := stores.ConversationQueue.RecentRunTimingsForOrgSystem(ctx, org, time.Unix(0, 0), past, 0); len(ts) != 0 {
-		t.Fatalf("RecentRunTimingsForOrgSystem with until in the past = %d, want 0 (upper bound applied)", len(ts))
+	if ts, _ := stores.ConversationQueue.RecentConversationTimingsForOrgSystem(ctx, org, time.Unix(0, 0), past, 0); len(ts) != 0 {
+		t.Fatalf("RecentConversationTimingsForOrgSystem with until in the past = %d, want 0 (upper bound applied)", len(ts))
 	}
 	future := time.Now().UTC().Add(time.Hour)
-	if ts, _ := stores.ConversationQueue.RecentRunTimingsForOrgSystem(ctx, org, time.Unix(0, 0), future, 0); len(ts) != 2 {
-		t.Fatalf("RecentRunTimingsForOrgSystem with until in the future = %d, want 2", len(ts))
+	if ts, _ := stores.ConversationQueue.RecentConversationTimingsForOrgSystem(ctx, org, time.Unix(0, 0), future, 0); len(ts) != 2 {
+		t.Fatalf("RecentConversationTimingsForOrgSystem with until in the future = %d, want 2", len(ts))
 	}
 }

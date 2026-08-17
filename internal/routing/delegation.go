@@ -358,7 +358,7 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conv
 		return false
 	case delegate.InjectDeliveredRemote:
 		routerLog.Info("handed additive event to a live remote executor via conversation_signals",
-			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", conversationID, "event_type", trigger.EventType)
+			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "conversation", conversationID, "event_type", trigger.EventType)
 		r.stampAgentClaim(ctx, orgID, task, claim)
 		return true
 	default: // InjectDeliveredLocal, InjectStagedResumable
@@ -369,12 +369,12 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conv
 		// falling through to the deferral would fire a second run for an event
 		// the agent has already been handed.
 		if claimed, err := r.tasks.MarkEventInjectedSystem(ctx, orgID, task.ID, triggeringEventID, claim); err != nil {
-			routerLog.Error("failed to mark injected task_event", "task_id", task.ID, "run_id", conversationID, "error", err)
+			routerLog.Error("failed to mark injected task_event", "task_id", task.ID, "conversation", conversationID, "error", err)
 		} else {
 			r.claimCommitted(orgID, task, claim.ActingTeamID, claim.AgentID, claimed)
 		}
 		routerLog.Info("injected additive event into active run",
-			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", conversationID, "event_type", trigger.EventType)
+			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "conversation", conversationID, "event_type", trigger.EventType)
 		return true
 	}
 }

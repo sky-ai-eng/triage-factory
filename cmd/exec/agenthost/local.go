@@ -164,7 +164,7 @@ func (c *LocalClient) Close() error { return nil }
 // falls back to the run's sole pending review. Returns an actionable error when
 // no matching pending review exists.
 func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*domain.Artifact, error) {
-	arts, err := c.listArtifactsByRun(ctx)
+	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +494,7 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 // Deliberately NOT filtered on pending: the caller's own claim just moved the
 // row to submitted, so a pending-only lookup would never find it.
 func (c *LocalClient) claimedReviewDetails(ctx context.Context, artifactID string) (domain.ReviewArtifactDetails, error) {
-	arts, err := c.listArtifactsByRun(ctx)
+	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
 		return domain.ReviewArtifactDetails{}, err
 	}
@@ -677,7 +677,7 @@ func shortCommit(sha string) string {
 // the first place. If a future flow needs the head re-pinned, refresh it on the
 // normal (non-fresh) start-review path, which already reads the head.
 func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID, commitSHA string, err error) {
-	arts, err := c.listArtifactsByRun(ctx)
+	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
 		return "", "", err
 	}
@@ -713,10 +713,10 @@ func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, 
 	return art.ID, details.HeadSHA, nil
 }
 
-// listArtifactsByRun reads the calling run's artifacts through the runtime
+// listArtifactsByConversation reads the calling run's artifacts through the runtime
 // (directRuntime respects the event-vs-manual pool split; relayRuntime relays).
-func (c *LocalClient) listArtifactsByRun(ctx context.Context) ([]domain.Artifact, error) {
-	return c.rt.ListRunArtifacts(ctx)
+func (c *LocalClient) listArtifactsByConversation(ctx context.Context) ([]domain.Artifact, error) {
+	return c.rt.ListConversationArtifacts(ctx)
 }
 
 // saveReviewDraftDetails persists a mutated review draft's details_json through
@@ -1827,7 +1827,7 @@ func errIfFinalized(details domain.ReviewArtifactDetails) error {
 // error when no draft carries it — the most likely cause is the agent passing a
 // numeric (live GitHub) comment id, which belongs on the REST update/delete path.
 func (c *LocalClient) runStagedComment(ctx context.Context, commentID string) (*domain.Artifact, domain.ReviewArtifactDetails, int, error) {
-	arts, err := c.listArtifactsByRun(ctx)
+	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
 		return nil, domain.ReviewArtifactDetails{}, 0, err
 	}

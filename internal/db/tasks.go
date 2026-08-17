@@ -434,7 +434,7 @@ type TaskStore interface {
 	BumpSystem(ctx context.Context, orgID, taskID, eventID string) error
 	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
 
-	// CloseWithRunCancelIntentSystem is the close the router performs: the
+	// CloseWithConversationCancelIntentSystem is the close the router performs: the
 	// task's terminal flip, its task_events audit row, and the durable STOP
 	// INTENT for the runs the close ends — one transaction, three tables.
 	//
@@ -466,7 +466,7 @@ type TaskStore interface {
 	// neither, and an empty closingEventID writes no audit row. Passing one
 	// without the other stamps a close_event_type no task_events row accounts
 	// for — not rejected here, but no caller does it.
-	CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeRunIDs []string, err error)
+	CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeConversationIDs []string, err error)
 
 	SetStatusSystem(ctx context.Context, orgID, taskID, status string) error
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error

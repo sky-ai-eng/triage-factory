@@ -434,7 +434,7 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 
 // --- shared close helpers (used by the driver) ------------------------------
 
-// stopRunsOnClosedTask asks the spawner to stop the runs the close just ended
+// stopConversationsOnClosedTask asks the spawner to stop the runs the close just ended
 // and cancel the blueprints behind them: the stop note on the transcript, the
 // kill signal, and the park. conversationIDs is the then-active set the close
 // transaction read and stamped, so this acts on exactly what closed rather
@@ -461,13 +461,13 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 // narrower reason than before: a replay could not repair it anyway (a replayed
 // close finds no active task and never walks back here), and now there is
 // nothing left for it to repair.
-func (r *Router) stopRunsOnClosedTask(orgID, taskID string, conversationIDs []string) {
+func (r *Router) stopConversationsOnClosedTask(orgID, taskID string, conversationIDs []string) {
 	if r.spawner == nil {
 		return
 	}
 	for _, id := range conversationIDs {
 		if err := r.spawner.StopAndCancelBlueprint(orgID, id, "", delegate.StopCauseTaskClosed); err != nil {
-			routerLog.Error("stop run on task close failed", "run_id", id, "task_id", taskID, "error", err)
+			routerLog.Error("stop run on task close failed", "conversation", id, "task_id", taskID, "error", err)
 		}
 	}
 }
@@ -489,13 +489,13 @@ func (r *Router) stopRunsOnClosedTask(orgID, taskID string, conversationIDs []st
 // a replayed close neither stamps nor stops — the run under it may be one a
 // user resumed after the close, which the resume ladder deliberately allows.
 func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingEventID, closeReason, closeEventType string) error {
-	closed, activeRunIDs, err := r.tasks.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
+	closed, activeConversationIDs, err := r.tasks.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
 	if err != nil {
 		return err
 	}
 	if !closed {
 		return nil
 	}
-	r.stopRunsOnClosedTask(orgID, taskID, activeRunIDs)
+	r.stopConversationsOnClosedTask(orgID, taskID, activeConversationIDs)
 	return nil
 }

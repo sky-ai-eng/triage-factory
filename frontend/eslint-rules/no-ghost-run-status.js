@@ -20,15 +20,16 @@ import { readFileSync } from 'node:fs'
 //      `request.status` and a blueprint run's `blueprint_run.status` both
 //      legitimately terminate `cancelled`. The case alone separates them, with
 //      no type information and no false positives.
-//   2. Anything annotated `RunStatusValue` — the alias exists so a status that
-//      travels one hop from that property into a helper (`runStatusColor(status)`,
-//      a tone switch) stays visible. Without it the guard would stop at the
-//      function boundary, which is exactly where two of the retired arms hid.
+//   2. Anything annotated `ConversationStatusValue` — the alias exists so a
+//      status that travels one hop from that property into a helper
+//      (`isActiveStatus(status)`, a tone switch) stays visible. Without it the
+//      guard would stop at the function boundary, which is exactly where two of
+//      the retired arms hid.
 //
 // The alternative scoping — type information, via a `Conversation['Status']`
 // -typed expression — buys nothing extra here: that property is typed `string`
 // on purpose (an unrecognized wire value must reach the closed-world predicates
-// in lib/runStatus, not blow up at the boundary), so the checker would answer
+// in lib/conversationStatus, not blow up at the boundary), so the checker would answer
 // "string" for the curator and blueprint statuses too, and the rule would have
 // to fall back on names anyway. This way the check costs no type-aware lint
 // pass.
@@ -45,7 +46,7 @@ import { readFileSync } from 'node:fs'
 const VOCABULARY_SOURCE = new URL('../src/types.ts', import.meta.url)
 const VOCABULARY_DECLARATIONS = ['CLAIM_PHASES', 'TERMINAL_RUN_STATUSES', 'RUN_STATUSES']
 const STATUS_PROPERTY = 'Status'
-const STATUS_TYPE = 'RunStatusValue'
+const STATUS_TYPE = 'ConversationStatusValue'
 
 // readVocabulary lifts the status names out of the types.ts mirror, so this
 // rule and the Go parity test read the same declaration and a status added in
@@ -83,6 +84,26 @@ function readVocabulary() {
   return statuses
 }
 
+// assertStatusTypeExists pins STATUS_TYPE to the alias types.ts actually
+// exports, under the same rule readVocabulary follows: a guard that silently
+// passes when it cannot find what it guards is worse than no guard. The
+// annotation arm is the half of this rule with no other symptom when it goes
+// stale — the `.Status` arm keeps firing, the rule's own fixtures name the type
+// as a bare string and so keep passing, and the only visible effect is that a
+// status reaching a comparison through a typed helper stops being checked.
+// That is exactly what happened when the alias was renamed in types.ts and the
+// name hardcoded here was left behind.
+function assertStatusTypeExists() {
+  const source = readFileSync(VOCABULARY_SOURCE, 'utf8')
+  if (!source.includes(`export type ${STATUS_TYPE} =`)) {
+    throw new Error(
+      `no-ghost-run-status: src/types.ts exports no \`type ${STATUS_TYPE}\` — the annotation half of the run-status vocabulary lint would match nothing`,
+    )
+  }
+}
+
+assertStatusTypeExists()
+
 // Exported for the rule's own tests, which assert on the parsed set rather
 // than a second hand-written copy of it.
 export const RUN_STATUS_VOCABULARY = readVocabulary()
@@ -111,7 +132,7 @@ export default {
   create(context) {
     const sourceCode = context.sourceCode
     // Checks are gathered during the traversal and evaluated at Program:exit,
-    // because resolving a `RunStatusValue` annotation walks up from the
+    // because resolving a `ConversationStatusValue` annotation walks up from the
     // declaration through `parent` links that ESLint only fills in as it
     // traverses — a helper declared below its caller would otherwise be
     // invisible.
@@ -135,7 +156,7 @@ export default {
     // Only same-file `const` initializers are followed. An imported constant,
     // a property of a frozen map, a value computed at runtime: all invisible
     // here, and all of them would need cross-file or type information to see.
-    // The `.Status` and RunStatusValue scoping is what makes those rare — a
+    // The `.Status` and ConversationStatusValue scoping is what makes those rare — a
     // status that reaches a comparison still has to reach it through one of
     // the two shapes above.
     function statusValue(node) {
@@ -200,9 +221,9 @@ export default {
       return member ? typeReferenceName(member.typeAnnotation) : null
     }
 
-    function isRunStatusExpression(node) {
+    function isConversationStatusExpression(node) {
       if (!node) return false
-      // An explicit `as RunStatusValue` names the value the same way an
+      // An explicit `as ConversationStatusValue` names the value the same way an
       // annotation does, and it is how a wire field reaches a comparison.
       if (node.type === 'TSAsExpression' && typeReferenceName(node.typeAnnotation) === STATUS_TYPE) {
         return true
@@ -223,10 +244,10 @@ export default {
     // Which side of a comparison is the status being tested, and which is the
     // name it is tested against. The subject is decided first: an identifier
     // can be both a declared status and a const holding a string, and the
-    // declaration is the stronger signal — `const s: RunStatusValue = 'open'`
+    // declaration is the stronger signal — `const s: ConversationStatusValue = 'open'`
     // compared against `'cancelled'` is the ghost, not the `'open'`.
     function report(subject, operand) {
-      if (!isRunStatusExpression(subject)) return
+      if (!isConversationStatusExpression(subject)) return
       const status = statusValue(operand)
       if (!status || RUN_STATUS_VOCABULARY.has(status.value)) return
       context.report({
@@ -252,7 +273,7 @@ export default {
         for (const { left, right } of checks) {
           // A comparison of two statuses (`run.Status === other.Status`) names
           // nothing, so neither ordering fires.
-          if (isRunStatusExpression(left)) report(left, right)
+          if (isConversationStatusExpression(left)) report(left, right)
           else report(right, left)
         }
       },

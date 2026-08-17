@@ -700,12 +700,17 @@ const (
 // conversation rename. The server still answers them; the client only ever
 // sends the current names.
 //
-// They exist because the two ends of this protocol are not upgraded together.
-// A credential sidecar is per-run — launched with its agent and living as long
-// as the run does — so its relay calls can outlast an orchestrator restart and
-// arrive at a binary newer than the one that launched it. Without these the
-// upgrade would fail those in-flight runs' exec verbs with ErrUnknownMethod.
-// Retire them once no pre-rename run can still be in flight.
+// They are kept as insurance, not because a skew path is known to exist. The
+// three processes this socket runs between are one binary generation for any
+// given engagement: the sidecar that hosts the Server is spawned by the
+// orchestrator at bring-up, and the jailed client is a single-file bind of the
+// broker's own running executable (sandbox.TrustedTFBinaryPath), pinned at cell
+// build. A restart takes the supervision stream, the cell, and the engagement
+// with it — the reaper requeues the row rather than a new orchestrator adopting
+// a live cell — so an old client should never meet a new server here. Answering
+// both spellings costs five dispatch arms and removes the need to be right
+// about that; a wrong answer would fail an in-flight run's exec verbs with
+// ErrUnknownMethod. Retire them together with this analysis, not before it.
 const (
 	legacyMethodLookupConversation                  = "LookupRun"
 	legacyMethodGetConversationWorktreeByRepoRef    = "GetRunWorktreeByRepoRef"

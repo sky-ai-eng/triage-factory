@@ -13,7 +13,7 @@
 // hit the router (a brain component) can't reach for a run executing on a
 // remote executor.
 //
-// Every mechanism here is dormant unless SetRunSignals wires it — always
+// Every mechanism here is dormant unless SetConversationSignals wires it — always
 // nil in local mode (conversation_signals is Postgres-only) and in every test that
 // doesn't opt in, which is what keeps s.controller as the plain
 // inProcessController and every cross-pod branch below unreached.
@@ -110,7 +110,7 @@ func (s *Spawner) signalTimeout() time.Duration {
 	return DefaultSignalAckTimeout
 }
 
-// SetRunSignals wires the cross-pod run-control outbox (multi mode only —
+// SetConversationSignals wires the cross-pod run-control outbox (multi mode only —
 // callers must gate this on runmode.Current() == ModeMulti before calling;
 // there is no internal mode check here, matching the other post-
 // construction seams like SetJiraResolver). Installing a non-nil
@@ -122,7 +122,7 @@ func (s *Spawner) signalTimeout() time.Duration {
 // comment on why it needs no session affinity, unlike the dedicated LISTEN
 // connection (internal/pgnotify.Listener, wired separately against
 // s.HandleCtlNotification).
-func (s *Spawner) SetRunSignals(runSignals db.ConversationSignalStore, notifyDB *sql.DB) {
+func (s *Spawner) SetConversationSignals(runSignals db.ConversationSignalStore, notifyDB *sql.DB) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.runSignals = runSignals
@@ -130,7 +130,7 @@ func (s *Spawner) SetRunSignals(runSignals db.ConversationSignalStore, notifyDB 
 	s.controller = crossPodController{inProcessController: inProcessController{s: s}}
 }
 
-// getController reads s.controller under lock — SetRunSignals is the only
+// getController reads s.controller under lock — SetConversationSignals is the only
 // mutator, called once at startup, but a bare unguarded read would race it
 // on the theoretical timing where a request lands mid-startup.
 func (s *Spawner) getController() RunController {
@@ -253,7 +253,7 @@ func (s *Spawner) routeControlSignal(ctx context.Context, conversationID string,
 // cancel row: the caller's DB-only park write is already
 // the source of truth and already works cross-pod, so a failure or
 // timeout here is never surfaced. No-op when runSignals isn't wired
-// (local mode, or multi mode before/without SetRunSignals).
+// (local mode, or multi mode before/without SetConversationSignals).
 func (s *Spawner) signalCancelBestEffort(orgID, conversationID, executorID string) {
 	s.mu.Lock()
 	runSignals := s.runSignals
@@ -550,7 +550,7 @@ const DefaultSignalApplyScanInterval = 5 * time.Second
 // acking with a result. One goroutine, deliberately serial (§5.2: "do not
 // parallelize" — signal volume is human-action-scale). No-op when
 // runSignals isn't wired (local mode, or a role that never called
-// SetRunSignals).
+// SetConversationSignals).
 func (s *Spawner) RunSignalApplyLoop(ctx context.Context, scanInterval time.Duration) {
 	if s.runSignals == nil {
 		return
@@ -718,7 +718,7 @@ func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.Conversati
 	if s.getProc(sig.ConversationID) == nil {
 		if s.pendingFirings != nil && p.EntityID != "" && p.TaskID != "" && p.TriggerID != "" && p.TriggeringEventID != "" {
 			if _, _, err := s.pendingFirings.Enqueue(ctx, sig.OrgID, "", p.EntityID, p.TaskID, p.TriggerID, p.TriggeringEventID, claim); err != nil {
-				delegateLog.Error("inject signal gone-compensation: enqueue pending_firing failed", "run", sig.ConversationID, "task_id", p.TaskID, "error", err)
+				delegateLog.Error("inject signal gone-compensation: enqueue pending_firing failed", "conversation", sig.ConversationID, "task_id", p.TaskID, "error", err)
 			}
 		}
 		return domain.ConversationSignalAckGone
@@ -726,7 +726,7 @@ func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.Conversati
 	s.deliverInjectionLive(sig.OrgID, sig.ConversationID, domain.WrapSystemNote(p.Body))
 	if s.tasks != nil && p.TaskID != "" && p.TriggeringEventID != "" {
 		if _, err := s.tasks.MarkEventInjectedSystem(ctx, sig.OrgID, p.TaskID, p.TriggeringEventID, claim); err != nil {
-			delegateLog.Error("mark injected task_event for cross-pod inject failed", "task_id", p.TaskID, "run_id", sig.ConversationID, "error", err)
+			delegateLog.Error("mark injected task_event for cross-pod inject failed", "task_id", p.TaskID, "conversation", sig.ConversationID, "error", err)
 		}
 	}
 	return domain.ConversationSignalAckDelivered

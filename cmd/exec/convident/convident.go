@@ -71,9 +71,10 @@ type ConversationIdentity struct {
 	// callers route through `...System` admin-pool methods.
 	UserID string
 
-	// ConversationID is TRIAGE_FACTORY_CONVERSATION_ID — the run the subprocess is
-	// acting on behalf of. Stamped into pending_review.run_id,
-	// pending_pr.run_id, conversation_worktrees.run_id, etc.
+	// ConversationID is TRIAGE_FACTORY_CONVERSATION_ID — the conversation the
+	// subprocess is acting on behalf of. Stamped into the conversation_id
+	// column of the rows a verb writes: artifacts, conversation_worktrees,
+	// messages.
 	ConversationID string
 
 	// TeamID is the run's owning team (conversations.team_id, NOT NULL), read

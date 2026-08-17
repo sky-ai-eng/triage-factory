@@ -234,7 +234,7 @@ type slackRunFixture struct {
 	Meta                            SlackMessageMetadata
 }
 
-// seedSlackMessageRun seeds the full chain resolveRunEntry walks: entity
+// seedSlackMessageRun seeds the full chain resolveConversationEntry walks: entity
 // (source='slack') -> event (slack:message, carrying SlackMessageMetadata)
 // -> task (event_type=slack:message, primary_event_id=event) -> run
 // (task_id=task). Mirrors exec_host_pg_test.go's seedNonSlackTask/seedConversation
@@ -778,7 +778,7 @@ func TestLifecycleAdapter_RunStatus_Failed_NoPublicURL_NoURLFragment(t *testing.
 	ctx := context.Background()
 
 	// Never went "running" — a run that fails during setup still owes the
-	// failure note, via the worker-less direct path in handleRunStatus.
+	// failure note, via the worker-less direct path in handleConversationStatus.
 	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "failed"), runs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.postCalls()) >= 1 })
 
@@ -826,7 +826,7 @@ func TestLifecycleAdapter_RunStatus_Parked_ClearsWithoutFailureReply(t *testing.
 //
 //  1. Ordering: a resumed run's successor worker must not make its initial
 //     setStatus call until the retiring worker's trailing setStatus("") has
-//     fully resolved (the predecessor gate in runStatusWorker.loop) — else
+//     fully resolved (the predecessor gate in conversationStatusWorker.loop) — else
 //     the stale clear can land last and wipe the fresh indicator.
 //  2. Non-blocking dispatch: the terminal sentinel's dispatch must NOT be
 //     the thing enforcing that ordering — the dispatcher is process-wide

@@ -19,14 +19,14 @@ import (
 // seals them to the per-turn sidecar key its home executor published on the
 // conversation's active claim, writing the shared claim_credentials channel
 // (ClaimCredentials, keyed by the conversation id). The curator-turn analog of
-// ProvisionForRun — called synchronously off the executor's
+// ProvisionForConversation — called synchronously off the executor's
 // curator_cred_request notification (the fast path) and by the backstop
 // sweep. Idempotent and safe to call repeatedly for the same turn.
 //
 // A tolerant no-op (nil error, no write) when the conversation has no active
 // claim or the claim hasn't published a sidecar pubkey — there is nothing to
 // seal to, and the turn may have just finished between the notification
-// firing and this handler running. Same posture as ProvisionForRun's
+// firing and this handler running. Same posture as ProvisionForConversation's
 // not-claimed no-op.
 func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversationID string) error {
 	turn, ok, err := m.stores.Curator.GetTurnProvisionInfoSystem(ctx, orgID, conversationID)
@@ -48,7 +48,7 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversati
 	}
 	// Seal to the home's current boot epoch directly: a curator turn runs on the
 	// live home's per-project session loop, so there is no separate claim epoch
-	// to reconcile the way ProvisionForRun guards against (a run parked under an
+	// to reconcile the way ProvisionForConversation guards against (a run parked under an
 	// earlier claim than the instance's current boot). The executor-side Get
 	// epoch check plus Put's never-regress guard cover a home restart mid-flight.
 	pubBytes, err := base64.StdEncoding.DecodeString(turn.CredPubKey)

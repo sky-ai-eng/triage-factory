@@ -361,14 +361,14 @@ func (a *App) buildExecution() error {
 	// Cross-pod run control (TFAC-585): the conversation_signals outbox is Postgres-
 	// only, so this is the ONE gate that keeps local mode structurally free
 	// of conversation_signals writes — s.controller stays the plain
-	// inProcessController unless SetRunSignals is called, and it is only
+	// inProcessController unless SetConversationSignals is called, and it is only
 	// ever called here, behind this mode check. Wired for every role in
 	// multi mode (not just dispatcher-capable ones): a control pod's HTTP
 	// handlers need the cross-pod controller to reach a run living on an
 	// executor just as much as an executor needs it to apply signals
 	// targeting itself.
 	if runmode.Current() == runmode.ModeMulti {
-		a.spawner.SetRunSignals(a.stores.ConversationSignals, a.database)
+		a.spawner.SetConversationSignals(a.stores.ConversationSignals, a.database)
 		if ackTimeout, terr := delegate.ParseSignalAckTimeout(os.Getenv("TF_SIGNAL_ACK_TIMEOUT")); terr != nil {
 			appLog.Warn("signal ack timeout", "error", terr)
 		} else if ackTimeout != delegate.DefaultSignalAckTimeout {

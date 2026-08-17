@@ -99,7 +99,7 @@ type AgentHostInfo struct {
 	OrgID          string `json:"org_id"`
 	UserID         string `json:"user_id,omitempty"`
 	TeamID         string `json:"team_id"`
-	ConversationID string `json:"run_id"`
+	ConversationID string `json:"conversation_id"`
 	EventTriggered bool   `json:"event_triggered,omitempty"`
 
 	// PinnedRepos carries a curator turn's authorized GitHub set ("owner/repo")

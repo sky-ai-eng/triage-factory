@@ -97,12 +97,12 @@ func (h *handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "fleet-overview-instances", err)
 		return
 	}
-	timings, err := h.stores.ConversationQueue.RecentRunTimingsSystem(ctx, since, 0)
+	timings, err := h.stores.ConversationQueue.RecentConversationTimingsSystem(ctx, since, 0)
 	if err != nil {
 		httpx.InternalError(w, "fleet-overview-timings", err)
 		return
 	}
-	queued, err := h.stores.ConversationQueue.QueuedRunAgesSystem(ctx)
+	queued, err := h.stores.ConversationQueue.QueuedConversationAgesSystem(ctx)
 	if err != nil {
 		httpx.InternalError(w, "fleet-overview-queue", err)
 		return
@@ -179,7 +179,7 @@ func versionSkews(instances []domain.Instance) []versionSkew {
 func summarizeQueue(queued []domain.QueuedConversation, timings []domain.ConversationTiming, now time.Time) queueSummary {
 	q := queueSummary{Depth: len(queued)}
 	if len(queued) > 0 {
-		// QueuedRunAgesSystem returns oldest-first, so [0] is the oldest wait.
+		// QueuedConversationAgesSystem returns oldest-first, so [0] is the oldest wait.
 		q.OldestWaitS = now.Sub(queued[0].EnqueuedAt).Seconds()
 	}
 	// Wait percentiles: claimed_at − started_at across recently-claimed runs.
@@ -649,14 +649,14 @@ func (h *handler) handleBacklog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	queued, err := h.stores.ConversationQueue.QueuedRunAgesSystem(r.Context())
+	queued, err := h.stores.ConversationQueue.QueuedConversationAgesSystem(r.Context())
 	if err != nil {
 		httpx.InternalError(w, "fleet-backlog", err)
 		return
 	}
 	dto := backlogDTO{GeneratedAt: now, Depth: len(queued), ByOrg: backlogByOrg(queued, now)}
 	if len(queued) > 0 {
-		// QueuedRunAgesSystem is oldest-first, so [0] is the oldest wait.
+		// QueuedConversationAgesSystem is oldest-first, so [0] is the oldest wait.
 		dto.OldestWaitS = now.Sub(queued[0].EnqueuedAt).Seconds()
 	}
 	httpx.WriteJSON(w, http.StatusOK, dto)

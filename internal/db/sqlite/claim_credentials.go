@@ -13,7 +13,7 @@ import (
 // table and this impl refuses every call.
 type runCredentialsStore struct{}
 
-func newRunCredentialsStore(_ queryer) db.ClaimCredentialsStore {
+func newClaimCredentialsStore(_ queryer) db.ClaimCredentialsStore {
 	return runCredentialsStore{}
 }
 

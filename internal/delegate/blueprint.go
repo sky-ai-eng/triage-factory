@@ -695,7 +695,7 @@ func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conver
 // pending review — domain.HasUnresolvedArtifacts). This is the derived signal
 // that decides whether a completed blueprint closes its task (none unresolved)
 // or leaves it open in the approval column (≥1 unresolved). It loads the
-// blueprint's step runs, then delegates to runsHaveUnresolvedArtifacts. Runs from
+// blueprint's step runs, then delegates to conversationsHaveUnresolvedArtifacts. Runs from
 // a detached goroutine with no request claims, so it reads via the admin-pool
 // `...System` readers.
 //
@@ -718,17 +718,17 @@ func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, bl
 		blueprintLog.Warn("list step runs for unresolved-artifact check failed; treating as unresolved (fail open)", "blueprint_run", blueprintRunID, "error", err)
 		return true
 	}
-	return s.runsHaveUnresolvedArtifacts(ctx, orgID, runs)
+	return s.conversationsHaveUnresolvedArtifacts(ctx, orgID, runs)
 }
 
-// runsHaveUnresolvedArtifacts reports whether any of the given runs produced an
+// conversationsHaveUnresolvedArtifacts reports whether any of the given runs produced an
 // unresolved artifact, reading each run's artifacts via the admin-pool reader.
 // Split out so a caller that already holds the run set (recomputeTaskBoardColumn)
 // reuses it without re-loading. Fails OPEN like blueprintHasUnresolvedArtifacts:
 // a per-run read error returns true rather than risk under-reporting. The read is
 // one query per run; the run set is a single blueprint_run's steps, so it is
 // bounded by step count, not blueprint history.
-func (s *Spawner) runsHaveUnresolvedArtifacts(ctx context.Context, orgID string, runs []domain.Conversation) bool {
+func (s *Spawner) conversationsHaveUnresolvedArtifacts(ctx context.Context, orgID string, runs []domain.Conversation) bool {
 	if s.artifacts == nil {
 		return false
 	}

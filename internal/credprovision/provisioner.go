@@ -93,7 +93,7 @@ func NewManager(stores db.Stores, llm llmResolver) *Manager {
 	}
 }
 
-// ProvisionForRun resolves conversationID's credentials and seals them to its
+// ProvisionForConversation resolves conversationID's credentials and seals them to its
 // current claimant's published pubkey, writing run_credentials. Called
 // synchronously off the executor's cred_request notification (the fast
 // path) and by both sweeps (the backstop / refresh paths) — idempotent and
@@ -105,7 +105,7 @@ func NewManager(stores db.Stores, llm llmResolver) *Manager {
 // (reaped, requeued) between the notification firing and this handler
 // running; the executor's own timeout/requeue path is what recovers that
 // window, not this function surfacing an error.
-func (m *Manager) ProvisionForRun(ctx context.Context, orgID, conversationID string) (err error) {
+func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversationID string) (err error) {
 	// The brain's half of the credential handshake, as its OWN root. It is
 	// deliberately not joined to the executor's awaiting-credentials span:
 	// the tf_ctl doorbell that usually triggers this is lossy by design (the

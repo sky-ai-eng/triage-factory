@@ -308,9 +308,9 @@ func (s *Spawner) stampExecutor(orgID, conversationID, claimID string) {
 	}
 	if errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Error("claim fence refused the go-live executor stamp — a successor owns this conversation",
-			"executor", executorID, "run_id", conversationID, "claim_id", claimID, "org_id", orgID, "error", err)
+			"executor", executorID, "conversation", conversationID, "claim_id", claimID, "org_id", orgID, "error", err)
 	} else if err != nil {
-		delegateLog.Warn("stamp executor on run failed", "executor", executorID, "run_id", conversationID, "error", err)
+		delegateLog.Warn("stamp executor on run failed", "executor", executorID, "conversation", conversationID, "error", err)
 	}
 }
 

@@ -17,7 +17,7 @@ import (
 // pool, mirroring InstanceStore's shape.
 type runSignalStore struct{ admin queryer }
 
-func newRunSignalStore(admin queryer) db.ConversationSignalStore {
+func newConversationSignalStore(admin queryer) db.ConversationSignalStore {
 	return &runSignalStore{admin: admin}
 }
 

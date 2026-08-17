@@ -40,7 +40,7 @@ type runWorktreeStore struct {
 	admin queryer
 }
 
-func newRunWorktreeStore(q, admin queryer) db.ConversationWorktreeStore {
+func newConversationWorktreeStore(q, admin queryer) db.ConversationWorktreeStore {
 	return &runWorktreeStore{q: q, admin: admin}
 }
 
@@ -165,14 +165,14 @@ func insertRunWorktree(
 }
 
 func (s *runWorktreeStore) GetByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
-	return getRunWorktreeByRepoRef(ctx, s.q, orgID, conversationID, repoID, ref)
+	return getConversationWorktreeByRepoRef(ctx, s.q, orgID, conversationID, repoID, ref)
 }
 
 func (s *runWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
-	return getRunWorktreeByRepoRef(ctx, s.admin, orgID, conversationID, repoID, ref)
+	return getConversationWorktreeByRepoRef(ctx, s.admin, orgID, conversationID, repoID, ref)
 }
 
-func getRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
+func getConversationWorktreeByRepoRef(ctx context.Context, q queryer, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
 	owner, repo := splitRepoSlug(repoID)
 	if owner == "" || repo == "" {
 		return nil, nil
@@ -195,14 +195,14 @@ func getRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, conversation
 }
 
 func (s *runWorktreeStore) List(ctx context.Context, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
-	return listRunWorktrees(ctx, s.q, orgID, conversationID)
+	return listConversationWorktrees(ctx, s.q, orgID, conversationID)
 }
 
 func (s *runWorktreeStore) ListSystem(ctx context.Context, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
-	return listRunWorktrees(ctx, s.admin, orgID, conversationID)
+	return listConversationWorktrees(ctx, s.admin, orgID, conversationID)
 }
 
-func listRunWorktrees(ctx context.Context, q queryer, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
+func listConversationWorktrees(ctx context.Context, q queryer, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT w.conversation_id, r.owner || '/' || r.repo, w.path, w.ref, w.created_at
 		FROM conversation_worktrees w
@@ -226,14 +226,14 @@ func listRunWorktrees(ctx context.Context, q queryer, orgID, conversationID stri
 }
 
 func (s *runWorktreeStore) DeleteByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) error {
-	return deleteRunWorktreeByRepoRef(ctx, s.q, orgID, conversationID, repoID, ref)
+	return deleteConversationWorktreeByRepoRef(ctx, s.q, orgID, conversationID, repoID, ref)
 }
 
 func (s *runWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) error {
-	return deleteRunWorktreeByRepoRef(ctx, s.admin, orgID, conversationID, repoID, ref)
+	return deleteConversationWorktreeByRepoRef(ctx, s.admin, orgID, conversationID, repoID, ref)
 }
 
-func deleteRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, conversationID, repoID, ref string) error {
+func deleteConversationWorktreeByRepoRef(ctx context.Context, q queryer, orgID, conversationID, repoID, ref string) error {
 	owner, repo := splitRepoSlug(repoID)
 	if owner == "" || repo == "" {
 		return nil

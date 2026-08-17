@@ -31,7 +31,7 @@ var _ db.FactoryReadStore = (*factoryReadStore)(nil)
 func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error) {
 	// Scoped to the viewer's teams by the same tracked-set semi-join the
 	// entity belt uses (factoryEventTrackedExists). The station header's
-	// other counters — Triggered24h (tasks) and ActiveRuns (runs) — are
+	// other counters — Triggered24h (tasks) and ActiveConversations (runs) — are
 	// team-scoped because tasks/runs RLS is team-bound; events RLS is
 	// org-wide (events_all keys on org_id only), so without this an event
 	// on a PR outside the viewer's tracked set would inflate this team's
@@ -126,11 +126,11 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 	return out, rows.Err()
 }
 
-// ActiveRuns lists the conversations the factory view treats as in flight:
+// ActiveConversations lists the conversations the factory view treats as in flight:
 // exactly those an engagement is actually driving (an unreleased claim — the
 // setup sub-states ride that claim's phase). Mirrors the X-button window in
 // AgentCard. Duplicated in sqlite/factory.go; intentional per-backend copy.
-func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]domain.FactoryActiveConversation, error) {
+func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string) ([]domain.FactoryActiveConversation, error) {
 	// memory_missing derivation: the agent has not produced
 	// its memory file iff no conversation_memory row exists, OR the row's
 	// agent_content is NULL/whitespace. BTRIM with the whitespace set

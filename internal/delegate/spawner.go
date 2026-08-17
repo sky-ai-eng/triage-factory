@@ -194,14 +194,14 @@ type Spawner struct {
 	// unconditionally — both dialects support pending_firings.
 	pendingFirings db.PendingFiringsStore
 	// runSignals is the cross-pod run-control outbox (TFAC-585, Postgres
-	// only). Nil except when SetRunSignals wires it — always nil in local
+	// only). Nil except when SetConversationSignals wires it — always nil in local
 	// mode and in every test that doesn't opt in, which is what keeps
 	// s.controller as the plain inProcessController and every cross-pod
 	// code path (crossPodController, the apply loop, StageOrDeliverAdditiveEvent's
 	// remote branch) a no-op/never-reached by construction. Guarded by mu
 	// like the other post-construction seams.
 	runSignals db.ConversationSignalStore
-	// signalNotifyDB is the admin-pool *sql.DB SetRunSignals wires
+	// signalNotifyDB is the admin-pool *sql.DB SetConversationSignals wires
 	// alongside runSignals — NOTIFY needs no session affinity (unlike
 	// LISTEN), so it rides whatever pooled connection is at hand. Nil
 	// exactly when runSignals is nil.
@@ -1257,7 +1257,7 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 	// loop above runs first only as an optimization — the artifact reads are
 	// skipped once a parked-open run has already forced in_review (and reuse the
 	// runs slice already loaded above rather than re-fetching).
-	if target != "in_review" && s.runsHaveUnresolvedArtifacts(ctx, orgID, runs) {
+	if target != "in_review" && s.conversationsHaveUnresolvedArtifacts(ctx, orgID, runs) {
 		target = "in_review"
 	}
 	// Idempotent: skip the write + WS broadcast when already at the target.

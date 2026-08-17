@@ -1004,7 +1004,7 @@ func getRunForBlueprintRun(ctx context.Context, q queryer, getRun func(context.C
 	if !isValidUUID(stepConversationID) {
 		return nil, nil, nil
 	}
-	blueprintRunID, stepIndex, err := readRunBlueprintPointer(ctx, q, orgID, stepConversationID)
+	blueprintRunID, stepIndex, err := readConversationBlueprintPointer(ctx, q, orgID, stepConversationID)
 	if err != nil || blueprintRunID == "" {
 		return nil, nil, err
 	}
@@ -1015,9 +1015,9 @@ func getRunForBlueprintRun(ctx context.Context, q queryer, getRun func(context.C
 	return br, stepIndex, nil
 }
 
-// readRunBlueprintPointer reads conversations.blueprint_run_id +
+// readConversationBlueprintPointer reads conversations.blueprint_run_id +
 // blueprint_step_index for a single run.
-func readRunBlueprintPointer(ctx context.Context, q queryer, orgID, conversationID string) (string, *int, error) {
+func readConversationBlueprintPointer(ctx context.Context, q queryer, orgID, conversationID string) (string, *int, error) {
 	var (
 		blueprintRunID sql.NullString
 		stepIndex      sql.NullInt64
@@ -1247,11 +1247,11 @@ func (s *blueprintStore) RequestRunCancelSystem(ctx context.Context, orgID, id s
 }
 
 func (s *blueprintStore) ConversationsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
-	return runsForBlueprint(ctx, s.app, orgID, blueprintRunID)
+	return conversationsForBlueprint(ctx, s.app, orgID, blueprintRunID)
 }
 
 func (s *blueprintStore) ConversationsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
-	return runsForBlueprint(ctx, s.admin, orgID, blueprintRunID)
+	return conversationsForBlueprint(ctx, s.admin, orgID, blueprintRunID)
 }
 
 func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
@@ -1317,7 +1317,7 @@ func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintR
 	return out, rows.Err()
 }
 
-func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]domain.Conversation, error) {
+func conversationsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]domain.Conversation, error) {
 	if !isValidUUID(blueprintRunID) {
 		return nil, nil
 	}

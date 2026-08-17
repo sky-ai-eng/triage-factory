@@ -278,7 +278,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 			}
 			// Stale: reservation outlived its creator without a
 			// completed worktree. Drop and fall through to re-reserve.
-			workspaceLog.Warn("dropping stale reservation; path missing and row age exceeds threshold", "run_id", info.ConversationID, "repo", repoID, "ref", ref, "path", existing.Path, "age", age, "threshold", staleReservationAge)
+			workspaceLog.Warn("dropping stale reservation; path missing and row age exceeds threshold", "conversation", info.ConversationID, "repo", repoID, "ref", ref, "path", existing.Path, "age", age, "threshold", staleReservationAge)
 			if delErr := host.DeleteConversationWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
 				return "", fmt.Errorf("workspace add: delete stale reservation: %w", delErr)
 			}
@@ -370,7 +370,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		// repo, ref-slug); a divergence means the create's derivation and our
 		// reservation no longer match. Surface loudly rather than silently
 		// storing the wrong path.
-		workspaceLog.Warn("created path diverges from reserved; investigate", "got_path", gotPath, "reserved_path", wtPath, "run_id", info.ConversationID, "repo", repoID, "ref", ref)
+		workspaceLog.Warn("created path diverges from reserved; investigate", "got_path", gotPath, "reserved_path", wtPath, "conversation", info.ConversationID, "repo", repoID, "ref", ref)
 	}
 
 	return agentViewPath(hostRoot, agentRoot, wtPath), nil

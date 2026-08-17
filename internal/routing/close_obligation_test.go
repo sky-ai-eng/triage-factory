@@ -81,11 +81,11 @@ type taskCloseOutageStore struct {
 	o          *outage
 }
 
-func (s *taskCloseOutageStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
+func (s *taskCloseOutageStore) CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
 	if taskID == s.failTaskID && s.o.down() {
 		return false, nil, errOutage
 	}
-	return s.TaskStore.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
+	return s.TaskStore.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
 }
 
 func closeAuditCount(t *testing.T, database *sql.DB, taskID string) int {

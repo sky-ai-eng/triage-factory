@@ -63,9 +63,9 @@ func TestRelayRuntime_RoundTripsCoreOps(t *testing.T) {
 	}
 
 	// A read op relays and returns the just-written row.
-	arts, err := rt.ListRunArtifacts(ctx)
+	arts, err := rt.ListConversationArtifacts(ctx)
 	if err != nil {
-		t.Fatalf("ListRunArtifacts relay: %v", err)
+		t.Fatalf("ListConversationArtifacts relay: %v", err)
 	}
 	found := false
 	for _, a := range arts {

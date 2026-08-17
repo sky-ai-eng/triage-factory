@@ -64,7 +64,7 @@ func New(conn *sql.DB) db.Stores {
 		EventQueue: newEventQueueStore(conn),
 		// ConversationQueue holds the connection directly; single-worker dispatcher
 		// in local mode (no claim contention, so a plain claim suffices).
-		ConversationQueue: newRunQueueStore(conn),
+		ConversationQueue: newConversationQueueStore(conn),
 		// TaskMemory wires both args to conn — SQLite has one
 		// connection so the dual-pool constructor collapses; the
 		// `...System` variants forward to the non-System bodies.
@@ -72,7 +72,7 @@ func New(conn *sql.DB) db.Stores {
 		// ConversationWorktrees wires both args to conn — SQLite has one
 		// connection so the dual-pool constructor collapses; the
 		// `...System` variants forward to the non-System bodies.
-		ConversationWorktrees: newRunWorktreeStore(conn, conn),
+		ConversationWorktrees: newConversationWorktreeStore(conn, conn),
 		// Orgs is dual-pool in Postgres; SQLite collapses to the one
 		// connection. Callers are background services iterating the
 		// active org set, settings reads/writes from request handlers,
@@ -165,11 +165,11 @@ func New(conn *sql.DB) db.Stores {
 		// ConversationSignals is Postgres-only (TFAC-585): this is a stub returning
 		// ErrNotApplicableInLocal from every method — local mode is always
 		// its own run's owner, so no code path may reach it.
-		ConversationSignals: newRunSignalStore(),
+		ConversationSignals: newConversationSignalStore(),
 		// ConversationPendingInput is dual-dialect (unlike ConversationSignals): local mode's
 		// dispatcher claims its own resumed runs through the identical
 		// queue path.
-		ConversationPendingInput: newRunPendingInputStore(conn),
+		ConversationPendingInput: newConversationPendingInputStore(conn),
 		// Permissions is split-pool in Postgres; SQLite collapses to the one
 		// connection (N=1, no RLS). This is the arm production uses — the
 		// browser permission round-trip is reached only by an unsandboxed
@@ -192,7 +192,7 @@ func New(conn *sql.DB) db.Stores {
 		// to the one connection. Never populated in local mode (forced
 		// role=all, the bundle path is executor-role-only) — exists for
 		// store-interface + conformance-test symmetry. See TFAC-614.
-		ClaimCredentials: newRunCredentialsStore(conn),
+		ClaimCredentials: newClaimCredentialsStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

@@ -426,7 +426,7 @@ func classifyFailureKind(err error) domain.ConversationFailureKind {
 // released. Nothing was written, and the caller must not go on to react to
 // the run's state either — the row it would read belongs to the successor.
 func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, triggerType, creatorUserID, errMsg string, kind domain.ConversationFailureKind) (fenced bool) {
-	delegateLog.Error("run failed", "run_id", conversationID, "error", errMsg, "failure_kind", string(kind))
+	delegateLog.Error("run failed", "conversation", conversationID, "error", errMsg, "failure_kind", string(kind))
 
 	bgCtx := context.Background()
 
@@ -461,11 +461,11 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 		// discard, which would delete the workspace that successor resumes
 		// from.
 		delegateLog.Error("claim fence refused the failure terminal — a successor owns this conversation; recording nothing",
-			"run_id", conversationID, "claim_id", claimID, "org_id", orgID, "error", insertErr)
+			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "error", insertErr)
 		return true
 	}
 	if insertErr != nil {
-		delegateLog.Warn("failed to record failure message", "run_id", conversationID, "error", insertErr)
+		delegateLog.Warn("failed to record failure message", "conversation", conversationID, "error", insertErr)
 	}
 
 	// Guarded — if a terminal racing path (cancel, natural completion)
@@ -489,11 +489,11 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 		// artifact of this engagement that stands, and it is attributed to
 		// this claim rather than the successor's.
 		delegateLog.Error("claim fence refused the failure terminal — a successor owns this conversation; recording nothing further",
-			"run_id", conversationID, "claim_id", claimID, "org_id", orgID, "error", markErr)
+			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "error", markErr)
 		return true
 	}
 	if markErr != nil {
-		delegateLog.Warn("failed to mark run as failed", "run_id", conversationID, "error", markErr)
+		delegateLog.Warn("failed to mark run as failed", "conversation", conversationID, "error", markErr)
 	}
 
 	s.updateBreakerCounter(taskID, triggerType, "failed")

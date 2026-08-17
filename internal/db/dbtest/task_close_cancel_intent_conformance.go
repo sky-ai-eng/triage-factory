@@ -51,7 +51,7 @@ type TaskCloseCancelIntentSeeder struct {
 }
 
 // RunTaskCloseCancelIntentConformance is the shared suite for
-// TaskStore.CloseWithRunCancelIntentSystem — the close that carries the stop
+// TaskStore.CloseWithConversationCancelIntentSystem — the close that carries the stop
 // intent for its own runs.
 //
 // The negative space is where the pressure is. The stamp is what makes a
@@ -78,9 +78,9 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		eventID := seed.Event(t, taskID)
 		brID, convID := seed.Run(t, taskID, "running", "")
 
-		closed, conversationIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
+		closed, conversationIDs, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
-			t.Fatalf("CloseWithRunCancelIntentSystem: %v", err)
+			t.Fatalf("CloseWithConversationCancelIntentSystem: %v", err)
 		}
 		if !closed {
 			t.Error("closed = false, want true — the task was active")
@@ -108,9 +108,9 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		eventID := seed.Event(t, taskID)
 		brID, _ := seed.Run(t, taskID, "completed", "completed")
 
-		closed, conversationIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
+		closed, conversationIDs, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
-			t.Fatalf("CloseWithRunCancelIntentSystem: %v", err)
+			t.Fatalf("CloseWithConversationCancelIntentSystem: %v", err)
 		}
 		if !closed {
 			t.Error("closed = false, want true")
@@ -131,12 +131,12 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		taskID := seed.Task(t)
 		eventID := seed.Event(t, taskID)
 
-		if closed, _, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID); err != nil || !closed {
+		if closed, _, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID); err != nil || !closed {
 			t.Fatalf("first close = (%v, %v), want (true, nil)", closed, err)
 		}
 		brID, _ := seed.Run(t, taskID, "running", "")
 
-		closed, conversationIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
+		closed, conversationIDs, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
 			t.Fatalf("replayed close: %v", err)
 		}
@@ -159,9 +159,9 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		taskID := seed.Task(t)
 		eventID := seed.Event(t, taskID)
 
-		closed, conversationIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "auto_closed_by_event", "github:pr:ci_check_passed", eventID)
+		closed, conversationIDs, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "auto_closed_by_event", "github:pr:ci_check_passed", eventID)
 		if err != nil {
-			t.Fatalf("CloseWithRunCancelIntentSystem: %v", err)
+			t.Fatalf("CloseWithConversationCancelIntentSystem: %v", err)
 		}
 		if !closed || len(conversationIDs) != 0 {
 			t.Errorf("= (closed %v, ids %v), want (true, none)", closed, conversationIDs)
@@ -183,9 +183,9 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		eventID := seed.Event(t, taskID)
 		convID := seed.BareRun(t, taskID, "")
 
-		closed, conversationIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
+		closed, conversationIDs, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
-			t.Fatalf("CloseWithRunCancelIntentSystem: %v", err)
+			t.Fatalf("CloseWithConversationCancelIntentSystem: %v", err)
 		}
 		if !closed {
 			t.Error("closed = false, want true")
@@ -202,9 +202,9 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 
-		closed, _, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "reconciled_terminal_entity", "", "")
+		closed, _, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "reconciled_terminal_entity", "", "")
 		if err != nil {
-			t.Fatalf("CloseWithRunCancelIntentSystem: %v", err)
+			t.Fatalf("CloseWithConversationCancelIntentSystem: %v", err)
 		}
 		if !closed {
 			t.Error("closed = false, want true")

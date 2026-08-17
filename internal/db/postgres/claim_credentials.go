@@ -16,7 +16,7 @@ import (
 // ACTIVE claim, resolved here from the conversation id the caller holds.
 type runCredentialsStore struct{ admin queryer }
 
-func newRunCredentialsStore(admin queryer) db.ClaimCredentialsStore {
+func newClaimCredentialsStore(admin queryer) db.ClaimCredentialsStore {
 	return &runCredentialsStore{admin: admin}
 }
 

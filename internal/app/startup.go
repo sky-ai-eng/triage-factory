@@ -97,7 +97,7 @@ func (a *App) startWorkers(ctx context.Context) {
 
 	// The shared tf_ctl control-plane listener + the cross-pod run-control
 	// workers (TFAC-585). Multi mode only: local mode never wires
-	// SetRunSignals (so the apply loop / purge reaper below are no-ops
+	// SetConversationSignals (so the apply loop / purge reaper below are no-ops
 	// there anyway), never builds a backplane, and role=all always
 	// self-holds the brain — nothing ever relays into a local process, so
 	// there is no reason to open a Postgres LISTEN connection at all.

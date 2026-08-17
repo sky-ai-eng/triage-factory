@@ -118,7 +118,7 @@ type emptyArgs struct{}
 type emptyResult struct{}
 
 type setupNetworkArgs struct {
-	ConversationID string `json:"run_id"`
+	ConversationID string `json:"conversation_id"`
 	SubnetIdx      uint8  `json:"subnet_idx"`
 }
 

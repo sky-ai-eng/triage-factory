@@ -609,7 +609,7 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 		var r req
 		_ = json.Unmarshal(body, &r)
 		// Echo back a LookupConversation-shaped response with our sentinel run id.
-		result := []byte(`{"info":{"org_id":"00000000-0000-0000-0000-000000000001","user_id":"","run_id":"` + sentinelConversationID + `","is_event_triggered":false}}`)
+		result := []byte(`{"info":{"org_id":"00000000-0000-0000-0000-000000000001","user_id":"","conversation_id":"` + sentinelConversationID + `","is_event_triggered":false}}`)
 		respBody, _ := json.Marshal(resp{R: result})
 		var outHeader [4]byte
 		binary.BigEndian.PutUint32(outHeader[:], uint32(len(respBody)))

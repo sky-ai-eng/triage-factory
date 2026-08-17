@@ -86,8 +86,8 @@ func Build(conversations db.ConversationStore, orgID, conversationID, kind strin
 		return bare
 	}
 
-	elapsed := elapsedFromRun(ctx, conversations, orgID, conversationID, run)
-	cost, costPrefix := costFromRun(ctx, conversations, orgID, conversationID, run)
+	elapsed := elapsedFromConversation(ctx, conversations, orgID, conversationID, run)
+	cost, costPrefix := costFromConversation(ctx, conversations, orgID, conversationID, run)
 
 	return fmt.Sprintf(
 		"\n\n---\n%s\n\nTime: %s | Cost: %s$%.3f",
@@ -122,10 +122,10 @@ func StripFooter(body string) string {
 	return body[:sep]
 }
 
-// elapsedFromRun returns the human-readable total time across the run's
+// elapsedFromConversation returns the human-readable total time across the run's
 // whole blueprint: the authoring run's own elapsed time plus the settled
 // duration of every sibling step in the same blueprint_run. This is the
-// time analog of costFromRun — a published review/PR discloses the total
+// time analog of costFromConversation — a published review/PR discloses the total
 // time the multi-step blueprint spent, not just the step that authored
 // it. Steps run sequentially, so summed per-step durations read as the
 // blueprint's working time. Sibling steps are all terminal by the time a
@@ -134,7 +134,7 @@ func StripFooter(body string) string {
 //
 // "?" only on a run with no own duration AND no StartedAt, which
 // shouldn't happen in practice.
-func elapsedFromRun(ctx context.Context, conversations db.ConversationStore, orgID, conversationID string, run *domain.Conversation) string {
+func elapsedFromConversation(ctx context.Context, conversations db.ConversationStore, orgID, conversationID string, run *domain.Conversation) string {
 	own, ok := ownDurationMs(run)
 	if !ok {
 		return "?"
@@ -166,7 +166,7 @@ func ownDurationMs(run *domain.Conversation) (int, bool) {
 	return 0, false
 }
 
-// costFromRun resolves the total cost USD across the run's whole
+// costFromConversation resolves the total cost USD across the run's whole
 // blueprint plus the "~" prefix indicator. It sums the authoring run's
 // own cost with the settled cost of every sibling step in the same
 // blueprint_run, so a published review/PR discloses the total spend of
@@ -182,7 +182,7 @@ func ownDurationMs(run *domain.Conversation) (int, bool) {
 // all terminal by the time a footer is built (the blueprint advanced
 // past them), so their total_cost_usd is settled; a failed sibling-cost
 // read just omits their contribution rather than blocking the submit.
-func costFromRun(ctx context.Context, conversations db.ConversationStore, orgID, conversationID string, run *domain.Conversation) (cost float64, prefix string) {
+func costFromConversation(ctx context.Context, conversations db.ConversationStore, orgID, conversationID string, run *domain.Conversation) (cost float64, prefix string) {
 	if run.TotalCostUSD != nil {
 		cost = *run.TotalCostUSD
 	} else {

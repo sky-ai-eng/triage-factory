@@ -206,7 +206,7 @@ func TestCrossPodController_Interrupt_RoutesRemoteAndAwaitsAck(t *testing.T) {
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
-	s.SetRunSignals(fakeSignals, nil)
+	s.SetConversationSignals(fakeSignals, nil)
 	s.SetSignalAckTimeout(2 * time.Second)
 
 	go func() {
@@ -233,7 +233,7 @@ func TestCrossPodController_Steer_CarriesTextInPayload(t *testing.T) {
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
-	s.SetRunSignals(fakeSignals, nil)
+	s.SetConversationSignals(fakeSignals, nil)
 	s.SetSignalAckTimeout(2 * time.Second)
 
 	go func() {
@@ -264,7 +264,7 @@ func TestCrossPodController_Steer_StaleAckSurfacesAsNoLiveProcess(t *testing.T) 
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
-	s.SetRunSignals(fakeSignals, nil)
+	s.SetConversationSignals(fakeSignals, nil)
 	s.SetSignalAckTimeout(2 * time.Second)
 
 	go func() {
@@ -288,7 +288,7 @@ func TestCrossPodController_Interrupt_TimesOutWhenOwnerNeverAcks(t *testing.T) {
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
-	s.SetRunSignals(newFakeRunSignalStore(), nil)
+	s.SetConversationSignals(newFakeRunSignalStore(), nil)
 	s.SetSignalAckTimeout(50 * time.Millisecond)
 
 	err := s.Interrupt(context.Background(), "r-timeout")
@@ -308,7 +308,7 @@ func TestCrossPodController_Interrupt_NoLiveOwnerFallsBackToNotLive(t *testing.T
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-dead": {ID: "executor-dead", LastHeartbeatAt: time.Now().Add(-time.Hour)},
 	}}
-	s.SetRunSignals(newFakeRunSignalStore(), nil)
+	s.SetConversationSignals(newFakeRunSignalStore(), nil)
 
 	err := s.Interrupt(context.Background(), "r-stale")
 	if !errors.Is(err, ErrNoLiveProcess) {
@@ -330,7 +330,7 @@ func TestCrossPodController_LocalHitNeverGoesRemote(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	s.controller = crossPodController{inProcessController: inProcessController{s: s}}
 	fakeSignals := newFakeRunSignalStore()
-	s.SetRunSignals(fakeSignals, nil)
+	s.SetConversationSignals(fakeSignals, nil)
 	s.registerProc(runmode.LocalDefaultOrgID, "r-local", &agentproc.LiveRun{})
 
 	func() {
@@ -356,7 +356,7 @@ func TestStop_SignalsRemoteOwnerBestEffort(t *testing.T) {
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
-	s.SetRunSignals(fakeSignals, nil)
+	s.SetConversationSignals(fakeSignals, nil)
 
 	if err := s.Stop(runmode.LocalDefaultOrgID, "r-cancel", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -386,7 +386,7 @@ func TestStop_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic(t *testing.T
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fakeSignals := newFakeRunSignalStore()
 	s.instances = nil
-	s.SetRunSignals(fakeSignals, nil)
+	s.SetConversationSignals(fakeSignals, nil)
 
 	if err := s.Stop(runmode.LocalDefaultOrgID, "r-cancel-noinst", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -419,7 +419,7 @@ func TestResolvePermission_RoutesRemoteWhenNoLocalProcess(t *testing.T) {
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
-	s.SetRunSignals(fakeSignals, nil)
+	s.SetConversationSignals(fakeSignals, nil)
 
 	go func() {
 		sig := fakeSignals.findUnacked(t, "executor-2")
@@ -442,7 +442,7 @@ func TestResolvePermission_LocalProcOwnedButRequestStaleNeverGoesRemote(t *testi
 	seedConversation(t, database, "r-perm2", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fakeSignals := newFakeRunSignalStore()
-	s.SetRunSignals(fakeSignals, nil)
+	s.SetConversationSignals(fakeSignals, nil)
 	s.registerProc(runmode.LocalDefaultOrgID, "r-perm2", &agentproc.LiveRun{})
 
 	err := s.ResolvePermission(runmode.LocalDefaultOrgID, "r-perm2", "req-ghost", "", agentproc.PermissionDecision{Behavior: "allow"})
@@ -467,7 +467,7 @@ func TestStageOrDeliverAdditiveEvent_RemoteLiveSignals(t *testing.T) {
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
-	s.SetRunSignals(fakeSignals, nil)
+	s.SetConversationSignals(fakeSignals, nil)
 
 	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj", "producer", "body", AdditiveFiringRef{
 		EntityID: "e1", TaskID: "t1", TriggerID: "tr1", TriggeringEventID: "ev1",
@@ -491,7 +491,7 @@ func TestStageOrDeliverAdditiveEvent_NoLiveOwnerFallsBackToStaged(t *testing.T) 
 		t.Fatalf("park run: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	s.SetRunSignals(newFakeRunSignalStore(), nil)
+	s.SetConversationSignals(newFakeRunSignalStore(), nil)
 
 	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj2", "producer", "body", AdditiveFiringRef{})
 	if outcome != InjectStagedResumable {
@@ -519,7 +519,7 @@ func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	}
 	stores := testSpawnerStores(database)
 	s := NewSpawner(database, stores, nil, nil, "m")
-	s.SetRunSignals(newFakeRunSignalStore(), nil)
+	s.SetConversationSignals(newFakeRunSignalStore(), nil)
 
 	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj3", "producer", "body", AdditiveFiringRef{})
 	if outcome != InjectNotDelivered {
@@ -577,7 +577,7 @@ func TestApplySignal_Inject_LiveDeliversAndRecords(t *testing.T) {
 	seedConversation(t, database, "r-owner-inj", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fakeSignals := newFakeRunSignalStore()
-	s.SetRunSignals(fakeSignals, nil)
+	s.SetConversationSignals(fakeSignals, nil)
 	s.registerProc(runmode.LocalDefaultOrgID, "r-owner-inj", &agentproc.LiveRun{})
 
 	taskID := taskIDForRun(t, database, "r-owner-inj")
@@ -620,7 +620,7 @@ func TestApplySignal_Inject_GoneCompensatesWithPendingFiring(t *testing.T) {
 	seedConversation(t, database, "r-owner-gone", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fakeSignals := newFakeRunSignalStore()
-	s.SetRunSignals(fakeSignals, nil)
+	s.SetConversationSignals(fakeSignals, nil)
 	// Deliberately no registerProc — the run isn't live here.
 
 	entityID := entityIDForRun(t, database, "r-owner-gone")
@@ -705,7 +705,7 @@ func TestRunSignalApplyLoop_AppliesQueuedSignalsAndWakesOnAck(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	s.SetExecutorID("me", 1)
 	fakeSignals := newFakeRunSignalStore()
-	s.SetRunSignals(fakeSignals, nil)
+	s.SetConversationSignals(fakeSignals, nil)
 
 	// Register a cancel handle so the apply loop's local Cancel() finds it.
 	cancelled := make(chan struct{})

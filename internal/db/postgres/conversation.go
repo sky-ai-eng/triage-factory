@@ -90,7 +90,7 @@ func releaseActiveClaim(ctx context.Context, q queryer, orgID, conversationID, o
 // messages ledger is app-writable (tf_app holds UPDATE) and the row is the
 // caller's own conversation.
 func (s *conversationStore) Complete(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
-	if err := completeRun(ctx, s.q, orgID, conversationID, status, costUSD, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+	if err := completeConversation(ctx, s.q, orgID, conversationID, status, costUSD, resultSummary, outcome, outcomeReason, failureKind); err != nil {
 		return err
 	}
 	return releaseActiveClaimWithTelemetry(ctx, s.admin, orgID, conversationID, claimOutcomeForStatus(status), durationMs, numTurns)
@@ -98,7 +98,7 @@ func (s *conversationStore) Complete(ctx context.Context, orgID, conversationID,
 
 func (s *conversationStore) CompleteSystem(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
 	return inTx(ctx, s.admin, func(q queryer) error {
-		if err := completeRun(ctx, q, orgID, conversationID, status, costUSD, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+		if err := completeConversation(ctx, q, orgID, conversationID, status, costUSD, resultSummary, outcome, outcomeReason, failureKind); err != nil {
 			return err
 		}
 		return releaseActiveClaimWithTelemetry(ctx, q, orgID, conversationID, claimOutcomeForStatus(status), durationMs, numTurns)
@@ -115,14 +115,14 @@ func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, c
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		if err := completeRun(ctx, q, orgID, conversationID, status, costUSD, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+		if err := completeConversation(ctx, q, orgID, conversationID, status, costUSD, resultSummary, outcome, outcomeReason, failureKind); err != nil {
 			return err
 		}
 		return releaseActiveClaimWithTelemetry(ctx, q, orgID, conversationID, claimOutcomeForStatus(status), durationMs, numTurns)
 	})
 }
 
-func completeRun(ctx context.Context, q queryer, orgID, conversationID, status string, costUSD float64, resultSummary, outcome, outcomeReason, failureKind string) error {
+func completeConversation(ctx context.Context, q queryer, orgID, conversationID, status string, costUSD float64, resultSummary, outcome, outcomeReason, failureKind string) error {
 	// The conversation carries no accounting cache — cost settles as one
 	// lump on the invocation's last message row (the ledger) below. A
 	// resume's Complete stamps its own invocation's lump on its own last
@@ -418,11 +418,11 @@ func (s *conversationStore) ListReapableSnapshotKeysSystem(ctx context.Context, 
 }
 
 func (s *conversationStore) SetSession(ctx context.Context, orgID, conversationID, sessionID string) error {
-	return setRunSession(ctx, s.q, orgID, conversationID, sessionID)
+	return setConversationSession(ctx, s.q, orgID, conversationID, sessionID)
 }
 
 func (s *conversationStore) SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) error {
-	return setRunSession(ctx, s.admin, orgID, conversationID, sessionID)
+	return setConversationSession(ctx, s.admin, orgID, conversationID, sessionID)
 }
 
 // SetSessionForClaimSystem is SetSessionSystem behind the fence. The write is
@@ -433,11 +433,11 @@ func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID,
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		return setRunSession(ctx, q, orgID, conversationID, sessionID)
+		return setConversationSession(ctx, q, orgID, conversationID, sessionID)
 	})
 }
 
-func setRunSession(ctx context.Context, q queryer, orgID, conversationID, sessionID string) error {
+func setConversationSession(ctx context.Context, q queryer, orgID, conversationID, sessionID string) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE conversations SET sdk_session_id = $1 WHERE org_id = $2 AND id = $3
 	`, sessionID, orgID, conversationID)
@@ -565,11 +565,11 @@ func (s *conversationStore) RecordClaimSandboxStatsSystem(ctx context.Context, o
 }
 
 func (s *conversationStore) SetWorktreePath(ctx context.Context, orgID, conversationID, path string) error {
-	return setRunWorktreePath(ctx, s.q, orgID, conversationID, path)
+	return setConversationWorktreePath(ctx, s.q, orgID, conversationID, path)
 }
 
 func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, conversationID, path string) error {
-	return setRunWorktreePath(ctx, s.admin, orgID, conversationID, path)
+	return setConversationWorktreePath(ctx, s.admin, orgID, conversationID, path)
 }
 
 // SetWorktreePathForClaimSystem is SetWorktreePathSystem behind the fence — the
@@ -580,11 +580,11 @@ func (s *conversationStore) SetWorktreePathForClaimSystem(ctx context.Context, o
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		return setRunWorktreePath(ctx, q, orgID, conversationID, path)
+		return setConversationWorktreePath(ctx, q, orgID, conversationID, path)
 	})
 }
 
-func setRunWorktreePath(ctx context.Context, q queryer, orgID, conversationID, path string) error {
+func setConversationWorktreePath(ctx context.Context, q queryer, orgID, conversationID, path string) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE conversations SET worktree_path = $1 WHERE org_id = $2 AND id = $3
 	`, path, orgID, conversationID)
@@ -660,7 +660,7 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, f
 
 // pgRunColumns is the SELECT list scanned into a domain.Conversation
 // via scanConversation. Owned here on ConversationStore; sibling Postgres
-// stores that need to project a run (e.g. factoryReadStore.ActiveRuns)
+// stores that need to project a run (e.g. factoryReadStore.ActiveConversations)
 // already use their own copy because they also project task+entity
 // JOINs. Keeping this here keeps the simple "just the run" projection
 // uncoupled from those. task_id/status/team_id COALESCE to ” because a
@@ -758,11 +758,11 @@ const runLedgerLateral = `
 `
 
 func (s *conversationStore) Get(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error) {
-	return getRun(ctx, s.q, orgID, conversationID)
+	return getConversation(ctx, s.q, orgID, conversationID)
 }
 
 func (s *conversationStore) GetSystem(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error) {
-	return getRun(ctx, s.admin, orgID, conversationID)
+	return getConversation(ctx, s.admin, orgID, conversationID)
 }
 
 func (s *conversationStore) LookupOrgForConversationSystem(ctx context.Context, conversationID string) (string, error) {
@@ -774,7 +774,7 @@ func (s *conversationStore) LookupOrgForConversationSystem(ctx context.Context, 
 	return orgID, err
 }
 
-func getRun(ctx context.Context, q queryer, orgID, conversationID string) (*domain.Conversation, error) {
+func getConversation(ctx context.Context, q queryer, orgID, conversationID string) (*domain.Conversation, error) {
 	row := q.QueryRowContext(ctx, `
 		SELECT `+pgRunColumns+`
 		FROM conversations r
@@ -877,14 +877,14 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 // task. Manual delegations are excluded. Used by the router's per-task firing
 // gate.
 func (s *conversationStore) HasActiveAutoConversationForTask(ctx context.Context, orgID, taskID string) (bool, error) {
-	return hasActiveAutoRunForTask(ctx, s.q, orgID, taskID)
+	return hasActiveAutoConversationForTask(ctx, s.q, orgID, taskID)
 }
 
 func (s *conversationStore) HasActiveAutoConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
-	return hasActiveAutoRunForTask(ctx, s.admin, orgID, taskID)
+	return hasActiveAutoConversationForTask(ctx, s.admin, orgID, taskID)
 }
 
-func hasActiveAutoRunForTask(ctx context.Context, q queryer, orgID, taskID string) (bool, error) {
+func hasActiveAutoConversationForTask(ctx context.Context, q queryer, orgID, taskID string) (bool, error) {
 	if !isValidUUID(taskID) {
 		return false, nil
 	}
@@ -901,11 +901,11 @@ func hasActiveAutoRunForTask(ctx context.Context, q queryer, orgID, taskID strin
 }
 
 func (s *conversationStore) ActiveIDsForTask(ctx context.Context, orgID, taskID string) ([]string, error) {
-	return activeRunIDsForTask(ctx, s.q, orgID, taskID)
+	return activeConversationIDsForTask(ctx, s.q, orgID, taskID)
 }
 
 func (s *conversationStore) ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
-	return activeRunIDsForTask(ctx, s.admin, orgID, taskID)
+	return activeConversationIDsForTask(ctx, s.admin, orgID, taskID)
 }
 
 func (s *conversationStore) ActiveAutoConversationIDForTaskSystem(ctx context.Context, orgID, taskID string) (string, error) {
@@ -929,7 +929,7 @@ func (s *conversationStore) ActiveAutoConversationIDForTaskSystem(ctx context.Co
 	return id, err
 }
 
-func activeRunIDsForTask(ctx context.Context, q queryer, orgID, taskID string) ([]string, error) {
+func activeConversationIDsForTask(ctx context.Context, q queryer, orgID, taskID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND task_id = $2

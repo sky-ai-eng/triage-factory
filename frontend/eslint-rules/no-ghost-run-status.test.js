@@ -62,8 +62,8 @@ describe('no-ghost-run-status', () => {
         "if (run.Status !== 'completed') wait()",
         "switch (run.Status) { case 'queued': case 'awaiting_credentials': case 'failed': break }",
         // A status one hop from the property, named through the alias.
-        "function tone(status: RunStatusValue) { return status === 'running' ? 'hot' : 'cold' }",
-        "function tone({ status }: { status: RunStatusValue }) { switch (status) { case 'open': return 1 } }",
+        "function tone(status: ConversationStatusValue) { return status === 'running' ? 'hot' : 'cold' }",
+        "function tone({ status }: { status: ConversationStatusValue }) { switch (status) { case 'open': return 1 } }",
         // A curator TURN status — its own vocabulary, still terminates cancelled.
         "if (request.status === 'cancelled') show()",
         "function tone(status: CuratorRequestStatus) { return status === 'cancelled' }",
@@ -113,16 +113,16 @@ describe('no-ghost-run-status', () => {
         },
         // Through the alias — the hop that hid two of the retired arms.
         {
-          code: "function color(status: RunStatusValue) { switch (status) { case 'cancelled': return '#000' } }",
+          code: "function color(status: ConversationStatusValue) { switch (status) { case 'cancelled': return '#000' } }",
           errors: [ghost('cancelled')],
         },
         {
-          code: "function tone({ status }: { status: RunStatusValue }) { return status === 'task_unsolvable' }",
+          code: "function tone({ status }: { status: ConversationStatusValue }) { return status === 'task_unsolvable' }",
           errors: [ghost('task_unsolvable')],
         },
         // Declared after its caller: the reason the checks run at Program:exit.
         {
-          code: "const bad = tone('x'); function tone(status: RunStatusValue) { return status === 'cancelled' }",
+          code: "const bad = tone('x'); function tone(status: ConversationStatusValue) { return status === 'cancelled' }",
           errors: [ghost('cancelled')],
         },
         // Behind a const alias — naming the ghost must not launder it.
@@ -135,19 +135,19 @@ describe('no-ghost-run-status', () => {
           errors: [ghostAlias('task_unsolvable', 'UNSOLVABLE')],
         },
         {
-          code: "const CANCELLED = 'cancelled'; function tone(status: RunStatusValue) { return status !== CANCELLED }",
+          code: "const CANCELLED = 'cancelled'; function tone(status: ConversationStatusValue) { return status !== CANCELLED }",
           errors: [ghostAlias('cancelled', 'CANCELLED')],
         },
         // A declared status compared against a ghost: the declaration decides
         // which side is the subject, so its own initializer isn't mistaken for
         // the name under test.
         {
-          code: "const status: RunStatusValue = 'open'; if (status === 'cancelled') showCancelled()",
+          code: "const status: ConversationStatusValue = 'open'; if (status === 'cancelled') showCancelled()",
           errors: [ghost('cancelled')],
         },
-        // An `as RunStatusValue` cast names the value the same way.
+        // An `as ConversationStatusValue` cast names the value the same way.
         {
-          code: "if (((claim.status ?? '') as RunStatusValue) === 'cancelled') show()",
+          code: "if (((claim.status ?? '') as ConversationStatusValue) === 'cancelled') show()",
           errors: [ghost('cancelled')],
         },
       ],

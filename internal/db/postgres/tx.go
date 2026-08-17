@@ -197,7 +197,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// ListSystem inside WithTx route outside the tx — those
 		// writes commit autonomously, same shape Events /
 		// Conversations / TaskMemory use for their admin-pool halves.
-		ConversationWorktrees: newRunWorktreeStore(tx, s.admin),
+		ConversationWorktrees: newConversationWorktreeStore(tx, s.admin),
 		// Orgs: app-side writes route through the tx so settings
 		// upserts compose with the surrounding claims tx; admin half
 		// stays pinned to s.admin so ListActiveSystem +
@@ -294,7 +294,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// resuming user's claims — the RLS policy admits it via the run's own
 		// visibility. Consume (claim time) runs system-side off the top-level
 		// store, never this tx-bound handle.
-		ConversationPendingInput: newRunPendingInputStore(tx),
+		ConversationPendingInput: newConversationPendingInputStore(tx),
 		// Permissions: the app half is the tx, so the pending read runs under
 		// the caller's claims in the same transaction that authorized the
 		// conversation. The admin half stays pinned to s.admin — every write

@@ -96,7 +96,7 @@ const slackLifecycleEventBuffer = 256
 // has ever seen. slackLifecycleCachePruneTarget is where a prune pass brings
 // the cache back down to — deliberately below the cap, not equal to it, so
 // pruning doesn't re-trigger on the very next insert: the O(n log n) sort in
-// pruneRunCache is amortized over the (max-target) inserts between prune
+// pruneConversationCache is amortized over the (max-target) inserts between prune
 // passes instead of paid on every single insert once the cache is full.
 var (
 	slackLifecycleCacheMaxEntries  = 2000
@@ -147,27 +147,27 @@ func (a *lifecycleAdapter) run(ctx context.Context) {
 		},
 	})
 
-	runs := map[string]*conversationEntry{}
+	conversations := map[string]*conversationEntry{}
 	for {
 		select {
 		case <-ctx.Done():
 			unsubscribe()
-			drainLifecycleWorkers(runs)
+			drainLifecycleWorkers(conversations)
 			return
 		case evt := <-ch:
-			a.dispatch(ctx, evt, runs)
+			a.dispatch(ctx, evt, conversations)
 		}
 	}
 }
 
 // drainLifecycleWorkers waits for every still-live per-run worker to notice
 // ctx cancellation and finish its own cleanup (each worker watches the same
-// ctx directly and clears its status on the way out — see runStatusWorker.loop)
+// ctx directly and clears its status on the way out — see conversationStatusWorker.loop)
 // before run returns, mirroring the socket manager's stopAll join discipline.
 // Joins prevDone too: a worker retired by a terminal sentinel (stop is
 // fire-and-forget) may still be mid-teardown at shutdown with no live
 // successor to imply it finished; a long-closed prevDone costs nothing.
-func drainLifecycleWorkers(runs map[string]*conversationEntry) {
+func drainLifecycleWorkers(conversations map[string]*conversationEntry) {
 	var wg sync.WaitGroup
 	join := func(done chan struct{}) {
 		if done == nil {
@@ -179,7 +179,7 @@ func drainLifecycleWorkers(runs map[string]*conversationEntry) {
 			<-done
 		}()
 	}
-	for _, entry := range runs {
+	for _, entry := range conversations {
 		if entry.worker != nil {
 			join(entry.worker.done)
 		}
@@ -191,14 +191,14 @@ func drainLifecycleWorkers(runs map[string]*conversationEntry) {
 // dispatch routes one bus sentinel to its handler by type. Anything else
 // matching the "system:conversation:"/"system:routing:" filter that isn't one of
 // these three exact types (there is none today) is silently ignored.
-func (a *lifecycleAdapter) dispatch(ctx context.Context, evt domain.Event, runs map[string]*conversationEntry) {
+func (a *lifecycleAdapter) dispatch(ctx context.Context, evt domain.Event, conversations map[string]*conversationEntry) {
 	switch evt.EventType {
 	case domain.EventSystemRoutingDisposition:
 		a.handleDisposition(ctx, evt)
 	case domain.EventSystemConversationStatus:
-		a.handleRunStatus(ctx, evt, runs)
+		a.handleConversationStatus(ctx, evt, conversations)
 	case domain.EventSystemConversationActivity:
-		a.handleRunActivity(ctx, evt, runs)
+		a.handleConversationActivity(ctx, evt, conversations)
 	}
 }
 
@@ -346,7 +346,7 @@ type conversationEntry struct {
 	isSlack           bool
 	channel, threadTS string
 	botToken          string
-	worker            *runStatusWorker
+	worker            *conversationStatusWorker
 	// agentLive records whether the current worker has seen "running" — a
 	// worker started by a pre-"running" progress status shows setup-phase
 	// text that the "running" transition must replace (the phase is over),
@@ -355,16 +355,16 @@ type conversationEntry struct {
 	agentLive bool
 	// prevDone is the most recently retired worker's done channel — the
 	// per-run ordering handoff for a resumed run. A successor worker gates
-	// on it before its first Slack call (runStatusWorker.predecessor), so a
+	// on it before its first Slack call (conversationStatusWorker.predecessor), so a
 	// retiring worker's trailing setStatus("") can never land after the
 	// successor's initial status and wipe it. Deliberately NOT cleared when
 	// a successor starts: drainLifecycleWorkers also joins it (a retiring
 	// worker may have no successor at shutdown), and receiving from an
 	// already-closed channel is free. While it is set and NOT yet closed,
-	// pruneRunCache must not evict this entry — see its doc.
+	// pruneConversationCache must not evict this entry — see its doc.
 	prevDone chan struct{}
-	// cachedAt is refreshed on every run-status touch (handleRunStatus), not
-	// just first resolution, so pruneRunCache's oldest-first eviction is a
+	// cachedAt is refreshed on every run-status touch (handleConversationStatus), not
+	// just first resolution, so pruneConversationCache's oldest-first eviction is a
 	// real LRU over sentinel activity.
 	cachedAt time.Time
 }
@@ -377,7 +377,7 @@ func isTerminalRunStatus(status string) bool {
 	return domain.IsTerminalRunStatus(status) || status == domain.StatusOpen
 }
 
-// handleRunStatus resolves (and caches) the run's Slack context on first
+// handleConversationStatus resolves (and caches) the run's Slack context on first
 // sight, then drives the per-run worker off the status value: a
 // pre-"running" progress status (queued, or any claim phase — see
 // preRunIndicatorText, which owns that set)
@@ -396,28 +396,28 @@ func isTerminalRunStatus(status string) bool {
 // initial status call. That ordering is enforced per run, in the worker
 // succession itself — the terminal branch records the retiring worker's
 // done channel on the entry, and the successor gates its first Slack call
-// on it (runStatusWorker.predecessor) — NEVER by blocking this dispatcher
+// on it (conversationStatusWorker.predecessor) — NEVER by blocking this dispatcher
 // goroutine on a Slack round trip: it is process-wide (one adapter for all
 // orgs), and stalling it on a slow/429'd teardown call would head-of-line
 // block every other org's sentinels behind one run's cleanup.
-func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event, runs map[string]*conversationEntry) {
+func (a *lifecycleAdapter) handleConversationStatus(ctx context.Context, evt domain.Event, conversations map[string]*conversationEntry) {
 	var meta events.SystemConversationStatusMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		slackLog.Warn("slack lifecycle: decode run status failed", "error", err)
 		return
 	}
 
-	entry, ok := runs[meta.ConversationID]
+	entry, ok := conversations[meta.ConversationID]
 	if !ok {
-		entry = a.resolveRunEntry(ctx, evt.OrgID, meta.ConversationID)
-		runs[meta.ConversationID] = entry
-		pruneRunCache(runs)
+		entry = a.resolveConversationEntry(ctx, evt.OrgID, meta.ConversationID)
+		conversations[meta.ConversationID] = entry
+		pruneConversationCache(conversations)
 	} else {
 		// LRU touch (before the isSlack early-return — non-Slack entries are
 		// the bulk of the cache and exactly what it exists to avoid
 		// re-resolving): without this, cachedAt is "when first resolved" and
 		// the pruner would evict by age-since-resolution, hitting long-lived
-		// still-active runs first instead of genuinely idle ones.
+		// still-active conversations first instead of genuinely idle ones.
 		entry.cachedAt = slackLifecycleNow()
 	}
 	if !entry.isSlack {
@@ -442,7 +442,7 @@ func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event
 	case meta.Status == "running":
 		switch {
 		case entry.worker == nil:
-			entry.worker = newRunStatusWorker(ctx, a.client, a.publicURL, evt.OrgID, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken, initialIndicatorText, entry.prevDone)
+			entry.worker = newConversationStatusWorker(ctx, a.client, a.publicURL, evt.OrgID, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken, initialIndicatorText, entry.prevDone)
 		case !entry.agentLive:
 			// Started by a setup-phase status — that phase is over; show the
 			// generic working pair until tool activity refines it.
@@ -466,7 +466,7 @@ func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event
 	default:
 		if text, ok := preRunIndicatorText(meta.Status); ok {
 			if entry.worker == nil {
-				entry.worker = newRunStatusWorker(ctx, a.client, a.publicURL, evt.OrgID, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken, text, entry.prevDone)
+				entry.worker = newConversationStatusWorker(ctx, a.client, a.publicURL, evt.OrgID, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken, text, entry.prevDone)
 				entry.agentLive = false
 			} else {
 				entry.worker.sendActivity(text)
@@ -475,26 +475,26 @@ func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event
 	}
 }
 
-// handleRunActivity forwards a tool-activity sentinel to its run's live
+// handleConversationActivity forwards a tool-activity sentinel to its run's live
 // worker, if any. A run with no cached entry yet (activity arrived before
 // this adapter ever saw a system:conversation:status for it) or no active worker
 // (not "running", or not a Slack run at all) is silently ignored — the
 // verdict-priming event is always system:conversation:status, per the cache contract
 // above.
-func (a *lifecycleAdapter) handleRunActivity(ctx context.Context, evt domain.Event, runs map[string]*conversationEntry) {
+func (a *lifecycleAdapter) handleConversationActivity(ctx context.Context, evt domain.Event, conversations map[string]*conversationEntry) {
 	var meta events.SystemConversationActivityMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		slackLog.Warn("slack lifecycle: decode run activity failed", "error", err)
 		return
 	}
-	entry, ok := runs[meta.ConversationID]
+	entry, ok := conversations[meta.ConversationID]
 	if !ok || !entry.isSlack || entry.worker == nil {
 		return
 	}
 	entry.worker.sendActivity(activityIndicatorText(meta.Tools))
 }
 
-// resolveRunEntry runs the documented chain — Conversations.GetSystem -> Task ->
+// resolveConversationEntry runs the documented chain — Conversations.GetSystem -> Task ->
 // Events.GetMetadataSystem — to decide whether conversationID belongs to a Slack
 // task and, if so, resolve the thread context + bot token a worker needs.
 // Every "this isn't a Slack run" outcome (no task, wrong entity source,
@@ -503,7 +503,7 @@ func (a *lifecycleAdapter) handleRunActivity(ctx context.Context, evt domain.Eve
 // degrades to isSlack=false rather than leaving the run unresolved forever
 // (a transient failure here would otherwise never get a chance to heal,
 // since resolution only ever runs once per conversationID).
-func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, conversationID string) *conversationEntry {
+func (a *lifecycleAdapter) resolveConversationEntry(ctx context.Context, orgID, conversationID string) *conversationEntry {
 	entry := &conversationEntry{cachedAt: slackLifecycleNow()}
 
 	run, err := a.stores.Conversations.GetSystem(ctx, orgID, conversationID)
@@ -554,7 +554,7 @@ func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, conversat
 	return entry
 }
 
-// pruneRunCache bounds the cache once it exceeds slackLifecycleCacheMaxEntries:
+// pruneConversationCache bounds the cache once it exceeds slackLifecycleCacheMaxEntries:
 // evict the oldest (by cachedAt, refreshed on every run-status touch — LRU)
 // entries with no live worker until the cache is back at
 // slackLifecycleCachePruneTarget. This is a genuine size cap, not a
@@ -578,16 +578,16 @@ func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, conversat
 // If every entry is protected, eviction legitimately can't bring the count
 // down further — bounded in practice by concurrent live/retiring workers,
 // not total history.
-func pruneRunCache(runs map[string]*conversationEntry) {
-	if len(runs) <= slackLifecycleCacheMaxEntries {
+func pruneConversationCache(conversations map[string]*conversationEntry) {
+	if len(conversations) <= slackLifecycleCacheMaxEntries {
 		return
 	}
 	type candidate struct {
 		id       string
 		cachedAt time.Time
 	}
-	candidates := make([]candidate, 0, len(runs))
-	for id, entry := range runs {
+	candidates := make([]candidate, 0, len(conversations))
+	for id, entry := range conversations {
 		if entry.worker != nil {
 			continue
 		}
@@ -603,10 +603,10 @@ func pruneRunCache(runs map[string]*conversationEntry) {
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].cachedAt.Before(candidates[j].cachedAt) })
 
 	for _, c := range candidates {
-		if len(runs) <= slackLifecycleCachePruneTarget {
+		if len(conversations) <= slackLifecycleCachePruneTarget {
 			return
 		}
-		delete(runs, c.id)
+		delete(conversations, c.id)
 	}
 }
 
@@ -709,7 +709,7 @@ func postSlackFailureReply(ctx context.Context, client *http.Client, publicURL f
 
 // --- per-run status worker ---
 
-// runStatusWorker owns one live run's assistant-status lifecycle: an initial
+// conversationStatusWorker owns one live run's assistant-status lifecycle: an initial
 // setStatus, a refresh ticker (the dead-man switch keeping it inside Slack's
 // 2-minute expiry), activity-driven updates debounced to at most one call
 // per slackLifecycleActivityDebounce, an idle-timeout reaper for a dropped
@@ -717,7 +717,7 @@ func postSlackFailureReply(ctx context.Context, client *http.Client, publicURL f
 // Every field is set once at construction and read-only thereafter except
 // from loop's own goroutine — all mutation happens by sending on the
 // channels below, never by a caller reaching into the struct.
-type runStatusWorker struct {
+type conversationStatusWorker struct {
 	ctx                         context.Context
 	client                      *http.Client
 	publicURL                   func() string
@@ -740,17 +740,17 @@ type runStatusWorker struct {
 	done        chan struct{}
 }
 
-// newRunStatusWorker constructs and starts a worker. Its initial setStatus
+// newConversationStatusWorker constructs and starts a worker. Its initial setStatus
 // is the first Slack call it makes — after the predecessor gate, before it
 // ever selects on the command channels — so it's ordered ahead of any
 // activity/keepAlive/stop command sent afterward AND behind everything a
 // retiring predecessor still had in flight. That ordering is internal to
-// the worker only: go w.loop() returns immediately, so newRunStatusWorker
+// the worker only: go w.loop() returns immediately, so newConversationStatusWorker
 // itself returns with no guarantee the initial call has started (or even
 // been scheduled) yet — callers that need to observe it must poll, not
 // assume synchronous completion.
-func newRunStatusWorker(ctx context.Context, client *http.Client, publicURL func() string, orgID, conversationID, channel, threadTS, botToken string, initial indicatorText, predecessor <-chan struct{}) *runStatusWorker {
-	w := &runStatusWorker{
+func newConversationStatusWorker(ctx context.Context, client *http.Client, publicURL func() string, orgID, conversationID, channel, threadTS, botToken string, initial indicatorText, predecessor <-chan struct{}) *conversationStatusWorker {
+	w := &conversationStatusWorker{
 		ctx: ctx, client: client, publicURL: publicURL,
 		orgID: orgID, conversationID: conversationID, channel: channel, threadTS: threadTS, botToken: botToken,
 		initial:     initial,
@@ -769,7 +769,7 @@ func newRunStatusWorker(ctx context.Context, client *http.Client, publicURL func
 // one call per ~3s per run (coalesce; latest wins)"; the debounce timer
 // inside loop is the other half (bounding the *outgoing* Slack call rate,
 // not just the queue depth).
-func (w *runStatusWorker) sendActivity(text indicatorText) {
+func (w *conversationStatusWorker) sendActivity(text indicatorText) {
 	for {
 		select {
 		case w.activityCh <- text:
@@ -789,7 +789,7 @@ func (w *runStatusWorker) sendActivity(text indicatorText) {
 // specific activity-derived text. Non-blocking: a dropped keepalive is
 // harmless, the next status/activity event (or the idle reap itself) covers
 // it.
-func (w *runStatusWorker) keepAlive() {
+func (w *conversationStatusWorker) keepAlive() {
 	select {
 	case w.keepAliveCh <- struct{}{}:
 	default:
@@ -806,8 +806,8 @@ func (w *runStatusWorker) keepAlive() {
 // worker's trailing clear is still in flight, then the stale clear landing
 // last and wiping it — is closed on the successor's side instead: the
 // dispatcher records w.done as the entry's prevDone, and the successor
-// gates its first Slack call on it (see runStatusWorker.predecessor).
-func (w *runStatusWorker) stop(failed bool) {
+// gates its first Slack call on it (see conversationStatusWorker.predecessor).
+func (w *conversationStatusWorker) stop(failed bool) {
 	select {
 	case w.stopCh <- failed:
 	default:
@@ -827,7 +827,7 @@ func (w *runStatusWorker) stop(failed bool) {
 // window elapses, and a new window only opens on the next event after that.
 // Not restarting the window also bounds worst-case latency: activity that
 // keeps arriving faster than the window can never starve it into silence.
-func (w *runStatusWorker) loop() {
+func (w *conversationStatusWorker) loop() {
 	defer close(w.done)
 
 	// Predecessor gate: on a resumed run, wait for the retiring worker's
@@ -929,7 +929,7 @@ func (w *runStatusWorker) loop() {
 // retries naturally). text.loading rides along as the single
 // loading_messages entry, so the in-conversation bubble shows the same live
 // state as the status line rather than Slack's default rotation.
-func (w *runStatusWorker) setStatus(text indicatorText) {
+func (w *conversationStatusWorker) setStatus(text indicatorText) {
 	var loading []string
 	if text.loading != "" {
 		loading = []string{text.loading}
@@ -941,9 +941,9 @@ func (w *runStatusWorker) setStatus(text indicatorText) {
 
 // clearStatus wipes the indicator on both surfaces — an empty status with no
 // loading_messages is Slack's documented "clear it" call.
-func (w *runStatusWorker) clearStatus() { w.setStatus(indicatorText{}) }
+func (w *conversationStatusWorker) clearStatus() { w.setStatus(indicatorText{}) }
 
-func (w *runStatusWorker) postFailureReply() {
+func (w *conversationStatusWorker) postFailureReply() {
 	postSlackFailureReply(w.ctx, w.client, w.publicURL, w.orgID, w.conversationID, w.channel, w.threadTS, w.botToken)
 }
 

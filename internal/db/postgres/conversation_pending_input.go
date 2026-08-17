@@ -15,7 +15,7 @@ import (
 // sending user's claims.
 type runPendingInputStore struct{ admin queryer }
 
-func newRunPendingInputStore(admin queryer) db.ConversationPendingInputStore {
+func newConversationPendingInputStore(admin queryer) db.ConversationPendingInputStore {
 	return &runPendingInputStore{admin: admin}
 }
 

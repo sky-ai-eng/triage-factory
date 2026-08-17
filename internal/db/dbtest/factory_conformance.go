@@ -87,7 +87,7 @@ const nullSentinel = "<NULL>"
 //     correctly across the cutoff.
 //   - LifetimeDistinctByEventType collapses re-entries from one
 //     entity to one count and ignores system events.
-//   - ActiveRuns filters by status, JOINs through tasks+entities,
+//   - ActiveConversations filters by status, JOINs through tasks+entities,
 //     and derives memory_missing from conversation_memory across all four
 //     forms of noncompliance (no row, NULL content, empty string,
 //     whitespace-only) plus the populated-content baseline.
@@ -242,9 +242,9 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		seed.SetRunMemory(t, runWhitespace, ent, "  \t\n ")
 		seed.SetRunMemory(t, runPopulated, ent, "agent wrote real reasoning")
 
-		runs, err := store.ActiveRuns(ctx, orgID)
+		runs, err := store.ActiveConversations(ctx, orgID)
 		if err != nil {
-			t.Fatalf("ActiveRuns: %v", err)
+			t.Fatalf("ActiveConversations: %v", err)
 		}
 
 		gotMem := map[string]bool{}
@@ -255,11 +255,11 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		}
 
 		if gotIDs[runTerminal] {
-			t.Errorf("terminal run %s leaked into ActiveRuns — status filter failed", runTerminal)
+			t.Errorf("terminal run %s leaked into ActiveConversations — status filter failed", runTerminal)
 		}
 		for _, id := range []string{runNoRow, runNullContent, runEmptyContent, runWhitespace, runPopulated} {
 			if !gotIDs[id] {
-				t.Errorf("active run %s missing from ActiveRuns", id)
+				t.Errorf("active run %s missing from ActiveConversations", id)
 			}
 		}
 

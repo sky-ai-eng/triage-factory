@@ -83,7 +83,7 @@ const ProtocolVersion = 1
 type ConversationInfo struct {
 	OrgID            string `json:"org_id"`
 	UserID           string `json:"user_id"`
-	ConversationID   string `json:"run_id"`
+	ConversationID   string `json:"conversation_id"`
 	TeamID           string `json:"team_id"`
 	IsEventTriggered bool   `json:"is_event_triggered"`
 
@@ -169,7 +169,7 @@ type MemoryLoadResult struct {
 // spawn-time materializer composes it (agent content + a
 // "## Human feedback (post-run)" separator).
 type MemoryLoadEntry struct {
-	ConversationID string    `json:"run_id"`
+	ConversationID string    `json:"conversation_id"`
 	BlueprintRunID string    `json:"blueprint_run_id,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	Content        string    `json:"content"`

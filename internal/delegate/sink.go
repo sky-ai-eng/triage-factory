@@ -171,7 +171,7 @@ func (k *runSink) tripFence(err error) {
 		return
 	}
 	delegateLog.Error("claim fence tripped — this executor no longer owns the conversation; abandoning the run without writing",
-		"run_id", k.conversationID, "claim_id", k.claimID, "org_id", k.orgID, "error", err)
+		"conversation", k.conversationID, "claim_id", k.claimID, "org_id", k.orgID, "error", err)
 	// Best-effort: no live handle means the process is already gone, which
 	// is the outcome this call was after.
 	k.spawner.getController().Cancel(k.conversationID)

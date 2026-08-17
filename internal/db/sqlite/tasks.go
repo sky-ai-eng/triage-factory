@@ -549,9 +549,9 @@ func closeTaskRows(ctx context.Context, q queryer, taskID, closeReason, closeEve
 	return res.RowsAffected()
 }
 
-// scanActiveRunIDs drains the task's non-terminal conversation ids and closes
+// scanActiveConversationIDs drains the task's non-terminal conversation ids and closes
 // the cursor before returning.
-func scanActiveRunIDs(ctx context.Context, q queryer, taskID string) ([]string, error) {
+func scanActiveConversationIDs(ctx context.Context, q queryer, taskID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE task_id = ?
@@ -572,7 +572,7 @@ func scanActiveRunIDs(ctx context.Context, q queryer, taskID string) ([]string, 
 	return out, rows.Err()
 }
 
-func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
+func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, nil, err
 	}
@@ -602,7 +602,7 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 		// Drained and closed before the UPDATE below rather than on a defer:
 		// both ride the one connection this tx holds, and an open cursor is
 		// the kind of thing a driver is entitled to refuse to write around.
-		if conversationIDs, err = scanActiveRunIDs(ctx, q, taskID); err != nil {
+		if conversationIDs, err = scanActiveConversationIDs(ctx, q, taskID); err != nil {
 			return fmt.Errorf("list active runs: %w", err)
 		}
 

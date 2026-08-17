@@ -279,22 +279,22 @@ type ConversationQueueStore interface {
 	// number. Cross-org system read on the admin pool.
 	CountQueuedSystem(ctx context.Context) (int, error)
 
-	// RecentRunTimingsSystem returns the timing projection of every run started
+	// RecentConversationTimingsSystem returns the timing projection of every run started
 	// at-or-after `since`, newest first, capped at `limit` rows — the fleet
 	// dashboard's source for queue-wait and run-duration percentiles and
 	// failure-kind rates (TFAC-589). Percentiles are computed Go-side (portable
 	// across SQLite/Postgres, matching the usage handler's aggregation style),
 	// so this returns rows, not aggregates. Cross-org system read.
-	RecentRunTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.ConversationTiming, error)
+	RecentConversationTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.ConversationTiming, error)
 
-	// QueuedRunAgesSystem returns every conversation currently matching the
+	// QueuedConversationAgesSystem returns every conversation currently matching the
 	// needs-driving predicate: its org + enqueue time (+ any placement
 	// preference), for the fleet queue view's oldest-waiting age and per-org
 	// share. Unwindowed on purpose — work that has waited a long time is what
 	// is worth surfacing. Cross-org system read.
-	QueuedRunAgesSystem(ctx context.Context) ([]domain.QueuedConversation, error)
+	QueuedConversationAgesSystem(ctx context.Context) ([]domain.QueuedConversation, error)
 
-	// RecentRunTimingsForOrgSystem is RecentRunTimingsSystem narrowed to one
+	// RecentConversationTimingsForOrgSystem is RecentConversationTimingsSystem narrowed to one
 	// org (WHERE org_id = orgID) — the org-scoped operations subset an org
 	// admin sees on /usage (their queue waits + run durations), SaaS-safe with
 	// no cross-tenant machine truth. The window is half-open [since, until):
@@ -303,11 +303,11 @@ type ConversationQueueStore interface {
 	// runs (a zero until drops the upper clause). Admin pool with org bound by
 	// argument, same posture as SpendByCategorySystem; the HTTP org-admin gate
 	// is the authorization to read it.
-	RecentRunTimingsForOrgSystem(ctx context.Context, orgID string, since, until time.Time, limit int) ([]domain.ConversationTiming, error)
+	RecentConversationTimingsForOrgSystem(ctx context.Context, orgID string, since, until time.Time, limit int) ([]domain.ConversationTiming, error)
 
-	// QueuedRunAgesForOrgSystem is QueuedRunAgesSystem narrowed to one org —
+	// QueuedConversationAgesForOrgSystem is QueuedConversationAgesSystem narrowed to one org —
 	// the org-scoped queue depth + oldest wait for the /usage ops subset.
-	QueuedRunAgesForOrgSystem(ctx context.Context, orgID string) ([]domain.QueuedConversation, error)
+	QueuedConversationAgesForOrgSystem(ctx context.Context, orgID string) ([]domain.QueuedConversation, error)
 
 	// RecentClaimsForExecutorSystem returns the `limit` most recently claimed
 	// engagements one executor drove, newest first, joined to their

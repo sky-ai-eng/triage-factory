@@ -274,7 +274,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(teamTracksRepoResult{Tracks: tracks})
 
-	case opGetRunWorktreeByRepoRef:
+	case opGetConversationWorktreeByRepoRef:
 		var a conversationWorktreeByRepoRefArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
@@ -292,7 +292,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(conversationWorktreesResult{Worktrees: w})
 
-	case opInsertRunWorktree:
+	case opInsertConversationWorktree:
 		var a insertConversationWorktreeArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
@@ -303,7 +303,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(insertConversationWorktreeResult{Inserted: inserted, WinningPath: winningPath})
 
-	case opDeleteRunWorktree:
+	case opDeleteConversationWorktree:
 		var a deleteConversationWorktreeByRepoRefArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
@@ -313,8 +313,8 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return nil, nil
 
-	case opListRunArtifacts:
-		arts, err := s.rt.ListRunArtifacts(ctx)
+	case opListConversationArtifacts:
+		arts, err := s.rt.ListConversationArtifacts(ctx)
 		if err != nil {
 			return nil, err
 		}

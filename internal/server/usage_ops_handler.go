@@ -59,12 +59,12 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	timings, err := h.runQueue.RecentRunTimingsForOrgSystem(r.Context(), orgID, since, until, 0)
+	timings, err := h.runQueue.RecentConversationTimingsForOrgSystem(r.Context(), orgID, since, until, 0)
 	if err != nil {
 		internalError(w, "usage-ops-timings", err)
 		return
 	}
-	queued, err := h.runQueue.QueuedRunAgesForOrgSystem(r.Context(), orgID)
+	queued, err := h.runQueue.QueuedConversationAgesForOrgSystem(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "usage-ops-queue", err)
 		return

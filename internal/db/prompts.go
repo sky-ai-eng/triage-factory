@@ -106,11 +106,11 @@ type PromptStore interface {
 
 	// Stats aggregates conversations.* for this prompt — totals, success
 	// rate, cost, last-used, runs-per-day-for-30-days. The
-	// underlying queries hit the conversations table; logically a Run-side
-	// concern but keyed on prompt_id, so it lives here so the
-	// prompts handler can depend on a single store. When RunStore
-	// lands (wave 3b) this stays put — the read still keys on
-	// prompt_id and PromptStore is the right ownership root.
+	// underlying queries hit the conversations table; logically a
+	// conversation-side concern but keyed on prompt_id, so it lives here so
+	// the prompts handler can depend on a single store. It stays here now
+	// that ConversationStore exists — the read still keys on prompt_id and
+	// PromptStore is the right ownership root.
 	Stats(ctx context.Context, orgID string, id string) (*domain.PromptStats, error)
 
 	// GetSystem mirrors Get but routes through the admin pool in

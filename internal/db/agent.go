@@ -348,7 +348,7 @@ type ConversationStore interface {
 	//
 	// No production caller today: the router's task-close cascade used to
 	// enumerate here, and now takes the same set from the close transaction
-	// itself (TaskStore.CloseWithRunCancelIntentSystem) so the runs it stops
+	// itself (TaskStore.CloseWithConversationCancelIntentSystem) so the runs it stops
 	// are the runs it stamped. Kept as the admin-pool arm of a pair whose
 	// app-pool half is live, and covered by the store conformance.
 	ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error)

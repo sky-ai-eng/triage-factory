@@ -84,7 +84,7 @@ func (r *Resolver) Enabled() bool { return r.cfg != Config{} && r.cfg.Enabled }
 
 // Candidate is one instance's placement standing for a key: its rendezvous
 // rank plus the liveness/eligibility facts that placed (or excluded) it.
-// Carries everything the explainer prints and everything PreferredForRun
+// Carries everything the explainer prints and everything PreferredForConversation
 // needs, so a Plan is self-contained.
 type Candidate struct {
 	InstanceID string
@@ -128,7 +128,7 @@ type Plan struct {
 	KeyValue   string
 	Candidates []Candidate // full order, eligible first (rendezvous), then excluded
 	// PreferredSet is the ordered preferred instance ids (pin, or top-K).
-	// PreferredForRun draws the single stamp from it.
+	// PreferredForConversation draws the single stamp from it.
 	PreferredSet []string
 	// Override is the row in effect, or nil. Surfaced by the explainer.
 	Override *domain.PlacementOverride
@@ -136,12 +136,12 @@ type Plan struct {
 	Liveness time.Duration
 }
 
-// PreferredForRun picks the single preferred_executor_id to stamp on a run
+// PreferredForConversation picks the single preferred_executor_id to stamp on a run
 // from the plan's preferred set. With one owner (the default and every pin)
 // it is that owner; with a hot-key replica count it spreads runs across the
 // top-K deterministically by run id, so all K caches stay warm and no single
 // replica head-of-line-blocks the key. Empty when there is no live owner.
-func (p Plan) PreferredForRun(conversationID string) string {
+func (p Plan) PreferredForConversation(conversationID string) string {
 	switch len(p.PreferredSet) {
 	case 0:
 		return ""

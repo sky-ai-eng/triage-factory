@@ -42,7 +42,7 @@ func RemoveAt(path, rootKey string) error {
 	pruneAll(paths.BareCacheRoot(runmode.LocalDefaultOrgID))
 
 	if rootKey != "" {
-		worktreeLog.Info("removed", "run_id", rootKey, "path", path)
+		worktreeLog.Info("removed", "root_key", rootKey, "path", path)
 	} else {
 		worktreeLog.Info("removed", "path", path)
 	}

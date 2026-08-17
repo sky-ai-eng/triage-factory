@@ -769,7 +769,7 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		if e != nil {
 			return fmt.Errorf("list runs for task: %w", e)
 		}
-		has, e := runsHaveUnresolvedArtifacts(ctx, tx, orgID, runs)
+		has, e := conversationsHaveUnresolvedArtifacts(ctx, tx, orgID, runs)
 		if e != nil {
 			return e
 		}
@@ -801,12 +801,12 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 	})
 }
 
-// runsHaveUnresolvedArtifacts reports whether any of the given runs still holds an
+// conversationsHaveUnresolvedArtifacts reports whether any of the given runs still holds an
 // unresolved artifact (a draft PR or a ready review — domain.HasUnresolvedArtifacts),
 // reading each run's artifacts under the caller's tx. One query per run, bounded
 // by a blueprint's step count. Shared by the terminal-on-last check so the
 // "blueprint still has unresolved work" definition lives next to its single use.
-func runsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) (bool, error) {
+func conversationsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) (bool, error) {
 	for i := range runs {
 		arts, err := tx.Artifacts.ListByConversation(ctx, orgID, runs[i].ID)
 		if err != nil {

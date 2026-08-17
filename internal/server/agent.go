@@ -638,7 +638,7 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 		writeDelegationUnavailable(w)
 		return
 	}
-	visible, err := ag.runVisible(r.Context(), orgID, userID, conversationID)
+	visible, err := ag.conversationVisible(r.Context(), orgID, userID, conversationID)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
@@ -662,12 +662,12 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "open"})
 }
 
-// runVisible reports whether conversationID exists and is visible to the caller's org
+// conversationVisible reports whether conversationID exists and is visible to the caller's org
 // (and team, under RLS). The steering control ops resolve a run by id against
 // in-memory state (the process registry, the permission broker), so this is the
 // authorization gate that stops a known run id from one tenant being acted on by
 // another: a non-existent or not-visible run reads as false → the caller 404s.
-func (ag *agentHandler) runVisible(ctx context.Context, orgID, userID, conversationID string) (bool, error) {
+func (ag *agentHandler) conversationVisible(ctx context.Context, orgID, userID, conversationID string) (bool, error) {
 	var exists bool
 	err := ag.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		run, e := tx.Conversations.Get(ctx, orgID, conversationID)
@@ -723,7 +723,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	visible, err := ag.runVisible(r.Context(), orgID, userID, conversationID)
+	visible, err := ag.conversationVisible(r.Context(), orgID, userID, conversationID)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
@@ -847,7 +847,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 
 	// Authorize the run under the caller's org before touching the broker — the
 	// broker's own org check is a backstop, not a team-level RLS gate.
-	exists, err := ag.runVisible(r.Context(), orgID, userID, conversationID)
+	exists, err := ag.conversationVisible(r.Context(), orgID, userID, conversationID)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
@@ -886,7 +886,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 // Pending only. A history read is for the audit UI, which doesn't exist yet;
 // an ?include=all now would be a filter with no caller.
 //
-// Authorized exactly like handleAgentPermission: runVisible under the caller's
+// Authorized exactly like handleAgentPermission: conversationVisible under the caller's
 // org before touching anything, so a conversation this org can't see is 404
 // rather than an empty list (which would confirm the id exists).
 func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Request) {
@@ -924,7 +924,7 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, domain.PendingPermissionDTOs(pending, time.Now().UTC()))
 }
 
-// enrichRuns projects runs onto the wire shape, augmenting each with a batched
+// enrichConversations projects runs onto the wire shape, augmenting each with a batched
 // artifact_count and the derived has_unresolved_artifacts (+ per-kind counts).
 // Both artifact reads stay O(1) in queries regardless of how many runs the set
 // has. Board's useWebSocket re-fetches on every status transition, so a per-run
@@ -944,7 +944,7 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 // are display annotations on rows the caller can already see, so surfacing the
 // failure would fail a whole board refresh over a badge. Shared by the
 // single-task and batched (task_ids) run-list paths.
-func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) ([]map[string]any, error) {
+func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) ([]map[string]any, error) {
 	conversationIDs := make([]string, len(runs))
 	for i := range runs {
 		conversationIDs[i] = runs[i].ID
@@ -1096,10 +1096,10 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 			return e
 		}
 		resp.TotalCount = total
-		// One enrichRuns over the whole page keeps the artifact reads O(1)
+		// One enrichConversations over the whole page keeps the artifact reads O(1)
 		// regardless of task/run count; the index alignment lets us group the
 		// projected responses by task without re-projecting.
-		enriched, e := enrichRuns(r.Context(), tx, orgID, runs)
+		enriched, e := enrichConversations(r.Context(), tx, orgID, runs)
 		if e != nil {
 			return e
 		}

@@ -84,7 +84,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Projects:                 newProjectStore(tx, tx),
 		Events:                   newEventStore(tx, tx),
 		TaskMemory:               newTaskMemoryStore(tx, tx),
-		ConversationWorktrees:    newRunWorktreeStore(tx, tx),
+		ConversationWorktrees:    newConversationWorktreeStore(tx, tx),
 		Orgs:                     newOrgsStore(tx, tx),
 		OrgMemberships:           newOrgMembershipsStore(),
 		Teams:                    newTeamsStore(tx, tx),
@@ -101,7 +101,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		ExternalActions:          newExternalActionStore(tx),
 		Spend:                    newSpendStore(tx),
 		Marketplace:              newMarketplaceStore(tx, tx),
-		ConversationPendingInput: newRunPendingInputStore(tx),
+		ConversationPendingInput: newConversationPendingInputStore(tx),
 		Permissions:              newPermissionStore(tx),
 		Ext:                      db.BuildStoreExtensions("sqlite", tx, tx),
 	}

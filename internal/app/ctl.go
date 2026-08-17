@@ -32,7 +32,7 @@ import (
 // latency (every tf_ctl doorbell has one), never a boot failure.
 //
 // Local mode never calls this: no conversation_signals writes exist there
-// (SetRunSignals is never wired), no backplane is constructed, and
+// (SetConversationSignals is never wired), no backplane is constructed, and
 // role=all always self-holds the brain, so nothing ever needs to relay
 // INTO the process.
 func (a *App) startCtlListener(ctx context.Context) {

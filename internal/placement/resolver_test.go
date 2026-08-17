@@ -39,7 +39,7 @@ func TestResolve_DisabledIsNoOp(t *testing.T) {
 	if plan.Enabled || len(plan.PreferredSet) != 0 {
 		t.Fatalf("disabled resolver must yield no preferred set: %+v", plan)
 	}
-	if plan.PreferredForRun("run-1") != "" {
+	if plan.PreferredForConversation("run-1") != "" {
 		t.Fatalf("disabled plan must stamp nothing")
 	}
 }
@@ -65,7 +65,7 @@ func TestResolve_SingleOwner(t *testing.T) {
 		t.Fatalf("top candidate should be the preferred owner: %+v", plan.Candidates)
 	}
 	// Every run of the key stamps the same single owner.
-	if plan.PreferredForRun("run-1") != plan.PreferredSet[0] || plan.PreferredForRun("run-2") != plan.PreferredSet[0] {
+	if plan.PreferredForConversation("run-1") != plan.PreferredSet[0] || plan.PreferredForConversation("run-2") != plan.PreferredSet[0] {
 		t.Fatalf("single-owner plan must stamp the owner for every run")
 	}
 }
@@ -131,7 +131,7 @@ func TestResolve_PinWinsOverHash(t *testing.T) {
 	if len(plan.PreferredSet) != 1 || plan.PreferredSet[0] != "exec-b" {
 		t.Fatalf("pin must force exec-b, got %v", plan.PreferredSet)
 	}
-	if plan.PreferredForRun("run-1") != "exec-b" {
+	if plan.PreferredForConversation("run-1") != "exec-b" {
 		t.Fatalf("pinned plan stamps the pin for every run")
 	}
 }
@@ -175,7 +175,7 @@ func TestResolve_ReplicasSpreadAcrossTopK(t *testing.T) {
 	// Runs spread across all 3 preferred replicas (deterministically).
 	seen := map[string]bool{}
 	for i := 0; i < 300; i++ {
-		id := plan.PreferredForRun(conversationID(i))
+		id := plan.PreferredForConversation(conversationID(i))
 		if !inSet(plan.PreferredSet, id) {
 			t.Fatalf("stamp %q not in preferred set %v", id, plan.PreferredSet)
 		}

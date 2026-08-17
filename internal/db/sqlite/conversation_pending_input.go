@@ -15,7 +15,7 @@ import (
 // (asserted at each entry).
 type runPendingInputStore struct{ q queryer }
 
-func newRunPendingInputStore(q queryer) db.ConversationPendingInputStore {
+func newConversationPendingInputStore(q queryer) db.ConversationPendingInputStore {
 	return &runPendingInputStore{q: q}
 }
 

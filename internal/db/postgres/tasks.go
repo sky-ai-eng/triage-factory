@@ -630,7 +630,7 @@ func closeTaskRows(ctx context.Context, q queryer, orgID, taskID, closeReason, c
 	return res.RowsAffected()
 }
 
-func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
+func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
 	var (
 		closed          bool
 		conversationIDs []string

@@ -23,7 +23,7 @@ import (
 // it and matches nothing when there is none.
 type runWorktreeStore struct{ q queryer }
 
-func newRunWorktreeStore(q, _ queryer) db.ConversationWorktreeStore {
+func newConversationWorktreeStore(q, _ queryer) db.ConversationWorktreeStore {
 	return &runWorktreeStore{q: q}
 }
 

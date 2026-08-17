@@ -20,7 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// lookupRun is the per-subcommand entry point for routing-sensitive
+// lookupConversation is the per-subcommand entry point for routing-sensitive
 // state access. The result carries OrgID / UserID / ConversationID + the
 // IsEventTriggered discriminator. Errors surface via the same
 // exitErr/os.Exit shape the rest of the file uses so the agent sees a
@@ -31,7 +31,7 @@ import (
 // determines identity and LookupConversation just round-trips. Either way the
 // subcommand body reads the routing-relevant fields from a single
 // in-process value.
-func lookupRun(host agenthost.Client) agenthost.ConversationInfo {
+func lookupConversation(host agenthost.Client) agenthost.ConversationInfo {
 	info, err := host.LookupConversation(context.Background())
 	if err != nil {
 		exitErr(err.Error())
@@ -628,7 +628,7 @@ func prReviewDismiss(ctx context.Context, client ghAPI, args []string) {
 // reset and falls through to a normal start.
 func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
-	_ = lookupRun(host) // validates identity is present; routing happens inside host
+	_ = lookupConversation(host) // validates identity is present; routing happens inside host
 
 	if hasFlag(args, "--fresh") {
 		// Pure-local reset of this run's existing draft for the PR — no GitHub
@@ -742,7 +742,7 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	}
 
 	owner, repo := ownerRepo(args)
-	_ = lookupRun(host)
+	_ = lookupConversation(host)
 
 	// Resolve the anchor: the reviewed PR's worktree HEAD — the commit the
 	// agent's checkout is on, which is the frame it read the diff in. The host
@@ -882,7 +882,7 @@ func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string)
 		ghEvent = event
 	}
 
-	_ = lookupRun(host)
+	_ = lookupConversation(host)
 
 	// Snapshot the draft into the run's review artifact, set the ready sentinel,
 	// and — under a posting posture — submit it. The "meaningful review" check
@@ -1126,7 +1126,7 @@ func prCommentUpdate(ctx context.Context, client ghAPI, host agenthost.Client, a
 	if err != nil {
 		exitErr(err.Error())
 	}
-	_ = lookupRun(host)
+	_ = lookupConversation(host)
 	_, unbadged := domain.ParseSeverityBadge(body)
 	badgedBody := domain.SeverityBadgeMarkdown(severity) + unbadged
 	exitOnErr(host.UpdateStagedReviewComment(ctx, args[0], badgedBody))
@@ -1149,7 +1149,7 @@ func prCommentDelete(ctx context.Context, client ghAPI, host agenthost.Client, a
 		return
 	}
 
-	_ = lookupRun(host)
+	_ = lookupConversation(host)
 	exitOnErr(host.DeleteStagedReviewComment(ctx, args[0]))
 	printJSON(map[string]any{"ok": true})
 }

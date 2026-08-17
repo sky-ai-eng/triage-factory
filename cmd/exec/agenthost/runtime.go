@@ -34,7 +34,7 @@ type Runtime interface {
 	Info() ConversationInfo
 
 	// Reads.
-	ListRunArtifacts(ctx context.Context) ([]domain.Artifact, error)
+	ListConversationArtifacts(ctx context.Context) ([]domain.Artifact, error)
 	GetConversation(ctx context.Context) (*domain.Conversation, error)
 	GetTask(ctx context.Context, taskID string) (*domain.Task, error)
 	ListRepos(ctx context.Context) ([]domain.Repository, error)
@@ -144,27 +144,37 @@ type ExtensionRuntime interface {
 // namespace, alongside the git ops (agentproc.Op*). Both the sidecar's
 // relayRuntime (producer) and the orchestrator's RelayServer (consumer) live
 // in this package, so these are package-local.
+//
+// Unlike the method names in protocol.go, these carry no legacy aliases and
+// need none: the relay rides the supervision stream the orchestrator opened
+// when it launched the sidecar, held for the run's lifetime and closed with
+// it (agentproc.BringUpRunSidecar). Producer and consumer are therefore always
+// the same binary generation — a restart takes the stream, the cell, and the
+// engagement with it — so an op string may be renamed in place.
 const (
-	opGetConversation           = "get_conversation"
-	opGetTask                   = "get_task"
-	opListRepos                 = "list_repos"
-	opGetRepo                   = "get_repo"
-	opTeamTracksRepo            = "team_tracks_repo"
-	opGetRunWorktreeByRepoRef   = "get_run_worktree_by_repo_ref"
-	opListConversationWorktrees = "list_conversation_worktrees"
-	opInsertRunWorktree         = "insert_run_worktree"
-	opDeleteRunWorktree         = "delete_run_worktree"
-	opListRunArtifacts          = "list_run_artifacts"
-	opOrgJiraBase               = "org_jira_base"
-	opBuildAgentFooter          = "build_agent_run_footer"
-	opUpsertArtifact            = "upsert_artifact"
-	opUpdateReviewDetails       = "update_review_details_if_pending"
-	opTransitionReviewState     = "transition_review_state"
-	opRecordExternalWrite       = "record_external_write"
-	opRecordReadTouch           = "record_read_touch"
-	opMemoryLoad                = "memory_load"
-	opCheckEntitlement          = "check_entitlement"
-	opReviewPosture             = "review_posture"
+	opGetConversation                  = "get_conversation"
+	opGetTask                          = "get_task"
+	opListRepos                        = "list_repos"
+	opGetRepo                          = "get_repo"
+	opTeamTracksRepo                   = "team_tracks_repo"
+	opGetConversationWorktreeByRepoRef = "get_conversation_worktree_by_repo_ref"
+	opListConversationWorktrees        = "list_conversation_worktrees"
+	opInsertConversationWorktree       = "insert_conversation_worktree"
+	opDeleteConversationWorktree       = "delete_conversation_worktree"
+	opListConversationArtifacts        = "list_conversation_artifacts"
+	opOrgJiraBase                      = "org_jira_base"
+	// opBuildAgentFooter keeps "run": it builds the footer TF appends to
+	// agent-authored PR and review bodies, which names the run in the
+	// product's own vocabulary and links to /runs/{id}.
+	opBuildAgentFooter      = "build_agent_run_footer"
+	opUpsertArtifact        = "upsert_artifact"
+	opUpdateReviewDetails   = "update_review_details_if_pending"
+	opTransitionReviewState = "transition_review_state"
+	opRecordExternalWrite   = "record_external_write"
+	opRecordReadTouch       = "record_read_touch"
+	opMemoryLoad            = "memory_load"
+	opCheckEntitlement      = "check_entitlement"
+	opReviewPosture         = "review_posture"
 	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
 	// the other core ops it is FS-bearing: the sidecar relays it because it owns
 	// neither the shared bare cache nor the run-root; the orchestrator serves it.
@@ -293,10 +303,10 @@ func (r *directRuntime) githubResolver() ghclient.Resolver {
 
 func (r *directRuntime) Info() ConversationInfo { return r.info }
 
-// ListRunArtifacts respects the pool split: event-triggered runs read
+// ListConversationArtifacts respects the pool split: event-triggered runs read
 // admin-pool (no JWT claims); manual runs read under the kicking-off user's
 // synthetic claims. Mirrors withWriteInfo for the read side.
-func (r *directRuntime) ListRunArtifacts(ctx context.Context) ([]domain.Artifact, error) {
+func (r *directRuntime) ListConversationArtifacts(ctx context.Context) ([]domain.Artifact, error) {
 	if r.info.IsEventTriggered {
 		return r.stores.Artifacts.ListByConversationSystem(ctx, r.info.OrgID, r.info.ConversationID)
 	}
@@ -616,9 +626,9 @@ func newRelayRuntime(conn relayConn, info ConversationInfo, providerCreds provid
 
 func (r *relayRuntime) Info() ConversationInfo { return r.info }
 
-func (r *relayRuntime) ListRunArtifacts(ctx context.Context) ([]domain.Artifact, error) {
+func (r *relayRuntime) ListConversationArtifacts(ctx context.Context) ([]domain.Artifact, error) {
 	var res listRunArtifactsResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opListRunArtifacts, emptyArgs{}, &res); err != nil {
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opListConversationArtifacts, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}
 	return res.Artifacts, nil
@@ -666,7 +676,7 @@ func (r *relayRuntime) TeamTracksRepo(ctx context.Context, owner, repo string) (
 
 func (r *relayRuntime) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
 	var res conversationWorktreeResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetRunWorktreeByRepoRef, conversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, &res); err != nil {
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetConversationWorktreeByRepoRef, conversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, &res); err != nil {
 		return nil, err
 	}
 	return res.Worktree, nil
@@ -706,14 +716,14 @@ func (r *relayRuntime) ReviewPosture(ctx context.Context, owner, repo string) (R
 
 func (r *relayRuntime) InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (bool, string, error) {
 	var res insertConversationWorktreeResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opInsertRunWorktree, insertConversationWorktreeArgs{Row: row}, &res); err != nil {
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opInsertConversationWorktree, insertConversationWorktreeArgs{Row: row}, &res); err != nil {
 		return false, "", err
 	}
 	return res.Inserted, res.WinningPath, nil
 }
 
 func (r *relayRuntime) DeleteConversationWorktree(ctx context.Context, repoID, ref string) error {
-	return r.conn.call(ctx, agentproc.RelayNamespaceCore, opDeleteRunWorktree, deleteConversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, nil)
+	return r.conn.call(ctx, agentproc.RelayNamespaceCore, opDeleteConversationWorktree, deleteConversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, nil)
 }
 
 func (r *relayRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {

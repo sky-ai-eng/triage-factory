@@ -22,7 +22,7 @@ type conversationQueueStore struct {
 	conn *sql.DB
 }
 
-func newRunQueueStore(conn *sql.DB) db.ConversationQueueStore {
+func newConversationQueueStore(conn *sql.DB) db.ConversationQueueStore {
 	return &conversationQueueStore{conn: conn}
 }
 
@@ -218,7 +218,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			  AND `+curatorHomedHereSQL+`
 			ORDER BY r.started_at, r.id
 			LIMIT 1`, executorID)
-		claimed, err := scanSqliteClaimedRun(row)
+		claimed, err := scanSqliteClaimedConversation(row)
 		if err != nil || claimed == nil {
 			return err
 		}
@@ -414,7 +414,7 @@ func (s *conversationQueueStore) ListAwaitingCredentials(ctx context.Context) ([
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAwaitingCredentialsRuns(rows)
+	return scanAwaitingCredentialsConversations(rows)
 }
 
 func (s *conversationQueueStore) ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan time.Time) ([]db.AwaitingCredentialsConversation, error) {
@@ -424,7 +424,7 @@ func (s *conversationQueueStore) ListActiveNeedingCredentialRefresh(ctx context.
 	return nil, nil
 }
 
-func scanAwaitingCredentialsRuns(rows *sql.Rows) ([]db.AwaitingCredentialsConversation, error) {
+func scanAwaitingCredentialsConversations(rows *sql.Rows) ([]db.AwaitingCredentialsConversation, error) {
 	var out []db.AwaitingCredentialsConversation
 	for rows.Next() {
 		// Same bare-column + Go-side coalesce as GetClaim — see the comment
@@ -727,7 +727,7 @@ const runTimingStatusSQL = `COALESCE(status, CASE WHEN EXISTS (
 		SELECT 1 FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL)
 	THEN 'running' ELSE 'queued' END)`
 
-func (s *conversationQueueStore) RecentRunTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.ConversationTiming, error) {
+func (s *conversationQueueStore) RecentConversationTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.ConversationTiming, error) {
 	if limit <= 0 {
 		limit = 5000
 	}
@@ -743,18 +743,18 @@ func (s *conversationQueueStore) RecentRunTimingsSystem(ctx context.Context, sin
 		return nil, err
 	}
 	defer rows.Close()
-	return scanSqliteRunTimings(rows)
+	return scanSqliteConversationTimings(rows)
 }
 
-func (s *conversationQueueStore) QueuedRunAgesSystem(ctx context.Context) ([]domain.QueuedConversation, error) {
-	return s.queuedRunAges(ctx, "")
+func (s *conversationQueueStore) QueuedConversationAgesSystem(ctx context.Context) ([]domain.QueuedConversation, error) {
+	return s.queuedConversationAges(ctx, "")
 }
 
-func (s *conversationQueueStore) QueuedRunAgesForOrgSystem(ctx context.Context, orgID string) ([]domain.QueuedConversation, error) {
-	return s.queuedRunAges(ctx, orgID)
+func (s *conversationQueueStore) QueuedConversationAgesForOrgSystem(ctx context.Context, orgID string) ([]domain.QueuedConversation, error) {
+	return s.queuedConversationAges(ctx, orgID)
 }
 
-func (s *conversationQueueStore) queuedRunAges(ctx context.Context, orgID string) ([]domain.QueuedConversation, error) {
+func (s *conversationQueueStore) queuedConversationAges(ctx context.Context, orgID string) ([]domain.QueuedConversation, error) {
 	q := `SELECT r.org_id, r.started_at, COALESCE(r.preferred_executor_id, '')
 	      FROM conversations r WHERE ` + eligibleForDrivingSQL
 	args := []any{}
@@ -780,7 +780,7 @@ func (s *conversationQueueStore) queuedRunAges(ctx context.Context, orgID string
 	return out, rows.Err()
 }
 
-func (s *conversationQueueStore) RecentRunTimingsForOrgSystem(ctx context.Context, orgID string, since, until time.Time, limit int) ([]domain.ConversationTiming, error) {
+func (s *conversationQueueStore) RecentConversationTimingsForOrgSystem(ctx context.Context, orgID string, since, until time.Time, limit int) ([]domain.ConversationTiming, error) {
 	if limit <= 0 {
 		limit = 5000
 	}
@@ -802,7 +802,7 @@ func (s *conversationQueueStore) RecentRunTimingsForOrgSystem(ctx context.Contex
 		return nil, err
 	}
 	defer rows.Close()
-	return scanSqliteRunTimings(rows)
+	return scanSqliteConversationTimings(rows)
 }
 
 // executorClaimCols is the shared projection behind both operator claim reads,
@@ -879,7 +879,7 @@ func scanSqliteExecutorClaims(rows *sql.Rows) ([]domain.ExecutorClaim, error) {
 	return out, rows.Err()
 }
 
-func scanSqliteRunTimings(rows *sql.Rows) ([]domain.ConversationTiming, error) {
+func scanSqliteConversationTimings(rows *sql.Rows) ([]domain.ConversationTiming, error) {
 	var out []domain.ConversationTiming
 	for rows.Next() {
 		var t domain.ConversationTiming
@@ -913,12 +913,12 @@ func scanSqliteRunTimings(rows *sql.Rows) ([]domain.ConversationTiming, error) {
 	return out, rows.Err()
 }
 
-// scanSqliteClaimedRun scans a claim candidate row into
+// scanSqliteClaimedConversation scans a claim candidate row into
 // *domain.Conversation. (nil, nil) on sql.ErrNoRows so callers treat "nothing
 // claimable" as a non-error empty result. Status is deliberately left empty:
 // a claimable conversation's stored status is NULL by construction, and the
 // dispatcher branches on Type and Runtime, never on it.
-func scanSqliteClaimedRun(row *sql.Row) (*domain.Conversation, error) {
+func scanSqliteClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 	var (
 		r         domain.Conversation
 		stepIdx   sql.NullInt64
