@@ -10,10 +10,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestRunQueueStore_SQLite_FleetReads exercises the fleet-dashboard + org-ops
+// TestConversationQueueStore_SQLite_FleetReads exercises the fleet-dashboard + org-ops
 // reads (TFAC-589): queue depth, queued ages (cross-org + org-scoped), and the
 // run-timing projection with its terminal-run duration/claim stamps.
-func TestRunQueueStore_SQLite_FleetReads(t *testing.T) {
+func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()

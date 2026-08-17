@@ -144,7 +144,7 @@ func (c *LocalClient) LookupConversation(_ context.Context) (ConversationInfo, e
 	// bypassed (test seam) or the caller constructed a LocalClient
 	// directly with a zero-value ConversationInfo. Surface the same sentinel
 	// the convident path does so subcommand helpers can translate it
-	// to their package-local "missing run id" sentinel without
+	// to their package-local "missing conversation id" sentinel without
 	// having to distinguish callers.
 	if c.info.ConversationID == "" {
 		return ConversationInfo{}, convident.ErrConversationIdentityMissing

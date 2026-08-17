@@ -34,7 +34,7 @@ import (
 // claim to deliver — nothing about that is a conflict to report. A flip lost
 // to a conversation that went terminal instead IS one: nothing will claim it,
 // so the queued message is never delivered.
-var ErrConversationNotResumable = errors.New("resume: run not in a resumable state")
+var ErrConversationNotResumable = errors.New("resume: conversation not in a resumable state")
 
 // ErrConversationConcluded is returned when a conversation's workspace is
 // intact but its blueprint will never drive it again, so a wake would strand it
@@ -75,7 +75,7 @@ var ErrStepHandedOff = errors.New("resume: this step just handed off to the next
 // reaped by the retention TTL. The conversation's status is left unchanged (no
 // flip), so the user gets a clear "this workspace has expired" signal rather
 // than seeing the run silently fail mid-resume. Callers map it to 410 Gone.
-var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired and can no longer be resumed")
+var ErrWorkspaceExpired = errors.New("resume: this conversation's workspace has expired and can no longer be resumed")
 
 // lostWakeOutcome answers for a wake whose compare-and-swap found the
 // conversation already moved. The message is queued either way — the only

@@ -617,7 +617,7 @@ func TestSlackExecHandler_Edit_UpsertsSameArtifactRow(t *testing.T) {
 		t.Errorf("state = %q, want %q", arts[0].State, domain.ArtifactStateMessagePosted)
 	}
 	if arts[0].ConversationID != conversationID {
-		t.Errorf("edit must not reassign run_id away from the creating run: got %q, want %q", arts[0].ConversationID, conversationID)
+		t.Errorf("edit must not reassign conversation_id away from the creating conversation: got %q, want %q", arts[0].ConversationID, conversationID)
 	}
 
 	acts := r.actionsForConversation(orgID, conversationID)

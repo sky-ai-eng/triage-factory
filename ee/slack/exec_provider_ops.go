@@ -71,7 +71,7 @@ type (
 	}
 )
 
-// slackOpAuthorizeChannel is the stage-1 gate: does the run's team track the
+// slackOpAuthorizeChannel is the stage-1 gate: does the conversation's team track the
 // channel (mirrors exec workspace add's team-tracked-repo gate).
 func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, args json.RawMessage) (any, error) {
 	var a slackChannelArg
@@ -94,7 +94,7 @@ func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agentho
 
 // slackOpResolveWorkspace resolves which (workspace, app) IDENTITY to act as for
 // a channel — the non-secret half of the old resolveWorkspaceAndToken. Channel
-// registry unknown → error. If this run's task is a slack:message naming this
+// registry unknown → error. If this conversation's task is a slack:message naming this
 // SAME channel, that message's (workspace_id, api_app_id) is authoritative;
 // otherwise every connected workspace matching the channel's WorkspaceID is
 // listed: exactly one → use it; more than one → refuse rather than guess.
@@ -144,7 +144,7 @@ func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agentho
 }
 
 // slackOpResolveWorkspaceForDownload resolves which (workspace, app) IDENTITY to
-// speak as for `download`, which carries no channel: prefer this run's own
+// speak as for `download`, which carries no channel: prefer this conversation's own
 // message-task metadata, else the org's sole connected workspace (refuse on
 // zero or ambiguous). This picks an identity ONLY; the file's real channel
 // membership is authorized separately (slackOpAuthorizeFileChannels).
@@ -160,7 +160,7 @@ func slackOpResolveWorkspaceForDownload(ctx context.Context, stores db.Stores, i
 	}
 	if len(workspaces) != 1 {
 		return nil, fmt.Errorf(
-			"slack: cannot determine which connected workspace to download from (this run has no Slack thread context and the org has %d connected workspaces)",
+			"slack: cannot determine which connected workspace to download from (this conversation has no Slack thread context and the org has %d connected workspaces)",
 			len(workspaces))
 	}
 	return slackWorkspaceIdentity{WorkspaceID: workspaces[0].WorkspaceID, APIAppID: workspaces[0].APIAppID}, nil
@@ -194,7 +194,7 @@ func slackOpAuthorizeFileChannels(ctx context.Context, stores db.Stores, info ag
 }
 
 // slackOpRecordThreadRoot is exec_host.go send()'s companion for a
-// channel-root post (no --thread-ts): the run's own message IS the thread's
+// channel-root post (no --thread-ts): the conversation's own message IS the thread's
 // root, so the thread is engaged the same way a root mention engages one at
 // ingest (ingest.go's handleEventCallback) — idempotent FindOrCreateSystem
 // with kind="thread", titled from the posted text. FindOrCreate never

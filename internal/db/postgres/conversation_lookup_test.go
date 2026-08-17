@@ -11,13 +11,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestConversationStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID
+// TestConversationStore_Postgres_LookupOrgForConversationSystem_ReturnsRealOrgID
 // pins the cold-start identity probe that cmd/exec convident depends
 // on: a delegated agent subprocess only has TRIAGE_FACTORY_CONVERSATION_ID in
 // its env, so the lookup has to discover the run's owning org by
 // conversationID alone. Returns the real Postgres org UUID, NOT the local-mode
 // sentinel — the exact regression this ticket exists to fix.
-func TestConversationStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID(t *testing.T) {
+func TestConversationStore_Postgres_LookupOrgForConversationSystem_ReturnsRealOrgID(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
@@ -68,12 +68,12 @@ func TestConversationStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID(t *te
 	}
 }
 
-// TestConversationStore_Postgres_LookupOrgForRunSystem_UnknownReturnsEmpty
+// TestConversationStore_Postgres_LookupOrgForConversationSystem_UnknownReturnsEmpty
 // — an unknown conversationID returns ("", nil). The convident helper maps this
 // to ErrConversationIdentityNotFound so the agent subprocess surfaces a clear
 // "stale env var / spawner bug" message in stderr rather than reading
 // nil-dereference-style panics.
-func TestConversationStore_Postgres_LookupOrgForRunSystem_UnknownReturnsEmpty(t *testing.T) {
+func TestConversationStore_Postgres_LookupOrgForConversationSystem_UnknownReturnsEmpty(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 

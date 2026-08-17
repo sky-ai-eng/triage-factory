@@ -553,7 +553,7 @@ function StationChassis({ info }: { info: ClickedStationInfo | null }) {
         items={runs.map((r) => ({
           key: r.run.ID,
           dot: conversationStatusColor(r.run.Status),
-          body: <RunRow conversation={r.run} task={r.task} />,
+          body: <ConversationRow conversation={r.run} task={r.task} />,
           // Clicking a run opens its full-screen station page in a new tab.
           href: orgHref(`/runs/${r.run.ID}`),
         }))}
@@ -797,7 +797,7 @@ function EntityTooltip({ entity }: { entity: FactoryEntity }) {
   )
 }
 
-function RunRow({ conversation, task }: { conversation: Conversation; task: Task }) {
+function ConversationRow({ conversation, task }: { conversation: Conversation; task: Task }) {
   const ref = task.source_id || task.entity_id
   const isOpen = conversation.Status === 'open'
   return (

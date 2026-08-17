@@ -255,7 +255,7 @@ func (s *promptStore) CountConversationReferences(ctx context.Context, orgID, id
 	var n int
 	err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversations WHERE prompt_id = ?`, id).Scan(&n)
 	if err != nil {
-		return 0, fmt.Errorf("count run references: %w", err)
+		return 0, fmt.Errorf("count conversation references: %w", err)
 	}
 	return n, nil
 }

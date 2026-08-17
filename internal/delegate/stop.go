@@ -57,7 +57,7 @@ import (
 // failed": everything else this returns wraps an internal fault (a failed
 // read, a failed park) and must not be reported as a missing run, nor echoed
 // to a client.
-var ErrNoActiveConversation = errors.New("no active run")
+var ErrNoActiveConversation = errors.New("no active conversation")
 
 // StopCause names the lifecycle event a teardown caller is acting on — the
 // thing that caller knows and the conversation itself does not. It exists so
@@ -173,7 +173,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 		conv, preflightErr = s.conversations.GetSystem(context.Background(), orgID, conversationID)
 	}
 	if preflightErr != nil {
-		return fmt.Errorf("load run: %w", preflightErr)
+		return fmt.Errorf("load conversation: %w", preflightErr)
 	}
 	if conv == nil {
 		return fmt.Errorf("%w %s", ErrNoActiveConversation, conversationID)
@@ -316,7 +316,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 		flipped, err = s.conversations.ParkOpenSystem(bgCtx, orgID, conversationID, park)
 	}
 	if err != nil {
-		return fmt.Errorf("park stopped run: %w", err)
+		return fmt.Errorf("park stopped conversation: %w", err)
 	}
 	if !flipped {
 		return fmt.Errorf("%w %s", ErrNoActiveConversation, conversationID)

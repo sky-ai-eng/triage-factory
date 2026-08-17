@@ -16,10 +16,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestTaskStore_CloseWithRunCancelIntent_SQLite runs the shared close-carries-
+// TestTaskStore_CloseWithConversationCancelIntent_SQLite runs the shared close-carries-
 // stop-intent suite against the SQLite impl. Each subtest gets a fresh
 // in-memory DB, so the exact-count assertions can't pick up a sibling's rows.
-func TestTaskStore_CloseWithRunCancelIntent_SQLite(t *testing.T) {
+func TestTaskStore_CloseWithConversationCancelIntent_SQLite(t *testing.T) {
 	dbtest.RunTaskCloseCancelIntentConformance(t, func(t *testing.T) (db.TaskStore, string, dbtest.TaskCloseCancelIntentSeeder) {
 		t.Helper()
 		conn, err := sql.Open("sqlite", db.TestDSNMemory)

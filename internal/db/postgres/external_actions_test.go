@@ -178,12 +178,12 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 	}
 }
 
-// TestExternalActionStore_Postgres_ListByRun pins the run-scoped read on the app
+// TestExternalActionStore_Postgres_ListByConversation pins the conversation-scoped read on the app
 // pool: one conversation's rows, and — because the read runs under the same
 // org-scoped policy as ListByTeam — nothing at all for a member of another org
 // who guesses a run id. The handler's own run-visibility check is what narrows
 // this within an org; RLS is the backstop across orgs.
-func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
+func TestExternalActionStore_Postgres_ListByConversation(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")

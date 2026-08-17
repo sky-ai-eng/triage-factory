@@ -657,14 +657,14 @@ func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context,
 			  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 		`, orgID, taskID)
 		if err != nil {
-			return fmt.Errorf("list active runs: %w", err)
+			return fmt.Errorf("list active conversations: %w", err)
 		}
 		// Drained and closed (scanIDs closes) before the UPDATE below rather
 		// than on a defer: both ride the one connection this tx holds, and an
 		// open cursor is the kind of thing a driver is entitled to refuse to
 		// write around.
 		if conversationIDs, err = scanIDs(rows, "conversations.id"); err != nil {
-			return fmt.Errorf("list active runs: %w", err)
+			return fmt.Errorf("list active conversations: %w", err)
 		}
 
 		// The same predicate one join further out, rather than a stamp keyed on

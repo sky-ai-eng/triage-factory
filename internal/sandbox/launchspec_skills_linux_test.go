@@ -105,10 +105,10 @@ func TestValidateLaunchParams_RejectsMissingSkillsSource(t *testing.T) {
 	}
 }
 
-// TestValidateLaunchParams_RejectsSkillsMountWithoutRunID: the run id is what
+// TestValidateLaunchParams_RejectsSkillsMountWithoutConversationID: the run id is what
 // scopes the staging dir to one step. Without it the derivation would collapse to
 // the shared staging base — every run's skills at once — so the mount is refused.
-func TestValidateLaunchParams_RejectsSkillsMountWithoutRunID(t *testing.T) {
+func TestValidateLaunchParams_RejectsSkillsMountWithoutConversationID(t *testing.T) {
 	p := validParams()
 	stageSkillsFixture(t, p.ConversationID)
 	base := SkillStagingBase()

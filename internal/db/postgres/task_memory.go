@@ -188,7 +188,7 @@ func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, 
 	rows, err := s.admin.QueryContext(ctx, taskMemorySelectTeamScoped+`
 		WHERE rm.org_id = $1
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
-		  AND (r.visibility = 'org' OR (r.visibility = 'team' AND r.team_id = NULLIF($3, '')::uuid))
+		  AND (c.visibility = 'org' OR (c.visibility = 'team' AND c.team_id = NULLIF($3, '')::uuid))
 		ORDER BY rm.created_at DESC
 		LIMIT $4
 	`, orgID, entityID, teamID, limit)
@@ -217,7 +217,7 @@ func getMemoriesForEntityTeamScoped(ctx context.Context, q queryer, orgID, entit
 	rows, err := q.QueryContext(ctx, taskMemorySelectTeamScoped+`
 		WHERE rm.org_id = $1
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
-		  AND (r.visibility = 'org' OR (r.visibility = 'team' AND r.team_id = NULLIF($3, '')::uuid))
+		  AND (c.visibility = 'org' OR (c.visibility = 'team' AND c.team_id = NULLIF($3, '')::uuid))
 		ORDER BY rm.created_at ASC
 	`, orgID, entityID, teamID)
 	if err != nil {
@@ -245,10 +245,10 @@ const taskMemorySelect = `
 
 const taskMemorySelectTeamScoped = `
 	SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at,
-	       r.blueprint_step_index, p.name
+	       c.blueprint_step_index, p.name
 	FROM conversation_memory rm
-	JOIN conversations r ON r.id = rm.conversation_id AND r.org_id = rm.org_id
-	LEFT JOIN prompts p ON p.id = r.prompt_id
+	JOIN conversations c ON c.id = rm.conversation_id AND c.org_id = rm.org_id
+	LEFT JOIN prompts p ON p.id = c.prompt_id
 `
 
 // scanTaskMemories drains a conversation_memory result set (the column list the
@@ -299,10 +299,10 @@ func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgI
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM conversation_memory rm
-		JOIN conversations r ON r.id = rm.conversation_id AND r.org_id = rm.org_id
+		JOIN conversations c ON c.id = rm.conversation_id AND c.org_id = rm.org_id
 		WHERE rm.org_id = $1
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
-		  AND (r.visibility = 'org' OR (r.visibility = 'team' AND r.team_id = NULLIF($3, '')::uuid))
+		  AND (c.visibility = 'org' OR (c.visibility = 'team' AND c.team_id = NULLIF($3, '')::uuid))
 	`, orgID, entityID, teamID).Scan(&n)
 	return n, err
 }

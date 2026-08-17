@@ -15,10 +15,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestRunPendingInputStore_SQLite runs the shared conformance suite against
+// TestConversationPendingInputStore_SQLite runs the shared conformance suite against
 // the SQLite ConversationPendingInputStore impl. Each subtest opens a fresh
 // in-memory DB so state doesn't leak between assertions.
-func TestRunPendingInputStore_SQLite(t *testing.T) {
+func TestConversationPendingInputStore_SQLite(t *testing.T) {
 	dbtest.RunConversationPendingInputStoreConformance(t, func(t *testing.T) (db.ConversationPendingInputStore, string, string, dbtest.ConversationPendingInputSeeder) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
@@ -51,8 +51,8 @@ func TestRunPendingInputStore_SQLite(t *testing.T) {
 	})
 }
 
-// TestRunPendingInputStore_SQLite_RejectsNonLocalOrg pins assertLocalOrg.
-func TestRunPendingInputStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
+// TestConversationPendingInputStore_SQLite_RejectsNonLocalOrg pins assertLocalOrg.
+func TestConversationPendingInputStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()

@@ -91,7 +91,7 @@ const TrustedGHInjectorCertDestination = "/run/tf-gh-injector.crt"
 // VALIDATES a launch's mount source against this derivation. A drift test
 // cross-checks it agrees with agenthost.CertPathFor.
 func TrustedGHInjectorCertPath(conversationID string) string {
-	return filepath.Join(trustedAgentHostSocketRoot, sanitizeRunIDForSocket(conversationID)+"-gh-injector.crt")
+	return filepath.Join(trustedAgentHostSocketRoot, sanitizeSocketName(conversationID)+"-gh-injector.crt")
 }
 
 // TrustedToolHostBinaryDestination is the fixed in-sandbox path the
@@ -131,7 +131,7 @@ const TrustedAgentHostSocketDestination = "/run/tf.sock"
 // so the broker VALIDATES a launch's mount source against this derivation
 // rather than resolving/overriding it.
 func TrustedAgentHostSocketPath(conversationID string) string {
-	return filepath.Join(trustedAgentHostSocketRoot, sanitizeRunIDForSocket(conversationID)+".sock")
+	return filepath.Join(trustedAgentHostSocketRoot, sanitizeSocketName(conversationID)+".sock")
 }
 
 // This file is the load-bearing narrowing of the broker's attack surface:

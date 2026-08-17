@@ -13,7 +13,7 @@ import (
 )
 
 // This file is the Slack provider's credential half: the brain-side resolver
-// that seals the run's authorizable Slack bot tokens into the per-run bundle,
+// that seals the conversation's authorizable Slack bot tokens into the per-claim bundle,
 // and the keyed-set shape the sidecar-side handler selects from. It is
 // provider-owned (the shape crosses core only as opaque JSON), so core never
 // sees a Slack credential symbol.
@@ -59,7 +59,7 @@ func (c slackBundleCreds) tokenFor(workspaceID, apiAppID string) (string, bool) 
 
 // slackProviderCredential is the brain-side resolver registered under the
 // "slack" namespace: it seals a bot token for every (workspace, app) that owns
-// a channel the run's team tracks. Returns (nil, nil) when the team tracks no
+// a channel the conversation's team tracks. Returns (nil, nil) when the team tracks no
 // Slack channels or the org has none connected (a GitHub/Jira-only run's
 // bundle then carries no Slack section). Runs only on the brain, against the
 // secret-bearing stores — the sidecar never reaches a secret store.

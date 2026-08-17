@@ -15,7 +15,7 @@ import (
 // without importing this package (a cycle: this package imports
 // internal/sandbox). So the two independent implementations — this
 // package's hostSocketRoot + sanitizeSocketName, and sandbox's
-// trustedAgentHostSocketRoot + sanitizeRunIDForSocket — must be kept
+// trustedAgentHostSocketRoot + sanitizeSocketName — must be kept
 // byte-for-byte in sync by hand; this test is what catches a future edit to
 // either side falling out of step, which would otherwise surface as every
 // real sandboxed run's agenthost mount being rejected by the broker.

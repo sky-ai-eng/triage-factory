@@ -705,8 +705,8 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	}()
 
 	if conv.SessionID == "" || conv.WorktreePath == "" || conv.Model == "" {
-		s.failEngagement(conv.ID, errors.New("resume: claimed run missing session/worktree/model"))
-		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", userID, "resume: claimed run missing session/worktree/model", domain.ConversationFailureUnclassified)
+		s.failEngagement(conv.ID, errors.New("resume: claimed conversation missing session/worktree/model"))
+		disposed = s.failConversation(orgID, conv.ID, task.ID, conv.ClaimID, "manual", userID, "resume: claimed conversation missing session/worktree/model", domain.ConversationFailureUnclassified)
 		return
 	}
 

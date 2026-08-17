@@ -266,7 +266,7 @@ func seedSlackMessageConversation(t *testing.T, h *pgtest.Harness, orgID, creato
 		INSERT INTO conversations (id, org_id, team_id, task_id, trigger_type, origin, status, visibility)
 		VALUES ($1, $2, $3, $4, 'event', 'interactive', 'running', 'team')
 	`, conversationID, orgID, teamID, taskID); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 
 	return slackConversationFixture{EventID: eventID, TaskID: taskID, ConversationID: conversationID, Meta: meta}
@@ -303,7 +303,7 @@ func seedGitHubTaskAndConversation(t *testing.T, h *pgtest.Harness, orgID, creat
 		INSERT INTO conversations (id, org_id, team_id, task_id, trigger_type, origin, status, visibility)
 		VALUES ($1, $2, $3, $4, 'event', 'interactive', 'running', 'team')
 	`, conversationID, orgID, teamID, taskID); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 	return taskID, conversationID
 }

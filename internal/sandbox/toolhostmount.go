@@ -31,5 +31,5 @@ const TrustedToolHostSocketDirDestination = "/run/tf-tools"
 // socket directory — both what the orchestrator creates and what the broker
 // requires a TrustedToolHostSocketDirDestination mount's source to resolve to.
 func TrustedToolHostSocketDir(conversationID string) string {
-	return filepath.Join(trustedAgentHostSocketRoot, sanitizeRunIDForSocket(conversationID)+"-tools")
+	return filepath.Join(trustedAgentHostSocketRoot, sanitizeSocketName(conversationID)+"-tools")
 }

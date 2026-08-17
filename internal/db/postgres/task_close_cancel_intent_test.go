@@ -14,12 +14,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestTaskStore_CloseWithRunCancelIntent_Postgres runs the shared close-
+// TestTaskStore_CloseWithConversationCancelIntent_Postgres runs the shared close-
 // carries-stop-intent suite against the Postgres impl. Fixtures are seeded
 // through the harness's admin connection (BYPASSRLS) and the store is wired
 // on the same pool — the method is admin-pool only, so that is the pool it
 // runs on in production too. Skips cleanly when Docker isn't available.
-func TestTaskStore_CloseWithRunCancelIntent_Postgres(t *testing.T) {
+func TestTaskStore_CloseWithConversationCancelIntent_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 

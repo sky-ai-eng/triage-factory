@@ -249,7 +249,7 @@ func (s *promptStore) CountConversationReferences(ctx context.Context, orgID, id
 		`SELECT COUNT(*) FROM conversations WHERE org_id = $1 AND prompt_id = $2`, orgID, id,
 	).Scan(&n)
 	if err != nil {
-		return 0, fmt.Errorf("count run references: %w", err)
+		return 0, fmt.Errorf("count conversation references: %w", err)
 	}
 	return n, nil
 }

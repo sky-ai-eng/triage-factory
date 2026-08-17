@@ -11,11 +11,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestRunPendingInputStore_Postgres runs the shared conformance suite
+// TestConversationPendingInputStore_Postgres runs the shared conformance suite
 // against the Postgres ConversationPendingInputStore impl, wired against AdminDB
 // (production wiring is admin-pool only — see the store's doc comment).
 // Skips cleanly when Docker isn't available (pgtest.Shared).
-func TestRunPendingInputStore_Postgres(t *testing.T) {
+func TestConversationPendingInputStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
 	dbtest.RunConversationPendingInputStoreConformance(t, func(t *testing.T) (db.ConversationPendingInputStore, string, string, dbtest.ConversationPendingInputSeeder) {

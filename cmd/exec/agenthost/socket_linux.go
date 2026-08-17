@@ -332,7 +332,7 @@ func grantReadOnlyToSandbox(path string) error {
 	return os.Chmod(path, 0o640)
 }
 
-// sanitizeSocketName trims a run id to a fs-safe form. ConversationIDs are
+// sanitizeSocketName trims a conversation id to a fs-safe form. ConversationIDs are
 // already UUIDs in production callers so this is a defense-in-depth
 // guard against future callers using a less-constrained shape (the
 // integration test uses "itest..." strings, for instance).

@@ -22,10 +22,10 @@ func seedPgActiveClaim(t *testing.T, h *pgtest.Harness, orgID, conversationID, e
 	return id
 }
 
-// TestRunCredentialsStore_Postgres_PutGet pins the basic round trip through
+// TestClaimCredentialsStore_Postgres_PutGet pins the basic round trip through
 // the run's active claim, plus the no-active-claim no-op.
 // Skips cleanly when Docker isn't available (pgtest.Shared).
-func TestRunCredentialsStore_Postgres_PutGet(t *testing.T) {
+func TestClaimCredentialsStore_Postgres_PutGet(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
@@ -69,12 +69,12 @@ func TestRunCredentialsStore_Postgres_PutGet(t *testing.T) {
 	}
 }
 
-// TestRunCredentialsStore_Postgres_PutNeverRegressesBootEpoch pins the CAS
+// TestClaimCredentialsStore_Postgres_PutNeverRegressesBootEpoch pins the CAS
 // guard: a write for an OLDER boot_epoch arriving after a NEWER one (the
 // slow-provision-races-a-reclaim window) must be a silent no-op, never an
 // overwrite. A same-epoch write (a refresh for the SAME still-live claim)
 // must still apply normally.
-func TestRunCredentialsStore_Postgres_PutNeverRegressesBootEpoch(t *testing.T) {
+func TestClaimCredentialsStore_Postgres_PutNeverRegressesBootEpoch(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()

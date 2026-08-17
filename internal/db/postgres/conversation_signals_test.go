@@ -9,10 +9,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestRunSignalStore_Postgres covers the outbox contract (TFAC-585): insert
+// TestConversationSignalStore_Postgres covers the outbox contract (TFAC-585): insert
 // mints an id, unacked signals for a target list oldest-first, ack is
 // idempotent, and PurgeAcked only removes rows past the age cutoff.
-func TestRunSignalStore_Postgres(t *testing.T) {
+func TestConversationSignalStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := t.Context()
@@ -119,11 +119,11 @@ func TestRunSignalStore_Postgres(t *testing.T) {
 	}
 }
 
-// TestRunSignalStore_Postgres_AckStatusUnknownID pins that polling a
+// TestConversationSignalStore_Postgres_AckStatusUnknownID pins that polling a
 // nonexistent signal id reports acked=false rather than erroring — the
 // waiting control pod's timeout path must not distinguish "never existed"
 // from "not yet acked".
-func TestRunSignalStore_Postgres_AckStatusUnknownID(t *testing.T) {
+func TestConversationSignalStore_Postgres_AckStatusUnknownID(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)

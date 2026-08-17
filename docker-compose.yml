@@ -76,7 +76,7 @@
 #   - seccomp: a tailored default-deny allowlist (TFAC-608), NOT unconfined —
 #     see docs/security/seccomp-profile.md.
 #   - cgroup: private — a private cgroup-v2 namespace so per-run memory
-#     ceilings (TF_RUN_MEMORY_LIMIT_MB) manage this container's own delegated
+#     ceilings (TF_CLAIM_MEMORY_LIMIT_MB) manage this container's own delegated
 #     subtree and can never reach host cgroups. Fails open without it.
 # Tightening the caps further is a hardening follow-up (SKY-336).
 x-tf-hardening: &tf-hardening

@@ -3,7 +3,7 @@
 // and NO secret store — it reaches its org-bound policy (channel authz,
 // workspace resolution) by RELAYING through the runtime to the
 // orchestrator-side ops (exec_provider_ops.go), and its bot token by SELECTING
-// from the run's sealed bundle (exec_provider.go). That is what lets the same
+// from the claim's sealed bundle (exec_provider.go). That is what lets the same
 // handler run in the orchestrator (all/local) AND in the capless per-run
 // credential sidecar, where the exec-verb parser now lives.
 //
@@ -102,7 +102,7 @@ type slackReactResult struct{}
 // Every store touch below is a RELAY to the orchestrator-side policy op
 // (exec_provider_ops.go): the handler holds no db.Stores. The orchestrator
 // answers with an authorization result or a workspace IDENTITY (never a
-// token), binding the run's org from its own ConversationInfo. The bot TOKEN is then
+// token), binding the conversation's org from its own ConversationInfo. The bot TOKEN is then
 // SELECTED locally from the run's sealed bundle — so no secret crosses back.
 
 // authorizeChannel is the stage-1 gate: the run's team must track channelID.
@@ -165,7 +165,7 @@ func selectBotToken(ctx context.Context, rt agenthost.ExtensionRuntime, ws slack
 	}
 	token, ok := creds.tokenFor(ws.WorkspaceID, ws.APIAppID)
 	if !ok {
-		return "", fmt.Errorf("slack: no bot token for workspace %s (app %s) in this run's sealed set", ws.WorkspaceID, ws.APIAppID)
+		return "", fmt.Errorf("slack: no bot token for workspace %s (app %s) in this claim's sealed set", ws.WorkspaceID, ws.APIAppID)
 	}
 	return token, nil
 }

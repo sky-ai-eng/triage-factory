@@ -9,9 +9,9 @@
 //   - Tier 1 — a per-org background Manager/Runner (this package), kicked off
 //     the system:poll: GitHub sentinel, mirroring scorer/profiler/classifier.
 //     Each cycle reconciles the org's whole non-terminal artifact set.
-//   - Tier 2 — a run-scoped refresh the frontend polls while a run view is
-//     open, reconciling just that run's non-terminal artifacts (wired in
-//     internal/server).
+//   - Tier 2 — a conversation-scoped refresh the frontend polls while a
+//     conversation view is open, reconciling just that conversation's
+//     non-terminal artifacts (wired in internal/server).
 package reconcile
 
 import (
@@ -315,17 +315,18 @@ func (rc *Reconciler) recordConversationOutcome(ctx context.Context, orgID, conv
 		return
 	}
 	if err := rc.memory.UpdateConversationMemoryHumanContentSystem(ctx, orgID, conversationID, note); err != nil {
-		reconcileLog.Warn("record run outcome memory failed", "org", orgID, "conversation", conversationID, "error", err)
+		reconcileLog.Warn("record conversation outcome memory failed", "org", orgID, "conversation", conversationID, "error", err)
 	}
 }
 
 // broadcast pushes the transition to the frontend as a dedicated artifact_updated
-// event on the owning run. It deliberately does NOT reuse conversation_update: that
-// event's consumers (the Board) optimistically write run.Status = data.status, so
-// a payload carrying no real status would blank the card until a refetch. The
-// run's own status is unchanged here — only its artifact-derived surface (pending
-// kind / approval card) is — so the FE handlers refetch the run on this event
-// without touching status. Skipped for a detached artifact (no run) or unset hub.
+// event on the owning conversation. It deliberately does NOT reuse conversation_update:
+// that event's consumers (the Board) optimistically write the conversation's
+// Status from data.status, so a payload carrying no real status would blank the
+// card until a refetch. The conversation's own status is unchanged here — only its
+// artifact-derived surface (pending kind / approval card) is — so the FE handlers
+// refetch the conversation on this event without touching status. Skipped for a
+// detached artifact (no conversation) or unset hub.
 func (rc *Reconciler) broadcast(orgID string, a domain.Artifact) {
 	if rc.ws == nil || a.ConversationID == "" {
 		return
@@ -447,7 +448,7 @@ const runOutcomeHeader = "**Post-run outcome** — how your work resolved on Git
 func (rc *Reconciler) composeConversationOutcome(ctx context.Context, orgID, conversationID string) string {
 	arts, err := rc.artifacts.ListByConversationSystem(ctx, orgID, conversationID)
 	if err != nil {
-		reconcileLog.Warn("list run artifacts for outcome note failed", "org", orgID, "conversation", conversationID, "error", err)
+		reconcileLog.Warn("list conversation artifacts for outcome note failed", "org", orgID, "conversation", conversationID, "error", err)
 		return ""
 	}
 	var blocks []string

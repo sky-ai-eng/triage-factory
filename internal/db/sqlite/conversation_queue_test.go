@@ -22,7 +22,7 @@ const (
 	sqliteRQBootEpoch  = int64(1)
 )
 
-func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
+func TestConversationQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -104,7 +104,7 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	}
 }
 
-func TestRunQueueStore_SQLite_CancelRequestedNotClaimed(t *testing.T) {
+func TestConversationQueueStore_SQLite_CancelRequestedNotClaimed(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -151,7 +151,7 @@ func TestRunQueueStore_SQLite_CancelRequestedNotClaimed(t *testing.T) {
 	}
 }
 
-func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
+func TestConversationQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -215,13 +215,13 @@ func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_SQLite_RequeueFromSetupPhase pins that RequeueConversation fires
+// TestConversationQueueStore_SQLite_RequeueFromSetupPhase pins that RequeueConversation fires
 // no matter which setup phase the run's active claim is in: setup progress
 // lives on the claim, the conversation stays 'running' the whole time, so a
 // workspace-setup failure mid-phase must still requeue the row and make it
 // re-claimable. Coverage walks the canonical vocabulary, so a phase added in
 // Go and not handled here fails rather than going untested.
-func TestRunQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
+func TestConversationQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
 	for _, phase := range domain.AllClaimPhases() {
 		t.Run(phase, func(t *testing.T) {
 			conn := openSQLiteForTest(t)
@@ -277,7 +277,7 @@ func TestRunQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
 	}
 }
 
-func TestRunQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
+func TestConversationQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -324,12 +324,12 @@ func TestRunQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_SQLite_ResetProcessingRuns_ScopedToOwner pins the
+// TestConversationQueueStore_SQLite_ResetProcessingRuns_ScopedToOwner pins the
 // TFAC-578 ownership predicate on the SQLite impl too — SQLite is N=1 (there
 // is never a live sibling to protect in practice), but the predicate must
 // hold identically to Postgres: a different executor_id is never swept, and
 // the same executor/epoch (not yet an earlier boot) is left untouched.
-func TestRunQueueStore_SQLite_ResetProcessingRuns_ScopedToOwner(t *testing.T) {
+func TestConversationQueueStore_SQLite_ResetProcessingRuns_ScopedToOwner(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -382,7 +382,7 @@ func TestRunQueueStore_SQLite_ResetProcessingRuns_ScopedToOwner(t *testing.T) {
 	}
 }
 
-func TestRunQueueStore_SQLite_SetCurrentStep(t *testing.T) {
+func TestConversationQueueStore_SQLite_SetCurrentStep(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -410,13 +410,13 @@ func TestRunQueueStore_SQLite_SetCurrentStep(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_SQLite_EnqueueStampsActorAgent pins the audit gap fix:
+// TestConversationQueueStore_SQLite_EnqueueStampsActorAgent pins the audit gap fix:
 // EnqueueConversation (the live run-creation path) persists
 // conversations.actor_agent_id, and the ConversationStore.Get read
 // projection JOINs agents to surface the bot's display name as
 // ActorAgentName for the "Ran as: {name}" UI. A run enqueued with no actor
 // reads back with both fields empty (the column's nullable contract).
-func TestRunQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
+func TestConversationQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -482,7 +482,7 @@ func TestRunQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_SQLite_EnqueueStampsTheSDKEngine is the twin of the
+// TestConversationQueueStore_SQLite_EnqueueStampsTheSDKEngine is the twin of the
 // Postgres assertion, and the pair is the point: the engine a delegation runs
 // on is decided by the dialect, because the dialect is the mode. Read
 // together they say the divergence is deliberate; either one alone could be
@@ -491,7 +491,7 @@ func TestRunQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
 // The stamp is explicit here too, rather than left to the column DEFAULT, so
 // that a later change to that DEFAULT is free to move without silently
 // re-homing local's delegations onto another engine.
-func TestRunQueueStore_SQLite_EnqueueStampsTheSDKEngine(t *testing.T) {
+func TestConversationQueueStore_SQLite_EnqueueStampsTheSDKEngine(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -529,10 +529,10 @@ func TestRunQueueStore_SQLite_EnqueueStampsTheSDKEngine(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_SQLite_Credentials runs the shared awaiting-credentials
+// TestConversationQueueStore_SQLite_Credentials runs the shared awaiting-credentials
 // pubkey conformance suite against the SQLite impl. Each factory call opens
 // a fresh in-memory DB so subtests don't share state.
-func TestRunQueueStore_SQLite_Credentials(t *testing.T) {
+func TestConversationQueueStore_SQLite_Credentials(t *testing.T) {
 	dbtest.RunClaimCredentialsConformance(t, func(t *testing.T) (db.ConversationQueueStore, string, dbtest.ClaimCredentialsSeeder) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
@@ -592,9 +592,9 @@ func TestRunQueueStore_SQLite_Credentials(t *testing.T) {
 	})
 }
 
-// TestRunQueueStore_SQLite_FleetQueueShares runs the shared per-org queue-share
+// TestConversationQueueStore_SQLite_FleetQueueShares runs the shared per-org queue-share
 // conformance against the SQLite impl (N=1 — one local org).
-func TestRunQueueStore_SQLite_FleetQueueShares(t *testing.T) {
+func TestConversationQueueStore_SQLite_FleetQueueShares(t *testing.T) {
 	dbtest.RunFleetQueueSharesConformance(t, func(t *testing.T) (db.ConversationQueueStore, string, dbtest.FleetQueueSharesSeeder) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
@@ -654,7 +654,7 @@ func TestRunQueueStore_SQLite_FleetQueueShares(t *testing.T) {
 	})
 }
 
-func TestRunQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
+func TestConversationQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -668,11 +668,11 @@ func TestRunQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_SQLite_QueuedAtStamps pins the queue-dwell timestamps the
+// TestConversationQueueStore_SQLite_QueuedAtStamps pins the queue-dwell timestamps the
 // UI's queue timer reads: enqueue stamps queued_at, a claim mints the claims
 // row whose claimed_at Get derives, and a requeue re-stamps queued_at while
 // releasing the claim — history is kept, ownership is not.
-func TestRunQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
+func TestConversationQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -747,11 +747,11 @@ func TestRunQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_SQLite_ExecutorClaims runs the shared operator
+// TestConversationQueueStore_SQLite_ExecutorClaims runs the shared operator
 // claim-projection conformance against the SQLite impl. The read is
 // deployment-wide by construction; SQLite is N=1, so the arm proves the SQL
 // and the scan rather than any cross-org behavior.
-func TestRunQueueStore_SQLite_ExecutorClaims(t *testing.T) {
+func TestConversationQueueStore_SQLite_ExecutorClaims(t *testing.T) {
 	dbtest.RunExecutorClaimsConformance(t, func(t *testing.T) (db.ConversationQueueStore, dbtest.ExecutorClaimsSeeder) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
@@ -949,10 +949,10 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 	})
 }
 
-// TestRunQueueStore_SQLite_ReconcileOrphanedRuns runs the shared boot-reconcile
+// TestConversationQueueStore_SQLite_ReconcileOrphanedRuns runs the shared boot-reconcile
 // conformance against the SQLite impl. Each factory call opens a fresh
 // in-memory DB, so the suite's exact healed counts are this subtest's alone.
-func TestRunQueueStore_SQLite_ReconcileOrphanedRuns(t *testing.T) {
+func TestConversationQueueStore_SQLite_ReconcileOrphanedRuns(t *testing.T) {
 	dbtest.RunReconcileOrphanedConversationsConformance(t, func(t *testing.T) (db.ConversationQueueStore, dbtest.ReconcileOrphanSeeder) {
 		t.Helper()
 		conn := openSQLiteForTest(t)

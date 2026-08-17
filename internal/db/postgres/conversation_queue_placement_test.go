@@ -23,7 +23,7 @@ var placementClaimCfg = db.ClaimPlacement{Enabled: true, AgingInterval: 20 * tim
 // enqueues one queued run stamped with preferred. Returns the run id.
 func enqueuePgConversationPreferred(t *testing.T, h *pgtest.Harness, stores db.Stores, orgID, userID, preferred string) string {
 	t.Helper()
-	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 	conversationID := uuid.New().String()
 	step0 := 0
 	if err := stores.ConversationQueue.EnqueueConversation(context.Background(), orgID, domain.Conversation{

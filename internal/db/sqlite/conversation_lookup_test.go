@@ -9,11 +9,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestConversationStore_SQLite_LookupOrgForRunSystem_ReturnsSentinelOrgID
+// TestConversationStore_SQLite_LookupOrgForConversationSystem_ReturnsSentinelOrgID
 // pins the local-mode behavior of the cold-start identity probe used
 // by cmd/exec/convident — every locally-seeded run resolves back to
 // the LocalDefaultOrgID sentinel.
-func TestConversationStore_SQLite_LookupOrgForRunSystem_ReturnsSentinelOrgID(t *testing.T) {
+func TestConversationStore_SQLite_LookupOrgForConversationSystem_ReturnsSentinelOrgID(t *testing.T) {
 	conn := newSQLiteForConversationTest(t)
 	stores := sqlitestore.New(conn)
 	seeder := newSQLiteConversationSeeder(conn)
@@ -36,10 +36,10 @@ func TestConversationStore_SQLite_LookupOrgForRunSystem_ReturnsSentinelOrgID(t *
 	}
 }
 
-// TestConversationStore_SQLite_LookupOrgForRunSystem_UnknownReturnsEmpty
+// TestConversationStore_SQLite_LookupOrgForConversationSystem_UnknownReturnsEmpty
 // — an unknown conversationID returns ("", nil). Callers (convident) map that
 // to ErrConversationIdentityNotFound rather than a SQL error.
-func TestConversationStore_SQLite_LookupOrgForRunSystem_UnknownReturnsEmpty(t *testing.T) {
+func TestConversationStore_SQLite_LookupOrgForConversationSystem_UnknownReturnsEmpty(t *testing.T) {
 	conn := newSQLiteForConversationTest(t)
 	stores := sqlitestore.New(conn)
 

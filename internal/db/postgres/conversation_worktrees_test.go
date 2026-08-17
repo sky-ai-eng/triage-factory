@@ -99,13 +99,13 @@ func expectNoCredRequest(t *testing.T, msgs <-chan ctlbus.Message) {
 	}
 }
 
-// TestRunWorktreeStore_Postgres_InsertRingsCredDoorbell pins the widening
+// TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell pins the widening
 // signal: a genuinely new conversation_worktrees row means the run's authorized
 // repo set grew past what its sealed credential bundle covers, so the insert
 // fires the same cred_request the claim's own credential request fires. A
 // conflicting insert (the row already existed) widens nothing and must stay
 // silent, or every idempotent `workspace add` would re-mint the run's tokens.
-func TestRunWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T) {
+func TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
@@ -160,14 +160,14 @@ func TestRunWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T) {
 	}
 }
 
-// TestRunWorktreeStore_Postgres_RolledBackInsertRingsNoDoorbell pins the
+// TestConversationWorktreeStore_Postgres_RolledBackInsertRingsNoDoorbell pins the
 // load-bearing half of the doorbell's placement: it is published on the SAME
 // connection that ran the INSERT, so pg_notify rides the transaction and is
 // delivered at COMMIT. Published on a separate pool handle it would fire before
 // the commit, letting the brain read a pre-insert state and seal a bundle
 // without the new repo — the very bug the doorbell exists to fix, reintroduced
 // through its own fix. A rolled-back insert must therefore be silent.
-func TestRunWorktreeStore_Postgres_RolledBackInsertRingsNoDoorbell(t *testing.T) {
+func TestConversationWorktreeStore_Postgres_RolledBackInsertRingsNoDoorbell(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()

@@ -327,12 +327,12 @@ func TestExternalActionStore_SQLite_EgressDenialDedupPerConversation(t *testing.
 	}
 }
 
-// TestExternalActionStore_SQLite_ListByRun pins the run-scoped read behind the
+// TestExternalActionStore_SQLite_ListByConversation pins the run-scoped read behind the
 // run view's actions list: one conversation's rows, newest first, and nothing
 // from a sibling run or from a row that has no run at all (a purged run's
 // actions survive in the org feed with conversation_id NULL, and must not
 // reappear under whichever run is being read).
-func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
+func TestExternalActionStore_SQLite_ListByConversation(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()

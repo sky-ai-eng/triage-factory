@@ -600,7 +600,7 @@ func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context,
 		// both ride the one connection this tx holds, and an open cursor is
 		// the kind of thing a driver is entitled to refuse to write around.
 		if conversationIDs, err = scanActiveConversationIDs(ctx, q, taskID); err != nil {
-			return fmt.Errorf("list active runs: %w", err)
+			return fmt.Errorf("list active conversations: %w", err)
 		}
 
 		// `status = 'running' AND cancel_requested = 0` is

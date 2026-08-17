@@ -26,7 +26,7 @@ type fairnessFixture struct {
 func newFairnessFixture(t *testing.T, h *pgtest.Harness) fairnessFixture {
 	t.Helper()
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 	return fairnessFixture{
 		orgID: orgID, userID: userID,
 		bpID: pgBlueprintIDOfRun(t, h, brID), taskID: taskID, promptID: promptID, h: h,

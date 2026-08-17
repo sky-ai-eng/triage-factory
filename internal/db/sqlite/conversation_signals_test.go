@@ -10,12 +10,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestRunSignalStore_SQLite_EveryMethodReturnsErrNotApplicableInLocal pins
+// TestConversationSignalStore_SQLite_EveryMethodReturnsErrNotApplicableInLocal pins
 // the Postgres-only stub (TFAC-585): conversation_signals lives in the Postgres
 // baseline only — local mode is always its own run's owner, so no code
 // path may ever reach this store. Every method must fail loudly rather
 // than silently no-op against a table that doesn't exist locally.
-func TestRunSignalStore_SQLite_EveryMethodReturnsErrNotApplicableInLocal(t *testing.T) {
+func TestConversationSignalStore_SQLite_EveryMethodReturnsErrNotApplicableInLocal(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()

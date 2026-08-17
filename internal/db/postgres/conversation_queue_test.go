@@ -16,27 +16,27 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// pgRunQueueExecutorID/pgRunQueueBootEpoch are the fixed ownership identity
+// pgConversationQueueExecutorID/pgConversationQueueBootEpoch are the fixed ownership identity
 // most claims in this file stamp a row with; tests specifically exercising
 // the ownership-scoping predicate (TFAC-578) pass their own values inline.
 const (
-	pgRunQueueExecutorID = "test-executor"
-	pgRunQueueBootEpoch  = int64(1)
+	pgConversationQueueExecutorID = "test-executor"
+	pgConversationQueueBootEpoch  = int64(1)
 )
 
-// TestRunQueueStore_Postgres_EnqueueClaim exercises the basic enqueue → claim →
+// TestConversationQueueStore_Postgres_EnqueueClaim exercises the basic enqueue → claim →
 // requeue → reset cycle against real Postgres (admin pool).
-func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
+func TestConversationQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 	// Empty queue.
-	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
+	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
 		t.Fatalf("ClaimNextConversation on empty queue = (%v, %v), want (nil, nil)", got, err)
 	}
 
@@ -49,7 +49,7 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 		t.Fatalf("EnqueueConversation: %v", err)
 	}
 
-	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{})
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{})
 	if err != nil || got == nil {
 		t.Fatalf("ClaimNextConversation: (%v, %v)", got, err)
 	}
@@ -76,33 +76,33 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 	if err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "transient"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
-	got2, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{})
+	got2, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{})
 	if err != nil || got2 == nil || got2.Attempts != 2 {
 		t.Fatalf("re-claim = (%+v, %v), want attempts=2", got2, err)
 	}
 
 	// ResetProcessingConversations flips the mid-flight 'running' row back to queued —
 	// a later boot epoch of the same executor (a restart) sweeps it.
-	n, err := stores.ConversationQueue.ResetProcessingConversations(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch+1)
+	n, err := stores.ConversationQueue.ResetProcessingConversations(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch+1)
 	if err != nil || n != 1 {
 		t.Fatalf("ResetProcessingConversations = (%d, %v), want (1, nil)", n, err)
 	}
 }
 
-// TestRunQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner is the core
+// TestConversationQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner is the core
 // TFAC-578 hazard test: two processes (distinct persistent executor
 // identities) against one Postgres. Process B booting must NOT reset process
 // A's claimed/running row — A's work would otherwise be re-queued and
 // re-executed by A while it's still live, a duplicate-execution hazard on a
 // rolling deploy or any N>1 topology.
-func TestRunQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner(t *testing.T) {
+func TestConversationQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 	step0 := 0
 	conversationID := uuid.New().String()
 	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
@@ -151,18 +151,18 @@ func TestRunQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner(t *testing.T) 
 	}
 }
 
-// TestRunQueueStore_Postgres_ResetProcessingRuns_NeverResetsCurrentEpoch pins
+// TestConversationQueueStore_Postgres_ResetProcessingRuns_NeverResetsCurrentEpoch pins
 // that a boot's own reconcile never touches rows claimed under its OWN
 // current epoch — only strictly earlier boots of itself are orphans. This is
 // what keeps ResetProcessingConversations safe to call unconditionally at every boot.
-func TestRunQueueStore_Postgres_ResetProcessingRuns_NeverResetsCurrentEpoch(t *testing.T) {
+func TestConversationQueueStore_Postgres_ResetProcessingRuns_NeverResetsCurrentEpoch(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 	step0 := 0
 	conversationID := uuid.New().String()
 	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
@@ -187,16 +187,16 @@ func TestRunQueueStore_Postgres_ResetProcessingRuns_NeverResetsCurrentEpoch(t *t
 	}
 }
 
-// TestRunQueueStore_Postgres_CancelRequestedNotClaimed pins that a queued step
+// TestConversationQueueStore_Postgres_CancelRequestedNotClaimed pins that a queued step
 // of a cancel-requested blueprint is never claimed.
-func TestRunQueueStore_Postgres_CancelRequestedNotClaimed(t *testing.T) {
+func TestConversationQueueStore_Postgres_CancelRequestedNotClaimed(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 	step0 := 0
 	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
@@ -208,22 +208,22 @@ func TestRunQueueStore_Postgres_CancelRequestedNotClaimed(t *testing.T) {
 	if changed, err := stores.Blueprints.RequestRunCancelSystem(ctx, orgID, brID); err != nil || !changed {
 		t.Fatalf("RequestRunCancelSystem = (%v, %v)", changed, err)
 	}
-	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
+	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
 		t.Fatalf("ClaimNextConversation on cancel-requested blueprint = (%v, %v), want (nil, nil)", got, err)
 	}
 }
 
-// TestRunQueueStore_Postgres_ConcurrentClaim proves the FOR UPDATE SKIP LOCKED
+// TestConversationQueueStore_Postgres_ConcurrentClaim proves the FOR UPDATE SKIP LOCKED
 // claim never hands the same queued run to two claimers: it enqueues N runs and
 // drains them from G goroutines, asserting every run is claimed exactly once.
-func TestRunQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
+func TestConversationQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 	bpID := pgBlueprintIDOfRun(t, h, brID)
 
 	// N runs queued at once = N blueprint_runs, each on its own step 0.
@@ -254,7 +254,7 @@ func TestRunQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for {
-				conv, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{})
+				conv, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{})
 				if err != nil {
 					t.Errorf("ClaimNextConversation: %v", err)
 					return
@@ -283,11 +283,11 @@ func TestRunQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_Postgres_ReconcileOrphanedRuns heals the desync where a
+// TestConversationQueueStore_Postgres_ReconcileOrphanedRuns heals the desync where a
 // child run is left non-terminal under an already-terminal blueprint_run: the
 // boot sweep cancels it (stamping completed_at) and only it, leaving a child
 // under a still-running parent untouched.
-func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
+func TestConversationQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -296,7 +296,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	orgID, userID := seedPgOrgForBlueprints(t, h)
 
 	// Orphan: terminal (cancelled) parent, child still running.
-	brA, taskA, promptA := seedPgRunQueueFixture(t, h, orgID, userID)
+	brA, taskA, promptA := seedPgConversationQueueFixture(t, h, orgID, userID)
 	orphanID := uuid.New().String()
 	step0 := 0
 	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
@@ -323,7 +323,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	}
 
 	// Healthy: running parent, child running — must be left alone.
-	brB, taskB, promptB := seedPgRunQueueFixture(t, h, orgID, userID)
+	brB, taskB, promptB := seedPgConversationQueueFixture(t, h, orgID, userID)
 	healthyID := uuid.New().String()
 	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: healthyID, TaskID: taskB, PromptID: promptB, Model: "m",
@@ -364,21 +364,21 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs pins the janitor arms
+// TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs pins the janitor arms
 // for the two shapes the non-atomic app-pool terminal writes can strand: a
 // terminal conversation with a dangling active claim gets the claim released
 // (outcome mapped from status), and an in-flight
 // delegation conversation with no active claim under a running parent goes
 // back to 'queued' with its placement stamp cleared — while a running row
 // with a live claim and a claimless queued row are untouched.
-func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
+func TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 	step0 := 0
 
 	seedChild := func(status string) string {
@@ -469,19 +469,19 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_Postgres_EnqueueStampsActorAgent is the Postgres parity of
+// TestConversationQueueStore_Postgres_EnqueueStampsActorAgent is the Postgres parity of
 // the SQLite actor-stamp test: EnqueueConversation (both the manual and event branches)
 // persists conversations.actor_agent_id, and ConversationStore.GetSystem
 // JOINs agents to surface the display name as ActorAgentName. A run with
 // no actor reads back with both fields empty.
-func TestRunQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
+func TestConversationQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 	// One org agent backs the composite FK (actor_agent_id, org_id) and carries
 	// the display name the read JOIN denormalizes.
@@ -551,7 +551,7 @@ func TestRunQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_Postgres_EnqueueStampsTheNativeEngine pins the single fact
+// TestConversationQueueStore_Postgres_EnqueueStampsTheNativeEngine pins the single fact
 // that makes the SDK engine unreachable for a delegation in this mode: the
 // mint names the engine, so no row is ever written that a claimant would have
 // to be taught to refuse. There is no caller-passed knob and no reliance on
@@ -564,14 +564,14 @@ func TestRunQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 // It reads the stored column rather than the projection on purpose. The
 // question is what the write put there, and a projection that COALESCEd an
 // absent value would answer it wrong.
-func TestRunQueueStore_Postgres_EnqueueStampsTheNativeEngine(t *testing.T) {
+func TestConversationQueueStore_Postgres_EnqueueStampsTheNativeEngine(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 	storedRuntime := func(t *testing.T, convID string) string {
 		t.Helper()
@@ -604,11 +604,11 @@ func TestRunQueueStore_Postgres_EnqueueStampsTheNativeEngine(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_Postgres_Credentials runs the shared awaiting-credentials
+// TestConversationQueueStore_Postgres_Credentials runs the shared awaiting-credentials
 // pubkey conformance suite against the Postgres impl (admin pool, matching
 // production wiring). Each factory call resets the harness so subtests don't
 // share state.
-func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
+func TestConversationQueueStore_Postgres_Credentials(t *testing.T) {
 	h := pgtest.Shared(t)
 	ctx := context.Background()
 
@@ -617,7 +617,7 @@ func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
-		brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+		brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 		nextStep := 0
 		seed := dbtest.ClaimCredentialsSeeder{
@@ -656,10 +656,10 @@ func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
 	})
 }
 
-// TestRunQueueStore_Postgres_FleetQueueShares runs the shared per-org
+// TestConversationQueueStore_Postgres_FleetQueueShares runs the shared per-org
 // queue-share conformance against the Postgres impl (admin pool). Each factory
 // call resets the harness so subtests don't share state.
-func TestRunQueueStore_Postgres_FleetQueueShares(t *testing.T) {
+func TestConversationQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 	h := pgtest.Shared(t)
 	ctx := context.Background()
 
@@ -677,7 +677,7 @@ func TestRunQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 			// all be queued at once.
 			EnqueueConversation: func(t *testing.T) string {
 				t.Helper()
-				brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+				brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 				conversationID := uuid.New().String()
 				step := 0
 				if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
@@ -735,9 +735,9 @@ func pgConversationParked(t *testing.T, h *pgtest.Harness, conversationID string
 	return stored.String, parkedAt != nil
 }
 
-// seedPgRunQueueFixture mints a prompt + blueprint + a running blueprint_run on
+// seedPgConversationQueueFixture mints a prompt + blueprint + a running blueprint_run on
 // a fresh task, returning (blueprintRunID, taskID, promptID) ready for enqueue.
-func seedPgRunQueueFixture(t *testing.T, h *pgtest.Harness, orgID, userID string) (brID, taskID, promptID string) {
+func seedPgConversationQueueFixture(t *testing.T, h *pgtest.Harness, orgID, userID string) (brID, taskID, promptID string) {
 	t.Helper()
 	bpID := "rq-bp-" + uuid.New().String()[:8]
 	seedPgBlueprint(t, h, orgID, userID, bpID)
@@ -776,18 +776,18 @@ func pgBlueprintIDOfRun(t *testing.T, h *pgtest.Harness, brID string) string {
 	return bpID
 }
 
-// TestRunQueueStore_Postgres_QueuedAtStamps mirrors the SQLite twin: enqueue
+// TestConversationQueueStore_Postgres_QueuedAtStamps mirrors the SQLite twin: enqueue
 // stamps queued_at, a claim stamps claimed_at (both surfaced through
 // Conversations.GetSystem), and a requeue re-stamps queued_at and clears
 // claimed_at so the next dwell measures from the re-entry, not the mint.
-func TestRunQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
+func TestConversationQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
-	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 	conversationID := uuid.New().String()
 	step0 := 0
@@ -810,7 +810,7 @@ func TestRunQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 	}
 	firstQueuedAt := *queued.QueuedAt
 
-	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
+	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
 		t.Fatalf("ClaimNextConversation: (%v, %v)", got, err)
 	}
 	claimed, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
@@ -844,13 +844,13 @@ func TestRunQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_Postgres_RequeueFromSetupPhase pins that RequeueConversation fires
+// TestConversationQueueStore_Postgres_RequeueFromSetupPhase pins that RequeueConversation fires
 // no matter which setup phase the run's active claim is in: setup progress
 // lives on the claim, the conversation stays 'running' the whole time, so a
 // workspace-setup failure mid-phase must still requeue the row and make it
 // re-claimable. Coverage walks the canonical vocabulary, so a phase added in
 // Go and not handled here fails rather than going untested.
-func TestRunQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
+func TestConversationQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
@@ -859,7 +859,7 @@ func TestRunQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			h.Reset(t)
 			orgID, userID := seedPgOrgForBlueprints(t, h)
-			brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+			brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 			conversationID := uuid.New().String()
 			step0 := 0
@@ -869,7 +869,7 @@ func TestRunQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("EnqueueConversation: %v", err)
 			}
-			if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
+			if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
 				t.Fatalf("ClaimNextConversation: (%v, %v)", got, err)
 			}
 			// Advance the claim into the setup phase the dispatcher would
@@ -889,18 +889,18 @@ func TestRunQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 			if after.Status != "queued" {
 				t.Fatalf("status after requeue from phase %q = %q, want queued (a mid-setup phase must not block the requeue)", phase, after.Status)
 			}
-			if reclaimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || reclaimed == nil {
+			if reclaimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}); err != nil || reclaimed == nil {
 				t.Fatalf("re-ClaimNextConversation after requeue from phase %q: (%v, %v)", phase, reclaimed, err)
 			}
 		})
 	}
 }
 
-// TestRunQueueStore_Postgres_ExecutorClaims runs the shared operator
+// TestConversationQueueStore_Postgres_ExecutorClaims runs the shared operator
 // claim-projection conformance against the Postgres impl (admin pool, matching
 // production wiring — the read is deployment-wide and RLS-bypassing by
 // design). Each factory call resets the harness so subtests don't share state.
-func TestRunQueueStore_Postgres_ExecutorClaims(t *testing.T) {
+func TestConversationQueueStore_Postgres_ExecutorClaims(t *testing.T) {
 	h := pgtest.Shared(t)
 	ctx := context.Background()
 
@@ -909,7 +909,7 @@ func TestRunQueueStore_Postgres_ExecutorClaims(t *testing.T) {
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
-		brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+		brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 		nextStep := 0
 		seed := dbtest.ExecutorClaimsSeeder{
@@ -987,7 +987,7 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
-		brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+		brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 		nextStep := 0
 		return dbtest.ClaimPredicateHarness{
@@ -1076,11 +1076,11 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 	})
 }
 
-// TestRunQueueStore_Postgres_ReconcileOrphanedRunsConformance runs the shared
+// TestConversationQueueStore_Postgres_ReconcileOrphanedRunsConformance runs the shared
 // boot-reconcile conformance against the Postgres impl (admin pool, matching
 // production wiring). Each factory call resets the harness, so the suite's exact
 // healed counts are this subtest's alone.
-func TestRunQueueStore_Postgres_ReconcileOrphanedRunsConformance(t *testing.T) {
+func TestConversationQueueStore_Postgres_ReconcileOrphanedRunsConformance(t *testing.T) {
 	h := pgtest.Shared(t)
 	ctx := context.Background()
 
@@ -1089,7 +1089,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRunsConformance(t *testing.T) {
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
-		brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+		brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 		bpID := pgBlueprintIDOfRun(t, h, brID)
 
 		nextStep := 0

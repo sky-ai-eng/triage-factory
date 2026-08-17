@@ -16,11 +16,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestRunWorktreeStore_SQLite runs the shared conformance suite
+// TestConversationWorktreeStore_SQLite runs the shared conformance suite
 // against the SQLite ConversationWorktreeStore impl. Each subtest opens a
 // fresh in-memory DB so conversation_worktrees state doesn't leak between
 // assertions.
-func TestRunWorktreeStore_SQLite(t *testing.T) {
+func TestConversationWorktreeStore_SQLite(t *testing.T) {
 	dbtest.RunConversationWorktreeStoreConformance(t, func(t *testing.T) (db.ConversationWorktreeStore, string, dbtest.ConversationWorktreeSeeder) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
@@ -48,8 +48,8 @@ func TestRunWorktreeStore_SQLite(t *testing.T) {
 	})
 }
 
-// TestRunWorktreeStore_SQLite_RejectsNonLocalOrg pins assertLocalOrg.
-func TestRunWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
+// TestConversationWorktreeStore_SQLite_RejectsNonLocalOrg pins assertLocalOrg.
+func TestConversationWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()

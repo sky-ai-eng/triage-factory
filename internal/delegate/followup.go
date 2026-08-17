@@ -34,7 +34,7 @@ import (
 // somewhere a wake can reach — so a queued row would sit undelivered forever.
 // Callers map it to 409 Conflict so the client refreshes and re-reads the run's
 // state.
-var ErrConversationNotSteerable = errors.New("run is not steerable")
+var ErrConversationNotSteerable = errors.New("conversation is not steerable")
 
 // ErrConversationNotFound is returned by SendMessage when the conversation does not
 // exist under the caller's org at routing time. Distinct from
@@ -44,7 +44,7 @@ var ErrConversationNotSteerable = errors.New("run is not steerable")
 // before routing, so reaching this normally means the run was deleted between
 // that read and this one — answering "conflict" would send the client chasing
 // state that no longer exists.
-var ErrConversationNotFound = errors.New("run not found")
+var ErrConversationNotFound = errors.New("conversation not found")
 
 // The SDK-only resume preconditions, as errors rather than formatted strings so
 // the one ladder can hand them back by name. Each is a row that cannot be
@@ -52,9 +52,9 @@ var ErrConversationNotFound = errors.New("run not found")
 // model to re-invoke it on — so they read as internal faults (500) rather than
 // as a state the client should re-read.
 var (
-	errResumeNoSessionID    = errors.New("run has no session id; cannot resume")
-	errResumeNoWorktreePath = errors.New("run has no worktree path; cannot resume")
-	errResumeNoModel        = errors.New("run has no model; cannot resume")
+	errResumeNoSessionID    = errors.New("conversation has no session id; cannot resume")
+	errResumeNoWorktreePath = errors.New("conversation has no worktree path; cannot resume")
+	errResumeNoModel        = errors.New("conversation has no model; cannot resume")
 )
 
 // The refusal ladder's rungs, named. A rung travels two ways from the single
@@ -288,7 +288,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 	// steerable.
 	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
-		return fmt.Errorf("load run: %w", err)
+		return fmt.Errorf("load conversation: %w", err)
 	}
 	if conv == nil {
 		return ErrConversationNotFound

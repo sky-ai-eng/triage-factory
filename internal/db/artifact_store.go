@@ -122,7 +122,7 @@ type ArtifactStore interface {
 	// org_id stays bound as defense in depth alongside RLS.
 	Get(ctx context.Context, orgID, id string) (*domain.Artifact, error)
 
-	// ListByConversation returns every artifact produced by one run, newest first.
+	// ListByConversation returns every artifact produced by one conversation, newest first.
 	// Backs the run-detail surface (A·6).
 	ListByConversation(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error)
 
@@ -151,7 +151,7 @@ type ArtifactStore interface {
 	// in SQLite (single-tenant, no RLS).
 	ListByConversationSystem(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error)
 
-	// CountByConversation returns the number of artifacts each given run produced,
+	// CountByConversation returns the number of artifacts each given conversation produced,
 	// keyed by run id. Runs with zero artifacts (or absent from the table)
 	// have no entry — the caller treats a missing key as 0. It batches the
 	// run-list path's per-card count into one query so listing a task's runs

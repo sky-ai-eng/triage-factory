@@ -107,8 +107,8 @@ func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context
 // setupAbsorbScenario seeds entity + prompt + a trigger on
 // absorbTestEventType + an initial event, then delegates it into an active
 // run (mirroring a real in-flight auto run) via stubDelegateRun. Returns the
-// entity, the task the trigger matches (which owns the active run), the
-// trigger (with its real resolved blueprint id), and the active run's ID.
+// entity, the task the trigger matches (which owns the active conversation), the
+// trigger (with its real resolved blueprint id), and the active conversation's ID.
 func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task *domain.Task, trigger domain.EventHandler, activeConversationID string) {
 	t.Helper()
 	registerAbsorbEventType(t, absorbTestEventType)
@@ -169,7 +169,7 @@ func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task 
 		TriggeringEventID:   firstEventID,
 	})
 	if err != nil {
-		t.Fatalf("seed active run: %v", err)
+		t.Fatalf("seed active conversation: %v", err)
 	}
 	// stubDelegateRun returns the blueprint_run id, not the conversations.id
 	// the injection seam targets (a staged injection is an undelivered
@@ -254,7 +254,7 @@ func TestTryAutoDelegate_SameTask_InjectsIntoActiveRun(t *testing.T) {
 	}
 	got := stub.calls[0]
 	if got.conversationID != activeConversationID {
-		t.Errorf("injected run_id = %q, want the active run %q", got.conversationID, activeConversationID)
+		t.Errorf("injected conversation_id = %q, want the active conversation %q", got.conversationID, activeConversationID)
 	}
 	if got.producer != absorbTestEventType {
 		t.Errorf("injected producer = %q, want %q", got.producer, absorbTestEventType)
@@ -315,7 +315,7 @@ func TestTryAutoDelegate_SameTask_StagedResumableRunHandled(t *testing.T) {
 		t.Fatalf("expected 1 StageOrDeliverAdditiveEvent attempt, got %d", len(stub.calls))
 	}
 	if stub.calls[0].conversationID != activeConversationID {
-		t.Errorf("attempt targeted run_id = %q, want %q", stub.calls[0].conversationID, activeConversationID)
+		t.Errorf("attempt targeted conversation_id = %q, want %q", stub.calls[0].conversationID, activeConversationID)
 	}
 
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
@@ -338,7 +338,7 @@ func TestTryAutoDelegate_SameTask_StagedResumableRunHandled(t *testing.T) {
 // TestTryAutoDelegate_SameTask_DeliveredRemoteHandledWithoutRecording
 // pins the cross-pod outcome: InjectDeliveredRemote means a live
 // remote executor now owns recording task_events 'injected' (or
-// compensating with a pending_firing if the run turns out dead by apply
+// compensating with a pending_firing if the conversation turns out dead by apply
 // time) — the router must treat the firing as handled but must NOT record
 // the task_event itself, or a slow/failed remote apply could leave a
 // duplicate or premature bookkeeping row.
@@ -370,7 +370,7 @@ func TestTryAutoDelegate_SameTask_DeliveredRemoteHandledWithoutRecording(t *test
 		t.Fatalf("expected 1 StageOrDeliverAdditiveEvent attempt, got %d", len(stub.calls))
 	}
 	if stub.calls[0].conversationID != activeConversationID {
-		t.Errorf("attempt targeted run_id = %q, want %q", stub.calls[0].conversationID, activeConversationID)
+		t.Errorf("attempt targeted conversation_id = %q, want %q", stub.calls[0].conversationID, activeConversationID)
 	}
 
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
@@ -545,7 +545,7 @@ func TestTryAutoDelegate_SameTask_NotDeliveredFallsThroughToDeferral(t *testing.
 // Unlike the sibling tests above, this one wires a REAL *delegate.Spawner as the Delegator
 // (not injectingStubDelegator) so StageOrDeliverAdditiveEvent's actual DB
 // side effects — the staged-injection message append AND its cleanup — are
-// observable. setupAbsorbScenario's active run is status="running" with
+// observable. setupAbsorbScenario's active conversation is status="running" with
 // no live process registered against this fresh spawner instance, so
 // getProc returns nil (no local delivery) and there's no conversation_signals wired
 // (no remote path either) — StageOrDeliverAdditiveEvent falls to staging,

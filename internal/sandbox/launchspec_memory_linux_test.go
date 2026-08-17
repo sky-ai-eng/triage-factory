@@ -106,10 +106,10 @@ func TestValidateLaunchParams_RejectsMissingMemorySource(t *testing.T) {
 	}
 }
 
-// TestValidateLaunchParams_RejectsMemoryMountWithoutRunID: the run id is what
+// TestValidateLaunchParams_RejectsMemoryMountWithoutConversationID: the run id is what
 // scopes the staging dir to one launch. Without it the derivation would collapse
 // to the shared staging base — every run's memory at once — so it is refused.
-func TestValidateLaunchParams_RejectsMemoryMountWithoutRunID(t *testing.T) {
+func TestValidateLaunchParams_RejectsMemoryMountWithoutConversationID(t *testing.T) {
 	p := validParams()
 	stageMemoryFixture(t, p.ConversationID)
 	base := MemoryStagingBase()
