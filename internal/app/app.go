@@ -177,7 +177,7 @@ type App struct {
 	// startBrain/stopBrain start/stop RunReaper + RunRegistryGC against it,
 	// nil-checked the same way a.wsBackplane is. reaperStaleThreshold /
 	// reaperMaxAttempts are the resolved TF_REAPER_STALE_SEC /
-	// TF_RUN_MAX_ATTEMPTS knobs those loops run with.
+	// TF_MAX_CLAIM_ATTEMPTS knobs those loops run with.
 	reaperStore          reaper.Store
 	reaperStaleThreshold time.Duration
 	reaperMaxAttempts    int

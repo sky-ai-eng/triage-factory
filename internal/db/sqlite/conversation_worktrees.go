@@ -42,7 +42,7 @@ func (s *conversationWorktreeStore) Insert(ctx context.Context, orgID string, w 
 	// clone, so the row exists; an absent one is a broken caller.
 	owner, repo := splitRepoSlug(w.RepoID)
 	if owner == "" || repo == "" {
-		return false, "", fmt.Errorf("run_worktree repo id %q is not an owner/repo slug", w.RepoID)
+		return false, "", fmt.Errorf("conversation_worktree repo id %q is not an owner/repo slug", w.RepoID)
 	}
 	repositoryID, err := findRepositoryID(ctx, s.q, domain.RepoSourceGitHub, owner, repo)
 	if err != nil {
@@ -56,7 +56,7 @@ func (s *conversationWorktreeStore) Insert(ctx context.Context, orgID string, w 
 		VALUES (?, ?, ?, ?)
 	`, w.ConversationID, repositoryID, w.Path, w.Ref)
 	if err != nil {
-		return false, "", fmt.Errorf("insert run_worktree: %w", err)
+		return false, "", fmt.Errorf("insert conversation_worktree: %w", err)
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {
@@ -67,10 +67,10 @@ func (s *conversationWorktreeStore) Insert(ctx context.Context, orgID string, w 
 	}
 	existing, err := s.GetByRepoRef(ctx, orgID, w.ConversationID, w.RepoID, w.Ref)
 	if err != nil {
-		return false, "", fmt.Errorf("read existing run_worktree after conflict: %w", err)
+		return false, "", fmt.Errorf("read existing conversation_worktree after conflict: %w", err)
 	}
 	if existing == nil {
-		return false, "", fmt.Errorf("run_worktree row vanished after INSERT OR IGNORE conflict (conversation_id=%s, repo_id=%s, ref=%s)", w.ConversationID, w.RepoID, w.Ref)
+		return false, "", fmt.Errorf("conversation_worktree row vanished after INSERT OR IGNORE conflict (conversation_id=%s, repo_id=%s, ref=%s)", w.ConversationID, w.RepoID, w.Ref)
 	}
 	return false, existing.Path, nil
 }

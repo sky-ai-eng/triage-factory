@@ -148,13 +148,13 @@ func New(stores db.Stores, wsHub *websocket.Hub, model string) *Curator {
 
 // DefaultTurnMaxAttempts is the failed-pickup budget a queued turn gets
 // before dispatch dead-letters it. Distinct from the delegation side's
-// TF_RUN_MAX_ATTEMPTS: this caps repeated BeginTurn failures on one turn's
+// TF_MAX_CLAIM_ATTEMPTS: this caps repeated BeginTurn failures on one turn's
 // message, not executor-loss re-claims.
 const DefaultTurnMaxAttempts = 3
 
 // ParseTurnMaxAttempts parses TF_CURATOR_TURN_MAX_ATTEMPTS. Empty maps to
 // DefaultTurnMaxAttempts; anything else must parse as a positive integer.
-// Mirrors reaper.ParseMaxAttempts (TF_RUN_MAX_ATTEMPTS).
+// Mirrors reaper.ParseMaxAttempts (TF_MAX_CLAIM_ATTEMPTS).
 func ParseTurnMaxAttempts(raw string) (int, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {

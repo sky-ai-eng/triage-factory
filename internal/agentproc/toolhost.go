@@ -347,7 +347,7 @@ func memoryLimitOrDefault(mb int) int {
 	if mb > 0 {
 		return mb
 	}
-	return RunMemoryLimitMB()
+	return ClaimMemoryLimitMB()
 }
 
 // prepareToolHostSocket creates the per-run directory, binds the tool host's

@@ -192,7 +192,7 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 		}
 	})
 
-	t.Run("Consume_is_per_run_isolated", func(t *testing.T) {
+	t.Run("Consume_is_per_conversation_isolated", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
 		convA := seed.Conversation(t, "iso-a")
 		convB := seed.Conversation(t, "iso-b")
@@ -202,14 +202,14 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 			t.Fatalf("consume B: %v", err)
 		}
 		if ok {
-			t.Error("run B consume found run A's input")
+			t.Error("conversation B consume found conversation A's input")
 		}
 		msg, _, ok, err := store.Consume(ctx, orgID, convA)
 		if err != nil {
 			t.Fatalf("consume A: %v", err)
 		}
 		if !ok || msg != "for-A" {
-			t.Errorf("run A input missing after B consume: msg=%q ok=%v", msg, ok)
+			t.Errorf("conversation A input missing after B consume: msg=%q ok=%v", msg, ok)
 		}
 	})
 

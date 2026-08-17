@@ -268,7 +268,7 @@ func TestRequeuedRunProducesSeparateTracesSharingConversationID(t *testing.T) {
 	read := recordSpans(t)
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 
-	for attempt := 1; attempt <= maxRunAttempts; attempt++ {
+	for attempt := 1; attempt <= maxClaimAttempts; attempt++ {
 		conv := traceTestConversation("run-requeued")
 		conv.Attempts = attempt
 		_, done := s.beginEngagement(context.Background(), conv)
@@ -277,8 +277,8 @@ func TestRequeuedRunProducesSeparateTracesSharingConversationID(t *testing.T) {
 	}
 
 	roots := spansNamed(read(), "engagement.setup")
-	if len(roots) != maxRunAttempts {
-		t.Fatalf("engagement.setup spans = %d, want %d — one per attempt", len(roots), maxRunAttempts)
+	if len(roots) != maxClaimAttempts {
+		t.Fatalf("engagement.setup spans = %d, want %d — one per attempt", len(roots), maxClaimAttempts)
 	}
 	traces := map[trace.TraceID]bool{}
 	attempts := map[int64]bool{}
@@ -289,11 +289,11 @@ func TestRequeuedRunProducesSeparateTracesSharingConversationID(t *testing.T) {
 			t.Errorf("conversation.id = %q, want the shared id", got)
 		}
 	}
-	if len(traces) != maxRunAttempts {
-		t.Errorf("distinct trace ids = %d, want %d — attempts must not share a trace", len(traces), maxRunAttempts)
+	if len(traces) != maxClaimAttempts {
+		t.Errorf("distinct trace ids = %d, want %d — attempts must not share a trace", len(traces), maxClaimAttempts)
 	}
-	if len(attempts) != maxRunAttempts {
-		t.Errorf("distinct claim.attempt values = %d, want %d", len(attempts), maxRunAttempts)
+	if len(attempts) != maxClaimAttempts {
+		t.Errorf("distinct claim.attempt values = %d, want %d", len(attempts), maxClaimAttempts)
 	}
 }
 

@@ -82,19 +82,19 @@ type PresenceChecker interface {
 
 // Spawner manages delegated agent runs.
 type Spawner struct {
-	database   *sql.DB
-	prompts    db.PromptStore
-	agents     db.AgentStore // resolves actor for run.actor_agent_id stamping
-	blueprints db.BlueprintStore
-	runQueue   db.ConversationQueueStore // the run queue the dispatcher drains: enqueue a step, claim it, run it, react
-	// runCredentials is the sealed per-run credential bundle channel
+	database          *sql.DB
+	prompts           db.PromptStore
+	agents            db.AgentStore // resolves actor for run.actor_agent_id stamping
+	blueprints        db.BlueprintStore
+	conversationQueue db.ConversationQueueStore // the run queue the dispatcher drains: enqueue a step, claim it, run it, react
+	// claimCredentials is the sealed per-run credential bundle channel
 	// (TFAC-614) — the executor's awaiting-credentials wait reads it;
 	// nil-safe (local resolves credentials directly and never gates on it).
-	runCredentials db.ClaimCredentialsStore
+	claimCredentials db.ClaimCredentialsStore
 	// curatorStore is the curator-turn half of the credential handshake:
 	// BringUpCuratorSidecar publishes the turn's sidecar pubkey onto the
 	// conversation's active claim via
-	// curatorStore.PublishTurnCredPubKeySystem and polls runCredentials
+	// curatorStore.PublishTurnCredPubKeySystem and polls claimCredentials
 	// (keyed by the conversation id — the shared claim_credentials channel)
 	// for the sealed bundle the brain wrote. nil-safe (local never brings a
 	// curator sidecar up); a nil store makes BringUpCuratorSidecar degrade
@@ -125,11 +125,11 @@ type Spawner struct {
 	// pool store. Both fire inside the runAgent goroutine, which has
 	// no JWT-claims context, so they hit the admin pool in Postgres.
 	taskMemory db.TaskMemoryStore
-	// runWorktrees serves the spawner's per-run cleanup defers (Jira
+	// conversationWorktrees serves the spawner's per-run cleanup defers (Jira
 	// runs accumulate lazy worktrees via the agent's `workspace add`
 	// CLI; the defer iterates and removes them). Goroutine-internal
 	// callers, all routed through the admin-pool System variants.
-	runWorktrees db.ConversationWorktreeStore
+	conversationWorktrees db.ConversationWorktreeStore
 	// orgs reads per-org settings (GitHub clone protocol, the TFAC-477 daily
 	// spend cap) from org_settings during run setup. Post-internal/config
 	// deletion; every per-org read goes through OrgsStore.GetSettingsSystem
@@ -366,7 +366,7 @@ type Spawner struct {
 	// runSem bounds how many runs execute off the dispatcher at once — a
 	// process-wide cap so a burst of queued steps doesn't fan into an
 	// unbounded number of agent subprocesses. Sized in NewSpawner
-	// (DefaultMaxConcurrentRuns) and replaceable via SetMaxConcurrentRuns
+	// (DefaultMaxConcurrentClaims) and replaceable via SetMaxConcurrentClaims
 	// before the dispatcher starts. Each drain acquires a slot before
 	// claiming and the run goroutine releases it on terminal.
 	runSem chan struct{}
@@ -510,46 +510,46 @@ type Spawner struct {
 // partial db.Stores{} — every field is a nil-safe interface.
 func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	s := &Spawner{
-		database:         database,
-		prompts:          stores.Prompts,
-		agents:           stores.Agents,
-		blueprints:       stores.Blueprints,
-		runQueue:         stores.ConversationQueue,
-		runCredentials:   stores.ClaimCredentials,
-		curatorStore:     stores.Curator,
-		tasks:            stores.Tasks,
-		conversations:    stores.Conversations,
-		entities:         stores.Entities,
-		artifacts:        stores.Artifacts,
-		stagedInjections: stores.StagedInjections,
-		events:           stores.Events,
-		taskMemory:       stores.TaskMemory,
-		runWorktrees:     stores.ConversationWorktrees,
-		orgs:             stores.Orgs,
-		spend:            stores.Spend,
-		jiraRules:        stores.JiraStatusRules,
-		externalActions:  stores.ExternalActions,
-		repos:            stores.Repos,
-		teams:            stores.Teams,
-		instances:        stores.Instances,
-		instanceStats:    stores.InstanceStats,
-		sandboxStats:     stores.SandboxStats,
-		pendingInput:     stores.ConversationPendingInput,
-		pendingFirings:   stores.PendingFirings,
-		permissions:      stores.Permissions,
-		tx:               stores.Tx,
-		ghClient:         ghClient,
-		wsHub:            wsHub,
-		model:            model,
-		cancels:          make(map[string]context.CancelFunc),
-		engagements:      make(map[string]*engagement),
-		dispatchWake:     make(chan struct{}, 1),
-		procs:            make(map[string]*liveRunHandle),
-		permPending:      make(map[string]*pendingPermission),
-		ackWaiters:       make(map[int64]chan struct{}),
-		signalApplyWake:  make(chan struct{}, 1),
-		runSem:           make(chan struct{}, DefaultMaxConcurrentRuns),
-		memAvailMB:       hostmem.AvailableMB,
+		database:              database,
+		prompts:               stores.Prompts,
+		agents:                stores.Agents,
+		blueprints:            stores.Blueprints,
+		conversationQueue:     stores.ConversationQueue,
+		claimCredentials:      stores.ClaimCredentials,
+		curatorStore:          stores.Curator,
+		tasks:                 stores.Tasks,
+		conversations:         stores.Conversations,
+		entities:              stores.Entities,
+		artifacts:             stores.Artifacts,
+		stagedInjections:      stores.StagedInjections,
+		events:                stores.Events,
+		taskMemory:            stores.TaskMemory,
+		conversationWorktrees: stores.ConversationWorktrees,
+		orgs:                  stores.Orgs,
+		spend:                 stores.Spend,
+		jiraRules:             stores.JiraStatusRules,
+		externalActions:       stores.ExternalActions,
+		repos:                 stores.Repos,
+		teams:                 stores.Teams,
+		instances:             stores.Instances,
+		instanceStats:         stores.InstanceStats,
+		sandboxStats:          stores.SandboxStats,
+		pendingInput:          stores.ConversationPendingInput,
+		pendingFirings:        stores.PendingFirings,
+		permissions:           stores.Permissions,
+		tx:                    stores.Tx,
+		ghClient:              ghClient,
+		wsHub:                 wsHub,
+		model:                 model,
+		cancels:               make(map[string]context.CancelFunc),
+		engagements:           make(map[string]*engagement),
+		dispatchWake:          make(chan struct{}, 1),
+		procs:                 make(map[string]*liveRunHandle),
+		permPending:           make(map[string]*pendingPermission),
+		ackWaiters:            make(map[int64]chan struct{}),
+		signalApplyWake:       make(chan struct{}, 1),
+		runSem:                make(chan struct{}, DefaultMaxConcurrentClaims),
+		memAvailMB:            hostmem.AvailableMB,
 	}
 	s.controller = inProcessController{s: s}
 	// Report capacity by default (executor/all); a pure-control pod flips

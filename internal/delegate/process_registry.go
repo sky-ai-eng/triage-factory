@@ -25,51 +25,51 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// DefaultMaxConcurrentRuns is the process-wide cap on how many runs
+// DefaultMaxConcurrentClaims is the process-wide cap on how many runs
 // execute off the dispatcher at once, so a burst of queued steps doesn't
 // fan into an unbounded number of agent subprocesses. 8 comfortably fits
 // the ~256 MB/run planning budget on ordinary hardware while still
-// throttling API spend. Tunable via SetMaxConcurrentRuns before the
-// dispatcher starts; deployments set it with the TF_MAX_CONCURRENT_RUNS
-// env var (see ParseMaxConcurrentRuns).
-const DefaultMaxConcurrentRuns = 8
+// throttling API spend. Tunable via SetMaxConcurrentClaims before the
+// dispatcher starts; deployments set it with the TF_MAX_CONCURRENT_CLAIMS
+// env var (see ParseMaxConcurrentClaims).
+const DefaultMaxConcurrentClaims = 8
 
-// MaxConcurrentRunsCeiling is the largest value the concurrency cap may
+// MaxConcurrentClaimsCeiling is the largest value the concurrency cap may
 // take. It mirrors sandbox.MaxSandboxes, the sandbox subnet allocator's
 // structural limit — each run owns a /24 out of one /16, so a higher
 // dispatcher cap could never be honored.
-const MaxConcurrentRunsCeiling = sandbox.MaxSandboxes
+const MaxConcurrentClaimsCeiling = sandbox.MaxSandboxes
 
-// ParseMaxConcurrentRuns interprets the TF_MAX_CONCURRENT_RUNS env value.
+// ParseMaxConcurrentClaims interprets the TF_MAX_CONCURRENT_CLAIMS env value.
 // Empty → the default. Non-numeric or < 1 → the default plus an error the
 // caller logs (a bad value must not brick boot). Values above the sandbox
 // ceiling clamp to it; clamped reports whether that happened, so the caller
 // can log a distinct signal for "you asked for more than the sandbox
 // allocator can honor" instead of it reading identically to an operator who
 // set the ceiling value directly.
-func ParseMaxConcurrentRuns(raw string) (n int, clamped bool, err error) {
+func ParseMaxConcurrentClaims(raw string) (n int, clamped bool, err error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return DefaultMaxConcurrentRuns, false, nil
+		return DefaultMaxConcurrentClaims, false, nil
 	}
 	n, err = strconv.Atoi(raw)
 	if err != nil || n < 1 {
-		return DefaultMaxConcurrentRuns, false, fmt.Errorf(
-			"invalid TF_MAX_CONCURRENT_RUNS %q (want an integer in [1,%d]); using default %d",
-			raw, MaxConcurrentRunsCeiling, DefaultMaxConcurrentRuns)
+		return DefaultMaxConcurrentClaims, false, fmt.Errorf(
+			"invalid TF_MAX_CONCURRENT_CLAIMS %q (want an integer in [1,%d]); using default %d",
+			raw, MaxConcurrentClaimsCeiling, DefaultMaxConcurrentClaims)
 	}
-	if n > MaxConcurrentRunsCeiling {
-		return MaxConcurrentRunsCeiling, true, nil
+	if n > MaxConcurrentClaimsCeiling {
+		return MaxConcurrentClaimsCeiling, true, nil
 	}
 	return n, false, nil
 }
 
-// DefaultRunMemoryBudgetMB is the planning budget for one concurrent
+// DefaultClaimMemoryBudgetMB is the planning budget for one concurrent
 // run: the fleet-measured ~155MB marginal cost of the agent engine
 // (read-only engine pages are shared across sandboxes and amortize
 // per-host) plus the node supervisor and transcript-growth headroom.
 // See docs/benchmarks/sandbox-bench.md for the measurements behind it.
-const DefaultRunMemoryBudgetMB = 256
+const DefaultClaimMemoryBudgetMB = 256
 
 // DefaultPlatformReserveMB is the instance memory the capacity rule sets
 // aside for everything that isn't a run on an all-in-one box: the TF
@@ -105,9 +105,9 @@ func DerivedRunCapacityWithReserve(totalMB, reserveMB int) int {
 	if totalMB <= reserveMB {
 		return 0
 	}
-	n := (totalMB - reserveMB) / DefaultRunMemoryBudgetMB
-	if n > MaxConcurrentRunsCeiling {
-		return MaxConcurrentRunsCeiling
+	n := (totalMB - reserveMB) / DefaultClaimMemoryBudgetMB
+	if n > MaxConcurrentClaimsCeiling {
+		return MaxConcurrentClaimsCeiling
 	}
 	return n
 }
@@ -206,16 +206,16 @@ func (s *Spawner) dispatchMemGated() bool {
 // of delegations sits visibly "queued" in the UI while the log shows nothing,
 // which reads as a hang rather than admission control.
 func (s *Spawner) noteCapAcquireBlocked(ctx context.Context, capN int) {
-	if s.capSaturated.Load() || s.runQueue == nil {
+	if s.capSaturated.Load() || s.conversationQueue == nil {
 		return
 	}
-	queued, err := s.runQueue.CountQueuedSystem(ctx)
+	queued, err := s.conversationQueue.CountQueuedSystem(ctx)
 	if err != nil || queued == 0 {
 		return
 	}
 	if s.capSaturated.CompareAndSwap(false, true) {
 		dispatchLog.Info("run concurrency cap reached; queued runs start as slots free",
-			"cap", capN, "queued", queued, "env", "TF_MAX_CONCURRENT_RUNS")
+			"cap", capN, "queued", queued, "env", "TF_MAX_CONCURRENT_CLAIMS")
 	}
 }
 
@@ -353,11 +353,11 @@ func (s *Spawner) executorIdentity() (string, int64) {
 	return s.executorID, s.bootEpoch
 }
 
-// SetMaxConcurrentRuns resizes the off-dispatcher concurrency cap. Call
+// SetMaxConcurrentClaims resizes the off-dispatcher concurrency cap. Call
 // once at startup before RunDispatcher runs; the in-flight goroutines
 // close over the channel they acquired from, so a startup-time resize is
 // safe. A value below 1 is clamped to 1.
-func (s *Spawner) SetMaxConcurrentRuns(n int) {
+func (s *Spawner) SetMaxConcurrentClaims(n int) {
 	if n < 1 {
 		n = 1
 	}
@@ -368,7 +368,7 @@ func (s *Spawner) SetMaxConcurrentRuns(n int) {
 
 // semaphore returns the current concurrency-cap channel. Callers capture
 // it once and use the captured value for both acquire and release so a
-// startup-time SetMaxConcurrentRuns can't strand a token on a replaced
+// startup-time SetMaxConcurrentClaims can't strand a token on a replaced
 // channel.
 func (s *Spawner) semaphore() chan struct{} {
 	s.mu.Lock()

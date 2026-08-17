@@ -48,7 +48,7 @@ type ConversationSignalStore interface {
 	AckStatus(ctx context.Context, id int64) (acked bool, result string, err error)
 
 	// PurgeAcked deletes acked rows whose acked_at is older than olderThan
-	// (the 24h audit-convenience window, TF_RUN_SIGNAL_PURGE_AFTER) and
+	// (the 24h audit-convenience window, TF_CONVERSATION_SIGNAL_PURGE_AFTER) and
 	// returns the count removed.
 	PurgeAcked(ctx context.Context, olderThan time.Duration) (int, error)
 }

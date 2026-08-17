@@ -271,7 +271,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	}
 	// Not wired (a test fixture) — degrade like every other nil-store seam in
 	// this package: behave as if the executor path doesn't exist.
-	if s.runCredentials == nil || s.runQueue == nil {
+	if s.claimCredentials == nil || s.conversationQueue == nil {
 		return nil, nil
 	}
 
@@ -426,7 +426,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	// orchestrator still never opens a bundle.
 	relaySrv.SetCredentialRefresh(&agenthost.CredentialRefresh{
 		SealedAt: func(ctx context.Context) (time.Time, bool, error) {
-			b, ok, err := s.runCredentials.Get(ctx, orgID, conv.ID)
+			b, ok, err := s.claimCredentials.Get(ctx, orgID, conv.ID)
 			if err != nil || !ok || b.BootEpoch != myBootEpoch {
 				return time.Time{}, false, err
 			}
@@ -438,26 +438,26 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	// The sidecar received this run's bundle once, at bring-up, but the brain's
 	// refresh sweep re-mints short-lived credentials mid-run (role-mode STS at
 	// its half-life; hour-lived GitHub installation tokens) and re-seals them
-	// into run_credentials against the SAME per-run key. The sidecar is capless
+	// into claim_credentials against the SAME per-run key. The sidecar is capless
 	// with no DB access, so it can't pull them — this goroutine relays each new
 	// sealed blob down (the sidecar idempotently re-accepts it) so a long run
 	// keeps signing with live credentials instead of 502-ing on expiry.
 	go s.relayCredentialRefreshes(conv.ID, func(ctx context.Context) (int64, []byte, bool, error) {
-		b, ok, err := s.runCredentials.Get(ctx, orgID, conv.ID)
+		b, ok, err := s.claimCredentials.Get(ctx, orgID, conv.ID)
 		return b.BootEpoch, b.Sealed, ok, err
 	}, myBootEpoch, conn, es.credNudge, es.stopRelay)
 	return es, nil
 }
 
 // credRefreshRelayInterval is how often the orchestrator re-reads
-// run_credentials and relays a changed sealed bundle to the sidecar. Well
+// claim_credentials and relays a changed sealed bundle to the sidecar. Well
 // inside every credential's refresh half-life (the brain re-mints long before
 // expiry), so the sidecar never serves a stale credential in practice.
 const credRefreshRelayInterval = 30 * time.Second
 
 // credBundleGetter reads the current sealed bundle for a run or a curator turn:
 // its boot_epoch, the ciphertext, whether a row exists, and any read error. The
-// run variant keys runCredentials.Get by run id, the curator variant by
+// run variant keys claimCredentials.Get by run id, the curator variant by
 // conversation id. relayCredentialRefreshes never unseals the bytes.
 type credBundleGetter func(ctx context.Context) (bootEpoch int64, sealed []byte, ok bool, err error)
 
@@ -632,7 +632,7 @@ func gitAuthorizeOutcome(dec gitproxy.Decision) string {
 // sidecar's published public key. It publishes that key onto the run's claim
 // (claims.cred_pubkey) and fires the cred_request doorbell — so the brain seals
 // THIS run's bundle to the sidecar's per-run key, not the claiming instance's
-// key — then polls run_credentials for the OPAQUE sealed bytes and hands them
+// key — then polls claim_credentials for the OPAQUE sealed bytes and hands them
 // back. The orchestrator never opens them; only the sidecar holds the matching
 // private key. This is what replaces the pre-sandbox awaitCredentials unseal.
 //
@@ -658,7 +658,7 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 		// cred_request doorbell. MarkAwaitingCredentials is the same call the
 		// old pre-sandbox gate used, now carrying the recipient key so the
 		// brain seals to it (credprovision reads claim.CredPubKey).
-		if _, err := s.runQueue.MarkAwaitingCredentials(provCtx, orgID, conversationID, sidecarPubKeyB64); err != nil {
+		if _, err := s.conversationQueue.MarkAwaitingCredentials(provCtx, orgID, conversationID, sidecarPubKeyB64); err != nil {
 			recordSpanError(span, err)
 			return nil, 0, fmt.Errorf("mark awaiting-credentials for run %s: %w", conversationID, err)
 		}
@@ -670,7 +670,7 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 		polls := 0
 		for {
 			polls++
-			b, ok, err := s.runCredentials.Get(provCtx, orgID, conversationID)
+			b, ok, err := s.claimCredentials.Get(provCtx, orgID, conversationID)
 			if err != nil {
 				dispatchLog.Warn("read run credential bundle failed; retrying", "conversation", conversationID, "error", err)
 			} else if ok && b.ExecutorID == myID && b.BootEpoch == myBootEpoch {

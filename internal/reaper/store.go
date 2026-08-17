@@ -217,7 +217,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 		-- where a failure's cause is recorded, and stamping the same word into
 		-- the park column would put a value on a row that was never parked.
 		UPDATE conversations SET status = 'failed', failure_kind = 'executor_lost', completed_at = now(),
-			result_summary = 'Failed: executor lost repeatedly and the retry budget (TF_RUN_MAX_ATTEMPTS) for this loss episode is exhausted (reaper)'
+			result_summary = 'Failed: executor lost repeatedly and the retry budget (TF_MAX_CLAIM_ATTEMPTS) for this loss episode is exhausted (reaper)'
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`
 			  AND br.cancel_requested = false

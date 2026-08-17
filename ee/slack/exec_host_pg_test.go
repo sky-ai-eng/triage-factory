@@ -261,21 +261,21 @@ func (r *slackExecRig) trackChannel(orgID, userID, teamID, channelID string) {
 }
 
 // seedNonSlackTask seeds a minimal entity + event + task chain with a
-// GitHub (not slack:message) event type, and returns the task id. Every run
-// this rig seeds carries one: ConversationStore.GetSystem's column list
-// (pgConversationColumns) selects task_id with no COALESCE, so scanning a run whose
-// task_id is genuinely NULL errors — harmless in production (every run
+// GitHub (not slack:message) event type, and returns the task id. Every
+// conversation this rig seeds carries one: ConversationStore.GetSystem's column list
+// (pgConversationColumns) selects task_id with no COALESCE, so scanning a conversation whose
+// task_id is genuinely NULL errors — harmless in production (every conversation
 // today is blueprint-origin, which requires a non-NULL task_id) but hit
 // immediately here since workspaceFromConversationTaskMetadata unconditionally reads
-// the run first. Giving every seeded run a real, non-slack-mention task
+// the conversation first. Giving every seeded conversation a real, non-slack-mention task
 // keeps that read clean while still exercising the intended "no Slack
 // context" fallback path (task.EventType != domain.EventSlackMessage) these
-// tests are actually about — a GitHub/Jira-triggered run using the Slack
+// tests are actually about — a GitHub/Jira-triggered conversation using the Slack
 // verbs is exactly the "general-purpose" shape the ticket describes.
 func (r *slackExecRig) seedNonSlackTask(orgID, creatorID, teamID string) string {
 	r.t.Helper()
 	// source_id must be unique per (org_id, source) — a fresh uuid per call
-	// so a test seeding several runs (e.g. one per team) doesn't collide on
+	// so a test seeding several conversations (e.g. one per team) doesn't collide on
 	// entities_org_id_source_source_id_key.
 	entityID := uuid.New().String()
 	sourceID := "octo/repo#" + uuid.New().String()
@@ -302,7 +302,7 @@ func (r *slackExecRig) seedNonSlackTask(orgID, creatorID, teamID string) string 
 	return taskID
 }
 
-// seedConversation inserts a minimal run row the artifacts/external_actions FK can
+// seedConversation inserts a minimal conversations row the artifacts/external_actions FK can
 // point at, matching ConversationInfo.ConversationID, carrying a real task_id (seedNonSlackTask).
 // trigger_type/creator_user_id follow the conversations_creator_matches_trigger_type
 // CHECK (event ⇒ NULL creator, manual ⇒ non-NULL) — mirrors seedPgArtifactConversation
@@ -316,7 +316,7 @@ func (r *slackExecRig) seedConversation(orgID, teamID, userID string, eventTrigg
 			INSERT INTO conversations (id, org_id, team_id, task_id, trigger_type, origin, status, visibility)
 			VALUES ($1, $2, $3, $4, 'event', 'interactive', 'running', 'team')
 		`, id, orgID, teamID, taskID); err != nil {
-			r.t.Fatalf("seed event-triggered run: %v", err)
+			r.t.Fatalf("seed event-triggered conversation: %v", err)
 		}
 		return id
 	}
@@ -324,7 +324,7 @@ func (r *slackExecRig) seedConversation(orgID, teamID, userID string, eventTrigg
 		INSERT INTO conversations (id, org_id, team_id, task_id, creator_user_id, trigger_type, origin, status, visibility)
 		VALUES ($1, $2, $3, $4, $5, 'manual', 'interactive', 'running', 'team')
 	`, id, orgID, teamID, taskID, userID); err != nil {
-		r.t.Fatalf("seed manual run: %v", err)
+		r.t.Fatalf("seed manual conversation: %v", err)
 	}
 	return id
 }
@@ -421,7 +421,7 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 				t.Errorf("artifact mismatch: %+v (want target=%q)", a, wantTarget)
 			}
 			if a.ConversationID != conversationID || a.TeamID != teamID {
-				t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
+				t.Errorf("attribution mismatch: conversation=%q team=%q", a.ConversationID, a.TeamID)
 			}
 
 			acts := r.actionsForConversation(orgID, conversationID)
@@ -674,22 +674,22 @@ func TestSlackExecHandler_Edit_PreservesCreatingConversationAndTeam_AcrossDiffer
 
 	artsA := r.artifactsForConversation(orgID, convA)
 	if len(artsA) != 1 {
-		t.Fatalf("want 1 artifact still attributed to the creating run A, got %d: %+v", len(artsA), artsA)
+		t.Fatalf("want 1 artifact still attributed to the creating conversation A, got %d: %+v", len(artsA), artsA)
 	}
 	if artsA[0].ConversationID != convA || artsA[0].TeamID != teamA {
-		t.Errorf("artifact attribution drifted: run=%q team=%q, want run=%q team=%q", artsA[0].ConversationID, artsA[0].TeamID, convA, teamA)
+		t.Errorf("artifact attribution drifted: conversation=%q team=%q, want conversation=%q team=%q", artsA[0].ConversationID, artsA[0].TeamID, convA, teamA)
 	}
 	if artsB := r.artifactsForConversation(orgID, convB); len(artsB) != 0 {
-		t.Errorf("editing run B must not have reassigned the artifact to itself, got %+v", artsB)
+		t.Errorf("editing conversation B must not have reassigned the artifact to itself, got %+v", artsB)
 	}
 
 	actsA := r.actionsForConversation(orgID, convA)
 	if len(actsA) != 1 || actsA[0].Action != domain.ActionSlackMessagePosted {
-		t.Errorf("run A's external_actions = %+v, want exactly one slack_message_posted", actsA)
+		t.Errorf("conversation A's external_actions = %+v, want exactly one slack_message_posted", actsA)
 	}
 	actsB := r.actionsForConversation(orgID, convB)
 	if len(actsB) != 1 || actsB[0].Action != domain.ActionSlackMessageEdited {
-		t.Errorf("run B's external_actions = %+v, want exactly one slack_message_edited (the audit trail still credits the editing run)", actsB)
+		t.Errorf("conversation B's external_actions = %+v, want exactly one slack_message_edited (the audit trail still credits the editing conversation)", actsB)
 	}
 }
 

@@ -191,7 +191,7 @@ func TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint(t *testing.T) {
 		t.Fatalf("force blueprint cancelled: %v", err)
 	}
 
-	s.reconcileRunQueue(context.Background())
+	s.reconcileConversationQueue(context.Background())
 
 	var status string
 	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, step0ConversationID).Scan(&status); err != nil {
@@ -209,7 +209,7 @@ func TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint(t *testing.T) {
 		step0ConversationID, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("queue input on the parked orphan: %v", err)
 	}
-	claimed, err := s.runQueue.ClaimNextConversation(context.Background(), "exec-orphan", 1, db.ClaimPlacement{})
+	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "exec-orphan", 1, db.ClaimPlacement{})
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}

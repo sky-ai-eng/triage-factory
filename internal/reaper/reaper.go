@@ -14,8 +14,8 @@ import (
 var reaperLog = logging.Component("reaper")
 
 // Default knobs (spec's "Pre-made decisions — do not re-derive"): heartbeat
-// 4s < self-fence 15s < reaper staleness 30s. TF_RUN_MAX_ATTEMPTS defaults
-// to 2 (decision log #4) — distinct from delegate.maxRunAttempts (5), which
+// 4s < self-fence 15s < reaper staleness 30s. TF_MAX_CLAIM_ATTEMPTS defaults
+// to 2 (decision log #4) — distinct from delegate.maxClaimAttempts (5), which
 // caps in-process workspace-setup retries on the SAME executor; this knob
 // caps executor-loss retries across a re-claim on a DIFFERENT executor. Two
 // budgets, two values, one unit: both count the current episode of
@@ -53,7 +53,7 @@ func ParseStaleThreshold(raw string) (time.Duration, error) {
 	return time.Duration(n) * time.Second, nil
 }
 
-// ParseMaxAttempts parses TF_RUN_MAX_ATTEMPTS. Empty maps to
+// ParseMaxAttempts parses TF_MAX_CLAIM_ATTEMPTS. Empty maps to
 // DefaultMaxAttempts; anything else must parse as a positive integer.
 func ParseMaxAttempts(raw string) (int, error) {
 	s := strings.TrimSpace(raw)
@@ -62,7 +62,7 @@ func ParseMaxAttempts(raw string) (int, error) {
 	}
 	n, err := strconv.Atoi(s)
 	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("invalid TF_RUN_MAX_ATTEMPTS=%q (want a positive integer)", raw)
+		return 0, fmt.Errorf("invalid TF_MAX_CLAIM_ATTEMPTS=%q (want a positive integer)", raw)
 	}
 	return n, nil
 }

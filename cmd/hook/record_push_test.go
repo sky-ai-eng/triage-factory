@@ -23,7 +23,7 @@ type pushDetails struct {
 
 // newTestStores opens an in-memory SQLite, migrates it, and seeds one
 // conversations row the artifacts FK (conversation_id) can point at. Returns the
-// stores plus the run id to wire into ConversationInfo.
+// stores plus the conversation id to wire into ConversationInfo.
 func newTestStores(t *testing.T) (db.Stores, string) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)

@@ -607,8 +607,8 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	// what the multi-PR review anchor (add-review-comment) resolves the PR's
 	// worktree HEAD through. Log-and-continue like SetWorktreePathSystem above:
 	// a failure degrades to denied pushes (a clear 403), never a crash.
-	if s.runWorktrees != nil {
-		if _, _, werr := s.runWorktrees.InsertSystem(context.Background(), orgID, domain.ConversationWorktree{
+	if s.conversationWorktrees != nil {
+		if _, _, werr := s.conversationWorktrees.InsertSystem(context.Background(), orgID, domain.ConversationWorktree{
 			ConversationID: conversationID,
 			RepoID:         owner + "/" + repo,
 			Path:           wtPath,

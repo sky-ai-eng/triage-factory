@@ -163,7 +163,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		}
 	})
 
-	t.Run("List_orders_by_created_at_then_repo_and_scopes_by_run", func(t *testing.T) {
+	t.Run("List_orders_by_created_at_then_repo_and_scopes_by_conversation", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		r1 := seed.Conversation(t, "list-r1")
 		r2 := seed.Conversation(t, "list-r2")
@@ -246,7 +246,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		}
 	})
 
-	t.Run("Cascade_on_run_delete_removes_rows", func(t *testing.T) {
+	t.Run("Cascade_on_conversation_delete_removes_rows", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "cascade")
 		if _, _, err := insertWorktree(t, store, seed, orgID, domain.ConversationWorktree{

@@ -57,8 +57,8 @@ const (
 	// Stored as NULL; renders as today's generic failed state.
 	ConversationFailureUnclassified ConversationFailureKind = ""
 	// ConversationFailureMemoryLimit — the sandbox's per-run memory ceiling
-	// killed the agent process (agentproc.ErrRunMemoryLimit in the
-	// error chain). The UI pairs this with TF_RUN_MEMORY_LIMIT_MB
+	// killed the agent process (agentproc.ErrClaimMemoryLimit in the
+	// error chain). The UI pairs this with TF_CLAIM_MEMORY_LIMIT_MB
 	// guidance.
 	ConversationFailureMemoryLimit ConversationFailureKind = "memory_limit"
 	// ConversationFailureCrash — the agent runtime process errored out
@@ -74,7 +74,7 @@ const (
 	ConversationFailureAgentError ConversationFailureKind = "agent_error"
 	// ConversationFailureExecutorLost — the run's owning executor's registry
 	// heartbeat went stale past the leader reaper's threshold and the
-	// run had already exhausted TF_RUN_MAX_ATTEMPTS, so the reaper
+	// run had already exhausted TF_MAX_CLAIM_ATTEMPTS, so the reaper
 	// terminal-failed it instead of requeuing (TFAC-586, spec §4.3).
 	// A run that still had attempts left is requeued and re-claimed
 	// instead — this kind only marks the case that ran out of retries.

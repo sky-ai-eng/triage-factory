@@ -82,7 +82,7 @@ const (
 // envelope that rides inline on the NOTIFY payload before falling back to
 // a ws_outbox row + ref. An invalid or out-of-range value logs and falls
 // back to the default rather than bricking boot (matches
-// ParseMaxConcurrentRuns's convention in internal/delegate).
+// ParseMaxConcurrentClaims's convention in internal/delegate).
 func InlineMaxBytesFromEnv() int {
 	raw := strings.TrimSpace(os.Getenv("TF_WS_INLINE_MAX_B"))
 	if raw == "" {

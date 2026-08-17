@@ -299,7 +299,7 @@ func TestNativeBashMemBudgetMB(t *testing.T) {
 	}{
 		{
 			name:    "the default ceiling leaves a gigabyte of session headroom",
-			ceiling: agentproc.DefaultRunMemoryLimitMB,
+			ceiling: agentproc.DefaultClaimMemoryLimitMB,
 			want:    3072,
 		},
 		{

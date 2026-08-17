@@ -338,7 +338,7 @@ func TestMaterializeWorkspace_MissingConversationID(t *testing.T) {
 		t.Errorf("err = %v, want errMissingConversationID", err)
 	}
 	if stub.createCalls != 0 {
-		t.Errorf("checkout called %d times on missing run id; should not be invoked before validation", stub.createCalls)
+		t.Errorf("checkout called %d times on missing conversation id; should not be invoked before validation", stub.createCalls)
 	}
 }
 
@@ -354,7 +354,7 @@ func TestMaterializeWorkspace_InvalidOwnerRepo(t *testing.T) {
 	}
 }
 
-func TestMaterializeWorkspace_RunNotFound(t *testing.T) {
+func TestMaterializeWorkspace_ConversationNotFound(t *testing.T) {
 	stores, _ := newTestDB(t)
 	stub := &stubCalls{}
 	_, err := materializeWorkspace(hostFor(stores, "missing-run"), "owner/repo", checkoutSpec{}, stub.deps())
@@ -362,7 +362,7 @@ func TestMaterializeWorkspace_RunNotFound(t *testing.T) {
 		t.Errorf("err = %v, want errConversationNotFound", err)
 	}
 	if stub.createCalls != 0 {
-		t.Errorf("checkout called for missing run")
+		t.Errorf("checkout called for missing conversation")
 	}
 }
 

@@ -74,7 +74,7 @@ type CleanupOptions struct {
 	// the worktree dir), a matching entry here skips removal of both.
 	//
 	// Keys are worktree directory names — i.e. filepath.Base(worktree_path),
-	// which is the run_id for a standalone run and the blueprint_run_id for a
+	// which is the conversation id for a standalone conversation and the blueprint_run_id for a
 	// blueprint's shared worktree. A swept (un-preserved) parked workspace
 	// still resumes via snapshot rehydrate, so this is the fast path, not a
 	// correctness gate. Ignored for any dir not present here.
@@ -158,7 +158,7 @@ func CleanupWithOptions(opts CleanupOptions) {
 // entire point of staging outside the run tree.
 //
 // preserve is the caller's warm-worktree keep set, keyed by worktree directory
-// name (a run id for a standalone run, the blueprint_run_id for a blueprint's
+// name (a conversation id for a standalone conversation, the blueprint_run_id for a blueprint's
 // shared tree). Staging dirs are keyed by the step's own conversation id, so
 // only the standalone shape ever matches — enough to keep the sweep from
 // fighting a preserved run, and moot for the blueprint shape today because the

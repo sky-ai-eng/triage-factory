@@ -263,7 +263,7 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, sr := range stepConversations {
-			rows, err := s.runWorktrees.ListSystem(context.Background(), cfg.orgID, sr.ID)
+			rows, err := s.conversationWorktrees.ListSystem(context.Background(), cfg.orgID, sr.ID)
 			if err != nil {
 				blueprintLog.Warn("list conversation_worktrees for step failed", "blueprint_run", blueprintRunID, "step_conversation", sr.ID, "error", err)
 				// Log but continue to attempt DB row deletion below.
@@ -279,7 +279,7 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 					// crash backstop. w.ConversationID == sr.ID (created the worktree).
 					reclaimWorkspaceAddPRConfig(w)
 				}
-				if err := s.runWorktrees.DeleteByPathSystem(cleanupCtx, cfg.orgID, sr.ID, w.Path); err != nil {
+				if err := s.conversationWorktrees.DeleteByPathSystem(cleanupCtx, cfg.orgID, sr.ID, w.Path); err != nil {
 					blueprintLog.Warn("delete conversation_worktrees row failed", "blueprint_run", blueprintRunID, "path", w.Path, "error", err)
 				}
 			}

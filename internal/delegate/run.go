@@ -235,8 +235,8 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			// above, so a resume or chain step keeps the row; only a real
 			// terminal teardown removes it. Best-effort: a leaked row is harmless
 			// (run-scoped, never collides a future run).
-			if s.runWorktrees != nil && cfg.owner != "" && cfg.repo != "" && cfg.prNumber > 0 {
-				if delErr := s.runWorktrees.DeleteByRepoRefSystem(context.WithoutCancel(ctx), orgID, conversationID, cfg.owner+"/"+cfg.repo, worktree.PRRefSlug(cfg.prNumber)); delErr != nil {
+			if s.conversationWorktrees != nil && cfg.owner != "" && cfg.repo != "" && cfg.prNumber > 0 {
+				if delErr := s.conversationWorktrees.DeleteByRepoRefSystem(context.WithoutCancel(ctx), orgID, conversationID, cfg.owner+"/"+cfg.repo, worktree.PRRefSlug(cfg.prNumber)); delErr != nil {
 					delegateLog.Warn("delete eager worktree conversation_worktrees row failed", "conversation", conversationID, "repo", cfg.owner+"/"+cfg.repo, "error", delErr)
 				}
 			}
@@ -264,7 +264,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			if parked {
 				return
 			}
-			rows, err := s.runWorktrees.ListSystem(context.WithoutCancel(ctx), orgID, conversationID)
+			rows, err := s.conversationWorktrees.ListSystem(context.WithoutCancel(ctx), orgID, conversationID)
 			if err != nil {
 				delegateLog.Warn("list conversation_worktrees for cleanup failed", "conversation", conversationID, "error", err)
 			} else {
@@ -289,7 +289,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 						// never a concurrent run's.
 						reclaimWorkspaceAddPRConfig(w)
 					}
-					if delErr := s.runWorktrees.DeleteByPathSystem(cleanupCtx, orgID, conversationID, w.Path); delErr != nil {
+					if delErr := s.conversationWorktrees.DeleteByPathSystem(cleanupCtx, orgID, conversationID, w.Path); delErr != nil {
 						delegateLog.Warn("delete conversation_worktrees row failed", "conversation", conversationID, "path", w.Path, "error", delErr)
 					}
 				}

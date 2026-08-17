@@ -755,10 +755,10 @@ const DefaultConversationSignalPurgeInterval = time.Hour
 
 // DefaultConversationSignalPurgeAge is the audit-convenience retention window for
 // acked signal rows (decision log #5, env-tunable via
-// TF_RUN_SIGNAL_PURGE_AFTER — ParseConversationSignalPurgeAge).
+// TF_CONVERSATION_SIGNAL_PURGE_AFTER — ParseConversationSignalPurgeAge).
 const DefaultConversationSignalPurgeAge = 24 * time.Hour
 
-// ParseConversationSignalPurgeAge interprets the TF_RUN_SIGNAL_PURGE_AFTER env
+// ParseConversationSignalPurgeAge interprets the TF_CONVERSATION_SIGNAL_PURGE_AFTER env
 // value. Empty → the default. Non-positive or unparseable → the default
 // plus an error the caller logs.
 func ParseConversationSignalPurgeAge(raw string) (time.Duration, error) {
@@ -769,7 +769,7 @@ func ParseConversationSignalPurgeAge(raw string) (time.Duration, error) {
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
 		return DefaultConversationSignalPurgeAge, fmt.Errorf(
-			"invalid TF_RUN_SIGNAL_PURGE_AFTER %q (want a positive duration like \"24h\"); using default %s",
+			"invalid TF_CONVERSATION_SIGNAL_PURGE_AFTER %q (want a positive duration like \"24h\"); using default %s",
 			raw, DefaultConversationSignalPurgeAge)
 	}
 	return d, nil

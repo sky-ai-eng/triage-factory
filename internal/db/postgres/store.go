@@ -88,7 +88,7 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 // db.ErrSecretStoreUnavailable's disabled SecretStore instead of a real
 // decrypting one (TFAC-614). For TF_ROLE=executor only: an executor never
 // holds TF_SECRET_ENCRYPTION_KEY at boot — all per-run credential material
-// arrives pre-resolved via sealed run_credentials bundles instead — so it
+// arrives pre-resolved via sealed claim_credentials bundles instead — so it
 // must never construct a real, key-bearing SecretStore, not even one
 // pointed at a throwaway key.
 func NewWithoutSecrets(admin, app *sql.DB) db.Stores {

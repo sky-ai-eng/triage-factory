@@ -23,7 +23,7 @@ const sidecarHelloTimeout = 30 * time.Second
 // brain wrote for it, plus the boot epoch it was sealed under. The
 // orchestrator relays those bytes to the sidecar without ever opening them —
 // only the sidecar holds the matching private key. Provided by the delegate
-// (which owns the run-queue + run_credentials stores); the returned bytes are
+// (which owns the run-queue + claim_credentials stores); the returned bytes are
 // ciphertext the orchestrator cannot read.
 type SidecarProvisionFunc func(ctx context.Context, sidecarPubKeyB64 string) (sealed []byte, bootEpoch int64, err error)
 

@@ -951,8 +951,8 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 			switch {
 			case v <= 0:
 				ranges.OutOfRange("max_concurrent_runs", "max_concurrent_runs must be greater than 0, or null for unlimited")
-			case v > domain.MaxConcurrentRunsCeiling:
-				ranges.OutOfRange("max_concurrent_runs", fmt.Sprintf("max_concurrent_runs must be at most %d", domain.MaxConcurrentRunsCeiling))
+			case v > domain.MaxConcurrentClaimsCeiling:
+				ranges.OutOfRange("max_concurrent_runs", fmt.Sprintf("max_concurrent_runs must be at most %d", domain.MaxConcurrentClaimsCeiling))
 			}
 			next = v
 		}

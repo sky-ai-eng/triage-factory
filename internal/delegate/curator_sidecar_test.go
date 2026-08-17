@@ -185,7 +185,7 @@ func TestCuratorSidecarProvisionFor(t *testing.T) {
 	s.SetExecutorID("home-exec", 5)
 	s.SetAwaitingCredentialsTimeout(3*time.Second, 5*time.Millisecond)
 	creds := &fakeRunCredentials{}
-	s.runCredentials = creds
+	s.claimCredentials = creds
 
 	fn := s.curatorSidecarProvisionFor(org, conversationID)
 
@@ -230,7 +230,7 @@ func TestCuratorSidecarProvisionFor_TimesOut(t *testing.T) {
 	s := NewSpawner(database, stores, nil, nil, "")
 	s.SetExecutorID("home-exec", 5)
 	s.SetAwaitingCredentialsTimeout(80*time.Millisecond, 5*time.Millisecond)
-	s.runCredentials = &fakeRunCredentials{}
+	s.claimCredentials = &fakeRunCredentials{}
 
 	fn := s.curatorSidecarProvisionFor(org, conversationID)
 	if _, _, err := fn(ctx, "sidecar-pubkey-b64"); err == nil {

@@ -198,7 +198,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		MaxIterations:  nativeMaxIterations(),
 		// Derived from the very ceiling this jail was launched under, not from
 		// a constant that could drift from it.
-		BashMemBudgetMB: nativeBashMemBudgetMB(agentproc.RunMemoryLimitMB()),
+		BashMemBudgetMB: nativeBashMemBudgetMB(agentproc.ClaimMemoryLimitMB()),
 		UserID:          creatorUserID,
 		// A delegation's opening turn is the control-plane-minted mission:
 		// compaction pins it instead of re-injecting the first message.
@@ -552,7 +552,7 @@ const (
 //
 // A disabled ceiling disables the budget. The derivation exists to keep a
 // single command from consuming a shared allowance, and an operator who set
-// TF_RUN_MEMORY_LIMIT_MB=0 has said there is no allowance to protect —
+// TF_CLAIM_MEMORY_LIMIT_MB=0 has said there is no allowance to protect —
 // inventing one here would impose a limit they explicitly turned off.
 func nativeBashMemBudgetMB(ceilingMB int) int {
 	if ceilingMB <= 0 {

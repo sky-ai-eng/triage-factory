@@ -406,7 +406,7 @@ func (s *Spawner) insertStopNote(orgID, conversationID, userID, content string) 
 // never message text. Anything that isn't the recognized memory-limit
 // kill is a generic runtime crash.
 func classifyFailureKind(err error) domain.ConversationFailureKind {
-	if errors.Is(err, agentproc.ErrRunMemoryLimit) {
+	if errors.Is(err, agentproc.ErrClaimMemoryLimit) {
 		return domain.ConversationFailureMemoryLimit
 	}
 	return domain.ConversationFailureCrash
@@ -515,7 +515,7 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 	// don't fit in a toast card.
 	if kind == domain.ConversationFailureMemoryLimit {
 		toast.Error(s.wsHub, orgID, fmt.Sprintf(
-			"Run %s was stopped: it exceeded its memory limit. Raise TF_RUN_MEMORY_LIMIT_MB if it legitimately needs more.",
+			"Run %s was stopped: it exceeded its memory limit. Raise TF_CLAIM_MEMORY_LIMIT_MB if it legitimately needs more.",
 			shortConversationID(conversationID)))
 	} else {
 		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s failed: %s", shortConversationID(conversationID), truncateToastMsg(errMsg, 160)))

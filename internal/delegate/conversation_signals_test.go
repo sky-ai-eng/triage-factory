@@ -679,7 +679,7 @@ func TestConversationSignalPurgeReaper_RemovesOldAckedRows(t *testing.T) {
 }
 
 // TestParseSignalAckTimeout pins the TF_SIGNAL_ACK_TIMEOUT env parsing
-// convention shared with ParseMaxConcurrentRuns et al.
+// convention shared with ParseMaxConcurrentClaims et al.
 func TestParseSignalAckTimeout(t *testing.T) {
 	if d, err := ParseSignalAckTimeout(""); err != nil || d != DefaultSignalAckTimeout {
 		t.Errorf("empty: got (%v,%v), want (%v,nil)", d, err, DefaultSignalAckTimeout)

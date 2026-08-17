@@ -207,7 +207,7 @@ export interface Conversation {
   // from message text. Empty/absent for non-failed runs, legacy failed rows,
   // and failures nothing classified; only 'memory_limit' currently gets
   // distinct rendering (the "Killed: memory limit" badge + the
-  // TF_RUN_MEMORY_LIMIT_MB pointer).
+  // TF_CLAIM_MEMORY_LIMIT_MB pointer).
   FailureKind?: string
   SessionID?: string
   WorktreePath?: string

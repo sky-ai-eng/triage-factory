@@ -241,12 +241,12 @@ func (a *App) buildExecution() error {
 	a.spawner.SetExecutorID(a.identity.ID, a.bootEpoch)
 	// Dispatcher concurrency is a deployment decision: the default of 8 fits
 	// ordinary hardware, while a provisioned multi-mode host handles
-	// far more (memory-bound; see the TF_MAX_CONCURRENT_RUNS guidance in
+	// far more (memory-bound; see the TF_MAX_CONCURRENT_CLAIMS guidance in
 	// .env.example for the sizing numbers). Resolved before RunDispatcher
 	// starts — resizing later would strand semaphore tokens.
-	rawMaxConcurrentRuns := os.Getenv("TF_MAX_CONCURRENT_RUNS")
-	capRuns := delegate.DefaultMaxConcurrentRuns
-	if n, clamped, err := delegate.ParseMaxConcurrentRuns(rawMaxConcurrentRuns); err != nil {
+	rawMaxConcurrentClaims := os.Getenv("TF_MAX_CONCURRENT_CLAIMS")
+	capRuns := delegate.DefaultMaxConcurrentClaims
+	if n, clamped, err := delegate.ParseMaxConcurrentClaims(rawMaxConcurrentClaims); err != nil {
 		appLog.Warn("max concurrent runs", "error", err)
 	} else if clamped {
 		// Distinct from the effective-cap log below: an operator asked for more
@@ -255,17 +255,17 @@ func (a *App) buildExecution() error {
 		// set 256 would log identically and the operator sizing for a bigger
 		// host would never see their setting got capped.
 		capRuns = n
-		a.spawner.SetMaxConcurrentRuns(n)
-		appLog.Warn("max concurrent runs requested above sandbox ceiling; clamped", "requested", rawMaxConcurrentRuns, "cap", n)
-	} else if n != delegate.DefaultMaxConcurrentRuns {
+		a.spawner.SetMaxConcurrentClaims(n)
+		appLog.Warn("max concurrent runs requested above sandbox ceiling; clamped", "requested", rawMaxConcurrentClaims, "cap", n)
+	} else if n != delegate.DefaultMaxConcurrentClaims {
 		capRuns = n
-		a.spawner.SetMaxConcurrentRuns(n)
+		a.spawner.SetMaxConcurrentClaims(n)
 	}
 	// Always name the effective cap, default included and in both modes — a
 	// burst of delegations queues behind this number, and "runs sit queued"
 	// must trace back to it from the boot log alone (local mode skips the
 	// multi-only capacity advertisement below entirely).
-	appLog.Info("run concurrency cap", "cap", capRuns, "env", "TF_MAX_CONCURRENT_RUNS")
+	appLog.Info("run concurrency cap", "cap", capRuns, "env", "TF_MAX_CONCURRENT_CLAIMS")
 	// Memory guardrail companion to the cap above: the cap bounds how many
 	// runs may execute, the floor stops new claims when the host is out of
 	// headroom regardless of the cap. Fails open off-Linux and when the
@@ -305,7 +305,7 @@ func (a *App) buildExecution() error {
 			derived := delegate.DerivedRunCapacityWithReserve(total, reserve)
 			appLog.Info("host run capacity",
 				"mem_total_mb", total,
-				"budget_per_run_mb", delegate.DefaultRunMemoryBudgetMB,
+				"budget_per_run_mb", delegate.DefaultClaimMemoryBudgetMB,
 				"platform_reserve_mb", reserve,
 				"derived_capacity", derived)
 			if capRuns > derived {
@@ -461,7 +461,7 @@ func (a *App) buildCuratorRuntime() error {
 	a.curator = curator.New(a.stores, a.wsHub, "")
 	a.curator.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
 	// Dead-letter cap for poisoned turns, resolved the same way the reaper's
-	// TF_RUN_MAX_ATTEMPTS is: parsed once at wiring, a malformed value fails
+	// TF_MAX_CLAIM_ATTEMPTS is: parsed once at wiring, a malformed value fails
 	// boot rather than silently running with a default.
 	turnMaxAttempts, err := curator.ParseTurnMaxAttempts(os.Getenv("TF_CURATOR_TURN_MAX_ATTEMPTS"))
 	if err != nil {

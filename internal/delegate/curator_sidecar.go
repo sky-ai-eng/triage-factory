@@ -42,7 +42,7 @@ func (s *Spawner) BringUpCuratorSidecar(ctx context.Context, orgID, conversation
 		return nil, nil
 	}
 	// Not wired (a test fixture) — degrade like every other nil-store seam here.
-	if s.runCredentials == nil || s.curatorStore == nil {
+	if s.claimCredentials == nil || s.curatorStore == nil {
 		return nil, nil
 	}
 
@@ -158,7 +158,7 @@ func (s *Spawner) BringUpCuratorSidecar(ctx context.Context, orgID, conversation
 	// worktrees are seeded ahead of the turn), so nothing here widens the repo
 	// set out of band and the periodic tick is the whole contract.
 	go s.relayCredentialRefreshes(conversationID, func(ctx context.Context) (int64, []byte, bool, error) {
-		b, ok, err := s.runCredentials.Get(ctx, orgID, conversationID)
+		b, ok, err := s.claimCredentials.Get(ctx, orgID, conversationID)
 		return b.BootEpoch, b.Sealed, ok, err
 	}, myBootEpoch, conn, nil, es.stopRelay)
 	return es, nil
@@ -183,7 +183,7 @@ func (s *Spawner) curatorSidecarProvisionFor(orgID, conversationID string) agent
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		for {
-			b, ok, err := s.runCredentials.Get(provCtx, orgID, conversationID)
+			b, ok, err := s.claimCredentials.Get(provCtx, orgID, conversationID)
 			if err != nil {
 				dispatchLog.Warn("read curator turn credential bundle failed; retrying", "conversation", conversationID, "error", err)
 			} else if ok && b.BootEpoch == myBootEpoch {

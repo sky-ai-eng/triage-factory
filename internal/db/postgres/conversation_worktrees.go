@@ -64,7 +64,7 @@ func (s *conversationWorktreeStore) InsertSystem(ctx context.Context, orgID stri
 func resolveWorktreeRepositoryID(ctx context.Context, q queryer, orgID, repoID string) (string, error) {
 	owner, repo := splitRepoSlug(repoID)
 	if owner == "" || repo == "" {
-		return "", fmt.Errorf("run_worktree repo id %q is not an owner/repo slug", repoID)
+		return "", fmt.Errorf("conversation_worktree repo id %q is not an owner/repo slug", repoID)
 	}
 	id, err := findRepositoryID(ctx, q, orgID, domain.RepoSourceGitHub, owner, repo)
 	if err != nil {
@@ -118,7 +118,7 @@ func insertConversationWorktree(
 		SELECT (SELECT count(*) FROM ins), (SELECT count(*) FROM prior)
 	`, w.ConversationID, orgID, repositoryID, w.Path, w.Ref).Scan(&inserted, &priorRows)
 	if err != nil {
-		return false, "", fmt.Errorf("insert run_worktree: %w", err)
+		return false, "", fmt.Errorf("insert conversation_worktree: %w", err)
 	}
 	if inserted == 1 {
 		if priorRows == 0 {
@@ -156,10 +156,10 @@ func insertConversationWorktree(
 	}
 	existing, err := lookup(ctx, orgID, w.ConversationID, w.RepoID, w.Ref)
 	if err != nil {
-		return false, "", fmt.Errorf("read existing run_worktree after conflict: %w", err)
+		return false, "", fmt.Errorf("read existing conversation_worktree after conflict: %w", err)
 	}
 	if existing == nil {
-		return false, "", fmt.Errorf("run_worktree row vanished after ON CONFLICT DO NOTHING (conversation_id=%s, repo_id=%s, ref=%s)", w.ConversationID, w.RepoID, w.Ref)
+		return false, "", fmt.Errorf("conversation_worktree row vanished after ON CONFLICT DO NOTHING (conversation_id=%s, repo_id=%s, ref=%s)", w.ConversationID, w.RepoID, w.Ref)
 	}
 	return false, existing.Path, nil
 }

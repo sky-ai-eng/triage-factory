@@ -614,7 +614,7 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "actually, try the other approach"); err != nil {
 		t.Fatalf("follow-up after a cross-pod stop: %v (ErrWorkspaceExpired here is the bug this ticket exists for)", err)
 	}
-	claimed, err := s.runQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{})
+	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{})
 	if err != nil {
 		t.Fatalf("claim next run: %v", err)
 	}

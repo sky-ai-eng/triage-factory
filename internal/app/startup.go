@@ -119,7 +119,7 @@ func (a *App) startWorkers(ctx context.Context) {
 		// identity — runs on brain roles like the other reapers/sweepers
 		// (never on a plain executor, avoiding N-executor duplicate sweeps).
 		if a.plan.brain {
-			purgeAge, perr := delegate.ParseConversationSignalPurgeAge(os.Getenv("TF_RUN_SIGNAL_PURGE_AFTER"))
+			purgeAge, perr := delegate.ParseConversationSignalPurgeAge(os.Getenv("TF_CONVERSATION_SIGNAL_PURGE_AFTER"))
 			if perr != nil {
 				appLog.Warn("run signal purge age", "error", perr)
 			}

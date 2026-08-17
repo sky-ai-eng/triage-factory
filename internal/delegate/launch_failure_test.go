@@ -223,7 +223,7 @@ func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testin
 	}
 
 	spent := f.run
-	spent.Attempts = maxRunAttempts
+	spent.Attempts = maxClaimAttempts
 	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent,
 		errors.New("connect to tool host: runsc: exit status 128"))
 
@@ -289,7 +289,7 @@ func TestPreAgentFailure_ExhaustedOnAFirstEngagement_StillPoisonPills(t *testing
 	f := newLaunchFixture(t, "poison")
 
 	spent := f.run
-	spent.Attempts = maxRunAttempts
+	spent.Attempts = maxClaimAttempts
 	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent,
 		errors.New("workspace setup: clone: repository not found"))
 
@@ -313,7 +313,7 @@ func TestPreAgentFailure_WithNoBlueprintInScope_Parks(t *testing.T) {
 	f := newLaunchFixture(t, "resume")
 
 	spent := f.run
-	spent.Attempts = maxRunAttempts
+	spent.Attempts = maxClaimAttempts
 	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, nil, spent,
 		errors.New("ensure workspace before resume failed: snapshot fetch: connection reset"))
 
@@ -388,7 +388,7 @@ func TestParkAfterLaunchExhaustion_FencedClaimRecordsNothing(t *testing.T) {
 	f.s.conversations = fenced
 
 	spent := f.run
-	spent.Attempts = maxRunAttempts
+	spent.Attempts = maxClaimAttempts
 	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent, errors.New("launch tool host: no route to broker"))
 
 	if fenced.inserts != 1 {

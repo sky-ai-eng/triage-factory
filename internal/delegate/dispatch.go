@@ -32,7 +32,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 )
 
-// maxRunAttempts caps how many times the dispatcher re-claims one queue
+// maxClaimAttempts caps how many times the dispatcher re-claims one queue
 // episode before giving up on it. A healthy engagement starts on attempt 1;
 // consecutive failures with nothing ever started mean a deterministic fault,
 // and stopping there is what keeps the dispatcher from spinning one row while
@@ -42,7 +42,7 @@ import (
 // At the scan interval this is about ten seconds of automatic retry, which is
 // the shape of the transient infrastructure faults it exists for. A fault that
 // outlasts it is not one more retry away.
-const maxRunAttempts = 5
+const maxClaimAttempts = 5
 
 // Default cadences for RunDispatcher, exported so main can tune them and tests
 // can drive the loop fast. The scan is the correctness backstop (a dropped wake
@@ -76,8 +76,8 @@ func (s *Spawner) wakeDispatcher() {
 // claims queued steps and drives each through runAgent + the reactor until ctx
 // is cancelled. A nil ConversationQueueStore makes this a logged no-op.
 func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration) {
-	if s.runQueue == nil {
-		dispatchLog.Warn("run-queue dispatcher not started: no ConversationQueueStore wired")
+	if s.conversationQueue == nil {
+		dispatchLog.Warn("conversation-queue dispatcher not started: no ConversationQueueStore wired")
 		return
 	}
 
@@ -87,7 +87,7 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 	s.dispatcherRunning.Store(true)
 	defer s.dispatcherRunning.Store(false)
 
-	s.reconcileRunQueue(ctx)
+	s.reconcileConversationQueue(ctx)
 
 	scan := time.NewTicker(scanInterval)
 	defer scan.Stop()
@@ -106,12 +106,12 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 	}
 }
 
-// reconcileRunQueue is the boot crash-recovery sweep (decision #4). Runs left
+// reconcileConversationQueue is the boot crash-recovery sweep (decision #4). Runs left
 // mid-flight by a crash (claimed/running/setup statuses) are re-queued so the
 // dispatcher re-claims and re-runs them; a mid-flight blueprint thus resumes by
 // re-running its current step. Dormant `open` runs are left parked — they resume
 // through their own paths, not the queue.
-func (s *Spawner) reconcileRunQueue(ctx context.Context) {
+func (s *Spawner) reconcileConversationQueue(ctx context.Context) {
 	// No step-plan handling needed: a re-queued mid-flight run is re-claimed by
 	// dispatchClaimedConversation, which reads the plan frozen on its blueprint_run (off
 	// br.StepPlan), so the resumed step runs the same program it was minted with.
@@ -120,7 +120,7 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	// claimed during an earlier boot (executorIdentity()), never a live
 	// sibling's claimed/running work — see ConversationQueueStore.ResetProcessingConversations.
 	executorID, bootEpoch := s.executorIdentity()
-	n, err := s.runQueue.ResetProcessingConversations(ctx, executorID, bootEpoch)
+	n, err := s.conversationQueue.ResetProcessingConversations(ctx, executorID, bootEpoch)
 	if err != nil {
 		dispatchLog.Error("boot reconcile: reset in-flight runs failed", "error", err)
 		return
@@ -138,7 +138,7 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	// worktree.Cleanup sweep already reclaimed the on-disk dir for non-parked
 	// runs). The atomic cancel in MarkRunStatus prevents new desyncs; this heals
 	// rows broken before that landed.
-	c, err := s.runQueue.ReconcileOrphanedConversations(ctx)
+	c, err := s.conversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil {
 		dispatchLog.Error("boot reconcile: cancel orphaned child runs failed", "error", err)
 		return
@@ -216,7 +216,7 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 			}
 		}
 		executorID, bootEpoch := s.executorIdentity()
-		conv, err := s.runQueue.ClaimNextConversation(ctx, executorID, bootEpoch, s.claimPlacement())
+		conv, err := s.conversationQueue.ClaimNextConversation(ctx, executorID, bootEpoch, s.claimPlacement())
 		if err != nil {
 			<-sem
 			dispatchLog.Warn("claim next run failed; retrying on the next scan", "error", err)
@@ -1160,7 +1160,7 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 	// and never outlives one queue dwell. Empty = no affinity (placement off,
 	// non-repo task, or a failed read) → the claim treats it as unowned.
 	preferred := s.preferredExecutorFor(ctx, orgID, task, conversationID)
-	return s.runQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	return s.conversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID:                  conversationID,
 		TaskID:              task.ID,
 		PromptID:            step.StepPromptID,
@@ -1387,18 +1387,18 @@ type engagementDisposition struct {
 // both leave the step live, so whatever this claim staged for it on disk is
 // the next claim's to re-mount; false is the poison pill, and the step is over.
 func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
-	if conv.Attempts >= maxRunAttempts {
+	if conv.Attempts >= maxClaimAttempts {
 		return s.disposeOfExhaustedConversation(orgID, br, conv, cause)
 	}
 	dispatchLog.Warn("engagement failed before the agent ran, requeuing", "conversation", conv.ID, "attempt", conv.Attempts, "error", cause)
-	if err := s.runQueue.RequeueConversation(context.Background(), orgID, conv.ID, cause.Error()); err != nil {
+	if err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, cause.Error()); err != nil {
 		dispatchLog.Warn("requeue run after a pre-agent failure failed", "conversation", conv.ID, "error", err)
 	}
 	return true
 }
 
 // disposeOfExhaustedConversation answers for a run that failed the same way
-// maxRunAttempts times over. What that means depends entirely on whether
+// maxClaimAttempts times over. What that means depends entirely on whether
 // anything has been said yet, and the two answers are opposites.
 //
 // A conversation with a transcript is work in progress — a resumed thread, a
@@ -1573,7 +1573,7 @@ func (s *Spawner) driveClaimedCuratorTurn(conv *domain.Conversation) {
 // releasing the claim is the whole requeue, since the conversation is
 // mid-flight and still holds its undelivered turn.
 func (s *Spawner) releaseCuratorClaim(conv *domain.Conversation, reason string) {
-	if err := s.runQueue.RequeueConversation(context.Background(), conv.OrgID, conv.ID, reason); err != nil {
+	if err := s.conversationQueue.RequeueConversation(context.Background(), conv.OrgID, conv.ID, reason); err != nil {
 		dispatchLog.Warn("release curator claim failed", "conversation", conv.ID, "error", err)
 	}
 }

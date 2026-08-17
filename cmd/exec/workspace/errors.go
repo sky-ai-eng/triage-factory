@@ -13,7 +13,7 @@ import (
 // wrapped with cmdPrefix ("workspace add:" / "workspace list:") so
 // the agent's stderr message correctly identifies the source command.
 //
-// conversationID is the env-derived run id when the caller has it (the
+// conversationID is the env-derived conversation id when the caller has it (the
 // ErrConversationIdentityNotFound branch uses it in the message); pass "" for
 // LookupConversation call sites that don't know it yet because LookupConversation
 // itself is what would have produced it.

@@ -410,7 +410,7 @@ func TestFollowUp_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
-	conv, err := s.runQueue.ClaimNextConversation(ctx, "test-executor", 1, db.ClaimPlacement{})
+	conv, err := s.conversationQueue.ClaimNextConversation(ctx, "test-executor", 1, db.ClaimPlacement{})
 	if err != nil {
 		t.Fatalf("claim next run: %v", err)
 	}
@@ -496,7 +496,7 @@ func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 	}
 
 	// The dispatcher's whole budget, one claim at a time.
-	for i := 0; i < maxRunAttempts; i++ {
+	for i := 0; i < maxClaimAttempts; i++ {
 		claimAndDispatch(t, s, database)
 		var bpStatus string
 		if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id=?`, bpr).Scan(&bpStatus); err != nil {
@@ -513,7 +513,7 @@ func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 	}
 	// Nothing is claimable any more: the queued follow-up was settled on the
 	// way down, so the retries stop rather than spinning forever.
-	claimed, err := s.runQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{})
+	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{})
 	if err != nil || claimed != nil {
 		t.Fatalf("ClaimNextConversation after the park = (%v, %v), want nothing claimable", claimed, err)
 	}
