@@ -21,10 +21,10 @@ import (
 func okConfig(t *testing.T) Config {
 	t.Helper()
 	return Config{
-		RunID:       "run-1",
-		Upstream:    "https://api.github.com",
-		BinDir:      t.TempDir(),
-		TokenSource: func(context.Context) (string, error) { return "ghs_real", nil },
+		ConversationID: "run-1",
+		Upstream:       "https://api.github.com",
+		BinDir:         t.TempDir(),
+		TokenSource:    func(context.Context) (string, error) { return "ghs_real", nil },
 	}
 }
 
@@ -38,7 +38,7 @@ func TestStart_RequiresInputs(t *testing.T) {
 		mutate func(*Config)
 		want   string
 	}{
-		{"no run id", func(c *Config) { c.RunID = "" }, "RunID"},
+		{"no run id", func(c *Config) { c.ConversationID = "" }, "ConversationID"},
 		{"no bin dir", func(c *Config) { c.BinDir = "" }, "BinDir"},
 		{"no token source", func(c *Config) { c.TokenSource = nil }, "TokenSource"},
 	} {
@@ -134,7 +134,7 @@ func TestStart_PlaceholderIsPerRun(t *testing.T) {
 	t.Cleanup(func() { _ = first.Close() })
 
 	second := okConfig(t)
-	second.RunID = "run-2"
+	second.ConversationID = "run-2"
 	other, err := Start(second)
 	if err != nil {
 		t.Fatalf("Start second: %v", err)

@@ -101,13 +101,13 @@ type mintOptions struct {
 	networkBound bool
 }
 
-// ResolveForBundle resolves executor-bound Material for run runID. Role
+// ResolveForBundle resolves executor-bound Material for run conversationID. Role
 // mode carries the network condition (TF_EXECUTOR_EGRESS_CIDRS /
 // TF_EXECUTOR_VPCE_IDS) and RoleSessionName = the run id (per-run CloudTrail
-// attribution on the customer's side). Passthrough modes ignore runID and
+// attribution on the customer's side). Passthrough modes ignore conversationID and
 // return the stored material unchanged.
-func (r *Resolver) ResolveForBundle(ctx context.Context, orgID, runID string) (Material, error) {
-	return r.resolve(ctx, orgID, mintOptions{sessionName: sessionNameForRun(runID), networkBound: true})
+func (r *Resolver) ResolveForBundle(ctx context.Context, orgID, conversationID string) (Material, error) {
+	return r.resolve(ctx, orgID, mintOptions{sessionName: sessionNameForRun(conversationID), networkBound: true})
 }
 
 // ResolveForSystem resolves brain-bound Material for a system consumer

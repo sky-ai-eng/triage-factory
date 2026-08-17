@@ -123,7 +123,7 @@ func parseSubnetIdx(ipStr string) (uint8, bool) {
 }
 
 // subnetIdxFromNetnsName extracts the embedded subnet index from a
-// per-run netns name (tf-<runID>-N where N is the 1-byte index in
+// per-run netns name (tf-<conversationID>-N where N is the 1-byte index in
 // decimal). Returns false if the name doesn't match. Used by the
 // reaper to figure out which allocator slot to release.
 var netnsNameRE = regexp.MustCompile(`^tf-[0-9a-f]+-(\d{1,3})$`)

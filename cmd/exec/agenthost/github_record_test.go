@@ -52,7 +52,7 @@ func startFakeGitHubComments(t *testing.T) *httptest.Server {
 // run for the artifacts FK to anchor on, and returns the bundle + run identity
 // + client. eventTriggered picks the write path withWrite routes through: admin
 // pool (no user) when true, a synthetic-claims tx (manual run) when false.
-func newGithubRecordingClient(t *testing.T, ghURL string, eventTriggered bool) (db.Stores, RunInfo, *LocalClient) {
+func newGithubRecordingClient(t *testing.T, ghURL string, eventTriggered bool) (db.Stores, ConversationInfo, *LocalClient) {
 	_, stores, info, client := newGithubRecordingClientConn(t, ghURL, eventTriggered)
 	return stores, info, client
 }
@@ -61,7 +61,7 @@ func newGithubRecordingClient(t *testing.T, ghURL string, eventTriggered bool) (
 // for touch tests that read conversation_memory_entities directly (the store interface
 // has no role-returning read) or that drop a table to exercise the best-effort
 // recording path.
-func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered bool) (*sql.DB, db.Stores, RunInfo, *LocalClient) {
+func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered bool) (*sql.DB, db.Stores, ConversationInfo, *LocalClient) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
@@ -74,18 +74,18 @@ func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered boo
 		t.Fatalf("bootstrap schema: %v", err)
 	}
 
-	const runID = "22222222-2222-2222-2222-222222222222"
+	const conversationID = "22222222-2222-2222-2222-222222222222"
 	if _, err := conn.Exec(
-		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, runID,
+		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, conversationID,
 	); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 
 	stores := sqlitestore.New(conn)
-	info := RunInfo{
+	info := ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		TeamID:           runmode.LocalDefaultTeamID,
-		RunID:            runID,
+		ConversationID:   conversationID,
 		IsEventTriggered: eventTriggered,
 	}
 	client := NewLocal(stores, info)
@@ -114,7 +114,7 @@ func TestLocalClient_GithubAddComment_RecordsArtifact(t *testing.T) {
 			if id != 777 {
 				t.Fatalf("comment id = %d, want 777", id)
 			}
-			arts := listRunArtifacts(t, stores, info.RunID)
+			arts := listConversationArtifacts(t, stores, info.ConversationID)
 			if len(arts) != 1 {
 				t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 			}
@@ -125,7 +125,7 @@ func TestLocalClient_GithubAddComment_RecordsArtifact(t *testing.T) {
 				a.State != domain.ArtifactStateCommentPosted || a.DedupKey != "github:comment:777" {
 				t.Errorf("comment artifact mismatch: %+v", a)
 			}
-			if a.ConversationID != info.RunID || a.TeamID != runmode.LocalDefaultTeamID {
+			if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
 				t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
 			}
 		})
@@ -150,7 +150,7 @@ func TestLocalClient_GithubCommentLifecycle_DedupsAndRetires(t *testing.T) {
 		t.Fatalf("GithubUpdateComment: %v", err)
 	}
 
-	arts := listRunArtifacts(t, stores, info.RunID)
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	if len(arts) != 1 {
 		t.Fatalf("update should upsert the same row, got %d artifacts: %+v", len(arts), arts)
 	}
@@ -162,7 +162,7 @@ func TestLocalClient_GithubCommentLifecycle_DedupsAndRetires(t *testing.T) {
 	if err := client.GithubDeleteComment(ctx, "octo", "repo", id); err != nil {
 		t.Fatalf("GithubDeleteComment: %v", err)
 	}
-	arts = listRunArtifacts(t, stores, info.RunID)
+	arts = listConversationArtifacts(t, stores, info.ConversationID)
 	if len(arts) != 1 {
 		t.Fatalf("delete should retire the same row, got %d artifacts: %+v", len(arts), arts)
 	}
@@ -212,7 +212,7 @@ func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_NotRecorded(t *test
 	if err := client.GithubDeleteComment(ctx, "octo", "repo", 999); err != nil {
 		t.Fatalf("delete via the review fallback must still succeed: %v", err)
 	}
-	if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
 		t.Errorf("a review line-comment update/delete must record no comment artifact, got %+v", arts)
 	}
 }
@@ -231,7 +231,7 @@ func TestLocalClient_GithubAddComment_NoID_SkipsArtifact(t *testing.T) {
 	if _, err := client.GithubAddComment(context.Background(), "octo", "repo", 1, "no id back"); err != nil {
 		t.Fatalf("GithubAddComment must succeed even when the id is missing: %v", err)
 	}
-	if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
 		t.Errorf("expected no artifact when comment id is empty, got %+v", arts)
 	}
 }

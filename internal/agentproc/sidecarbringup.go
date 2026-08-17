@@ -119,7 +119,7 @@ type SidecarBringUpParams struct {
 	// Relay is the org-bound op server the supervisor routes the sidecar's
 	// relay envelope to (the git proxy's authorize/audit, and — once the
 	// agenthost is relocated — the exec verb trace and provider policy ops).
-	// The delegate builds it from the run's stores + RunInfo + git gate. nil
+	// The delegate builds it from the run's stores + ConversationInfo + git gate. nil
 	// only in a test fixture, where a relayed op fails closed.
 	Relay RelayDispatcher
 

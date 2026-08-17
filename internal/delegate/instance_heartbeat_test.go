@@ -36,7 +36,7 @@ func TestSetExecutorID_OverridesConstructorDefault(t *testing.T) {
 		t.Fatalf("executorIdentity() = (%q, %d), want (%q, %d)", gotID, gotEpoch, "persistent-instance-id", 7)
 	}
 
-	seedRun(t, database, "run-stamp", "sess-1", "/tmp/wt-run-stamp")
+	seedConversation(t, database, "run-stamp", "sess-1", "/tmp/wt-run-stamp")
 	s.stampExecutor(runmode.LocalDefaultOrgID, "run-stamp", "")
 
 	var stored string

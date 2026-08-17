@@ -121,7 +121,7 @@ func assertLaunchParamsSafe(t *testing.T, p LaunchParams) {
 	// TrustedAgentHostSocketPath) rather than re-deriving them — same as the
 	// netns check below reusing NetnsNameForRun — since these ARE the
 	// broker's own resolutions, not a parallel implementation to agree with.
-	orgPrefix, hasScope, scopeErr := worktreeScope(p.RunID, p.MemoryNamespace, p.Worktree)
+	orgPrefix, hasScope, scopeErr := worktreeScope(p.ConversationID, p.MemoryNamespace, p.Worktree)
 	if scopeErr != nil {
 		t.Fatalf("accepted worktree %q that fails its own scope re-check: %v", p.Worktree, scopeErr)
 	}
@@ -151,7 +151,7 @@ func assertLaunchParamsSafe(t *testing.T, p LaunchParams) {
 				t.Fatalf("accepted mount %q source %q not the trusted git-hooks dir", m.Destination, m.Source)
 			}
 		case TrustedAgentHostSocketDestination:
-			realTrusted, rErr := realPath(TrustedAgentHostSocketPath(p.RunID))
+			realTrusted, rErr := realPath(TrustedAgentHostSocketPath(p.ConversationID))
 			if rErr != nil || realSource != realTrusted {
 				t.Fatalf("accepted mount %q source %q not this run's own agenthost socket", m.Destination, m.Source)
 			}
@@ -188,8 +188,8 @@ func assertLaunchParamsSafe(t *testing.T, p LaunchParams) {
 	if filepath.Clean(dir) != "/var/run/netns" && filepath.Clean(dir) != "/run/netns" {
 		t.Fatalf("accepted a netns path %q outside the sandbox netns dir", p.NetnsPath)
 	}
-	if idx, ok := subnetIdxFromNetnsName(name); !ok || name != NetnsNameForRun(p.RunID, idx) {
-		t.Fatalf("accepted netns %q not derived from run id %q", name, p.RunID)
+	if idx, ok := subnetIdxFromNetnsName(name); !ok || name != NetnsNameForRun(p.ConversationID, idx) {
+		t.Fatalf("accepted netns %q not derived from run id %q", name, p.ConversationID)
 	}
 
 	// ExtraEgressCIDR (if any): must parse AND not overlap the internal
@@ -236,8 +236,8 @@ func FuzzValidateLaunchParams(f *testing.F) {
 	}
 
 	valid := LaunchParams{
-		ContainerID: "tf-run1frag-3",
-		RunID:       "run-1",
+		ContainerID:    "tf-run1frag-3",
+		ConversationID: "run-1",
 		Env: []EnvVar{
 			{Key: "PATH", Value: "/usr/bin"},
 			{Key: "ANTHROPIC_BASE_URL", Value: "http://127.0.0.1:9"},

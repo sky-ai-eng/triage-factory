@@ -66,7 +66,7 @@ func TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft(t *testing.T) {
 				t.Fatal("expected a non-empty local review handle")
 			}
 
-			arts := listRunArtifacts(t, stores, info.RunID)
+			arts := listConversationArtifacts(t, stores, info.ConversationID)
 			if len(arts) != 1 {
 				t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 			}
@@ -74,7 +74,7 @@ func TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft(t *testing.T) {
 			if a.ID != handle {
 				t.Errorf("handle = %q, want the artifact id %q", handle, a.ID)
 			}
-			wantDedup := "github:review:octo/repo#7:" + info.RunID
+			wantDedup := "github:review:octo/repo#7:" + info.ConversationID
 			if a.Kind != domain.ArtifactKindReview || a.State != domain.ArtifactStateReviewPending ||
 				a.Target != "octo/repo#7" || a.ExternalID != "" || a.DedupKey != wantDedup {
 				t.Errorf("review artifact mismatch: %+v (want dedup %q)", a, wantDedup)
@@ -117,7 +117,7 @@ func TestLocalClient_GithubAddPendingReviewComment_StagesLocally(t *testing.T) {
 		t.Fatal("expected a non-empty staged comment id")
 	}
 
-	arts := listRunArtifacts(t, stores, info.RunID)
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 1 || d.StagedComments[0].ID != cid {
 		t.Fatalf("comment not staged: %+v", d.StagedComments)
@@ -135,7 +135,7 @@ func TestLocalClient_GithubAddPendingReviewComment_StagesLocally(t *testing.T) {
 	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "bad", 99, nil, anchor); err == nil {
 		t.Error("expected an out-of-diff line to be rejected")
 	}
-	arts = listRunArtifacts(t, stores, info.RunID)
+	arts = listConversationArtifacts(t, stores, info.ConversationID)
 	d, _ = domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 1 {
 		t.Errorf("a rejected comment must not be staged, got %d", len(d.StagedComments))
@@ -163,7 +163,7 @@ func TestLocalClient_GithubAddPendingReviewComment_FallbackLiveHead(t *testing.T
 		t.Fatal("expected a non-empty staged comment id")
 	}
 
-	arts := listRunArtifacts(t, stores, info.RunID)
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 1 || d.StagedComments[0].CommitSHA != "commit_v1" {
 		t.Errorf("fallback must anchor to the live head commit_v1, got %+v", d.StagedComments)
@@ -191,7 +191,7 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
 
-	arts := listRunArtifacts(t, stores, info.RunID)
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	if len(arts) != 1 {
 		t.Fatalf("want 1 artifact, got %d", len(arts))
 	}
@@ -245,7 +245,7 @@ func TestLocalClient_MultipleReviewDrafts_ResolveByHandle(t *testing.T) {
 		t.Fatalf("finalize review 8: %v", err)
 	}
 
-	arts := listRunArtifacts(t, stores, info.RunID)
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	byID := map[string]domain.ReviewArtifactDetails{}
 	for _, a := range arts {
 		d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
@@ -302,7 +302,7 @@ func TestLocalClient_ResetReviewDraft(t *testing.T) {
 		t.Errorf("reset commit_sha = %q, want the preserved headsha7", gotSHA)
 	}
 
-	arts := listRunArtifacts(t, stores, info.RunID)
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	if len(arts) != 1 {
 		t.Fatalf("reset must keep the one draft row, got %d", len(arts))
 	}
@@ -367,7 +367,7 @@ func TestLocalClient_StagedReviewComment_UpdateDelete(t *testing.T) {
 	if err := client.UpdateStagedReviewComment(context.Background(), cid1, "first edited"); err != nil {
 		t.Fatalf("UpdateStagedReviewComment: %v", err)
 	}
-	d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	d, _ := domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
 	if len(d.StagedComments) != 2 {
 		t.Fatalf("update must not change the comment count, got %d", len(d.StagedComments))
 	}
@@ -382,7 +382,7 @@ func TestLocalClient_StagedReviewComment_UpdateDelete(t *testing.T) {
 	if err := client.DeleteStagedReviewComment(context.Background(), cid2); err != nil {
 		t.Fatalf("DeleteStagedReviewComment: %v", err)
 	}
-	d, _ = domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	d, _ = domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
 	if len(d.StagedComments) != 1 || d.StagedComments[0].ID != cid1 {
 		t.Fatalf("delete must leave only comment 1, got %+v", d.StagedComments)
 	}
@@ -427,7 +427,7 @@ func TestLocalClient_StagedReviewComment_RejectedAfterFinalize(t *testing.T) {
 	}
 
 	// The staged comment + frozen proposed snapshot are untouched.
-	d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	d, _ := domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
 	if len(d.StagedComments) != 1 || byID(d.StagedComments, cid).Body != "first" {
 		t.Errorf("a rejected mutation must leave the staged comment intact, got %+v", d.StagedComments)
 	}
@@ -477,7 +477,7 @@ func TestLocalClient_GithubAddPendingReviewComment_DedupsExactMatch(t *testing.T
 		t.Errorf("duplicate add returned id %q, want the existing id %q", cid2, cid1)
 	}
 
-	arts := listRunArtifacts(t, stores, info.RunID)
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 1 {
 		t.Fatalf("exact duplicate must not append a second staged comment, got %d: %+v", len(d.StagedComments), d.StagedComments)
@@ -494,7 +494,7 @@ func TestLocalClient_GithubAddPendingReviewComment_DedupsExactMatch(t *testing.T
 	if cid3 == cid1 {
 		t.Errorf("a different body on the same line must NOT dedup, got the same id %q", cid3)
 	}
-	arts = listRunArtifacts(t, stores, info.RunID)
+	arts = listConversationArtifacts(t, stores, info.ConversationID)
 	d, _ = domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 2 {
 		t.Fatalf("a same-line different-body comment must stage separately, got %d: %+v", len(d.StagedComments), d.StagedComments)
@@ -515,7 +515,7 @@ func TestLocalClient_GithubAddPendingReviewComment_DedupsExactMatch(t *testing.T
 	if cid5 != cid4 {
 		t.Errorf("a multi-line duplicate (start_line=2, line=3) returned id %q, want the existing id %q", cid5, cid4)
 	}
-	arts = listRunArtifacts(t, stores, info.RunID)
+	arts = listConversationArtifacts(t, stores, info.ConversationID)
 	d, _ = domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 3 {
 		t.Fatalf("a multi-line exact duplicate must not append a second staged comment, got %d: %+v", len(d.StagedComments), d.StagedComments)
@@ -569,7 +569,7 @@ func TestLocalClient_GithubAddPendingReviewComment_DedupRefreshesStaleAnchor(t *
 		t.Errorf("dedup across a changed anchor returned id %q, want the existing id %q", cid2, cid1)
 	}
 
-	arts := listRunArtifacts(t, stores, info.RunID)
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 1 {
 		t.Fatalf("dedup across a changed anchor must not append a second staged comment, got %d: %+v", len(d.StagedComments), d.StagedComments)
@@ -602,7 +602,7 @@ func TestLocalClient_PerCommentHeadSHA_CapturedAcrossCheckoutAdvance(t *testing.
 		t.Fatalf("add comment 2: %v", err)
 	}
 
-	arts := listRunArtifacts(t, stores, info.RunID)
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
 	if len(d.StagedComments) != 2 {
 		t.Fatalf("want 2 staged comments, got %d", len(d.StagedComments))

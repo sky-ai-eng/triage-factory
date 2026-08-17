@@ -124,25 +124,25 @@ type runFooterFixture struct {
 func TestBuild_NoRunID(t *testing.T) {
 	got := Build(nil, runmode.LocalDefaultOrgID, "", "review")
 	if got != "" {
-		t.Errorf("Build with empty runID = %q, want empty string (no AI disclosure when no run)", got)
+		t.Errorf("Build with empty conversationID = %q, want empty string (no AI disclosure when no run)", got)
 	}
 }
 
 // TestBuild_KindNounRendersInDisclaimer pins the noun parameterization
 // so a future "issue" or "comment" surface gets its own phrasing.
 // Requires a real run because the disclaimer is suppressed for
-// no-runID; we use the legacy-fallback fixture (TotalCostUSD nil) so
+// no-conversationID; we use the legacy-fallback fixture (TotalCostUSD nil) so
 // the body of the test isn't sensitive to the metrics.
 func TestBuild_KindNounRendersInDisclaimer(t *testing.T) {
 	database := newTestDB(t)
 	for i, kind := range []string{"review", "PR", "issue"} {
-		runID := fmt.Sprintf("run-kind-%d", i)
+		conversationID := fmt.Sprintf("run-kind-%d", i)
 		seedFooterRun(t, database, runFooterFixture{
-			ID:        runID,
+			ID:        conversationID,
 			Model:     "claude-haiku-4-5",
 			StartedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
 		})
-		got := Build(sqlitestore.New(database).Conversations, runmode.LocalDefaultOrgID, runID, kind)
+		got := Build(sqlitestore.New(database).Conversations, runmode.LocalDefaultOrgID, conversationID, kind)
 		want := "This " + kind + " was partially generated"
 		if !strings.Contains(got, want) {
 			t.Errorf("kind=%q: missing %q in %q", kind, want, got)

@@ -64,7 +64,7 @@ type Server struct {
 	// P1 methods, the runtime launch makes the broker stateful for the
 	// lifetime of each run.
 	runsMu sync.Mutex
-	runs   map[string]*runEntry
+	runs   map[string]*conversationEntry
 
 	// launchSem caps concurrent in-flight LaunchRuns. Buffered to
 	// maxInflightLaunches (the subnet-pool size); a full channel makes the
@@ -94,7 +94,7 @@ func NewServer(ops sandbox.PrivilegedOps) *Server {
 		baseCtx:    baseCtx,
 		cancelBase: cancel,
 		shutdown:   make(chan struct{}),
-		runs:       make(map[string]*runEntry),
+		runs:       make(map[string]*conversationEntry),
 		launchSem:  make(chan struct{}, maxInflightLaunches),
 	}
 }
@@ -269,7 +269,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		state, err := s.ops.SetupNetwork(ctx, a.RunID, a.SubnetIdx)
+		state, err := s.ops.SetupNetwork(ctx, a.ConversationID, a.SubnetIdx)
 		if err != nil {
 			return nil, err
 		}

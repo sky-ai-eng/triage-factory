@@ -243,7 +243,7 @@ func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) error
 	return err
 }
 
-func (s *promptStore) CountRunReferences(ctx context.Context, orgID, id string) (int, error) {
+func (s *promptStore) CountConversationReferences(ctx context.Context, orgID, id string) (int, error) {
 	var n int
 	err := s.app.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM conversations WHERE org_id = $1 AND prompt_id = $2`, orgID, id,

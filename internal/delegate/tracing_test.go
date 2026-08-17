@@ -88,7 +88,7 @@ func TestEngagementRootEndsAtAgentLive(t *testing.T) {
 	}
 
 	// The phase-clear to running IS agent-live, and it is the one signal both
-	// runtimes share. s.agentRuns is nil here, so updatePhase's write no-ops
+	// runtimes share. s.conversations is nil here, so updatePhase's write no-ops
 	// and this covers exactly the span half.
 	s.endEngagement(run.ID, engagementLive)
 	done()

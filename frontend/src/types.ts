@@ -150,9 +150,9 @@ export const RUN_STATUSES = [
 ] as const
 export type RunStatus = (typeof RUN_STATUSES)[number]
 
-// RunStatusValue is a conversation status as it arrives over the wire: a plain
+// ConversationStatusValue is a conversation status as it arrives over the wire: a plain
 // string, deliberately NOT the RunStatus union, so a server emitting a name
-// this build predates flows through the lib/runStatus predicates (which
+// this build predates flows through the lib/conversationStatus predicates (which
 // classify it as unknown) instead of being a compile error at the boundary.
 //
 // It exists to be a NAME rather than a type constraint. The lint rule reads a
@@ -162,7 +162,7 @@ export type RunStatus = (typeof RUN_STATUSES)[number]
 // this one) and any value annotated with this alias. So a helper that takes a
 // status second-hand — `runStatusColor(status)`, a tone switch — says so in its
 // signature and gets checked like the property access it came from.
-export type RunStatusValue = string
+export type ConversationStatusValue = string
 
 // Conversation is the durable agent-context row's display projection —
 // served through a handler-side map, so its fields are PascalCase (mirroring
@@ -171,10 +171,10 @@ export type RunStatusValue = string
 export interface Conversation {
   ID: string
   TaskID: string
-  // Status is the coalesced display status. RunStatusValue (a string), not the
+  // Status is the coalesced display status. ConversationStatusValue (a string), not the
   // RunStatus union, on purpose — see the alias for why the wire field stays
   // open-world and how the lint rule closes the branching over it.
-  Status: RunStatusValue
+  Status: ConversationStatusValue
   Model: string
   StartedAt: string
   // QueuedAt is when the run last entered the queue; ClaimedAt is when the
@@ -190,7 +190,7 @@ export interface Conversation {
   NumTurns?: number
   // ParkReason is WHY the conversation was parked `open` — one of the
   // domain.ParkReason vocabulary, glossed for display by parkReasonLabel
-  // (lib/runStatus.ts). Absent when it was never parked, or was resumed
+  // (lib/conversationStatus.ts). Absent when it was never parked, or was resumed
   // since. The MODEL's stop reason is per-turn and rides MessageDTO.
   ParkReason?: string
   ResultSummary: string
@@ -254,7 +254,7 @@ export interface Conversation {
   // step plan — what turns blueprint_step_index into a position ("step 2 of
   // 4") and says whether a completed step is the chain's last. 0 when the
   // server could not resolve the plan (a manual blueprint run is creator-scoped
-  // under RLS, so a teammate reads 0); lib/runStatus treats that as unknown and
+  // under RLS, so a teammate reads 0); lib/conversationStatus treats that as unknown and
   // falls back to the unqualified reading. Every delegated run belongs to a
   // blueprint, so 1 — not 0 — is the plain single-prompt run.
   blueprint_step_count?: number
@@ -262,7 +262,7 @@ export interface Conversation {
   // same run read that carries TotalCostUSD / DurationMs / NumTurns. The
   // authoritative numbers — the same ones the usage dashboard reports — so a
   // surface reads them here rather than walking the transcript. 0 for a run
-  // that never streamed a usage-bearing message; useRunDetail folds live
+  // that never streamed a usage-bearing message; useConversationDetail folds live
   // per-message deltas on top between refetches of the run row, exactly as it
   // does for cost.
   input_tokens?: number
@@ -375,7 +375,7 @@ export interface Message {
   cache_creation_tokens?: number
   // cost_usd is the dollars settled at this row — absent when the row is not a
   // settlement row, 0 when it is and cost nothing. A runtime that stamps as it
-  // streams turns these into a live spend signal: useRunDetail folds each
+  // streams turns these into a live spend signal: useConversationDetail folds each
   // stamped row into the displayed run total between refetches of the
   // conversation's authoritative SUM.
   cost_usd?: number
@@ -1584,9 +1584,9 @@ export interface FleetSandboxClaim {
   peak_mem_mb?: number
   cpu_usec?: number
   /** The driven conversation's status — the same vocabulary Conversation.Status
-   *  carries, so branch on it through a RunStatusValue-annotated helper rather
+   *  carries, so branch on it through a ConversationStatusValue-annotated helper rather
    *  than inline literals. */
-  status?: RunStatusValue
+  status?: ConversationStatusValue
   failure_kind?: string
   /** How the ENGAGEMENT ended (completed | failed | cancelled | requeued |
    *  parked | reaped) — a claim vocabulary of its own, not a run status. */

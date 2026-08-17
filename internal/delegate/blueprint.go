@@ -22,7 +22,7 @@ import (
 // blueprintStepDecision is the orchestrator's decision after a completed
 // blueprint step, derived from the step run's conversations.outcome and the
 // step's position. Named a decision, not an outcome: an outcome is what the
-// agent reported (domain.RunOutcome, on the conversation), and this is what the
+// agent reported (domain.ConversationOutcome, on the conversation), and this is what the
 // orchestrator does about it — the two appear in the same scope below.
 type blueprintStepDecision int
 
@@ -38,7 +38,7 @@ const (
 	blueprintStepAbort
 )
 
-// blueprintDecisionForStepRun maps a completed step RUN's terminal outcome +
+// blueprintDecisionForStepConversation maps a completed step RUN's terminal outcome +
 // the step's position to the orchestrator's next move. runOutcome is the step
 // run's conversations.outcome — the step itself (a blueprint_steps row) carries
 // no outcome, which is why this reads the run and is named for it. Only valid
@@ -48,9 +48,9 @@ const (
 // abortReason is non-empty only for the missing-outcome-on-a-non-final-step
 // case ("no-outcome"); for an explicit abort it is empty and the caller
 // copies conversations.outcome_reason into blueprint_runs.abort_reason.
-func blueprintDecisionForStepRun(runOutcome string, isFinal bool) (decision blueprintStepDecision, abortReason string) {
-	switch domain.RunOutcome(runOutcome) {
-	case domain.RunOutcomeContinue:
+func blueprintDecisionForStepConversation(runOutcome string, isFinal bool) (decision blueprintStepDecision, abortReason string) {
+	switch domain.ConversationOutcome(runOutcome) {
+	case domain.ConversationOutcomeContinue:
 		// continue hands off to the next step — except on the final step,
 		// where there is no next step and continue resolves to a structural
 		// finish.
@@ -58,9 +58,9 @@ func blueprintDecisionForStepRun(runOutcome string, isFinal bool) (decision blue
 			return blueprintStepFinish, ""
 		}
 		return blueprintStepAdvance, ""
-	case domain.RunOutcomeFinish:
+	case domain.ConversationOutcomeFinish:
 		return blueprintStepFinish, ""
-	case domain.RunOutcomeAbort:
+	case domain.ConversationOutcomeAbort:
 		return blueprintStepAbort, ""
 	case "":
 		// Missing outcome (empty string === SQL NULL). On the final step
@@ -222,14 +222,14 @@ func (s *Spawner) reclaimBlueprintStepStaging(ctx context.Context, orgID, bluepr
 	if !agentproc.WillSandbox() {
 		return // local mode never stages outside the worktree
 	}
-	stepRuns, err := s.blueprints.RunsForBlueprintSystem(ctx, orgID, blueprintRunID)
+	stepConversations, err := s.blueprints.ConversationsForBlueprintSystem(ctx, orgID, blueprintRunID)
 	if err != nil {
 		blueprintLog.Warn("list step runs for staging reclaim failed", "blueprint_run", blueprintRunID, "error", err)
 		return
 	}
-	for _, sr := range stepRuns {
+	for _, sr := range stepConversations {
 		if err := skills.RemoveStagedSkills(sandbox.TrustedSkillsSourcePath(sr.ID)); err != nil {
-			blueprintLog.Warn("remove staged step skill failed", "blueprint_run", blueprintRunID, "step_run", sr.ID, "error", err)
+			blueprintLog.Warn("remove staged step skill failed", "blueprint_run", blueprintRunID, "step_conversation", sr.ID, "error", err)
 		}
 		removeStagedMemory(sandbox.TrustedMemorySourcePath(sr.ID))
 	}
@@ -256,16 +256,16 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 		// *step's* run_id (the agent's TRIAGE_FACTORY_CONVERSATION_ID), not the
 		// blueprint_run_id. Iterate every step run so we find + remove their
 		// worktrees and their run-root dirs.
-		stepRuns, err := s.blueprints.RunsForBlueprintSystem(context.Background(), cfg.orgID, blueprintRunID)
+		stepConversations, err := s.blueprints.ConversationsForBlueprintSystem(context.Background(), cfg.orgID, blueprintRunID)
 		if err != nil {
 			blueprintLog.Warn("list step runs for cleanup failed", "blueprint_run", blueprintRunID, "error", err)
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		for _, sr := range stepRuns {
+		for _, sr := range stepConversations {
 			rows, err := s.runWorktrees.ListSystem(context.Background(), cfg.orgID, sr.ID)
 			if err != nil {
-				blueprintLog.Warn("list conversation_worktrees for step failed", "blueprint_run", blueprintRunID, "step_run", sr.ID, "error", err)
+				blueprintLog.Warn("list conversation_worktrees for step failed", "blueprint_run", blueprintRunID, "step_conversation", sr.ID, "error", err)
 				// Log but continue to attempt DB row deletion below.
 				rows = nil
 			}
@@ -276,7 +276,7 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 				} else {
 					// Worktree gone — reclaim its per-run PR branch + push remote
 					// inline (Decision D), so the bootstrap sweep stays a pure
-					// crash backstop. w.RunID == sr.ID (created the worktree).
+					// crash backstop. w.ConversationID == sr.ID (created the worktree).
 					reclaimWorkspaceAddPRConfig(w)
 				}
 				if err := s.runWorktrees.DeleteByPathSystem(cleanupCtx, cfg.orgID, sr.ID, w.Path); err != nil {
@@ -307,7 +307,7 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 // eager path's inline cleanup into the lazy teardown so the bootstrap sweep
 // stays a pure crash backstop (Decision D / TFAC-502). Shared by both lazy
 // teardown paths (runAgent's Jira defer and runBlueprintWorktreeCleanup).
-func reclaimWorkspaceAddPRConfig(w domain.RunWorktree) {
+func reclaimWorkspaceAddPRConfig(w domain.ConversationWorktree) {
 	prNum, ok := prNumberFromRef(w.Ref)
 	if !ok {
 		return
@@ -316,7 +316,7 @@ func reclaimWorkspaceAddPRConfig(w domain.RunWorktree) {
 	if owner == "" || repo == "" {
 		return
 	}
-	worktree.CleanupPRConfig(owner, repo, prNum, w.RunID)
+	worktree.CleanupPRConfig(owner, repo, prNum, w.ConversationID)
 }
 
 // prNumberFromRef extracts N from a "pr-<N>" conversation_worktrees ref. ok=false for any
@@ -442,7 +442,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	// queued step that was never claimed — no dispatcher goroutine will run the
 	// reactor, so we drive terminateBlueprint ourselves below.
 	var anyActive bool
-	stepIDs, err := s.blueprints.ActiveStepRunIDsSystem(context.Background(), orgID, blueprintRunID)
+	stepIDs, err := s.blueprints.ActiveStepConversationIDsSystem(context.Background(), orgID, blueprintRunID)
 	if err != nil {
 		// Couldn't enumerate the active step runs, so we can't target their
 		// subprocess kills — the cancel_requested signal above still stops the
@@ -453,8 +453,8 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 		blueprintLog.Warn("list active step runs failed; a live subprocess may run to completion", "blueprint_run", blueprintRunID, "error", err)
 	} else {
 		s.mu.Lock()
-		for _, runID := range stepIDs {
-			if cancel, ok := s.cancels[runID]; ok {
+		for _, conversationID := range stepIDs {
+			if cancel, ok := s.cancels[conversationID]; ok {
 				cancel()
 				anyActive = true
 			}
@@ -477,9 +477,9 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	// Unfenced, deliberately: a user cancelling their blueprint overrides
 	// whoever holds its steps, and this process holds a claim on none of them
 	// (that is the branch condition). Same category as Spawner.Cancel.
-	for _, runID := range stepIDs {
-		if _, mErr := s.agentRuns.ParkOpenSystem(context.Background(), orgID, runID, db.ParkStopped(domain.ParkReasonBlueprintCancelled, "Blueprint cancelled by user")); mErr != nil {
-			blueprintLog.Warn("park cancelled step run failed", "step_run", runID, "error", mErr)
+	for _, conversationID := range stepIDs {
+		if _, mErr := s.conversations.ParkOpenSystem(context.Background(), orgID, conversationID, db.ParkStopped(domain.ParkReasonBlueprintCancelled, "Blueprint cancelled by user")); mErr != nil {
+			blueprintLog.Warn("park cancelled step run failed", "step_conversation", conversationID, "error", mErr)
 		}
 	}
 
@@ -594,8 +594,8 @@ func (s *Spawner) markBlueprintRunStatusAsUser(ctx context.Context, orgID, userI
 // userID identifies the actor for audit (the user whose action resumed the
 // run). Local mode passes runmode.LocalDefaultUserID; multi-mode handlers
 // extract it from JWT claims.
-func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
-	cr, stepIdx, err := s.blueprints.GetRunForStepRunSystem(context.Background(), orgID, stepRunID)
+func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepConversationID, userID string) {
+	cr, stepIdx, err := s.blueprints.GetRunForConversationSystem(context.Background(), orgID, stepConversationID)
 	if err != nil || cr == nil {
 		return
 	}
@@ -608,13 +608,13 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 	// run whose current step is still executing.
 	if !isCurrentBlueprintStep(cr, stepIdx) {
 		blueprintLog.Error("resume finalize: terminal from a step the blueprint has moved past; ignoring it (no transition)",
-			"blueprint_run", cr.ID, "step_run", stepRunID, "step", stepIdx, "current_step", cr.CurrentStepIndex)
+			"blueprint_run", cr.ID, "step_conversation", stepConversationID, "step", stepIdx, "current_step", cr.CurrentStepIndex)
 		return
 	}
 
-	stepRun, err := s.agentRuns.GetSystem(context.Background(), orgID, stepRunID)
-	if err != nil || stepRun == nil {
-		blueprintLog.Warn("read step run failed", "step_run", stepRunID, "error", err)
+	stepConversation, err := s.conversations.GetSystem(context.Background(), orgID, stepConversationID)
+	if err != nil || stepConversation == nil {
+		blueprintLog.Warn("read step run failed", "step_conversation", stepConversationID, "error", err)
 		return
 	}
 	// Still dormant after the resume (went open again) → the blueprint stays
@@ -622,7 +622,7 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 	// the park: a cancelled resume parks `open` rather than writing a terminal
 	// of its own, so cancel_requested is what tells the two apart — the same
 	// ordering reactToStepTerminal uses, and for the same reason.
-	if stepRun.Status == "open" && !cr.CancelRequested {
+	if stepConversation.Status == "open" && !cr.CancelRequested {
 		return
 	}
 
@@ -657,36 +657,36 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 		isFinal = *stepIdx >= len(cr.StepPlan)-1
 	}
 
-	status, reason := blueprintTerminalForResumedStepRun(stepRun, isFinal)
+	status, reason := blueprintTerminalForResumedStepConversation(stepConversation, isFinal)
 	s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
 		status, reason, stepIdx, false)
 }
 
-// blueprintTerminalForResumedStepRun maps a resumed step run's terminal state +
+// blueprintTerminalForResumedStepConversation maps a resumed step run's terminal state +
 // position to the blueprint's terminal status. Mirrors runBlueprint's in-loop
 // disposition for the resume path: a clean completion routes through
-// blueprintDecisionForStepRun (finish/advance/abort), and the
+// blueprintDecisionForStepConversation (finish/advance/abort), and the
 // non-terminal-completed statuses map to the matching blueprint terminal.
-func blueprintTerminalForResumedStepRun(stepRun *domain.Conversation, isFinal bool) (domain.BlueprintRunStatus, string) {
-	switch stepRun.Status {
+func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conversation, isFinal bool) (domain.BlueprintRunStatus, string) {
+	switch stepConversation.Status {
 	case "completed":
-		decision, abortReason := blueprintDecisionForStepRun(stepRun.Outcome, isFinal)
+		decision, abortReason := blueprintDecisionForStepConversation(stepConversation.Outcome, isFinal)
 		switch decision {
 		case blueprintStepFinish:
 			return domain.BlueprintRunStatusCompleted, ""
 		case blueprintStepAbort:
 			reason := abortReason
 			if reason == "" {
-				reason = stepRun.OutcomeReason
+				reason = stepConversation.OutcomeReason
 			}
 			return domain.BlueprintRunStatusAborted, reason
 		default: // blueprintStepAdvance — mid-blueprint resume not implemented
 			return domain.BlueprintRunStatusAborted, "multi_step_resume_not_implemented"
 		}
 	case "failed":
-		return domain.BlueprintRunStatusFailed, "step " + stepRun.Status
+		return domain.BlueprintRunStatusFailed, "step " + stepConversation.Status
 	default:
-		return domain.BlueprintRunStatusFailed, "step ended with status " + stepRun.Status
+		return domain.BlueprintRunStatusFailed, "step ended with status " + stepConversation.Status
 	}
 }
 
@@ -713,7 +713,7 @@ func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, bl
 	if s.artifacts == nil || s.blueprints == nil || blueprintRunID == "" {
 		return false
 	}
-	runs, err := s.blueprints.RunsForBlueprintSystem(ctx, orgID, blueprintRunID)
+	runs, err := s.blueprints.ConversationsForBlueprintSystem(ctx, orgID, blueprintRunID)
 	if err != nil {
 		blueprintLog.Warn("list step runs for unresolved-artifact check failed; treating as unresolved (fail open)", "blueprint_run", blueprintRunID, "error", err)
 		return true
@@ -733,9 +733,9 @@ func (s *Spawner) runsHaveUnresolvedArtifacts(ctx context.Context, orgID string,
 		return false
 	}
 	for _, r := range runs {
-		arts, err := s.artifacts.ListByRunSystem(ctx, orgID, r.ID)
+		arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, r.ID)
 		if err != nil {
-			blueprintLog.Warn("list artifacts for unresolved check failed; treating as unresolved (fail open)", "step_run", r.ID, "error", err)
+			blueprintLog.Warn("list artifacts for unresolved check failed; treating as unresolved (fail open)", "step_conversation", r.ID, "error", err)
 			return true
 		}
 		if domain.HasUnresolvedArtifacts(arts) {

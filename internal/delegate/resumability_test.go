@@ -77,17 +77,17 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					paths.SetForTest(t, t.TempDir())
 					database := newDelegateTestDB(t)
-					const runID = "r-resumability"
+					const conversationID = "r-resumability"
 					wt := t.TempDir()
-					seedRun(t, database, runID, "sess-"+runID, wt)
-					setRunStatus(t, database, runID, "open")
+					seedConversation(t, database, conversationID, "sess-"+conversationID, wt)
+					setRunStatus(t, database, conversationID, "open")
 					if _, err := database.Exec(`UPDATE blueprint_runs SET status=?, current_step_index=? WHERE id=?`,
-						tc.blueprintStatus, tc.currentStep, blueprintRunIDForRun(t, database, runID)); err != nil {
+						tc.blueprintStatus, tc.currentStep, blueprintRunIDForRun(t, database, conversationID)); err != nil {
 						t.Fatalf("set blueprint status: %v", err)
 					}
 					s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 					if runtime == "native" {
-						markNative(t, database, runID)
+						markNative(t, database, conversationID)
 					}
 					// An empty blob store: nothing to cold-rehydrate from, so
 					// removing the worktree really does end the workspace.
@@ -102,7 +102,7 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 						}
 					}
 
-					run, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrgID, runID)
+					run, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 					if err != nil || run == nil {
 						t.Fatalf("load run: %v", err)
 					}
@@ -111,7 +111,7 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 						t.Errorf("ResumabilityFor = (%v, %q), want (%v, %q)", ok, reason, tc.wantOK, tc.wantReason)
 					}
 
-					sendErr := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID, "pick this up")
+					sendErr := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "pick this up")
 					if !errors.Is(sendErr, tc.wantErr) {
 						t.Errorf("SendMessage err = %v, want %v", sendErr, tc.wantErr)
 					}
@@ -133,12 +133,12 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 // refusal SendMessage gives.
 func TestResumabilityFor_FailedRunIsNotSteerable(t *testing.T) {
 	database := newDelegateTestDB(t)
-	const runID = "r-failed-resumability"
-	seedRun(t, database, runID, "sess", t.TempDir())
-	setRunStatus(t, database, runID, "failed")
+	const conversationID = "r-failed-resumability"
+	seedConversation(t, database, conversationID, "sess", t.TempDir())
+	setRunStatus(t, database, conversationID, "failed")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	run, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrgID, runID)
+	run, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil || run == nil {
 		t.Fatalf("load run: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestResumabilityFor_FailedRunIsNotSteerable(t *testing.T) {
 	if ok || reason != ResumeBlockedNotSteerable {
 		t.Errorf("ResumabilityFor = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedNotSteerable)
 	}
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID, "hello"); !errors.Is(err, ErrRunNotSteerable) {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "hello"); !errors.Is(err, ErrRunNotSteerable) {
 		t.Errorf("SendMessage err = %v, want ErrRunNotSteerable", err)
 	}
 }
@@ -164,7 +164,7 @@ func TestResumabilityFor_FailedRunIsNotSteerable(t *testing.T) {
 func TestParkRunOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
-	s, database, runID, _ := setupAdvanceFixture(t, "fenced-resumable")
+	s, database, conversationID, _ := setupAdvanceFixture(t, "fenced-resumable")
 	blobs, err := storage.New()
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
@@ -177,18 +177,18 @@ func TestParkRunOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "half-finished work")
-	namespace := blueprintRunIDForRun(t, database, runID)
-	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
-	s.agentRuns = stub
+	namespace := blueprintRunIDForRun(t, database, conversationID)
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
 
-	fenced := s.parkRunOpen(context.Background(), liveParkContext{
-		orgID:       runmode.LocalDefaultOrgID,
-		runID:       runID,
-		claudeCwd:   wt,
-		namespace:   namespace,
-		triggerType: "event",
-		claimID:     "claim-1",
-		reason:      db.ParkStopped("user_cancelled", "Cancelled by user"),
+	fenced := s.parkConversationOpen(context.Background(), liveParkContext{
+		orgID:          runmode.LocalDefaultOrgID,
+		conversationID: conversationID,
+		claudeCwd:      wt,
+		namespace:      namespace,
+		triggerType:    "event",
+		claimID:        "claim-1",
+		reason:         db.ParkStopped("user_cancelled", "Cancelled by user"),
 	}, "")
 	if !fenced {
 		t.Fatal("the teardown did not report the fence trip")
@@ -201,7 +201,7 @@ func TestParkRunOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 	}
 	_ = rc.Close()
 
-	frames := captured.conversationUpdates(runID)
+	frames := captured.conversationUpdates(conversationID)
 	if len(frames) != 1 {
 		t.Fatalf("conversation_update frames = %d, want 1 (the fenced park records no status of its own; this one carries the workspace news)", len(frames))
 	}
@@ -217,8 +217,8 @@ func TestParkRunOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 		t.Fatalf("published events = %d, want 1", len(published))
 	}
 	meta := decodeRunStatus(t, published[0].MetadataJSON)
-	if meta.ConversationID != runID || meta.Status != "open" {
-		t.Errorf("metadata = %+v, want the parked status for %s", meta, runID)
+	if meta.ConversationID != conversationID || meta.Status != "open" {
+		t.Errorf("metadata = %+v, want the parked status for %s", meta, conversationID)
 	}
 	if meta.Resumable == nil || !*meta.Resumable {
 		t.Errorf("metadata Resumable = %v, want true", meta.Resumable)
@@ -230,24 +230,24 @@ func TestParkRunOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 // during setup) has learned nothing a watcher needs, and saying "resumable"
 // there would enable a composer over a workspace that does not exist.
 func TestParkRunOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T) {
-	s, _, runID, _ := setupAdvanceFixture(t, "fenced-no-snapshot")
+	s, _, conversationID, _ := setupAdvanceFixture(t, "fenced-no-snapshot")
 	hub, captured := capturingHub(t)
 	s.wsHub = hub
 	pub := &fakeEventPublisher{}
 	s.SetEventPublisher(pub)
-	s.agentRuns = &fencedConversationStore{ConversationStore: s.agentRuns}
+	s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
 
-	fenced := s.parkRunOpen(context.Background(), liveParkContext{
-		orgID:       runmode.LocalDefaultOrgID,
-		runID:       runID,
-		triggerType: "event",
-		claimID:     "claim-1",
-		reason:      db.ParkStopped("user_cancelled", "Cancelled by user"),
+	fenced := s.parkConversationOpen(context.Background(), liveParkContext{
+		orgID:          runmode.LocalDefaultOrgID,
+		conversationID: conversationID,
+		triggerType:    "event",
+		claimID:        "claim-1",
+		reason:         db.ParkStopped("user_cancelled", "Cancelled by user"),
 	}, "")
 	if !fenced {
 		t.Fatal("the teardown did not report the fence trip")
 	}
-	if frames := captured.conversationUpdates(runID); len(frames) != 0 {
+	if frames := captured.conversationUpdates(conversationID); len(frames) != 0 {
 		t.Errorf("conversation_update frames = %d, want none: %+v", len(frames), frames)
 	}
 
@@ -267,7 +267,7 @@ func TestParkRunOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T) {
 func TestParkRunOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
-	s, database, runID, _ := setupAdvanceFixture(t, "fenced-idle")
+	s, database, conversationID, _ := setupAdvanceFixture(t, "fenced-idle")
 	blobs, err := storage.New()
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
@@ -280,17 +280,17 @@ func TestParkRunOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
 
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "half-finished work")
-	namespace := blueprintRunIDForRun(t, database, runID)
-	s.agentRuns = &fencedConversationStore{ConversationStore: s.agentRuns}
+	namespace := blueprintRunIDForRun(t, database, conversationID)
+	s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
 
-	fenced := s.parkRunOpen(context.Background(), liveParkContext{
-		orgID:       runmode.LocalDefaultOrgID,
-		runID:       runID,
-		claudeCwd:   wt,
-		namespace:   namespace,
-		triggerType: "event",
-		claimID:     "claim-1",
-		reason:      db.ParkIdle(),
+	fenced := s.parkConversationOpen(context.Background(), liveParkContext{
+		orgID:          runmode.LocalDefaultOrgID,
+		conversationID: conversationID,
+		claudeCwd:      wt,
+		namespace:      namespace,
+		triggerType:    "event",
+		claimID:        "claim-1",
+		reason:         db.ParkIdle(),
 	}, "")
 	if !fenced {
 		t.Fatal("the teardown did not report the fence trip")
@@ -302,7 +302,7 @@ func TestParkRunOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
 		t.Fatalf("fixture wrote no snapshot, so this test would pass for the wrong reason: %v", err)
 	}
 	_ = rc.Close()
-	if frames := captured.conversationUpdates(runID); len(frames) != 0 {
+	if frames := captured.conversationUpdates(conversationID); len(frames) != 0 {
 		t.Errorf("conversation_update frames = %d, want none — the successor's run is not parked: %+v", len(frames), frames)
 	}
 	if published := pub.eventsCopy(); len(published) != 0 {
@@ -322,12 +322,12 @@ func capturingHub(t *testing.T) (*websocket.Hub, *capturedEvents) {
 
 // conversationUpdates returns the conversation_update payloads captured for one
 // conversation, in broadcast order.
-func (c *capturedEvents) conversationUpdates(runID string) []map[string]any {
+func (c *capturedEvents) conversationUpdates(conversationID string) []map[string]any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var out []map[string]any
 	for _, e := range c.events {
-		if e.Type != "conversation_update" || e.ConversationID != runID {
+		if e.Type != "conversation_update" || e.ConversationID != conversationID {
 			continue
 		}
 		switch data := e.Data.(type) {

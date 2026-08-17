@@ -97,8 +97,8 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		// a real one accumulates: a worktree a run checked out, and a pin on a
 		// project somebody configured.
 		convID := conversation(t, "untrack")
-		if _, _, err := s.RunWorktrees.InsertSystem(ctx, orgID, domain.RunWorktree{
-			RunID: convID, RepoID: untrackedSlug, Ref: "pr-7",
+		if _, _, err := s.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
+			ConversationID: convID, RepoID: untrackedSlug, Ref: "pr-7",
 			Path: "/tmp/wt/" + convID + "/octo/dropped/pr-7",
 		}); err != nil {
 			t.Fatalf("reserve worktree: %v", err)
@@ -137,7 +137,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		if err != nil || row == nil {
 			t.Fatalf("registry row after untracking = %v, %v; want it standing — a reference may still name it", row, err)
 		}
-		worktrees, err := s.RunWorktrees.ListSystem(ctx, orgID, convID)
+		worktrees, err := s.ConversationWorktrees.ListSystem(ctx, orgID, convID)
 		if err != nil {
 			t.Fatalf("worktrees ListSystem: %v", err)
 		}
@@ -203,8 +203,8 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		// executor's role holds no INSERT on repositories.
 		s, orgID, _, conversation := mk(t)
 		convID := conversation(t, "unknown")
-		if _, _, err := s.RunWorktrees.InsertSystem(ctx, orgID, domain.RunWorktree{
-			RunID: convID, RepoID: "ghost/repo", Ref: "@default", Path: "/tmp/wt/ghost",
+		if _, _, err := s.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
+			ConversationID: convID, RepoID: "ghost/repo", Ref: "@default", Path: "/tmp/wt/ghost",
 		}); err == nil {
 			t.Error("reserving a worktree for a repository with no registry row succeeded; want an error")
 		}

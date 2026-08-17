@@ -18,7 +18,7 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactRun(t, h, orgID, teamID, userID)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
@@ -33,7 +33,7 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 		URL:            "https://github.com/octo/repo/pull/123",
 		FromState:      domain.ArtifactStatePRDraft,
 		ToState:        domain.ArtifactStatePROpen,
-		ConversationID: runID,
+		ConversationID: conversationID,
 		ActorUserID:    userID,
 		Credential:     domain.CredentialGitHubApp,
 		DetailJSON:     `{"k":"v"}`,
@@ -55,7 +55,7 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 	}
 	if a.Provider != "github" || a.Action != domain.ActionPRMarkedReady || a.Target != "octo/repo#123" ||
 		a.ExternalID != "123" || a.URL != in.URL || a.FromState != "draft" || a.ToState != "open" ||
-		a.ConversationID != runID || a.ActorUserID != userID || a.Credential != "github_app" || a.DetailJSON != `{"k":"v"}` {
+		a.ConversationID != conversationID || a.ActorUserID != userID || a.Credential != "github_app" || a.DetailJSON != `{"k":"v"}` {
 		t.Errorf("round-trip mismatch: %+v", a)
 	}
 }
@@ -212,20 +212,20 @@ func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
 	}
 
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByRun(ctx, orgA, runA, domain.ExternalActionListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByConversation(ctx, orgA, runA, domain.ExternalActionListOpts{})
 		if err != nil {
 			return err
 		}
 		if len(rows) != 1 || rows[0].Action != domain.ActionGHChannelWrite {
-			t.Errorf("alice ListByRun saw %+v, want just the run's own row", rows)
+			t.Errorf("alice ListByConversation saw %+v, want just the run's own row", rows)
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("alice ListByRun: %v", err)
+		t.Fatalf("alice ListByConversation: %v", err)
 	}
 
 	if err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByRun(ctx, orgA, runA, domain.ExternalActionListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByConversation(ctx, orgA, runA, domain.ExternalActionListOpts{})
 		if err != nil {
 			return err
 		}
@@ -234,6 +234,6 @@ func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("bob ListByRun: %v", err)
+		t.Fatalf("bob ListByConversation: %v", err)
 	}
 }

@@ -25,8 +25,14 @@ import {
   noteWrittenTeam,
   teamFilterQuery,
 } from '../hooks/useTeams'
-import type { Conversation, FactoryEntity, FactorySnapshot, RunStatusValue, Task } from '../types'
-import { isActiveStatus } from '../lib/runStatus'
+import type {
+  Conversation,
+  FactoryEntity,
+  FactorySnapshot,
+  ConversationStatusValue,
+  Task,
+} from '../types'
+import { isActiveStatus } from '../lib/conversationStatus'
 import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 // Production factory page — Babylon scene driven by /api/factory/snapshot.
@@ -831,7 +837,7 @@ function entityLabel(e: FactoryEntity): string {
 // The active arm is the shared predicate rather than a list of names, so
 // every claim phase — including a run parked awaiting its credential
 // bundle — reads as working instead of falling through to the inert grey.
-function runStatusColor(status: RunStatusValue): string {
+function runStatusColor(status: ConversationStatusValue): string {
   if (isActiveStatus(status)) return '#3f6b4d' // --color-claim (sage)
   switch (status) {
     case 'open':
@@ -845,7 +851,7 @@ function runStatusColor(status: RunStatusValue): string {
 
 // Shorter copy for the statuses whose raw name reads badly in a tray row;
 // everything else renders as itself.
-function runStatusLabel(status: RunStatusValue): string {
+function runStatusLabel(status: ConversationStatusValue): string {
   switch (status) {
     case 'agent_starting':
       return 'starting'

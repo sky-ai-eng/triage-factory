@@ -80,14 +80,14 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		return listOutput{}, fmt.Errorf("workspace list: load run: %w", err)
 	}
 	if run == nil {
-		return listOutput{}, fmt.Errorf("%w: %s", errRunNotFound, info.RunID)
+		return listOutput{}, fmt.Errorf("%w: %s", errRunNotFound, info.ConversationID)
 	}
 
 	configured, err := host.ListRepos(ctx)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load configured repos: %w", err)
 	}
-	rows, err := host.ListRunWorktrees(ctx)
+	rows, err := host.ListConversationWorktrees(ctx)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load materialized worktrees: %w", err)
 	}

@@ -122,7 +122,7 @@ func TestArtifactApprove(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, runID, _ := seedDraftPRArtifactWithRun(t, srv, "appr", "acme", "api", 42)
+	artID, conversationID, _ := seedDraftPRArtifactWithRun(t, srv, "appr", "acme", "api", 42)
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -138,14 +138,14 @@ func TestArtifactApprove(t *testing.T) {
 		t.Errorf("artifact state = %q, want open", got)
 	}
 	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, runID).Scan(&runStatus); err != nil {
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&runStatus); err != nil {
 		t.Fatalf("read run: %v", err)
 	}
 	if runStatus != "completed" {
 		t.Errorf("run status = %q, want completed", runStatus)
 	}
 	var human string
-	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, runID).Scan(&human); err != nil {
+	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {
 		t.Fatalf("read conversation_memory: %v", err)
 	}
 	if !strings.Contains(human, "as drafted") {
@@ -215,9 +215,9 @@ func TestArtifactTeardown_ResolvesAllArtifacts(t *testing.T) {
 	// seedClaimedPRApprovalFixture hangs a draft PR (#7) off run r_ab; add a
 	// finalized review draft on the same run so the task holds two unresolved
 	// artifacts of different kinds.
-	taskID, runID, prArtID := seedClaimedPRApprovalFixture(t, srv, "acme", "api", 7)
-	rv := domain.NewReviewArtifact("acme/api", 7, "headsha7", runID)
-	rv.ConversationID = runID
+	taskID, conversationID, prArtID := seedClaimedPRApprovalFixture(t, srv, "acme", "api", 7)
+	rv := domain.NewReviewArtifact("acme/api", 7, "headsha7", conversationID)
+	rv.ConversationID = conversationID
 	rv.OrgID = runmode.LocalDefaultOrgID
 	rv.TeamID = runmode.LocalDefaultTeamID
 	rd, _ := domain.ParseReviewArtifactDetails(rv.DetailsJSON)
@@ -266,7 +266,7 @@ func TestArtifactDismiss_PR(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, runID, _ := seedDraftPRArtifactWithRun(t, srv, "dis", "acme", "api", 42)
+	artID, conversationID, _ := seedDraftPRArtifactWithRun(t, srv, "dis", "acme", "api", 42)
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -279,7 +279,7 @@ func TestArtifactDismiss_PR(t *testing.T) {
 	}
 	// The run lifecycle is untouched — dismiss is a decoupled sidecar.
 	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, runID).Scan(&runStatus); err != nil {
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&runStatus); err != nil {
 		t.Fatalf("read run: %v", err)
 	}
 	if runStatus != "completed" {
@@ -382,7 +382,7 @@ func TestArtifactDismiss_AbortedBlueprintLeavesTaskOpen(t *testing.T) {
 // against the actual model: a future user-triggered run (origin='interactive') is
 // neither a blueprint nor a task run — it carries a NULL blueprint_run_id AND a
 // NULL task_id (both allowed once origin <> 'blueprint'). Resolving an artifact on
-// such a run must be a clean no-op for task closure: GetRunForStepRun routes to the
+// such a run must be a clean no-op for task closure: GetRunForConversation routes to the
 // standalone branch, the run has no task, and the taskID == "" guard short-circuits
 // — no task is closed, no error. (No such run exists in production today; this
 // pins the forward-compat path so it can't regress into closing a phantom task.)
@@ -626,30 +626,30 @@ func TestArtifactApprove_NonDraft_409(t *testing.T) {
 
 // seedDraftPRArtifactWithRun mints a completed (terminal) run chain (entity → … →
 // run) and a draft pull_request artifact hung off it, returning all three ids.
-func seedDraftPRArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo string, number int) (artifactID, runID, taskID string) {
+func seedDraftPRArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo string, number int) (artifactID, conversationID, taskID string) {
 	t.Helper()
-	runID = seedSteerRun(t, s.db, suffix, "completed")
+	conversationID = seedSteerRun(t, s.db, suffix, "completed")
 	taskID = fixtureUUID("t_" + suffix)
 	// conversation_memory row so the human-verdict UPDATE has a target (the termination
 	// upsert guarantees this in production).
-	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, runID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
+	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	a := domain.NewPullRequestArtifact(owner+"/"+repo, number, "PR_node", "feature/x", "main",
 		fmt.Sprintf("https://example.test/%s/%s/pull/%d", owner, repo, number), "Proposed title", "Proposed body", true)
-	a.ConversationID = runID
+	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
 	if err != nil {
 		t.Fatalf("seed draft PR artifact: %v", err)
 	}
-	return stored.ID, runID, taskID
+	return stored.ID, conversationID, taskID
 }
 
 // seedClaimedPRApprovalFixture builds a claimed task (the shape /requeue expects)
-// whose completed run opened a draft PR. Returns (taskID, runID, artifactID).
-func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, number int) (taskID, runID, artifactID string) {
+// whose completed run opened a draft PR. Returns (taskID, conversationID, artifactID).
+func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, number int) (taskID, conversationID, artifactID string) {
 	t.Helper()
 	const eventType = "github:pr:ci_check_passed"
 	execSQL(t, s.db, `INSERT INTO entities (id, source, source_id, kind, state) VALUES ('e_ab', 'github', ?, 'pr', 'active')`, fmt.Sprintf("%s/%s#%d", owner, repo, number))

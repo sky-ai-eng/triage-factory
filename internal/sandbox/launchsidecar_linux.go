@@ -83,7 +83,7 @@ func LaunchSidecarProcess(ctx context.Context, containerID string, uid, gid int,
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		// The per-run uid/gid, PLUS the sandbox group as a supplementary group:
 		// the relocated exec-verb socket server the sidecar hosts must chgrp its
-		// /run/tf/<runID>.sock to WorktreeGID so the sandbox uid (which runs with
+		// /run/tf/<conversationID>.sock to WorktreeGID so the sandbox uid (which runs with
 		// that gid) can connect. chgrp is owner-legal only for a group the caller
 		// belongs to, so the sidecar must carry WorktreeGID — the same owner-legal
 		// grant the orchestrator used before the relocation. The broker is root

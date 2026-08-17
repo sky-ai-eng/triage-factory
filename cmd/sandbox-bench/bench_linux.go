@@ -49,11 +49,11 @@ const (
 // handle is one live benchmark sandbox: the per-run network, the tool-host
 // jail, the workload driver's controls, and everything teardown reclaims.
 type handle struct {
-	id          int
-	runID       string
-	claimID     string
-	containerID string
-	worktree    string
+	id             int
+	conversationID string
+	claimID        string
+	containerID    string
+	worktree       string
 
 	net       *sandbox.RunNetwork
 	jail      *agentproc.ToolHostJail
@@ -630,21 +630,21 @@ func spawnDelta(ctx context.Context, cfg benchConfig, nextID *int, delta int) (a
 // connection the workload drives. Ready means the resident host answered a
 // real tool call, not merely that the jail process started.
 func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*handle, time.Duration, time.Duration, error) {
-	runID := fmt.Sprintf("bench-%04d", id)
-	h := &handle{id: id, runID: runID, claimID: "bench-claim-" + runID}
+	conversationID := fmt.Sprintf("bench-%04d", id)
+	h := &handle{id: id, conversationID: conversationID, claimID: "bench-claim-" + conversationID}
 	fail := func(err error) (*handle, time.Duration, time.Duration, error) {
 		h.teardown()
 		return nil, 0, 0, err
 	}
 
-	worktree := sandbox.RunTreeRoot(runID)
+	worktree := sandbox.RunTreeRoot(conversationID)
 	if err := seedWorktree(worktree, cfg.seedFiles); err != nil {
 		return fail(fmt.Errorf("seed worktree: %w", err))
 	}
 	h.worktree = worktree
 
 	start := time.Now()
-	rn, err := sandbox.SetupRunNetwork(ctx, runID)
+	rn, err := sandbox.SetupRunNetwork(ctx, conversationID)
 	if err != nil {
 		return fail(fmt.Errorf("run network: %w", err))
 	}
@@ -656,7 +656,7 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 	// and its workload runs no exec verbs, so a bound-but-unserved socket at
 	// the trusted path satisfies the launch without changing what the jail
 	// sees on disk.
-	agentMount := agenthost.SocketMountFor(runID)
+	agentMount := agenthost.SocketMountFor(conversationID)
 	if err := os.MkdirAll(filepath.Dir(agentMount.Source), 0o700); err != nil {
 		return fail(fmt.Errorf("create agenthost socket dir: %w", err))
 	}
@@ -668,7 +668,7 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 	h.agentSock = ln
 
 	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
-		RunID:                runID,
+		ConversationID:       conversationID,
 		Worktree:             worktree,
 		SDKDir:               sandbox.TrustedSDKDir(),
 		PrebuiltNetwork:      rn,

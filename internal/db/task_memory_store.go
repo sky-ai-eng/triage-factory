@@ -18,7 +18,7 @@ import (
 // Method naming follows the dual-pool convention introduced with
 // UsersStore / EntityStore / EventStore:
 //
-//   - Plain methods (UpsertAgentMemory, UpdateRunMemoryHumanContent,
+//   - Plain methods (UpsertAgentMemory, UpdateConversationMemoryHumanContent,
 //     GetMemoriesForEntity) run on the app pool in Postgres
 //     (RLS-active). Callers are request-handler equivalents (review
 //     submit, PR submit, swipe-discard cleanup, factory read-back)
@@ -33,7 +33,7 @@ import (
 //     spawner's `runAgent` goroutine which has no request scope.
 //     org_id stays bound in the INSERT/SELECT as defense in depth.
 //
-// No System variant exists for UpdateRunMemoryHumanContent (only
+// No System variant exists for UpdateConversationMemoryHumanContent (only
 // called from HTTP handlers under request claims). Adding a
 // speculative System variant would just be dead code the admin-pool
 // conformance suite would have to cover for no consumer; the
@@ -67,17 +67,17 @@ type TaskMemoryStore interface {
 	// after a retry overwrites agent_content but preserves the row's
 	// id, created_at, and any human_content the user has already
 	// attached.
-	UpsertAgentMemory(ctx context.Context, orgID, runID, entityID, blueprintRunID, content string) error
+	UpsertAgentMemory(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) error
 
 	// UpsertAgentMemorySystem is the admin-pool variant for the
 	// delegate spawner's post-completion gate teardown. Fires inside
 	// the runAgent goroutine, which has no JWT-claims context, so the
 	// write routes around RLS via BYPASSRLS. Same idempotency +
 	// NULL-on-empty contract as the non-System variant.
-	UpsertAgentMemorySystem(ctx context.Context, orgID, runID, entityID, blueprintRunID, content string) error
+	UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) error
 
-	// UpdateRunMemoryHumanContent records the human's verdict on a
-	// run's agent draft into the conversation_memory row keyed by runID. The
+	// UpdateConversationMemoryHumanContent records the human's verdict on a
+	// run's agent draft into the conversation_memory row keyed by conversationID. The
 	// gate-teardown upsert at termination guarantees the row exists
 	// by the time the human writes a verdict, so this is a plain
 	// UPDATE with no INSERT-or-UPDATE branching.
@@ -86,17 +86,17 @@ type TaskMemoryStore interface {
 	// UpsertAgentMemory's agent_content handling.
 	//
 	// A missing row is logged-and-returned-nil rather than failing
-	// the call: the only way a runID with no row reaches here is a
+	// the call: the only way a conversationID with no row reaches here is a
 	// non-agent review path or a cleanup race, and failing the
 	// response after GitHub already accepted the review would be
 	// worse than the missed memory write.
 	//
 	// App pool only — every caller (reviews handler, artifact-PR approve
 	// handler, swipe-discard cleanup) runs under request claims.
-	UpdateRunMemoryHumanContent(ctx context.Context, orgID, runID, content string) error
+	UpdateConversationMemoryHumanContent(ctx context.Context, orgID, conversationID, content string) error
 
-	// UpdateRunMemoryHumanContentSystem is the admin-pool (BYPASSRLS) variant
-	// of UpdateRunMemoryHumanContent for the artifact reconciler (TFAC-464 β),
+	// UpdateConversationMemoryHumanContentSystem is the admin-pool (BYPASSRLS) variant
+	// of UpdateConversationMemoryHumanContent for the artifact reconciler (TFAC-464 β),
 	// which has no JWT-claims context. It overwrites human_content with the
 	// run's post-run outcome — how the run's artifacts resolved on GitHub
 	// (merged/closed/deleted/submitted) vs. what the agent drafted — so the
@@ -110,7 +110,7 @@ type TaskMemoryStore interface {
 	// cycle is idempotent. Same empty→NULL + missing-row-logged-not-fatal
 	// contract as the app-pool variant. org_id stays bound as defense in depth;
 	// SQLite collapses onto the one connection.
-	UpdateRunMemoryHumanContentSystem(ctx context.Context, orgID, runID, content string) error
+	UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) error
 
 	// GetMemoriesForEntity returns every conversation_memory row reachable for
 	// this entity through conversation_memory_entities — the run touched,
@@ -168,7 +168,7 @@ type TaskMemoryStore interface {
 	// write with no JWT-claims context. Best-effort by contract:
 	// callers must never fail the operation that produced the touch
 	// on this method's error.
-	RecordEntityTouchSystem(ctx context.Context, orgID, runID, entityID, role string) error
+	RecordEntityTouchSystem(ctx context.Context, orgID, conversationID, entityID, role string) error
 
 	// CountMemoriesForEntitySystem returns the number of conversation_memory
 	// rows reachable for entityID through conversation_memory_entities, under

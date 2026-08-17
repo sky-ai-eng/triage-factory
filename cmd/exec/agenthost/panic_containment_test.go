@@ -30,7 +30,7 @@ func TestServer_PanickingVerb_FailsRPCAndKeepsServing(t *testing.T) {
 		panic("verb exploded mid-dispatch")
 	})
 
-	info := RunInfo{OrgID: "org-1", RunID: "run-panic"}
+	info := ConversationInfo{OrgID: "org-1", ConversationID: "run-panic"}
 	client := startExtensionTestDaemon(t, info)
 
 	// The client's contract for a mid-request death: EOF, surfaced as a failed
@@ -51,8 +51,8 @@ func TestServer_PanickingVerb_FailsRPCAndKeepsServing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("next RPC after the panic: %v", err)
 	}
-	if got.RunID != info.RunID {
-		t.Errorf("LookupRun after the panic returned %+v, want run %q", got, info.RunID)
+	if got.ConversationID != info.ConversationID {
+		t.Errorf("LookupRun after the panic returned %+v, want run %q", got, info.ConversationID)
 	}
 }
 
@@ -63,7 +63,7 @@ func TestServer_PanickingVerb_FailsRPCAndKeepsServing(t *testing.T) {
 // working RPC into a failed one, using the mechanism added to prevent exactly
 // that.
 func TestHandleConn_NilMethodSeenServesNormally(t *testing.T) {
-	info := RunInfo{OrgID: "org-1", RunID: "run-nil-out"}
+	info := ConversationInfo{OrgID: "org-1", ConversationID: "run-nil-out"}
 	stores, _ := newTestDB(t)
 	srv := NewServer(stores, info, nil)
 
@@ -78,7 +78,7 @@ func TestHandleConn_NilMethodSeenServesNormally(t *testing.T) {
 	if err := cliSide.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("set deadline: %v", err)
 	}
-	if err := writeFrame(cliSide, request{Version: ProtocolVersion, Method: methodLookupRun, Args: json.RawMessage(`{}`)}); err != nil {
+	if err := writeFrame(cliSide, request{Version: ProtocolVersion, Method: methodLookupConversation, Args: json.RawMessage(`{}`)}); err != nil {
 		t.Fatalf("writeFrame: %v", err)
 	}
 	var resp response
@@ -88,12 +88,12 @@ func TestHandleConn_NilMethodSeenServesNormally(t *testing.T) {
 	if resp.Error != "" {
 		t.Fatalf("daemon answered with an error: %s", resp.Error)
 	}
-	var res lookupRunResult
+	var res lookupConversationResult
 	if err := json.Unmarshal(resp.Result, &res); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
-	if res.Info.RunID != info.RunID {
-		t.Errorf("LookupRun returned %+v, want run %q", res.Info, info.RunID)
+	if res.Info.ConversationID != info.ConversationID {
+		t.Errorf("LookupRun returned %+v, want run %q", res.Info, info.ConversationID)
 	}
 	_ = cliSide.Close()
 	<-served

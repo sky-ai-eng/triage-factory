@@ -142,9 +142,9 @@ func turnStatusPg(t *testing.T, h *pgtest.Harness, messageID int64) string {
 // production path now that there is no curator-only claim door.
 func claimSeededTurn(t *testing.T, ctx context.Context, stores db.Stores, conversationID string) string {
 	t.Helper()
-	got, err := stores.RunQueue.ClaimNextRun(ctx, "test-executor", 1, db.ClaimPlacement{})
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "test-executor", 1, db.ClaimPlacement{})
 	if err != nil || got == nil || got.ID != conversationID {
-		t.Fatalf("ClaimNextRun = (%+v, %v), want a claim on conversation %s", got, err, conversationID)
+		t.Fatalf("ClaimNextConversation = (%+v, %v), want a claim on conversation %s", got, err, conversationID)
 	}
 	return got.ClaimID
 }

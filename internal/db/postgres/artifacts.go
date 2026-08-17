@@ -14,7 +14,7 @@ import (
 // in every WHERE/INSERT clause as defense in depth. Mirrors the runs store
 // (agentrun.go) for $N placeholders + scan conventions. See TFAC-455.
 //
-// Holds two pools, the same split Conversations / RunWorktrees use:
+// Holds two pools, the same split Conversations / ConversationWorktrees use:
 //
 //   - q: app pool (tf_app, RLS-active). Manual-run exec writes (under
 //     synthetic claims) and run-detail / C2 reads route here.
@@ -248,30 +248,30 @@ func (s *artifactStore) Get(ctx context.Context, orgID, id string) (*domain.Arti
 	return &a, nil
 }
 
-func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
+func (s *artifactStore) ListByConversation(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`
 		FROM artifacts
 		WHERE org_id = $1 AND conversation_id = $2
 		ORDER BY created_at DESC, id DESC
-	`, orgID, runID)
+	`, orgID, conversationID)
 	if err != nil {
 		return nil, err
 	}
 	return scanArtifactRows(rows)
 }
 
-// ListByRunSystem runs ListByRun's query on the admin pool (BYPASSRLS) for the
+// ListByConversationSystem runs ListByConversation's query on the admin pool (BYPASSRLS) for the
 // spawner's park check, which reads a completed run's artifacts from a goroutine
 // with no JWT-claims context. org_id stays in the WHERE clause as defense in
 // depth.
-func (s *artifactStore) ListByRunSystem(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
+func (s *artifactStore) ListByConversationSystem(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`
 		FROM artifacts
 		WHERE org_id = $1 AND conversation_id = $2
 		ORDER BY created_at DESC, id DESC
-	`, orgID, runID)
+	`, orgID, conversationID)
 	if err != nil {
 		return nil, err
 	}
@@ -297,13 +297,13 @@ func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, or
 	return scanArtifactRows(rows)
 }
 
-func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []string) (map[string]int, error) {
-	counts := make(map[string]int, len(runIDs))
-	if len(runIDs) == 0 {
+func (s *artifactStore) CountByConversation(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {
+	counts := make(map[string]int, len(conversationIDs))
+	if len(conversationIDs) == 0 {
 		return counts, nil
 	}
 	// App pool (RLS-active): both callers are HTTP handlers under request
-	// claims, so the count is team-scoped exactly like ListByRun. conversation_id is a
+	// claims, so the count is team-scoped exactly like ListByConversation. conversation_id is a
 	// uuid column, so the slice goes through pgUUIDArray (a Postgres array
 	// literal) rather than a raw []string bind — a []string encodes as text[]
 	// and `conversation_id = ANY(text[])` errors with "operator does not exist: uuid =
@@ -313,37 +313,37 @@ func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []s
 		FROM artifacts
 		WHERE org_id = $1 AND conversation_id = ANY($2)
 		GROUP BY conversation_id
-	`, orgID, pgUUIDArray(runIDs))
+	`, orgID, pgUUIDArray(conversationIDs))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var runID string
+		var conversationID string
 		var n int
-		if err := rows.Scan(&runID, &n); err != nil {
+		if err := rows.Scan(&conversationID, &n); err != nil {
 			return nil, err
 		}
-		counts[runID] = n
+		counts[conversationID] = n
 	}
 	return counts, rows.Err()
 }
 
-func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Artifact, error) {
-	if len(runIDs) == 0 {
+func (s *artifactStore) ListByConversations(ctx context.Context, orgID string, conversationIDs []string) ([]domain.Artifact, error) {
+	if len(conversationIDs) == 0 {
 		return nil, nil
 	}
 	// App pool (RLS-active): the caller is the run-list handler under request
-	// claims, so rows are team-scoped exactly like ListByRun. conversation_id is a uuid
+	// claims, so rows are team-scoped exactly like ListByConversation. conversation_id is a uuid
 	// column, so the slice goes through pgUUIDArray (a Postgres array literal),
-	// not a raw []string bind — see CountByRun. A NULL conversation_id never matches ANY,
+	// not a raw []string bind — see CountByConversation. A NULL conversation_id never matches ANY,
 	// so detached artifacts are excluded.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`
 		FROM artifacts
 		WHERE org_id = $1 AND conversation_id = ANY($2)
 		ORDER BY created_at DESC, id DESC
-	`, orgID, pgUUIDArray(runIDs))
+	`, orgID, pgUUIDArray(conversationIDs))
 	if err != nil {
 		return nil, err
 	}

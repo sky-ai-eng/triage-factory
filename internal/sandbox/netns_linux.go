@@ -13,23 +13,23 @@ import (
 )
 
 // netnsIDFrag derives the deterministic 8-hex-char fragment embedded in a
-// per-run netns name from the run id (sha1 of the runID). Extracted so the
+// per-run netns name from the run id (sha1 of the conversationID). Extracted so the
 // launch-time netns ownership check re-derives the exact same fragment
 // setupNetwork used — keeping the two in lockstep by construction.
-func netnsIDFrag(runID string) string {
-	h := sha1.Sum([]byte(runID))
+func netnsIDFrag(conversationID string) string {
+	h := sha1.Sum([]byte(conversationID))
 	return hex.EncodeToString(h[:])[:8]
 }
 
-// NetnsNameForRun is the per-run network-namespace name for (runID,
+// NetnsNameForRun is the per-run network-namespace name for (conversationID,
 // subnetIdx): tf-<idFrag>-<idx>. It is deterministic in the run id, so the
 // broker can re-derive the name a given run's netns MUST have and reject a
 // LaunchRun that hands it any other (even a sibling run's) broker-created
 // namespace — closing the netns-confusion gap where a shape-only check
 // would accept any tf-shaped path. Exported so the launch validation and
 // its tests build the same name this package's setup produces.
-func NetnsNameForRun(runID string, subnetIdx uint8) string {
-	return fmt.Sprintf("tf-%s-%d", netnsIDFrag(runID), subnetIdx)
+func NetnsNameForRun(conversationID string, subnetIdx uint8) string {
+	return fmt.Sprintf("tf-%s-%d", netnsIDFrag(conversationID), subnetIdx)
 }
 
 // setupNetwork creates the netns + veth pair + addressing matching
@@ -45,18 +45,18 @@ func NetnsNameForRun(runID string, subnetIdx uint8) string {
 //     cold-start, so the speed difference doesn't matter.
 //
 // Returns netState with the names + IPs needed by teardown.
-func setupNetwork(ctx context.Context, runID string, subnetIdx uint8) (*netState, error) {
+func setupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (*netState, error) {
 	// Per-run identifiers. veth name length is constrained by
 	// IFNAMSIZ=16, leaving 13 chars after the "vh-"/"vs-" prefix.
 	//
 	// idFrag MUST be hex — the reaper's regex (^tf-[0-9a-f]+-(\d+)$)
 	// strict-matches hex so it can't false-positive against unrelated
 	// tf-* netns owned by other processes. We can't trust the caller's
-	// runID to be hex (TraceID may be "live-smoke" or any free-form
+	// conversationID to be hex (TraceID may be "live-smoke" or any free-form
 	// string), so derive a deterministic 8-hex-char fragment from a
-	// sha1 of the runID. Same runID → same fragment, every time.
-	idFrag := netnsIDFrag(runID)
-	netnsName := NetnsNameForRun(runID, subnetIdx)
+	// sha1 of the conversationID. Same conversationID → same fragment, every time.
+	idFrag := netnsIDFrag(conversationID)
+	netnsName := NetnsNameForRun(conversationID, subnetIdx)
 	vethHost := fmt.Sprintf("vh-%s%d", idFrag[:min(len(idFrag), 4)], subnetIdx)
 	vethSandbox := fmt.Sprintf("vs-%s%d", idFrag[:min(len(idFrag), 4)], subnetIdx)
 	netnsPath := "/var/run/netns/" + netnsName
@@ -112,7 +112,7 @@ func setupNetwork(ctx context.Context, runID string, subnetIdx uint8) (*netState
 	// the add below fails loudly as it always did.
 	if owner, live := netnsLiveRun(netnsName); live {
 		sandboxLog.Error("refusing to reclaim a network namespace this process created and has not torn down; the launch will fail rather than take a live cell's namespace name",
-			"netns", netnsName, "live_run", owner, "requested_run", runID, "subnet_idx", subnetIdx)
+			"netns", netnsName, "live_run", owner, "requested_run", conversationID, "subnet_idx", subnetIdx)
 	} else {
 		// Best-effort — the common case is that there is nothing to delete.
 		_ = runIPNoErr(ctx, "netns", "delete", netnsName)
@@ -126,7 +126,7 @@ func setupNetwork(ctx context.Context, runID string, subnetIdx uint8) (*netState
 	if err := runIP(ctx, "netns", "add", netnsName); err != nil {
 		return state, fmt.Errorf("netns: netns add: %w", err)
 	}
-	markNetnsLive(netnsName, runID)
+	markNetnsLive(netnsName, conversationID)
 
 	// Each ip command is wrapped so failure → cleanup of partial state.
 	// We return the partial state on the way out so cleanup can use it.

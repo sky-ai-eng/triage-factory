@@ -1,5 +1,5 @@
 import type { Conversation } from '../../types'
-import { isActiveRun } from '../../lib/runStatus'
+import { isActiveConversation } from '../../lib/conversationStatus'
 
 // cardStyle — the design tokens + status→tone logic for the board's lit-plane
 // cards. Pure module (no JSX) so the shared chrome components live in
@@ -49,7 +49,7 @@ export interface Glow {
 // drop-shadow under the card (and those states already announce themselves via
 // the attention row / result verdict).
 export function runGlow(run: Conversation): Glow | null {
-  if (isActiveRun(run)) return { tone: 'active', breathing: true }
+  if (isActiveConversation(run)) return { tone: 'active', breathing: true }
   return null
 }
 

@@ -108,11 +108,11 @@ var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired a
 // step the CAS's hand-off guard refused after the pre-check let it through. The
 // conflict is right (nothing claims it while the reactor still owes it a
 // decision); only the log line's "went terminal" overstates what happened.
-func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, runID string) error {
-	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
+func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, conversationID string) error {
+	run, err := s.conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
 		delegateLog.Warn("resume: lost the wake race and could not re-read the conversation; reporting a conflict",
-			"run", runID, "org_id", orgID, "error", err)
+			"conversation", conversationID, "org_id", orgID, "error", err)
 		return ErrRunNotResumable
 	}
 	if run == nil {
@@ -122,7 +122,7 @@ func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, runID string) erro
 		return nil
 	}
 	delegateLog.Warn("resume: lost the wake race to a conversation that went terminal; the queued message will not be delivered",
-		"run", runID, "org_id", orgID, "status", run.Status)
+		"conversation", conversationID, "org_id", orgID, "status", run.Status)
 	return ErrRunNotResumable
 }
 
@@ -155,7 +155,7 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 		FromOutcome:    run.Outcome,
 	})
 	if err != nil {
-		delegateLog.Warn("marshal resume event metadata failed; the follow-up is not on the task timeline", "run", run.ID, "error", err)
+		delegateLog.Warn("marshal resume event metadata failed; the follow-up is not on the task timeline", "conversation", run.ID, "error", err)
 		return
 	}
 	eventID, err := s.events.RecordSystem(ctx, orgID, domain.Event{
@@ -165,11 +165,11 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 		OccurredAt:   time.Now().UTC(),
 	})
 	if err != nil {
-		delegateLog.Warn("record resume event failed; the follow-up is not on the task timeline", "run", run.ID, "task", run.TaskID, "error", err)
+		delegateLog.Warn("record resume event failed; the follow-up is not on the task timeline", "conversation", run.ID, "task", run.TaskID, "error", err)
 		return
 	}
 	if err := s.tasks.RecordEventSystem(ctx, orgID, run.TaskID, eventID, "resumed"); err != nil {
-		delegateLog.Warn("link resume event to task failed", "run", run.ID, "task", run.TaskID, "event", eventID, "error", err)
+		delegateLog.Warn("link resume event to task failed", "conversation", run.ID, "task", run.TaskID, "event", eventID, "error", err)
 	}
 }
 
@@ -186,7 +186,7 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *d
 			// A stat we couldn't complete (permission, I/O) is not proof the
 			// worktree is gone — count it as recoverable rather than emit a
 			// false 410 on a transient error.
-			delegateLog.Warn("resume: worktree stat inconclusive; treating as recoverable", "run", run.ID, "path", run.WorktreePath, "error", err)
+			delegateLog.Warn("resume: worktree stat inconclusive; treating as recoverable", "conversation", run.ID, "path", run.WorktreePath, "error", err)
 			return true
 		}
 	}
@@ -196,7 +196,7 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *d
 	}
 	ok, err := blobs.Exists(ctx, snapshotKey(orgID, memoryNamespace(run.BlueprintRunID)))
 	if err != nil {
-		delegateLog.Warn("resume: snapshot existence check failed", "run", run.ID, "error", err)
+		delegateLog.Warn("resume: snapshot existence check failed", "conversation", run.ID, "error", err)
 		return true
 	}
 	return ok
@@ -242,7 +242,7 @@ type ResumeOptions struct {
 
 	// TeamID is the run's owning team. Resolves the presence-gated
 	// absent-auto-deny policy for the resumed run's permission prompts
-	// (TFAC-392), and stamps the resumed run's agenthost.RunInfo.TeamID so
+	// (TFAC-392), and stamps the resumed run's agenthost.ConversationInfo.TeamID so
 	// the capture writers can attribute artifacts (TFAC-458). The claim
 	// captures it from the run row (run.TeamID, NOT NULL); empty falls back
 	// to the schema defaults for the absent-auto-deny resolve.
@@ -286,7 +286,7 @@ type ResumeOutcome struct {
 // from conversations.sdk_session_id, populated on the runSink during the original
 // invocation), the cwd the original run used so the resumed
 // subprocess sees the same worktree, and the user message to append
-// to the conversation. The runID is reused so resumed messages append
+// to the conversation. The conversationID is reused so resumed messages append
 // to the existing messages stream — the UI sees one coherent
 // conversation.
 //
@@ -296,7 +296,7 @@ type ResumeOutcome struct {
 // gives up. Mirroring the initial invocation's status updates here
 // would produce double terminal completion writes with stale
 // cost/duration fields overwriting the real totals.
-func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID, cwd, message string, opts ResumeOptions, triggerType, creatorUserID string) (*ResumeOutcome, error) {
+func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, sessionID, cwd, message string, opts ResumeOptions, triggerType, creatorUserID string) (*ResumeOutcome, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("resume: missing session id")
 	}
@@ -326,7 +326,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	}
 
 	extraEnv := []string{
-		"TRIAGE_FACTORY_CONVERSATION_ID=" + runID,
+		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
 		// Mirror runAgent's TRIAGE_FACTORY_CONVERSATION_ROOT setting. The resume
 		// cwd IS the original run-root (runAgent passed runRoot as the
 		// agentproc Cwd; for GitHub PR runs the worktree IS the run-root,
@@ -365,7 +365,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	var startAgentHost func() (sandbox.Mount, io.Closer, error)
 	if opts.sidecar != nil {
 		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-			return agenthost.SocketMountFor(runID), noopCloser{}, nil
+			return agenthost.SocketMountFor(conversationID), noopCloser{}, nil
 		}
 	}
 
@@ -374,15 +374,15 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// per-invocation, not per-run — a cold resume starts a new subprocess, so it
 	// needs its own listener, placeholder and trust file).
 	ownerForGH, _, _ := strings.Cut(opts.RepoEnv, "/")
-	localGH, localGHCloser := s.startLocalGHChannel(ctx, orgID, runID, ownerForGH, agenthost.RunInfo{
+	localGH, localGHCloser := s.startLocalGHChannel(ctx, orgID, conversationID, ownerForGH, agenthost.ConversationInfo{
 		OrgID:            orgID,
 		UserID:           creatorUserID,
-		RunID:            runID,
+		ConversationID:   conversationID,
 		TeamID:           opts.TeamID,
 		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 	})
 	defer func() { _ = localGHCloser.Close() }()
-	ghChannel := opts.sidecar.ghChannel(runID)
+	ghChannel := opts.sidecar.ghChannel(conversationID)
 	if ghChannel == nil {
 		ghChannel = localGH
 	}
@@ -400,11 +400,11 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		}),
 		MaxTurns:        100,
 		ExtraEnv:        extraEnv,
-		TraceID:         runID,
+		TraceID:         conversationID,
 		MemoryNamespace: opts.Namespace,
 		OrgID:           orgID,
 		Secrets:         s.getRunSecrets(),
-		LLMResolver:     s.llmResolverForRun(orgID, runID),
+		LLMResolver:     s.llmResolverForRun(orgID, conversationID),
 		// This turn's own engagement pays for this turn's jail.
 		ClaimID:              opts.claimID,
 		RecordSandboxActuals: s.recordSandboxActuals,
@@ -417,12 +417,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		// Re-mount the step skill this run's original claim staged, when it's
 		// still on disk — a resume continues the same step, so it should see the
 		// same skill it started with.
-		SkillsSourcePath: stagedStepSkillsSource(runID),
+		SkillsSourcePath: stagedStepSkillsSource(conversationID),
 		// Same for the prior-memory tree: a resume continues the same step, so it
 		// reads the same handoff it started with rather than a freshly rendered one.
-		MemorySourcePath: stagedEntityMemorySource(runID),
+		MemorySourcePath: stagedEntityMemorySource(conversationID),
 	}
-	sink := newRunSink(s, orgID, runID, opts.claimID, triggerType, creatorUserID)
+	sink := newRunSink(s, orgID, conversationID, opts.claimID, triggerType, creatorUserID)
 
 	// Off-allowlist tool calls route the same way the initial run does:
 	// gVisor-sandboxed delegated runs auto-approve (the sandbox + the static
@@ -432,9 +432,9 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// their only boundary. opts.TeamID falls back to defaults when empty.
 	var perms agentproc.PermissionHandler
 	if agentproc.WillSandbox() {
-		perms = s.AutoApprovePermissionHandler(runID)
+		perms = s.AutoApprovePermissionHandler(conversationID)
 	} else {
-		perms = s.BrowserPermissionHandler(orgID, runID, opts.claimID, s.resolveAbsentAutoDeny(ctx, opts.TeamID))
+		perms = s.BrowserPermissionHandler(orgID, conversationID, opts.claimID, s.resolveAbsentAutoDeny(ctx, opts.TeamID))
 	}
 
 	// Resume executes as a LiveRun (re-registered in procs, so a resumed run
@@ -450,13 +450,13 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 			// taskID consumer — is unreachable here. (It also degrades safely
 			// to a no-op board recompute if a future change re-enables idle.)
 			park: liveParkContext{
-				orgID:         orgID,
-				runID:         runID,
-				namespace:     opts.Namespace,
-				claudeCwd:     cwd,
-				triggerType:   triggerType,
-				creatorUserID: creatorUserID,
-				claimID:       opts.claimID,
+				orgID:          orgID,
+				conversationID: conversationID,
+				namespace:      opts.Namespace,
+				claudeCwd:      cwd,
+				triggerType:    triggerType,
+				creatorUserID:  creatorUserID,
+				claimID:        opts.claimID,
 			},
 			opts:        baseOpts,
 			perms:       perms,
@@ -469,8 +469,8 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 
 	// A fence trip on this path — the sink's refused insert, or the driver's
 	// refused park — surfaces as an outcome with no completion, and the caller
-	// routes that through failRun. That is the correct disposition and it is
-	// safe to reach: failRun's terminal is itself claim-fenced, so the refusal
+	// routes that through failConversation. That is the correct disposition and it is
+	// safe to reach: failConversation's terminal is itself claim-fenced, so the refusal
 	// repeats there and nothing lands on the successor's row. No dedicated
 	// fenced field on ResumeOutcome, because there is no action it would
 	// unlock that isn't already refused one layer down.

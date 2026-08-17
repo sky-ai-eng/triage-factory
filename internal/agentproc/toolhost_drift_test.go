@@ -36,8 +36,8 @@ func TestToolHost_MatchesBrokerTrustedPaths(t *testing.T) {
 // loop dials is the socket the in-jail server binds: the host-side directory
 // the broker validates, joined with the same file name the argv names.
 func TestToolHostSocketPath_IsInsideTheBrokerDerivedDir(t *testing.T) {
-	const runID = "conv-123"
-	hostDir := sandbox.TrustedToolHostSocketDir(runID)
+	const conversationID = "conv-123"
+	hostDir := sandbox.TrustedToolHostSocketDir(conversationID)
 	hostSock := filepath.Join(hostDir, toolHostSocketName)
 	jailSock := filepath.Join(sandboxToolHostSocketDir, toolHostSocketName)
 

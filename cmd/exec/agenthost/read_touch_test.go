@@ -18,13 +18,13 @@ import (
 // LocalClient is the one seam the multi daemon dispatches through, so proving
 // it here covers both the sandbox and local-mode paths.
 
-// touchRole reads conversation_memory_entities.role for (runID, entityID) directly — the
+// touchRole reads conversation_memory_entities.role for (conversationID, entityID) directly — the
 // store interface exposes no role-returning read. "" when no row exists.
-func touchRole(t *testing.T, conn *sql.DB, runID, entityID string) string {
+func touchRole(t *testing.T, conn *sql.DB, conversationID, entityID string) string {
 	t.Helper()
 	var role string
 	switch err := conn.QueryRow(
-		`SELECT role FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ?`, runID, entityID,
+		`SELECT role FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ?`, conversationID, entityID,
 	).Scan(&role); err {
 	case nil:
 		return role
@@ -81,7 +81,7 @@ func TestFunnel_GithubWrite_RecordsEntityTouch(t *testing.T) {
 			if ent.Kind != "pr" {
 				t.Errorf("entity kind = %q, want pr", ent.Kind)
 			}
-			if role := touchRole(t, conn, info.RunID, ent.ID); role != domain.MemoryRoleTouched {
+			if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleTouched {
 				t.Errorf("touch role = %q, want %q", role, domain.MemoryRoleTouched)
 			}
 		})
@@ -124,7 +124,7 @@ func TestReadTouch_GithubGetPR_TouchesPR(t *testing.T) {
 	if ent.SnapshotJSON != "" {
 		t.Errorf("expected a snapshot-less stub, got snapshot %q", ent.SnapshotJSON)
 	}
-	if role := touchRole(t, conn, info.RunID, ent.ID); role != domain.MemoryRoleTouched {
+	if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleTouched {
 		t.Errorf("touch role = %q, want %q", role, domain.MemoryRoleTouched)
 	}
 }
@@ -172,7 +172,7 @@ func TestReadTouch_JiraGetIssue_TouchesIssue(t *testing.T) {
 	if ent.Kind != "issue" {
 		t.Errorf("entity kind = %q, want issue", ent.Kind)
 	}
-	if role := touchRole(t, conn, info.RunID, ent.ID); role != domain.MemoryRoleTouched {
+	if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleTouched {
 		t.Errorf("touch role = %q, want %q", role, domain.MemoryRoleTouched)
 	}
 }
@@ -221,7 +221,7 @@ func TestTouch_ReadThenWrite_StaysTouched(t *testing.T) {
 	if err != nil || ent == nil {
 		t.Fatalf("entity missing: ent=%v err=%v", ent, err)
 	}
-	if role := touchRole(t, conn, info.RunID, ent.ID); role != domain.MemoryRoleTouched {
+	if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleTouched {
 		t.Errorf("touch role = %q, want %q (a read touch + a write to the same entity stays touched)", role, domain.MemoryRoleTouched)
 	}
 }

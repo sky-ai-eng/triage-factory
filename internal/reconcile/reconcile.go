@@ -37,7 +37,7 @@ type clientResolver interface {
 // shared between Tier 1 (the background Manager/Runner) and Tier 2 (the
 // run-scoped refresh endpoint): both call Reconcile with a set of non-terminal
 // artifacts. Writes route through the admin pool (UpsertSystem /
-// UpdateRunMemoryHumanContentSystem) — the reconciler has no JWT-claims context
+// UpdateConversationMemoryHumanContentSystem) — the reconciler has no JWT-claims context
 // in either tier.
 type Reconciler struct {
 	resolver  clientResolver
@@ -275,8 +275,8 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 			terminalRuns[a.ConversationID] = true
 		}
 	}
-	for runID := range terminalRuns {
-		rc.recordRunOutcome(writeCtx, orgID, runID)
+	for conversationID := range terminalRuns {
+		rc.recordRunOutcome(writeCtx, orgID, conversationID)
 	}
 	return transitioned, nil
 }
@@ -309,13 +309,13 @@ func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domai
 // is the authoritative account of how reality diverged from the agent's draft.
 // Best-effort — the external state already moved, so a failed note must not
 // undo the transition.
-func (rc *Reconciler) recordRunOutcome(ctx context.Context, orgID, runID string) {
-	note := rc.composeRunOutcome(ctx, orgID, runID)
+func (rc *Reconciler) recordRunOutcome(ctx context.Context, orgID, conversationID string) {
+	note := rc.composeRunOutcome(ctx, orgID, conversationID)
 	if note == "" {
 		return
 	}
-	if err := rc.memory.UpdateRunMemoryHumanContentSystem(ctx, orgID, runID, note); err != nil {
-		reconcileLog.Warn("record run outcome memory failed", "org", orgID, "run", runID, "error", err)
+	if err := rc.memory.UpdateConversationMemoryHumanContentSystem(ctx, orgID, conversationID, note); err != nil {
+		reconcileLog.Warn("record run outcome memory failed", "org", orgID, "conversation", conversationID, "error", err)
 	}
 }
 
@@ -444,10 +444,10 @@ const runOutcomeHeader = "**Post-run outcome** — how your work resolved on Git
 // which cycle each artifact resolved in. Returns "" when nothing is terminal yet
 // (still in flight — no outcome to report), which recordRunOutcome treats as
 // "don't touch the row."
-func (rc *Reconciler) composeRunOutcome(ctx context.Context, orgID, runID string) string {
-	arts, err := rc.artifacts.ListByRunSystem(ctx, orgID, runID)
+func (rc *Reconciler) composeRunOutcome(ctx context.Context, orgID, conversationID string) string {
+	arts, err := rc.artifacts.ListByConversationSystem(ctx, orgID, conversationID)
 	if err != nil {
-		reconcileLog.Warn("list run artifacts for outcome note failed", "org", orgID, "run", runID, "error", err)
+		reconcileLog.Warn("list run artifacts for outcome note failed", "org", orgID, "conversation", conversationID, "error", err)
 		return ""
 	}
 	var blocks []string

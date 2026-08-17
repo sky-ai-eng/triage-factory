@@ -175,7 +175,7 @@ func TestResolve_ReplicasSpreadAcrossTopK(t *testing.T) {
 	// Runs spread across all 3 preferred replicas (deterministically).
 	seen := map[string]bool{}
 	for i := 0; i < 300; i++ {
-		id := plan.PreferredForRun(runID(i))
+		id := plan.PreferredForRun(conversationID(i))
 		if !inSet(plan.PreferredSet, id) {
 			t.Fatalf("stamp %q not in preferred set %v", id, plan.PreferredSet)
 		}
@@ -195,7 +195,7 @@ func inSet(set []string, v string) bool {
 	return false
 }
 
-func runID(i int) string { return "run-" + string(rune('a'+i%26)) + "-" + itoa(i) }
+func conversationID(i int) string { return "run-" + string(rune('a'+i%26)) + "-" + itoa(i) }
 
 func itoa(i int) string {
 	if i == 0 {

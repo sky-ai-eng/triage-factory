@@ -380,12 +380,12 @@ type TaskStore interface {
 
 	// --- Breaker ---
 
-	// CountConsecutiveFailedRuns counts consecutive non-success
+	// CountConsecutiveFailedConversations counts consecutive non-success
 	// auto-runs at the tail of runs for (entity_id, prompt_id),
 	// stopping at the first completed row. Chain instances count
 	// once, not once-per-step. Used by the router to check the
 	// circuit-breaker threshold.
-	CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error)
+	CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error)
 
 	// --- Admin-pool variants (`...System`) ---
 	//
@@ -483,7 +483,7 @@ type TaskStore interface {
 	// or not at all (see AgentClaimStamp). Returns claimed=true only when the
 	// stamp actually moved the claim — a refusal commits the fold anyway.
 	MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string, claim AgentClaimStamp) (claimed bool, err error)
-	CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
+	CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
 	StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error)
 
 	// ReassignClaimToUserSystem is ReassignClaimToUser routed through the

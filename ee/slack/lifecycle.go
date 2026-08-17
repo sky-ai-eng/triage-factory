@@ -91,7 +91,7 @@ var (
 // contract that subscriber handlers must return fast.
 const slackLifecycleEventBuffer = 256
 
-// slackLifecycleCacheMaxEntries bounds the per-run verdict cache (runEntry)
+// slackLifecycleCacheMaxEntries bounds the per-run verdict cache (conversationEntry)
 // so a long-lived process doesn't grow it unboundedly across every run it
 // has ever seen. slackLifecycleCachePruneTarget is where a prune pass brings
 // the cache back down to — deliberately below the cap, not equal to it, so
@@ -147,7 +147,7 @@ func (a *lifecycleAdapter) run(ctx context.Context) {
 		},
 	})
 
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -167,7 +167,7 @@ func (a *lifecycleAdapter) run(ctx context.Context) {
 // Joins prevDone too: a worker retired by a terminal sentinel (stop is
 // fire-and-forget) may still be mid-teardown at shutdown with no live
 // successor to imply it finished; a long-closed prevDone costs nothing.
-func drainLifecycleWorkers(runs map[string]*runEntry) {
+func drainLifecycleWorkers(runs map[string]*conversationEntry) {
 	var wg sync.WaitGroup
 	join := func(done chan struct{}) {
 		if done == nil {
@@ -191,7 +191,7 @@ func drainLifecycleWorkers(runs map[string]*runEntry) {
 // dispatch routes one bus sentinel to its handler by type. Anything else
 // matching the "system:conversation:"/"system:routing:" filter that isn't one of
 // these three exact types (there is none today) is silently ignored.
-func (a *lifecycleAdapter) dispatch(ctx context.Context, evt domain.Event, runs map[string]*runEntry) {
+func (a *lifecycleAdapter) dispatch(ctx context.Context, evt domain.Event, runs map[string]*conversationEntry) {
 	switch evt.EventType {
 	case domain.EventSystemRoutingDisposition:
 		a.handleDisposition(ctx, evt)
@@ -337,12 +337,12 @@ func (a *lifecycleAdapter) resolveBotToken(ctx context.Context, orgID, workspace
 
 // --- run-status / run-activity consumer: setStatus lifecycle + failure note ---
 
-// runEntry is the per-runID cache entry: the resolved slack-or-not verdict
+// conversationEntry is the per-conversationID cache entry: the resolved slack-or-not verdict
 // (and, when true, the channel/thread/token context a worker needs), plus
 // whichever per-run status worker is currently live. Owned exclusively by
 // the single dispatch goroutine — no locking, since nothing else ever
 // touches this map.
-type runEntry struct {
+type conversationEntry struct {
 	isSlack           bool
 	channel, threadTS string
 	botToken          string
@@ -388,9 +388,9 @@ func isTerminalRunStatus(status string) bool {
 // terminal status stops it (clearing the indicator, and on "failed" posting
 // the brief failure reply).
 //
-// Terminal statuses here are not necessarily final for the runID: a parked
+// Terminal statuses here are not necessarily final for the conversationID: a parked
 // ("open") run is resumable, and so is a completed+abort run
-// (internal/delegate/resume.go rebroadcasts "running" for the same runID on
+// (internal/delegate/resume.go rebroadcasts "running" for the same conversationID on
 // resume). So terminal→running for one run is a legitimate sequence, and
 // the retiring worker's trailing setStatus("") must not race the successor's
 // initial status call. That ordering is enforced per run, in the worker
@@ -400,7 +400,7 @@ func isTerminalRunStatus(status string) bool {
 // goroutine on a Slack round trip: it is process-wide (one adapter for all
 // orgs), and stalling it on a slow/429'd teardown call would head-of-line
 // block every other org's sentinels behind one run's cleanup.
-func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event, runs map[string]*runEntry) {
+func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event, runs map[string]*conversationEntry) {
 	var meta events.SystemConversationStatusMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		slackLog.Warn("slack lifecycle: decode run status failed", "error", err)
@@ -481,7 +481,7 @@ func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event
 // (not "running", or not a Slack run at all) is silently ignored — the
 // verdict-priming event is always system:conversation:status, per the cache contract
 // above.
-func (a *lifecycleAdapter) handleRunActivity(ctx context.Context, evt domain.Event, runs map[string]*runEntry) {
+func (a *lifecycleAdapter) handleRunActivity(ctx context.Context, evt domain.Event, runs map[string]*conversationEntry) {
 	var meta events.SystemConversationActivityMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		slackLog.Warn("slack lifecycle: decode run activity failed", "error", err)
@@ -495,20 +495,20 @@ func (a *lifecycleAdapter) handleRunActivity(ctx context.Context, evt domain.Eve
 }
 
 // resolveRunEntry runs the documented chain — Conversations.GetSystem -> Task ->
-// Events.GetMetadataSystem — to decide whether runID belongs to a Slack
+// Events.GetMetadataSystem — to decide whether conversationID belongs to a Slack
 // task and, if so, resolve the thread context + bot token a worker needs.
 // Every "this isn't a Slack run" outcome (no task, wrong entity source,
 // wrong event type, no metadata, unresolvable workspace/token) returns the
 // same isSlack=false zero value; a genuine store failure logs and also
 // degrades to isSlack=false rather than leaving the run unresolved forever
 // (a transient failure here would otherwise never get a chance to heal,
-// since resolution only ever runs once per runID).
-func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, runID string) *runEntry {
-	entry := &runEntry{cachedAt: slackLifecycleNow()}
+// since resolution only ever runs once per conversationID).
+func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, conversationID string) *conversationEntry {
+	entry := &conversationEntry{cachedAt: slackLifecycleNow()}
 
-	run, err := a.stores.Conversations.GetSystem(ctx, orgID, runID)
+	run, err := a.stores.Conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
-		slackLog.Warn("slack lifecycle: load run failed", "run", runID, "error", err)
+		slackLog.Warn("slack lifecycle: load run failed", "conversation", conversationID, "error", err)
 		return entry
 	}
 	if run == nil || run.TaskID == "" {
@@ -517,7 +517,7 @@ func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, runID str
 
 	task, err := a.stores.Tasks.GetSystem(ctx, orgID, run.TaskID)
 	if err != nil {
-		slackLog.Warn("slack lifecycle: load task failed", "run", runID, "error", err)
+		slackLog.Warn("slack lifecycle: load task failed", "conversation", conversationID, "error", err)
 		return entry
 	}
 	if task == nil || task.EntitySource != "slack" || task.EventType != domain.EventSlackMessage || task.PrimaryEventID == "" {
@@ -526,7 +526,7 @@ func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, runID str
 
 	metaJSON, err := a.stores.Events.GetMetadataSystem(ctx, orgID, task.PrimaryEventID)
 	if err != nil {
-		slackLog.Warn("slack lifecycle: load event metadata failed", "run", runID, "error", err)
+		slackLog.Warn("slack lifecycle: load event metadata failed", "conversation", conversationID, "error", err)
 		return entry
 	}
 	if metaJSON == "" {
@@ -534,7 +534,7 @@ func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, runID str
 	}
 	var meta SlackMessageMetadata
 	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
-		slackLog.Warn("slack lifecycle: parse event metadata failed", "run", runID, "error", err)
+		slackLog.Warn("slack lifecycle: parse event metadata failed", "conversation", conversationID, "error", err)
 		return entry
 	}
 
@@ -578,7 +578,7 @@ func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, runID str
 // If every entry is protected, eviction legitimately can't bring the count
 // down further — bounded in practice by concurrent live/retiring workers,
 // not total history.
-func pruneRunCache(runs map[string]*runEntry) {
+func pruneRunCache(runs map[string]*conversationEntry) {
 	if len(runs) <= slackLifecycleCacheMaxEntries {
 		return
 	}
@@ -695,15 +695,15 @@ func humanizeToolName(name string) string {
 // a "Details: <url>" fragment built from the multi-mode run URL shape
 // (/orgs/{org}/runs/{id}) only when publicURL() is non-empty — per the
 // ticket, omit the link entirely rather than guess a wrong fallback.
-func postSlackFailureReply(ctx context.Context, client *http.Client, publicURL func() string, orgID, runID, channel, threadTS, botToken string) {
+func postSlackFailureReply(ctx context.Context, client *http.Client, publicURL func() string, orgID, conversationID, channel, threadTS, botToken string) {
 	text := slackLifecycleFailureCopy
 	if u := publicURL(); u != "" {
-		text += fmt.Sprintf(" Details: %s/orgs/%s/runs/%s", u, orgID, runID)
+		text += fmt.Sprintf(" Details: %s/orgs/%s/runs/%s", u, orgID, conversationID)
 	}
 	if _, err := slackChatPostMessage(ctx, client, botToken, slackMessageParams{
 		Channel: channel, ThreadTS: threadTS, Text: text,
 	}); err != nil {
-		slackLog.Warn("slack lifecycle: failure reply post failed", "run", runID, "error", err)
+		slackLog.Warn("slack lifecycle: failure reply post failed", "conversation", conversationID, "error", err)
 	}
 }
 
@@ -721,7 +721,7 @@ type runStatusWorker struct {
 	ctx                         context.Context
 	client                      *http.Client
 	publicURL                   func() string
-	orgID, runID                string
+	orgID, conversationID       string
 	channel, threadTS, botToken string
 	// initial is the first indicator text the worker shows — the generic
 	// working pair for a worker started by "running", a setup-phase pair for
@@ -749,10 +749,10 @@ type runStatusWorker struct {
 // itself returns with no guarantee the initial call has started (or even
 // been scheduled) yet — callers that need to observe it must poll, not
 // assume synchronous completion.
-func newRunStatusWorker(ctx context.Context, client *http.Client, publicURL func() string, orgID, runID, channel, threadTS, botToken string, initial indicatorText, predecessor <-chan struct{}) *runStatusWorker {
+func newRunStatusWorker(ctx context.Context, client *http.Client, publicURL func() string, orgID, conversationID, channel, threadTS, botToken string, initial indicatorText, predecessor <-chan struct{}) *runStatusWorker {
 	w := &runStatusWorker{
 		ctx: ctx, client: client, publicURL: publicURL,
-		orgID: orgID, runID: runID, channel: channel, threadTS: threadTS, botToken: botToken,
+		orgID: orgID, conversationID: conversationID, channel: channel, threadTS: threadTS, botToken: botToken,
 		initial:     initial,
 		predecessor: predecessor,
 		activityCh:  make(chan indicatorText, 1),
@@ -935,7 +935,7 @@ func (w *runStatusWorker) setStatus(text indicatorText) {
 		loading = []string{text.loading}
 	}
 	if err := slackAssistantSetStatus(w.ctx, w.client, w.botToken, w.channel, w.threadTS, text.status, loading); err != nil {
-		slackLog.Warn("slack lifecycle: setStatus failed", "run", w.runID, "error", err)
+		slackLog.Warn("slack lifecycle: setStatus failed", "conversation", w.conversationID, "error", err)
 	}
 }
 
@@ -944,7 +944,7 @@ func (w *runStatusWorker) setStatus(text indicatorText) {
 func (w *runStatusWorker) clearStatus() { w.setStatus(indicatorText{}) }
 
 func (w *runStatusWorker) postFailureReply() {
-	postSlackFailureReply(w.ctx, w.client, w.publicURL, w.orgID, w.runID, w.channel, w.threadTS, w.botToken)
+	postSlackFailureReply(w.ctx, w.client, w.publicURL, w.orgID, w.conversationID, w.channel, w.threadTS, w.botToken)
 }
 
 // resetLifecycleTimer safely stops-drains-resets a running *time.Timer —

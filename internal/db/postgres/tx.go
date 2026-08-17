@@ -169,7 +169,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// compose with the surrounding claims tx (artifacts_* RLS scopes
 		// by team_id like runs); admin half stays pinned to s.admin so
 		// UpsertSystem inside WithTx routes outside the tx and commits
-		// autonomously, the same shape Conversations / RunWorktrees use.
+		// autonomously, the same shape Conversations / ConversationWorktrees use.
 		Artifacts:      newArtifactStore(tx, s.admin),
 		Entities:       newEntityStore(tx, tx),
 		Repos:          newRepositoryStore(tx, tx),
@@ -192,12 +192,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// autonomously, same shape Events / Conversations use for their
 		// admin-pool halves.
 		TaskMemory: newTaskMemoryStore(tx, s.admin),
-		// RunWorktrees: app-side write routes through the tx; admin
+		// ConversationWorktrees: app-side write routes through the tx; admin
 		// half stays pinned to s.admin so DeleteByPathSystem +
 		// ListSystem inside WithTx route outside the tx — those
 		// writes commit autonomously, same shape Events /
 		// Conversations / TaskMemory use for their admin-pool halves.
-		RunWorktrees: newRunWorktreeStore(tx, s.admin),
+		ConversationWorktrees: newRunWorktreeStore(tx, s.admin),
 		// Orgs: app-side writes route through the tx so settings
 		// upserts compose with the surrounding claims tx; admin half
 		// stays pinned to s.admin so ListActiveSystem +
@@ -289,12 +289,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// RLS for its cross-team aggregate, mirroring Spend/ExternalActions'
 		// split.
 		Marketplace: newMarketplaceStore(tx, s.admin),
-		// RunPendingInput: bound to the claims tx (not s.admin) so a resume
+		// ConversationPendingInput: bound to the claims tx (not s.admin) so a resume
 		// wake's input write commits atomically with its status flip under the
 		// resuming user's claims — the RLS policy admits it via the run's own
 		// visibility. Consume (claim time) runs system-side off the top-level
 		// store, never this tx-bound handle.
-		RunPendingInput: newRunPendingInputStore(tx),
+		ConversationPendingInput: newRunPendingInputStore(tx),
 		// Permissions: the app half is the tx, so the pending read runs under
 		// the caller's claims in the same transaction that authorized the
 		// conversation. The admin half stays pinned to s.admin — every write

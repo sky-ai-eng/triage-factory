@@ -624,7 +624,7 @@ const (
 	// the Cards swipe-right against a delegated task). The agent's
 	// prepared review is being thrown away in favor of the human
 	// handling the entity themselves. This case exists primarily
-	// to close the race where a stale frontend agentRuns
+	// to close the race where a stale frontend conversations
 	// map could let /swipe claim slip past without /requeue's
 	// cleanup; the swipe handler now runs the cleanup on every
 	// claim regardless of frontend state.
@@ -722,7 +722,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 //
 // All-or-nothing per call: any DB error inside the closure rolls back the whole
 // batch (notes + flips + audit rows), leaving the artifacts unresolved for a
-// retry on the next /undo, /requeue, dismiss, or complete. UpdateRunMemoryHumanContent
+// retry on the next /undo, /requeue, dismiss, or complete. UpdateConversationMemoryHumanContent
 // is idempotent and the flips re-target the same predicate set, so retry is safe.
 // All failures are logged, not fatal: the calling handler has already flipped the
 // task to its new state.
@@ -745,10 +745,10 @@ func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskI
 			return fmt.Errorf("list runs for task: %w", err)
 		}
 		for i := range runs {
-			runID := runs[i].ID
-			arts, artErr := tx.Artifacts.ListByRun(ctx, orgID, runID)
+			conversationID := runs[i].ID
+			arts, artErr := tx.Artifacts.ListByConversation(ctx, orgID, conversationID)
 			if artErr != nil {
-				return fmt.Errorf("artifacts.ListByRun(%s): %w", runID, artErr)
+				return fmt.Errorf("artifacts.ListByConversation(%s): %w", conversationID, artErr)
 			}
 			draftPRs := domain.AllDraftPullRequests(arts)
 			pendingReviews := domain.AllPendingReviewArtifacts(arts)
@@ -763,7 +763,7 @@ func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskI
 			if len(draftPRs) > 0 {
 				kind = "pr"
 			}
-			if err := tx.TaskMemory.UpdateRunMemoryHumanContent(ctx, orgID, runID, buildDiscardHumanContent(outcome, kind)); err != nil {
+			if err := tx.TaskMemory.UpdateConversationMemoryHumanContent(ctx, orgID, conversationID, buildDiscardHumanContent(outcome, kind)); err != nil {
 				return fmt.Errorf("human_content write: %w", err)
 			}
 
@@ -834,7 +834,7 @@ func (s *Server) draftPRCredentials(ctx context.Context, orgID, userID, taskID s
 			return err
 		}
 		for i := range runs {
-			arts, artErr := tx.Artifacts.ListByRun(ctx, orgID, runs[i].ID)
+			arts, artErr := tx.Artifacts.ListByConversation(ctx, orgID, runs[i].ID)
 			if artErr != nil {
 				return artErr
 			}

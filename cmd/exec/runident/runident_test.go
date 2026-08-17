@@ -57,13 +57,13 @@ func seedBlueprintRun(t *testing.T, conn *sql.DB, taskID string) string {
 	return brID
 }
 
-// seedRun stamps a task + run with the requested trigger_type so the
+// seedConversation stamps a task + run with the requested trigger_type so the
 // resolver has a row to find. Manual runs get LocalDefaultUserID per
 // schema CHECK; event runs leave creator_user_id NULL.
-func seedRun(t *testing.T, stores db.Stores, conn *sql.DB, runID, triggerType string) {
+func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, conversationID, triggerType string) {
 	t.Helper()
 	ctx := context.Background()
-	entity, _, err := stores.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "jira", "K-"+runID, "issue", "T", "https://x/"+runID)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "jira", "K-"+conversationID, "issue", "T", "https://x/"+conversationID)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
@@ -75,15 +75,15 @@ func seedRun(t *testing.T, stores db.Stores, conn *sql.DB, runID, triggerType st
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := stores.Tasks.FindOrCreate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, evt, 0.5)
+	task, _, err := stores.Tasks.FindOrCreate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, conversationID, evt, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := stores.Prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if err := stores.Prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + conversationID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 	dbtest.SeedConversation(t, conn, domain.Conversation{
-		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
+		ID: conversationID, TaskID: task.ID, PromptID: "p-" + conversationID,
 		Status: "running", Model: "m",
 		TriggerType:    triggerType,
 		BlueprintRunID: seedBlueprintRun(t, conn, task.ID),
@@ -108,7 +108,7 @@ func TestResolveRunIdentity_RunNotFound(t *testing.T) {
 
 func TestResolveRunIdentity_ManualRun(t *testing.T) {
 	stores, conn := newStores(t)
-	seedRun(t, stores, conn, "m1", "manual")
+	seedConversation(t, stores, conn, "m1", "manual")
 
 	ident, err := ResolveRunIdentity(context.Background(), stores, "m1")
 	if err != nil {
@@ -120,10 +120,10 @@ func TestResolveRunIdentity_ManualRun(t *testing.T) {
 	if ident.UserID == "" {
 		t.Errorf("manual run UserID empty; schema CHECK requires non-NULL creator_user_id for trigger_type='manual' (got %+v)", ident)
 	}
-	if ident.RunID != "m1" {
-		t.Errorf("RunID = %q, want m1", ident.RunID)
+	if ident.ConversationID != "m1" {
+		t.Errorf("ConversationID = %q, want m1", ident.ConversationID)
 	}
-	// TeamID rides off conversations.team_id (TFAC-458) — the local-mode RunInfo
+	// TeamID rides off conversations.team_id (TFAC-458) — the local-mode ConversationInfo
 	// source the capture writers stamp artifacts.team_id from. Create lands
 	// every local run on the sole team.
 	if ident.TeamID != runmode.LocalDefaultTeamID {
@@ -133,7 +133,7 @@ func TestResolveRunIdentity_ManualRun(t *testing.T) {
 
 func TestResolveRunIdentity_EventTriggeredRun(t *testing.T) {
 	stores, conn := newStores(t)
-	seedRun(t, stores, conn, "e1", "event")
+	seedConversation(t, stores, conn, "e1", "event")
 
 	ident, err := ResolveRunIdentity(context.Background(), stores, "e1")
 	if err != nil {
@@ -156,10 +156,10 @@ func TestResolveRunIdentity_EventTriggeredRun(t *testing.T) {
 // off the run's row (conversations.team_id), not synthesized from a
 // constant: a run whose team_id has been moved off the local sentinel
 // resolves to that exact value. This is the local-resolver half of the
-// TFAC-458 "RunInfo carries TeamID" contract the capture writers depend on.
+// TFAC-458 "ConversationInfo carries TeamID" contract the capture writers depend on.
 func TestResolveRunIdentity_TeamIDFromRow(t *testing.T) {
 	stores, conn := newStores(t)
-	seedRun(t, stores, conn, "t1", "manual")
+	seedConversation(t, stores, conn, "t1", "manual")
 
 	const customTeam = "00000000-0000-0000-0000-0000000009f9"
 	if _, err := conn.Exec(`UPDATE conversations SET team_id = ? WHERE id = 't1'`, customTeam); err != nil {

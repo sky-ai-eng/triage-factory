@@ -20,21 +20,21 @@ import (
 // run, never its lineage.
 func seedPgRunWithMemory(t *testing.T, h *pgtest.Harness, stores db.Stores, orgID, teamID, creatorID, entityID, visibility, narrative string) string {
 	t.Helper()
-	runID := uuid.New().String()
+	conversationID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO conversations (id, org_id, team_id, creator_user_id, visibility, trigger_type, origin, status)
 		VALUES ($1, $2, $3, $4, $5, 'manual', 'interactive', 'completed')
-	`, runID, orgID, teamID, creatorID, visibility); err != nil {
+	`, conversationID, orgID, teamID, creatorID, visibility); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	ctx := context.Background()
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, runID, entityID, "", narrative); err != nil {
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, entityID, "", narrative); err != nil {
 		t.Fatalf("UpsertAgentMemorySystem: %v", err)
 	}
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, runID, entityID, domain.MemoryRolePrimary); err != nil {
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, domain.MemoryRolePrimary); err != nil {
 		t.Fatalf("RecordEntityTouchSystem: %v", err)
 	}
-	return runID
+	return conversationID
 }
 
 // contentsOf collects each entry's composed Content for set assertions.
@@ -85,7 +85,7 @@ func TestLocalClient_MemoryLoad_Postgres_TeamScoped(t *testing.T) {
 		t.Fatalf("seed reader run: %v", err)
 	}
 
-	client := NewLocal(stores, RunInfo{OrgID: orgID, UserID: owner, TeamID: team1, RunID: readerRun, IsEventTriggered: true})
+	client := NewLocal(stores, ConversationInfo{OrgID: orgID, UserID: owner, TeamID: team1, ConversationID: readerRun, IsEventTriggered: true})
 	res, err := client.MemoryLoad(ctx, "github", "octo/repo#7", 20)
 	if err != nil {
 		t.Fatalf("MemoryLoad: %v", err)
@@ -136,7 +136,7 @@ func TestLocalClient_MemoryLoad_Postgres_TeamScoped(t *testing.T) {
 	}
 
 	// Symmetric: a team-2 read sees team2 + org-visible, never team1's.
-	client2 := NewLocal(stores, RunInfo{OrgID: orgID, UserID: owner, TeamID: team2, RunID: readerRun, IsEventTriggered: true})
+	client2 := NewLocal(stores, ConversationInfo{OrgID: orgID, UserID: owner, TeamID: team2, ConversationID: readerRun, IsEventTriggered: true})
 	res2, err := client2.MemoryLoad(ctx, "github", "octo/repo#7", 20)
 	if err != nil {
 		t.Fatalf("MemoryLoad team2: %v", err)
@@ -165,7 +165,7 @@ func TestLocalClient_MemoryLoad_Postgres_Miss(t *testing.T) {
 		t.Fatalf("seed reader run: %v", err)
 	}
 
-	client := NewLocal(stores, RunInfo{OrgID: orgID, UserID: owner, TeamID: team1, RunID: readerRun, IsEventTriggered: true})
+	client := NewLocal(stores, ConversationInfo{OrgID: orgID, UserID: owner, TeamID: team1, ConversationID: readerRun, IsEventTriggered: true})
 	res, err := client.MemoryLoad(ctx, "jira", "NOPE-1", 20)
 	if err != nil {
 		t.Fatalf("MemoryLoad(miss): %v", err)

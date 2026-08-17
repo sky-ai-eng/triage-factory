@@ -36,7 +36,7 @@ import (
 // LLM material through — declared here so the provisioner's test can stub it
 // without a real STS minter. The production impl is *llmcred.Resolver.
 type llmResolver interface {
-	ResolveForBundle(ctx context.Context, orgID, runID string) (llmcred.Material, error)
+	ResolveForBundle(ctx context.Context, orgID, conversationID string) (llmcred.Material, error)
 }
 
 var log = slog.Default().With("component", "credprovision")
@@ -93,7 +93,7 @@ func NewManager(stores db.Stores, llm llmResolver) *Manager {
 	}
 }
 
-// ProvisionForRun resolves runID's credentials and seals them to its
+// ProvisionForRun resolves conversationID's credentials and seals them to its
 // current claimant's published pubkey, writing run_credentials. Called
 // synchronously off the executor's cred_request notification (the fast
 // path) and by both sweeps (the backstop / refresh paths) — idempotent and
@@ -105,7 +105,7 @@ func NewManager(stores db.Stores, llm llmResolver) *Manager {
 // (reaped, requeued) between the notification firing and this handler
 // running; the executor's own timeout/requeue path is what recovers that
 // window, not this function surfacing an error.
-func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err error) {
+func (m *Manager) ProvisionForRun(ctx context.Context, orgID, conversationID string) (err error) {
 	// The brain's half of the credential handshake, as its OWN root. It is
 	// deliberately not joined to the executor's awaiting-credentials span:
 	// the tf_ctl doorbell that usually triggers this is lossy by design (the
@@ -114,7 +114,7 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 	// with no requester at all. conversation.id is the join; put the same id
 	// in a Tempo query and both sides come back.
 	ctx, span := tracer.Start(ctx, "credentials.provision", trace.WithNewRoot(),
-		trace.WithAttributes(telemetry.ConversationID(runID), telemetry.OrgID(orgID)))
+		trace.WithAttributes(telemetry.ConversationID(conversationID), telemetry.OrgID(orgID)))
 	defer func() {
 		if err != nil {
 			span.RecordError(err)
@@ -123,9 +123,9 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 		span.End()
 	}()
 
-	claim, ok, err := m.stores.RunQueue.GetClaim(ctx, orgID, runID)
+	claim, ok, err := m.stores.ConversationQueue.GetClaim(ctx, orgID, conversationID)
 	if err != nil {
-		return fmt.Errorf("credprovision: read claim for run %s: %w", runID, err)
+		return fmt.Errorf("credprovision: read claim for run %s: %w", conversationID, err)
 	}
 	if !ok || claim.ExecutorID == "" {
 		span.SetAttributes(telemetry.Outcome("unclaimed"))
@@ -138,7 +138,7 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 	}
 	if inst == nil {
 		log.Warn("claiming instance not found; skipping (not yet registered)",
-			"run", runID, "executor", claim.ExecutorID)
+			"conversation", conversationID, "executor", claim.ExecutorID)
 		span.SetAttributes(telemetry.Outcome("executor_unregistered"))
 		return nil
 	}
@@ -153,7 +153,7 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 	}
 	if sealPubKey == "" {
 		log.Warn("no sidecar or instance pubkey to seal to; skipping (not yet published, or not an executor)",
-			"run", runID, "executor", claim.ExecutorID)
+			"conversation", conversationID, "executor", claim.ExecutorID)
 		span.SetAttributes(telemetry.Outcome("no_recipient_key"))
 		return nil
 	}
@@ -169,14 +169,14 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 		// desync the executor's understanding of which claim this bundle
 		// answers. Skip and let the reaper requeue.
 		log.Warn("claiming executor's boot epoch has moved on since this run was claimed; skipping (reaper will requeue)",
-			"run", runID, "executor", claim.ExecutorID, "claim_epoch", claim.BootEpoch, "instance_epoch", inst.BootEpoch)
+			"conversation", conversationID, "executor", claim.ExecutorID, "claim_epoch", claim.BootEpoch, "instance_epoch", inst.BootEpoch)
 		span.SetAttributes(telemetry.Outcome("stale_boot_epoch"))
 		return nil
 	}
 
 	pubBytes, err := base64.StdEncoding.DecodeString(sealPubKey)
 	if err != nil || len(pubBytes) != 32 {
-		return fmt.Errorf("credprovision: run %s claim carries a malformed recipient pubkey", runID)
+		return fmt.Errorf("credprovision: run %s claim carries a malformed recipient pubkey", conversationID)
 	}
 	var pub [32]byte
 	copy(pub[:], pubBytes)
@@ -192,9 +192,9 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 	// the executor's awaiting-credentials wait times out and requeues, and
 	// the error names AssumeRole + the role ARN (surfaced by llmcred).
 	if m.llm != nil {
-		mat, err := m.llm.ResolveForBundle(ctx, orgID, runID)
+		mat, err := m.llm.ResolveForBundle(ctx, orgID, conversationID)
 		if err != nil && !llmcred.IsNoCredentials(err) {
-			return fmt.Errorf("credprovision: resolve LLM credentials for org %s (run %s): %w", orgID, runID, err)
+			return fmt.Errorf("credprovision: resolve LLM credentials for org %s (run %s): %w", orgID, conversationID, err)
 		}
 		bundle.LLM = mat.Env
 		if !mat.Expiry.IsZero() {
@@ -208,8 +208,8 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 		bundle.LLM = llm
 	}
 
-	if gh, err := m.resolveGitHub(ctx, orgID, claim.TeamID, claim.TaskID, runID); err != nil {
-		return fmt.Errorf("credprovision: resolve github credentials for run %s: %w", runID, err)
+	if gh, err := m.resolveGitHub(ctx, orgID, claim.TeamID, claim.TaskID, conversationID); err != nil {
+		return fmt.Errorf("credprovision: resolve github credentials for run %s: %w", conversationID, err)
 	} else {
 		bundle.GitHub = gh
 	}
@@ -226,25 +226,25 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 	// free of provider-specific credential symbols. A provider with nothing
 	// configured for this org/team is simply absent from the map.
 	if providers, err := agenthost.ResolveProviderCredentials(ctx, m.stores, agenthost.ProvisionScope{
-		OrgID: orgID, TeamID: claim.TeamID, TaskID: claim.TaskID, RunID: runID,
+		OrgID: orgID, TeamID: claim.TeamID, TaskID: claim.TaskID, ConversationID: conversationID,
 	}); err != nil {
-		return fmt.Errorf("credprovision: resolve provider credentials for run %s: %w", runID, err)
+		return fmt.Errorf("credprovision: resolve provider credentials for run %s: %w", conversationID, err)
 	} else {
 		bundle.Providers = providers
 	}
 
 	plaintext, err := bundle.Marshal()
 	if err != nil {
-		return fmt.Errorf("credprovision: marshal bundle for run %s: %w", runID, err)
+		return fmt.Errorf("credprovision: marshal bundle for run %s: %w", conversationID, err)
 	}
 	sealed, err := credseal.Seal(pub, plaintext)
 	if err != nil {
-		return fmt.Errorf("credprovision: seal bundle for run %s: %w", runID, err)
+		return fmt.Errorf("credprovision: seal bundle for run %s: %w", conversationID, err)
 	}
-	if err := m.stores.RunCredentials.Put(ctx, orgID, runID, claim.ExecutorID, inst.BootEpoch, sealed); err != nil {
-		return fmt.Errorf("credprovision: write bundle for run %s: %w", runID, err)
+	if err := m.stores.ClaimCredentials.Put(ctx, orgID, conversationID, claim.ExecutorID, inst.BootEpoch, sealed); err != nil {
+		return fmt.Errorf("credprovision: write bundle for run %s: %w", conversationID, err)
 	}
-	log.Debug("provisioned run credential bundle", "run", runID, "org", orgID, "executor", claim.ExecutorID, "boot_epoch", inst.BootEpoch)
+	log.Debug("provisioned run credential bundle", "conversation", conversationID, "org", orgID, "executor", claim.ExecutorID, "boot_epoch", inst.BootEpoch)
 	span.SetAttributes(telemetry.Outcome("sealed"))
 	return nil
 }
@@ -256,7 +256,7 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 // every repo in the run's authorized set (the same team-tracked ∩
 // conversation_worktrees intersection the git proxy's live authorize gate uses, see
 // gitAuthorizeDecision in internal/delegate/spawner.go).
-func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runID string) (*credbundle.GitHubCreds, error) {
+func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conversationID string) (*credbundle.GitHubCreds, error) {
 	scoped, ok := m.ghResolver.(ghclient.ScopedResolver)
 	if !ok {
 		return nil, nil
@@ -269,7 +269,7 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 		return nil, nil
 	}
 
-	repoIDs, err := m.authorizedRepos(ctx, orgID, teamID, taskID, runID)
+	repoIDs, err := m.authorizedRepos(ctx, orgID, teamID, taskID, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve authorized repo set: %w", err)
 	}
@@ -403,7 +403,7 @@ func cliChannelScope(primaryRepo string, repoIDs []string) (owner string, repoNa
 // tokens stay per-repo scoped (resolveGitHub), and pushes remain gated by the
 // conversation_worktrees ledger a `workspace add` creates. The boundary is the team's
 // own tracked repos — never another team's, never another org's.
-func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, runID string) ([]string, error) {
+func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, conversationID string) ([]string, error) {
 	if m.stores.TeamGitHubRepos == nil {
 		return nil, nil
 	}
@@ -429,8 +429,8 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, ru
 	if repoID := m.taskPrimaryRepo(ctx, orgID, taskID); repoID != "" {
 		add(repoID)
 	}
-	if m.stores.RunWorktrees != nil {
-		rows, err := m.stores.RunWorktrees.ListSystem(ctx, orgID, runID)
+	if m.stores.ConversationWorktrees != nil {
+		rows, err := m.stores.ConversationWorktrees.ListSystem(ctx, orgID, conversationID)
 		if err != nil {
 			return nil, err
 		}

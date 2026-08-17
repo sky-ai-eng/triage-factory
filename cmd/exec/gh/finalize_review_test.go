@@ -22,8 +22,8 @@ type finalizeHost struct {
 	gotEv  string
 }
 
-func (h *finalizeHost) LookupRun(context.Context) (agenthost.RunInfo, error) {
-	return agenthost.RunInfo{RunID: "run-1", OrgID: "org-1"}, nil
+func (h *finalizeHost) LookupRun(context.Context) (agenthost.ConversationInfo, error) {
+	return agenthost.ConversationInfo{ConversationID: "run-1", OrgID: "org-1"}, nil
 }
 
 func (h *finalizeHost) FinalizeReviewDraft(_ context.Context, reviewID, event, _ string) (agenthost.ReviewFinalizeResult, error) {

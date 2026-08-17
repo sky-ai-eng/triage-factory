@@ -97,12 +97,12 @@ func (h *handler) handleOverview(w http.ResponseWriter, r *http.Request) {
 		httpx.InternalError(w, "fleet-overview-instances", err)
 		return
 	}
-	timings, err := h.stores.RunQueue.RecentRunTimingsSystem(ctx, since, 0)
+	timings, err := h.stores.ConversationQueue.RecentRunTimingsSystem(ctx, since, 0)
 	if err != nil {
 		httpx.InternalError(w, "fleet-overview-timings", err)
 		return
 	}
-	queued, err := h.stores.RunQueue.QueuedRunAgesSystem(ctx)
+	queued, err := h.stores.ConversationQueue.QueuedRunAgesSystem(ctx)
 	if err != nil {
 		httpx.InternalError(w, "fleet-overview-queue", err)
 		return
@@ -176,7 +176,7 @@ func versionSkews(instances []domain.Instance) []versionSkew {
 	return out
 }
 
-func summarizeQueue(queued []domain.QueuedRun, timings []domain.RunTiming, now time.Time) queueSummary {
+func summarizeQueue(queued []domain.QueuedConversation, timings []domain.ConversationTiming, now time.Time) queueSummary {
 	q := queueSummary{Depth: len(queued)}
 	if len(queued) > 0 {
 		// QueuedRunAgesSystem returns oldest-first, so [0] is the oldest wait.
@@ -194,7 +194,7 @@ func summarizeQueue(queued []domain.QueuedRun, timings []domain.RunTiming, now t
 	return q
 }
 
-func summarizeRuns(timings []domain.RunTiming, hours int) runsSummary {
+func summarizeRuns(timings []domain.ConversationTiming, hours int) runsSummary {
 	rs := runsSummary{WindowHours: hours, Total: len(timings)}
 	failureCounts := map[string]int{}
 	var durations []int
@@ -471,7 +471,7 @@ func (h *handler) handleInstanceSandboxes(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	claims, err := h.stores.RunQueue.RecentClaimsForExecutorSystem(ctx, id, limit)
+	claims, err := h.stores.ConversationQueue.RecentClaimsForExecutorSystem(ctx, id, limit)
 	if err != nil {
 		httpx.InternalError(w, "fleet-sandboxes", err)
 		return
@@ -546,7 +546,7 @@ func (h *handler) handleClaimSeries(w http.ResponseWriter, r *http.Request) {
 	// claim nobody ever sampled" (200 with an empty series — an ordinary
 	// sub-minute run, or one that predates the sampler). Without it every
 	// unsampled run would read as a missing one.
-	claim, err := h.stores.RunQueue.ClaimByIDSystem(ctx, id)
+	claim, err := h.stores.ConversationQueue.ClaimByIDSystem(ctx, id)
 	if err != nil {
 		httpx.InternalError(w, "fleet-series-claim", err)
 		return
@@ -649,7 +649,7 @@ func (h *handler) handleBacklog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	queued, err := h.stores.RunQueue.QueuedRunAgesSystem(r.Context())
+	queued, err := h.stores.ConversationQueue.QueuedRunAgesSystem(r.Context())
 	if err != nil {
 		httpx.InternalError(w, "fleet-backlog", err)
 		return
@@ -662,7 +662,7 @@ func (h *handler) handleBacklog(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, dto)
 }
 
-func backlogByOrg(queued []domain.QueuedRun, now time.Time) []backlogOrgShare {
+func backlogByOrg(queued []domain.QueuedConversation, now time.Time) []backlogOrgShare {
 	// queued is oldest-first, so the first row seen per org is its oldest wait.
 	idx := map[string]int{}
 	var shares []backlogOrgShare

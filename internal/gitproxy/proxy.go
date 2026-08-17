@@ -197,10 +197,10 @@ type Config struct {
 	// in via this flag.
 	AllowNonLoopback bool
 
-	// RunID is the run identifier this proxy serves. Carried for
+	// ConversationID is the run identifier this proxy serves. Carried for
 	// future per-run policy / observability; the proxy itself does not
 	// branch on it today.
-	RunID string
+	ConversationID string
 
 	// IncomingToken, when non-empty, is the per-run secret every request
 	// must present before the proxy injects the real credential and

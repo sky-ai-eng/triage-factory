@@ -248,7 +248,7 @@ func TestCancelProject_DrainsQueuedTurnAndStopsRetry(t *testing.T) {
 		}
 	}
 	// And the predicate agrees: nothing is claimable on this conversation.
-	if claimed, err := stores.RunQueue.ClaimNextRun(context.Background(), "post-stop", 1, db.ClaimPlacement{}); err != nil {
+	if claimed, err := stores.ConversationQueue.ClaimNextConversation(context.Background(), "post-stop", 1, db.ClaimPlacement{}); err != nil {
 		t.Fatalf("post-stop claim: %v", err)
 	} else if claimed != nil {
 		t.Errorf("claimed %s after the force-stop, want nothing", claimed.ID)

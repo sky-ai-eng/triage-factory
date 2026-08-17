@@ -14,7 +14,7 @@ import "time"
 // Build the key with ArtifactDedupKey.
 //
 // TeamID is denormalized from the owning run so reads scope by team
-// exactly like runs. RunID is nullable (empty string here) so a row
+// exactly like runs. ConversationID is nullable (empty string here) so a row
 // survives a run purge for audit — the FK is ON DELETE SET NULL.
 type Artifact struct {
 	ID string `json:"id"`

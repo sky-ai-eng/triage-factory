@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import * as Popover from '@radix-ui/react-popover'
 import type { Conversation, Task } from '../types'
-import { EMPTY_FEED, type FeedLine, type RunCardFeed } from '../lib/runFeed'
+import { EMPTY_FEED, type FeedLine, type RunCardFeed } from '../lib/conversationFeed'
 import { useOrgHref } from '../hooks/useOrgHref'
 import ArtifactList from './ArtifactList'
 import RequestedReviewerBadge from './RequestedReviewerBadge'
@@ -13,14 +13,14 @@ import {
   completionKind,
   formatDurationMs,
   formatElapsed,
-  isActiveRun,
+  isActiveConversation,
   isActiveStatus,
   isFailedStatus,
   isTerminalStatus,
   QUEUE_DWELL_VISIBLE_MS,
   queueDwellMs,
   workStartedAt,
-} from '../lib/runStatus'
+} from '../lib/conversationStatus'
 import { AttentionRow, CardPlane, EventTag, HudHeader, SourceTag } from './board/cardChrome'
 import {
   compactNum,
@@ -45,7 +45,7 @@ interface Props {
   run: Conversation
   chainSteps?: Conversation[]
   // Bounded live-feed projection for this run (running stats + last few ticker
-  // lines) — see lib/runFeed. The board maintains it incrementally instead of
+  // lines) — see lib/conversationFeed. The board maintains it incrementally instead of
   // holding every run's full message array in state.
   feed?: RunCardFeed
   // Unanswered tool-permission prompts for this run, head-first. When non-empty
@@ -90,7 +90,7 @@ export default function AgentCard({
   // (unresolved rows sort to the top of the list).
   const [artifactsOpen, setArtifactsOpen] = useState(false)
 
-  const isActive = isActiveRun(run)
+  const isActive = isActiveConversation(run)
   // Waiting for a dispatcher slot (the process-wide concurrency cap), not
   // executing. Without an explicit state the card reads as broken — a frozen
   // elapsed readout and an empty feed — when the run is just in line.
@@ -396,7 +396,7 @@ function ArtifactsAffordance({
             Artifacts
           </div>
           <ArtifactList
-            runId={run.ID}
+            conversationId={run.ID}
             pendingArtifactIds={run.pending_artifact_ids}
             refreshKey={artifactSetKey(run)}
             onOpenApproval={(kind, id) => {
@@ -457,7 +457,7 @@ const FEED_MASK = 'linear-gradient(to bottom, transparent 0, #000 22px, #000 100
 // LiveFeed is the flush, borderless activity ticker: a few of the most recent
 // one-liners in monospace, auto-advancing to the newest, top-masked so older
 // lines dissolve upward. No box, no scrollbar — it's part of the card. The
-// lines arrive pre-flattened (lib/runFeed) so the card does no per-render
+// lines arrive pre-flattened (lib/conversationFeed) so the card does no per-render
 // transcript work.
 function LiveFeed({ lines, isActive }: { lines: FeedLine[]; isActive: boolean }) {
   if (lines.length === 0) {
@@ -510,7 +510,7 @@ function LiveFeed({ lines, isActive }: { lines: FeedLine[]; isActive: boolean })
 // has no summary (infra failures don't write one), explanatory copy naming
 // the knob to turn.
 //
-// The success terminal splits three ways (lib/runStatus completionKind), and
+// The success terminal splits three ways (lib/conversationStatus completionKind), and
 // the card says which: a mid-chain step that handed off is not the task being
 // over, and an abort is not a success at all. Same derivation the run station's
 // state light uses, so the board card and the run page agree.

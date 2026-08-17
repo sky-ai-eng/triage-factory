@@ -65,10 +65,10 @@ func NewLocalFromEnv(ctx context.Context, stores db.Stores) (Client, error) {
 		}
 		return nil, fmt.Errorf("agenthost: resolve run identity: %w", err)
 	}
-	return NewLocal(stores, RunInfo{
+	return NewLocal(stores, ConversationInfo{
 		OrgID:            ident.OrgID,
 		UserID:           ident.UserID,
-		RunID:            ident.RunID,
+		ConversationID:   ident.ConversationID,
 		TeamID:           ident.TeamID,
 		IsEventTriggered: ident.IsEventTriggered,
 	}), nil

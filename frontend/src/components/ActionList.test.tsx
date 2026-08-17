@@ -34,7 +34,7 @@ describe('ActionList', () => {
       action({ id: 'a1', action: 'comment_posted', target: 'org/repo#18' }),
       action({ id: 'a2', action: 'branch_pushed', target: 'org/repo' }),
     ])
-    render(<ActionList runId="r1" />)
+    render(<ActionList conversationId="r1" />)
 
     expect(await screen.findByText('Comment posted')).toBeInTheDocument()
     expect(screen.getByText('Branch pushed')).toBeInTheDocument()
@@ -60,7 +60,7 @@ describe('ActionList', () => {
         },
       }),
     ])
-    render(<ActionList runId="r1" />)
+    render(<ActionList conversationId="r1" />)
 
     expect(await screen.findByText('Raw gh write')).toBeInTheDocument()
     expect(
@@ -79,7 +79,7 @@ describe('ActionList', () => {
         details: { target: 'evil.example.com:443', reason: 'not_on_allowlist' },
       }),
     ])
-    render(<ActionList runId="r1" />)
+    render(<ActionList conversationId="r1" />)
 
     expect(await screen.findByText('Network refused')).toBeInTheDocument()
     expect(screen.getByText('reason not_on_allowlist')).toBeInTheDocument()
@@ -99,7 +99,7 @@ describe('ActionList', () => {
         details: { operation: 'ClosePr' },
       }),
     ])
-    render(<ActionList runId="r1" />)
+    render(<ActionList conversationId="r1" />)
 
     expect(
       await screen.findByLabelText('Raw gh GraphQL write: PR_kwDOabc (operation ClosePr)'),
@@ -108,7 +108,7 @@ describe('ActionList', () => {
 
   it('says a run touched nothing outside the box, rather than hiding', async () => {
     mockActions([])
-    render(<ActionList runId="r1" />)
+    render(<ActionList conversationId="r1" />)
     expect(await screen.findByText('No external actions yet.')).toBeInTheDocument()
   })
 
@@ -116,7 +116,7 @@ describe('ActionList', () => {
     // It used to cap at 200 rows and print "older actions are in the activity
     // feed"; the older actions are now one click away on this surface.
     mockActions([action({ id: 'a1' })], 'tok-2', 250)
-    render(<ActionList runId="r1" />)
+    render(<ActionList conversationId="r1" />)
     expect(
       await screen.findByRole('button', { name: /Load more \(1 of 250\)/ }),
     ).toBeInTheDocument()
@@ -126,7 +126,7 @@ describe('ActionList', () => {
     // "No external actions yet" on a failed fetch would be a false statement
     // about a governance surface — worse than an error.
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500, ...jsonBody({}) }))
-    render(<ActionList runId="r1" />)
+    render(<ActionList conversationId="r1" />)
     expect(await screen.findByText(/Couldn't load this run's actions\./)).toBeInTheDocument()
   })
 
@@ -137,10 +137,10 @@ describe('ActionList', () => {
       .mockResolvedValueOnce({ ok: false, status: 500, ...jsonBody({}) })
     vi.stubGlobal('fetch', fetchMock)
 
-    const { rerender } = render(<ActionList runId="r1" refreshKey="running:1" />)
+    const { rerender } = render(<ActionList conversationId="r1" refreshKey="running:1" />)
     expect(await screen.findByText('Comment posted')).toBeInTheDocument()
 
-    rerender(<ActionList runId="r1" refreshKey="running:2" />)
+    rerender(<ActionList conversationId="r1" refreshKey="running:2" />)
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     expect(screen.getByText('Comment posted')).toBeInTheDocument()
   })

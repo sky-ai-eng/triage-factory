@@ -25,8 +25,8 @@ import (
 //   - admin: SpendByCategorySystem. The org-wide aggregate a claims-less system
 //     caller needs — the TFAC-477 safety cap reads it from a Spawner.Delegate
 //     goroutine with no tf.current_org_id(), where an app-pool read would see
-//     nothing. Mirrors the app/admin split on artifactStore (ListByRun /
-//     ListByRunSystem).
+//     nothing. Mirrors the app/admin split on artifactStore (ListByConversation /
+//     ListByConversationSystem).
 //
 // org_id stays in every WHERE as defense in depth alongside RLS on both pools.
 type spendStore struct {
@@ -52,7 +52,7 @@ func (s *spendStore) ListSpend(ctx context.Context, orgID string, opts domain.Sp
 // ListSpendSystem runs listSpend on the admin pool (BYPASSRLS) so a role-gated
 // team / org usage read (TFAC-478) sees spend across teams the caller may not
 // belong to. org_id stays in the WHERE as defense in depth. Mirrors
-// SpendByCategorySystem / ListByRunSystem.
+// SpendByCategorySystem / ListByConversationSystem.
 func (s *spendStore) ListSpendSystem(ctx context.Context, orgID string, opts domain.SpendFilter) ([]domain.SpendRow, error) {
 	return listSpend(ctx, s.admin, orgID, opts)
 }
@@ -114,7 +114,7 @@ func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since, u
 // SpendByCategorySystem runs SpendByCategory's aggregate on the admin pool
 // (BYPASSRLS) so a claims-less system caller (the TFAC-477 safety cap, in a
 // Spawner.Delegate goroutine) sees org-wide spend across every team. org_id
-// stays in the WHERE as defense in depth. Mirrors ListByRunSystem.
+// stays in the WHERE as defense in depth. Mirrors ListByConversationSystem.
 func (s *spendStore) SpendByCategorySystem(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
 	return spendByCategory(ctx, s.admin, orgID, "", since, until)
 }

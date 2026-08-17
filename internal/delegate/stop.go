@@ -117,12 +117,12 @@ const (
 // write routes through the admin pool. Local mode handlers pass
 // runmode.LocalDefaultUserID; multi-mode handlers extract from JWT
 // claims.
-func (s *Spawner) Stop(orgID, runID, userID string) error {
+func (s *Spawner) Stop(orgID, conversationID, userID string) error {
 	note := stopNoteBySystem
 	if userID != "" {
 		note = stopNoteByUser
 	}
-	return s.stop(orgID, runID, userID, false, note)
+	return s.stop(orgID, conversationID, userID, false, note)
 }
 
 // StopAndCancelBlueprint stops the conversation and finalizes its blueprint
@@ -138,19 +138,19 @@ func (s *Spawner) Stop(orgID, runID, userID string) error {
 // cause is the lifecycle event the caller is acting on. It reaches the
 // transcript verbatim, so the ended conversation explains its own ending to
 // whoever reads it later.
-func (s *Spawner) StopAndCancelBlueprint(orgID, runID, userID string, cause StopCause) error {
-	return s.stop(orgID, runID, userID, true, cause.note())
+func (s *Spawner) StopAndCancelBlueprint(orgID, conversationID, userID string, cause StopCause) error {
+	return s.stop(orgID, conversationID, userID, true, cause.note())
 }
 
 // stop is the shared body of both verbs. cancelBlueprint gates the two places
 // the blueprint layer is touched, and nothing else differs — one path, so the
 // stop verb and the lifecycle teardown cannot drift apart in the parts they
 // share. note is the sentence each verb writes onto the transcript.
-func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note string) error {
+func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint bool, note string) error {
 	// Preflight: load the run under the caller's identity so a
-	// cross-org runID surfaces as "not found" BEFORE we tear anything
-	// down. The cancels map below is keyed only by runID, so without
-	// this gate any caller who learns an active runID could fire its
+	// cross-org conversationID surfaces as "not found" BEFORE we tear anything
+	// down. The cancels map below is keyed only by conversationID, so without
+	// this gate any caller who learns an active conversationID could fire its
 	// goroutine cancel() regardless of which org owns the run — the
 	// goroutine then writes the terminal row under its own captured
 	// cfg.orgID and the cross-org actor is invisible to the audit
@@ -165,18 +165,18 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note s
 	)
 	if userID != "" {
 		preflightErr = s.tx.SyntheticClaimsWithTx(context.Background(), orgID, userID, func(ts db.TxStores) error {
-			r, e := ts.Conversations.Get(context.Background(), orgID, runID)
+			r, e := ts.Conversations.Get(context.Background(), orgID, conversationID)
 			run = r
 			return e
 		})
 	} else {
-		run, preflightErr = s.agentRuns.GetSystem(context.Background(), orgID, runID)
+		run, preflightErr = s.conversations.GetSystem(context.Background(), orgID, conversationID)
 	}
 	if preflightErr != nil {
 		return fmt.Errorf("load run: %w", preflightErr)
 	}
 	if run == nil {
-		return fmt.Errorf("%w %s", ErrNoActiveRun, runID)
+		return fmt.Errorf("%w %s", ErrNoActiveRun, conversationID)
 	}
 	// A run that already concluded has nothing to stop, and saying so here —
 	// rather than letting the park write below discover it — is what keeps a
@@ -185,7 +185,7 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note s
 	// its NEXT step cancelled by a click aimed at work that had already
 	// finished.
 	if domain.IsTerminalRunStatus(run.Status) {
-		return fmt.Errorf("%w %s", ErrNoActiveRun, runID)
+		return fmt.Errorf("%w %s", ErrNoActiveRun, conversationID)
 	}
 
 	// The stop's record is a transcript row, not a verdict on the
@@ -208,7 +208,7 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note s
 	// it there and a swiped or closed task silently ends a conversation with
 	// no explanation at all, which is the case this note exists for.
 	if cancelBlueprint || run.Status != domain.StatusOpen {
-		s.insertStopNote(orgID, runID, userID, note)
+		s.insertStopNote(orgID, conversationID, userID, note)
 	}
 
 	if cancelBlueprint {
@@ -228,7 +228,7 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note s
 	// the live process; the goroutine then parks the run when it observes
 	// ctx.Err(), and its reactor either freezes the blueprint (the stop verb)
 	// or finalizes it off the signal raised above (the lifecycle teardown).
-	if s.getController().Cancel(runID) {
+	if s.getController().Cancel(conversationID) {
 		return nil
 	}
 
@@ -237,7 +237,7 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note s
 	// truth and already works cross-pod, so a best-effort signal to a live
 	// remote owner only HASTENS the kill — never waited on, never affects
 	// this call's outcome.
-	s.signalCancelBestEffort(orgID, runID, run.ExecutorID)
+	s.signalCancelBestEffort(orgID, conversationID, run.ExecutorID)
 
 	// No active goroutine — the run may be parked `open` with no subprocess to
 	// kill. Park it directly via DB.
@@ -268,7 +268,7 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note s
 	// whichever executor holds the run — it even signals the remote owner
 	// best-effort above — so gating it on claim ownership would break the
 	// feature. The claim-fenced variants exist for the executor's own
-	// self-park (parkRunOpen with a claim in scope, parkCancelledAfterResume);
+	// self-park (parkConversationOpen with a claim in scope, parkCancelledAfterResume);
 	// do not route this path through them.
 	//
 	// No snapshot is taken here, and in the split that is a sequencing
@@ -287,7 +287,7 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note s
 	// signal above reaches its engine: it snapshots BEFORE its status flip,
 	// so the workspace lands even though the flip is then refused by the
 	// claim fence this release just tripped. That ordering is what makes the
-	// stop resumable at all — see parkRunOpen, which owns it.
+	// stop resumable at all — see parkConversationOpen, which owns it.
 	//
 	// The gap between the two is real and accepted: a follow-up sent inside
 	// it finds no workspace yet and is refused as expired. It is seconds
@@ -308,20 +308,20 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note s
 	}
 	if userID != "" {
 		err = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, userID, func(ts db.TxStores) error {
-			f, mErr := ts.Conversations.ParkOpen(bgCtx, orgID, runID, park)
+			f, mErr := ts.Conversations.ParkOpen(bgCtx, orgID, conversationID, park)
 			flipped = f
 			return mErr
 		})
 	} else {
-		flipped, err = s.agentRuns.ParkOpenSystem(bgCtx, orgID, runID, park)
+		flipped, err = s.conversations.ParkOpenSystem(bgCtx, orgID, conversationID, park)
 	}
 	if err != nil {
 		return fmt.Errorf("park stopped run: %w", err)
 	}
 	if !flipped {
-		return fmt.Errorf("%w %s", ErrNoActiveRun, runID)
+		return fmt.Errorf("%w %s", ErrNoActiveRun, conversationID)
 	}
-	s.broadcastRunUpdate(orgID, runID, "open")
+	s.broadcastConversationUpdate(orgID, conversationID, "open")
 	if cancelBlueprint {
 		// This DB-only path runs only with no live orchestrator goroutine — the
 		// step had parked (open), so the orchestrator already returned and no
@@ -359,8 +359,8 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note s
 // Best effort: a stop whose note failed to land is still a stop, and
 // returning an error here would leave a live agent running because its
 // explanation could not be written.
-func (s *Spawner) insertStopNote(orgID, runID, userID, content string) {
-	if content == "" || s.agentRuns == nil {
+func (s *Spawner) insertStopNote(orgID, conversationID, userID, content string) {
+	if content == "" || s.conversations == nil {
 		return
 	}
 	ctx := context.Background()
@@ -373,15 +373,15 @@ func (s *Spawner) insertStopNote(orgID, runID, userID, content string) {
 	// new event and gets its own note. A failed read falls through and
 	// writes: a duplicated sentence is a far smaller loss than a conversation
 	// that never says why it ended.
-	if rows, err := s.agentRuns.ListForAssemblySystem(ctx, orgID, runID); err == nil {
+	if rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID); err == nil {
 		if agentloop.HasNoticeSince(rows, content) {
 			return
 		}
 	} else {
-		delegateLog.Warn("stop-note dedupe read failed; writing the note anyway", "run", runID, "error", err)
+		delegateLog.Warn("stop-note dedupe read failed; writing the note anyway", "conversation", conversationID, "error", err)
 	}
 	msg := &domain.Message{
-		ConversationID: runID,
+		ConversationID: conversationID,
 		UserID:         userID,
 		Role:           "user",
 		Subtype:        domain.MessageSubtypeStopNote,
@@ -394,10 +394,10 @@ func (s *Spawner) insertStopNote(orgID, runID, userID, content string) {
 			return ierr
 		})
 	} else {
-		_, err = s.agentRuns.InsertMessageSystem(ctx, orgID, msg)
+		_, err = s.conversations.InsertMessageSystem(ctx, orgID, msg)
 	}
 	if err != nil {
-		delegateLog.Warn("record stop note failed; the stop itself still lands", "run", runID, "error", err)
+		delegateLog.Warn("record stop note failed; the stop itself still lands", "conversation", conversationID, "error", err)
 	}
 }
 
@@ -405,14 +405,14 @@ func (s *Spawner) insertStopNote(orgID, runID, userID, content string) {
 // its machine-readable failure kind, via errors.Is on the chain —
 // never message text. Anything that isn't the recognized memory-limit
 // kill is a generic runtime crash.
-func classifyFailureKind(err error) domain.RunFailureKind {
+func classifyFailureKind(err error) domain.ConversationFailureKind {
 	if errors.Is(err, agentproc.ErrRunMemoryLimit) {
-		return domain.RunFailureMemoryLimit
+		return domain.ConversationFailureMemoryLimit
 	}
-	return domain.RunFailureCrash
+	return domain.ConversationFailureCrash
 }
 
-// failRun records the infra-failure terminal for a run: guarded status flip,
+// failConversation records the infra-failure terminal for a run: guarded status flip,
 // a failure row on the transcript, breaker + broadcast + snapshot cleanup.
 //
 // claimID names the engagement doing the failing, when there is one in scope
@@ -425,13 +425,13 @@ func classifyFailureKind(err error) domain.RunFailureKind {
 // Returns fenced: true when the terminal was refused because the claim is
 // released. Nothing was written, and the caller must not go on to react to
 // the run's state either — the row it would read belongs to the successor.
-func (s *Spawner) failRun(orgID, runID, taskID, claimID, triggerType, creatorUserID, errMsg string, kind domain.RunFailureKind) (fenced bool) {
-	delegateLog.Error("run failed", "run_id", runID, "error", errMsg, "failure_kind", string(kind))
+func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, triggerType, creatorUserID, errMsg string, kind domain.ConversationFailureKind) (fenced bool) {
+	delegateLog.Error("run failed", "run_id", conversationID, "error", errMsg, "failure_kind", string(kind))
 
 	bgCtx := context.Background()
 
 	failMsg := &domain.Message{
-		ConversationID: runID,
+		ConversationID: conversationID,
 		Role:           "assistant",
 		Content:        "Error: " + errMsg,
 		IsError:        true,
@@ -445,14 +445,14 @@ func (s *Spawner) failRun(orgID, runID, taskID, claimID, triggerType, creatorUse
 	var insertErr error
 	switch {
 	case claimID != "":
-		_, insertErr = s.agentRuns.InsertMessageForClaimSystem(bgCtx, orgID, claimID, failMsg)
+		_, insertErr = s.conversations.InsertMessageForClaimSystem(bgCtx, orgID, claimID, failMsg)
 	case triggerType == "manual":
 		insertErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
 			_, ierr := ts.Conversations.InsertMessage(bgCtx, orgID, failMsg)
 			return ierr
 		})
 	default:
-		_, insertErr = s.agentRuns.InsertMessageSystem(bgCtx, orgID, failMsg)
+		_, insertErr = s.conversations.InsertMessageSystem(bgCtx, orgID, failMsg)
 	}
 	if errors.Is(insertErr, db.ErrClaimReleased) {
 		// Not this engagement's run to fail anymore. Everything below writes
@@ -461,11 +461,11 @@ func (s *Spawner) failRun(orgID, runID, taskID, claimID, triggerType, creatorUse
 		// discard, which would delete the workspace that successor resumes
 		// from.
 		delegateLog.Error("claim fence refused the failure terminal — a successor owns this conversation; recording nothing",
-			"run_id", runID, "claim_id", claimID, "org_id", orgID, "error", insertErr)
+			"run_id", conversationID, "claim_id", claimID, "org_id", orgID, "error", insertErr)
 		return true
 	}
 	if insertErr != nil {
-		delegateLog.Warn("failed to record failure message", "run_id", runID, "error", insertErr)
+		delegateLog.Warn("failed to record failure message", "run_id", conversationID, "error", insertErr)
 	}
 
 	// Guarded — if a terminal racing path (cancel, natural completion)
@@ -474,14 +474,14 @@ func (s *Spawner) failRun(orgID, runID, taskID, claimID, triggerType, creatorUse
 	var markErr error
 	switch {
 	case claimID != "":
-		_, markErr = s.agentRuns.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, runID, claimID, string(kind))
+		_, markErr = s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conversationID, claimID, string(kind))
 	case triggerType == "manual":
 		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			_, mErr := ts.Conversations.MarkFailedIfActive(bgCtx, orgID, runID, string(kind))
+			_, mErr := ts.Conversations.MarkFailedIfActive(bgCtx, orgID, conversationID, string(kind))
 			return mErr
 		})
 	default:
-		_, markErr = s.agentRuns.MarkFailedIfActiveSystem(bgCtx, orgID, runID, string(kind))
+		_, markErr = s.conversations.MarkFailedIfActiveSystem(bgCtx, orgID, conversationID, string(kind))
 	}
 	if errors.Is(markErr, db.ErrClaimReleased) {
 		// The release landed between the two writes. Same answer, same tail
@@ -489,36 +489,36 @@ func (s *Spawner) failRun(orgID, runID, taskID, claimID, triggerType, creatorUse
 		// artifact of this engagement that stands, and it is attributed to
 		// this claim rather than the successor's.
 		delegateLog.Error("claim fence refused the failure terminal — a successor owns this conversation; recording nothing further",
-			"run_id", runID, "claim_id", claimID, "org_id", orgID, "error", markErr)
+			"run_id", conversationID, "claim_id", claimID, "org_id", orgID, "error", markErr)
 		return true
 	}
 	if markErr != nil {
-		delegateLog.Warn("failed to mark run as failed", "run_id", runID, "error", markErr)
+		delegateLog.Warn("failed to mark run as failed", "run_id", conversationID, "error", markErr)
 	}
 
 	s.updateBreakerCounter(taskID, triggerType, "failed")
-	s.broadcastRunFailed(orgID, runID, kind)
+	s.broadcastConversationFailed(orgID, conversationID, kind)
 
 	// A failed run won't resume, so drop the workspace snapshot it may have
 	// written when it parked (e.g. an idle hibernation that later failed
 	// mid-resume). Keyed by the run's own id: for a blueprint step (whose
 	// snapshot is keyed by blueprint_run_id) this is a harmless no-op and
 	// terminateBlueprint owns that blob; for a run that never snapshotted it's
-	// also a no-op. The single failure chokepoint covers every failRun caller
+	// also a no-op. The single failure chokepoint covers every failConversation caller
 	// (the resume goroutine's three exits among them).
-	s.discardWorkspaceSnapshot(bgCtx, orgID, runID)
+	s.discardWorkspaceSnapshot(bgCtx, orgID, conversationID)
 
 	// Surface as a sticky error toast so the user sees the failure even when
 	// they're not watching the runs page. A memory-limit kill gets copy that
 	// says what happened and which knob to turn instead of echoing the raw
 	// error prefix; everything else truncates the message — full stderr dumps
 	// don't fit in a toast card.
-	if kind == domain.RunFailureMemoryLimit {
+	if kind == domain.ConversationFailureMemoryLimit {
 		toast.Error(s.wsHub, orgID, fmt.Sprintf(
 			"Run %s was stopped: it exceeded its memory limit. Raise TF_RUN_MEMORY_LIMIT_MB if it legitimately needs more.",
-			shortRunID(runID)))
+			shortConversationID(conversationID)))
 	} else {
-		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s failed: %s", shortRunID(runID), truncateToastMsg(errMsg, 160)))
+		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s failed: %s", shortConversationID(conversationID), truncateToastMsg(errMsg, 160)))
 	}
 	return false
 }

@@ -37,7 +37,7 @@ type SpendStore interface {
 	// HTTP role gate is the authorization, this System read is the authorized
 	// path past RLS. Same opts contract as ListSpend (a non-nil TeamID narrows
 	// to one team; an empty filter is the whole org). Mirrors
-	// SpendByCategorySystem / artifactStore.ListByRunSystem. SQLite is N=1 / no
+	// SpendByCategorySystem / artifactStore.ListByConversationSystem. SQLite is N=1 / no
 	// RLS, so it delegates to ListSpend.
 	ListSpendSystem(ctx context.Context, orgID string, opts domain.SpendFilter) ([]domain.SpendRow, error)
 
@@ -59,7 +59,7 @@ type SpendStore interface {
 	// would see nothing and the cap would never trip, so it MUST use this
 	// variant. Returns spend summed across EVERY team + curator + system row in
 	// the org (the runaway-spend fuse counts all categories). Mirrors
-	// OrgsStore.GetSettingsSystem / ArtifactStore.ListByRunSystem. SQLite is N=1
+	// OrgsStore.GetSettingsSystem / ArtifactStore.ListByConversationSystem. SQLite is N=1
 	// / no RLS, so it delegates to SpendByCategory.
 	SpendByCategorySystem(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error)
 

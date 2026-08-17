@@ -248,7 +248,7 @@ func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) error
 	return err
 }
 
-func (s *promptStore) CountRunReferences(ctx context.Context, orgID, id string) (int, error) {
+func (s *promptStore) CountConversationReferences(ctx context.Context, orgID, id string) (int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}

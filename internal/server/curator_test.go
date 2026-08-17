@@ -332,9 +332,9 @@ func TestHandleCuratorSend_NotConfiguredWhenRuntimeUnset(t *testing.T) {
 // asserts the identity rather than let a mis-claim pass silently.
 func claimCuratorTurn(t *testing.T, srv *Server, convID string) string {
 	t.Helper()
-	got, err := srv.allStores.RunQueue.ClaimNextRun(t.Context(), "test-exec", 1, db.ClaimPlacement{})
+	got, err := srv.allStores.ConversationQueue.ClaimNextConversation(t.Context(), "test-exec", 1, db.ClaimPlacement{})
 	if err != nil || got == nil || got.ID != convID {
-		t.Fatalf("ClaimNextRun = (%+v, %v), want a claim on conversation %s", got, err, convID)
+		t.Fatalf("ClaimNextConversation = (%+v, %v), want a claim on conversation %s", got, err, convID)
 	}
 	return got.ClaimID
 }

@@ -43,7 +43,7 @@ type Server struct {
 	users            db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities
 	blueprints       db.BlueprintStore       // used by event-handler + project test fixtures
 	tasks            db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
-	agentRuns        db.ConversationStore    // agent run lifecycle + transcript
+	conversations    db.ConversationStore    // agent run lifecycle + transcript
 	repos            db.RepositoryStore      // repositories CRUD for repos/settings/projects handlers and curator pinned-repo materialization
 	projects         db.ProjectStore         // projects CRUD for projects/curator/backfill/project_entities handlers
 	curatorStore     db.CuratorStore         // curator view of conversations/messages/claims — handler-side System writes (cancel release, pending-context producer) go through here; claims-bound reads ride tx.Curator
@@ -108,7 +108,7 @@ type Server struct {
 	// endpoint 503s rather than panicking if a request races startup.
 	placement placementResolver
 	// fleetQueue backs the GET /api/fleet/queue view: per-org run-queue shares
-	// (active/queued + cap). Satisfied by the RunQueue store; a narrow
+	// (active/queued + cap). Satisfied by the ConversationQueue store; a narrow
 	// interface so the handler test can inject canned shares.
 	fleetQueue fleetQueueReader
 	// ghResolver picks the right GitHub credential (org App installation
@@ -485,7 +485,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		users:            stores.Users,
 		blueprints:       stores.Blueprints,
 		tasks:            stores.Tasks,
-		agentRuns:        stores.Conversations,
+		conversations:    stores.Conversations,
 		repos:            stores.Repos,
 		projects:         stores.Projects,
 		events:           stores.Events,
@@ -502,7 +502,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		authEvents:       stores.AuthEvents,
 		tx:               stores.Tx,
 		az:               authz.New(database, stores.Tx),
-		fleetQueue:       stores.RunQueue,
+		fleetQueue:       stores.ConversationQueue,
 		allStores:        stores,
 		mux:              http.NewServeMux(),
 		ws:               websocket.NewHub(),
@@ -866,7 +866,7 @@ func (s *Server) routes() {
 	// Scope is role-gated: /me is any org member, /teams/{id} is team-admin OR
 	// org-admin, /org is org-admin. The team/org reads use the admin-pool
 	// ListSpendSystem (the role gate is the authorization for crossing RLS).
-	uh := &usageHandler{tx: s.tx, az: s.az, runQueue: s.allStores.RunQueue}
+	uh := &usageHandler{tx: s.tx, az: s.az, runQueue: s.allStores.ConversationQueue}
 	s.api("GET /api/usage/me", uh.handleUsageMe)
 	s.api("GET /api/usage/teams/{team_id}", uh.handleUsageTeam)
 	s.api("GET /api/usage/org", uh.handleUsageOrg)
@@ -1119,7 +1119,7 @@ func (s *Server) routes() {
 	// edit/delete inline comments on the live pending review, approve submits it,
 	// and dismiss resolves a single artifact (per-item). The task-level
 	// resolve-all (drag-to-Done / Return-to-queue) flows through teardownTaskArtifacts.
-	ah := &artifactsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
+	ah := &artifactsHandler{tx: s.tx, ws: s.ws, conversations: s.conversations, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
 	s.api("GET /api/artifacts/{id}", ah.handleArtifactGet)
 	s.apiMutating("PATCH /api/artifacts/{id}", ah.handleArtifactUpdate)
 	s.api("GET /api/artifacts/{id}/diff", ah.handleArtifactDiff)

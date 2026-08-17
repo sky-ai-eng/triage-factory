@@ -118,10 +118,10 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 
 	// (2) Advancement enqueues step 1 with the ORIGINAL prompt, even though the
 	// live blueprint now has only one step (which would make step 0 final).
-	stepRun, _ := s.agentRuns.GetSystem(ctx, org, run0)
-	stepRun.TriggerType = "manual"
-	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(context.Background(), org, br, *stepRun, runConfig{orgID: org}, time.Now())
+	stepConversation, _ := s.conversations.GetSystem(ctx, org, run0)
+	stepConversation.TriggerType = "manual"
+	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+	s.reactToStepTerminal(context.Background(), org, br, *stepConversation, runConfig{orgID: org}, time.Now())
 
 	if br2 := mustGetRun(t, s, org, brID); br2.Status != domain.BlueprintRunStatusRunning {
 		t.Fatalf("blueprint status = %q, want running (must advance off the frozen plan, not finish on the shortened live list)", br2.Status)

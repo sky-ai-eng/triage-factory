@@ -103,7 +103,7 @@ func WithRepoLock(owner, repo string, fn func() error) error {
 
 // runsDir is the basename for ephemeral run worktrees under
 // os.TempDir() (/tmp/triagefactory-runs/{run-id}). Ephemeral and
-// unique-by-runID, so it is deliberately NOT routed through
+// unique-by-conversationID, so it is deliberately NOT routed through
 // internal/paths — there is no persistence and no cross-tenant
 // collision risk. The persistent bare clone cache, by contrast, lives
 // under paths.BareCacheDir / paths.BareCacheRoot.
@@ -393,7 +393,7 @@ func RepoDir(owner, repo string) (string, error) {
 }
 
 // rootKey names the id a run root is keyed by — see RunRoot for which id that
-// is, and why this family does not spell it runID.
+// is, and why this family does not spell it conversationID.
 func runDir(rootKey string) string {
 	return filepath.Join(os.TempDir(), runsDir, rootKey)
 }
@@ -455,8 +455,8 @@ func RemoveRunRoot(rootKey string) {
 // the run-root and materialize worktrees as subdirs. Kept temporarily so
 // future cleanup callers don't break; remove in a follow-up once no callers
 // remain.
-func MakeRunCwd(runID string) (string, error) {
-	dir := filepath.Join(os.TempDir(), runsDir, runID+"-nocwd")
+func MakeRunCwd(conversationID string) (string, error) {
+	dir := filepath.Join(os.TempDir(), runsDir, conversationID+"-nocwd")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("mkdir run cwd: %w", err)
 	}
@@ -465,8 +465,8 @@ func MakeRunCwd(runID string) (string, error) {
 
 // RemoveRunCwd removes the throwaway cwd created by MakeRunCwd. Safe if missing.
 // Vestigial — see MakeRunCwd.
-func RemoveRunCwd(runID string) {
-	_ = sandbox.RemoveRunTree(context.Background(), filepath.Join(os.TempDir(), runsDir, runID+"-nocwd"))
+func RemoveRunCwd(conversationID string) {
+	_ = sandbox.RemoveRunTree(context.Background(), filepath.Join(os.TempDir(), runsDir, conversationID+"-nocwd"))
 }
 
 // EnsureBareClone is the exported entry point for callers that want a
@@ -607,8 +607,8 @@ func repairOriginURL(ctx context.Context, bareDir, wantURL string) error {
 }
 
 // makeWorktreeDir creates the run directory for a worktree.
-func makeWorktreeDir(runID string) (string, error) {
-	wtDir := runDir(runID)
+func makeWorktreeDir(conversationID string) (string, error) {
+	wtDir := runDir(conversationID)
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
 		return "", fmt.Errorf("mkdir runs: %w", err)
 	}

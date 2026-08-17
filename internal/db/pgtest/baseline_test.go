@@ -1619,11 +1619,11 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
-	var runID string
+	var conversationID string
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO conversations (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id, status)
 		VALUES ($1, $2, $3, 'private', $4, $5, $6, 'running') RETURNING id
-	`, orgA, alice, teamA, taskID, prompt, bpRun).Scan(&runID); err != nil {
+	`, orgA, alice, teamA, taskID, prompt, bpRun).Scan(&conversationID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	// Seed one child row per parent kind we care about.
@@ -1631,13 +1631,13 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 		SELECT $1, $2, e.id, 'closed' FROM events e WHERE e.entity_id = $3 LIMIT 1`,
 		orgA, taskID, entityA)
 	MustExec(t, h.AdminDB, `INSERT INTO messages (org_id, conversation_id, role, content) VALUES ($1, $2, 'assistant', 'hi')`,
-		orgA, runID)
+		orgA, conversationID)
 	MustExec(t, h.AdminDB, `INSERT INTO conversation_memory (org_id, conversation_id, entity_id, agent_content) VALUES ($1, $2, $3, 'note')`,
-		orgA, runID, entityA)
+		orgA, conversationID, entityA)
 	MustExec(t, h.AdminDB, `INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role) VALUES ($1, $2, $3, 'primary')`,
-		orgA, runID, entityA)
+		orgA, conversationID, entityA)
 	MustExec(t, h.AdminDB, `INSERT INTO conversation_worktrees (org_id, conversation_id, repository_id, path, ref) VALUES ($1, $2, $3, '/tmp/x', 'pr-1')`,
-		orgA, runID, SeedRepository(t, h, orgA, "octo", "repo"))
+		orgA, conversationID, SeedRepository(t, h, orgA, "octo", "repo"))
 
 	// Alice sees all her child rows.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
@@ -2476,11 +2476,11 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	promptID := seedPrompt(t, h, orgA, alice, "p1")
 	projectID := seedProject(t, h, orgA, alice, "proj-a")
 	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
-	var runID string
+	var conversationID string
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id, status)
 		VALUES ($1, $2, $3, $4, $5, $6, 'running') RETURNING id
-	`, orgA, alice, teamA, taskID, promptID, bpRun).Scan(&runID); err != nil {
+	`, orgA, alice, teamA, taskID, promptID, bpRun).Scan(&conversationID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	var ehID string
@@ -2520,7 +2520,7 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 		}
 		ids := map[string]string{
 			"tasks":          taskID,
-			"conversations":  runID,
+			"conversations":  conversationID,
 			"prompts":        promptID,
 			"projects":       projectID,
 			"event_handlers": ehID,

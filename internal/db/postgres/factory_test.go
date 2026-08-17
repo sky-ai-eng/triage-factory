@@ -230,14 +230,14 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("close entity: %v", err)
 			}
 		},
-		SetRunMemory: func(t *testing.T, runID, entityID, content string) {
+		SetRunMemory: func(t *testing.T, conversationID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
 					INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content)
 					VALUES ($1, $2, $3, $4, NULL)
-				`, memID, orgID, runID, entityID); err != nil {
+				`, memID, orgID, conversationID, entityID); err != nil {
 					t.Fatalf("seed null conversation_memory: %v", err)
 				}
 				return
@@ -245,7 +245,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			if _, err := conn.Exec(`
 				INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content)
 				VALUES ($1, $2, $3, $4, $5)
-			`, memID, orgID, runID, entityID, content); err != nil {
+			`, memID, orgID, conversationID, entityID, content); err != nil {
 				t.Fatalf("seed conversation_memory: %v", err)
 			}
 		},

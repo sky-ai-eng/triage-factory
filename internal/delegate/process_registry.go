@@ -241,9 +241,9 @@ const DefaultIdleHibernateTimeout = 5 * time.Minute
 // and deregisters it when the process closes (terminal, hibernation, or
 // cancel).
 type liveRunHandle struct {
-	lr    *agentproc.LiveRun
-	runID string
-	orgID string
+	lr             *agentproc.LiveRun
+	conversationID string
+	orgID          string
 }
 
 // registerProc records a run's live process handle so control ops can
@@ -254,32 +254,32 @@ type liveRunHandle struct {
 // registered handle is proof the conversation is an SDK one, so a message can
 // be steered into the process without re-reading the runtime. A second driver
 // registering here silently breaks that.
-func (s *Spawner) registerProc(orgID, runID string, lr *agentproc.LiveRun) {
+func (s *Spawner) registerProc(orgID, conversationID string, lr *agentproc.LiveRun) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.procs[runID] = &liveRunHandle{lr: lr, runID: runID, orgID: orgID}
+	s.procs[conversationID] = &liveRunHandle{lr: lr, conversationID: conversationID, orgID: orgID}
 }
 
 // getProc returns the live handle for a run, or nil when the run has no
 // live process (never started, already hibernated, or terminated).
-func (s *Spawner) getProc(runID string) *liveRunHandle {
+func (s *Spawner) getProc(conversationID string) *liveRunHandle {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.procs[runID]
+	return s.procs[conversationID]
 }
 
 // deregisterProc drops a run's live handle once the process is gone.
 // Idempotent.
-func (s *Spawner) deregisterProc(runID string) {
+func (s *Spawner) deregisterProc(conversationID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.procs, runID)
+	delete(s.procs, conversationID)
 }
 
 // stampExecutor records this spawner instance's executor identity + boot
 // epoch on the engagement's claim when the run goes live (a system write —
 // the run goroutine holds no JWT claims). This re-stamps what
-// RunQueueStore.ClaimNextRun already wrote atomically at claim on
+// ConversationQueueStore.ClaimNextConversation already wrote atomically at claim on
 // a fresh claim — cheap and harmless — but it is the ONLY stamp on the
 // resume path, so it must write both columns, not
 // just executor_id, to keep boot_epoch reflecting the most recent boot that
@@ -295,22 +295,22 @@ func (s *Spawner) deregisterProc(runID string) {
 // scope. A refusal is logged loudly and nothing else changes — the engagement
 // carries on to its first transcript write, which meets the same fence and
 // abandons the run properly.
-func (s *Spawner) stampExecutor(orgID, runID, claimID string) {
-	if s.agentRuns == nil {
+func (s *Spawner) stampExecutor(orgID, conversationID, claimID string) {
+	if s.conversations == nil {
 		return
 	}
 	executorID, bootEpoch := s.executorIdentity()
 	var err error
 	if claimID != "" {
-		err = s.agentRuns.SetExecutorForClaimSystem(context.Background(), orgID, runID, claimID, executorID, bootEpoch)
+		err = s.conversations.SetExecutorForClaimSystem(context.Background(), orgID, conversationID, claimID, executorID, bootEpoch)
 	} else {
-		err = s.agentRuns.SetExecutorSystem(context.Background(), orgID, runID, executorID, bootEpoch)
+		err = s.conversations.SetExecutorSystem(context.Background(), orgID, conversationID, executorID, bootEpoch)
 	}
 	if errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Error("claim fence refused the go-live executor stamp — a successor owns this conversation",
-			"executor", executorID, "run_id", runID, "claim_id", claimID, "org_id", orgID, "error", err)
+			"executor", executorID, "run_id", conversationID, "claim_id", claimID, "org_id", orgID, "error", err)
 	} else if err != nil {
-		delegateLog.Warn("stamp executor on run failed", "executor", executorID, "run_id", runID, "error", err)
+		delegateLog.Warn("stamp executor on run failed", "executor", executorID, "run_id", conversationID, "error", err)
 	}
 }
 
@@ -326,10 +326,10 @@ func (s *Spawner) stampExecutor(orgID, runID, claimID string) {
 // conversation's active claim": by teardown the completion bookkeeping has
 // already released it.
 func (s *Spawner) recordSandboxActuals(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error {
-	if s.agentRuns == nil {
+	if s.conversations == nil {
 		return nil
 	}
-	return s.agentRuns.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, actuals.PeakMemMB, actuals.CPUUsec)
+	return s.conversations.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, actuals.PeakMemMB, actuals.CPUUsec)
 }
 
 // SetExecutorID overrides this spawner's executor identity with the
@@ -432,15 +432,15 @@ func (s *Spawner) awaitingCredentialsKnobs() (time.Duration, time.Duration) {
 type RunController interface {
 	// Interrupt stops the run's current turn, leaving the process alive
 	// for further input. Errors when the run has no live process.
-	Interrupt(ctx context.Context, runID string) error
+	Interrupt(ctx context.Context, conversationID string) error
 	// Steer delivers a free-form user message to a live run. Errors when
 	// the run has no live process.
-	Steer(ctx context.Context, runID, text string) error
+	Steer(ctx context.Context, conversationID, text string) error
 	// Cancel signals the run's process to terminate (SIGKILL via the
 	// registered ctx cancel). Reports whether a live handle was found; a
 	// false result means the run has no in-process goroutine and the
 	// caller must take the DB-only terminal path.
-	Cancel(runID string) (found bool)
+	Cancel(conversationID string) (found bool)
 }
 
 // ErrNoLiveProcess is the typed error the control seam returns when a run has
@@ -452,25 +452,25 @@ var ErrNoLiveProcess = errors.New("run has no live process")
 // in this same process, so the lookups are direct map reads.
 type inProcessController struct{ s *Spawner }
 
-func (c inProcessController) Interrupt(ctx context.Context, runID string) error {
-	h := c.s.getProc(runID)
+func (c inProcessController) Interrupt(ctx context.Context, conversationID string) error {
+	h := c.s.getProc(conversationID)
 	if h == nil {
-		return fmt.Errorf("interrupt run %s: %w", runID, ErrNoLiveProcess)
+		return fmt.Errorf("interrupt run %s: %w", conversationID, ErrNoLiveProcess)
 	}
 	return h.lr.Interrupt(ctx)
 }
 
-func (c inProcessController) Steer(ctx context.Context, runID, text string) error {
-	h := c.s.getProc(runID)
+func (c inProcessController) Steer(ctx context.Context, conversationID, text string) error {
+	h := c.s.getProc(conversationID)
 	if h == nil {
-		return fmt.Errorf("steer run %s: %w", runID, ErrNoLiveProcess)
+		return fmt.Errorf("steer run %s: %w", conversationID, ErrNoLiveProcess)
 	}
 	return h.lr.Send(ctx, text)
 }
 
-func (c inProcessController) Cancel(runID string) bool {
+func (c inProcessController) Cancel(conversationID string) bool {
 	c.s.mu.Lock()
-	cancel, ok := c.s.cancels[runID]
+	cancel, ok := c.s.cancels[conversationID]
 	c.s.mu.Unlock()
 	if ok {
 		cancel()
@@ -483,12 +483,12 @@ func (c inProcessController) Cancel(runID string) bool {
 // from the stop verb, which ends the engagement and parks the conversation.
 // Routing through s.controller (read via getController) is what keeps the
 // horizontal-scaling swap additive.
-func (s *Spawner) Interrupt(ctx context.Context, runID string) error {
-	return s.getController().Interrupt(ctx, runID)
+func (s *Spawner) Interrupt(ctx context.Context, conversationID string) error {
+	return s.getController().Interrupt(ctx, conversationID)
 }
 
 // Steer delivers a free-form user message to a live run through the
 // control seam. The P3 message endpoint calls this.
-func (s *Spawner) Steer(ctx context.Context, runID, text string) error {
-	return s.getController().Steer(ctx, runID, text)
+func (s *Spawner) Steer(ctx context.Context, conversationID, text string) error {
+	return s.getController().Steer(ctx, conversationID, text)
 }

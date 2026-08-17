@@ -83,8 +83,8 @@ type injectingStubDelegator struct {
 }
 
 type injectCall struct {
-	orgID, runID, producer, body string
-	firing                       delegate.AdditiveFiringRef
+	orgID, conversationID, producer, body string
+	firing                                delegate.AdditiveFiringRef
 }
 
 func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
@@ -95,12 +95,12 @@ func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.Delega
 	return "run-" + task.ID, nil
 }
 
-func (s *injectingStubDelegator) StopAndCancelBlueprint(orgID, runID, userID string, cause delegate.StopCause) error {
+func (s *injectingStubDelegator) StopAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
 	return nil
 }
 
-func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
-	s.calls = append(s.calls, injectCall{orgID, runID, producer, body, firing})
+func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
+	s.calls = append(s.calls, injectCall{orgID, conversationID, producer, body, firing})
 	return s.outcome
 }
 
@@ -109,7 +109,7 @@ func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context
 // run (mirroring a real in-flight auto run) via stubDelegateRun. Returns the
 // entity, the task the trigger matches (which owns the active run), the
 // trigger (with its real resolved blueprint id), and the active run's ID.
-func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task *domain.Task, trigger domain.EventHandler, activeRunID string) {
+func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task *domain.Task, trigger domain.EventHandler, activeConversationID string) {
 	t.Helper()
 	registerAbsorbEventType(t, absorbTestEventType)
 	seedAbsorbEventCatalog(t, database, absorbTestEventType)
@@ -176,7 +176,7 @@ func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task 
 	// messages row, whose conversation_id FKs conversations(id)) — resolve
 	// the real run row it minted (one run per blueprint_run in the stub,
 	// step_index 0).
-	if err := database.QueryRow(`SELECT id FROM conversations WHERE blueprint_run_id = ?`, blueprintRunID).Scan(&activeRunID); err != nil {
+	if err := database.QueryRow(`SELECT id FROM conversations WHERE blueprint_run_id = ?`, blueprintRunID).Scan(&activeConversationID); err != nil {
 		t.Fatalf("resolve seeded run id: %v", err)
 	}
 	return
@@ -212,10 +212,10 @@ func bumpTaskViaRealUpsert(t *testing.T, router *Router, task *domain.Task, trig
 
 // newAbsorbTestRouter builds a Router wired for the absorption gate tests,
 // sharing the same store construction every test below needs.
-func newAbsorbTestRouter(database *sql.DB, agentRuns db.ConversationStore, stub *injectingStubDelegator) *Router {
+func newAbsorbTestRouter(database *sql.DB, conversations db.ConversationStore, stub *injectingStubDelegator) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), agentRuns, st.Entities, st.PendingFirings,
+		testTaskStore(database), conversations, st.Entities, st.PendingFirings,
 		st.Events, st.Orgs, st.Teams, nil, nil, nil,
 		stub, noopScorer{}, websocket.NewHub())
 }
@@ -227,7 +227,7 @@ func newAbsorbTestRouter(database *sql.DB, agentRuns db.ConversationStore, stub 
 // and the task_events row records the injection.
 func TestTryAutoDelegate_SameTask_InjectsIntoActiveRun(t *testing.T) {
 	database := newTestDB(t)
-	entityID, task, trigger, activeRunID := setupAbsorbScenario(t, database)
+	entityID, task, trigger, activeConversationID := setupAbsorbScenario(t, database)
 
 	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    absorbTestEventType,
@@ -253,8 +253,8 @@ func TestTryAutoDelegate_SameTask_InjectsIntoActiveRun(t *testing.T) {
 		t.Fatalf("expected exactly 1 StageOrDeliverAdditiveEvent call, got %d", len(stub.calls))
 	}
 	got := stub.calls[0]
-	if got.runID != activeRunID {
-		t.Errorf("injected run_id = %q, want the active run %q", got.runID, activeRunID)
+	if got.conversationID != activeConversationID {
+		t.Errorf("injected run_id = %q, want the active run %q", got.conversationID, activeConversationID)
 	}
 	if got.producer != absorbTestEventType {
 		t.Errorf("injected producer = %q, want %q", got.producer, absorbTestEventType)
@@ -290,7 +290,7 @@ func TestTryAutoDelegate_SameTask_InjectsIntoActiveRun(t *testing.T) {
 // recorded, no pending_firings row.
 func TestTryAutoDelegate_SameTask_StagedResumableRunHandled(t *testing.T) {
 	database := newTestDB(t)
-	entityID, task, trigger, activeRunID := setupAbsorbScenario(t, database)
+	entityID, task, trigger, activeConversationID := setupAbsorbScenario(t, database)
 
 	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    absorbTestEventType,
@@ -314,8 +314,8 @@ func TestTryAutoDelegate_SameTask_StagedResumableRunHandled(t *testing.T) {
 	if len(stub.calls) != 1 {
 		t.Fatalf("expected 1 StageOrDeliverAdditiveEvent attempt, got %d", len(stub.calls))
 	}
-	if stub.calls[0].runID != activeRunID {
-		t.Errorf("attempt targeted run_id = %q, want %q", stub.calls[0].runID, activeRunID)
+	if stub.calls[0].conversationID != activeConversationID {
+		t.Errorf("attempt targeted run_id = %q, want %q", stub.calls[0].conversationID, activeConversationID)
 	}
 
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
@@ -344,7 +344,7 @@ func TestTryAutoDelegate_SameTask_StagedResumableRunHandled(t *testing.T) {
 // duplicate or premature bookkeeping row.
 func TestTryAutoDelegate_SameTask_DeliveredRemoteHandledWithoutRecording(t *testing.T) {
 	database := newTestDB(t)
-	entityID, task, trigger, activeRunID := setupAbsorbScenario(t, database)
+	entityID, task, trigger, activeConversationID := setupAbsorbScenario(t, database)
 
 	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    absorbTestEventType,
@@ -369,8 +369,8 @@ func TestTryAutoDelegate_SameTask_DeliveredRemoteHandledWithoutRecording(t *test
 	if len(stub.calls) != 1 {
 		t.Fatalf("expected 1 StageOrDeliverAdditiveEvent attempt, got %d", len(stub.calls))
 	}
-	if stub.calls[0].runID != activeRunID {
-		t.Errorf("attempt targeted run_id = %q, want %q", stub.calls[0].runID, activeRunID)
+	if stub.calls[0].conversationID != activeConversationID {
+		t.Errorf("attempt targeted run_id = %q, want %q", stub.calls[0].conversationID, activeConversationID)
 	}
 
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
@@ -556,7 +556,7 @@ func TestTryAutoDelegate_SameTask_NotDeliveredFallsThroughToDeferral(t *testing.
 // the way must be deleted rather than orphaned.
 func TestTryAutoDelegate_SameTask_StageToNonResumableRun_NoOrphanedRow(t *testing.T) {
 	database := newTestDB(t)
-	entityID, task, trigger, activeRunID := setupAbsorbScenario(t, database)
+	entityID, task, trigger, activeConversationID := setupAbsorbScenario(t, database)
 
 	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType:    absorbTestEventType,
@@ -591,11 +591,11 @@ func TestTryAutoDelegate_SameTask_StageToNonResumableRun_NoOrphanedRow(t *testin
 	// stays 0 — withdrawn means the note never happened), so "orphaned"
 	// means an undelivered row still in the flushable set.
 	var staged int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND delivered = 0 AND window_state <> 'inactive' AND subtype = 'injection:system-note'`, activeRunID).Scan(&staged); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND delivered = 0 AND window_state <> 'inactive' AND subtype = 'injection:system-note'`, activeConversationID).Scan(&staged); err != nil {
 		t.Fatalf("count staged injection messages: %v", err)
 	}
 	if staged != 0 {
-		t.Errorf("messages holds %d orphaned staged-injection row(s) for run %q, want 0 (deferral landed but the staged row was never cleaned up)", staged, activeRunID)
+		t.Errorf("messages holds %d orphaned staged-injection row(s) for run %q, want 0 (deferral landed but the staged row was never cleaned up)", staged, activeConversationID)
 	}
 }
 
@@ -670,16 +670,16 @@ func TestTryAutoDelegate_SameTask_StampsAgentClaimOnInjectedTask(t *testing.T) {
 // and a sibling task fires immediately.
 func TestTryAutoDelegate_FrozenTask_BlocksOnlyItself(t *testing.T) {
 	database := newTestDB(t)
-	entityID, taskA, trigA, activeRunID := setupAbsorbScenario(t, database)
+	entityID, taskA, trigA, activeConversationID := setupAbsorbScenario(t, database)
 
 	// Freeze task A exactly as a stop leaves it: conversation parked `open`,
 	// blueprint still 'running'.
-	if _, err := database.Exec(`UPDATE conversations SET status = 'open' WHERE id = ?`, activeRunID); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open' WHERE id = ?`, activeConversationID); err != nil {
 		t.Fatalf("park conversation: %v", err)
 	}
 	var bpStatus string
 	if err := database.QueryRow(
-		`SELECT status FROM blueprint_runs WHERE id = (SELECT blueprint_run_id FROM conversations WHERE id = ?)`, activeRunID,
+		`SELECT status FROM blueprint_runs WHERE id = (SELECT blueprint_run_id FROM conversations WHERE id = ?)`, activeConversationID,
 	).Scan(&bpStatus); err != nil {
 		t.Fatalf("read blueprint status: %v", err)
 	}
@@ -742,7 +742,7 @@ func TestTryAutoDelegate_FrozenTask_BlocksOnlyItself(t *testing.T) {
 	if len(stub.delegated) != 0 {
 		t.Errorf("frozen task fired a second run (%v); its own gate must stay closed", stub.delegated)
 	}
-	if len(stub.calls) != 1 || stub.calls[0].runID != activeRunID {
+	if len(stub.calls) != 1 || stub.calls[0].conversationID != activeConversationID {
 		t.Errorf("follow-up on the frozen task should fold into its parked conversation, got calls=%+v", stub.calls)
 	}
 }

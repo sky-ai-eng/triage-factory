@@ -25,7 +25,7 @@
 // Both trays are carved from the body via CSG.subtract, so each
 // lip is a real geometric step on a single mesh. Chip pools are
 // pre-built up to capacity and toggled visible based on the
-// station handle's setQueuedCount / setRunCount calls.
+// station handle's setQueuedCount / setConversationCount calls.
 
 import {
   Color3,
@@ -69,8 +69,8 @@ export interface Station {
    *  later. */
   queuedCount?: number
   /** Initial visible run chips on the main tray floor (capped at
-   *  MAX_RUNS). One per active run; setRunCount updates dynamically. */
-  runCount?: number
+   *  MAX_RUNS). One per active run; setConversationCount updates dynamically. */
+  conversationCount?: number
   /** Etched identity label rendered along the back of the main tray
    *  floor. Empty/undefined → no label plate. */
   label?: string
@@ -95,7 +95,7 @@ export interface StationHandle {
    *  the cap are not rendered (caller surfaces overflow elsewhere). */
   setQueuedCount(n: number): void
   /** Show n run chips. n clamped to MAX_RUNS. */
-  setRunCount(n: number): void
+  setConversationCount(n: number): void
   /** Update the lifetime counter rendered on the station's front-face
    *  status screen. Diff-gated internally — calling with the same
    *  value as last call is a no-op, so per-frame reconcilers can call
@@ -1098,7 +1098,7 @@ export function buildStationMesh(
 
   // ─── Run chip pool (main tray) ───────────────────────────────────────
   // Pre-build MAX_RUNS chips arrayed in a grid in the front portion
-  // of the main tray (label takes the back). setRunCount toggles
+  // of the main tray (label takes the back). setConversationCount toggles
   // visibility on the first n.
 
   const runLayout = layoutChipGrid({
@@ -1179,7 +1179,7 @@ export function buildStationMesh(
     }
     queuedVisible = target
   }
-  const setRunCount = (n: number) => {
+  const setConversationCount = (n: number) => {
     const target = Math.max(0, Math.min(n, runShells.length))
     if (target === runVisible) return
     for (let i = 0; i < runShells.length; i++) {
@@ -1198,7 +1198,7 @@ export function buildStationMesh(
   }
 
   setQueuedCount(station.queuedCount ?? 0)
-  setRunCount(station.runCount ?? 0)
+  setConversationCount(station.conversationCount ?? 0)
 
   // Single per-station observer drives both scanner translation and
   // per-chip pulse. Cheap: only updates visible meshes.
@@ -1226,7 +1226,7 @@ export function buildStationMesh(
     bounds: { x: station.x, y: station.y, w: station.w, d: station.d, h: station.h },
     id: station.id,
     setQueuedCount,
-    setRunCount,
+    setConversationCount,
     setLifetimeCount,
   }
 }

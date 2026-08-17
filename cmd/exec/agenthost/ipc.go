@@ -164,10 +164,10 @@ func (c *IPCClient) callWithin(ctx context.Context, timeout time.Duration, metho
 
 // --- Client interface implementation ---
 
-func (c *IPCClient) LookupRun(ctx context.Context) (RunInfo, error) {
-	var res lookupRunResult
-	if err := c.call(ctx, methodLookupRun, emptyArgs{}, &res); err != nil {
-		return RunInfo{}, err
+func (c *IPCClient) LookupRun(ctx context.Context) (ConversationInfo, error) {
+	var res lookupConversationResult
+	if err := c.call(ctx, methodLookupConversation, emptyArgs{}, &res); err != nil {
+		return ConversationInfo{}, err
 	}
 	return res.Info, nil
 }
@@ -238,32 +238,32 @@ func (c *IPCClient) TeamTracksRepo(ctx context.Context, owner, repo string) (boo
 	return res.Tracks, nil
 }
 
-func (c *IPCClient) GetRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.RunWorktree, error) {
-	var res runWorktreeResult
-	if err := c.call(ctx, methodGetRunWorktreeByRepoRef, runWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, &res); err != nil {
+func (c *IPCClient) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
+	var res conversationWorktreeResult
+	if err := c.call(ctx, methodGetConversationWorktreeByRepoRef, conversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, &res); err != nil {
 		return nil, err
 	}
 	return res.Worktree, nil
 }
 
-func (c *IPCClient) ListRunWorktrees(ctx context.Context) ([]domain.RunWorktree, error) {
-	var res runWorktreesResult
-	if err := c.call(ctx, methodListRunWorktrees, emptyArgs{}, &res); err != nil {
+func (c *IPCClient) ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error) {
+	var res conversationWorktreesResult
+	if err := c.call(ctx, methodListConversationWorktrees, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}
 	return res.Worktrees, nil
 }
 
-func (c *IPCClient) InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (bool, string, error) {
-	var res insertRunWorktreeResult
-	if err := c.call(ctx, methodInsertRunWorktree, insertRunWorktreeArgs{Row: row}, &res); err != nil {
+func (c *IPCClient) InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (bool, string, error) {
+	var res insertConversationWorktreeResult
+	if err := c.call(ctx, methodInsertConversationWorktree, insertConversationWorktreeArgs{Row: row}, &res); err != nil {
 		return false, "", err
 	}
 	return res.Inserted, res.WinningPath, nil
 }
 
-func (c *IPCClient) DeleteRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
-	return c.call(ctx, methodDeleteRunWorktreeByRepoRef, deleteRunWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, nil)
+func (c *IPCClient) DeleteConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
+	return c.call(ctx, methodDeleteConversationWorktreeByRepoRef, deleteConversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, nil)
 }
 
 // WorkspaceRoots asks the daemon for the run root's two views. This transport

@@ -953,7 +953,7 @@ func (s *blueprintStore) ListRuns(ctx context.Context, orgID string, f db.Bluepr
 	return out, total, rows.Err()
 }
 
-func (s *blueprintStore) GetRunForStepRun(ctx context.Context, orgID, stepRunID string) (*domain.BlueprintRun, *int, error) {
+func (s *blueprintStore) GetRunForConversation(ctx context.Context, orgID, stepConversationID string) (*domain.BlueprintRun, *int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, nil, err
 	}
@@ -961,7 +961,7 @@ func (s *blueprintStore) GetRunForStepRun(ctx context.Context, orgID, stepRunID 
 		blueprintRunID sql.NullString
 		stepIndex      sql.NullInt64
 	)
-	err := s.q.QueryRowContext(ctx, `SELECT blueprint_run_id, blueprint_step_index FROM conversations WHERE id = ?`, stepRunID).
+	err := s.q.QueryRowContext(ctx, `SELECT blueprint_run_id, blueprint_step_index FROM conversations WHERE id = ?`, stepConversationID).
 		Scan(&blueprintRunID, &stepIndex)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, nil
@@ -984,8 +984,8 @@ func (s *blueprintStore) GetRunForStepRun(ctx context.Context, orgID, stepRunID 
 	return br, idx, nil
 }
 
-func (s *blueprintStore) GetRunForStepRunSystem(ctx context.Context, orgID, stepRunID string) (*domain.BlueprintRun, *int, error) {
-	return s.GetRunForStepRun(ctx, orgID, stepRunID)
+func (s *blueprintStore) GetRunForConversationSystem(ctx context.Context, orgID, stepConversationID string) (*domain.BlueprintRun, *int, error) {
+	return s.GetRunForConversation(ctx, orgID, stepConversationID)
 }
 
 func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
@@ -1045,7 +1045,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 
 // parkOrphanedChildRuns parks every still-mid-flight child run of
 // blueprintRunID `open` and releases those children's active claims. Called by
-// MarkRunStatus's atomic flip; RunQueueStore.ReconcileOrphanedRuns applies the
+// MarkRunStatus's atomic flip; ConversationQueueStore.ReconcileOrphanedRuns applies the
 // same predicate in its own boot sweep (it can't share this body — different
 // store, different scope).
 //
@@ -1126,7 +1126,7 @@ func (s *blueprintStore) RequestRunCancelSystem(ctx context.Context, orgID, id s
 	return n > 0, nil
 }
 
-func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
+func (s *blueprintStore) ConversationsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -1209,7 +1209,7 @@ func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintR
 	return out, rows.Err()
 }
 
-func (s *blueprintStore) ActiveStepRunIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
+func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -1280,10 +1280,10 @@ func (s *blueprintStore) GetRunSystem(ctx context.Context, orgID, id string) (*d
 	return s.GetRun(ctx, orgID, id)
 }
 
-func (s *blueprintStore) ActiveStepRunIDsSystem(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
-	return s.ActiveStepRunIDs(ctx, orgID, blueprintRunID)
+func (s *blueprintStore) ActiveStepConversationIDsSystem(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
+	return s.ActiveStepConversationIDs(ctx, orgID, blueprintRunID)
 }
 
-func (s *blueprintStore) RunsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
-	return s.RunsForBlueprint(ctx, orgID, blueprintRunID)
+func (s *blueprintStore) ConversationsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
+	return s.ConversationsForBlueprint(ctx, orgID, blueprintRunID)
 }

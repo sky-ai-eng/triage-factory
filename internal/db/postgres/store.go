@@ -138,7 +138,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// trigger_type (event → admin with NULL creator, manual → app
 		// with COALESCE fallback), mirroring ConversationStore.Create. The
 		// `...System` variants on the read/write methods (ListSteps,
-		// MarkRunStatus, RunsForBlueprint) give the blueprint orchestrator
+		// MarkRunStatus, ConversationsForBlueprint) give the blueprint orchestrator
 		// goroutine an admin-pool route for its detached-context work.
 		Blueprints: newBlueprintStore(app, admin),
 		// Agents.Create routes through admin (bootstrap has no JWT
@@ -230,10 +230,10 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// the admin *sql.DB directly. event_queue_all RLS is
 		// defense-in-depth (admin bypasses it).
 		EventQueue: newEventQueueStore(admin),
-		// RunQueue is admin-pool only: the dispatcher is a system worker with
+		// ConversationQueue is admin-pool only: the dispatcher is a system worker with
 		// no JWT-claims context. The claim uses FOR UPDATE SKIP LOCKED so a
 		// future multi-worker dispatcher never double-claims a queued run.
-		RunQueue: newRunQueueStore(admin),
+		ConversationQueue: newRunQueueStore(admin),
 		// TaskMemory wires both pools: app for request-handler
 		// equivalents (review/PR submit, swipe-discard cleanup,
 		// factory + run-summary reads) and admin for the delegate
@@ -244,12 +244,12 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// EXISTS subquery against conversations; admin bypasses RLS, and
 		// org_id stays in every WHERE clause as defense in depth.
 		TaskMemory: newTaskMemoryStore(app, admin),
-		// RunWorktrees wires both pools: app for cmd/exec workspace
+		// ConversationWorktrees wires both pools: app for cmd/exec workspace
 		// callers (a separate cmd/exec auth pass owns the
 		// synthetic-claims wrap) and admin for the delegate spawner
 		// cleanup defers. org_id stays bound everywhere as defense
 		// in depth.
-		RunWorktrees: newRunWorktreeStore(app, admin),
+		ConversationWorktrees: newRunWorktreeStore(app, admin),
 		// Orgs holds both pools: admin for ListActiveSystem +
 		// GetSettingsSystem (background services iterating the active
 		// org set / reading per-org settings without JWT claims) and
@@ -368,7 +368,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		Marketplace: newMarketplaceStore(app, admin),
 		// Instances is admin-pool only: a fleet member isn't tenant data, so
 		// there's no org to scope an app-pool policy on — same admin-only
-		// shape as SystemLLMRuns/PendingFirings/EventQueue/RunQueue. Fleet
+		// shape as SystemLLMRuns/PendingFirings/EventQueue/ConversationQueue. Fleet
 		// membership registry every TF process registers into at boot and
 		// refreshes via periodic heartbeat.
 		Instances: newInstanceStore(admin),
@@ -381,16 +381,16 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// sampler writes with no request identity in hand.
 		SandboxStats: newSandboxStatStore(admin),
 		Operators:    newOperatorStore(admin),
-		// RunSignals is admin-pool only, same posture as Instances: the
+		// ConversationSignals is admin-pool only, same posture as Instances: the
 		// cross-pod run-control outbox (TFAC-585), never read under a
 		// user's RLS context.
-		RunSignals: newRunSignalStore(admin),
-		// RunPendingInput on the top-level store is the admin-pool handle the
+		ConversationSignals: newRunSignalStore(admin),
+		// ConversationPendingInput on the top-level store is the admin-pool handle the
 		// dispatcher's claim path uses for Consume (a goroutine with no request
 		// context). Store is reached through the claims-tx handle
-		// (TxStores.RunPendingInput, see tx.go) so the resume write commits
+		// (TxStores.ConversationPendingInput, see tx.go) so the resume write commits
 		// atomically with the status flip.
-		RunPendingInput: newRunPendingInputStore(admin),
+		ConversationPendingInput: newRunPendingInputStore(admin),
 		// Permissions is split-pool like Artifacts: the pending read runs on
 		// the app pool under RLS (the policy composes through the
 		// conversation, mirroring claims), every write on the admin pool —
@@ -411,10 +411,10 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// the (org, project) -> home executor map for curator homing (spec
 		// §6.3), coordination state read/written for an explicit orgID.
 		CuratorHomes: newCuratorHomeStore(admin),
-		// RunCredentials is admin-pool only, same posture as Instances/
-		// RunSignals: the sealed per-run credential bundle channel
+		// ClaimCredentials is admin-pool only, same posture as Instances/
+		// ConversationSignals: the sealed per-run credential bundle channel
 		// (TFAC-614) never serves a request handler.
-		RunCredentials: newRunCredentialsStore(admin),
+		ClaimCredentials: newRunCredentialsStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),
@@ -467,37 +467,37 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		// `...System` methods that bypass RLS in
 		// production) need the production WithTx wiring instead,
 		// which gets the real admin pool via Store.admin.
-		Conversations:    newConversationStore(tx, tx),
-		Artifacts:        newArtifactStore(tx, tx),
-		Entities:         newEntityStore(tx, tx),
-		Repos:            newRepositoryStore(tx, tx),
-		PendingFirings:   newPendingFiringsStore(tx),
-		Projects:         newProjectStore(tx, tx),
-		Events:           newEventStore(tx, tx),
-		TaskMemory:       newTaskMemoryStore(tx, tx),
-		RunWorktrees:     newRunWorktreeStore(tx, tx),
-		Orgs:             newOrgsStore(tx, tx),
-		OrgMemberships:   newOrgMembershipsStore(tx, tx),
-		Teams:            newTeamsStore(tx, tx),
-		JiraStatusRules:  newJiraStatusRulesStore(tx, tx),
-		TeamGitHubGroups: newTeamGitHubGroupsStore(tx, tx),
-		TeamGitHubRepos:  newTeamGitHubReposStore(tx, tx),
-		Curator:          newCuratorStore(tx, tx),
+		Conversations:         newConversationStore(tx, tx),
+		Artifacts:             newArtifactStore(tx, tx),
+		Entities:              newEntityStore(tx, tx),
+		Repos:                 newRepositoryStore(tx, tx),
+		PendingFirings:        newPendingFiringsStore(tx),
+		Projects:              newProjectStore(tx, tx),
+		Events:                newEventStore(tx, tx),
+		TaskMemory:            newTaskMemoryStore(tx, tx),
+		ConversationWorktrees: newRunWorktreeStore(tx, tx),
+		Orgs:                  newOrgsStore(tx, tx),
+		OrgMemberships:        newOrgMembershipsStore(tx, tx),
+		Teams:                 newTeamsStore(tx, tx),
+		JiraStatusRules:       newJiraStatusRulesStore(tx, tx),
+		TeamGitHubGroups:      newTeamGitHubGroupsStore(tx, tx),
+		TeamGitHubRepos:       newTeamGitHubReposStore(tx, tx),
+		Curator:               newCuratorStore(tx, tx),
 		// Both pools collapse to tx (test door). BackfillInstallationsFromAPI's
 		// GetSystem would hit tf_app and be denied here — tests that exercise
 		// it use New(admin, app, key) directly, same as the SecretStore tests.
-		GitHubApps:      newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
-		JiraApps:        newJiraAppsStore(tx, tx),
-		ShippedDefaults: newTxShippedDefaultsStore(tx, newTxEventHandlerStore(tx)),
-		Invites:         newInvitesStore(tx, tx),
-		SystemLLMRuns:   newSystemLLMRunStore(tx),
-		AccessChangeLog: newAccessChangeLogStore(tx, tx),
-		ExternalActions: newExternalActionStore(tx, tx),
-		Spend:           newSpendStore(tx, tx),
-		AuthEvents:      newAuthEventStore(tx),
-		Marketplace:     newMarketplaceStore(tx, tx),
-		Instances:       newInstanceStore(tx),
-		RunPendingInput: newRunPendingInputStore(tx),
-		Ext:             db.BuildStoreExtensions("postgres", tx, tx),
+		GitHubApps:               newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
+		JiraApps:                 newJiraAppsStore(tx, tx),
+		ShippedDefaults:          newTxShippedDefaultsStore(tx, newTxEventHandlerStore(tx)),
+		Invites:                  newInvitesStore(tx, tx),
+		SystemLLMRuns:            newSystemLLMRunStore(tx),
+		AccessChangeLog:          newAccessChangeLogStore(tx, tx),
+		ExternalActions:          newExternalActionStore(tx, tx),
+		Spend:                    newSpendStore(tx, tx),
+		AuthEvents:               newAuthEventStore(tx),
+		Marketplace:              newMarketplaceStore(tx, tx),
+		Instances:                newInstanceStore(tx),
+		ConversationPendingInput: newRunPendingInputStore(tx),
+		Ext:                      db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

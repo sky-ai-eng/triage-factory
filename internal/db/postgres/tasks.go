@@ -632,8 +632,8 @@ func closeTaskRows(ctx context.Context, q queryer, orgID, taskID, closeReason, c
 
 func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
 	var (
-		closed bool
-		runIDs []string
+		closed          bool
+		conversationIDs []string
 	)
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		n, err := closeTaskRows(ctx, q, orgID, taskID, closeReason, closeEventType)
@@ -663,7 +663,7 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 		// than on a defer: both ride the one connection this tx holds, and an
 		// open cursor is the kind of thing a driver is entitled to refuse to
 		// write around.
-		if runIDs, err = scanIDs(rows, "conversations.id"); err != nil {
+		if conversationIDs, err = scanIDs(rows, "conversations.id"); err != nil {
 			return fmt.Errorf("list active runs: %w", err)
 		}
 
@@ -693,7 +693,7 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 	if err != nil {
 		return false, nil, err
 	}
-	return closed, runIDs, nil
+	return closed, conversationIDs, nil
 }
 
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) error {
@@ -1087,11 +1087,11 @@ func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUser
 
 // --- Breaker ---
 
-func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+func (s *taskStore) CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error) {
 	return countConsecutiveFailedRuns(ctx, s.q, orgID, entityID, promptID)
 }
 
-func (s *taskStore) CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+func (s *taskStore) CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
 	return countConsecutiveFailedRuns(ctx, s.admin, orgID, entityID, promptID)
 }
 

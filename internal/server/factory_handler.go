@@ -224,7 +224,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	// factory should still render for a user who's only set up Jira.
 	var ghUsername string
 	var eventCounts, taskCounts, lifetimeCounts map[string]int
-	var activeRuns []domain.FactoryActiveRun
+	var activeRuns []domain.FactoryActiveConversation
 	var entityRows []domain.FactoryEntityRow
 	var recentByEntity map[string][]domain.FactoryRecentEvent
 	var pendingTasks []domain.PendingTaskRef
@@ -290,7 +290,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 			return e
 		}
 
-		openRunsByEntity, e = tx.Conversations.EntitiesWithOpenRuns(r.Context(), orgID, entityIDs)
+		openRunsByEntity, e = tx.Conversations.EntitiesWithOpenConversations(r.Context(), orgID, entityIDs)
 		return e
 	}); err != nil {
 		internalError(w, "factory", err)

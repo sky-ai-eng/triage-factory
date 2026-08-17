@@ -166,8 +166,8 @@ func readFrame(r io.Reader, dst any) error {
 // format lives in one place. Adding a method = appending one struct
 // here + one case in dispatch.go + one method on IPCClient.
 
-type lookupRunResult struct {
-	Info RunInfo `json:"info"`
+type lookupConversationResult struct {
+	Info ConversationInfo `json:"info"`
 }
 
 type finalizeReviewDraftArgs struct {
@@ -218,29 +218,29 @@ type teamTracksRepoResult struct {
 	Tracks bool `json:"tracks"`
 }
 
-type runWorktreeByRepoRefArgs struct {
+type conversationWorktreeByRepoRefArgs struct {
 	RepoID string `json:"repo_id"`
 	Ref    string `json:"ref"`
 }
 
-type runWorktreeResult struct {
-	Worktree *domain.RunWorktree `json:"worktree,omitempty"`
+type conversationWorktreeResult struct {
+	Worktree *domain.ConversationWorktree `json:"worktree,omitempty"`
 }
 
-type runWorktreesResult struct {
-	Worktrees []domain.RunWorktree `json:"worktrees"`
+type conversationWorktreesResult struct {
+	Worktrees []domain.ConversationWorktree `json:"worktrees"`
 }
 
-type insertRunWorktreeArgs struct {
-	Row domain.RunWorktree `json:"row"`
+type insertConversationWorktreeArgs struct {
+	Row domain.ConversationWorktree `json:"row"`
 }
 
-type insertRunWorktreeResult struct {
+type insertConversationWorktreeResult struct {
 	Inserted    bool   `json:"inserted"`
 	WinningPath string `json:"winning_path"`
 }
 
-type deleteRunWorktreeByRepoRefArgs struct {
+type deleteConversationWorktreeByRepoRefArgs struct {
 	RepoID string `json:"repo_id"`
 	Ref    string `json:"ref"`
 }
@@ -606,7 +606,7 @@ type callExtensionResult struct {
 }
 
 // emptyArgs is the args type for methods that take no parameters
-// (LookupRun, GetConversation, ListRunWorktrees, ListRepos). Using an empty
+// (LookupRun, GetConversation, ListConversationWorktrees, ListRepos). Using an empty
 // struct rather than json.RawMessage(nil)
 // lets the daemon-side dispatch use the same json.Unmarshal call shape
 // for every method without a nil-check.
@@ -629,25 +629,29 @@ type memoryLoadResult struct {
 }
 
 // methodCallNames are the wire-name constants. Used by both client
-// and server so a rename here is the only edit needed to propagate.
+// and server so a rename here is the only edit needed to propagate —
+// within one binary version. A sidecar outlives an orchestrator restart
+// (it is per-run, launched with its agent), so its relay calls can reach
+// a newer orchestrator than the one that launched it; see legacyMethodNames
+// for the names that upgrade skew keeps alive.
 const (
-	methodLookupRun                  = "LookupRun"
-	methodFinalizeReviewDraft        = "FinalizeReviewDraft"
-	methodResetReviewDraft           = "ResetReviewDraft"
-	methodUpdateStagedReviewComment  = "UpdateStagedReviewComment"
-	methodDeleteStagedReviewComment  = "DeleteStagedReviewComment"
-	methodGetConversation            = "GetConversation"
-	methodGetTask                    = "GetTask"
-	methodListRepos                  = "ListRepos"
-	methodGetRepo                    = "GetRepo"
-	methodTeamTracksRepo             = "TeamTracksRepo"
-	methodGetRunWorktreeByRepoRef    = "GetRunWorktreeByRepoRef"
-	methodListRunWorktrees           = "ListRunWorktrees"
-	methodInsertRunWorktree          = "InsertRunWorktree"
-	methodDeleteRunWorktreeByRepoRef = "DeleteRunWorktreeByRepoRef"
-	methodWorkspaceRoots             = "WorkspaceRoots"
-	methodCreateWorkspaceCheckout    = "CreateWorkspaceCheckout"
-	methodBuildAgentFooter           = "BuildAgentFooter"
+	methodLookupConversation                  = "LookupConversation"
+	methodFinalizeReviewDraft                 = "FinalizeReviewDraft"
+	methodResetReviewDraft                    = "ResetReviewDraft"
+	methodUpdateStagedReviewComment           = "UpdateStagedReviewComment"
+	methodDeleteStagedReviewComment           = "DeleteStagedReviewComment"
+	methodGetConversation                     = "GetConversation"
+	methodGetTask                             = "GetTask"
+	methodListRepos                           = "ListRepos"
+	methodGetRepo                             = "GetRepo"
+	methodTeamTracksRepo                      = "TeamTracksRepo"
+	methodGetConversationWorktreeByRepoRef    = "GetConversationWorktreeByRepoRef"
+	methodListConversationWorktrees           = "ListConversationWorktrees"
+	methodInsertConversationWorktree          = "InsertConversationWorktree"
+	methodDeleteConversationWorktreeByRepoRef = "DeleteConversationWorktreeByRepoRef"
+	methodWorkspaceRoots                      = "WorkspaceRoots"
+	methodCreateWorkspaceCheckout             = "CreateWorkspaceCheckout"
+	methodBuildAgentFooter                    = "BuildAgentFooter"
 
 	methodUpsertArtifact = "UpsertArtifact"
 
@@ -690,4 +694,22 @@ const (
 	methodRecordReadTouch = "RecordReadTouch"
 
 	methodMemoryLoad = "MemoryLoad"
+)
+
+// The legacy* names are the wire names these five methods carried before the
+// conversation rename. The server still answers them; the client only ever
+// sends the current names.
+//
+// They exist because the two ends of this protocol are not upgraded together.
+// A credential sidecar is per-run — launched with its agent and living as long
+// as the run does — so its relay calls can outlast an orchestrator restart and
+// arrive at a binary newer than the one that launched it. Without these the
+// upgrade would fail those in-flight runs' exec verbs with ErrUnknownMethod.
+// Retire them once no pre-rename run can still be in flight.
+const (
+	legacyMethodLookupConversation                  = "LookupRun"
+	legacyMethodGetConversationWorktreeByRepoRef    = "GetRunWorktreeByRepoRef"
+	legacyMethodListConversationWorktrees           = "ListRunWorktrees"
+	legacyMethodInsertConversationWorktree          = "InsertRunWorktree"
+	legacyMethodDeleteConversationWorktreeByRepoRef = "DeleteRunWorktreeByRepoRef"
 )

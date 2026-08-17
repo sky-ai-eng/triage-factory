@@ -21,7 +21,7 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactRun(t, conn)
 
 	in := domain.ExternalAction{
 		OrgID:          runmode.LocalDefaultOrgID,
@@ -33,7 +33,7 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 		URL:            "https://github.com/octo/repo/pull/123",
 		FromState:      domain.ArtifactStatePRDraft,
 		ToState:        domain.ArtifactStatePROpen,
-		ConversationID: runID,
+		ConversationID: conversationID,
 		ActorUserID:    runmode.LocalDefaultUserID,
 		Credential:     domain.CredentialGitHubApp,
 		DedupKey:       "pr_marked_ready:octo/repo#123:once",
@@ -56,7 +56,7 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 	}
 	if a.Provider != "github" || a.Action != domain.ActionPRMarkedReady || a.Target != "octo/repo#123" ||
 		a.ExternalID != "123" || a.URL != in.URL || a.FromState != "draft" || a.ToState != "open" ||
-		a.ConversationID != runID || a.ActorUserID != runmode.LocalDefaultUserID || a.Credential != "github_app" ||
+		a.ConversationID != conversationID || a.ActorUserID != runmode.LocalDefaultUserID || a.Credential != "github_app" ||
 		a.DedupKey != in.DedupKey || a.DetailJSON != `{"k":"v"}` {
 		t.Errorf("round-trip mismatch: %+v", a)
 	}
@@ -93,14 +93,14 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactRun(t, conn)
 
-	key := domain.BranchPushDedupKey(runID, "refs/heads/feat", "abc123")
+	key := domain.BranchPushDedupKey(conversationID, "refs/heads/feat", "abc123")
 	twin := func(url string) domain.ExternalAction {
 		return domain.ExternalAction{
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: domain.ArtifactProviderGitHub, Action: domain.ActionBranchPushed,
-			Target: "octo/repo", ExternalID: "refs/heads/feat", URL: url, ConversationID: runID,
+			Target: "octo/repo", ExternalID: "refs/heads/feat", URL: url, ConversationID: conversationID,
 			ToState: domain.ArtifactStateBranchPushed, Credential: domain.CredentialGitHubApp, DedupKey: key,
 		}
 	}
@@ -131,7 +131,7 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
 		OrgID: runmode.LocalDefaultOrgID, Provider: domain.ArtifactProviderGitHub,
 		Action: domain.ActionBranchPushed, Target: "octo/repo", Credential: domain.CredentialGitHubApp,
-		DedupKey: domain.BranchPushDedupKey(runID, "refs/heads/feat", "def456"),
+		DedupKey: domain.BranchPushDedupKey(conversationID, "refs/heads/feat", "def456"),
 	}); err != nil {
 		t.Fatalf("new-push Record: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
 	conn := newSQLiteForArtifactTestTimed(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactRun(t, conn)
 
 	seeds := []struct {
 		provider, action, actor, when string
@@ -212,7 +212,7 @@ func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
 	for i, s := range seeds {
 		e := domain.ExternalAction{
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: s.provider, Action: s.action, Target: "t", ActorUserID: s.actor, ConversationID: runID,
+			Provider: s.provider, Action: s.action, Target: "t", ActorUserID: s.actor, ConversationID: conversationID,
 			Credential: domain.CredentialGitHubApp, DedupKey: "k" + string(rune('a'+i)),
 		}
 		if err := stores.ExternalActions.Record(ctx, runmode.LocalDefaultOrgID, e); err != nil {
@@ -292,12 +292,12 @@ func TestExternalActionStore_SQLite_EgressDenialDedupPerConversation(t *testing.
 	runB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
 
 	const target = "api.github.com:443"
-	denial := func(runID string) domain.ExternalAction {
+	denial := func(conversationID string) domain.ExternalAction {
 		return domain.ExternalAction{
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: domain.ArtifactProviderNetwork, Action: domain.ActionEgressDenied,
-			Target: target, ConversationID: runID, Credential: domain.CredentialNone,
-			DedupKey: domain.EgressDenialDedupKey(runID, target),
+			Target: target, ConversationID: conversationID, Credential: domain.CredentialNone,
+			DedupKey: domain.EgressDenialDedupKey(conversationID, target),
 		}
 	}
 
@@ -343,12 +343,12 @@ func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
 	// UPDATEs below address exactly the row they mean. Keying them on `action`
 	// instead would silently span rows the moment this test grew a run that
 	// performs the same act twice — which is most runs.
-	record := func(id, runID, action string, occurred time.Time) string {
+	record := func(id, conversationID, action string, occurred time.Time) string {
 		t.Helper()
 		if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
 			ID: id, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: domain.ArtifactProviderGitHub, Action: action, Target: "octo/repo",
-			ConversationID: runID, Credential: domain.CredentialGitHubApp,
+			ConversationID: conversationID, Credential: domain.CredentialGitHubApp,
 		}); err != nil {
 			t.Fatalf("record %s: %v", action, err)
 		}
@@ -369,9 +369,9 @@ func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
 		t.Fatalf("detach: %v", err)
 	}
 
-	got, _, err := stores.ExternalActions.ListByRun(ctx, runmode.LocalDefaultOrgID, runA, domain.ExternalActionListOpts{})
+	got, _, err := stores.ExternalActions.ListByConversation(ctx, runmode.LocalDefaultOrgID, runA, domain.ExternalActionListOpts{})
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	var actions []string
 	for _, a := range got {
@@ -379,16 +379,16 @@ func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
 	}
 	want := []string{domain.ActionGHChannelWrite, domain.ActionBranchPushed}
 	if !slices.Equal(actions, want) {
-		t.Errorf("ListByRun(runA) = %v, want %v (newest first, runB's and the detached row excluded)", actions, want)
+		t.Errorf("ListByConversation(runA) = %v, want %v (newest first, runB's and the detached row excluded)", actions, want)
 	}
 
 	// The same opts the handler binds: a cap on how much of a runaway run's
 	// history the run view pulls.
-	capped, _, err := stores.ExternalActions.ListByRun(ctx, runmode.LocalDefaultOrgID, runA, domain.ExternalActionListOpts{Limit: 1})
+	capped, _, err := stores.ExternalActions.ListByConversation(ctx, runmode.LocalDefaultOrgID, runA, domain.ExternalActionListOpts{Limit: 1})
 	if err != nil {
-		t.Fatalf("ListByRun(limit): %v", err)
+		t.Fatalf("ListByConversation(limit): %v", err)
 	}
 	if len(capped) != 1 || capped[0].Action != domain.ActionGHChannelWrite {
-		t.Errorf("ListByRun with Limit 1 = %+v, want just the newest row", capped)
+		t.Errorf("ListByConversation with Limit 1 = %+v, want just the newest row", capped)
 	}
 }

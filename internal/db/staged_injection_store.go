@@ -42,7 +42,7 @@ type StagedInjectionStore interface {
 	// Returns an empty slice (no error) when nothing is staged. The
 	// spawner bundles the returned bodies into one <system-note> block
 	// prepended ahead of the resuming user's message.
-	FlushPendingSystem(ctx context.Context, orgID, runID string) ([]domain.StagedInjection, error)
+	FlushPendingSystem(ctx context.Context, orgID, conversationID string) ([]domain.StagedInjection, error)
 
 	// DeleteSystem withdraws one staged injection by id (the decimal
 	// message row id AppendSystem returned). Used to clean up a row staged

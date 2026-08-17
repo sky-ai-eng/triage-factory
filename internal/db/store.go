@@ -151,7 +151,7 @@ type Stores struct {
 	// worker run as background goroutines with no per-user identity.
 	EventQueue EventQueueStore
 
-	// RunQueue owns the run queue — the work list the delegation dispatcher
+	// ConversationQueue owns the run queue — the work list the delegation dispatcher
 	// drains to drive blueprints through their steps (sibling of EventQueue).
 	// A blueprint step is enqueued as a conversations row with no stored
 	// status — the absence of an outcome is what makes it claimable;
@@ -159,7 +159,7 @@ type Stores struct {
 	// reactor advances the blueprint_run.
 	// A system-service store (admin pool in Postgres): the dispatcher runs as
 	// a background worker with no per-user identity.
-	RunQueue RunQueueStore
+	ConversationQueue ConversationQueueStore
 
 	// TaskMemory owns the conversation_memory table — per-run agent narrative
 	// + human verdict, read back by the delegate spawner to
@@ -170,14 +170,14 @@ type Stores struct {
 	// start materializer, both without a JWT-claims context).
 	TaskMemory TaskMemoryStore
 
-	// RunWorktrees owns the conversation_worktrees table — one row per
+	// ConversationWorktrees owns the conversation_worktrees table — one row per
 	// (conversation_id, repo_id) lazy worktree reservation a Jira-style run
 	// accumulates as the agent materializes repos via `workspace
 	// add`. Holds both pools: app for the cmd/exec workspace CLI
 	// (its synthetic-claims wrap is owned by a separate cmd/exec
 	// auth pass) and admin for the spawner's runAgent + chain
 	// orchestrator cleanup defers (no JWT-claims context).
-	RunWorktrees RunWorktreeStore
+	ConversationWorktrees ConversationWorktreeStore
 
 	// Orgs owns the orgs table — the tenancy root. Background
 	// services (poller, tracker, projectclassify, repoprofile)
@@ -368,7 +368,7 @@ type Stores struct {
 	// every TF process registers into at boot and refreshes via periodic
 	// heartbeat. Admin-pool-only in Postgres: no org_id (a fleet member
 	// isn't tenant data), so there's no app-pool counterpart and no
-	// "...System" suffix, same shape as RunQueueStore/EventQueueStore.
+	// "...System" suffix, same shape as ConversationQueueStore/EventQueueStore.
 	// SQLite is N=1: one row, epoch bumping per restart.
 	Instances InstanceStore
 
@@ -390,19 +390,19 @@ type Stores struct {
 	// deployment config, not tenant data.
 	Operators OperatorStore
 
-	// RunSignals owns the conversation_signals table — the cross-pod run-control
+	// ConversationSignals owns the conversation_signals table — the cross-pod run-control
 	// outbox (TFAC-585). Postgres only: the SQLite impl is a stub
 	// returning ErrNotApplicableInLocal from every method, mirroring
 	// MarketplaceStore/InvitesStore — local mode is always its own run's
 	// owner, so no code path may reach this store there.
-	RunSignals RunSignalStore
+	ConversationSignals ConversationSignalStore
 
-	// RunPendingInput is the durable half of resume-by-enqueue (TFAC-585):
+	// ConversationPendingInput is the durable half of resume-by-enqueue (TFAC-585):
 	// the message recorded before a parked run's continuation is re-queued
 	// as ordinary claimable work, stored as an undelivered user messages
-	// row. Both dialects (unlike RunSignals): local mode's dispatcher
+	// row. Both dialects (unlike ConversationSignals): local mode's dispatcher
 	// claims its own resumed runs through the identical queue path.
-	RunPendingInput RunPendingInputStore
+	ConversationPendingInput ConversationPendingInputStore
 
 	// Permissions owns the conversation_permissions table — the durable
 	// record of every tool-approval prompt a conversation raised and how it
@@ -432,13 +432,13 @@ type Stores struct {
 	// PlacementOverrides: placement coordination, not a browsable RLS surface.
 	CuratorHomes CuratorHomeStore
 
-	// RunCredentials owns the claim_credentials table — the sealed
+	// ClaimCredentials owns the claim_credentials table — the sealed
 	// per-claim credential bundle channel (TFAC-614), keyed by the run's
 	// active claim. Admin-pool-only, same shape as
-	// Instances/RunSignals: never a request-handler surface, and unlike
-	// RunPendingInput its payload is credential-bearing ciphertext, so
+	// Instances/ConversationSignals: never a request-handler surface, and unlike
+	// ConversationPendingInput its payload is credential-bearing ciphertext, so
 	// there is no app-pool grant at all.
-	RunCredentials RunCredentialsStore
+	ClaimCredentials ClaimCredentialsStore
 
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
@@ -466,48 +466,48 @@ type Stores struct {
 // in the same transaction. Fields are added as their parent stores
 // land in successive waves.
 type TxStores struct {
-	Scores           ScoreStore
-	Prompts          PromptStore
-	Swipes           SwipeStore
-	Dashboard        DashboardStore
-	Secrets          SecretStore
-	EventHandlers    EventHandlerStore
-	Blueprints       BlueprintStore
-	Agents           AgentStore
-	TeamAgents       TeamAgentStore
-	Users            UsersStore
-	Tasks            TaskStore
-	Factory          FactoryReadStore
-	Conversations    ConversationStore
-	Artifacts        ArtifactStore
-	Entities         EntityStore
-	Repos            RepositoryStore
-	PendingFirings   PendingFiringsStore
-	Projects         ProjectStore
-	Events           EventStore
-	TaskMemory       TaskMemoryStore
-	RunWorktrees     RunWorktreeStore
-	Orgs             OrgsStore
-	OrgMemberships   OrgMembershipsStore
-	Teams            TeamsStore
-	JiraStatusRules  JiraStatusRulesStore
-	TeamGitHubGroups TeamGitHubGroupsStore
-	TeamGitHubRepos  TeamGitHubReposStore
-	Curator          CuratorStore
-	GitHubApps       GitHubAppsStore
-	JiraApps         JiraAppsStore
-	ShippedDefaults  ShippedDefaultsStore
-	Invites          InvitesStore
-	SystemLLMRuns    SystemLLMRunStore
-	AccessChangeLog  AccessChangeLogStore
-	ExternalActions  ExternalActionStore
-	Spend            SpendStore
-	AuthEvents       AuthEventStore
-	StagedInjections StagedInjectionStore
-	Marketplace      MarketplaceStore
-	Instances        InstanceStore
-	RunPendingInput  RunPendingInputStore
-	Permissions      PermissionStore
+	Scores                   ScoreStore
+	Prompts                  PromptStore
+	Swipes                   SwipeStore
+	Dashboard                DashboardStore
+	Secrets                  SecretStore
+	EventHandlers            EventHandlerStore
+	Blueprints               BlueprintStore
+	Agents                   AgentStore
+	TeamAgents               TeamAgentStore
+	Users                    UsersStore
+	Tasks                    TaskStore
+	Factory                  FactoryReadStore
+	Conversations            ConversationStore
+	Artifacts                ArtifactStore
+	Entities                 EntityStore
+	Repos                    RepositoryStore
+	PendingFirings           PendingFiringsStore
+	Projects                 ProjectStore
+	Events                   EventStore
+	TaskMemory               TaskMemoryStore
+	ConversationWorktrees    ConversationWorktreeStore
+	Orgs                     OrgsStore
+	OrgMemberships           OrgMembershipsStore
+	Teams                    TeamsStore
+	JiraStatusRules          JiraStatusRulesStore
+	TeamGitHubGroups         TeamGitHubGroupsStore
+	TeamGitHubRepos          TeamGitHubReposStore
+	Curator                  CuratorStore
+	GitHubApps               GitHubAppsStore
+	JiraApps                 JiraAppsStore
+	ShippedDefaults          ShippedDefaultsStore
+	Invites                  InvitesStore
+	SystemLLMRuns            SystemLLMRunStore
+	AccessChangeLog          AccessChangeLogStore
+	ExternalActions          ExternalActionStore
+	Spend                    SpendStore
+	AuthEvents               AuthEventStore
+	StagedInjections         StagedInjectionStore
+	Marketplace              MarketplaceStore
+	Instances                InstanceStore
+	ConversationPendingInput ConversationPendingInputStore
+	Permissions              PermissionStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same

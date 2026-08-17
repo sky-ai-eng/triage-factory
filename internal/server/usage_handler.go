@@ -41,7 +41,7 @@ type usageHandler struct {
 	// admin's own queue waits + run durations. Admin-pool reads with orgID
 	// bound by argument, gated by the HTTP org-admin check — SaaS-safe, no
 	// cross-tenant machine truth.
-	runQueue db.RunQueueStore
+	runQueue db.ConversationQueueStore
 }
 
 // --- response shapes ---

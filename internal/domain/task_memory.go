@@ -15,7 +15,7 @@ import "time"
 // denormalized `blueprint_run_id` that groups one blueprint run's files.
 type TaskMemory struct {
 	ID             string
-	RunID          string
+	ConversationID string
 	EntityID       string // denormalized from run→task→entity for fast entity-scoped queries
 	BlueprintRunID string // denormalized from the run; empty for a standalone (non-blueprint) run
 	Content        string

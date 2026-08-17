@@ -12,14 +12,19 @@ import type {
 import { useWebSocket, setPresenceView } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
 import {
-  isActiveRun,
+  isActiveConversation,
   isActiveStatus,
   isFailedStatus,
   isPermissionTerminalStatus,
   isTerminalStatus,
-} from '../lib/runStatus'
+} from '../lib/conversationStatus'
 import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
-import { appendToFeed, feedFromMessages, EMPTY_FEED, type RunCardFeed } from '../lib/runFeed'
+import {
+  appendToFeed,
+  feedFromMessages,
+  EMPTY_FEED,
+  type RunCardFeed,
+} from '../lib/conversationFeed'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
 import { usePagedList } from '../hooks/usePagedList'
@@ -192,20 +197,22 @@ export default function Board() {
   // Agent run state — runs render on cards regardless of which column
   // the card is in (a user-claimed in_progress task can also have a
   // run; a bot-claimed in_review task definitely has one).
-  const [agentRuns, setAgentRuns] = useState<Record<string, Conversation>>({})
+  const [conversations, setConversations] = useState<Record<string, Conversation>>({})
   // Per-run card feed (running stats + last few ticker lines), keyed by run
   // ID. Bounded by construction — the board used to accumulate every run's
   // full message array here, growing without limit for the lifetime of the
   // page while each card re-derived its stats from scratch per render.
   const [runFeeds, setRunFeeds] = useState<Record<string, RunCardFeed>>({})
-  const [chainStepRuns, setChainStepRuns] = useState<Record<string, Conversation[]>>({})
-  const chainStepRunsRef = useRef(chainStepRuns)
+  const [chainStepConversations, setChainStepConversations] = useState<
+    Record<string, Conversation[]>
+  >({})
+  const chainStepRunsRef = useRef(chainStepConversations)
   useEffect(() => {
-    chainStepRunsRef.current = chainStepRuns
-  }, [chainStepRuns])
+    chainStepRunsRef.current = chainStepConversations
+  }, [chainStepConversations])
 
   // Tool-permission prompts for every run on the board, keyed by run ID. The
-  // shared queue core (same one useRunDetail uses) owns dedup + per-prompt TTL
+  // shared queue core (same one useConversationDetail uses) owns dedup + per-prompt TTL
   // timers; the board ingests `permission_request` and drops a run's queue when
   // it finishes or leaves the board. A queuesRef mirrors the map so the
   // leave-the-board reconciliation effect can read it without re-running on
@@ -215,7 +222,7 @@ export default function Board() {
     queues: permQueueMap,
     refresh: refreshPermissions,
     resolve: resolvePermission,
-    dropRun: dropPermissionRun,
+    dropConversation: dropPermissionRun,
   } = usePermissionQueues()
   const queuesRef = useRef(permQueueMap)
   useEffect(() => {
@@ -316,7 +323,7 @@ export default function Board() {
 
   // Per-item approval overlay (open one unresolved artifact's editor).
   const [approvalCtx, setApprovalCtx] = useState<{
-    runID: string
+    conversationID: string
     kind: 'review' | 'pr'
     artifactId: string
   } | null>(null)
@@ -338,13 +345,13 @@ export default function Board() {
   // array of step runs — synthetic 'pending' placeholders for steps without
   // a run yet — the shape the chain rail renders. Pure: returns the array
   // (null on error / empty) and writes no state, so fetchTasks can resolve
-  // many chains in parallel and apply them in one batched setChainStepRuns.
-  const fetchChainStepRuns = useCallback(
-    async (chainRunID: string): Promise<Conversation[] | null> => {
+  // many chains in parallel and apply them in one batched setChainStepConversations.
+  const fetchChainStepConversations = useCallback(
+    async (blueprintRunID: string): Promise<Conversation[] | null> => {
       try {
         const data = await apiJSON<{
           steps?: Array<{ step: { step_index: number }; run?: Conversation | null }>
-        }>(`/api/blueprint-runs/${chainRunID}`)
+        }>(`/api/blueprint-runs/${blueprintRunID}`)
         const total = data.steps?.length ?? 0
         if (total === 0) return null
         return Array.from({ length: total }, (_, i) => {
@@ -356,9 +363,9 @@ export default function Board() {
           // conversation vocabulary that no conversation can carry. The
           // `__pending-` id is what marks the row synthetic.
           return {
-            ID: `__pending-${chainRunID}-${i}`,
+            ID: `__pending-${blueprintRunID}-${i}`,
             Status: '',
-            blueprint_run_id: chainRunID,
+            blueprint_run_id: blueprintRunID,
             blueprint_step_index: i,
           } as unknown as Conversation
         })
@@ -371,15 +378,15 @@ export default function Board() {
     [],
   )
 
-  // Seeds chainStepRuns for one task from its blueprint run. Thin wrapper
-  // over fetchChainStepRuns for the WS handlers (which seed one task at a
-  // time); fetchTasks batches via fetchChainStepRuns directly.
-  const seedChainStepRuns = useCallback(
-    async (taskID: string, chainRunID: string) => {
-      const steps = await fetchChainStepRuns(chainRunID)
-      if (steps) setChainStepRuns((prev) => ({ ...prev, [taskID]: steps }))
+  // Seeds chainStepConversations for one task from its blueprint run. Thin wrapper
+  // over fetchChainStepConversations for the WS handlers (which seed one task at a
+  // time); fetchTasks batches via fetchChainStepConversations directly.
+  const seedChainStepConversations = useCallback(
+    async (taskID: string, blueprintRunID: string) => {
+      const steps = await fetchChainStepConversations(blueprintRunID)
+      if (steps) setChainStepConversations((prev) => ({ ...prev, [taskID]: steps }))
     },
-    [fetchChainStepRuns],
+    [fetchChainStepConversations],
   )
 
   // Fetch members + bot once at mount. The picker degrades gracefully
@@ -488,10 +495,10 @@ export default function Board() {
         const runs = runsByTask[task.id]
         if (!runs || runs.length === 0) continue
         const latestRun = runs[0]
-        const chainRunID = latestRun.blueprint_run_id
-        if (chainRunID) {
+        const blueprintRunID = latestRun.blueprint_run_id
+        if (blueprintRunID) {
           const stepRuns = runs
-            .filter((r) => r.blueprint_run_id === chainRunID)
+            .filter((r) => r.blueprint_run_id === blueprintRunID)
             .sort((a, b) => (a.blueprint_step_index ?? 0) - (b.blueprint_step_index ?? 0))
           const activeStep =
             stepRuns.find((r) => isActiveStatus(r.Status)) ?? stepRuns[stepRuns.length - 1]
@@ -504,7 +511,7 @@ export default function Board() {
           const msgs = messagesByRun[activeStep.ID]
           if (msgs) nextFeeds[activeStep.ID] = feedFromMessages(msgs)
           chainSeeds.push(
-            fetchChainStepRuns(chainRunID).then((steps) =>
+            fetchChainStepConversations(blueprintRunID).then((steps) =>
               steps ? { taskID: task.id, steps } : null,
             ),
           )
@@ -515,7 +522,7 @@ export default function Board() {
         }
       }
 
-      setAgentRuns((prev) => ({ ...prev, ...nextRuns }))
+      setConversations((prev) => ({ ...prev, ...nextRuns }))
       // A fetched feed replaces the incrementally-built one wholesale — the
       // server transcript is authoritative, so any WS/fetch race drift
       // self-corrects here.
@@ -529,7 +536,7 @@ export default function Board() {
           (s): s is { taskID: string; steps: Conversation[] } => s !== null,
         )
         if (seeded.length > 0) {
-          setChainStepRuns((prev) => {
+          setChainStepConversations((prev) => {
             const next = { ...prev }
             for (const { taskID, steps } of seeded) next[taskID] = steps
             return next
@@ -542,7 +549,7 @@ export default function Board() {
       setLoading(false)
     }
   }, [
-    fetchChainStepRuns,
+    fetchChainStepConversations,
     showSnoozed,
     loadQueued,
     loadClaimed,
@@ -616,7 +623,7 @@ export default function Board() {
           const conversationID = event.conversation_id
           const status = event.data.status ?? ''
           let matched = false
-          setAgentRuns((prev) => {
+          setConversations((prev) => {
             const updated = { ...prev }
             for (const [taskId, run] of Object.entries(updated)) {
               if (run.ID === conversationID) {
@@ -635,20 +642,23 @@ export default function Board() {
             return updated
           })
           apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
-            .then((fullRun) => {
-              setAgentRuns((p) => {
-                const existing = p[fullRun.TaskID]
+            .then((fullConversation) => {
+              setConversations((p) => {
+                const existing = p[fullConversation.TaskID]
                 if (
                   existing &&
-                  existing.ID !== fullRun.ID &&
-                  existing.StartedAt >= fullRun.StartedAt
+                  existing.ID !== fullConversation.ID &&
+                  existing.StartedAt >= fullConversation.StartedAt
                 ) {
                   return p
                 }
-                return { ...p, [fullRun.TaskID]: fullRun }
+                return { ...p, [fullConversation.TaskID]: fullConversation }
               })
-              if (fullRun.blueprint_run_id) {
-                seedChainStepRuns(fullRun.TaskID, fullRun.blueprint_run_id)
+              if (fullConversation.blueprint_run_id) {
+                seedChainStepConversations(
+                  fullConversation.TaskID,
+                  fullConversation.blueprint_run_id,
+                )
               }
             })
             .catch(() => {})
@@ -669,7 +679,7 @@ export default function Board() {
 
           if (!matched) {
             // Chain step run that isn't the active step: a new step
-            // started or a prior one changed. Otherwise seed agentRuns
+            // started or a prior one changed. Otherwise seed conversations
             // so auto-delegation / cross-tab / swipe responses we
             // haven't tracked yet render immediately.
             let isChainStep = false
@@ -685,10 +695,13 @@ export default function Board() {
               }
             } else {
               apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
-                .then((fullRun) => {
-                  setAgentRuns((p) => ({ ...p, [fullRun.TaskID]: fullRun }))
-                  if (fullRun.blueprint_run_id) {
-                    seedChainStepRuns(fullRun.TaskID, fullRun.blueprint_run_id)
+                .then((fullConversation) => {
+                  setConversations((p) => ({ ...p, [fullConversation.TaskID]: fullConversation }))
+                  if (fullConversation.blueprint_run_id) {
+                    seedChainStepConversations(
+                      fullConversation.TaskID,
+                      fullConversation.blueprint_run_id,
+                    )
                   }
                 })
                 .catch(() => {})
@@ -700,17 +713,17 @@ export default function Board() {
           // artifact-derived surface (pending kind / approval card) — so refetch
           // the run, with NO optimistic Status write (unlike conversation_update).
           apiJSON<Conversation>(`/api/agent/conversations/${event.conversation_id}`)
-            .then((fullRun) => {
-              setAgentRuns((p) => {
-                const existing = p[fullRun.TaskID]
+            .then((fullConversation) => {
+              setConversations((p) => {
+                const existing = p[fullConversation.TaskID]
                 if (
                   existing &&
-                  existing.ID !== fullRun.ID &&
-                  existing.StartedAt >= fullRun.StartedAt
+                  existing.ID !== fullConversation.ID &&
+                  existing.StartedAt >= fullConversation.StartedAt
                 ) {
                   return p
                 }
-                return { ...p, [fullRun.TaskID]: fullRun }
+                return { ...p, [fullConversation.TaskID]: fullConversation }
               })
             })
             .catch(() => {})
@@ -754,7 +767,7 @@ export default function Board() {
           refreshPermissions(event.conversation_id)
         }
       },
-      [scheduleFetchTasks, seedChainStepRuns, refreshPermissions, dropPermissionRun],
+      [scheduleFetchTasks, seedChainStepConversations, refreshPermissions, dropPermissionRun],
     ),
   )
 
@@ -768,25 +781,25 @@ export default function Board() {
   // every event doesn't turn into a request per card per event.
   const permissionsAskedRef = useRef<Set<string>>(new Set())
   useEffect(() => {
-    for (const run of Object.values(agentRuns)) {
+    for (const run of Object.values(conversations)) {
       if (!run?.ID || isPermissionTerminalStatus(run.Status)) continue
       if (permissionsAskedRef.current.has(run.ID)) continue
       permissionsAskedRef.current.add(run.ID)
       refreshPermissions(run.ID)
     }
-  }, [agentRuns, refreshPermissions])
+  }, [conversations, refreshPermissions])
 
-  // Drop a run's queue when the run leaves the board (its agentRuns entry was
+  // Drop a run's queue when the run leaves the board (its conversations entry was
   // replaced — e.g. a chain advanced to a new step, or a task got re-delegated).
-  // Keyed on agentRuns only (not the queue map) so a freshly-ingested prompt
+  // Keyed on conversations only (not the queue map) so a freshly-ingested prompt
   // isn't dropped in the window before its run's conversation_update seeds
-  // agentRuns. queuesRef gives the latest queue keys without that dependency.
+  // conversations. queuesRef gives the latest queue keys without that dependency.
   useEffect(() => {
-    const live = new Set(Object.values(agentRuns).map((r) => r.ID))
-    for (const runID of Object.keys(queuesRef.current)) {
-      if (!live.has(runID)) dropPermissionRun(runID)
+    const live = new Set(Object.values(conversations).map((r) => r.ID))
+    for (const conversationID of Object.keys(queuesRef.current)) {
+      if (!live.has(conversationID)) dropPermissionRun(conversationID)
     }
-  }, [agentRuns, dropPermissionRun])
+  }, [conversations, dropPermissionRun])
 
   // Sort tasks with active runs in a meaningful order. Used for
   // In Progress and In Review where the run state matters for
@@ -795,7 +808,7 @@ export default function Board() {
   const sortByRunAttention = useCallback(
     (tasks: Task[]) => {
       const weight = (t: Task) => {
-        const run = agentRuns[t.id]
+        const run = conversations[t.id]
         if (!run) return 2
         // A live tool-permission prompt or an unresolved artifact set is the most
         // urgent "needs you" — top weight — so it can't be missed in the column.
@@ -807,7 +820,7 @@ export default function Board() {
       }
       return [...tasks].sort((a, b) => weight(a) - weight(b))
     },
-    [agentRuns, permQueueMap],
+    [conversations, permQueueMap],
   )
 
   // Resolve a task's claimee to a display name for the claimee sort. Agent
@@ -924,19 +937,19 @@ export default function Board() {
   // nothing to resolve and the caller should proceed directly.
   const requestResolveAll = useCallback(
     (taskId: string, action: 'complete' | 'requeue'): boolean => {
-      const run = agentRuns[taskId]
+      const run = conversations[taskId]
       if (!run || !hasUnresolvedArtifacts(run)) return false
       const c = approvalCounts(run)
       setConfirmResolve({
         taskId,
         prCount: c.pr,
         reviewCount: c.review,
-        isLive: isActiveRun(run),
+        isLive: isActiveConversation(run),
         action,
       })
       return true
     },
-    [agentRuns],
+    [conversations],
   )
 
   // The board opens at the left (Queued first). With Claimed + In
@@ -1198,8 +1211,8 @@ export default function Board() {
   // to a stable callback (rather than an inline closure in the column JSX) so
   // the memoized cards' props don't churn on every board render.
   const handleOpenApproval = useCallback(
-    (runID: string, kind: 'review' | 'pr', artifactId: string) => {
-      setApprovalCtx({ runID, kind, artifactId })
+    (conversationID: string, kind: 'review' | 'pr', artifactId: string) => {
+      setApprovalCtx({ conversationID, kind, artifactId })
     },
     [],
   )
@@ -1240,9 +1253,9 @@ export default function Board() {
             blueprint_id: promptId,
           }),
         })
-        const runID = body.conversation_id
-        if (runID) {
-          setAgentRuns((prev) => ({
+        const conversationID = body.conversation_id
+        if (conversationID) {
+          setConversations((prev) => ({
             ...prev,
             // Optimistic row for the conversation the delegate call just
             // minted, standing in until the first WS status lands. `queued`
@@ -1250,7 +1263,7 @@ export default function Board() {
             // mint — nobody has claimed it yet — so the card shows its
             // queue wait instead of pretending an agent is already working.
             [task.id]: {
-              ID: runID,
+              ID: conversationID,
               TaskID: task.id,
               Status: 'queued',
               Model: '',
@@ -1394,9 +1407,9 @@ export default function Board() {
                   <ColumnContents
                     colId={colId}
                     tasks={filtered[colId]}
-                    agentRuns={agentRuns}
+                    conversations={conversations}
                     runFeeds={runFeeds}
-                    chainStepRuns={chainStepRuns}
+                    chainStepConversations={chainStepConversations}
                     permQueues={permQueueMap}
                     onResolvePermission={resolvePermission}
                     currentUserID={currentUserID}
@@ -1519,9 +1532,9 @@ interface PickerProps {
 function ColumnContents({
   colId,
   tasks,
-  agentRuns,
+  conversations,
   runFeeds,
-  chainStepRuns,
+  chainStepConversations,
   permQueues,
   onResolvePermission,
   currentUserID,
@@ -1539,18 +1552,18 @@ function ColumnContents({
 }: {
   colId: ColumnId
   tasks: Task[]
-  agentRuns: Record<string, Conversation>
+  conversations: Record<string, Conversation>
   runFeeds: Record<string, RunCardFeed>
-  chainStepRuns: Record<string, Conversation[]>
+  chainStepConversations: Record<string, Conversation[]>
   permQueues: Record<string, PendingPermission[]>
   onResolvePermission: (
-    runID: string,
+    conversationID: string,
     toolCallID: string,
     decision: PermissionDecisionInput,
   ) => Promise<void>
   delegateFailures: Record<string, string>
   onRequeue: (taskID: string) => void
-  onOpenApproval: (runID: string, kind: 'review' | 'pr', artifactId: string) => void
+  onOpenApproval: (conversationID: string, kind: 'review' | 'pr', artifactId: string) => void
   onArtifactResolved: () => void
   onRetry: (task: Task) => void
 } & Omit<PickerProps, 'pickerReadOnly'>) {
@@ -1573,20 +1586,20 @@ function ColumnContents({
     <SortableContext items={tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
       {tasks.map((task) => {
         // Queued tasks never render as AgentCards even if the
-        // agentRuns map has a stale entry from a prior delegate.
+        // conversations map has a stale entry from a prior delegate.
         // After requeue, the run row stays in the DB but the task
         // is back in the team queue with claim cols cleared —
         // showing an AgentCard there would lie about who's working
         // on it. The map is cleaned up on the next WS update; this
         // gate covers the window before that lands.
-        const run = colId === 'queued' ? undefined : agentRuns[task.id]
+        const run = colId === 'queued' ? undefined : conversations[task.id]
         if (run) {
           return (
             <SortableAgentCard
               key={task.id}
               task={task}
               run={run}
-              chainSteps={chainStepRuns[task.id]}
+              chainSteps={chainStepConversations[task.id]}
               feed={runFeeds[run.ID]}
               pendingPermissions={permQueues[run.ID]}
               onResolvePermission={onResolvePermission}
@@ -1714,12 +1727,12 @@ const SortableAgentCard = memo(function SortableAgentCard({
   feed?: RunCardFeed
   pendingPermissions?: PendingPermission[]
   onResolvePermission: (
-    runID: string,
+    conversationID: string,
     toolCallID: string,
     decision: PermissionDecisionInput,
   ) => Promise<void>
   onRequeue: (taskID: string) => void
-  onOpenApproval: (runID: string, kind: 'review' | 'pr', artifactId: string) => void
+  onOpenApproval: (conversationID: string, kind: 'review' | 'pr', artifactId: string) => void
   onArtifactResolved: () => void
 } & PickerProps) {
   // Bot-managed cards in in_progress / in_review are
@@ -1735,7 +1748,8 @@ const SortableAgentCard = memo(function SortableAgentCard({
   // (behind the confirmation). An actively-executing turn stays anchored (cancel
   // is the right intent; dragging mid-run races the spawner).
   const draggable =
-    (draggableRunStatuses.has(run.Status) || (hasUnresolvedArtifacts(run) && !isActiveRun(run))) &&
+    (draggableRunStatuses.has(run.Status) ||
+      (hasUnresolvedArtifacts(run) && !isActiveConversation(run))) &&
     !botManaged
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,

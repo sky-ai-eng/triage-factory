@@ -40,9 +40,9 @@ func (f *fencedConversationStore) SetSessionForClaimSystem(context.Context, stri
 	return db.ErrClaimReleased
 }
 
-func (f *fencedConversationStore) SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error {
+func (f *fencedConversationStore) SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) error {
 	f.unfencedSessions++
-	return f.ConversationStore.SetSessionSystem(ctx, orgID, runID, sessionID)
+	return f.ConversationStore.SetSessionSystem(ctx, orgID, conversationID, sessionID)
 }
 
 func (f *fencedConversationStore) InsertMessageForClaimSystem(context.Context, string, string, *domain.Message) (int64, error) {
@@ -68,19 +68,19 @@ func (f *fencedConversationStore) ParkOpenForClaimSystem(context.Context, string
 // stops the agent and marks the engagement fenced, so runAgent abandons the
 // run instead of writing a terminal for it.
 func TestRunSink_FenceTripKillsTheRunAndRecordsIt(t *testing.T) {
-	s, database, runID, _ := setupAdvanceFixture(t, "fence-sink")
+	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-sink")
 	_ = database
-	s.agentRuns = &fencedConversationStore{ConversationStore: s.agentRuns}
+	s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
 
 	// The run's cancel handle, as the dispatcher registers it — the sink's
 	// only way to kill a live agent.
 	killed := false
 	s.mu.Lock()
-	s.cancels[runID] = func() { killed = true }
+	s.cancels[conversationID] = func() { killed = true }
 	s.mu.Unlock()
 
-	sink := newRunSink(s, runmode.LocalDefaultOrgID, runID, "claim-1", "event", "")
-	err := sink.OnMessage(&domain.Message{ConversationID: runID, Role: "assistant", Content: "hello"})
+	sink := newRunSink(s, runmode.LocalDefaultOrgID, conversationID, "claim-1", "event", "")
+	err := sink.OnMessage(&domain.Message{ConversationID: conversationID, Role: "assistant", Content: "hello"})
 	if !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("OnMessage = %v, want ErrClaimReleased surfaced to the runtime", err)
 	}
@@ -95,12 +95,12 @@ func TestRunSink_FenceTripKillsTheRunAndRecordsIt(t *testing.T) {
 // TestRunSink_UnfencedWithoutAClaim: a sink with no claim in scope keeps the
 // pre-fence write path, so the paths that never claimed a run are unaffected.
 func TestRunSink_UnfencedWithoutAClaim(t *testing.T) {
-	s, database, runID, _ := setupAdvanceFixture(t, "fence-sink-noclaim")
-	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
-	s.agentRuns = stub
+	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-sink-noclaim")
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
 
-	sink := newRunSink(s, runmode.LocalDefaultOrgID, runID, "", "event", "")
-	if err := sink.OnMessage(&domain.Message{ConversationID: runID, Role: "assistant", Content: "hello"}); err != nil {
+	sink := newRunSink(s, runmode.LocalDefaultOrgID, conversationID, "", "event", "")
+	if err := sink.OnMessage(&domain.Message{ConversationID: conversationID, Role: "assistant", Content: "hello"}); err != nil {
 		t.Fatalf("OnMessage: %v", err)
 	}
 	if stub.inserts != 0 {
@@ -110,7 +110,7 @@ func TestRunSink_UnfencedWithoutAClaim(t *testing.T) {
 		t.Error("claimless sink reported a fence trip")
 	}
 	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, runID).Scan(&n); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, conversationID).Scan(&n); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
 	if n != 1 {
@@ -123,16 +123,16 @@ func TestRunSink_UnfencedWithoutAClaim(t *testing.T) {
 // write that must never land. The engagement stops, and the id dies with it;
 // falling back to the unfenced door would be the corruption itself.
 func TestRunSink_SessionFenceTripDiscardsTheSessionID(t *testing.T) {
-	s, database, runID, _ := setupAdvanceFixture(t, "fence-session")
-	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
-	s.agentRuns = stub
+	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-session")
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
 
 	killed := false
 	s.mu.Lock()
-	s.cancels[runID] = func() { killed = true }
+	s.cancels[conversationID] = func() { killed = true }
 	s.mu.Unlock()
 
-	sink := newRunSink(s, runmode.LocalDefaultOrgID, runID, "claim-1", "event", "")
+	sink := newRunSink(s, runmode.LocalDefaultOrgID, conversationID, "claim-1", "event", "")
 	err := sink.OnSession("sess-zombie")
 	if !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("OnSession = %v, want ErrClaimReleased surfaced to the runtime", err)
@@ -149,7 +149,7 @@ func TestRunSink_SessionFenceTripDiscardsTheSessionID(t *testing.T) {
 	// The coordinate on the row is whatever the owner put there — here the
 	// fixture's seeded id, standing in for the successor's.
 	var stored string
-	if err := database.QueryRow(`SELECT COALESCE(sdk_session_id, '') FROM conversations WHERE id = ?`, runID).Scan(&stored); err != nil {
+	if err := database.QueryRow(`SELECT COALESCE(sdk_session_id, '') FROM conversations WHERE id = ?`, conversationID).Scan(&stored); err != nil {
 		t.Fatalf("read sdk_session_id: %v", err)
 	}
 	if stored != "sess-fence-session" {
@@ -160,11 +160,11 @@ func TestRunSink_SessionFenceTripDiscardsTheSessionID(t *testing.T) {
 // TestRunSink_SessionWithoutAClaim: a manual run that never claimed keeps its
 // pre-fence door, so the paths with no engagement to name are unaffected.
 func TestRunSink_SessionWithoutAClaim(t *testing.T) {
-	s, database, runID, _ := setupAdvanceFixture(t, "fence-session-noclaim")
-	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
-	s.agentRuns = stub
+	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-session-noclaim")
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
 
-	sink := newRunSink(s, runmode.LocalDefaultOrgID, runID, "", "event", "")
+	sink := newRunSink(s, runmode.LocalDefaultOrgID, conversationID, "", "event", "")
 	if err := sink.OnSession("sess-plain"); err != nil {
 		t.Fatalf("OnSession: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestRunSink_SessionWithoutAClaim(t *testing.T) {
 		t.Errorf("claimless sink took the fenced path %d times", stub.sessions)
 	}
 	var stored string
-	if err := database.QueryRow(`SELECT COALESCE(sdk_session_id, '') FROM conversations WHERE id = ?`, runID).Scan(&stored); err != nil {
+	if err := database.QueryRow(`SELECT COALESCE(sdk_session_id, '') FROM conversations WHERE id = ?`, conversationID).Scan(&stored); err != nil {
 		t.Fatalf("read sdk_session_id: %v", err)
 	}
 	if stored != "sess-plain" {
@@ -185,11 +185,11 @@ func TestRunSink_SessionWithoutAClaim(t *testing.T) {
 // claimless writer (mint / enqueue, where no successor can exist yet) keeps the
 // unfenced one.
 func TestSetWorktreePath_RoutesByClaim(t *testing.T) {
-	s, _, runID, _ := setupAdvanceFixture(t, "fence-worktree")
-	stub := &worktreeFencedStore{ConversationStore: s.agentRuns}
-	s.agentRuns = stub
+	s, _, conversationID, _ := setupAdvanceFixture(t, "fence-worktree")
+	stub := &worktreeFencedStore{ConversationStore: s.conversations}
+	s.conversations = stub
 
-	err := s.setWorktreePath(context.Background(), runmode.LocalDefaultOrgID, runID, "claim-1", "/tmp/triagefactory-runs/zombie")
+	err := s.setWorktreePath(context.Background(), runmode.LocalDefaultOrgID, conversationID, "claim-1", "/tmp/triagefactory-runs/zombie")
 	if !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("fenced stamp = %v, want ErrClaimReleased returned to the caller", err)
 	}
@@ -197,7 +197,7 @@ func TestSetWorktreePath_RoutesByClaim(t *testing.T) {
 		t.Errorf("with a claim: byClaim=%d unfenced=%d, want 1/0", stub.byClaim, stub.unfenced)
 	}
 
-	if err := s.setWorktreePath(context.Background(), runmode.LocalDefaultOrgID, runID, "", "/tmp/triagefactory-runs/mint"); err != nil {
+	if err := s.setWorktreePath(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "/tmp/triagefactory-runs/mint"); err != nil {
 		t.Fatalf("claimless stamp: %v", err)
 	}
 	if stub.unfenced != 1 {
@@ -210,18 +210,18 @@ func TestSetWorktreePath_RoutesByClaim(t *testing.T) {
 // path to the caller (the agent has to run somewhere), but must not stamp it —
 // the row's path is the successor's, on whatever host it is running.
 func TestEnsureWorkspace_RehydrateFenceTripLeavesTheSuccessorsPathAlone(t *testing.T) {
-	s, database, runID, _ := setupAdvanceFixture(t, "fence-rehydrate")
-	stub := &worktreeFencedStore{ConversationStore: s.agentRuns}
-	s.agentRuns = stub
+	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-rehydrate")
+	stub := &worktreeFencedStore{ConversationStore: s.conversations}
+	s.conversations = stub
 
 	// The successor's stamp, standing where the fixture's seeded path was.
 	if _, err := database.Exec(`UPDATE conversations SET worktree_path = ? WHERE id = ?`,
-		"/tmp/triagefactory-runs/successors-host", runID); err != nil {
+		"/tmp/triagefactory-runs/successors-host", conversationID); err != nil {
 		t.Fatalf("seed successor path: %v", err)
 	}
 
 	// The zombie's rebuild lands somewhere else and tries to record it.
-	err := s.setWorktreePath(context.Background(), runmode.LocalDefaultOrgID, runID, "claim-1", "/tmp/triagefactory-runs/zombies-host")
+	err := s.setWorktreePath(context.Background(), runmode.LocalDefaultOrgID, conversationID, "claim-1", "/tmp/triagefactory-runs/zombies-host")
 	if !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("rehydrate stamp = %v, want ErrClaimReleased", err)
 	}
@@ -230,7 +230,7 @@ func TestEnsureWorkspace_RehydrateFenceTripLeavesTheSuccessorsPathAlone(t *testi
 	}
 
 	var path string
-	if err := database.QueryRow(`SELECT COALESCE(worktree_path, '') FROM conversations WHERE id = ?`, runID).Scan(&path); err != nil {
+	if err := database.QueryRow(`SELECT COALESCE(worktree_path, '') FROM conversations WHERE id = ?`, conversationID).Scan(&path); err != nil {
 		t.Fatalf("read worktree_path: %v", err)
 	}
 	if path != "/tmp/triagefactory-runs/successors-host" {
@@ -261,16 +261,16 @@ func (w *worktreeFencedStore) SetWorktreePathSystem(context.Context, string, str
 // own claim. A refusal is logged and nothing else — the engagement carries on
 // to a first transcript write that meets the same fence.
 func TestStampExecutor_RoutesByClaim(t *testing.T) {
-	s, _, runID, _ := setupAdvanceFixture(t, "fence-executor")
-	stub := &executorFencedStore{ConversationStore: s.agentRuns}
-	s.agentRuns = stub
+	s, _, conversationID, _ := setupAdvanceFixture(t, "fence-executor")
+	stub := &executorFencedStore{ConversationStore: s.conversations}
+	s.conversations = stub
 
-	s.stampExecutor(runmode.LocalDefaultOrgID, runID, "claim-1")
+	s.stampExecutor(runmode.LocalDefaultOrgID, conversationID, "claim-1")
 	if stub.byClaim != 1 || stub.unfenced != 0 {
 		t.Errorf("with a claim: byClaim=%d unfenced=%d, want 1/0", stub.byClaim, stub.unfenced)
 	}
 
-	s.stampExecutor(runmode.LocalDefaultOrgID, runID, "")
+	s.stampExecutor(runmode.LocalDefaultOrgID, conversationID, "")
 	if stub.unfenced != 1 {
 		t.Errorf("without a claim: unfenced=%d, want the active-claim fallback", stub.unfenced)
 	}
@@ -299,12 +299,12 @@ func (e *executorFencedStore) SetExecutorSystem(context.Context, string, string,
 // run somebody else is driving — while parked stays true so the workspace the
 // successor may be running in is left alone.
 func TestProcessCompletion_IdleParkFenceTripReportsFenced(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "fence-idle-park")
-	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
-	s.agentRuns = stub
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-idle-park")
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
 
-	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID,
-		"bpr-"+runID, "claim-1", loadTask(t, s, taskID),
+	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
+		"bpr-"+conversationID, "claim-1", loadTask(t, s, taskID),
 		res("just thinking out loud, no envelope here"), t.TempDir(), nil, "", "event", "")
 	if !fenced {
 		t.Fatal("a refused idle park reported unfenced; the caller would react to a run it no longer owns")
@@ -317,7 +317,7 @@ func TestProcessCompletion_IdleParkFenceTripReportsFenced(t *testing.T) {
 	}
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&status); err != nil {
 		t.Fatalf("read run status: %v", err)
 	}
 	if status != "running" {
@@ -331,12 +331,12 @@ func TestProcessCompletion_IdleParkFenceTripReportsFenced(t *testing.T) {
 // blueprint reactor) and "parked" (so the workspace the successor may be
 // using is left on disk).
 func TestProcessCompletion_FenceTripRecordsNothing(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "fence-complete")
-	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
-	s.agentRuns = stub
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-complete")
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
 
-	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID,
-		"bpr-"+runID, "claim-1", loadTask(t, s, taskID),
+	parked, fenced := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID,
+		"bpr-"+conversationID, "claim-1", loadTask(t, s, taskID),
 		res(`{"outcome":"finish","summary":"done"}`), t.TempDir(), nil, "", "event", "")
 	if !fenced {
 		t.Fatal("processCompletion did not report the fence trip; the caller would react to a run it no longer owns")
@@ -349,14 +349,14 @@ func TestProcessCompletion_FenceTripRecordsNothing(t *testing.T) {
 	}
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&status); err != nil {
 		t.Fatalf("read run status: %v", err)
 	}
 	if status != "running" {
 		t.Errorf("run status = %q, want running (a refused terminal must leave the row alone)", status)
 	}
 	var msgs int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, runID).Scan(&msgs); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, conversationID).Scan(&msgs); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
 	if msgs != 0 {
@@ -367,22 +367,22 @@ func TestProcessCompletion_FenceTripRecordsNothing(t *testing.T) {
 // TestFailRun_FenceTripRecordsNothing: the same for the infra-failure
 // terminal — a fenced-out engagement's crash is not the successor's failure.
 func TestFailRun_FenceTripRecordsNothing(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "fence-fail")
-	s.agentRuns = &fencedConversationStore{ConversationStore: s.agentRuns}
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "fence-fail")
+	s.conversations = &fencedConversationStore{ConversationStore: s.conversations}
 
-	if fenced := s.failRun(runmode.LocalDefaultOrgID, runID, taskID, "claim-1", "event", "", "boom", domain.RunFailureCrash); !fenced {
-		t.Fatal("failRun did not report the fence trip; the dispatcher would react to a run it no longer owns")
+	if fenced := s.failConversation(runmode.LocalDefaultOrgID, conversationID, taskID, "claim-1", "event", "", "boom", domain.ConversationFailureCrash); !fenced {
+		t.Fatal("failConversation did not report the fence trip; the dispatcher would react to a run it no longer owns")
 	}
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&status); err != nil {
 		t.Fatalf("read run status: %v", err)
 	}
 	if status != "running" {
 		t.Errorf("run status = %q, want running (a refused failure must leave the row alone)", status)
 	}
 	var msgs int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, runID).Scan(&msgs); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, conversationID).Scan(&msgs); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
 	if msgs != 0 {
@@ -397,16 +397,16 @@ func TestFailRun_FenceTripRecordsNothing(t *testing.T) {
 // the successor's claim, and aborting the run from here would mean the
 // terminal write a fenced-out engagement must never make.
 func TestUpdatePhase_RoutesByClaimAndSurvivesAFenceTrip(t *testing.T) {
-	s, _, runID, _ := setupAdvanceFixture(t, "fence-phase")
-	stub := &phaseFencedStore{ConversationStore: s.agentRuns}
-	s.agentRuns = stub
+	s, _, conversationID, _ := setupAdvanceFixture(t, "fence-phase")
+	stub := &phaseFencedStore{ConversationStore: s.conversations}
+	s.conversations = stub
 
-	s.updatePhase(context.Background(), runmode.LocalDefaultOrgID, runID, "claim-1", "cloning")
+	s.updatePhase(context.Background(), runmode.LocalDefaultOrgID, conversationID, "claim-1", "cloning")
 	if stub.byClaim != 1 || stub.byConversation != 0 {
 		t.Errorf("with a claim: byClaim=%d byConversation=%d, want 1/0", stub.byClaim, stub.byConversation)
 	}
 
-	s.updatePhase(context.Background(), runmode.LocalDefaultOrgID, runID, "", "cloning")
+	s.updatePhase(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "cloning")
 	if stub.byConversation != 1 {
 		t.Errorf("without a claim: byConversation=%d, want the active-claim fallback", stub.byConversation)
 	}
@@ -437,9 +437,9 @@ func (p *phaseFencedStore) SetActiveClaimPhaseSystem(context.Context, string, st
 // would bury a successor's live conversation. It must be refused, and
 // nothing around it may happen either.
 func TestParkRunOpen_CancelFenceTripRecordsNothing(t *testing.T) {
-	s, database, runID, _ := setupAdvanceFixture(t, "fence-cancelled")
-	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
-	s.agentRuns = stub
+	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-cancelled")
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
 
 	// A worktree dir the unfenced path would delete on its way out.
 	wt := t.TempDir()
@@ -448,23 +448,23 @@ func TestParkRunOpen_CancelFenceTripRecordsNothing(t *testing.T) {
 		t.Fatalf("seed worktree marker: %v", err)
 	}
 
-	fenced := s.parkRunOpen(context.Background(), liveParkContext{
-		orgID:       runmode.LocalDefaultOrgID,
-		runID:       runID,
-		claudeCwd:   wt,
-		triggerType: "event",
-		claimID:     "claim-1",
-		reason:      db.ParkStopped("user_cancelled", "Cancelled by user"),
+	fenced := s.parkConversationOpen(context.Background(), liveParkContext{
+		orgID:          runmode.LocalDefaultOrgID,
+		conversationID: conversationID,
+		claudeCwd:      wt,
+		triggerType:    "event",
+		claimID:        "claim-1",
+		reason:         db.ParkStopped("user_cancelled", "Cancelled by user"),
 	}, "")
 	if !fenced {
-		t.Fatal("parkRunOpen did not report the fence trip; runAgent would fall through to the unfenced disposition")
+		t.Fatal("parkConversationOpen did not report the fence trip; runAgent would fall through to the unfenced disposition")
 	}
 	if stub.cancels != 1 {
 		t.Errorf("fenced cancellation park attempted %d times, want 1", stub.cancels)
 	}
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&status); err != nil {
 		t.Fatalf("read run status: %v", err)
 	}
 	if status != "running" {
@@ -480,16 +480,16 @@ func TestParkRunOpen_CancelFenceTripRecordsNothing(t *testing.T) {
 // resumes from survives. It is the same park as every other stop now; what
 // this pins is that routing it through the fence (claimID set) still refuses.
 func TestParkRunOpen_ResumeCancelFenceTripRecordsNothing(t *testing.T) {
-	s, database, runID, _ := setupAdvanceFixture(t, "fence-resume-cancel")
-	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
-	s.agentRuns = stub
+	s, database, conversationID, _ := setupAdvanceFixture(t, "fence-resume-cancel")
+	stub := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = stub
 
-	fenced := s.markRunOpen(context.Background(), liveParkContext{
-		orgID:       runmode.LocalDefaultOrgID,
-		runID:       runID,
-		triggerType: "manual",
-		claimID:     "claim-1",
-		reason:      db.ParkStopped("user_cancelled", "Run cancelled by user"),
+	fenced := s.markConversationOpen(context.Background(), liveParkContext{
+		orgID:          runmode.LocalDefaultOrgID,
+		conversationID: conversationID,
+		triggerType:    "manual",
+		claimID:        "claim-1",
+		reason:         db.ParkStopped("user_cancelled", "Run cancelled by user"),
 	})
 	if !fenced {
 		t.Fatal("the resume cancel did not report the fence trip; the blueprint would be finalized off a successor's run")
@@ -499,7 +499,7 @@ func TestParkRunOpen_ResumeCancelFenceTripRecordsNothing(t *testing.T) {
 	}
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&status); err != nil {
 		t.Fatalf("read run status: %v", err)
 	}
 	if status != "running" {

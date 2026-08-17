@@ -2,41 +2,41 @@ package domain
 
 import "time"
 
-// RunOutcome is the single terminal vocabulary an agent emits in its
+// ConversationOutcome is the single terminal vocabulary an agent emits in its
 // completion envelope (the `outcome` field). It replaces the dual-channel
 // design where single runs used a completion `status` and blueprint steps
 // used a separate per-step verdict CLI:
 //
-//   - RunOutcomeContinue → hand off to the next blueprint stage. Non-terminal
+//   - ConversationOutcomeContinue → hand off to the next blueprint stage. Non-terminal
 //     steps only; the overwhelmingly common, correct choice when a step's
 //     part is done.
-//   - RunOutcomeFinish   → end the whole blueprint successfully and close the
+//   - ConversationOutcomeFinish   → end the whole blueprint successfully and close the
 //     task. On a single/terminal run this is normal completion.
-//   - RunOutcomeAbort    → stop; leave the task open for a human. Carries a
+//   - ConversationOutcomeAbort    → stop; leave the task open for a human. Carries a
 //     natural-language `reason` (the old `unsolvable` folds into this).
 //
 // A turn that ends without one of these (prose / nothing) is not an outcome at
 // all — the run is left `open` (not concluded, not executing); see
 // internal/delegate. conversations.outcome persists the parsed value; the blueprint
 // orchestrator's step advancement and the later queue work read it.
-type RunOutcome string
+type ConversationOutcome string
 
 const (
-	RunOutcomeContinue RunOutcome = "continue"
-	RunOutcomeFinish   RunOutcome = "finish"
-	RunOutcomeAbort    RunOutcome = "abort"
+	ConversationOutcomeContinue ConversationOutcome = "continue"
+	ConversationOutcomeFinish   ConversationOutcome = "finish"
+	ConversationOutcomeAbort    ConversationOutcome = "abort"
 )
 
 // Valid reports whether o is one of the recognized outcomes.
-func (o RunOutcome) Valid() bool {
+func (o ConversationOutcome) Valid() bool {
 	switch o {
-	case RunOutcomeContinue, RunOutcomeFinish, RunOutcomeAbort:
+	case ConversationOutcomeContinue, ConversationOutcomeFinish, ConversationOutcomeAbort:
 		return true
 	}
 	return false
 }
 
-// RunFailureKind is the machine-readable discriminator for WHY a run
+// ConversationFailureKind is the machine-readable discriminator for WHY a run
 // reached status='failed' — the same pattern as
 // repositories.clone_error_kind. It exists so the UI can render
 // specific failures specifically (a memory-limit kill points at the
@@ -45,47 +45,47 @@ func (o RunOutcome) Valid() bool {
 // wire, and free text stays where it always was (messages /
 // result_summary).
 //
-// Persisted to conversations.failure_kind (NULL === RunFailureUnclassified).
+// Persisted to conversations.failure_kind (NULL === ConversationFailureUnclassified).
 // Closed set — extend it here when a new failure genuinely needs
 // distinct rendering; an unrecognized value renders as a generic
 // failure, so additions are backward compatible.
-type RunFailureKind string
+type ConversationFailureKind string
 
 const (
-	// RunFailureUnclassified is the zero value: a failure with no
+	// ConversationFailureUnclassified is the zero value: a failure with no
 	// specific classification (infra/setup errors, legacy rows).
 	// Stored as NULL; renders as today's generic failed state.
-	RunFailureUnclassified RunFailureKind = ""
-	// RunFailureMemoryLimit — the sandbox's per-run memory ceiling
+	ConversationFailureUnclassified ConversationFailureKind = ""
+	// ConversationFailureMemoryLimit — the sandbox's per-run memory ceiling
 	// killed the agent process (agentproc.ErrRunMemoryLimit in the
 	// error chain). The UI pairs this with TF_RUN_MEMORY_LIMIT_MB
 	// guidance.
-	RunFailureMemoryLimit RunFailureKind = "memory_limit"
-	// RunFailureCrash — the agent runtime process errored out
+	ConversationFailureMemoryLimit ConversationFailureKind = "memory_limit"
+	// ConversationFailureCrash — the agent runtime process errored out
 	// (nonzero exit, stream failure) for any reason other than the
 	// memory ceiling.
-	RunFailureCrash RunFailureKind = "crash"
-	// RunFailureNoResult — the agent ended without a usable result:
+	ConversationFailureCrash ConversationFailureKind = "crash"
+	// ConversationFailureNoResult — the agent ended without a usable result:
 	// a clean exit that never produced a result event, or an
 	// envelope attempt that exhausted validation.
-	RunFailureNoResult RunFailureKind = "no_result"
-	// RunFailureAgentError — the agent itself reported an error
+	ConversationFailureNoResult ConversationFailureKind = "no_result"
+	// ConversationFailureAgentError — the agent itself reported an error
 	// result (IsError terminal).
-	RunFailureAgentError RunFailureKind = "agent_error"
-	// RunFailureExecutorLost — the run's owning executor's registry
+	ConversationFailureAgentError ConversationFailureKind = "agent_error"
+	// ConversationFailureExecutorLost — the run's owning executor's registry
 	// heartbeat went stale past the leader reaper's threshold and the
 	// run had already exhausted TF_RUN_MAX_ATTEMPTS, so the reaper
 	// terminal-failed it instead of requeuing (TFAC-586, spec §4.3).
 	// A run that still had attempts left is requeued and re-claimed
 	// instead — this kind only marks the case that ran out of retries.
-	RunFailureExecutorLost RunFailureKind = "executor_lost"
-	// RunFailureSessionLost — a resume could not continue because the
+	ConversationFailureExecutorLost ConversationFailureKind = "executor_lost"
+	// ConversationFailureSessionLost — a resume could not continue because the
 	// run's Claude session transcript was not on disk after the workspace
 	// rehydrate: the parking executor snapshotted without it, or nothing
 	// restored it (e.g. the executor was rebuilt and its warm copy was on
 	// wiped ephemeral storage). The run is failed with an actionable reason
 	// rather than handed an opaque "No conversation found" from the SDK.
-	RunFailureSessionLost RunFailureKind = "session_lost"
+	ConversationFailureSessionLost ConversationFailureKind = "session_lost"
 )
 
 // The conversations.runtime vocabulary — which engine drives a
@@ -242,7 +242,7 @@ type Conversation struct {
 	WorktreePath  string
 	ResultSummary string
 
-	// Outcome is the parsed terminal envelope `outcome` (RunOutcome
+	// Outcome is the parsed terminal envelope `outcome` (ConversationOutcome
 	// vocabulary), persisted by processCompletion. Empty string === SQL
 	// NULL: an infra-error run (status='failed') or a blueprint step whose
 	// outcome gate exhausted its retries without a valid envelope. The
@@ -253,10 +253,10 @@ type Conversation struct {
 	// ResultSummary (the always-present "what I did"). Empty === NULL.
 	OutcomeReason string
 	// FailureKind is the machine-readable failure discriminator
-	// (RunFailureKind vocabulary) for a status='failed' run — see the
+	// (ConversationFailureKind vocabulary) for a status='failed' run — see the
 	// type's doc. Empty string === SQL NULL: non-failed runs, legacy
 	// failed rows, and failures nothing classified.
-	FailureKind   RunFailureKind
+	FailureKind   ConversationFailureKind
 	SessionID     string // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
 	MemoryMissing bool   // true if the pre-complete memory-file gate was exhausted without the agent writing a memory file
 	TriggerType   string // "manual" | "event" (matches conversations.trigger_type / blueprint_runs.trigger_type vocabulary)
@@ -301,11 +301,11 @@ type Conversation struct {
 
 	// TeamID is the run's owning team — conversations.team_id, NOT NULL (the
 	// LocalDefaultTeamID sentinel in local mode, the task-derived team in
-	// multi mode; EnqueueRun / Create denormalize it from the parent task
+	// multi mode; EnqueueConversation / Create denormalize it from the parent task
 	// at insert, so it carries the team without a task hop at read time).
-	// Surfaced onto RunInfo (TFAC-458) so the capture writers can stamp
+	// Surfaced onto ConversationInfo (TFAC-458) so the capture writers can stamp
 	// artifacts.team_id (NOT NULL, per TFAC-455 F1) directly off the run.
-	// Populated by the Get and ClaimNextRun scan paths; empty on rows
+	// Populated by the Get and ClaimNextConversation scan paths; empty on rows
 	// hydrated by projections that don't select it.
 	TeamID string
 
@@ -317,7 +317,7 @@ type Conversation struct {
 	// different questions and both answers are wanted. Check the producer
 	// before branching on it.
 	//
-	//   - RunQueueStore.ClaimNextRun fills it with the CURRENT queue episode:
+	//   - ConversationQueueStore.ClaimNextConversation fills it with the CURRENT queue episode:
 	//     this claim plus the consecutive hand-backs behind it ('requeued' /
 	//     'reaped' — see the dialects' episodeAttemptsSQL). This is the retry
 	//     budget's counter and the only meaning anything branches on
@@ -339,7 +339,7 @@ type Conversation struct {
 	Attempts int `json:"attempts,omitempty"`
 
 	// OrgID is the run's owning tenant. Populated only by
-	// RunQueueStore.ClaimNextRun (a cross-org system claim that returns the row
+	// ConversationQueueStore.ClaimNextConversation (a cross-org system claim that returns the row
 	// it reserved); the dispatcher reads it to scope every downstream store
 	// call. Empty on rows hydrated by the per-org Get paths, which already
 	// carry org in their call args.
@@ -348,13 +348,13 @@ type Conversation struct {
 	// ClaimMessageID is the queued input row the claim was minted to drive —
 	// the claim's mint intent, so a pickup that fails before attaching any
 	// message stays attributable to its exact turn. Populated by
-	// RunQueueStore.ClaimNextRun for surfaces whose work unit is one queued
+	// ConversationQueueStore.ClaimNextConversation for surfaces whose work unit is one queued
 	// message (curator today); 0 for a delegation conversation, whose work
 	// unit is the conversation itself.
 	ClaimMessageID int64 `json:"-"`
 
 	// ClaimID is the claims row minted for this engagement, populated only by
-	// RunQueueStore.ClaimNextRun (which returns the row it just reserved
+	// ConversationQueueStore.ClaimNextConversation (which returns the row it just reserved
 	// along with the claim it minted for it). The dispatcher threads it into
 	// the run config so teardown can stamp the engagement's measured sandbox
 	// cost by id — an active-claim lookup at that point would race the

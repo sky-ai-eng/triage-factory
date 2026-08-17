@@ -110,7 +110,7 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 // exactly those an engagement is actually driving (an unreleased claim — the
 // setup sub-states ride that claim's phase). Mirrors the X-button window in
 // AgentCard. Duplicated in postgres/factory.go; intentional per-backend copy.
-func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]domain.FactoryActiveRun, error) {
+func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]domain.FactoryActiveConversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -158,7 +158,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 	}
 	defer rows.Close()
 
-	var out []domain.FactoryActiveRun
+	var out []domain.FactoryActiveConversation
 	for rows.Next() {
 		var r domain.Conversation
 		var t domain.Task
@@ -196,9 +196,9 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			v := int(numTurns.Int64)
 			r.NumTurns = &v
 		}
-		r.FailureKind = domain.RunFailureKind(failureKind)
+		r.FailureKind = domain.ConversationFailureKind(failureKind)
 		r.ParkReason = domain.ParkReason(parkReason)
-		out = append(out, domain.FactoryActiveRun{Run: r, Task: t, EntityEventTyp: t.EventType})
+		out = append(out, domain.FactoryActiveConversation{Run: r, Task: t, EntityEventTyp: t.EventType})
 	}
 	return out, rows.Err()
 }

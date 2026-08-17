@@ -22,7 +22,7 @@ import (
 //
 // The per-task firing gate's runs-shaped half lives on ConversationStore —
 // strict ownership. The router composes the gate from this store's
-// HasPendingForTask + ConversationStore's HasActiveAutoRunForTask.
+// HasPendingForTask + ConversationStore's HasActiveAutoConversationForTask.
 type pendingFiringsStore struct{ q queryer }
 
 func newPendingFiringsStore(q queryer) db.PendingFiringsStore {
@@ -149,12 +149,12 @@ func (s *pendingFiringsStore) RequeueStaleDraining(ctx context.Context, orgID st
 	return int(n), nil
 }
 
-func (s *pendingFiringsStore) MarkFired(ctx context.Context, orgID string, firingID int64, runID string) error {
+func (s *pendingFiringsStore) MarkFired(ctx context.Context, orgID string, firingID int64, conversationID string) error {
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE pending_firings
 		SET status = 'fired', drained_at = now(), fired_run_id = $1
 		WHERE org_id = $2 AND id = $3 AND status = 'draining'
-	`, runID, orgID, firingID)
+	`, conversationID, orgID, firingID)
 	return err
 }
 
@@ -232,13 +232,13 @@ func (s *pendingFiringsStore) ListForEntity(ctx context.Context, orgID, entityID
 // non-error empty result. Mirrors the SQLite-side helper.
 func scanPgPendingFiring(row *sql.Row) (*domain.PendingFiring, error) {
 	var (
-		f          domain.PendingFiring
-		drainedAt  sql.NullTime
-		firedRunID sql.NullString
+		f                   domain.PendingFiring
+		drainedAt           sql.NullTime
+		firedBlueprintRunID sql.NullString
 	)
 	err := row.Scan(
 		&f.ID, &f.EntityID, &f.TaskID, &f.TriggerID, &f.TriggeringEventID,
-		&f.Status, &f.SkipReason, &f.QueuedAt, &drainedAt, &firedRunID,
+		&f.Status, &f.SkipReason, &f.QueuedAt, &drainedAt, &firedBlueprintRunID,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -250,9 +250,9 @@ func scanPgPendingFiring(row *sql.Row) (*domain.PendingFiring, error) {
 		t := drainedAt.Time
 		f.DrainedAt = &t
 	}
-	if firedRunID.Valid {
-		s := firedRunID.String
-		f.FiredRunID = &s
+	if firedBlueprintRunID.Valid {
+		s := firedBlueprintRunID.String
+		f.FiredBlueprintRunID = &s
 	}
 	return &f, nil
 }
@@ -260,13 +260,13 @@ func scanPgPendingFiring(row *sql.Row) (*domain.PendingFiring, error) {
 // scanPgPendingFiringRow is the sql.Rows variant.
 func scanPgPendingFiringRow(rows *sql.Rows) (*domain.PendingFiring, error) {
 	var (
-		f          domain.PendingFiring
-		drainedAt  sql.NullTime
-		firedRunID sql.NullString
+		f                   domain.PendingFiring
+		drainedAt           sql.NullTime
+		firedBlueprintRunID sql.NullString
 	)
 	err := rows.Scan(
 		&f.ID, &f.EntityID, &f.TaskID, &f.TriggerID, &f.TriggeringEventID,
-		&f.Status, &f.SkipReason, &f.QueuedAt, &drainedAt, &firedRunID,
+		&f.Status, &f.SkipReason, &f.QueuedAt, &drainedAt, &firedBlueprintRunID,
 	)
 	if err != nil {
 		return nil, err
@@ -275,9 +275,9 @@ func scanPgPendingFiringRow(rows *sql.Rows) (*domain.PendingFiring, error) {
 		t := drainedAt.Time
 		f.DrainedAt = &t
 	}
-	if firedRunID.Valid {
-		s := firedRunID.String
-		f.FiredRunID = &s
+	if firedBlueprintRunID.Valid {
+		s := firedBlueprintRunID.String
+		f.FiredBlueprintRunID = &s
 	}
 	return &f, nil
 }

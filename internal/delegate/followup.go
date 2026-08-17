@@ -104,7 +104,7 @@ const (
 // not have to know that this predicate has stopped caring.
 //
 // `failed` is the exclusion: the infrastructure under the run died, so there is
-// no coherent workspace to rehydrate — failRun drops whatever blob it had.
+// no coherent workspace to rehydrate — failConversation drops whatever blob it had.
 // Runs never park for approval; a terminal run that left an unresolved artifact
 // (draft PR / ready review) resumes through this same path plus the feedback
 // ledger, not through a parked status.
@@ -140,7 +140,7 @@ func injectionWillFlush(status, outcome string) bool {
 	case "open":
 		return true
 	case "completed":
-		return domain.RunOutcome(outcome) == domain.RunOutcomeAbort
+		return domain.ConversationOutcome(outcome) == domain.ConversationOutcomeAbort
 	default:
 		return false
 	}
@@ -187,7 +187,7 @@ func (s *Spawner) blueprintFollowUpBlock(ctx context.Context, orgID string, run 
 	}
 	br, err := s.blueprints.GetRunSystem(ctx, orgID, run.BlueprintRunID)
 	if err != nil {
-		delegateLog.Warn("resume: blueprint state lookup inconclusive; treating as drivable", "run", run.ID, "blueprint_run", run.BlueprintRunID, "error", err)
+		delegateLog.Warn("resume: blueprint state lookup inconclusive; treating as drivable", "conversation", run.ID, "blueprint_run", run.BlueprintRunID, "error", err)
 		return ""
 	}
 	if !blueprintDrivableForClaim(br, run.BlueprintStepIndex) {
@@ -249,7 +249,7 @@ func isCurrentBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
 // that user's synthetic claims regardless of the conversation's original
 // trigger (a follow-up is user-initiated even when the run that earned it was
 // not).
-func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text string) error {
+func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID, text string) error {
 	// One validation gate for every arm, ahead of the routing: a live steer
 	// must refuse exactly the inputs a queued follow-up refuses. Checked here
 	// rather than in queueFollowUp so the steer arms can't hand a blank user
@@ -273,11 +273,11 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 	// conversation therefore CANNOT be in it, so this can never send one down a
 	// Claude-session resume it never had. Anything that starts registering
 	// handles from a second driver has to re-read the runtime here first.
-	if s.getProc(runID) != nil {
-		if err := s.Steer(ctx, runID, text); err != nil {
+	if s.getProc(conversationID) != nil {
+		if err := s.Steer(ctx, conversationID, text); err != nil {
 			return err
 		}
-		s.recordSteeredMessage(ctx, orgID, runID, userID, text)
+		s.recordSteeredMessage(ctx, orgID, conversationID, userID, text)
 		return nil
 	}
 	// No LOCAL process. Route on the conversation's runtime and STATUS, not on
@@ -286,7 +286,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 	// (its process on an executor) as unreachable and 409'd. GetSystem is scoped
 	// by its orgID arg, so a run in another tenant reads as absent → not
 	// steerable.
-	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
+	run, err := s.conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
 		return fmt.Errorf("load run: %w", err)
 	}
@@ -304,10 +304,10 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 	// the controller is local-only, so an active run absent from this (sole)
 	// process's registry is a genuine race → ErrNoLiveProcess.
 	if run.Runtime != domain.ConversationRuntimeNative && domain.IsActiveRunStatus(run.Status) {
-		if err := s.Steer(ctx, runID, text); err != nil {
+		if err := s.Steer(ctx, conversationID, text); err != nil {
 			return err
 		}
-		s.recordSteeredMessage(ctx, orgID, runID, userID, text)
+		s.recordSteeredMessage(ctx, orgID, conversationID, userID, text)
 		return nil
 	}
 	return s.queueFollowUp(ctx, orgID, *run, userID, text)
@@ -329,7 +329,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 // The row is delivered (nothing will come back to drain it) and attributed to
 // the sender, same as pendingUserInput; the DB-assigned id is stamped before
 // the broadcast because the client dedups and orders by id.
-func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, runID, userID, text string) {
+func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, conversationID, userID, text string) {
 	if s.tx == nil {
 		return
 	}
@@ -338,7 +338,7 @@ func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, runID, userID
 	// right after the controller accepted the steer must not cost the
 	// transcript its only record of the turn.
 	ctx = context.WithoutCancel(ctx)
-	msg := &domain.Message{ConversationID: runID, UserID: userID, Role: "user", Content: text}
+	msg := &domain.Message{ConversationID: conversationID, UserID: userID, Role: "user", Content: text}
 	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
 		id, iErr := ts.Conversations.InsertMessage(ctx, orgID, msg)
 		if iErr != nil {
@@ -347,10 +347,10 @@ func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, runID, userID
 		msg.ID = int(id)
 		return nil
 	}); err != nil {
-		delegateLog.Warn("record steered user message failed; the message itself was already delivered", "run", runID, "error", err)
+		delegateLog.Warn("record steered user message failed; the message itself was already delivered", "conversation", conversationID, "error", err)
 		return
 	}
-	s.broadcastMessage(orgID, runID, msg)
+	s.broadcastMessage(orgID, conversationID, msg)
 }
 
 // queueFollowUp is the follow-up path: it records the user's message as an
@@ -391,7 +391,7 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, run domain.Co
 
 	// The write, and it is an ordinary transcript insert whatever the runtime —
 	// the queue IS the transcript's undelivered tail (role='user', blank
-	// subtype, delivered=false), which is the row shape RunPendingInputStore's
+	// subtype, delivered=false), which is the row shape ConversationPendingInputStore's
 	// Peek/Consume read. It appends, so several messages sent before a claim
 	// arrives are all delivered: the native loop folds them in as separate
 	// turns, an SDK resume takes them joined into its one prompt string.
@@ -430,7 +430,7 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, run domain.Co
 // pendingUserInput builds the one row every input to a conversation takes: an
 // undelivered plain user message on its own transcript. That shape is not
 // cosmetic — it is the entire definition of the pending-input queue, matched by
-// RunPendingInputStore's `role='user' AND subtype=” AND delivered=false`
+// ConversationPendingInputStore's `role='user' AND subtype=” AND delivered=false`
 // predicate, and no DB constraint backs it (a partial unique index on
 // undelivered user rows cannot exist on the shared messages table, because
 // curator conversations legitimately queue several).
@@ -582,7 +582,7 @@ func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, run
 	// worktree, no snapshot, nothing to rebuild from, and no future release
 	// brings it back. That is 410 Gone, and refusing here means no side effect —
 	// without it the flip below succeeds and the conversation dies at claim time
-	// as a generic failRun, turning an expected "this expired" into a destroyed
+	// as a generic failConversation, turning an expected "this expired" into a destroyed
 	// run. Every run stopped by an older build lands here too: the old cancel
 	// path discarded the snapshot on its way out, so a migrated row has no
 	// workspace by construction and inherits exactly this answer.
@@ -618,7 +618,7 @@ func (s *Spawner) wakeParked(ctx context.Context, orgID string, run domain.Conve
 	// case and stays finished; finished machinery never restarts and the
 	// follow-up rides it as-is (ReopenRunForResume's status='aborted' CAS is a
 	// no-op there, and on a still-running blueprint).
-	reopenAbortedBlueprint := run.Status == domain.StatusCompleted && domain.RunOutcome(run.Outcome) == domain.RunOutcomeAbort
+	reopenAbortedBlueprint := run.Status == domain.StatusCompleted && domain.ConversationOutcome(run.Outcome) == domain.ConversationOutcomeAbort
 
 	var flipped bool
 	err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
@@ -646,7 +646,7 @@ func (s *Spawner) wakeParked(ctx context.Context, orgID string, run domain.Conve
 	if !flipped {
 		return s.lostWakeOutcome(ctx, orgID, run.ID)
 	}
-	s.broadcastRunUpdate(orgID, run.ID, domain.StatusQueued)
+	s.broadcastConversationUpdate(orgID, run.ID, domain.StatusQueued)
 	s.recordResumeTaskEvent(ctx, orgID, userID, run)
 	// The parked step is queued again → bounce the aggregate board column back
 	// to in_progress (no-op if a sibling run is still parked).

@@ -19,18 +19,18 @@ import { ActionRow } from './ActionRow'
 // in a footnote; now it pages, and "older actions are in the activity feed"
 // becomes a "load more" that actually fetches them.
 interface Props {
-  runId: string
-  /** Soft-refetch trigger. Unlike a runId change this keeps the rows already on
+  conversationId: string
+  /** Soft-refetch trigger. Unlike a conversationId change this keeps the rows already on
    *  screen until the new set lands, so a live run's list doesn't blink. */
   refreshKey?: string
 }
 
-export default function ActionList({ runId, refreshKey }: Props) {
+export default function ActionList({ conversationId, refreshKey }: Props) {
   // The hook is keyed by path and the path carries the run id, so a run change
   // swaps its target — which is also what keeps a page token minted for one
   // run from ever being sent against another.
   const list = usePagedList<ActivityAction>(
-    `/api/agent/conversations/${runId}/actions/list`,
+    `/api/agent/conversations/${conversationId}/actions/list`,
     "Couldn't load this run's actions.",
   )
   const { items: actions, total, hasMore, loading, error, load, loadMore, setItems } = list
@@ -42,10 +42,10 @@ export default function ActionList({ runId, refreshKey }: Props) {
   const shownRun = useRef('')
 
   useEffect(() => {
-    if (!runId) return
+    if (!conversationId) return
     let cancelled = false
-    if (shownRun.current !== runId) {
-      shownRun.current = runId
+    if (shownRun.current !== conversationId) {
+      shownRun.current = conversationId
       // The clear must land before the new run's rows do, so it is synchronous
       // by design — the alternative renders one run's actions under another
       // run's heading for a frame.
@@ -63,7 +63,7 @@ export default function ActionList({ runId, refreshKey }: Props) {
     return () => {
       cancelled = true
     }
-  }, [runId, refreshKey, load, setItems])
+  }, [conversationId, refreshKey, load, setItems])
 
   // A failed load stands in for the rows only when there are none to show. A
   // failed soft refetch keeps what it has — those rows were true a moment ago,

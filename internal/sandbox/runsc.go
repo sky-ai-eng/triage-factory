@@ -169,7 +169,7 @@ func runscStateRoot() string {
 var runtimeStateExtensions = []string{".state", ".lock", ".json"}
 
 // tfContainerIDRE matches exactly the container ids this package mints:
-// tf-<run id fragment>-<subnet index>, where the fragment is a RunID cut to
+// tf-<run id fragment>-<subnet index>, where the fragment is a ConversationID cut to
 // containerIDRunFragmentMax and the index is one byte in decimal. Strict for
 // the same reason the netns reaper's regex is — the sweep deletes what it
 // matches, and the state root is shared with whatever else on the host runs

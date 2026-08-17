@@ -419,7 +419,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		fx := factory(t)
 		ctx := context.Background()
 
-		runID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
+		conversationID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
 		// Team-attributed curator (project carries fx.TeamID) → included.
 		teamCuratorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.5, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
 		// Null-team curator (org/private project) + system → NULL team_id, excluded.
@@ -435,8 +435,8 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		for _, r := range got {
 			gotIDs[r.SourceID] = true
 		}
-		if len(got) != 2 || !gotIDs[runID] || !gotIDs[teamCuratorID] {
-			t.Fatalf("TeamID filter = %d rows %v, want exactly the run %s + team-attributed curator %s (null-team curator/system excluded)", len(got), gotIDs, runID, teamCuratorID)
+		if len(got) != 2 || !gotIDs[conversationID] || !gotIDs[teamCuratorID] {
+			t.Fatalf("TeamID filter = %d rows %v, want exactly the run %s + team-attributed curator %s (null-team curator/system excluded)", len(got), gotIDs, conversationID, teamCuratorID)
 		}
 
 		other := "00000000-0000-0000-0000-0000000009ff"
@@ -518,7 +518,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		fx := factory(t)
 		ctx := context.Background()
 
-		runID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
+		conversationID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
 		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.50, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
 		systemID := fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
 
@@ -527,7 +527,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			t.Fatalf("ListSpendSystem: %v", err)
 		}
 		byID := indexSpend(t, all)
-		for _, id := range []string{runID, curatorID, systemID} {
+		for _, id := range []string{conversationID, curatorID, systemID} {
 			if _, ok := byID[id]; !ok {
 				t.Errorf("ListSpendSystem missing %s; want every source org-wide", id)
 			}
@@ -538,7 +538,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		if err != nil {
 			t.Fatalf("ListSpendSystem since: %v", err)
 		}
-		if _, ok := indexSpend(t, since)[runID]; ok {
+		if _, ok := indexSpend(t, since)[conversationID]; ok {
 			t.Errorf("ListSpendSystem(since=t2) included the t1 run; lower bound not applied")
 		}
 
@@ -553,7 +553,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		if _, ok := tIDs[systemID]; ok {
 			t.Errorf("ListSpendSystem(TeamID) included the NULL-team system row")
 		}
-		if _, ok := tIDs[runID]; !ok {
+		if _, ok := tIDs[conversationID]; !ok {
 			t.Errorf("ListSpendSystem(TeamID) missing the team's run")
 		}
 	})

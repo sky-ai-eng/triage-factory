@@ -86,7 +86,7 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 		return "", err
 	}
 	// Raw insert rather than a store call: conversation rows are minted by
-	// EnqueueRun in production, and this stub runs on drain goroutines where
+	// EnqueueConversation in production, and this stub runs on drain goroutines where
 	// a testing.TB-based seeding helper can't fail safely.
 	if _, err := database.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model, trigger_type, trigger_id,
@@ -102,11 +102,11 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 	return brID, nil
 }
 
-func (s *stubDelegator) StopAndCancelBlueprint(orgID, runID, userID string, cause delegate.StopCause) error {
+func (s *stubDelegator) StopAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
 	return nil
 }
 
-func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
+func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
 }
 
@@ -451,7 +451,7 @@ func TestDrainTask_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
 	if rows[0].Status != domain.PendingFiringStatusFired {
 		t.Errorf("status = %q, want fired", rows[0].Status)
 	}
-	if rows[0].FiredRunID == nil {
+	if rows[0].FiredBlueprintRunID == nil {
 		t.Error("fired_run_id should be set on the winning drain's mark")
 	}
 }

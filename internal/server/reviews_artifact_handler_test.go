@@ -22,17 +22,17 @@ import (
 // draft snapshotted into proposed. The whole review is staged TF-side — no GitHub
 // object exists until approval. The run is completed because approval/dismiss are
 // decoupled sidecars that never flip run lifecycle (TFAC-379). Returns
-// (artifactID, runID, taskID).
-func seedReviewArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo string, number int, event string) (artifactID, runID, taskID string) {
+// (artifactID, conversationID, taskID).
+func seedReviewArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo string, number int, event string) (artifactID, conversationID, taskID string) {
 	t.Helper()
-	runID = seedSteerRun(t, s.db, suffix, "completed")
+	conversationID = seedSteerRun(t, s.db, suffix, "completed")
 	taskID = fixtureUUID("t_" + suffix)
-	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, runID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
+	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	line := 3
-	a := domain.NewReviewArtifact(owner+"/"+repo, number, "headsha"+suffix, runID)
-	a.ConversationID = runID
+	a := domain.NewReviewArtifact(owner+"/"+repo, number, "headsha"+suffix, conversationID)
+	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
@@ -50,7 +50,7 @@ func seedReviewArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo stri
 	if err != nil {
 		t.Fatalf("seed review artifact: %v", err)
 	}
-	return stored.ID, runID, taskID
+	return stored.ID, conversationID, taskID
 }
 
 // TestReviewArtifactGet_SeverityRoundTrip pins the read: GET returns the artifact
@@ -115,7 +115,7 @@ func TestReviewArtifactApprove(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, runID, _ := seedReviewArtifactWithRun(t, srv, "rappr", "acme", "api", 7, "COMMENT")
+	artID, conversationID, _ := seedReviewArtifactWithRun(t, srv, "rappr", "acme", "api", 7, "COMMENT")
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -156,14 +156,14 @@ func TestReviewArtifactApprove(t *testing.T) {
 		t.Errorf("artifact URL = %q, want the org GitHub host %q, not hardcoded github.com", art.URL, stub.URL)
 	}
 	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, runID).Scan(&runStatus); err != nil {
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&runStatus); err != nil {
 		t.Fatalf("read run: %v", err)
 	}
 	if runStatus != "completed" {
 		t.Errorf("run status = %q, want completed", runStatus)
 	}
 	var human string
-	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, runID).Scan(&human); err != nil {
+	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {
 		t.Fatalf("read conversation_memory: %v", err)
 	}
 	if !strings.Contains(human, "as drafted") {
@@ -496,7 +496,7 @@ func TestReviewArtifactDismiss(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 
-	artID, runID, _ := seedReviewArtifactWithRun(t, srv, "rdis", "acme", "api", 7, "COMMENT")
+	artID, conversationID, _ := seedReviewArtifactWithRun(t, srv, "rdis", "acme", "api", 7, "COMMENT")
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -505,7 +505,7 @@ func TestReviewArtifactDismiss(t *testing.T) {
 		t.Errorf("artifact state = %q, want dismissed", got)
 	}
 	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, runID).Scan(&runStatus); err != nil {
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&runStatus); err != nil {
 		t.Fatalf("read run: %v", err)
 	}
 	if runStatus != "completed" {

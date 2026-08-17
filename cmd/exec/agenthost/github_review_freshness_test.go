@@ -75,7 +75,7 @@ func TestLocalClient_FinalizeReview_Freshness_CleanAnchorAtHead(t *testing.T) {
 		t.Fatalf("finalize (clean) must pass: %v", err)
 	}
 
-	d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	d, _ := domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
 	if d.ReviewEvent != "COMMENT" {
 		t.Errorf("ready sentinel not set: %+v", d)
 	}
@@ -115,7 +115,7 @@ func TestLocalClient_FinalizeReview_Freshness_ShiftAutoRemaps(t *testing.T) {
 		t.Fatalf("finalize (pure shift) must pass: %v", err)
 	}
 
-	d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	d, _ := domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
 	c := byID(d.StagedComments, cid)
 	if c.Line == nil || *c.Line != 5 {
 		t.Errorf("shifted comment line = %+v, want auto-remapped 5", c.Line)
@@ -165,7 +165,7 @@ func TestLocalClient_FinalizeReview_Freshness_OutdatedFails(t *testing.T) {
 
 	// Nothing persisted: the ready sentinel stays unset and the comment keeps its
 	// original line + anchor, so the agent retries from where it was.
-	d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	d, _ := domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
 	if d.ReviewEvent != "" {
 		t.Errorf("a failed finalize must NOT arm the ready sentinel, got %q", d.ReviewEvent)
 	}
@@ -228,7 +228,7 @@ func TestLocalClient_FinalizeReview_Freshness_MixedMultiComment(t *testing.T) {
 
 	// Nothing persisted: the sentinel is unset and neither comment moved (the a.go
 	// remap was in-memory only, discarded with the failing finalize).
-	d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	d, _ := domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
 	if d.ReviewEvent != "" {
 		t.Errorf("a failed finalize must not arm the ready sentinel, got %q", d.ReviewEvent)
 	}
@@ -270,7 +270,7 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 			t.Fatalf("finalize: %v", err)
 		}
 
-		d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+		d, _ := domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
 		if d.FinalizedHeadSHA != "head2" {
 			t.Errorf("FinalizedHeadSHA = %q, want head2 (the reconcile head)", d.FinalizedHeadSHA)
 		}
@@ -297,7 +297,7 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 			t.Fatalf("finalize (comment-less approve): %v", err)
 		}
 
-		d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+		d, _ := domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
 		if d.FinalizedHeadSHA != "head1" {
 			t.Errorf("FinalizedHeadSHA = %q, want head1 (the start-review head fallback)", d.FinalizedHeadSHA)
 		}
@@ -351,7 +351,7 @@ func TestLocalClient_FinalizeReview_Freshness_HTTP406Fallback(t *testing.T) {
 		t.Fatalf("finalize via the 406 patch fallback must pass: %v", err)
 	}
 
-	d, _ := domain.ParseReviewArtifactDetails(listRunArtifacts(t, stores, info.RunID)[0].DetailsJSON)
+	d, _ := domain.ParseReviewArtifactDetails(listConversationArtifacts(t, stores, info.ConversationID)[0].DetailsJSON)
 	c := byID(d.StagedComments, cid)
 	if c.Line == nil || *c.Line != 5 {
 		t.Errorf("406-fallback comment line = %+v, want auto-remapped 5", c.Line)

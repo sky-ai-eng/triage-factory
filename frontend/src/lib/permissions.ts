@@ -12,7 +12,7 @@
 //
 // Both the run-detail page (one run) and the board (many runs at once) surface
 // prompts, so the queue/TTL/fetch/resolve logic lives here once —
-// `usePermissionQueues` builds on it; `useRunDetail` consumes that hook filtered
+// `usePermissionQueues` builds on it; `useConversationDetail` consumes that hook filtered
 // to its single run. The UI lives in components/permissions/PermissionPrompt.
 
 import { apiFetch, apiJSON, httpErrorMessage } from './apiClient'
@@ -81,9 +81,11 @@ export function ttlForPrompt(prompt: PendingPermission): number {
 // live prompt off every surface on one transient 500 and leave it invisible
 // until some later frame happened to arrive — reintroducing exactly the
 // reachability hole this endpoint exists to close.
-export async function fetchPendingPermissions(runID: string): Promise<PendingPermission[] | null> {
+export async function fetchPendingPermissions(
+  conversationID: string,
+): Promise<PendingPermission[] | null> {
   try {
-    const data = await apiJSON<unknown>(`/api/agent/conversations/${runID}/permissions`)
+    const data = await apiJSON<unknown>(`/api/agent/conversations/${conversationID}/permissions`)
     if (!Array.isArray(data)) return null
     // Normalize at the boundary rather than trusting the cast: `input` is what
     // the user is actually approving, and PermissionPrompt indexes it directly,
@@ -110,7 +112,7 @@ export type PermissionResolveResult =
 // run-scoped endpoint. A 200 (resolved) or 404 (already answered / timed out)
 // is definitive; anything else is a transient error the caller surfaces.
 export async function resolvePermission(
-  runID: string,
+  conversationID: string,
   toolCallID: string,
   decision: PermissionDecisionInput,
 ): Promise<PermissionResolveResult> {
@@ -118,12 +120,15 @@ export async function resolvePermission(
     // 404 is an outcome, not a failure: the prompt was already answered or
     // timed out, and either way the caller drops it. `allow` puts that at the
     // call site instead of a status re-derived in the catch.
-    const res = await apiFetch(`/api/agent/conversations/${runID}/permissions/${toolCallID}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(decision),
-      allow: [404],
-    })
+    const res = await apiFetch(
+      `/api/agent/conversations/${conversationID}/permissions/${toolCallID}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(decision),
+        allow: [404],
+      },
+    )
     return res.status === 404 ? { kind: 'gone' } : { kind: 'resolved' }
   } catch (err) {
     return {

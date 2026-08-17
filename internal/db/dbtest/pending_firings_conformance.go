@@ -15,7 +15,7 @@ import (
 //   - the orgID to pass to every call,
 //   - a PendingFiringsSeeder for fixtures the store can't create itself
 //     (entity → task → event_handler → event chains, plus optional
-//     non-terminal runs for the HasActiveAutoRunForTask gate).
+//     non-terminal runs for the HasActiveAutoConversationForTask gate).
 type PendingFiringsStoreFactory func(t *testing.T) (
 	store db.PendingFiringsStore,
 	orgID string,
@@ -90,7 +90,7 @@ type PendingFiringsSeeder struct {
 //   - ListForEntity orders by queued_at ASC then id ASC.
 //
 // The runs-shaped half of the per-task firing gate
-// (HasActiveAutoRunForTask) is owned by ConversationStore — its
+// (HasActiveAutoConversationForTask) is owned by ConversationStore — its
 // behavior is covered by that store's own tests, not here.
 func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFactory) {
 	t.Helper()
@@ -377,16 +377,16 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		// (fired_run_id has FK with ON DELETE on (fired_run_id, org_id)
 		// referencing blueprint_runs(id, org_id)). The seeder's
 		// run-insert helpers produce valid blueprint_run ids.
-		runID := seed.RunForTask(t, tup.TaskID)
-		if err := s.MarkFired(ctx, orgID, row.ID, runID); err != nil {
+		conversationID := seed.RunForTask(t, tup.TaskID)
+		if err := s.MarkFired(ctx, orgID, row.ID, conversationID); err != nil {
 			t.Fatalf("MarkFired: %v", err)
 		}
 		rows, _ := s.ListForEntity(ctx, orgID, tup.EntityID)
 		if len(rows) != 1 || rows[0].Status != domain.PendingFiringStatusFired {
 			t.Errorf("expected one fired row, got %+v", rows)
 		}
-		if rows[0].FiredRunID == nil || *rows[0].FiredRunID != runID {
-			t.Errorf("fired_run_id = %v, want pointer to %q", rows[0].FiredRunID, runID)
+		if rows[0].FiredBlueprintRunID == nil || *rows[0].FiredBlueprintRunID != conversationID {
+			t.Errorf("fired_run_id = %v, want pointer to %q", rows[0].FiredBlueprintRunID, conversationID)
 		}
 		if rows[0].DrainedAt == nil {
 			t.Errorf("drained_at should be set after MarkFired")
@@ -403,9 +403,9 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if err := s.MarkSkipped(ctx, orgID, row.ID, domain.PendingFiringSkipTaskClosed); err != nil {
 			t.Fatalf("MarkSkipped: %v", err)
 		}
-		runID := seed.RunForTask(t, tup.TaskID)
+		conversationID := seed.RunForTask(t, tup.TaskID)
 		// Should silently no-op — guarded by WHERE status='pending'.
-		if err := s.MarkFired(ctx, orgID, row.ID, runID); err != nil {
+		if err := s.MarkFired(ctx, orgID, row.ID, conversationID); err != nil {
 			t.Fatalf("MarkFired on terminal: %v", err)
 		}
 		rows, _ := s.ListForEntity(ctx, orgID, tup.EntityID)

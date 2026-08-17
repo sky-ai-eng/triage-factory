@@ -443,7 +443,7 @@ func (f *fakeResolver) ClientFor(_ context.Context, _, target string) (*github.C
 	return f.client, nil
 }
 
-func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, runID, content string), func(a domain.Artifact)) {
+func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID, content string), func(a domain.Artifact)) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
@@ -458,20 +458,20 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, runID, content
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
-	seedRun := func(entityID, runID, content string) {
+	seedConversation := func(entityID, conversationID, content string) {
 		if _, err := conn.Exec(`INSERT INTO entities (id, source, source_id, kind) VALUES (?, 'github', ?, 'pull_request')`, entityID, entityID); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
-		if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'completed')`, runID); err != nil {
+		if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'completed')`, conversationID); err != nil {
 			t.Fatalf("seed run: %v", err)
 		}
-		if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, runID, entityID, "", content); err != nil {
+		if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conversationID, entityID, "", content); err != nil {
 			t.Fatalf("seed memory: %v", err)
 		}
 		// The primary join row a real run's completion will carry once the
 		// run-end attach ticket (TFAC-625) lands — GetMemoriesForEntity's
 		// join-based read (TFAC-622) needs it to find anything.
-		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, runID, entityID, domain.MemoryRolePrimary); err != nil {
+		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, conversationID, entityID, domain.MemoryRolePrimary); err != nil {
 			t.Fatalf("seed join row: %v", err)
 		}
 	}
@@ -482,21 +482,21 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, runID, content
 			t.Fatalf("seed artifact %s: %v", a.DedupKey, err)
 		}
 	}
-	return stores, seedRun, seedArt
+	return stores, seedConversation, seedArt
 }
 
-// getRunMemory finds the memory row belonging to runID via
+// getRunMemory finds the memory row belonging to conversationID via
 // GetMemoriesForEntity — the replacement for the removed GetRunMemory now
 // that reads are join-based (conversation_memory_entities) rather than a direct
 // run_id lookup.
-func getRunMemory(t *testing.T, stores db.Stores, ctx context.Context, orgID, entityID, runID string) *domain.TaskMemory {
+func getRunMemory(t *testing.T, stores db.Stores, ctx context.Context, orgID, entityID, conversationID string) *domain.TaskMemory {
 	t.Helper()
 	mems, err := stores.TaskMemory.GetMemoriesForEntity(ctx, orgID, entityID)
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntity: %v", err)
 	}
 	for i := range mems {
-		if mems[i].RunID == runID {
+		if mems[i].ConversationID == conversationID {
 			return &mems[i]
 		}
 	}
@@ -511,22 +511,22 @@ func getRunMemory(t *testing.T, stores db.Stores, ctx context.Context, orgID, en
 // review-draft artifact is seeded too and must stay pending — reviews are staged
 // TF-side and never reconciled (TFAC-494 §8).
 func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
-	stores, seedRun, seedArt := reconcileTestStores(t)
+	stores, seedConversation, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
-	const runID = "11111111-1111-1111-1111-111111111111"
-	seedRun("ent-1", runID, "agent narrative")
+	const conversationID = "11111111-1111-1111-1111-111111111111"
+	seedConversation("ent-1", conversationID, "agent narrative")
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 1, "PR_1", "feat", "main", "https://github.com/octo/repo/pull/1", "t", "b", true)
-	prArt.ConversationID = runID
-	reviewArt := domain.NewReviewArtifact("octo/repo", 2, "headsha2", runID)
-	reviewArt.ConversationID = runID
+	prArt.ConversationID = conversationID
+	reviewArt := domain.NewReviewArtifact("octo/repo", 2, "headsha2", conversationID)
+	reviewArt.ConversationID = conversationID
 	branchArt, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/feature", "sha", true)
-	branchArt.ConversationID = runID
+	branchArt.ConversationID = conversationID
 	// A terminal PR already merged — it must NOT be in the non-terminal set and
 	// must never be fetched.
 	mergedArt := domain.NewPullRequestArtifact("octo/repo", 9, "PR_9", "old", "main", "https://github.com/octo/repo/pull/9", "t", "b", false)
 	mergedArt.State = domain.ArtifactStatePRMerged
-	mergedArt.ConversationID = runID
+	mergedArt.ConversationID = conversationID
 	seedArt(prArt)
 	seedArt(reviewArt)
 	seedArt(branchArt)
@@ -561,7 +561,7 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 	// ONE composed note covering all three artifacts, after the agent narrative
 	// (which is untouched). Overwrite, not append — but composed over the run's
 	// whole set, so nothing is clobbered.
-	mem := getRunMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-1", runID)
+	mem := getRunMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-1", conversationID)
 	if mem == nil {
 		t.Fatalf("getRunMemory: nil")
 	}
@@ -587,15 +587,15 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 // review-draft artifact is seeded alongside and must stay pending — reviews are
 // staged TF-side and never reconciled (TFAC-494).
 func TestReconcile_PRClosed(t *testing.T) {
-	stores, seedRun, seedArt := reconcileTestStores(t)
+	stores, seedConversation, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
-	const runID = "22222222-2222-2222-2222-222222222222"
-	seedRun("ent-2", runID, "narrative")
+	const conversationID = "22222222-2222-2222-2222-222222222222"
+	seedConversation("ent-2", conversationID, "narrative")
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 3, "PR_3", "x", "main", "u", "t", "b", false)
-	prArt.ConversationID = runID
-	reviewArt := domain.NewReviewArtifact("octo/repo", 4, "headsha4", runID)
-	reviewArt.ConversationID = runID
+	prArt.ConversationID = conversationID
+	reviewArt := domain.NewReviewArtifact("octo/repo", 4, "headsha4", conversationID)
+	reviewArt.ConversationID = conversationID
 	seedArt(prArt)
 	seedArt(reviewArt)
 
@@ -611,7 +611,7 @@ func TestReconcile_PRClosed(t *testing.T) {
 	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewPending)
 
 	// The note covers the PR disposition; the un-reconciled review contributes none.
-	mem := getRunMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-2", runID)
+	mem := getRunMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-2", conversationID)
 	if mem == nil || !strings.Contains(mem.Content, "closed without merging") {
 		t.Errorf("composed note missing the PR disposition; got: %v", mem)
 	}
@@ -621,17 +621,17 @@ func TestReconcile_PRClosed(t *testing.T) {
 // review still private, and a present branch all stay put — and a still-pending
 // review writes no memory note (no terminal transition).
 func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
-	stores, seedRun, seedArt := reconcileTestStores(t)
+	stores, seedConversation, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
-	const runID = "33333333-3333-3333-3333-333333333333"
-	seedRun("ent-3", runID, "narrative")
+	const conversationID = "33333333-3333-3333-3333-333333333333"
+	seedConversation("ent-3", conversationID, "narrative")
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 5, "PR_5", "x", "main", "u", "t", "b", false) // open
-	prArt.ConversationID = runID
-	reviewArt := domain.NewReviewArtifact("octo/repo", 6, "headsha6", runID) // pending draft
-	reviewArt.ConversationID = runID
+	prArt.ConversationID = conversationID
+	reviewArt := domain.NewReviewArtifact("octo/repo", 6, "headsha6", conversationID) // pending draft
+	reviewArt.ConversationID = conversationID
 	branchArt, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/keep", "sha", true)
-	branchArt.ConversationID = runID
+	branchArt.ConversationID = conversationID
 	seedArt(prArt)
 	seedArt(reviewArt)
 	seedArt(branchArt)
@@ -653,7 +653,7 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewPending)
 	assertState(t, stores, runmode.LocalDefaultOrgID, branchArt.DedupKey, domain.ArtifactStateBranchPushed)
 
-	mem := getRunMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-3", runID)
+	mem := getRunMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-3", conversationID)
 	if mem != nil && strings.Contains(mem.Content, "Post-run outcome") {
 		t.Errorf("no terminal transition, but a post-run outcome note was written: %q", mem.Content)
 	}
@@ -663,11 +663,11 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 // repository didn't resolve (inaccessible) is left as-is, never flipped to
 // deleted on a non-answer.
 func TestReconcile_UnknownBranchNotDeleted(t *testing.T) {
-	stores, seedRun, seedArt := reconcileTestStores(t)
-	const runID = "44444444-4444-4444-4444-444444444444"
-	seedRun("ent-4", runID, "narrative")
+	stores, seedConversation, seedArt := reconcileTestStores(t)
+	const conversationID = "44444444-4444-4444-4444-444444444444"
+	seedConversation("ent-4", conversationID, "narrative")
 	branchArt, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/maybe", "sha", true)
-	branchArt.ConversationID = runID
+	branchArt.ConversationID = conversationID
 	seedArt(branchArt)
 
 	stub := &stubGH{branches: map[string]bool{}} // empty → repository alias null → unknown
@@ -684,12 +684,12 @@ func TestReconcile_UnknownBranchNotDeleted(t *testing.T) {
 // TestReconcile_SingleRunScope pins the Tier-2 shape: Reconcile over just one
 // run's artifacts transitions exactly those (the run-scoped refresh path).
 func TestReconcile_SingleRunScope(t *testing.T) {
-	stores, seedRun, seedArt := reconcileTestStores(t)
+	stores, seedConversation, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
 	const runA = "55555555-5555-5555-5555-555555555555"
 	const runB = "66666666-6666-6666-6666-666666666666"
-	seedRun("ent-a", runA, "a")
-	seedRun("ent-b", runB, "b")
+	seedConversation("ent-a", runA, "a")
+	seedConversation("ent-b", runB, "b")
 
 	prA := domain.NewPullRequestArtifact("octo/repo", 7, "PR_7", "x", "main", "u", "t", "b", false)
 	prA.ConversationID = runA
@@ -705,9 +705,9 @@ func TestReconcile_SingleRunScope(t *testing.T) {
 	}}
 	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
 
-	runAArts, err := stores.Artifacts.ListByRun(ctx, runmode.LocalDefaultOrgID, runA)
+	runAArts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, runA)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	updated, err := rc.Reconcile(ctx, runmode.LocalDefaultOrgID, runAArts)
 	if err != nil {
@@ -730,17 +730,17 @@ func TestReconcile_SingleRunScope(t *testing.T) {
 // verdict (the final state is the authoritative divergence account), while the
 // agent's own narrative is untouched.
 func TestReconcile_OutcomeSupersedesVerdict(t *testing.T) {
-	stores, seedRun, seedArt := reconcileTestStores(t)
+	stores, seedConversation, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
-	const runID = "77777777-7777-7777-7777-777777777777"
-	seedRun("ent-7", runID, "agent narrative")
+	const conversationID = "77777777-7777-7777-7777-777777777777"
+	seedConversation("ent-7", conversationID, "agent narrative")
 	// Approval-time verdict already recorded.
-	if err := stores.TaskMemory.UpdateRunMemoryHumanContent(ctx, runmode.LocalDefaultOrgID, runID, "Human approved with a tweaked body."); err != nil {
+	if err := stores.TaskMemory.UpdateConversationMemoryHumanContent(ctx, runmode.LocalDefaultOrgID, conversationID, "Human approved with a tweaked body."); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 10, "PR_10", "x", "main", "u", "draft title", "draft body", false)
-	prArt.ConversationID = runID
+	prArt.ConversationID = conversationID
 	seedArt(prArt)
 
 	stub := &stubGH{
@@ -752,7 +752,7 @@ func TestReconcile_OutcomeSupersedesVerdict(t *testing.T) {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}
 
-	mem := getRunMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-7", runID)
+	mem := getRunMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-7", conversationID)
 	if mem == nil {
 		t.Fatalf("getRunMemory: nil")
 	}
@@ -825,11 +825,11 @@ func (h *recLogger) records() []slog.Record {
 // still land. A terminal artifact drops out of both tiers' working sets, so a
 // note skipped here would never be re-written — the write-back must detach.
 func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
-	stores, seedRun, seedArt := reconcileTestStores(t)
-	const runID = "99999999-9999-9999-9999-999999999991"
-	seedRun("ent-9", runID, "narrative")
+	stores, seedConversation, seedArt := reconcileTestStores(t)
+	const conversationID = "99999999-9999-9999-9999-999999999991"
+	seedConversation("ent-9", conversationID, "narrative")
 	prArt := domain.NewPullRequestArtifact("octo/repo", 12, "PR_12", "x", "main", "u", "t", "b", false)
-	prArt.ConversationID = runID
+	prArt.ConversationID = conversationID
 	seedArt(prArt)
 
 	stub := &stubGH{
@@ -848,9 +848,9 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 		&http.Client{Transport: &cancelAfterFetchRT{t: t, base: http.DefaultTransport, cancel: cancel}})
 	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.TaskMemory, nil)
 
-	arts, err := stores.Artifacts.ListByRunSystem(context.Background(), runmode.LocalDefaultOrgID, runID)
+	arts, err := stores.Artifacts.ListByConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRunSystem: %v", err)
+		t.Fatalf("ListByConversationSystem: %v", err)
 	}
 	if _, err := rc.Reconcile(ctx, runmode.LocalDefaultOrgID, arts); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -860,7 +860,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 	}
 
 	assertState(t, stores, runmode.LocalDefaultOrgID, prArt.DedupKey, domain.ArtifactStatePRMerged)
-	mem := getRunMemory(t, stores, context.Background(), runmode.LocalDefaultOrgID, "ent-9", runID)
+	mem := getRunMemory(t, stores, context.Background(), runmode.LocalDefaultOrgID, "ent-9", conversationID)
 	if mem == nil || !strings.Contains(mem.Content, "was merged on GitHub") {
 		t.Errorf("memory note was dropped on a cancelled caller ctx — the write-back must detach; got: %v", mem)
 	}
@@ -941,8 +941,8 @@ func prArtifactFor(t *testing.T, stores db.Stores, repoPath string, number int) 
 // observation never fired). The backstop discovers the PR and records it, linked
 // to the pushing conversation.
 func TestBackstop_RecordsPRFromBranchMatch(t *testing.T) {
-	stores, seedRun, seedArt := reconcileTestStores(t)
-	seedRun("octo/repo#5", "conv-1", "memory")
+	stores, seedConversation, seedArt := reconcileTestStores(t)
+	seedConversation("octo/repo#5", "conv-1", "memory")
 
 	br, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feature-x", "sha1", true)
 	if !ok {
@@ -980,8 +980,8 @@ func TestBackstop_RecordsPRFromBranchMatch(t *testing.T) {
 // PR changes nothing (negative space) — and never regresses a state a prior
 // writer advanced.
 func TestBackstop_Idempotent(t *testing.T) {
-	stores, seedRun, seedArt := reconcileTestStores(t)
-	seedRun("octo/repo#5", "conv-1", "memory")
+	stores, seedConversation, seedArt := reconcileTestStores(t)
+	seedConversation("octo/repo#5", "conv-1", "memory")
 
 	br, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feature-x", "sha1", true)
 	if !ok {

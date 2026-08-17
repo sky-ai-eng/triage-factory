@@ -97,11 +97,11 @@ type HostDaemon struct {
 // hold only per-run placeholders and the sidecar injects the real credential
 // upstream, instead of reading the (disabled, on an executor) secret store.
 // See Server.proxyCreds.
-func Start(stores db.Stores, info RunInfo, proxyCreds *ProxyCredentials) (*HostDaemon, sandbox.Mount, error) {
-	if info.RunID == "" {
-		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: RunInfo.RunID required")
+func Start(stores db.Stores, info ConversationInfo, proxyCreds *ProxyCredentials) (*HostDaemon, sandbox.Mount, error) {
+	if info.ConversationID == "" {
+		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: ConversationInfo.ConversationID required")
 	}
-	return StartWithServer(NewServer(stores, info, proxyCreds), info.RunID)
+	return StartWithServer(NewServer(stores, info, proxyCreds), info.ConversationID)
 }
 
 // StartWithServer creates the per-run socket for an already-built Server, grants
@@ -114,14 +114,14 @@ func Start(stores db.Stores, info RunInfo, proxyCreds *ProxyCredentials) (*HostD
 // chgrp+0660 grant are identical either way — only the process that owns them
 // moves. On the sidecar the grant works because the sidecar is launched as a
 // member of the sandbox group (see internal/sandbox's sidecar launch).
-func StartWithServer(server *Server, runID string) (*HostDaemon, sandbox.Mount, error) {
-	if runID == "" {
-		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: RunID required")
+func StartWithServer(server *Server, conversationID string) (*HostDaemon, sandbox.Mount, error) {
+	if conversationID == "" {
+		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: ConversationID required")
 	}
 	if err := os.MkdirAll(hostSocketRoot, 0o700); err != nil {
 		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: mkdir %s: %w", hostSocketRoot, err)
 	}
-	sockPath := filepath.Join(hostSocketRoot, sanitizeSocketName(runID)+".sock")
+	sockPath := filepath.Join(hostSocketRoot, sanitizeSocketName(conversationID)+".sock")
 
 	// Remove any stale socket file from a previous crash. net.Listen
 	// would otherwise EADDRINUSE on a path that's actually unused.
@@ -242,45 +242,45 @@ func (h *HostDaemon) Close() error {
 // going through the bind-mount-into-sandbox shape.
 func (h *HostDaemon) SocketPath() string { return h.sockPath }
 
-// SocketPathFor returns the host-side path of runID's agenthost socket.
+// SocketPathFor returns the host-side path of conversationID's agenthost socket.
 // Deterministic so the sidecar (which creates + serves it on the executor
 // path) and the orchestrator (which bind-mounts it into the jail) agree on the
 // path without a round trip.
-func SocketPathFor(runID string) string {
-	return filepath.Join(hostSocketRoot, sanitizeSocketName(runID)+".sock")
+func SocketPathFor(conversationID string) string {
+	return filepath.Join(hostSocketRoot, sanitizeSocketName(conversationID)+".sock")
 }
 
-// SocketMountFor returns the bind mount exposing runID's socket to the agent at
+// SocketMountFor returns the bind mount exposing conversationID's socket to the agent at
 // DefaultSocketPath. On the executor path the SIDECAR creates + serves the
 // socket, so the orchestrator adds THIS mount to the sandbox spec without
 // starting a Server of its own — the socket already exists (the sidecar bound
 // it during bring-up, before the sandbox launches).
-func SocketMountFor(runID string) sandbox.Mount {
-	return sandbox.Mount{Source: SocketPathFor(runID), Destination: DefaultSocketPath}
+func SocketMountFor(conversationID string) sandbox.Mount {
+	return sandbox.Mount{Source: SocketPathFor(conversationID), Destination: DefaultSocketPath}
 }
 
-// CertPathFor returns the host-side path of runID's gh-injector TLS
+// CertPathFor returns the host-side path of conversationID's gh-injector TLS
 // certificate, alongside the run's socket under hostSocketRoot. Deterministic
 // so the sidecar (which writes + serves the injector) and the orchestrator
 // (which bind-mounts the cert into the jail) agree without a round trip — the
 // same contract as SocketPathFor. The cap-broker independently re-derives this
 // as TrustedGHInjectorCertPath and validates a launch's mount source against it;
 // a drift test cross-checks the two derivations agree.
-func CertPathFor(runID string) string {
-	return filepath.Join(hostSocketRoot, sanitizeSocketName(runID)+"-gh-injector.crt")
+func CertPathFor(conversationID string) string {
+	return filepath.Join(hostSocketRoot, sanitizeSocketName(conversationID)+"-gh-injector.crt")
 }
 
-// WriteInjectorCert writes runID's per-run gh-injector certificate (PEM, the
+// WriteInjectorCert writes conversationID's per-run gh-injector certificate (PEM, the
 // PUBLIC half only — the private key never leaves the sidecar) to
-// CertPathFor(runID) and grants the sandbox group read access, mirroring the
+// CertPathFor(conversationID) and grants the sandbox group read access, mirroring the
 // socket's owner-legal group grant. Called by the sidecar during bring-up when
 // the gh channel is enabled, before the sandbox launches (the OCI spec
 // references the source path, which must exist).
-func WriteInjectorCert(runID string, certPEM []byte) error {
+func WriteInjectorCert(conversationID string, certPEM []byte) error {
 	if err := os.MkdirAll(hostSocketRoot, 0o700); err != nil {
 		return fmt.Errorf("agenthost: mkdir %s: %w", hostSocketRoot, err)
 	}
-	path := CertPathFor(runID)
+	path := CertPathFor(conversationID)
 	if err := writeFreshInjectorCert(path, certPEM); err != nil {
 		return err
 	}
@@ -332,7 +332,7 @@ func grantReadOnlyToSandbox(path string) error {
 	return os.Chmod(path, 0o640)
 }
 
-// sanitizeSocketName trims a run id to a fs-safe form. RunIDs are
+// sanitizeSocketName trims a run id to a fs-safe form. ConversationIDs are
 // already UUIDs in production callers so this is a defense-in-depth
 // guard against future callers using a less-constrained shape (the
 // integration test uses "itest..." strings, for instance).

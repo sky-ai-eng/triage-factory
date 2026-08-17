@@ -18,7 +18,7 @@ func serveSocket(t *testing.T, stores db.Stores, path string) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-connect"}, nil)
+	srv := NewServer(stores, ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "run-connect"}, nil)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 }
@@ -103,8 +103,8 @@ func TestNewLocalFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupRun: %v", err)
 	}
-	if got.RunID != "run-local-env" {
-		t.Errorf("RunID: got %q, want run-local-env", got.RunID)
+	if got.ConversationID != "run-local-env" {
+		t.Errorf("ConversationID: got %q, want run-local-env", got.ConversationID)
 	}
 }
 

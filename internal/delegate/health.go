@@ -12,7 +12,7 @@ import "time"
 
 // DispatcherAlive reports whether the run-queue dispatcher loop is
 // currently running. False before RunDispatcher starts, after it returns
-// (ctx cancel / shutdown), or when no RunQueueStore was wired.
+// (ctx cancel / shutdown), or when no ConversationQueueStore was wired.
 func (s *Spawner) DispatcherAlive() bool {
 	return s.dispatcherRunning.Load()
 }

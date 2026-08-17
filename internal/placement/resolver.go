@@ -141,14 +141,14 @@ type Plan struct {
 // it is that owner; with a hot-key replica count it spreads runs across the
 // top-K deterministically by run id, so all K caches stay warm and no single
 // replica head-of-line-blocks the key. Empty when there is no live owner.
-func (p Plan) PreferredForRun(runID string) string {
+func (p Plan) PreferredForRun(conversationID string) string {
 	switch len(p.PreferredSet) {
 	case 0:
 		return ""
 	case 1:
 		return p.PreferredSet[0]
 	default:
-		idx := hash64(runID, "") % uint64(len(p.PreferredSet))
+		idx := hash64(conversationID, "") % uint64(len(p.PreferredSet))
 		return p.PreferredSet[idx]
 	}
 }

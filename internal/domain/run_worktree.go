@@ -2,9 +2,9 @@ package domain
 
 import "time"
 
-// RunWorktree is one row in the conversation_worktrees table — a worktree
+// ConversationWorktree is one row in the conversation_worktrees table — a worktree
 // reservation associated with one delegated agent run. Lifecycle is
-// managed by db.RunWorktreeStore; the value type lives in domain
+// managed by db.ConversationWorktreeStore; the value type lives in domain
 // because it's passed across packages (cmd/exec/workspace,
 // internal/delegate).
 //
@@ -21,10 +21,10 @@ import "time"
 // gate reads the worktree's live current branch, never this row, so a
 // stored prescribed branch carried no authority — ref instead records
 // the checkout intent for `workspace list` and the per-run worktree path.
-type RunWorktree struct {
-	RunID     string
-	RepoID    string
-	Path      string
-	Ref       string
-	CreatedAt time.Time
+type ConversationWorktree struct {
+	ConversationID string
+	RepoID         string
+	Path           string
+	Ref            string
+	CreatedAt      time.Time
 }

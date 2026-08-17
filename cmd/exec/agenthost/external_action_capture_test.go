@@ -31,7 +31,7 @@ import (
 // the injected-error paths don't call out). eventTriggered picks the write path:
 // admin pool (no user) when true, a synthetic-claims tx (manual run, with a user)
 // when false.
-func newCaptureStores(t *testing.T, eventTriggered bool) (db.Stores, RunInfo) {
+func newCaptureStores(t *testing.T, eventTriggered bool) (db.Stores, ConversationInfo) {
 	_, stores, info := newCaptureStoresConn(t, eventTriggered)
 	return stores, info
 }
@@ -39,7 +39,7 @@ func newCaptureStores(t *testing.T, eventTriggered bool) (db.Stores, RunInfo) {
 // newCaptureStoresConn is newCaptureStores plus the raw *sql.DB, for touch tests
 // that read conversation_memory_entities directly (the store interface has no
 // role-returning read).
-func newCaptureStoresConn(t *testing.T, eventTriggered bool) (*sql.DB, db.Stores, RunInfo) {
+func newCaptureStoresConn(t *testing.T, eventTriggered bool) (*sql.DB, db.Stores, ConversationInfo) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
@@ -51,18 +51,18 @@ func newCaptureStoresConn(t *testing.T, eventTriggered bool) (*sql.DB, db.Stores
 	if err := db.BootstrapSchemaForTest(conn); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
-	const runID = "11111111-1111-1111-1111-111111111111"
-	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, runID); err != nil {
+	const conversationID = "11111111-1111-1111-1111-111111111111"
+	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, conversationID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	userID := ""
 	if !eventTriggered {
 		userID = runmode.LocalDefaultUserID
 	}
-	return conn, sqlitestore.New(conn), RunInfo{
+	return conn, sqlitestore.New(conn), ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		TeamID:           runmode.LocalDefaultTeamID,
-		RunID:            runID,
+		ConversationID:   conversationID,
 		UserID:           userID,
 		IsEventTriggered: eventTriggered,
 	}
@@ -102,7 +102,7 @@ func TestCapture_JiraActions_RecordExternalActions(t *testing.T) {
 				}
 				a := acts[0]
 				if a.Action != domain.ActionIssueCreated || a.Provider != domain.ArtifactProviderJira ||
-					a.Credential != domain.CredentialJiraOrg || a.Target != "SKY-1" || a.ConversationID != info.RunID ||
+					a.Credential != domain.CredentialJiraOrg || a.Target != "SKY-1" || a.ConversationID != info.ConversationID ||
 					a.TeamID != runmode.LocalDefaultTeamID {
 					t.Errorf("create action mismatch: %+v", a)
 				}
@@ -167,7 +167,7 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 				a.ExternalID != "refs/heads/feat" {
 				t.Errorf("branch action mismatch: %+v", a)
 			}
-			if want := domain.BranchPushDedupKey(info.RunID, "refs/heads/feat", "abc123"); a.DedupKey != want {
+			if want := domain.BranchPushDedupKey(info.ConversationID, "refs/heads/feat", "abc123"); a.DedupKey != want {
 				t.Errorf("branch dedup_key = %q, want %q", a.DedupKey, want)
 			}
 			// A genuinely new push (new sha) is recorded distinctly.
@@ -244,7 +244,7 @@ func TestCapture_GithubReply_RecordsArtifactlessAction(t *testing.T) {
 				t.Fatalf("reply id = %d, want 777", replyID)
 			}
 			// No artifact — the reply rides the review thread, like every line-comment.
-			if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+			if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
 				t.Errorf("a review-thread reply should produce no artifact, got %+v", arts)
 			}
 			// But exactly one external action (the audit log records artifact-less writes).
@@ -255,7 +255,7 @@ func TestCapture_GithubReply_RecordsArtifactlessAction(t *testing.T) {
 			a := acts[0]
 			if a.Action != domain.ActionCommentPosted || a.Provider != domain.ArtifactProviderGitHub ||
 				a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo#1" ||
-				a.ExternalID != "777" || a.ConversationID != info.RunID {
+				a.ExternalID != "777" || a.ConversationID != info.ConversationID {
 				t.Errorf("reply action mismatch: %+v", a)
 			}
 			// The audit row deep-links to the reply on the PR.
@@ -282,7 +282,7 @@ func TestCapture_GithubReaction_RecordsArtifactlessAction(t *testing.T) {
 	if err := client.GithubReactToComment(context.Background(), "octo", "repo", 555, "+1"); err != nil {
 		t.Fatalf("GithubReactToComment: %v", err)
 	}
-	if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
 		t.Errorf("a reaction should produce no artifact, got %+v", arts)
 	}
 	acts := listExternalActions(t, stores)
@@ -295,7 +295,7 @@ func TestCapture_GithubReaction_RecordsArtifactlessAction(t *testing.T) {
 	// to owner/repo + the comment id), so one act reads one way either way.
 	if a.Action != domain.ActionReactionAdded || a.Provider != domain.ArtifactProviderGitHub ||
 		a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||
-		a.ExternalID != "555" || a.ConversationID != info.RunID {
+		a.ExternalID != "555" || a.ConversationID != info.ConversationID {
 		t.Errorf("reaction action mismatch: %+v", a)
 	}
 	if !strings.Contains(a.DetailJSON, `"emoji":"+1"`) {
@@ -355,7 +355,7 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsArtifactlessAction(t *test
 					t.Fatalf("GithubUpdateComment: %v", err)
 				}
 				// No comment artifact — the review line-comment rides the review.
-				if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+				if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
 					t.Errorf("a review line-comment edit must record no comment artifact, got %+v", arts)
 				}
 				acts := listExternalActions(t, stores)
@@ -365,7 +365,7 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsArtifactlessAction(t *test
 				a := acts[0]
 				if a.Action != domain.ActionReviewCommentEdited || a.Provider != domain.ArtifactProviderGitHub ||
 					a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||
-					a.ExternalID != "999" || a.URL != "" || a.ConversationID != info.RunID {
+					a.ExternalID != "999" || a.URL != "" || a.ConversationID != info.ConversationID {
 					t.Errorf("review-comment edit action mismatch: %+v", a)
 				}
 				assertActor(t, a, eventTriggered)
@@ -383,7 +383,7 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsArtifactlessAction(t *test
 				if err := client.GithubDeleteComment(context.Background(), "octo", "repo", 999); err != nil {
 					t.Fatalf("GithubDeleteComment: %v", err)
 				}
-				if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+				if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
 					t.Errorf("a review line-comment delete must record no comment artifact, got %+v", arts)
 				}
 				acts := listExternalActions(t, stores)
@@ -393,7 +393,7 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsArtifactlessAction(t *test
 				a := acts[0]
 				if a.Action != domain.ActionReviewCommentDeleted || a.Provider != domain.ArtifactProviderGitHub ||
 					a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||
-					a.ExternalID != "999" || a.URL != "" || a.ConversationID != info.RunID {
+					a.ExternalID != "999" || a.URL != "" || a.ConversationID != info.ConversationID {
 					t.Errorf("review-comment delete action mismatch: %+v", a)
 				}
 				assertActor(t, a, eventTriggered)
@@ -454,7 +454,7 @@ func TestCapture_EventPath_RecordFailure_DoesNotFailAction(t *testing.T) {
 		t.Fatalf("transition must not fail when action recording fails: %v", err)
 	}
 	// The artifact (the separate admin write) still committed.
-	if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 1 {
+	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 1 {
 		t.Errorf("artifact should persist despite the action-record failure, got %d", len(arts))
 	}
 }
@@ -475,7 +475,7 @@ func assertActor(t *testing.T, a domain.ExternalAction, eventTriggered bool) {
 // newJiraRecordingStoresForCapture is newJiraRecordingStores but also sets a
 // non-empty UserID on the manual path so the actor assertion has something to
 // check (the shared helper leaves it empty).
-func newJiraRecordingStoresForCapture(t *testing.T, jiraURL string, eventTriggered bool) (db.Stores, RunInfo) {
+func newJiraRecordingStoresForCapture(t *testing.T, jiraURL string, eventTriggered bool) (db.Stores, ConversationInfo) {
 	t.Helper()
 	stores, info := newJiraRecordingStores(t, jiraURL, eventTriggered)
 	if !eventTriggered {
@@ -528,10 +528,10 @@ func TestCapture_EgressDenied_RecordsOneRowPerConversationAndHost(t *testing.T) 
 		gh.Credential != domain.CredentialNone {
 		t.Errorf("egress row mismatch: %+v", gh)
 	}
-	if gh.ConversationID != info.RunID {
-		t.Errorf("conversation = %q, want the run's own %q", gh.ConversationID, info.RunID)
+	if gh.ConversationID != info.ConversationID {
+		t.Errorf("conversation = %q, want the run's own %q", gh.ConversationID, info.ConversationID)
 	}
-	if want := domain.EgressDenialDedupKey(info.RunID, "api.github.com:443"); gh.DedupKey != want {
+	if want := domain.EgressDenialDedupKey(info.ConversationID, "api.github.com:443"); gh.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", gh.DedupKey, want)
 	}
 	if !strings.Contains(gh.DetailJSON, "allowlist") || !strings.Contains(gh.DetailJSON, "api.github.com:443") {
@@ -565,8 +565,8 @@ func TestCapture_GHChannelWrite_RecordsEveryAttempt(t *testing.T) {
 		if a.Provider != domain.ArtifactProviderGitHub || a.Credential != domain.CredentialGitHubApp {
 			t.Errorf("gh channel row mismatch: %+v", a)
 		}
-		if a.ConversationID != info.RunID {
-			t.Errorf("conversation = %q, want %q", a.ConversationID, info.RunID)
+		if a.ConversationID != info.ConversationID {
+			t.Errorf("conversation = %q, want %q", a.ConversationID, info.ConversationID)
 		}
 		if strings.Contains(a.DetailJSON, "404") {
 			refused = a
@@ -729,7 +729,7 @@ func TestCapture_GHChannelReply_IsIndistinguishableFromTheVerbRow(t *testing.T) 
 	var touches int
 	if err := conn.QueryRow(
 		`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ? AND role = 'touched'`,
-		info.RunID, ent.ID,
+		info.ConversationID, ent.ID,
 	).Scan(&touches); err != nil {
 		t.Fatalf("count touches: %v", err)
 	}
@@ -938,8 +938,8 @@ func TestCapture_GraphQLOverCapStillLandsAnAttributedRow(t *testing.T) {
 	if row.Action != domain.ActionGraphQLWrite {
 		t.Errorf("action = %q, want graphql_write — the act is unknown, the write is not", row.Action)
 	}
-	if row.ConversationID != info.RunID {
-		t.Errorf("conversation = %q, want the run that made the write %q", row.ConversationID, info.RunID)
+	if row.ConversationID != info.ConversationID {
+		t.Errorf("conversation = %q, want the run that made the write %q", row.ConversationID, info.ConversationID)
 	}
 	if row.Credential != domain.CredentialGitHubApp {
 		t.Errorf("credential = %q, want the org credential it spent", row.Credential)
@@ -987,7 +987,7 @@ func TestCapture_GithubReviewDismiss_RecordsArtifactlessAction(t *testing.T) {
 		t.Fatalf("GithubDismissReview: %v", err)
 	}
 
-	if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
 		t.Errorf("dismissing someone else's review should produce no artifact, got %+v", arts)
 	}
 	acts := listExternalActions(t, stores)
@@ -996,7 +996,7 @@ func TestCapture_GithubReviewDismiss_RecordsArtifactlessAction(t *testing.T) {
 	}
 	a := acts[0]
 	if a.Action != domain.ActionReviewDismissed || a.Target != "octo/repo#1" ||
-		a.ExternalID != "99" || a.ConversationID != info.RunID {
+		a.ExternalID != "99" || a.ConversationID != info.ConversationID {
 		t.Errorf("dismiss action mismatch: %+v", a)
 	}
 	if a.URL != "https://github.com/octo/repo/pull/1#pullrequestreview-99" {

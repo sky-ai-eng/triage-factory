@@ -19,25 +19,25 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// waitForPending blocks until the broker has registered (runID, toolCallID). The
+// waitForPending blocks until the broker has registered (conversationID, toolCallID). The
 // handler registers synchronously on entry and then parks, so a test can resolve
 // it without racing the handler goroutine. Only safe when permTimeout is far
 // longer than a poll interval — the entry must still be pending when the poll
 // runs. Tests that shrink permTimeout near the poll interval must use
 // waitForPendingOrDone instead.
-func waitForPending(t *testing.T, s *Spawner, runID, toolCallID string) {
+func waitForPending(t *testing.T, s *Spawner, conversationID, toolCallID string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
-		_, ok := s.permPending[permKey(runID, toolCallID)]
+		_, ok := s.permPending[permKey(conversationID, toolCallID)]
 		s.mu.Unlock()
 		if ok {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("permission request %q (run %q) never registered", toolCallID, runID)
+	t.Fatalf("permission request %q (run %q) never registered", toolCallID, conversationID)
 }
 
 // waitForPendingOrDone polls until the prompt is observably pending (false) or
@@ -46,12 +46,12 @@ func waitForPending(t *testing.T, s *Spawner, runID, toolCallID string) {
 // between two polls on a starved runner — registration, timeout, deregistration
 // all inside one oversleep — so "handler already finished" must be a navigable
 // outcome, not a missed observation that fails the test.
-func waitForPendingOrDone(t *testing.T, s *Spawner, runID, toolCallID string, got <-chan agentproc.PermissionDecision, d *agentproc.PermissionDecision) bool {
+func waitForPendingOrDone(t *testing.T, s *Spawner, conversationID, toolCallID string, got <-chan agentproc.PermissionDecision, d *agentproc.PermissionDecision) bool {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
-		_, pending := s.permPending[permKey(runID, toolCallID)]
+		_, pending := s.permPending[permKey(conversationID, toolCallID)]
 		s.mu.Unlock()
 		if pending {
 			return false
@@ -63,7 +63,7 @@ func waitForPendingOrDone(t *testing.T, s *Spawner, runID, toolCallID string, go
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("permission request %q (run %q) neither registered nor returned", toolCallID, runID)
+	t.Fatalf("permission request %q (run %q) neither registered nor returned", toolCallID, conversationID)
 	return false
 }
 
@@ -311,10 +311,10 @@ func dialHubClientOrg(t *testing.T, h *websocket.Hub, orgID string) (*ws.Conn, f
 }
 
 // sendPresence writes a presence control frame the way the frontend does, then
-// blocks until the hub observes the expected presence for (orgID, runID) — so a
+// blocks until the hub observes the expected presence for (orgID, conversationID) — so a
 // test that depends on a client being present (or absent) doesn't race the
 // async readPump apply.
-func sendPresence(t *testing.T, conn *ws.Conn, h *websocket.Hub, orgID, runID, viewing string, visible bool, want bool) {
+func sendPresence(t *testing.T, conn *ws.Conn, h *websocket.Hub, orgID, conversationID, viewing string, visible bool, want bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -324,12 +324,12 @@ func sendPresence(t *testing.T, conn *ws.Conn, h *websocket.Hub, orgID, runID, v
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if h.PresentFor(orgID, runID) == want {
+		if h.PresentFor(orgID, conversationID) == want {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("hub presence for (%s,%s) never became %v", orgID, runID, want)
+	t.Fatalf("hub presence for (%s,%s) never became %v", orgID, conversationID, want)
 }
 
 const presenceTestOrg = "00000000-0000-0000-0000-0000000000aa"
@@ -620,7 +620,7 @@ func TestHumanWait(t *testing.T) {
 // (skipping the permission_request the handler emits on registration), and
 // returns its run_id + tool_call_id. A bounded read deadline turns a missing
 // broadcast into a clean failure instead of a hang.
-func readPermissionResolved(t *testing.T, conn *ws.Conn) (runID, toolCallID string) {
+func readPermissionResolved(t *testing.T, conn *ws.Conn) (conversationID, toolCallID string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -667,9 +667,9 @@ func TestBrowserPermissionHandler_ResolveBroadcastsResolved(t *testing.T) {
 	}
 	<-got // handler unblocked
 
-	runID, toolCallID := readPermissionResolved(t, conn)
-	if runID != "run-1" || toolCallID != "req-1" {
-		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-1)", runID, toolCallID)
+	conversationID, toolCallID := readPermissionResolved(t, conn)
+	if conversationID != "run-1" || toolCallID != "req-1" {
+		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-1)", conversationID, toolCallID)
 	}
 }
 
@@ -690,8 +690,8 @@ func TestBrowserPermissionHandler_TimeoutBroadcastsResolved(t *testing.T) {
 		t.Fatalf("behavior = %q, want deny on timeout", d.Behavior)
 	}
 
-	runID, toolCallID := readPermissionResolved(t, conn)
-	if runID != "run-1" || toolCallID != "req-timeout" {
-		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-timeout)", runID, toolCallID)
+	conversationID, toolCallID := readPermissionResolved(t, conn)
+	if conversationID != "run-1" || toolCallID != "req-timeout" {
+		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-timeout)", conversationID, toolCallID)
 	}
 }

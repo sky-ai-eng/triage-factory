@@ -78,15 +78,15 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		eventID := seed.Event(t, taskID)
 		brID, convID := seed.Run(t, taskID, "running", "")
 
-		closed, runIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
+		closed, conversationIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
 			t.Fatalf("CloseWithRunCancelIntentSystem: %v", err)
 		}
 		if !closed {
 			t.Error("closed = false, want true — the task was active")
 		}
-		if len(runIDs) != 1 || runIDs[0] != convID {
-			t.Errorf("run ids = %v, want exactly [%s] — the caller stops what the tx stamped", runIDs, convID)
+		if len(conversationIDs) != 1 || conversationIDs[0] != convID {
+			t.Errorf("run ids = %v, want exactly [%s] — the caller stops what the tx stamped", conversationIDs, convID)
 		}
 		if !seed.CancelRequested(t, brID) {
 			t.Error("cancel_requested = false; the close must carry the stop intent for its active runs")
@@ -108,15 +108,15 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		eventID := seed.Event(t, taskID)
 		brID, _ := seed.Run(t, taskID, "completed", "completed")
 
-		closed, runIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
+		closed, conversationIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
 			t.Fatalf("CloseWithRunCancelIntentSystem: %v", err)
 		}
 		if !closed {
 			t.Error("closed = false, want true")
 		}
-		if len(runIDs) != 0 {
-			t.Errorf("run ids = %v, want none — a terminal conversation is not stopped", runIDs)
+		if len(conversationIDs) != 0 {
+			t.Errorf("run ids = %v, want none — a terminal conversation is not stopped", conversationIDs)
 		}
 		if seed.CancelRequested(t, brID) {
 			t.Error("cancel_requested = true on a finished blueprint; the post-close resume flow is now refused forever")
@@ -136,15 +136,15 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		}
 		brID, _ := seed.Run(t, taskID, "running", "")
 
-		closed, runIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
+		closed, conversationIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
 			t.Fatalf("replayed close: %v", err)
 		}
 		if closed {
 			t.Error("closed = true on an already-terminal task, want false")
 		}
-		if len(runIDs) != 0 {
-			t.Errorf("run ids = %v, want none — a replay must not re-stop anything", runIDs)
+		if len(conversationIDs) != 0 {
+			t.Errorf("run ids = %v, want none — a replay must not re-stop anything", conversationIDs)
 		}
 		if seed.CancelRequested(t, brID) {
 			t.Error("cancel_requested = true; a replayed close reached back and stamped a run started after it")
@@ -159,12 +159,12 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		taskID := seed.Task(t)
 		eventID := seed.Event(t, taskID)
 
-		closed, runIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "auto_closed_by_event", "github:pr:ci_check_passed", eventID)
+		closed, conversationIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "auto_closed_by_event", "github:pr:ci_check_passed", eventID)
 		if err != nil {
 			t.Fatalf("CloseWithRunCancelIntentSystem: %v", err)
 		}
-		if !closed || len(runIDs) != 0 {
-			t.Errorf("= (closed %v, ids %v), want (true, none)", closed, runIDs)
+		if !closed || len(conversationIDs) != 0 {
+			t.Errorf("= (closed %v, ids %v), want (true, none)", closed, conversationIDs)
 		}
 		if got := seed.TaskStatus(t, taskID); got != "done" {
 			t.Errorf("task status = %q, want done", got)
@@ -183,15 +183,15 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		eventID := seed.Event(t, taskID)
 		convID := seed.BareRun(t, taskID, "")
 
-		closed, runIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
+		closed, conversationIDs, err := s.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
 			t.Fatalf("CloseWithRunCancelIntentSystem: %v", err)
 		}
 		if !closed {
 			t.Error("closed = false, want true")
 		}
-		if len(runIDs) != 1 || runIDs[0] != convID {
-			t.Errorf("run ids = %v, want exactly [%s]", runIDs, convID)
+		if len(conversationIDs) != 1 || conversationIDs[0] != convID {
+			t.Errorf("run ids = %v, want exactly [%s]", conversationIDs, convID)
 		}
 	})
 

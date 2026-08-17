@@ -515,10 +515,10 @@ func setupJiraMirrorFixture(t *testing.T, suffix string, status, assignee string
 	}
 	seedJiraMirrorRule(t, database)
 
-	runID := "r-jira-" + suffix
-	seedJiraRun(t, database, runID, "sess-"+suffix, "/tmp/wt-jira-"+suffix)
+	conversationID := "r-jira-" + suffix
+	seedJiraRun(t, database, conversationID, "sess-"+suffix, "/tmp/wt-jira-"+suffix)
 	var taskID string
-	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, runID).Scan(&taskID); err != nil {
+	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, conversationID).Scan(&taskID); err != nil {
 		t.Fatalf("lookup task_id: %v", err)
 	}
 
@@ -526,7 +526,7 @@ func setupJiraMirrorFixture(t *testing.T, suffix string, status, assignee string
 	res := &fakeJiraResolver{client: fake.client()}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	s.SetJiraResolver(res)
-	return s, database, runID, taskID, fake, res
+	return s, database, conversationID, taskID, fake, res
 }
 
 // A bot delegation against a Jira task assigns the service account and
@@ -556,9 +556,9 @@ func TestRecomputeBoard_JiraTask_MirrorsInProgress(t *testing.T) {
 // A user takeover flips the claim off the agent; recomputeTaskBoardColumn
 // early-returns, so the bot never mirrors (no ForSystem, no Jira write).
 func TestRecomputeBoard_UserClaimedJiraTask_NoMirror(t *testing.T) {
-	s, database, runID, taskID, fake, res := setupJiraMirrorFixture(t, "user", "To Do", "")
+	s, database, conversationID, taskID, fake, res := setupJiraMirrorFixture(t, "user", "To Do", "")
 	stampUserClaim(t, database, taskID)
-	setRunStatus(t, database, runID, "open")
+	setRunStatus(t, database, conversationID, "open")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
@@ -598,9 +598,9 @@ func TestRecomputeBoard_GitHubTask_NoMirror(t *testing.T) {
 // also exercises the self-heal: completion brings a ticket left behind by a
 // failed dispatch-time mirror up to In Progress.
 func TestTerminateBlueprint_CompletedJiraTask_MirrorsInProgress(t *testing.T) {
-	s, database, runID, taskID, fake, res := setupJiraMirrorFixture(t, "complete", "To Do", "")
+	s, database, conversationID, taskID, fake, res := setupJiraMirrorFixture(t, "complete", "To Do", "")
 	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
@@ -625,9 +625,9 @@ func TestTerminateBlueprint_CompletedJiraTask_MirrorsInProgress(t *testing.T) {
 // common case (the dispatch-time mirror already moved it) is an idempotent
 // no-op, and crucially does NOT advance it to Done.
 func TestTerminateBlueprint_CompletedJiraTask_AlreadyInProgress_NoDoneMove(t *testing.T) {
-	s, database, runID, taskID, fake, _ := setupJiraMirrorFixture(t, "complete-noop", "In Progress", "bot")
+	s, database, conversationID, taskID, fake, _ := setupJiraMirrorFixture(t, "complete-noop", "In Progress", "bot")
 	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
@@ -653,9 +653,9 @@ func TestTerminateBlueprint_CompletedJiraTask_AlreadyInProgress_NoDoneMove(t *te
 // A failed/aborted blueprint must NOT move the ticket at all — the mirror is
 // gated to the completed branch only, so ForSystem is never reached.
 func TestTerminateBlueprint_AbortedJiraTask_NoMirror(t *testing.T) {
-	s, database, runID, taskID, fake, res := setupJiraMirrorFixture(t, "abort", "In Progress", "bot")
+	s, database, conversationID, taskID, fake, res := setupJiraMirrorFixture(t, "abort", "In Progress", "bot")
 	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
@@ -672,9 +672,9 @@ func TestTerminateBlueprint_AbortedJiraTask_NoMirror(t *testing.T) {
 // so the completion hook skips the Jira mirror (the terminal write is the
 // user's).
 func TestTerminateBlueprint_CompletedButUserTookOver_NoMirror(t *testing.T) {
-	s, database, runID, taskID, fake, res := setupJiraMirrorFixture(t, "takeover", "In Progress", "bot")
+	s, database, conversationID, taskID, fake, res := setupJiraMirrorFixture(t, "takeover", "In Progress", "bot")
 	stampUserClaim(t, database, taskID) // takeover flipped the claim to the user
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)

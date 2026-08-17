@@ -109,17 +109,17 @@ type blueprintRunStepJSON struct {
 	} `json:"step"`
 }
 
-func getBlueprintRunSteps(t *testing.T, s *Server, runID string) []blueprintRunStepJSON {
+func getBlueprintRunSteps(t *testing.T, s *Server, conversationID string) []blueprintRunStepJSON {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodGet, "/api/blueprint-runs/"+runID, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/blueprint-runs/"+conversationID, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("get blueprint run %s: %d: %s", runID, rec.Code, rec.Body.String())
+		t.Fatalf("get blueprint run %s: %d: %s", conversationID, rec.Code, rec.Body.String())
 	}
 	var resp struct {
 		Steps []blueprintRunStepJSON `json:"steps"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode blueprint run %s: %v", runID, err)
+		t.Fatalf("decode blueprint run %s: %v", conversationID, err)
 	}
 	return resp.Steps
 }

@@ -19,7 +19,7 @@ type placementResolver interface {
 
 // SetPlacement wires the placement affinity layer: the resolver
 // that computes the (org, repo) rendezvous stamp at enqueue, and the claim
-// config the dispatcher passes to ClaimNextRun. Called once at startup
+// config the dispatcher passes to ClaimNextConversation. Called once at startup
 // (internal/app) before RunDispatcher starts. A nil resolver or a disabled
 // claim leaves the whole layer off — enqueue stamps nothing and the claim
 // runs the global-oldest path, byte-identical to the pre-placement
@@ -45,9 +45,9 @@ func (s *Spawner) claimPlacement() db.ClaimPlacement {
 // affinity) whenever placement is off, the task has no resolvable GitHub repo
 // (Jira/Slack tasks, or an unparseable source id), or the placement read
 // fails — a failed or absent stamp only costs a cold clone, never a claim, so
-// this never blocks minting work. runID is the id of the row being enqueued;
+// this never blocks minting work. conversationID is the id of the row being enqueued;
 // it selects which replica owns the run under a K>1 override.
-func (s *Spawner) preferredExecutorFor(ctx context.Context, orgID string, task domain.Task, runID string) string {
+func (s *Spawner) preferredExecutorFor(ctx context.Context, orgID string, task domain.Task, conversationID string) string {
 	s.mu.Lock()
 	resolver := s.placementResolver
 	s.mu.Unlock()
@@ -64,5 +64,5 @@ func (s *Spawner) preferredExecutorFor(ctx context.Context, orgID string, task d
 			"org", orgID, "repo", owner+"/"+repo, "error", err)
 		return ""
 	}
-	return plan.PreferredForRun(runID)
+	return plan.PreferredForRun(conversationID)
 }

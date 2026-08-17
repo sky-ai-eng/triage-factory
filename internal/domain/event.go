@@ -132,8 +132,8 @@ const (
 
 	// EventSystemConversationStatus / EventSystemConversationActivity are
 	// EE-observable conversation lifecycle sentinels: bus mirrors of the two
-	// websocket choke points in internal/delegate/spawner.go (broadcastRunUpdate/
-	// broadcastRunFailed → the conversation_update WS event, broadcastMessage →
+	// websocket choke points in internal/delegate/spawner.go (broadcastConversationUpdate/
+	// broadcastConversationFailed → the conversation_update WS event, broadcastMessage →
 	// the message WS event), so an EE subscriber (ExtensionAPI.Bus()) can
 	// observe conversation activity without a websocket connection. See
 	// internal/domain/events/system.go for the metadata shapes.

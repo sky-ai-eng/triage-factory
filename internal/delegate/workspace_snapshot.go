@@ -104,7 +104,7 @@ func snapshotKey(orgID, keyID string) string {
 // worktree (preserved on dormancy by the per-run guards) is the primary resume
 // path and the snapshot is the durable backstop, only read when that cache is
 // gone.
-func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, runID, keyID, wtPath, sessionID string) (err error) {
+func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, keyID, wtPath, sessionID string) (err error) {
 	blobs := s.Storage()
 	if blobs == nil {
 		return nil // no store wired (tests / a configuration without the seam)
@@ -115,7 +115,7 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, runID, keyID, wt
 	// the one piece of run teardown with an unbounded cost — a git bundle, a
 	// tar of the whole scratch tree, and a blob PUT — so a park that took a
 	// minute is answerable here rather than only in the log.
-	ctx, span := s.startPunctual(ctx, runID, "workspace.snapshot", telemetry.OrgID(orgID))
+	ctx, span := s.startPunctual(ctx, conversationID, "workspace.snapshot", telemetry.OrgID(orgID))
 	defer func() {
 		recordSpanError(span, err)
 		span.End()
@@ -381,7 +381,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 		// lost the conversation — and saying anything further here would file
 		// a lost claim under slow rehydrates.
 		if wErr := s.setWorktreePath(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, wtDir); wErr != nil && !errors.Is(wErr, db.ErrClaimReleased) {
-			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "run", run.ID, "error", wErr)
+			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "conversation", run.ID, "error", wErr)
 		}
 	}
 	return wtDir, domain.WorkspaceProvenanceRehydrated, nil

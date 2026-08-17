@@ -39,12 +39,12 @@ const Channel = "tf_ctl"
 // Message is the relay payload. Kind selects which field group applies:
 // "trigger" uses Manager/OrgID/Force (a scorer/classifier/profiler/
 // reconciler Manager.Trigger call); "pollsoon" uses Source/OrgID (a
-// poller.Manager.PollSoon call); "cred_request" uses OrgID/RunID (TFAC-614:
+// poller.Manager.PollSoon call); "cred_request" uses OrgID/ConversationID (TFAC-614:
 // an executor whose claim is parked in phase='awaiting_credentials' nudging the brain's
 // credential provisioner — see internal/credprovision and
-// internal/app/ctl.go's dispatch case); "curator_cred_request" uses OrgID/RunID
+// internal/app/ctl.go's dispatch case); "curator_cred_request" uses OrgID/ConversationID
 // too (a home executor standing a curator turn's credential sidecar up nudging
-// the same provisioner — RunID carries the curator conversation id, the
+// the same provisioner — ConversationID carries the curator conversation id, the
 // claim-credentials channel's key);
 // "curator_new" / "curator_cancel" use
 // OrgID/ProjectID (curator homing, spec §6.3): a control pod nudging the home
@@ -59,14 +59,14 @@ const Channel = "tf_ctl"
 // self-filtered like the curator kinds — only the pod holding (or homing) the
 // project reacts.
 type Message struct {
-	Kind      string `json:"kind"`
-	Manager   string `json:"manager,omitempty"`
-	OrgID     string `json:"org_id"`
-	Source    string `json:"source,omitempty"`
-	Force     bool   `json:"force,omitempty"`
-	RunID     string `json:"run_id,omitempty"`
-	ProjectID string `json:"project_id,omitempty"`
-	Op        string `json:"op,omitempty"`
+	Kind           string `json:"kind"`
+	Manager        string `json:"manager,omitempty"`
+	OrgID          string `json:"org_id"`
+	Source         string `json:"source,omitempty"`
+	Force          bool   `json:"force,omitempty"`
+	ConversationID string `json:"run_id,omitempty"`
+	ProjectID      string `json:"project_id,omitempty"`
+	Op             string `json:"op,omitempty"`
 }
 
 // execer is the minimal *sql.DB surface Publish needs — a pooled

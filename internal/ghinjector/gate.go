@@ -69,11 +69,11 @@ func (s *Server) refused(w http.ResponseWriter, r *http.Request, facts *ghwrite.
 		// client this broke or someone probing the boundary, and those need
 		// telling apart by someone reading logs.
 		injectorLog.Warn("refused a gh-channel request whose act could not be read",
-			"run", s.cfg.RunID, "reason", ref.Unreadable, "path", req.Path,
+			"conversation", s.cfg.ConversationID, "reason", ref.Unreadable, "path", req.Path,
 			"content_length", r.ContentLength)
 	} else {
 		injectorLog.Info("refused a gh-channel write",
-			"run", s.cfg.RunID, "reason", ref.Reason, "act", ref.Action, "mutation", ref.Mutation)
+			"conversation", s.cfg.ConversationID, "reason", ref.Reason, "act", ref.Action, "mutation", ref.Mutation)
 	}
 
 	explanation := ref.Explain()

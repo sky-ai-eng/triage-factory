@@ -8,21 +8,21 @@ import (
 )
 
 // FleetQueueSharesFactory is what a per-backend test file hands to
-// RunFleetQueueSharesConformance. Returns the wired RunQueueStore, the orgID
+// RunFleetQueueSharesConformance. Returns the wired ConversationQueueStore, the orgID
 // its seeder stages rows under, and the seeder.
-type FleetQueueSharesFactory func(t *testing.T) (store db.RunQueueStore, orgID string, seed FleetQueueSharesSeeder)
+type FleetQueueSharesFactory func(t *testing.T) (store db.ConversationQueueStore, orgID string, seed FleetQueueSharesSeeder)
 
 // FleetQueueSharesSeeder stages the run + settings states FleetQueueShares
 // reads. The store's own guarded flips can't reach terminal/dormant/active
 // statuses on demand, so ForceStatus writes them directly.
 type FleetQueueSharesSeeder struct {
-	// EnqueueRun stages one queued run (under a running blueprint_run) and
+	// EnqueueConversation stages one queued run (under a running blueprint_run) and
 	// returns its id.
-	EnqueueRun func(t *testing.T) (runID string)
+	EnqueueConversation func(t *testing.T) (conversationID string)
 
 	// ForceStatus rewrites a run's status directly, bypassing the store's
 	// guards.
-	ForceStatus func(t *testing.T, runID, status string)
+	ForceStatus func(t *testing.T, conversationID, status string)
 
 	// SetMaxConcurrentRuns upserts the org's max_concurrent_runs cap; a nil
 	// cap writes SQL NULL (unlimited).
@@ -43,7 +43,7 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 
 	// shareFor returns the org's row from FleetQueueShares, or a zero value
 	// with found=false when the org has no active/queued runs (omitted).
-	shareFor := func(t *testing.T, store db.RunQueueStore, orgID string) (db.OrgQueueShare, bool) {
+	shareFor := func(t *testing.T, store db.ConversationQueueStore, orgID string) (db.OrgQueueShare, bool) {
 		t.Helper()
 		shares, err := store.FleetQueueShares(ctx)
 		if err != nil {
@@ -69,16 +69,16 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 		// active runs are made active by actually claiming them — which is
 		// also the only way to reach the state, the conversation row itself
 		// carrying no "running" any more.
-		seed.EnqueueRun(t)
-		seed.EnqueueRun(t)
-		seed.EnqueueRun(t)
+		seed.EnqueueConversation(t)
+		seed.EnqueueConversation(t)
+		seed.EnqueueConversation(t)
 		for i := 0; i < 2; i++ {
-			claimed, err := store.ClaimNextRun(ctx, "fleet-share-executor", 1, db.ClaimPlacement{})
+			claimed, err := store.ClaimNextConversation(ctx, "fleet-share-executor", 1, db.ClaimPlacement{})
 			if err != nil {
-				t.Fatalf("ClaimNextRun: %v", err)
+				t.Fatalf("ClaimNextConversation: %v", err)
 			}
 			if claimed == nil {
-				t.Fatalf("ClaimNextRun returned nothing on claim %d of 2", i+1)
+				t.Fatalf("ClaimNextConversation returned nothing on claim %d of 2", i+1)
 			}
 		}
 
@@ -115,11 +115,11 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 	t.Run("terminal_and_dormant_runs_excluded", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 
-		queued := seed.EnqueueRun(t) // counts as queued
+		queued := seed.EnqueueConversation(t) // counts as queued
 		_ = queued
-		done := seed.EnqueueRun(t)
+		done := seed.EnqueueConversation(t)
 		seed.ForceStatus(t, done, "completed") // terminal: excluded from both
-		parked := seed.EnqueueRun(t)
+		parked := seed.EnqueueConversation(t)
 		seed.ForceStatus(t, parked, "open") // hibernated: excluded from active
 
 		s, found := shareFor(t, store, orgID)

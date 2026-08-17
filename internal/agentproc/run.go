@@ -110,7 +110,7 @@ type RunOptions struct {
 	GitUserName  string
 	GitUserEmail string
 
-	// TraceID is stamped onto every emitted message's RunID field.
+	// TraceID is stamped onto every emitted message's ConversationID field.
 	// Storage-neutral: delegate uses the agent run UUID, the curator
 	// uses its own message-group id.
 	TraceID string
@@ -319,7 +319,7 @@ type GHChannelParams struct {
 	// (GH_ENTERPRISE_TOKEN). The injector strips it and injects the real token.
 	Token string
 	// CertSourcePath is the host path of the injector's trust file. On the
-	// sandbox path it is what the sidecar wrote (agenthost.CertPathFor(runID)),
+	// sandbox path it is what the sidecar wrote (agenthost.CertPathFor(conversationID)),
 	// bind-mounted RO at sandboxGHInjectorCert with the broker validating the
 	// source against its own derivation; on the direct path SSL_CERT_FILE
 	// points at it as-is.
@@ -399,7 +399,7 @@ func (s *UsageSink) OnMessage(m *domain.Message) error {
 
 // Sink is the storage-side adapter that turns parsed stream events
 // into rows + websocket pushes. Implementations are constructed per
-// invocation (they typically close over a runID or projectID) and are
+// invocation (they typically close over a conversationID or projectID) and are
 // not concurrency-safe — Run drives the sink from a single goroutine.
 type Sink interface {
 	// OnSession fires once, the first time the stream emits a
@@ -624,7 +624,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 			// Ordering is load-bearing beyond that: container ids are
 			// tf-<runIDfrag>-<idx> and the subnet idx is RECYCLED, so a later
 			// run can legitimately mint this same id (some callers pass a
-			// fixed RunID — see Wrap). Deregistering here, ahead of the idx
+			// fixed ConversationID — see Wrap). Deregistering here, ahead of the idx
 			// release in sb.Close() (or, on the executor path, in the
 			// delegate's even-later RunNetwork.Close), is what keeps a reused
 			// container id from ever being sampled against this claim.
@@ -872,7 +872,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	sbEnv = append(sbEnv, ghChannelEnv(opts.GHChannel)...)
 
 	sandboxRun, sboxObj, err := sandbox.Wrap(runCtx, sandbox.Config{
-		RunID:           opts.TraceID,
+		ConversationID:  opts.TraceID,
 		MemoryNamespace: opts.MemoryNamespace,
 		Worktree:        workCwd,
 		SDKDir:          sdkDir,

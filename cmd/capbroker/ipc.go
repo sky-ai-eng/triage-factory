@@ -172,9 +172,9 @@ func (c *IPCClient) Ping(ctx context.Context) error {
 // the privileged operations below plus LaunchRun (brokerrun_linux.go).
 var _ sandbox.SandboxOps = (*IPCClient)(nil)
 
-func (c *IPCClient) SetupNetwork(ctx context.Context, runID string, subnetIdx uint8) (sandbox.NetworkState, error) {
+func (c *IPCClient) SetupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (sandbox.NetworkState, error) {
 	var res setupNetworkResult
-	if err := c.call(ctx, methodSetupNetwork, setupNetworkArgs{RunID: runID, SubnetIdx: subnetIdx}, &res); err != nil {
+	if err := c.call(ctx, methodSetupNetwork, setupNetworkArgs{ConversationID: conversationID, SubnetIdx: subnetIdx}, &res); err != nil {
 		return sandbox.NetworkState{}, err
 	}
 	return res.State, nil

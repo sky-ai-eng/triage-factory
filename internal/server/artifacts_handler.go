@@ -26,10 +26,10 @@ import (
 // per repo at call time, so App-only orgs work identically to PAT orgs. Mirrors
 // pendingPRsHandler's deps.
 type artifactsHandler struct {
-	tx         db.TxRunner
-	ws         *websocket.Hub
-	agentRuns  db.ConversationStore
-	ghResolver ghclient.Resolver
+	tx            db.TxRunner
+	ws            *websocket.Hub
+	conversations db.ConversationStore
+	ghResolver    ghclient.Resolver
 	// spawner is a lazy delegation-spawner accessor (wired by Server.routes via a
 	// closure over s.spawner) used to feed the drafting agent a <system-note> when
 	// a human resolves one of its artifacts (TFAC-493).
@@ -524,7 +524,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 
 	// Append the footer idempotently: strip any footer a prior (partially failed)
 	// approve already added before re-appending, so a retry can't stack footers.
-	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.agentRuns, orgID, art.ConversationID, "PR")
+	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.conversations, orgID, art.ConversationID, "PR")
 	if err := gh.UpdatePR(r.Context(), owner, repo, number, finalTitle, footeredBody); err != nil {
 		artifactsLog.Warn("approve UpdatePR (footer) failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		writeUpstreamGitHub(w, "GitHub API error", err)
@@ -577,9 +577,9 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	if art.ConversationID != "" && derr == nil {
 		humanContent := formatPRHumanFeedback(details.Proposed.Title, details.Proposed.Body, finalTitle, finalBody)
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
+			return tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
 		}); err != nil {
-			artifactsLog.Warn("failed to record human verdict", "run", art.ConversationID, "error", err)
+			artifactsLog.Warn("failed to record human verdict", "conversation", art.ConversationID, "error", err)
 		}
 	}
 
@@ -731,8 +731,8 @@ func artifactPRNumber(art *domain.Artifact) int {
 // direction — any read error leaves the task open (recoverable; the next resolve
 // or run termination re-checks) rather than closing a task that may still hold
 // unresolved work.
-func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, orgID, userID, runID string) {
-	if runID == "" {
+func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, orgID, userID, conversationID string) {
+	if conversationID == "" {
 		return
 	}
 	var (
@@ -745,7 +745,7 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		// terminal-on-last task closure. A non-blueprint run (origin <> 'blueprint'
 		// — a future interactive/ad-hoc run) is task-less by construction (NULL
 		// task_id), so there is nothing to close: leave taskID empty and no-op below.
-		br, _, bpErr := tx.Blueprints.GetRunForStepRun(ctx, orgID, runID)
+		br, _, bpErr := tx.Blueprints.GetRunForConversation(ctx, orgID, conversationID)
 		if bpErr != nil {
 			return fmt.Errorf("blueprint lookup: %w", bpErr)
 		}
@@ -776,7 +776,7 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		unresolved = has
 		return nil
 	}); err != nil {
-		artifactsLog.Warn("terminal-on-last close check failed; leaving task open (fail closed)", "run", runID, "error", err)
+		artifactsLog.Warn("terminal-on-last close check failed; leaving task open (fail closed)", "conversation", conversationID, "error", err)
 		return
 	}
 	if taskID == "" || !closeEligible || unresolved {
@@ -790,7 +790,7 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		return tx.Tasks.Close(ctx, orgID, taskID, "run_completed", "")
 	}); err != nil {
-		artifactsLog.Warn("terminal-on-last task close failed", "task", taskID, "run", runID, "error", err)
+		artifactsLog.Warn("terminal-on-last task close failed", "task", taskID, "conversation", conversationID, "error", err)
 		return
 	}
 	// Move the card to Done on peer boards without a refetch.
@@ -808,9 +808,9 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 // "blueprint still has unresolved work" definition lives next to its single use.
 func runsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) (bool, error) {
 	for i := range runs {
-		arts, err := tx.Artifacts.ListByRun(ctx, orgID, runs[i].ID)
+		arts, err := tx.Artifacts.ListByConversation(ctx, orgID, runs[i].ID)
 		if err != nil {
-			return false, fmt.Errorf("artifacts.ListByRun(%s): %w", runs[i].ID, err)
+			return false, fmt.Errorf("artifacts.ListByConversation(%s): %w", runs[i].ID, err)
 		}
 		if domain.HasUnresolvedArtifacts(arts) {
 			return true, nil

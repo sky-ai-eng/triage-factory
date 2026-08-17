@@ -299,7 +299,7 @@ func GHBinaryPath() string {
 }
 
 // GHChannelRunDir is one local-mode run's private gh-channel directory:
-// <StateRoot>/gh-channel/<runID>. It holds the per-run injector trust file and
+// <StateRoot>/gh-channel/<conversationID>. It holds the per-run injector trust file and
 // the per-run gh config dir, and is removed when the run ends.
 //
 // The config dir matters as much as the cert: local mode runs the agent under
@@ -307,8 +307,8 @@ func GHBinaryPath() string {
 // user's ~/.config/gh — including the hosts entry carrying their personal
 // credential. Pointing it at an empty per-run dir is the local-mode analogue of
 // the jail's HOME isolation in multi mode.
-func GHChannelRunDir(runID string) string {
-	return filepath.Join(StateRoot(), "gh-channel", sanitizePathSegment(runID))
+func GHChannelRunDir(conversationID string) string {
+	return filepath.Join(StateRoot(), "gh-channel", sanitizePathSegment(conversationID))
 }
 
 // sanitizePathSegment reduces an id to a filesystem-safe single segment. Run ids

@@ -100,7 +100,7 @@ func newRaceFixture(t *testing.T, h *pgtest.Harness) raceFixture {
 }
 
 // TestBlueprintStore_Postgres_OneActiveAutoRunPerTask: the task gate
-// (HasActiveAutoRunForTaskSystem) is check-then-act, so two different
+// (HasActiveAutoConversationForTaskSystem) is check-then-act, so two different
 // (event, trigger) pairs racing to auto-fire on the SAME task could both
 // pass the check and each mint an active blueprint_run —
 // blueprint_runs_one_active_auto_run_per_task is the DB-enforced backstop.

@@ -56,7 +56,7 @@ func TestIntegration_SharedRORepoMount(t *testing.T) {
 
 	newCfg := func(t *testing.T, tag string) Config {
 		cfg := minimalConfig(t) // chowns cwd to UID 10000; skips if not root
-		cfg.RunID = "itest-tfac61-" + tag
+		cfg.ConversationID = "itest-tfac61-" + tag
 		// Empty mount point under the cwd (the /work mount), exactly as
 		// agentproc.ensureRepoMountPoints creates it; the ro bind overlays the
 		// shared worktree here.

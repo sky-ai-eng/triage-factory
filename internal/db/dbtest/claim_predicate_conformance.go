@@ -88,9 +88,9 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 
 	claim := func(t *testing.T, h ClaimPredicateHarness) *domain.Conversation {
 		t.Helper()
-		got, err := h.Stores.RunQueue.ClaimNextRun(ctx, "predicate-exec", 1, db.ClaimPlacement{})
+		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, "predicate-exec", 1, db.ClaimPlacement{})
 		if err != nil {
-			t.Fatalf("ClaimNextRun: %v", err)
+			t.Fatalf("ClaimNextConversation: %v", err)
 		}
 		return got
 	}
@@ -98,14 +98,14 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		t.Helper()
 		got := claim(t, h)
 		if got == nil || got.ID != convID {
-			t.Fatalf("ClaimNextRun = %+v, want conversation %s", got, convID)
+			t.Fatalf("ClaimNextConversation = %+v, want conversation %s", got, convID)
 		}
 		return got
 	}
 	mustNotClaim := func(t *testing.T, h ClaimPredicateHarness) {
 		t.Helper()
 		if got := claim(t, h); got != nil {
-			t.Fatalf("ClaimNextRun = %s, want nothing claimable", got.ID)
+			t.Fatalf("ClaimNextConversation = %s, want nothing claimable", got.ID)
 		}
 	}
 	release := func(t *testing.T, h ClaimPredicateHarness, orgID, convID, outcome string) {
@@ -563,7 +563,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		}
 		err := h.EnqueueUnindexed(t)
 		if !errors.Is(err, db.ErrBlueprintStepUnindexed) {
-			t.Fatalf("EnqueueRun with no step index = %v, want ErrBlueprintStepUnindexed", err)
+			t.Fatalf("EnqueueConversation with no step index = %v, want ErrBlueprintStepUnindexed", err)
 		}
 		// The refusal is the whole point: nothing landed, so nothing is
 		// sitting in the work list that no claim could ever reach.

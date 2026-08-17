@@ -54,9 +54,9 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 	// this asserts the identity rather than let a mis-claim pass silently.
 	claimTurnAs := func(t *testing.T, h CuratorHarness, convID, executorID string, bootEpoch int64) string {
 		t.Helper()
-		got, err := h.Stores.RunQueue.ClaimNextRun(ctx, executorID, bootEpoch, db.ClaimPlacement{})
+		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, executorID, bootEpoch, db.ClaimPlacement{})
 		if err != nil || got == nil || got.ID != convID {
-			t.Fatalf("ClaimNextRun = (%+v, %v), want a claim on conversation %s", got, err, convID)
+			t.Fatalf("ClaimNextConversation = (%+v, %v), want a claim on conversation %s", got, err, convID)
 		}
 		return got.ClaimID
 	}
@@ -69,9 +69,9 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 	// derived answer to "another engagement owns it" / "the turn is gone".
 	claimTurnRefused := func(t *testing.T, h CuratorHarness, convID string) {
 		t.Helper()
-		got, err := h.Stores.RunQueue.ClaimNextRun(ctx, "exec-1", 1, db.ClaimPlacement{})
+		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, "exec-1", 1, db.ClaimPlacement{})
 		if err != nil {
-			t.Fatalf("ClaimNextRun: %v", err)
+			t.Fatalf("ClaimNextConversation: %v", err)
 		}
 		if got != nil && got.ID == convID {
 			t.Fatalf("conversation %s was claimable; want it refused", convID)
@@ -909,7 +909,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 
 		// Un-homed: claimable by anyone (the local/role=all shape — one
 		// process, nothing to home to).
-		got, err := h.Stores.RunQueue.ClaimNextRun(ctx, "home-1", 1, db.ClaimPlacement{})
+		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, "home-1", 1, db.ClaimPlacement{})
 		if err != nil || got == nil || got.ID != convID {
 			t.Fatalf("un-homed claim = (%+v, %v), want conversation %s", got, err, convID)
 		}
@@ -931,10 +931,10 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		if err := h.Stores.CuratorHomes.Upsert(ctx, h.OrgID, projectID, "home-1", 1); err != nil {
 			t.Fatalf("home upsert: %v", err)
 		}
-		if other, err := h.Stores.RunQueue.ClaimNextRun(ctx, "home-2", 1, db.ClaimPlacement{}); err != nil || other != nil {
+		if other, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, "home-2", 1, db.ClaimPlacement{}); err != nil || other != nil {
 			t.Fatalf("non-home claim = (%+v, %v), want nothing", other, err)
 		}
-		if mine, err := h.Stores.RunQueue.ClaimNextRun(ctx, "home-1", 1, db.ClaimPlacement{}); err != nil || mine == nil || mine.ID != convID {
+		if mine, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, "home-1", 1, db.ClaimPlacement{}); err != nil || mine == nil || mine.ID != convID {
 			t.Fatalf("home claim = (%+v, %v), want conversation %s", mine, err, convID)
 		}
 	})

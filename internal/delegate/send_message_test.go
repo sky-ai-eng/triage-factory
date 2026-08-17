@@ -16,27 +16,27 @@ import (
 // Interrupt can be asserted without spawning a live subprocess. It satisfies
 // RunController; the real inProcessController is exercised separately.
 type fakeController struct {
-	mu             sync.Mutex
-	steerCalls     int
-	steerRunID     string
-	steerText      string
-	interruptCalls int
-	interruptRunID string
+	mu                      sync.Mutex
+	steerCalls              int
+	steerConversationID     string
+	steerText               string
+	interruptCalls          int
+	interruptConversationID string
 }
 
-func (f *fakeController) Interrupt(_ context.Context, runID string) error {
+func (f *fakeController) Interrupt(_ context.Context, conversationID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.interruptCalls++
-	f.interruptRunID = runID
+	f.interruptConversationID = conversationID
 	return nil
 }
 
-func (f *fakeController) Steer(_ context.Context, runID, text string) error {
+func (f *fakeController) Steer(_ context.Context, conversationID, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.steerCalls++
-	f.steerRunID = runID
+	f.steerConversationID = conversationID
 	f.steerText = text
 	return nil
 }
@@ -63,8 +63,8 @@ func TestSendMessage_LiveProcessRoutesToSteer(t *testing.T) {
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "run-live", runmode.LocalDefaultUserID, "hello"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	if fc.steerCalls != 1 || fc.steerRunID != "run-live" || fc.steerText != "hello" {
-		t.Errorf("steer = {calls:%d runID:%q text:%q}, want {1 run-live hello}", fc.steerCalls, fc.steerRunID, fc.steerText)
+	if fc.steerCalls != 1 || fc.steerConversationID != "run-live" || fc.steerText != "hello" {
+		t.Errorf("steer = {calls:%d conversationID:%q text:%q}, want {1 run-live hello}", fc.steerCalls, fc.steerConversationID, fc.steerText)
 	}
 }
 
@@ -78,7 +78,7 @@ func TestSendMessage_ParkedQueuesAndWakes(t *testing.T) {
 	for _, runtime := range []string{"sdk", "native"} {
 		t.Run(runtime, func(t *testing.T) {
 			database := newDelegateTestDB(t)
-			seedRun(t, database, "r-open", "sess-open", t.TempDir())
+			seedConversation(t, database, "r-open", "sess-open", t.TempDir())
 			if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-open'`); err != nil {
 				t.Fatalf("open: %v", err)
 			}
@@ -115,7 +115,7 @@ func TestSendMessage_ParkedQueuesAndWakes(t *testing.T) {
 // fell through to the resumable check (running isn't resumable) and 409'd.
 func TestSendMessage_RunningRemoteRoutesToController(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-run", "sess-run", "/tmp/wt-run")
+	seedConversation(t, database, "r-run", "sess-run", "/tmp/wt-run")
 	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-run'`); err != nil {
 		t.Fatalf("running: %v", err)
 	}
@@ -130,8 +130,8 @@ func TestSendMessage_RunningRemoteRoutesToController(t *testing.T) {
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-run", runmode.LocalDefaultUserID, "steer me"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	if fc.steerCalls != 1 || fc.steerRunID != "r-run" || fc.steerText != "steer me" {
-		t.Errorf("steer = {calls:%d runID:%q text:%q}, want {1 r-run \"steer me\"} — a running-but-remote run must route to the controller, not 409", fc.steerCalls, fc.steerRunID, fc.steerText)
+	if fc.steerCalls != 1 || fc.steerConversationID != "r-run" || fc.steerText != "steer me" {
+		t.Errorf("steer = {calls:%d conversationID:%q text:%q}, want {1 r-run \"steer me\"} — a running-but-remote run must route to the controller, not 409", fc.steerCalls, fc.steerConversationID, fc.steerText)
 	}
 }
 
@@ -145,7 +145,7 @@ func TestSendMessage_RunningRemoteRoutesToController(t *testing.T) {
 // transcript itself.
 func TestSendMessage_QueuedSDKNotSteerable(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-q", "sess-q", "/tmp/wt-q")
+	seedConversation(t, database, "r-q", "sess-q", "/tmp/wt-q")
 	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id='r-q'`); err != nil {
 		t.Fatalf("queued: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestInjectionWillFlush(t *testing.T) {
 // artifact resumes through — approval is never a parked status.
 func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-ab", "sess-ab", "/tmp/does-not-exist-ab")
+	seedConversation(t, database, "r-ab", "sess-ab", "/tmp/does-not-exist-ab")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-ab'`); err != nil {
 		t.Fatalf("completed+abort: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 // exactly as it was.
 func TestSendMessage_CompletedFinishIsResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-fin", "sess-fin", t.TempDir())
+	seedConversation(t, database, "r-fin", "sess-fin", t.TempDir())
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-fin'`); err != nil {
 		t.Fatalf("completed+finish: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestSendMessage_MissingRunNotFound(t *testing.T) {
 // entirely.
 func TestSendMessage_SteerRecordsAfterDelivery(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-rec", "sess-rec", "/tmp/wt-rec")
+	seedConversation(t, database, "r-rec", "sess-rec", "/tmp/wt-rec")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fc := &fakeController{}
 	s.controller = fc
@@ -422,7 +422,7 @@ func TestSendMessage_SteerRecordsAfterDelivery(t *testing.T) {
 // the process and nothing is recorded.
 func TestSendMessage_EmptyInputsRefusedBeforeSteer(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-blank", "sess-blank", "/tmp/wt-blank")
+	seedConversation(t, database, "r-blank", "sess-blank", "/tmp/wt-blank")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fc := &fakeController{}
 	s.controller = fc
@@ -453,7 +453,7 @@ func TestSendMessage_EmptyInputsRefusedBeforeSteer(t *testing.T) {
 // is already acting on.
 func TestSendMessage_SteerRecordSurvivesRequestCancellation(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-gone", "sess-gone", "/tmp/wt-gone")
+	seedConversation(t, database, "r-gone", "sess-gone", "/tmp/wt-gone")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fc := &fakeController{}
 	s.controller = fc
@@ -485,8 +485,8 @@ func TestSendMessage_SteerRecordSurvivesRequestCancellation(t *testing.T) {
 // words in the transcript alongside the error toast for the same send.
 func TestSendMessage_RefusedSteerRecordsNothing(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-orphan", "sess-orphan", "/tmp/wt-orphan")
-	// Status stays `running` (seedRun's default) and no process is registered:
+	seedConversation(t, database, "r-orphan", "sess-orphan", "/tmp/wt-orphan")
+	// Status stays `running` (seedConversation's default) and no process is registered:
 	// the default inProcessController answers the steer with ErrNoLiveProcess.
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
@@ -513,7 +513,7 @@ func TestInterrupt_LiveRoutesToController(t *testing.T) {
 	if err := s.Interrupt(context.Background(), "run-live"); err != nil {
 		t.Fatalf("Interrupt: %v", err)
 	}
-	if fc.interruptCalls != 1 || fc.interruptRunID != "run-live" {
-		t.Errorf("interrupt = {calls:%d runID:%q}, want {1 run-live}", fc.interruptCalls, fc.interruptRunID)
+	if fc.interruptCalls != 1 || fc.interruptConversationID != "run-live" {
+		t.Errorf("interrupt = {calls:%d conversationID:%q}, want {1 run-live}", fc.interruptCalls, fc.interruptConversationID)
 	}
 }

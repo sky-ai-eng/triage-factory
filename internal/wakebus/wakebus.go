@@ -22,7 +22,7 @@ const Channel = "tf_wake"
 
 // Kind values discriminate WHY a row became claimable — not which table it
 // lives in (both kinds nudge the same run-queue claim loop): "run" is a
-// fresh RunQueueStore.EnqueueRun (a new blueprint step); "event" is
+// fresh ConversationQueueStore.EnqueueConversation (a new blueprint step); "event" is
 // ConversationStore.MarkQueuedForResume (resume-by-enqueue — a
 // parked/terminal-resumable run woken by an external message).
 const (

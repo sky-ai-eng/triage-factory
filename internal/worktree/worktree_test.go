@@ -712,10 +712,10 @@ func TestEncodeClaudeProjectDir_ReplacesDots(t *testing.T) {
 
 // TestRemoveAt_HandlesNonCanonicalPath guards review-comment fix #3:
 // callers hold the source worktree path explicitly. If they used
-// Remove(runID) (which derives the path from the canonical /tmp
+// Remove(conversationID) (which derives the path from the canonical /tmp
 // layout), they'd silently target the wrong directory whenever the
 // source is elsewhere — leaking the actual source on disk and possibly
-// destroying an unrelated runID's canonical dir.
+// destroying an unrelated conversationID's canonical dir.
 //
 // RemoveAt takes the path explicitly so this can't happen.
 func TestRemoveAt_HandlesNonCanonicalPath(t *testing.T) {
@@ -749,7 +749,7 @@ func TestRemoveAt_EmptyPath(t *testing.T) {
 // TestCleanupWithOptions_NilPreserveSet is safe (no panic) and behaves
 // like the legacy Cleanup() — every orphan's project dir gets nuked.
 // Map reads on nil maps return the zero value in Go, so the index
-// expression `opts.PreserveClaudeProjectFor[runID]` returns false and
+// expression `opts.PreserveClaudeProjectFor[conversationID]` returns false and
 // every run is treated as non-preserved.
 func TestCleanupWithOptions_NilPreserveSet(t *testing.T) {
 	tmp := t.TempDir()

@@ -166,7 +166,7 @@ func (s *StreamState) flush() *domain.Message {
 // ParseLine processes one NDJSON line from claude's stream-json output.
 // Returns messages ready to store and an optional terminal Result.
 //
-// traceID is stamped onto every emitted message's RunID field — the
+// traceID is stamped onto every emitted message's ConversationID field — the
 // caller's choice of identifier (delegate runs use the agent run ID;
 // the curator wires its own message-group ID through). Storage
 // decisions live in the Sink, not here.

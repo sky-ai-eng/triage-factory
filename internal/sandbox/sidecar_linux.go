@@ -21,7 +21,7 @@ func launchSidecar(ctx context.Context, cfg SidecarConfig) (LaunchedSidecar, err
 	// ContainerID (tf-<runIDfrag>-<idx>, no suffix) in the broker's shared
 	// run registry — enforced again at the RPC boundary
 	// (ValidateSidecarLaunchParams), not just upheld here by convention.
-	containerID := fmt.Sprintf("tf-%s-%d%s", truncate(cfg.RunID, containerIDRunFragmentMax), cfg.SubnetIdx, SidecarContainerIDSuffix)
+	containerID := fmt.Sprintf("tf-%s-%d%s", truncate(cfg.ConversationID, containerIDRunFragmentMax), cfg.SubnetIdx, SidecarContainerIDSuffix)
 	sc, err := sidecarLauncher.LaunchSidecar(ctx, SidecarLaunchParams{
 		ContainerID: containerID,
 		UID:         uid,

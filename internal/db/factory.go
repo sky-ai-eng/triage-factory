@@ -72,7 +72,7 @@ type FactoryReadStore interface {
 	// than read off a column. The agent has not
 	// produced its memory file iff no conversation_memory row exists, or the
 	// row's agent_content is NULL/whitespace.
-	ActiveRuns(ctx context.Context, orgID string) ([]domain.FactoryActiveRun, error)
+	ActiveRuns(ctx context.Context, orgID string) ([]domain.FactoryActiveConversation, error)
 
 	// RecentEventsByEntity returns the last `perEntity` events per
 	// entity id, grouped in a map keyed by entity_id with each slice

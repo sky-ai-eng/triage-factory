@@ -102,7 +102,7 @@ type slackReactResult struct{}
 // Every store touch below is a RELAY to the orchestrator-side policy op
 // (exec_provider_ops.go): the handler holds no db.Stores. The orchestrator
 // answers with an authorization result or a workspace IDENTITY (never a
-// token), binding the run's org from its own RunInfo. The bot TOKEN is then
+// token), binding the run's org from its own ConversationInfo. The bot TOKEN is then
 // SELECTED locally from the run's sealed bundle — so no secret crosses back.
 
 // authorizeChannel is the stage-1 gate: the run's team must track channelID.

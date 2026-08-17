@@ -165,7 +165,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 	// curator in-flight count is a point-in-time read taken before CancelProject
 	// clears the in-flight marker; the run ids are stable (cancellation only moves
 	// them to terminal).
-	runIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
+	conversationIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
 	if err != nil {
 		internalError(w, "teams", err)
 		return
@@ -188,9 +188,9 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 	// so one stuck run can't strand the rest; count only the ones we stopped.
 	cancelledRuns := 0
 	if sp := th.spawnerRuntime(); sp != nil {
-		for _, runID := range runIDs {
-			if cErr := sp.StopAndCancelBlueprint(orgID, runID, "", delegate.StopCauseTeamArchived); cErr != nil {
-				teamsLog.Warn("archive: run stop failed", "team", teamID, "run", runID, "error", cErr)
+		for _, conversationID := range conversationIDs {
+			if cErr := sp.StopAndCancelBlueprint(orgID, conversationID, "", delegate.StopCauseTeamArchived); cErr != nil {
+				teamsLog.Warn("archive: run stop failed", "team", teamID, "conversation", conversationID, "error", cErr)
 				continue
 			}
 			cancelledRuns++
@@ -331,7 +331,7 @@ func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Re
 // (ActiveIDsForTeamSystem); curator sessions are the in-flight count over the
 // team's projects.
 func (th *teamsHandler) teamActiveWork(r *http.Request, orgID, teamID string) (runs, curatorSessions int, err error) {
-	runIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
+	conversationIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -342,7 +342,7 @@ func (th *teamsHandler) teamActiveWork(r *http.Request, orgID, teamID string) (r
 	if cur := th.curatorRuntime(); cur != nil {
 		curatorSessions = cur.InFlightProjectCount(projectIDs)
 	}
-	return len(runIDs), curatorSessions, nil
+	return len(conversationIDs), curatorSessions, nil
 }
 
 // spawnerRuntime / curatorRuntime resolve the wired delegation spawner / curator

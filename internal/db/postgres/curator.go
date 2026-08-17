@@ -652,7 +652,7 @@ func (s *curatorStore) PublishTurnCredPubKeySystem(ctx context.Context, orgID, c
 		// Best-effort doorbell so the brain provisions this turn without
 		// waiting for the backstop sweep; the payload carries the
 		// conversation id — the claim-credentials channel's key.
-		_ = ctlbus.Publish(ctx, s.admin, ctlbus.Message{Kind: "curator_cred_request", OrgID: orgID, RunID: conversationID})
+		_ = ctlbus.Publish(ctx, s.admin, ctlbus.Message{Kind: "curator_cred_request", OrgID: orgID, ConversationID: conversationID})
 	}
 	return n > 0, nil
 }

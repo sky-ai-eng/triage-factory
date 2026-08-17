@@ -9,10 +9,10 @@ import (
 )
 
 // stageSkillsFixture materializes a staging dir at the path the broker derives
-// for runID, the way the orchestrator does before issuing the launch RPC.
-func stageSkillsFixture(t *testing.T, runID string) string {
+// for conversationID, the way the orchestrator does before issuing the launch RPC.
+func stageSkillsFixture(t *testing.T, conversationID string) string {
 	t.Helper()
-	dir := TrustedSkillsSourcePath(runID)
+	dir := TrustedSkillsSourcePath(conversationID)
 	if err := os.MkdirAll(filepath.Join(dir, "chain-step-1-x"), 0o755); err != nil {
 		t.Fatalf("stage skills fixture: %v", err)
 	}
@@ -32,7 +32,7 @@ func withSkillsMount(p LaunchParams, source string, options ...string) LaunchPar
 // mount of THIS run's own step-skill staging dir at the fixed rootfs destination.
 func TestValidateLaunchParams_AcceptsOwnSkillsMount(t *testing.T) {
 	p := validParams()
-	dir := stageSkillsFixture(t, p.RunID)
+	dir := stageSkillsFixture(t, p.ConversationID)
 	if err := ValidateLaunchParams(withSkillsMount(p, dir, "ro")); err != nil {
 		t.Fatalf("rejected this run's own read-only skills mount: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestValidateLaunchParams_AcceptsOwnSkillsMount(t *testing.T) {
 // merely permitted — a bare mount with no options is rejected too.
 func TestValidateLaunchParams_RejectsWritableSkillsMount(t *testing.T) {
 	p := validParams()
-	dir := stageSkillsFixture(t, p.RunID)
+	dir := stageSkillsFixture(t, p.ConversationID)
 	for _, opts := range [][]string{{"rw"}, {"ro", "rw"}, nil} {
 		if err := ValidateLaunchParams(withSkillsMount(p, dir, opts...)); err == nil {
 			t.Errorf("accepted a skills mount with options %v; want rejection", opts)
@@ -58,14 +58,14 @@ func TestValidateLaunchParams_RejectsWritableSkillsMount(t *testing.T) {
 // An arbitrary host path is rejected the same way.
 func TestValidateLaunchParams_RejectsForeignSkillsSource(t *testing.T) {
 	p := validParams()
-	stageSkillsFixture(t, p.RunID) // this run's own dir exists; the mount still claims another
+	stageSkillsFixture(t, p.ConversationID) // this run's own dir exists; the mount still claims another
 	foreign := stageSkillsFixture(t, "some-other-run")
 
 	for name, source := range map[string]string{
 		"another runs staging dir": foreign,
 		"arbitrary host path":      t.TempDir(),
-		"relative path":            "triagefactory-skills/" + p.RunID,
-		"traversal":                filepath.Join(SkillStagingBase(), p.RunID, "..", "some-other-run"),
+		"relative path":            "triagefactory-skills/" + p.ConversationID,
+		"traversal":                filepath.Join(SkillStagingBase(), p.ConversationID, "..", "some-other-run"),
 	} {
 		if err := ValidateLaunchParams(withSkillsMount(p, source, "ro")); err == nil {
 			t.Errorf("accepted skills mount source (%s) %q; want rejection", name, source)
@@ -80,7 +80,7 @@ func TestValidateLaunchParams_RejectsSymlinkedSkillsSource(t *testing.T) {
 	p := validParams()
 	elsewhere := stageSkillsFixture(t, "victim-run")
 
-	own := TrustedSkillsSourcePath(p.RunID)
+	own := TrustedSkillsSourcePath(p.ConversationID)
 	if err := os.MkdirAll(filepath.Dir(own), 0o755); err != nil {
 		t.Fatalf("mkdir staging base: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestValidateLaunchParams_RejectsSymlinkedSkillsSource(t *testing.T) {
 // nonexistent source fails at the boundary rather than late inside runsc.
 func TestValidateLaunchParams_RejectsMissingSkillsSource(t *testing.T) {
 	p := validParams()
-	if err := ValidateLaunchParams(withSkillsMount(p, TrustedSkillsSourcePath(p.RunID), "ro")); err == nil {
+	if err := ValidateLaunchParams(withSkillsMount(p, TrustedSkillsSourcePath(p.ConversationID), "ro")); err == nil {
 		t.Fatal("accepted a skills mount with no staging dir on disk; want rejection")
 	}
 }
@@ -110,10 +110,10 @@ func TestValidateLaunchParams_RejectsMissingSkillsSource(t *testing.T) {
 // the shared staging base — every run's skills at once — so the mount is refused.
 func TestValidateLaunchParams_RejectsSkillsMountWithoutRunID(t *testing.T) {
 	p := validParams()
-	stageSkillsFixture(t, p.RunID)
+	stageSkillsFixture(t, p.ConversationID)
 	base := SkillStagingBase()
-	p.MemoryNamespace = p.RunID // keeps the worktree scope check satisfied
-	p.RunID = ""
+	p.MemoryNamespace = p.ConversationID // keeps the worktree scope check satisfied
+	p.ConversationID = ""
 	if err := ValidateLaunchParams(withSkillsMount(p, base, "ro")); err == nil {
 		t.Fatal("accepted a skills mount of the shared staging base with no run id; want rejection")
 	}

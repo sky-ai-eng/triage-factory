@@ -237,7 +237,7 @@ func (s *artifactStore) Get(ctx context.Context, orgID, id string) (*domain.Arti
 	return &a, nil
 }
 
-func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
+func (s *artifactStore) ListByConversation(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -246,19 +246,19 @@ func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]d
 		FROM artifacts
 		WHERE org_id = ? AND conversation_id = ?
 		ORDER BY created_at DESC, id DESC
-	`, orgID, runID)
+	`, orgID, conversationID)
 	if err != nil {
 		return nil, err
 	}
 	return scanArtifactRows(rows)
 }
 
-// ListByRunSystem is identical to ListByRun in SQLite: local mode is
+// ListByConversationSystem is identical to ListByConversation in SQLite: local mode is
 // single-tenant (N=1) with no RLS, so there is no admin/app pool split. The
 // method exists for parity with the Postgres store, where the spawner's park
 // check (no JWT-claims context) needs an admin-pool path.
-func (s *artifactStore) ListByRunSystem(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
-	return s.ListByRun(ctx, orgID, runID)
+func (s *artifactStore) ListByConversationSystem(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error) {
+	return s.ListByConversation(ctx, orgID, conversationID)
 }
 
 // ListPendingReviewsByTargetSystem is identical to a plain org read in SQLite:
@@ -281,19 +281,19 @@ func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, or
 	return scanArtifactRows(rows)
 }
 
-func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []string) (map[string]int, error) {
+func (s *artifactStore) CountByConversation(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	counts := make(map[string]int, len(runIDs))
-	if len(runIDs) == 0 {
+	counts := make(map[string]int, len(conversationIDs))
+	if len(conversationIDs) == 0 {
 		return counts, nil
 	}
 	// ?-placeholder IN list (SQLite has no array bind), chunked to stay inside
 	// SQLite's variable limit (chunkIDs) — the batched run-list path counts
 	// every run across many tasks, which can exceed the limit. A NULL conversation_id
 	// never matches IN, so detached artifacts are excluded for free.
-	for _, chunk := range chunkIDs(runIDs) {
+	for _, chunk := range chunkIDs(conversationIDs) {
 		placeholders := make([]string, len(chunk))
 		args := make([]any, 0, len(chunk)+1)
 		args = append(args, orgID)
@@ -311,13 +311,13 @@ func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []s
 			return nil, err
 		}
 		for rows.Next() {
-			var runID string
+			var conversationID string
 			var n int
-			if err := rows.Scan(&runID, &n); err != nil {
+			if err := rows.Scan(&conversationID, &n); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			counts[runID] = n
+			counts[conversationID] = n
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -328,11 +328,11 @@ func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []s
 	return counts, nil
 }
 
-func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Artifact, error) {
+func (s *artifactStore) ListByConversations(ctx context.Context, orgID string, conversationIDs []string) ([]domain.Artifact, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	if len(runIDs) == 0 {
+	if len(conversationIDs) == 0 {
 		return nil, nil
 	}
 	// ?-placeholder IN list (SQLite has no array bind), chunked to stay inside
@@ -340,7 +340,7 @@ func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []s
 	// detached artifacts are excluded for free. Each conversation_id is in one chunk, so
 	// per-run grouping by the caller is unaffected by the chunk boundary.
 	var arts []domain.Artifact
-	for _, chunk := range chunkIDs(runIDs) {
+	for _, chunk := range chunkIDs(conversationIDs) {
 		placeholders := make([]string, len(chunk))
 		args := make([]any, 0, len(chunk)+1)
 		args = append(args, orgID)
@@ -502,14 +502,14 @@ func scanArtifactRows(rows *sql.Rows) ([]domain.Artifact, error) {
 // unifies *sql.Row and *sql.Rows so this serves both the single-row Upsert
 // RETURNING and the list paths.
 func scanArtifact(sc rowScanner, a *domain.Artifact) error {
-	var runID, externalID, url, detailsJSON sql.NullString
+	var conversationID, externalID, url, detailsJSON sql.NullString
 	if err := sc.Scan(
-		&a.ID, &runID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Target,
+		&a.ID, &conversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Target,
 		&externalID, &url, &a.State, &a.DedupKey, &detailsJSON, &a.CreatedAt, &a.UpdatedAt,
 	); err != nil {
 		return err
 	}
-	a.ConversationID = runID.String
+	a.ConversationID = conversationID.String
 	a.ExternalID = externalID.String
 	a.URL = url.String
 	a.DetailsJSON = detailsJSON.String

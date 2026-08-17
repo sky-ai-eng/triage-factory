@@ -37,7 +37,7 @@ func newTaskMemoryStore(q, _ queryer) db.TaskMemoryStore { return &taskMemorySto
 
 var _ db.TaskMemoryStore = (*taskMemoryStore)(nil)
 
-func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, runID, entityID, blueprintRunID, content string) error {
+func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -53,15 +53,15 @@ func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, runID, e
 		INSERT INTO conversation_memory (id, conversation_id, entity_id, blueprint_run_id, agent_content, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(conversation_id) DO UPDATE SET agent_content = excluded.agent_content, blueprint_run_id = excluded.blueprint_run_id
-	`, uuid.New().String(), runID, entityID, blueprintRun, agentContent, time.Now().UTC())
+	`, uuid.New().String(), conversationID, entityID, blueprintRun, agentContent, time.Now().UTC())
 	return err
 }
 
-func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, runID, entityID, blueprintRunID, content string) error {
-	return s.UpsertAgentMemory(ctx, orgID, runID, entityID, blueprintRunID, content)
+func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) error {
+	return s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, blueprintRunID, content)
 }
 
-func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID, runID, content string) error {
+func (s *taskMemoryStore) UpdateConversationMemoryHumanContent(ctx context.Context, orgID, conversationID, content string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -71,7 +71,7 @@ func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID
 	}
 	res, err := s.q.ExecContext(ctx,
 		`UPDATE conversation_memory SET human_content = ? WHERE conversation_id = ?`,
-		humanContent, runID,
+		humanContent, conversationID,
 	)
 	if err != nil {
 		return err
@@ -84,7 +84,7 @@ func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID
 		var exists int
 		err := s.q.QueryRowContext(ctx,
 			`SELECT 1 FROM conversation_memory WHERE conversation_id = ? LIMIT 1`,
-			runID,
+			conversationID,
 		).Scan(&exists)
 		switch err {
 		case nil:
@@ -94,20 +94,20 @@ func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID
 			// doesn't exist (cleanup race, taken-over run, etc.), the
 			// human's submit shouldn't fail. The agent-side upsert path
 			// will surface its own warning if it failed earlier.
-			memoryLog.Warn("no conversation_memory row; human_content not recorded", "conversation_id", runID)
+			memoryLog.Warn("no conversation_memory row; human_content not recorded", "conversation_id", conversationID)
 		default:
-			memoryLog.Warn("verify conversation_memory row after no-op human_content update failed", "conversation_id", runID, "error", err)
+			memoryLog.Warn("verify conversation_memory row after no-op human_content update failed", "conversation_id", conversationID, "error", err)
 		}
 	}
 	return nil
 }
 
-// UpdateRunMemoryHumanContentSystem is identical to UpdateRunMemoryHumanContent
+// UpdateConversationMemoryHumanContentSystem is identical to UpdateConversationMemoryHumanContent
 // in SQLite: local mode is single-tenant (N=1) with no RLS, so there is no
 // admin/app pool split. The method exists for parity with the Postgres store,
 // where the reconciler (no JWT-claims context) needs the admin pool. TFAC-464.
-func (s *taskMemoryStore) UpdateRunMemoryHumanContentSystem(ctx context.Context, orgID, runID, content string) error {
-	return s.UpdateRunMemoryHumanContent(ctx, orgID, runID, content)
+func (s *taskMemoryStore) UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) error {
+	return s.UpdateConversationMemoryHumanContent(ctx, orgID, conversationID, content)
 }
 
 func (s *taskMemoryStore) GetMemoriesForEntity(ctx context.Context, orgID, entityID string) ([]domain.TaskMemory, error) {
@@ -193,7 +193,7 @@ func scanTaskMemories(rows *sql.Rows) ([]domain.TaskMemory, error) {
 		var blueprintRunID, agentContent, humanContent, promptName sql.NullString
 		var stepIndex sql.NullInt64
 		var createdAt time.Time
-		if err := rows.Scan(&m.ID, &m.RunID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt,
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt,
 			&stepIndex, &promptName); err != nil {
 			return nil, err
 		}
@@ -226,7 +226,7 @@ func reverseTaskMemories(mems []domain.TaskMemory) {
 // per statement with different column references.
 const memoryRoleRankCASE = "(CASE %s WHEN 'primary' THEN 3 WHEN 'produced' THEN 2 WHEN 'touched' THEN 1 ELSE 0 END)"
 
-func (s *taskMemoryStore) RecordEntityTouchSystem(ctx context.Context, orgID, runID, entityID, role string) error {
+func (s *taskMemoryStore) RecordEntityTouchSystem(ctx context.Context, orgID, conversationID, entityID, role string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -235,7 +235,7 @@ func (s *taskMemoryStore) RecordEntityTouchSystem(ctx context.Context, orgID, ru
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(conversation_id, entity_id) DO UPDATE SET role = excluded.role
 		WHERE ` + fmt.Sprintf(memoryRoleRankCASE, "excluded.role") + ` > ` + fmt.Sprintf(memoryRoleRankCASE, "conversation_memory_entities.role")
-	_, err := s.q.ExecContext(ctx, query, orgID, runID, entityID, role, time.Now().UTC())
+	_, err := s.q.ExecContext(ctx, query, orgID, conversationID, entityID, role, time.Now().UTC())
 	return err
 }
 

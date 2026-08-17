@@ -20,20 +20,20 @@ import (
 // completed terminal it snapshots on the way out.
 func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "draftpr-nopark")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "draftpr-nopark")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 
-	seedDraftPRArtifact(t, s, runID)
+	seedDraftPRArtifact(t, s, conversationID)
 
 	task := loadTask(t, s, taskID)
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		res(`{"outcome":"continue","summary":"opened a PR"}`), t.TempDir(), nil, "", "event", "")
 
 	if parked {
 		t.Fatal("processCompletion(draft PR) = true; want parked=false (a draft PR is a sidecar; the step never parks)")
 	}
-	if run := loadRun(t, s, runID); run.Status != "completed" || run.Outcome != "continue" {
+	if run := loadRun(t, s, conversationID); run.Status != "completed" || run.Outcome != "continue" {
 		t.Fatalf("run = {status:%q outcome:%q}, want {completed continue}", run.Status, run.Outcome)
 	}
 	assertSnapshotPresent(t, s, bpr, true)
@@ -45,19 +45,19 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 // defers and cold rehydrate from the snapshot is the resume path.
 func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "ab-snap")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "ab-snap")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 
 	task := loadTask(t, s, taskID)
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		res(`{"outcome":"abort","summary":"looked into it","reason":"needs a human to rotate the token"}`),
 		t.TempDir(), nil, "", "event", "")
 
 	if parked {
 		t.Error("processCompletion(plain abort) = true; want parked=false (worktree torn down, snapshot is the resume path)")
 	}
-	if run := loadRun(t, s, runID); run.Status != "completed" || run.Outcome != "abort" {
+	if run := loadRun(t, s, conversationID); run.Status != "completed" || run.Outcome != "abort" {
 		t.Fatalf("run = {status:%q outcome:%q}, want {completed abort}", run.Status, run.Outcome)
 	}
 	assertSnapshotPresent(t, s, bpr, true)
@@ -69,18 +69,18 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 // run produced is still somewhere once the cleanup defers tear the tree down.
 func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "fin-snap")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "fin-snap")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 
 	task := loadTask(t, s, taskID)
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		res(`{"outcome":"finish","summary":"shipped it"}`), t.TempDir(), nil, "", "event", "")
 
 	if parked {
 		t.Error("processCompletion(clean finish) = true; want parked=false (a finish is terminal; the snapshot is the resume path, not a warm tree)")
 	}
-	if run := loadRun(t, s, runID); run.Status != "completed" || run.Outcome != "finish" {
+	if run := loadRun(t, s, conversationID); run.Status != "completed" || run.Outcome != "finish" {
 		t.Fatalf("run = {status:%q outcome:%q}, want {completed finish}", run.Status, run.Outcome)
 	}
 	assertSnapshotPresent(t, s, bpr, true)
@@ -91,17 +91,17 @@ func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 // failed run's infrastructure died, so there is nothing coherent to rehydrate.
 func TestProcessCompletion_FailedWritesNoSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "fail-nosnap")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "fail-nosnap")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 
 	task := loadTask(t, s, taskID)
 	errored := res(`the agent runtime blew up`)
 	errored.IsError = true
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		errored, t.TempDir(), nil, "", "event", "")
 
-	if run := loadRun(t, s, runID); run.Status != "failed" {
+	if run := loadRun(t, s, conversationID); run.Status != "failed" {
 		t.Fatalf("run status = %q, want failed", run.Status)
 	}
 	assertSnapshotPresent(t, s, bpr, false)
@@ -112,9 +112,9 @@ func TestProcessCompletion_FailedWritesNoSnapshot(t *testing.T) {
 // sweep reaps it later), where a clean finish discards it at terminate time.
 func TestTerminateBlueprint_AbortRetainsSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "term-abort-keep")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-abort-keep")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 	putTestSnapshot(t, s, bpr)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
@@ -130,9 +130,9 @@ func TestTerminateBlueprint_AbortRetainsSnapshot(t *testing.T) {
 // what collects it instead.
 func TestTerminateBlueprint_CancelRetainsSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "term-cancel-keep")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-cancel-keep")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 	putTestSnapshot(t, s, bpr)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
@@ -147,9 +147,9 @@ func TestTerminateBlueprint_CancelRetainsSnapshot(t *testing.T) {
 // leave a successful blueprint as the one outcome with no workspace at all.
 func TestTerminateBlueprint_CompletedRetainsSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "term-finish-keep")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-finish-keep")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 	putTestSnapshot(t, s, bpr)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
@@ -164,9 +164,9 @@ func TestTerminateBlueprint_CompletedRetainsSnapshot(t *testing.T) {
 // and any blob is an earlier step's park.
 func TestTerminateBlueprint_FailedDiscardsSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "term-failed-drop")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-failed-drop")
 	wireBlobStore(t, s)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 	putTestSnapshot(t, s, bpr)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
@@ -189,7 +189,7 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 	}
 	putTestSnapshot(t, s, oldBpr)
 
-	seedRun(t, database, "r-fresh", "sess-fresh", "/tmp/wt-fresh")
+	seedConversation(t, database, "r-fresh", "sess-fresh", "/tmp/wt-fresh")
 	freshBpr := blueprintRunIDForRun(t, database, "r-fresh")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='r-fresh'`); err != nil {
 		t.Fatalf("complete fresh run: %v", err)
@@ -215,17 +215,17 @@ func TestListReapableSnapshotKeys_CoversEveryCompletedExcludesFailedAndInTTL(t *
 		t.Fatalf("age abort run: %v", err)
 	}
 
-	seedRun(t, database, "r-fin2", "s", "/tmp/wt")
+	seedConversation(t, database, "r-fin2", "s", "/tmp/wt")
 	finishBpr := blueprintRunIDForRun(t, database, "r-fin2")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish', completed_at=datetime('now','-30 days') WHERE id='r-fin2'`); err != nil {
 		t.Fatalf("finish run: %v", err)
 	}
-	seedRun(t, database, "r-failed2", "s", "/tmp/wt")
+	seedConversation(t, database, "r-failed2", "s", "/tmp/wt")
 	failedBpr := blueprintRunIDForRun(t, database, "r-failed2")
 	if _, err := database.Exec(`UPDATE conversations SET status='failed', completed_at=datetime('now','-30 days') WHERE id='r-failed2'`); err != nil {
 		t.Fatalf("failed run: %v", err)
 	}
-	seedRun(t, database, "r-open2", "s", "/tmp/wt")
+	seedConversation(t, database, "r-open2", "s", "/tmp/wt")
 	openBpr := blueprintRunIDForRun(t, database, "r-open2")
 	if _, err := database.Exec(`UPDATE conversations SET status='open', completed_at=NULL, started_at=datetime('now') WHERE id='r-open2'`); err != nil {
 		t.Fatalf("open run: %v", err)
@@ -269,7 +269,7 @@ func TestListReapableSnapshotKeys_SharedBlueprintNeedsAllPastTTL(t *testing.T) {
 	}
 
 	cutoff := time.Now().Add(-14 * 24 * time.Hour)
-	keys, err := s.agentRuns.ListReapableSnapshotKeysSystem(context.Background(), cutoff)
+	keys, err := s.conversations.ListReapableSnapshotKeysSystem(context.Background(), cutoff)
 	if err != nil {
 		t.Fatalf("ListReapableSnapshotKeysSystem: %v", err)
 	}
@@ -287,14 +287,14 @@ func TestParkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
 	s, database, run, _ := setupAdvanceFixture(t, "parked-stamp")
 	ctx := context.Background()
 
-	if _, err := s.agentRuns.ParkOpen(ctx, runmode.LocalDefaultOrgID, run, db.ParkIdle()); err != nil {
+	if _, err := s.conversations.ParkOpen(ctx, runmode.LocalDefaultOrgID, run, db.ParkIdle()); err != nil {
 		t.Fatalf("ParkOpen: %v", err)
 	}
 	if !parkedAtSet(t, database, run) {
 		t.Error("ParkOpen did not stamp parked_at")
 	}
 
-	if _, err := s.agentRuns.MarkQueuedForResume(ctx, runmode.LocalDefaultOrgID, run); err != nil {
+	if _, err := s.conversations.MarkQueuedForResume(ctx, runmode.LocalDefaultOrgID, run); err != nil {
 		t.Fatalf("MarkQueuedForResume: %v", err)
 	}
 	if parkedAtSet(t, database, run) {
@@ -331,10 +331,10 @@ func TestListReapableSnapshotKeys_OpenRunKeysOffParkedAt(t *testing.T) {
 
 // --- helpers ---------------------------------------------------------------
 
-func parkedAtSet(t *testing.T, database *sql.DB, runID string) bool {
+func parkedAtSet(t *testing.T, database *sql.DB, conversationID string) bool {
 	t.Helper()
 	var pa sql.NullString
-	if err := database.QueryRow(`SELECT parked_at FROM conversations WHERE id=?`, runID).Scan(&pa); err != nil {
+	if err := database.QueryRow(`SELECT parked_at FROM conversations WHERE id=?`, conversationID).Scan(&pa); err != nil {
 		t.Fatalf("read parked_at: %v", err)
 	}
 	return pa.Valid
@@ -342,7 +342,7 @@ func parkedAtSet(t *testing.T, database *sql.DB, runID string) bool {
 
 func reapKeys(t *testing.T, s *Spawner, cutoff time.Time) []domain.SnapshotReapKey {
 	t.Helper()
-	keys, err := s.agentRuns.ListReapableSnapshotKeysSystem(context.Background(), cutoff)
+	keys, err := s.conversations.ListReapableSnapshotKeysSystem(context.Background(), cutoff)
 	if err != nil {
 		t.Fatalf("ListReapableSnapshotKeysSystem: %v", err)
 	}

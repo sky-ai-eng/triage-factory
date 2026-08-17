@@ -219,7 +219,7 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE conversations SET status = NULL WHERE id = 'rb-child'`); err != nil {
 		t.Fatalf("set child B running: %v", err)
 	}
-	// A genuinely running child holds an active claim (ClaimNextRun mints
+	// A genuinely running child holds an active claim (ClaimNextConversation mints
 	// it); without one, the claim-desync requeue arm would rightly treat the
 	// row as stranded.
 	if _, err := conn.Exec(`
@@ -228,7 +228,7 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 		t.Fatalf("seed rb-child claim: %v", err)
 	}
 
-	n, err := stores.RunQueue.ReconcileOrphanedRuns(ctx)
+	n, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx)
 	if err != nil {
 		t.Fatalf("ReconcileOrphanedRuns: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
+	if n2, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
 		t.Errorf("second ReconcileOrphanedRuns = (%d, %v), want (0, nil)", n2, err)
 	}
 }
@@ -328,7 +328,7 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	activeClaim("ds-healthy-cl", "ds-healthy")
 	seedChild("ds-queued", "")
 
-	n, err := stores.RunQueue.ReconcileOrphanedRuns(ctx)
+	n, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx)
 	if err != nil {
 		t.Fatalf("ReconcileOrphanedRuns: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
+	if n2, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
 		t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
 	}
 }
@@ -447,7 +447,7 @@ func TestReconcileOrphanedRuns_MintCrashStampMatchesMarkRunStatus(t *testing.T) 
 	if _, err := conn.Exec(`UPDATE blueprint_runs SET started_at = datetime('now', '-1 hour') WHERE id = ?`, swept); err != nil {
 		t.Fatalf("backdate started_at: %v", err)
 	}
-	if _, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil {
+	if _, err := stores.ConversationQueue.ReconcileOrphanedRuns(ctx); err != nil {
 		t.Fatalf("ReconcileOrphanedRuns: %v", err)
 	}
 	if got, _, _ := blueprintRunStatusDB(t, conn, swept); got != string(domain.BlueprintRunStatusFailed) {

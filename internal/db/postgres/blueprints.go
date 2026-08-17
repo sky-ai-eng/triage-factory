@@ -759,7 +759,7 @@ func (s *blueprintStore) createRunManual(ctx context.Context, orgID string, br d
 // blueprintRunsOneActivePerTaskConstraint is the partial unique index name
 // backing "at most one active (trigger_type='event', status='running')
 // blueprint_run per task" — the DB-enforced twin of the router's in-process
-// task gate (HasActiveAutoRunForTaskSystem), which is check-then-act: two
+// task gate (HasActiveAutoConversationForTaskSystem), which is check-then-act: two
 // processes (or a leader-failover overlap within one) could both pass the
 // check and each mint an active auto run on the same task via different
 // triggers. See the migration for the full index definition.
@@ -992,19 +992,19 @@ func (s *blueprintStore) ListRuns(ctx context.Context, orgID string, f db.Bluepr
 	return out, total, rows.Err()
 }
 
-func (s *blueprintStore) GetRunForStepRun(ctx context.Context, orgID, stepRunID string) (*domain.BlueprintRun, *int, error) {
-	return getRunForBlueprintRun(ctx, s.app, s.GetRun, orgID, stepRunID)
+func (s *blueprintStore) GetRunForConversation(ctx context.Context, orgID, stepConversationID string) (*domain.BlueprintRun, *int, error) {
+	return getRunForBlueprintRun(ctx, s.app, s.GetRun, orgID, stepConversationID)
 }
 
-func (s *blueprintStore) GetRunForStepRunSystem(ctx context.Context, orgID, stepRunID string) (*domain.BlueprintRun, *int, error) {
-	return getRunForBlueprintRun(ctx, s.admin, s.GetRunSystem, orgID, stepRunID)
+func (s *blueprintStore) GetRunForConversationSystem(ctx context.Context, orgID, stepConversationID string) (*domain.BlueprintRun, *int, error) {
+	return getRunForBlueprintRun(ctx, s.admin, s.GetRunSystem, orgID, stepConversationID)
 }
 
-func getRunForBlueprintRun(ctx context.Context, q queryer, getRun func(context.Context, string, string) (*domain.BlueprintRun, error), orgID, stepRunID string) (*domain.BlueprintRun, *int, error) {
-	if !isValidUUID(stepRunID) {
+func getRunForBlueprintRun(ctx context.Context, q queryer, getRun func(context.Context, string, string) (*domain.BlueprintRun, error), orgID, stepConversationID string) (*domain.BlueprintRun, *int, error) {
+	if !isValidUUID(stepConversationID) {
 		return nil, nil, nil
 	}
-	blueprintRunID, stepIndex, err := readRunBlueprintPointer(ctx, q, orgID, stepRunID)
+	blueprintRunID, stepIndex, err := readRunBlueprintPointer(ctx, q, orgID, stepConversationID)
 	if err != nil || blueprintRunID == "" {
 		return nil, nil, err
 	}
@@ -1017,14 +1017,14 @@ func getRunForBlueprintRun(ctx context.Context, q queryer, getRun func(context.C
 
 // readRunBlueprintPointer reads conversations.blueprint_run_id +
 // blueprint_step_index for a single run.
-func readRunBlueprintPointer(ctx context.Context, q queryer, orgID, runID string) (string, *int, error) {
+func readRunBlueprintPointer(ctx context.Context, q queryer, orgID, conversationID string) (string, *int, error) {
 	var (
 		blueprintRunID sql.NullString
 		stepIndex      sql.NullInt64
 	)
 	err := q.QueryRowContext(ctx,
 		`SELECT blueprint_run_id, blueprint_step_index FROM conversations WHERE org_id = $1 AND id = $2`,
-		orgID, runID).Scan(&blueprintRunID, &stepIndex)
+		orgID, conversationID).Scan(&blueprintRunID, &stepIndex)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, nil
 	}
@@ -1131,7 +1131,7 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 // parkOrphanedChildRunsWithClaims parks every still-mid-flight child run of
 // blueprintRunID `open` and releases those children's active claims in the
 // same statement — q must hold claims-write privilege. Called by
-// markBlueprintRunStatus's atomic flip; RunQueueStore.ReconcileOrphanedRuns
+// markBlueprintRunStatus's atomic flip; ConversationQueueStore.ReconcileOrphanedRuns
 // applies the same predicate in its own boot sweep (it can't share this body —
 // different store, different scope).
 //
@@ -1246,19 +1246,19 @@ func (s *blueprintStore) RequestRunCancelSystem(ctx context.Context, orgID, id s
 	return n > 0, nil
 }
 
-func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
+func (s *blueprintStore) ConversationsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
 	return runsForBlueprint(ctx, s.app, orgID, blueprintRunID)
 }
 
-func (s *blueprintStore) RunsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
+func (s *blueprintStore) ConversationsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
 	return runsForBlueprint(ctx, s.admin, orgID, blueprintRunID)
 }
 
-func (s *blueprintStore) ActiveStepRunIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
+func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
 	return blueprintActiveStepRunIDs(ctx, s.app, orgID, blueprintRunID)
 }
 
-func (s *blueprintStore) ActiveStepRunIDsSystem(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
+func (s *blueprintStore) ActiveStepConversationIDsSystem(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
 	return blueprintActiveStepRunIDs(ctx, s.admin, orgID, blueprintRunID)
 }
 

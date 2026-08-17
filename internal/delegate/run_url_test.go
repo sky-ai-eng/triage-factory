@@ -17,7 +17,7 @@ func TestRunURLFor_EmptyPublicURL(t *testing.T) {
 }
 
 // TestRunURLFor_LocalMode pins the local-mode route shape
-// (frontend/src/main.tsx "/runs/:runID" — no org segment).
+// (frontend/src/main.tsx "/runs/:conversationID" — no org segment).
 func TestRunURLFor_LocalMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := &Spawner{}
@@ -30,7 +30,7 @@ func TestRunURLFor_LocalMode(t *testing.T) {
 }
 
 // TestRunURLFor_MultiMode pins the multi-mode route shape
-// (frontend/src/main.tsx "/orgs/:org_id/runs/:runID").
+// (frontend/src/main.tsx "/orgs/:org_id/runs/:conversationID").
 func TestRunURLFor_MultiMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	s := &Spawner{}

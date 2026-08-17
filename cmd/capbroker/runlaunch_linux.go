@@ -67,11 +67,11 @@ var launchRuntime = func(ctx context.Context, bundleDir, containerID string, mem
 // socket-passthrough wiring.
 var prepareBundle = sandbox.PrepareBundle
 
-// runEntry is one in-flight supervised run. done is closed once the
+// conversationEntry is one in-flight supervised run. done is closed once the
 // supervising goroutine has reaped the child; oom/actuals/waitErr are
 // written before that close and read only after it, so no further lock is
 // needed to observe them.
-type runEntry struct {
+type conversationEntry struct {
 	rt         supervisedRuntime
 	done       chan struct{}
 	oom        bool
@@ -189,7 +189,7 @@ func (s *Server) launchRun(ctx context.Context, a launchRunArgs) (any, error) {
 	// Key the registry by the unique container id, never the run id (which
 	// callers may share via a fixed TraceID — keying off it would let one
 	// run's wait/kill hit another's runtime).
-	entry := &runEntry{rt: rt, done: make(chan struct{})}
+	entry := &conversationEntry{rt: rt, done: make(chan struct{})}
 	s.runsMu.Lock()
 	s.runs[p.ContainerID] = entry
 	s.runsMu.Unlock()

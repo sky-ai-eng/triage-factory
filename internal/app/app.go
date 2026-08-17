@@ -160,7 +160,7 @@ type App struct {
 
 	// placementResolver computes the capacity-weighted rendezvous placement
 	// (TFAC-587): the (org, repo) affinity stamp the spawner writes at enqueue
-	// and the two-tier claim config the dispatcher passes to ClaimNextRun.
+	// and the two-tier claim config the dispatcher passes to ClaimNextConversation.
 	// Also backs the GET /api/fleet/placement explainer. Built in
 	// buildPlacement; a disabled config (local mode, or TF_PLACEMENT=off)
 	// still constructs a resolver whose Enabled() is false — a uniform no-op

@@ -2,9 +2,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import type { BlueprintStep, Conversation } from '../types'
 import { setPresenceView } from '../hooks/useWebSocket'
-import { useRunDetail } from '../hooks/useRunDetail'
+import { useConversationDetail } from '../hooks/useConversationDetail'
 import { useOrgHref } from '../hooks/useOrgHref'
-import { isActiveRun } from '../lib/runStatus'
+import { isActiveConversation } from '../lib/conversationStatus'
 import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
 import RunStation, {
   type ChainStepLabel,
@@ -18,11 +18,11 @@ import { toast } from '../components/Toast/toastStore'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 // RunDetail — the data shell for the full-screen run station. It loads the run +
-// task + messages (live over websocket via useRunDetail), wires the real
+// task + messages (live over websocket via useConversationDetail), wires the real
 // actions (message/interrupt steering, cancel, requeue, review/PR approval),
 // and hands it all to <RunStation>, which owns every pixel.
 export default function RunDetail() {
-  const { runID } = useParams<{ runID: string }>()
+  const { conversationID } = useParams<{ conversationID: string }>()
   const navigate = useNavigate()
   const orgHref = useOrgHref()
   const {
@@ -38,7 +38,7 @@ export default function RunDetail() {
     hasOlderMessages,
     loadingOlderMessages,
     loadOlderMessages,
-  } = useRunDetail(runID)
+  } = useConversationDetail(conversationID)
 
   const [chainSteps, setChainSteps] = useState<Conversation[] | null>(null)
   // Per-step labels for the chain track, index-aligned with chainSteps. Kept
@@ -62,16 +62,16 @@ export default function RunDetail() {
 
   // Presence (TFAC-392): this run's detail page is an answer-capable surface for
   // ITS run's permission prompts. Report run:<id> while mounted (re-firing if the
-  // runID changes) and fall back to 'other' on unmount.
+  // conversationID changes) and fall back to 'other' on unmount.
   useEffect(() => {
-    if (!runID) return
-    setPresenceView(`run:${runID}`)
+    if (!conversationID) return
+    setPresenceView(`run:${conversationID}`)
     return () => setPresenceView('other')
-  }, [runID])
+  }, [conversationID])
 
   // Tick while live so elapsed + the vent-heat flare stay current.
   useEffect(() => {
-    if (!run || !isActiveRun(run)) return
+    if (!run || !isActiveConversation(run)) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [run])
@@ -135,7 +135,7 @@ export default function RunDetail() {
 
   // Steer a run: a free-form message lands on the live process (or wakes an
   // `open` run via resume). The backend records + broadcasts it as an
-  // `message` event, so useRunDetail's append renders it — no optimistic insert.
+  // `message` event, so useConversationDetail's append renders it — no optimistic insert.
   const handleMessage = useCallback(
     async (text: string) => {
       if (!run) return
@@ -264,7 +264,7 @@ export default function RunDetail() {
         open={confirmRequeueOpen}
         prCount={counts.pr}
         reviewCount={counts.review}
-        isLive={isActiveRun(run)}
+        isLive={isActiveConversation(run)}
         actionLabel="Return to queue"
         busy={requeueBusy}
         onConfirm={() => void doRequeue()}

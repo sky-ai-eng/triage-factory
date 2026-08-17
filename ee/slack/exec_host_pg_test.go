@@ -216,7 +216,7 @@ func newSlackExecRig(t *testing.T) *slackExecRig {
 // sealed bot-token set from those stores — the same path an all/local run
 // takes (the sidecar path relays instead, exercised in agenthost's relay
 // tests).
-func (r *slackExecRig) rt(info agenthost.RunInfo) agenthost.ExtensionRuntime {
+func (r *slackExecRig) rt(info agenthost.ConversationInfo) agenthost.ExtensionRuntime {
 	return agenthost.NewDirectRuntime(r.stor, info)
 }
 
@@ -302,12 +302,12 @@ func (r *slackExecRig) seedNonSlackTask(orgID, creatorID, teamID string) string 
 	return taskID
 }
 
-// seedRun inserts a minimal run row the artifacts/external_actions FK can
-// point at, matching RunInfo.RunID, carrying a real task_id (seedNonSlackTask).
+// seedConversation inserts a minimal run row the artifacts/external_actions FK can
+// point at, matching ConversationInfo.ConversationID, carrying a real task_id (seedNonSlackTask).
 // trigger_type/creator_user_id follow the conversations_creator_matches_trigger_type
 // CHECK (event ⇒ NULL creator, manual ⇒ non-NULL) — mirrors seedPgArtifactRun
 // (internal/db/postgres/artifacts_test.go).
-func (r *slackExecRig) seedRun(orgID, teamID, userID string, eventTriggered bool) string {
+func (r *slackExecRig) seedConversation(orgID, teamID, userID string, eventTriggered bool) string {
 	r.t.Helper()
 	taskID := r.seedNonSlackTask(orgID, userID, teamID)
 	id := uuid.New().String()
@@ -329,16 +329,16 @@ func (r *slackExecRig) seedRun(orgID, teamID, userID string, eventTriggered bool
 	return id
 }
 
-func (r *slackExecRig) artifactsForRun(orgID, runID string) []domain.Artifact {
+func (r *slackExecRig) artifactsForRun(orgID, conversationID string) []domain.Artifact {
 	r.t.Helper()
-	arts, err := r.stor.Artifacts.ListByRunSystem(r.t.Context(), orgID, runID)
+	arts, err := r.stor.Artifacts.ListByConversationSystem(r.t.Context(), orgID, conversationID)
 	if err != nil {
 		r.t.Fatalf("list artifacts: %v", err)
 	}
 	return arts
 }
 
-func (r *slackExecRig) actionsForRun(orgID, runID string) []domain.ExternalAction {
+func (r *slackExecRig) actionsForRun(orgID, conversationID string) []domain.ExternalAction {
 	r.t.Helper()
 	all, _, err := r.stor.ExternalActions.ListByOrgSystem(r.t.Context(), orgID, domain.ExternalActionListOpts{})
 	if err != nil {
@@ -346,20 +346,20 @@ func (r *slackExecRig) actionsForRun(orgID, runID string) []domain.ExternalActio
 	}
 	var out []domain.ExternalAction
 	for _, a := range all {
-		if a.ConversationID == runID {
+		if a.ConversationID == conversationID {
 			out = append(out, a)
 		}
 	}
 	return out
 }
 
-// touchRole reads conversation_memory_entities.role for (runID, entityID) directly — the
+// touchRole reads conversation_memory_entities.role for (conversationID, entityID) directly — the
 // store interface exposes no role-returning read. "" when no row exists.
-func (r *slackExecRig) touchRole(runID, entityID string) string {
+func (r *slackExecRig) touchRole(conversationID, entityID string) string {
 	r.t.Helper()
 	var role string
 	err := r.h.AdminDB.QueryRow(
-		`SELECT role FROM conversation_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, runID, entityID,
+		`SELECT role FROM conversation_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, conversationID, entityID,
 	).Scan(&role)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ""
@@ -372,10 +372,10 @@ func (r *slackExecRig) touchRole(runID, entityID string) string {
 
 // touchRowCount counts every conversation_memory_entities row for a run — a set-returning
 // read must leave this at 0.
-func (r *slackExecRig) touchRowCount(runID string) int {
+func (r *slackExecRig) touchRowCount(conversationID string) int {
 	r.t.Helper()
 	var n int
-	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM conversation_memory_entities WHERE conversation_id = $1`, runID).Scan(&n); err != nil {
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM conversation_memory_entities WHERE conversation_id = $1`, conversationID).Scan(&n); err != nil {
 		r.t.Fatalf("count conversation_memory_entities: %v", err)
 	}
 	return n
@@ -395,9 +395,9 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 			r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 			r.seedChannel(orgID, "T1", "C1")
 			r.trackChannel(orgID, owner, teamID, "C1")
-			runID := r.seedRun(orgID, teamID, owner, eventTriggered)
+			conversationID := r.seedConversation(orgID, teamID, owner, eventTriggered)
 
-			info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: eventTriggered}
+			info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: eventTriggered}
 			out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "hello **world**"})
 			if err != nil {
 				t.Fatalf("send: %v", err)
@@ -409,7 +409,7 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 				t.Errorf("chat.postMessage not called as expected: channel=%q markdown=%q", r.fake.lastPostChannel, r.fake.lastPostMarkdown)
 			}
 
-			arts := r.artifactsForRun(orgID, runID)
+			arts := r.artifactsForRun(orgID, conversationID)
 			if len(arts) != 1 {
 				t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 			}
@@ -420,11 +420,11 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 				a.DedupKey != domain.ArtifactDedupKey(domain.ArtifactProviderSlack, domain.ArtifactKindMessage, "C1/"+out.TS, "") {
 				t.Errorf("artifact mismatch: %+v (want target=%q)", a, wantTarget)
 			}
-			if a.ConversationID != runID || a.TeamID != teamID {
+			if a.ConversationID != conversationID || a.TeamID != teamID {
 				t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
 			}
 
-			acts := r.actionsForRun(orgID, runID)
+			acts := r.actionsForRun(orgID, conversationID)
 			if len(acts) != 1 {
 				t.Fatalf("want 1 external_action, got %d: %+v", len(acts), acts)
 			}
@@ -447,8 +447,8 @@ func TestSlackExecHandler_Send_RootPostMintsThreadKind(t *testing.T) {
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "kicking off a new thread"})
 	if err != nil {
@@ -482,8 +482,8 @@ func TestSlackExecHandler_Send_ThreadedReplyMintsMessageKind(t *testing.T) {
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	const rootTS = "1699999999.000001"
 	if _, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{
@@ -515,8 +515,8 @@ func TestSlackExecHandler_Send_RootPostThenEdit_PreservesThreadKind(t *testing.T
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "root message"})
 	if err != nil {
@@ -546,8 +546,8 @@ func TestSlackExecHandler_Send_FileOnlyRootPost_TitlesFromAttachmentName(t *test
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	// findRecentMessageTSForFile (the file-only path's ts resolution) scans
 	// conversations.history for a message carrying the uploaded file id —
@@ -590,8 +590,8 @@ func TestSlackExecHandler_Edit_UpsertsSameArtifactRow(t *testing.T) {
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	sendOut, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "first take"})
 	if err != nil {
@@ -609,18 +609,18 @@ func TestSlackExecHandler_Edit_UpsertsSameArtifactRow(t *testing.T) {
 		t.Errorf("chat.update not called as expected: %+v", r.fake)
 	}
 
-	arts := r.artifactsForRun(orgID, runID)
+	arts := r.artifactsForRun(orgID, conversationID)
 	if len(arts) != 1 {
 		t.Fatalf("edit should upsert the same row, got %d artifacts: %+v", len(arts), arts)
 	}
 	if arts[0].State != domain.ArtifactStateMessagePosted {
 		t.Errorf("state = %q, want %q", arts[0].State, domain.ArtifactStateMessagePosted)
 	}
-	if arts[0].ConversationID != runID {
-		t.Errorf("edit must not reassign run_id away from the creating run: got %q, want %q", arts[0].ConversationID, runID)
+	if arts[0].ConversationID != conversationID {
+		t.Errorf("edit must not reassign run_id away from the creating run: got %q, want %q", arts[0].ConversationID, conversationID)
 	}
 
-	acts := r.actionsForRun(orgID, runID)
+	acts := r.actionsForRun(orgID, conversationID)
 	if len(acts) != 2 {
 		t.Fatalf("want 2 external_actions (post + edit), got %d: %+v", len(acts), acts)
 	}
@@ -658,10 +658,10 @@ func TestSlackExecHandler_Edit_PreservesCreatingRunAndTeam_AcrossDifferentTeams(
 	r.trackChannel(orgID, owner, teamA, "C1")
 	r.trackChannel(orgID, owner, teamB, "C1")
 
-	runA := r.seedRun(orgID, teamA, owner, true)
-	runB := r.seedRun(orgID, teamB, owner, true)
-	infoA := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runA, TeamID: teamA, IsEventTriggered: true}
-	infoB := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runB, TeamID: teamB, IsEventTriggered: true}
+	runA := r.seedConversation(orgID, teamA, owner, true)
+	runB := r.seedConversation(orgID, teamB, owner, true)
+	infoA := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: runA, TeamID: teamA, IsEventTriggered: true}
+	infoB := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: runB, TeamID: teamB, IsEventTriggered: true}
 
 	sendOut, err := r.hdl.send(context.Background(), r.rt(infoA), slackSendArgs{Channel: "C1", Body: "posted by team A"})
 	if err != nil {
@@ -704,8 +704,8 @@ func TestSlackExecHandler_React_RecordsActionOnly(t *testing.T) {
 			r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 			r.seedChannel(orgID, "T1", "C1")
 			r.trackChannel(orgID, owner, teamID, "C1")
-			runID := r.seedRun(orgID, teamID, owner, eventTriggered)
-			info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: eventTriggered}
+			conversationID := r.seedConversation(orgID, teamID, owner, eventTriggered)
+			info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: eventTriggered}
 
 			if _, err := r.hdl.react(context.Background(), r.rt(info), slackReactArgs{Channel: "C1", TS: "1700000000.000001", Emoji: "thumbsup"}); err != nil {
 				t.Fatalf("react: %v", err)
@@ -714,10 +714,10 @@ func TestSlackExecHandler_React_RecordsActionOnly(t *testing.T) {
 				t.Errorf("reactions.add not called as expected: %+v", r.fake)
 			}
 
-			if arts := r.artifactsForRun(orgID, runID); len(arts) != 0 {
+			if arts := r.artifactsForRun(orgID, conversationID); len(arts) != 0 {
 				t.Errorf("react must not write an artifact, got %+v", arts)
 			}
-			acts := r.actionsForRun(orgID, runID)
+			acts := r.actionsForRun(orgID, conversationID)
 			if len(acts) != 1 {
 				t.Fatalf("want 1 external_action, got %d: %+v", len(acts), acts)
 			}
@@ -753,8 +753,8 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies(t *testing.T) {
 			r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 			r.seedChannel(orgID, "T1", "C1")
 			r.trackChannel(orgID, owner, teamID, "C1")
-			runID := r.seedRun(orgID, teamID, owner, true)
-			info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+			conversationID := r.seedConversation(orgID, teamID, owner, true)
+			info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 			r.fake.repliesMessages = []map[string]any{
 				{"ts": rootTS, "user": "U1", "text": "root message"},
@@ -774,7 +774,7 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies(t *testing.T) {
 				if out.TS != replyTS {
 					t.Errorf("edit TS = %q, want %q (the message's own ts, not the root)", out.TS, replyTS)
 				}
-				arts := r.artifactsForRun(orgID, runID)
+				arts := r.artifactsForRun(orgID, conversationID)
 				if len(arts) != 1 || arts[0].Target != wantTarget {
 					t.Fatalf("artifacts = %+v, want one artifact targeting %q", arts, wantTarget)
 				}
@@ -783,7 +783,7 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies(t *testing.T) {
 					t.Fatalf("react: %v", err)
 				}
 			}
-			acts := r.actionsForRun(orgID, runID)
+			acts := r.actionsForRun(orgID, conversationID)
 			if len(acts) != 1 || acts[0].Target != wantTarget {
 				t.Fatalf("external_actions = %+v, want one action targeting %q", acts, wantTarget)
 			}
@@ -811,8 +811,8 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies_ChannelRootFallback(t *te
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	r.fake.repliesMessages = []map[string]any{{"ts": ts, "user": "U1", "text": "an unthreaded message"}}
 
@@ -820,7 +820,7 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies_ChannelRootFallback(t *te
 		t.Fatalf("react: %v", err)
 	}
 	wantTarget := domain.SlackSourceID("C1", ts)
-	acts := r.actionsForRun(orgID, runID)
+	acts := r.actionsForRun(orgID, conversationID)
 	if len(acts) != 1 || acts[0].Target != wantTarget {
 		t.Fatalf("external_actions = %+v, want one action targeting %q", acts, wantTarget)
 	}
@@ -846,8 +846,8 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies_NeverFollowsCursor(t *tes
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	r.fake.repliesMessages = []map[string]any{{"ts": rootTS, "user": "U1", "text": "root message"}}
 	r.fake.repliesNextCursor = "dGVhbTpD" // a non-empty cursor: "there's another page"
@@ -859,7 +859,7 @@ func TestSlackExecHandler_ResolvesRootViaThreadReplies_NeverFollowsCursor(t *tes
 		t.Errorf("conversations.replies was called %d time(s), want exactly 1 (must not follow next_cursor)", r.fake.repliesCalls)
 	}
 	wantTarget := domain.SlackSourceID("C1", rootTS)
-	acts := r.actionsForRun(orgID, runID)
+	acts := r.actionsForRun(orgID, conversationID)
 	if len(acts) != 1 || acts[0].Target != wantTarget {
 		t.Fatalf("external_actions = %+v, want one action targeting %q", acts, wantTarget)
 	}
@@ -878,8 +878,8 @@ func TestSlackExecHandler_Send_AttachFailure_StillRecordsPostedMessage(t *testin
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	r.fake.attachCompleteFails = true
 
@@ -897,14 +897,14 @@ func TestSlackExecHandler_Send_AttachFailure_StillRecordsPostedMessage(t *testin
 		t.Errorf("result = %+v, want the posted message's channel/ts even on attach failure", out)
 	}
 
-	arts := r.artifactsForRun(orgID, runID)
+	arts := r.artifactsForRun(orgID, conversationID)
 	if len(arts) != 1 {
 		t.Fatalf("want 1 artifact for the message that DID post, got %d: %+v", len(arts), arts)
 	}
 	if arts[0].ExternalID != out.TS || arts[0].State != domain.ArtifactStateMessagePosted {
 		t.Errorf("artifact mismatch: %+v", arts[0])
 	}
-	acts := r.actionsForRun(orgID, runID)
+	acts := r.actionsForRun(orgID, conversationID)
 	if len(acts) != 1 || acts[0].Action != domain.ActionSlackMessagePosted {
 		t.Fatalf("external_actions = %+v, want one slack_message_posted row despite the attach failure", acts)
 	}
@@ -920,8 +920,8 @@ func TestSlackExecHandler_Send_ThreadedAttach_UsesParentThreadTS(t *testing.T) {
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	const parentTS = "1700000000.000000"
 	out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{
@@ -952,8 +952,8 @@ func TestSlackExecHandler_Send_ChannelRootAttach_UsesOwnTS(t *testing.T) {
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{
 		Channel: "C1", Body: "here's the report", AttachName: "report.csv",
@@ -975,8 +975,8 @@ func TestSlackExecHandler_Send_AuthzRefusal_TeamDoesNotTrackChannel(t *testing.T
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	// Deliberately NOT tracked by teamID.
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	_, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "hi"})
 	if err == nil {
@@ -995,8 +995,8 @@ func TestSlackExecHandler_Send_UnknownChannel(t *testing.T) {
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-unknown-chan")
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	// No Channels.EnsureSystem call — C1 is not in the registry at all.
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	// authorizeChannel runs before channel resolution and would itself refuse
 	// (an unregistered channel is never tracked either) — track it explicitly
@@ -1021,8 +1021,8 @@ func TestSlackExecHandler_Send_WorkspaceAmbiguity_TwoAppsOneWorkspace(t *testing
 	r.seedWorkspace(orgID, owner, "T1", "A2", "xoxb-app2")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	_, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "hi"})
 	if err == nil {
@@ -1044,8 +1044,8 @@ func TestSlackExecHandler_ReadThread_Golden(t *testing.T) {
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	r.fake.userNames["U1"] = "Ada Lovelace"
 	r.fake.repliesMessages = []map[string]any{
@@ -1077,8 +1077,8 @@ func TestSlackExecHandler_ReadChannel_LimitOnly_Golden(t *testing.T) {
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	r.fake.historyMessages = []map[string]any{
 		{"ts": "1700000002.000000", "user": "U2", "text": "third"},
@@ -1107,8 +1107,8 @@ func TestSlackExecHandler_ReadChannel_AuthzRefusal(t *testing.T) {
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	// Deliberately NOT tracked.
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	if _, err := r.hdl.readChannel(context.Background(), r.rt(info), slackReadChannelArgs{Channel: "C1", Limit: 10}); err == nil {
 		t.Fatal("expected an authz refusal, got nil")
@@ -1128,8 +1128,8 @@ func TestSlackExecHandler_ReadThread_RecordsTouch(t *testing.T) {
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	const rootTS = "1700000000.000100"
 	r.fake.repliesMessages = []map[string]any{
@@ -1151,7 +1151,7 @@ func TestSlackExecHandler_ReadThread_RecordsTouch(t *testing.T) {
 	if ent.Kind != "message" {
 		t.Errorf("entity kind = %q, want message", ent.Kind)
 	}
-	if role := r.touchRole(runID, ent.ID); role != domain.MemoryRoleTouched {
+	if role := r.touchRole(conversationID, ent.ID); role != domain.MemoryRoleTouched {
 		t.Errorf("touch role = %q, want %q", role, domain.MemoryRoleTouched)
 	}
 }
@@ -1165,8 +1165,8 @@ func TestSlackExecHandler_ReadChannel_RecordsNoTouch(t *testing.T) {
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	r.fake.historyMessages = []map[string]any{
 		{"ts": "1700000000.000000", "user": "U2", "text": "hello"},
@@ -1175,7 +1175,7 @@ func TestSlackExecHandler_ReadChannel_RecordsNoTouch(t *testing.T) {
 		t.Fatalf("readChannel: %v", err)
 	}
 
-	if n := r.touchRowCount(runID); n != 0 {
+	if n := r.touchRowCount(conversationID); n != 0 {
 		t.Errorf("read channel recorded %d touch row(s), want 0", n)
 	}
 }
@@ -1188,8 +1188,8 @@ func TestSlackExecHandler_Download_Golden(t *testing.T) {
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	r.seedChannel(orgID, "T1", "C1")
 	r.trackChannel(orgID, owner, teamID, "C1")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	r.fake.setFile("F1", "report.csv", []byte("a,b,c\n1,2,3\n"), []string{"C1"})
 
@@ -1221,8 +1221,8 @@ func TestSlackExecHandler_Download_UntrackedChannel_Refused(t *testing.T) {
 	r.seedChannel(orgID, "T1", "C1")
 	r.seedChannel(orgID, "T1", "C-untracked")
 	r.trackChannel(orgID, owner, teamID, "C1") // tracks C1, NOT C-untracked
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	r.fake.setFile("F1", "secret.csv", []byte("data"), []string{"C-untracked"})
 
@@ -1249,8 +1249,8 @@ func TestSlackExecHandler_Download_NoChannels_Refused(t *testing.T) {
 	// what must refuse it.
 	r.seedChannel(orgID, "T1", "C-home")
 	r.trackChannel(orgID, owner, teamID, "C-home")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	r.fake.setFile("F1", "dm-only.csv", []byte("data"), nil)
 
@@ -1282,8 +1282,8 @@ func TestSlackExecHandler_Download_FallbackPath_StillAuthorizes(t *testing.T) {
 	// must then refuse the download of a file in the untracked channel.
 	r.seedChannel(orgID, "T1", "C-home")
 	r.trackChannel(orgID, owner, teamID, "C-home")
-	runID := r.seedRun(orgID, teamID, owner, true)
-	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
 
 	r.fake.setFile("F1", "leak.csv", []byte("data"), []string{"C-untracked"})
 
@@ -1309,7 +1309,7 @@ func TestSlackExtension_RefusedWithoutEntitlement(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "slack-ext-gate")
-	client := agenthost.NewLocal(stores, agenthost.RunInfo{OrgID: orgID, UserID: owner, TeamID: teamID, RunID: "r1"})
+	client := agenthost.NewLocal(stores, agenthost.ConversationInfo{OrgID: orgID, UserID: owner, TeamID: teamID, ConversationID: "r1"})
 
 	_, err := client.CallExtension(context.Background(), "slack", "send", nil)
 	if err == nil {
@@ -1331,7 +1331,7 @@ func TestSlackExtension_EntitledDispatchesToHandler(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "slack-ext-entitled")
-	client := agenthost.NewLocal(stores, agenthost.RunInfo{OrgID: orgID, UserID: owner, TeamID: teamID, RunID: "r1"})
+	client := agenthost.NewLocal(stores, agenthost.ConversationInfo{OrgID: orgID, UserID: owner, TeamID: teamID, ConversationID: "r1"})
 
 	// An unknown method reaching the real handler (not refused by the
 	// entitlement gate) confirms dispatch happened — the gate only blocks

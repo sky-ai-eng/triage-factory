@@ -7,7 +7,7 @@ import (
 )
 
 // runTreeBasename is the directory ephemeral per-run worktrees live under
-// inside os.TempDir(): os.TempDir()/triagefactory-runs/<runID>. This is the
+// inside os.TempDir(): os.TempDir()/triagefactory-runs/<conversationID>. This is the
 // GitHub-PR / Jira / Slack task-run shape of Config.Worktree — org-blind by
 // construction, since these trees don't outlive their own run.
 // internal/worktree is the historical owner of this path (its
@@ -30,7 +30,7 @@ const runTreeBasename = "triagefactory-runs"
 // rootKey is the tree's key, not a conversation id: a delegated run's tree is
 // keyed by its memory namespace (the blueprint run id), so a blueprint's steps
 // share one root and a resumed step rebuilds at the same path. Both keys reach
-// this package — the launch pins the worktree by namespace while Config.RunID
+// this package — the launch pins the worktree by namespace while Config.ConversationID
 // stays the conversation — which is why worktreeScope accepts either and this
 // parameter claims neither.
 func RunTreeRoot(rootKey string) string {

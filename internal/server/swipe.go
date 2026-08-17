@@ -667,9 +667,9 @@ func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action st
 	// A swipe is the task's own disposition, so the blueprints behind these
 	// runs go terminal with them rather than freezing 'running' — the plain
 	// conversation stop is for a user pausing work they mean to come back to.
-	for _, runID := range ids {
-		if err := s.spawner.StopAndCancelBlueprint(orgID, runID, userID, delegate.StopCauseTaskDispositioned); err != nil {
-			swipeLog.Warn("stop run failed", "run", runID, "action", action, "task", id, "error", err)
+	for _, conversationID := range ids {
+		if err := s.spawner.StopAndCancelBlueprint(orgID, conversationID, userID, delegate.StopCauseTaskDispositioned); err != nil {
+			swipeLog.Warn("stop run failed", "conversation", conversationID, "action", action, "task", id, "error", err)
 		}
 	}
 }
@@ -759,7 +759,7 @@ func (s *Server) swipeTriggerDelegation(w http.ResponseWriter, r *http.Request, 
 	// The actor is the agent this swipe just claimed the task with (swipeDelegate
 	// stamped claimed_by_agent_id before this re-read, and Tasks.Get hydrates it).
 	// Pass it so the run's frozen blueprint_run actor matches the task claim.
-	runID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
+	conversationID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: req.BlueprintID,
 		TriggerType:         "manual",
@@ -770,7 +770,7 @@ func (s *Server) swipeTriggerDelegation(w http.ResponseWriter, r *http.Request, 
 		writeDelegateSpawnError(w, err)
 		return false
 	}
-	response["conversation_id"] = runID
+	response["conversation_id"] = conversationID
 	return true
 }
 

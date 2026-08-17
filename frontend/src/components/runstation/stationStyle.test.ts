@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { Conversation } from '../../types'
 import { RUN_STATUSES } from '../../types'
-import { isActiveStatus } from '../../lib/runStatus'
+import { isActiveStatus } from '../../lib/conversationStatus'
 import { HMI_CYAN, stationState, type StationKey } from './stationStyle'
 
 const run = (over: Partial<Conversation>): Conversation =>

@@ -139,10 +139,10 @@ func TestLocalGHChannel_WiresRealGH(t *testing.T) {
 		seen []ghinjector.ObservedMutation
 	)
 	ch, err := ghchannel.Start(ghchannel.Config{
-		RunID:       "run-wire-1",
-		Upstream:    upstream.URL + "/api/v3",
-		BinDir:      wireBinDir(t),
-		TokenSource: func(context.Context) (string, error) { return wireReal, nil },
+		ConversationID: "run-wire-1",
+		Upstream:       upstream.URL + "/api/v3",
+		BinDir:         wireBinDir(t),
+		TokenSource:    func(context.Context) (string, error) { return wireReal, nil },
 		Observe: func(_ context.Context, m ghinjector.ObservedMutation) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -215,10 +215,10 @@ func TestLocalGHChannel_IgnoresUserGHConfig(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 
 	ch, err := ghchannel.Start(ghchannel.Config{
-		RunID:       "run-wire-2",
-		Upstream:    upstream.URL + "/api/v3",
-		BinDir:      wireBinDir(t),
-		TokenSource: func(context.Context) (string, error) { return wireReal, nil },
+		ConversationID: "run-wire-2",
+		Upstream:       upstream.URL + "/api/v3",
+		BinDir:         wireBinDir(t),
+		TokenSource:    func(context.Context) (string, error) { return wireReal, nil },
 	})
 	if err != nil {
 		t.Fatalf("ghchannel.Start: %v", err)
@@ -267,10 +267,10 @@ func TestLocalGHChannel_CloseTearsDown(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 
 	ch, err := ghchannel.Start(ghchannel.Config{
-		RunID:       "run-wire-3",
-		Upstream:    upstream.URL + "/api/v3",
-		BinDir:      wireBinDir(t),
-		TokenSource: func(context.Context) (string, error) { return wireReal, nil },
+		ConversationID: "run-wire-3",
+		Upstream:       upstream.URL + "/api/v3",
+		BinDir:         wireBinDir(t),
+		TokenSource:    func(context.Context) (string, error) { return wireReal, nil },
 	})
 	if err != nil {
 		t.Fatalf("ghchannel.Start: %v", err)

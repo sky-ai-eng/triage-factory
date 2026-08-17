@@ -148,9 +148,9 @@ func TestFrontendMirrorsRunStatusVocabulary(t *testing.T) {
 // key the backend never writes is the opposite: a phrase that can never appear,
 // which is how a gloss outlives the reason it described.
 func TestFrontendMirrorsParkReasonVocabulary(t *testing.T) {
-	src, err := os.ReadFile("frontend/src/lib/runStatus.ts")
+	src, err := os.ReadFile("frontend/src/lib/conversationStatus.ts")
 	if err != nil {
-		t.Fatalf("read runStatus.ts: %v", err)
+		t.Fatalf("read conversationStatus.ts: %v", err)
 	}
 	got := tsObjectKeys(t, string(src), "PARK_REASON_LABELS: Record<string, string>")
 

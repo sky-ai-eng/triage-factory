@@ -6,8 +6,8 @@ import "testing"
 // with the given PR number + run id, for the set-helper tests. A TF-side draft
 // (TFAC-494) has no GitHub review id, so the tests key on Target/ID, not
 // ExternalID.
-func readyReview(number int, runID string) Artifact {
-	a := NewReviewArtifact("o/r", number, "headsha", runID)
+func readyReview(number int, conversationID string) Artifact {
+	a := NewReviewArtifact("o/r", number, "headsha", conversationID)
 	rd, _ := ParseReviewArtifactDetails(a.DetailsJSON)
 	rd.ReviewEvent = "APPROVE"
 	a.DetailsJSON = MarshalReviewArtifactDetails(rd)

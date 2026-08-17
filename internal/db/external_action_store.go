@@ -70,8 +70,8 @@ type ExternalActionStore interface {
 	// authorization is enforced at the HTTP handler. Bounded + filtered by opts.
 	ListByTeam(ctx context.Context, orgID, teamID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error)
 
-	// ListByRun returns one conversation's actions, newest first — what a single
-	// run did to the outside world, the sibling of Artifacts.ListByRun. App pool
+	// ListByConversation returns one conversation's actions, newest first — what a single
+	// run did to the outside world, the sibling of Artifacts.ListByConversation. App pool
 	// in Postgres under the same org-scoped policy as ListByTeam; the handler
 	// reads the conversation first, so a run the caller's team cannot see is a
 	// 404 before this runs. Bounded + filtered by opts.
@@ -80,5 +80,5 @@ type ExternalActionStore interface {
 	// answer different questions and are reached from different surfaces: this
 	// one needs no governance entitlement, since a member of the owning team is
 	// already reading that run's transcript and artifacts.
-	ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error)
+	ListByConversation(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error)
 }

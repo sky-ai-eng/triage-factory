@@ -28,9 +28,9 @@ func TestStagedInjectionStore_Postgres(t *testing.T) {
 				t.Helper()
 				return seedPgArtifactRun(t, h, orgID, teamID, userID)
 			},
-			DeleteRun: func(t *testing.T, runID string) {
+			DeleteRun: func(t *testing.T, conversationID string) {
 				t.Helper()
-				if _, err := h.AdminDB.Exec(`DELETE FROM conversations WHERE id = $1`, runID); err != nil {
+				if _, err := h.AdminDB.Exec(`DELETE FROM conversations WHERE id = $1`, conversationID); err != nil {
 					t.Fatalf("delete run: %v", err)
 				}
 			},
@@ -53,7 +53,7 @@ func TestStagedInjectionStore_Postgres_OrgScoped(t *testing.T) {
 	runA := seedPgArtifactRun(t, h, orgA, teamA, userA)
 
 	if err := stores.StagedInjections.AppendSystem(ctx, orgA, &domain.StagedInjection{
-		RunID: runA, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "for org A",
+		ConversationID: runA, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "for org A",
 	}); err != nil {
 		t.Fatalf("append: %v", err)
 	}

@@ -6,17 +6,17 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // the delegate path both reason about this tool by name.
 const StopBlueprintName = "stop_blueprint"
 
-// stop_blueprint's `type` argument. The values are the stored RunOutcome
+// stop_blueprint's `type` argument. The values are the stored ConversationOutcome
 // vocabulary verbatim rather than a second, friendlier set of words: a
 // translation table between what the model says and what the row holds is a
 // thing that drifts.
 //
-// RunOutcomeContinue is deliberately absent. It is what an ordinary stop
+// ConversationOutcomeContinue is deliberately absent. It is what an ordinary stop
 // means, so offering it here would reintroduce the ambiguity this tool exists
 // to remove.
 const (
-	stopTypeFinish = string(domain.RunOutcomeFinish)
-	stopTypeAbort  = string(domain.RunOutcomeAbort)
+	stopTypeFinish = string(domain.ConversationOutcomeFinish)
+	stopTypeAbort  = string(domain.ConversationOutcomeAbort)
 )
 
 // StopBlueprint is the one flow-control tool: every deliberate ending other
@@ -66,12 +66,12 @@ func stopBlueprint(args map[string]any) Outcome {
 	reason := stringArg(args, "reason")
 	summary := stringArg(args, "summary")
 
-	var outcome domain.RunOutcome
+	var outcome domain.ConversationOutcome
 	switch stringArg(args, "type") {
 	case stopTypeFinish:
-		outcome = domain.RunOutcomeFinish
+		outcome = domain.ConversationOutcomeFinish
 	case stopTypeAbort:
-		outcome = domain.RunOutcomeAbort
+		outcome = domain.ConversationOutcomeAbort
 	default:
 		// A model that reached for a type that does not exist has usually
 		// reached for `continue`, and the answer to that is not another tool.
@@ -98,7 +98,7 @@ func stopBlueprint(args map[string]any) Outcome {
 		}
 	}
 
-	if outcome == domain.RunOutcomeAbort {
+	if outcome == domain.ConversationOutcomeAbort {
 		return Outcome{Content: "Stopping this run. Recorded: " + reason, Terminal: outcome, Reason: reason, Summary: summary}
 	}
 	return Outcome{Content: "Ending the task here. Recorded: " + reason, Terminal: outcome, Reason: reason, Summary: summary}

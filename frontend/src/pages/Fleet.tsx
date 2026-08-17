@@ -16,9 +16,9 @@ import type {
   FleetSandboxes,
   FleetSandboxSeries,
   FleetTimeseries,
-  RunStatusValue,
+  ConversationStatusValue,
 } from '../types'
-import { isActiveStatus } from '../lib/runStatus'
+import { isActiveStatus } from '../lib/conversationStatus'
 
 // Fleet — the sandbox-fleet administration console (TFAC-589). Operator-gated,
 // EE-licensed (FeatureFleet). A DB-backed live view over the instances registry,
@@ -682,7 +682,7 @@ function CopyId({ id, kind }: { id: string; kind: string }) {
 // declared conversation status rather than a status-keyed record: the record
 // carried two names the backend had already stopped emitting, and a record's
 // keys are invisible to the vocabulary lint — a `case` arm is not.
-function statusTone(status: RunStatusValue): ChipTone {
+function statusTone(status: ConversationStatusValue): ChipTone {
   if (isActiveStatus(status)) return 'rust'
   switch (status) {
     case 'completed':

@@ -385,27 +385,27 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root
 //
 // The repo-owned set only travels with the in-tree target. A staging dir is TF's
 // outright, is no repo, and shares no path with one.
-func entityMemoryTarget(cfg *runConfig, runID, cwd string, owned repoFiles) (string, repoFiles) {
+func entityMemoryTarget(cfg *runConfig, conversationID, cwd string, owned repoFiles) (string, repoFiles) {
 	if !agentproc.WillSandbox() {
 		return filepath.Join(cwd, scratchDirName, entityMemoryDirName), owned
 	}
-	dir := sandbox.TrustedMemorySourcePath(runID)
+	dir := sandbox.TrustedMemorySourcePath(conversationID)
 	cfg.memorySourcePath = dir
 	return dir, nil
 }
 
-// stagedEntityMemorySource returns runID's memory staging dir when one is still
+// stagedEntityMemorySource returns conversationID's memory staging dir when one is still
 // on disk, else "". A resume re-invokes the agent in the same conversation and
 // runs none of the per-launch setup, so it re-mounts whatever its original claim
 // materialized rather than re-rendering it. Absent — a cold resume on an executor
 // that never staged it, or after a startup sweep — the resumed agent continues
 // from its transcript with nothing behind the symlink; the mount is ambient
 // context, not the conversation's state.
-func stagedEntityMemorySource(runID string) string {
-	if runID == "" || !agentproc.WillSandbox() {
+func stagedEntityMemorySource(conversationID string) string {
+	if conversationID == "" || !agentproc.WillSandbox() {
 		return ""
 	}
-	dir := sandbox.TrustedMemorySourcePath(runID)
+	dir := sandbox.TrustedMemorySourcePath(conversationID)
 	if _, err := os.Stat(dir); err != nil {
 		return ""
 	}
@@ -528,13 +528,13 @@ func lookupEntityProjectID(entities db.EntityStore, orgID, entityID string) *str
 // attach mints the create-minimal stub the poller/enrichment path later fills
 // (the artifact URL links it out). A repo-level artifact target (a branch
 // push, or owner/repo with no '#N') maps to no entity and is skipped.
-func (s *Spawner) attachRunMemoryEntities(ctx context.Context, orgID, runID, primaryEntityID string) {
+func (s *Spawner) attachRunMemoryEntities(ctx context.Context, orgID, conversationID, primaryEntityID string) {
 	if s.taskMemory == nil {
 		return
 	}
 	// primary — the task's entity always carries the run's memory.
-	if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, runID, primaryEntityID, domain.MemoryRolePrimary); err != nil {
-		delegateLog.Warn("attach primary entity to run memory failed", "run", runID, "entity", primaryEntityID, "error", err)
+	if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, primaryEntityID, domain.MemoryRolePrimary); err != nil {
+		delegateLog.Warn("attach primary entity to run memory failed", "conversation", conversationID, "entity", primaryEntityID, "error", err)
 	}
 
 	if s.artifacts == nil || s.entities == nil {
@@ -542,9 +542,9 @@ func (s *Spawner) attachRunMemoryEntities(ctx context.Context, orgID, runID, pri
 	}
 	// produced — every external object the run created/mutated, resolved from
 	// its artifacts. A listing failure leaves the upsert + primary row intact.
-	arts, err := s.artifacts.ListByRunSystem(ctx, orgID, runID)
+	arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("list artifacts for produced-entity attach failed", "run", runID, "error", err)
+		delegateLog.Warn("list artifacts for produced-entity attach failed", "conversation", conversationID, "error", err)
 		return
 	}
 	for _, a := range arts {
@@ -555,11 +555,11 @@ func (s *Spawner) attachRunMemoryEntities(ctx context.Context, orgID, runID, pri
 		ent, _, err := s.entities.FindOrCreateSystem(ctx, orgID, source, sourceID, kind, "", a.URL)
 		if err != nil || ent == nil {
 			delegateLog.Warn("resolve produced entity for run memory failed",
-				"run", runID, "provider", a.Provider, "target", a.Target, "error", err)
+				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)
 			continue
 		}
-		if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, runID, ent.ID, domain.MemoryRoleProduced); err != nil {
-			delegateLog.Warn("attach produced entity to run memory failed", "run", runID, "entity", ent.ID, "error", err)
+		if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, ent.ID, domain.MemoryRoleProduced); err != nil {
+			delegateLog.Warn("attach produced entity to run memory failed", "conversation", conversationID, "entity", ent.ID, "error", err)
 		}
 	}
 }

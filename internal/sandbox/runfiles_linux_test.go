@@ -19,18 +19,18 @@ func redirectSocketRoot(t *testing.T) string {
 	return trustedAgentHostSocketRoot
 }
 
-// seedCellFiles stages the full per-run family for runID: the agenthost
+// seedCellFiles stages the full per-run family for conversationID: the agenthost
 // socket, the gh-injector cert, and the tool-host socket directory with
 // something inside it (a stale dir is never empty in production — it holds the
 // previous jail's socket).
-func seedCellFiles(t *testing.T, runID string) {
+func seedCellFiles(t *testing.T, conversationID string) {
 	t.Helper()
-	for _, path := range []string{TrustedAgentHostSocketPath(runID), TrustedGHInjectorCertPath(runID)} {
+	for _, path := range []string{TrustedAgentHostSocketPath(conversationID), TrustedGHInjectorCertPath(conversationID)} {
 		if err := os.WriteFile(path, []byte("stale"), 0o640); err != nil {
 			t.Fatalf("seed %s: %v", path, err)
 		}
 	}
-	dir := TrustedToolHostSocketDir(runID)
+	dir := TrustedToolHostSocketDir(conversationID)
 	if err := os.MkdirAll(dir, 0o770); err != nil {
 		t.Fatalf("seed %s: %v", dir, err)
 	}

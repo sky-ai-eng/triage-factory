@@ -296,8 +296,8 @@ func (s *taskStore) RecordEventSystem(ctx context.Context, orgID, taskID, eventI
 	return s.RecordEvent(ctx, orgID, taskID, eventID, kind)
 }
 
-func (s *taskStore) CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
-	return s.CountConsecutiveFailedRuns(ctx, orgID, entityID, promptID)
+func (s *taskStore) CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+	return s.CountConsecutiveFailedConversations(ctx, orgID, entityID, promptID)
 }
 
 func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
@@ -577,8 +577,8 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 		return false, nil, err
 	}
 	var (
-		closed bool
-		runIDs []string
+		closed          bool
+		conversationIDs []string
 	)
 	err := inTx(ctx, s.q, func(q queryer) error {
 		n, err := closeTaskRows(ctx, q, taskID, closeReason, closeEventType)
@@ -602,7 +602,7 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 		// Drained and closed before the UPDATE below rather than on a defer:
 		// both ride the one connection this tx holds, and an open cursor is
 		// the kind of thing a driver is entitled to refuse to write around.
-		if runIDs, err = scanActiveRunIDs(ctx, q, taskID); err != nil {
+		if conversationIDs, err = scanActiveRunIDs(ctx, q, taskID); err != nil {
 			return fmt.Errorf("list active runs: %w", err)
 		}
 
@@ -629,7 +629,7 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 	if err != nil {
 		return false, nil, err
 	}
-	return closed, runIDs, nil
+	return closed, conversationIDs, nil
 }
 
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) error {
@@ -1047,7 +1047,7 @@ func reassignClaimToUserSQLite(ctx context.Context, q queryer, taskID, fromUserI
 
 // --- Breaker ---
 
-func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+func (s *taskStore) CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}

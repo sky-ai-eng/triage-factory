@@ -45,7 +45,7 @@ func TestLaunchSidecar_DerivesUIDFromSubnetIdx(t *testing.T) {
 	fake := &fakeSidecarLauncher{}
 	withFakeSidecarLauncher(t, fake)
 
-	if _, err := LaunchSidecar(context.Background(), SidecarConfig{RunID: "run-abc123", SubnetIdx: 7}); err != nil {
+	if _, err := LaunchSidecar(context.Background(), SidecarConfig{ConversationID: "run-abc123", SubnetIdx: 7}); err != nil {
 		t.Fatalf("LaunchSidecar: %v", err)
 	}
 
@@ -66,13 +66,13 @@ func TestLaunchSidecar_ContainerIDDistinctFromRunContainerID(t *testing.T) {
 	fake := &fakeSidecarLauncher{}
 	withFakeSidecarLauncher(t, fake)
 
-	const runID = "run-xyz"
+	const conversationID = "run-xyz"
 	const idx = 3
-	if _, err := LaunchSidecar(context.Background(), SidecarConfig{RunID: runID, SubnetIdx: idx}); err != nil {
+	if _, err := LaunchSidecar(context.Background(), SidecarConfig{ConversationID: conversationID, SubnetIdx: idx}); err != nil {
 		t.Fatalf("LaunchSidecar: %v", err)
 	}
 
-	runContainerID := "tf-" + truncate(runID, 11) + "-3" // mirrors wrap()'s own naming
+	runContainerID := "tf-" + truncate(conversationID, 11) + "-3" // mirrors wrap()'s own naming
 	if fake.gotParams.ContainerID == runContainerID {
 		t.Errorf("sidecar container id %q collides with the run's own %q", fake.gotParams.ContainerID, runContainerID)
 	}
@@ -90,7 +90,7 @@ func TestLaunchSidecar_NoLauncherInstalledErrors(t *testing.T) {
 	sidecarLauncher = nil
 	t.Cleanup(func() { sidecarLauncher = orig })
 
-	_, err := LaunchSidecar(context.Background(), SidecarConfig{RunID: "run-x", SubnetIdx: 0})
+	_, err := LaunchSidecar(context.Background(), SidecarConfig{ConversationID: "run-x", SubnetIdx: 0})
 	if err == nil {
 		t.Fatal("expected an error when no sidecar launcher is installed")
 	}

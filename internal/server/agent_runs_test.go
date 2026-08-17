@@ -35,11 +35,11 @@ func TestHandleConversations_Batched(t *testing.T) {
 	taskB := fixtureUUID("t_bb")
 
 	store := sqlitestore.New(s.db)
-	seedMsg := func(runID, content string) {
+	seedMsg := func(conversationID, content string) {
 		if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: content,
+			ConversationID: conversationID, Role: "assistant", Content: content,
 		}); err != nil {
-			t.Fatalf("InsertMessage(%s): %v", runID, err)
+			t.Fatalf("InsertMessage(%s): %v", conversationID, err)
 		}
 	}
 	seedMsg(primaryA, "primary-a")
@@ -77,10 +77,10 @@ func TestHandleConversations_Batched(t *testing.T) {
 	if _, ok := resp.Messages[olderA]; ok {
 		t.Errorf("messages included older run %s; want only primary runs", olderA)
 	}
-	assertMsg := func(runID, want string) {
-		ms := resp.Messages[runID]
+	assertMsg := func(conversationID, want string) {
+		ms := resp.Messages[conversationID]
 		if len(ms) != 1 || ms[0]["content"] != want {
-			t.Errorf("messages[%s] = %v, want one %q", runID, ms, want)
+			t.Errorf("messages[%s] = %v, want one %q", conversationID, ms, want)
 		}
 	}
 	assertMsg(primaryA, "primary-a")
@@ -198,13 +198,13 @@ func TestHandleConversations_RejectsUnknownField(t *testing.T) {
 // param must never buy.
 func TestHandleMessages_SinceID(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "since", "running")
+	conversationID := seedSteerRun(t, s.db, "since", "running")
 
 	store := sqlitestore.New(s.db)
 	ids := map[string]int{}
 	for _, content := range []string{"first", "second", "third"} {
 		id, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: content,
+			ConversationID: conversationID, Role: "assistant", Content: content,
 		})
 		if err != nil {
 			t.Fatalf("InsertMessage(%s): %v", content, err)
@@ -214,7 +214,7 @@ func TestHandleMessages_SinceID(t *testing.T) {
 
 	contents := func(query string) []string {
 		t.Helper()
-		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/messages"+query, nil)
+		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID+"/messages"+query, nil)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET messages%s = %d; body=%s", query, rec.Code, rec.Body.String())
 		}
@@ -251,7 +251,7 @@ func TestHandleMessages_SinceID(t *testing.T) {
 	// A watermark that isn't one fails the read rather than silently widening
 	// it back to the whole transcript.
 	for _, bad := range []string{"?since_id=nonsense", "?since_id=-5"} {
-		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/messages"+bad, nil)
+		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID+"/messages"+bad, nil)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("GET messages%s = %d, want 400; body=%s", bad, rec.Code, rec.Body.String())
 		}
@@ -265,13 +265,13 @@ func TestHandleMessages_SinceID(t *testing.T) {
 // snake_case ints — a run with no usage-bearing message reads 0, never absent.
 func TestRunResponse_TokenSums(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "tok", "running")
+	conversationID := seedSteerRun(t, s.db, "tok", "running")
 
 	store := sqlitestore.New(s.db)
 	usage := func(in, out, cacheRead, cacheWrite int) {
 		t.Helper()
 		if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: "working",
+			ConversationID: conversationID, Role: "assistant", Content: "working",
 			InputTokens: &in, OutputTokens: &out, CacheReadTokens: &cacheRead, CacheCreationTokens: &cacheWrite,
 		}); err != nil {
 			t.Fatalf("InsertMessage: %v", err)
@@ -282,12 +282,12 @@ func TestRunResponse_TokenSums(t *testing.T) {
 	// A row with no usage at all (a user message / tool result) contributes
 	// nothing rather than breaking the SUM.
 	if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-		ConversationID: runID, Role: "user", Content: "carry on",
+		ConversationID: conversationID, Role: "user", Content: "carry on",
 	}); err != nil {
 		t.Fatalf("InsertMessage(no usage): %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -341,22 +341,22 @@ func TestRunResponse_TokenSums(t *testing.T) {
 // cannot say whether the chain moves on.
 func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "chainpos", "running")
+	conversationID := seedSteerRun(t, s.db, "chainpos", "running")
 
 	// Step 0 of a three-step plan, concluded the way processCompletion does.
 	var blueprintRunID string
-	if err := s.db.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, runID).Scan(&blueprintRunID); err != nil {
+	if err := s.db.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, conversationID).Scan(&blueprintRunID); err != nil {
 		t.Fatalf("read blueprint_run_id: %v", err)
 	}
 	execSQL(t, s.db, `UPDATE blueprint_runs SET step_plan = ? WHERE id = ?`,
 		`[{"step_index":0},{"step_index":1},{"step_index":2}]`, blueprintRunID)
-	execSQL(t, s.db, `UPDATE conversations SET blueprint_step_index = 0 WHERE id = ?`, runID)
+	execSQL(t, s.db, `UPDATE conversations SET blueprint_step_index = 0 WHERE id = ?`, conversationID)
 	if err := sqlitestore.New(s.db).Conversations.CompleteSystem(context.Background(), runmode.LocalDefaultOrgID,
-		runID, "completed", 0, 0, 0, "did my part", "continue", "", ""); err != nil {
+		conversationID, "completed", 0, 0, 0, "did my part", "continue", "", ""); err != nil {
 		t.Fatalf("complete run: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}

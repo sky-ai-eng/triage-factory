@@ -26,7 +26,7 @@ func execSQL(t *testing.T, database *sql.DB, query string, args ...any) {
 // the run id. status sets the run's lifecycle state.
 //
 // The run is step 0 of its blueprint, which is where the blueprint's
-// current_step_index sits — the shape EnqueueRun produces, and the one the
+// current_step_index sits — the shape EnqueueConversation produces, and the one the
 // drivability gate reads. A row that named no step would be undrivable, so a
 // fixture that left it NULL would silently make every steering test a test of
 // the refusal path.
@@ -44,10 +44,10 @@ func seedSteerRun(t *testing.T, database *sql.DB, suffix, status string) string 
 }
 
 // messageRowCount counts the transcript rows a conversation holds.
-func messageRowCount(t *testing.T, database *sql.DB, runID string) int {
+func messageRowCount(t *testing.T, database *sql.DB, conversationID string) int {
 	t.Helper()
 	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id=?`, runID).Scan(&n); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id=?`, conversationID).Scan(&n); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
 	return n
@@ -66,13 +66,13 @@ func messageRowCount(t *testing.T, database *sql.DB, runID string) int {
 func TestHandleMessage_TerminalConflictRecordsNothing(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	runID := seedSteerRun(t, s.db, "msg", "failed")
+	conversationID := seedSteerRun(t, s.db, "msg", "failed")
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/message", map[string]string{"text": "pick this back up"})
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/message", map[string]string{"text": "pick this back up"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (a terminal run is not steerable)", rec.Code)
 	}
-	if n := messageRowCount(t, s.db, runID); n != 0 {
+	if n := messageRowCount(t, s.db, conversationID); n != 0 {
 		t.Errorf("messages recorded = %d, want 0 — a refused send must leave no transcript row", n)
 	}
 }
@@ -86,13 +86,13 @@ func TestHandleMessage_TerminalConflictRecordsNothing(t *testing.T) {
 func TestHandleMessage_OrphanedRunningConflictRecordsNothing(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	runID := seedSteerRun(t, s.db, "orphan", "running")
+	conversationID := seedSteerRun(t, s.db, "orphan", "running")
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/message", map[string]string{"text": "how is it going?"})
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/message", map[string]string{"text": "how is it going?"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (running with no live process is a conflict)", rec.Code)
 	}
-	if n := messageRowCount(t, s.db, runID); n != 0 {
+	if n := messageRowCount(t, s.db, conversationID); n != 0 {
 		t.Errorf("messages recorded = %d, want 0 — a refused send must leave no transcript row", n)
 	}
 }
@@ -105,23 +105,23 @@ func TestHandleMessage_OrphanedRunningConflictRecordsNothing(t *testing.T) {
 func TestHandleMessage_ParkedSDKRecordsExactlyOnce(t *testing.T) {
 	s := newTestServer(t)
 	withEmptyBlobStore(t, s)
-	runID := seedSteerRun(t, s.db, "once", "open")
-	execSQL(t, s.db, `UPDATE conversations SET sdk_session_id='sess-once', worktree_path=?, model='m' WHERE id=?`, t.TempDir(), runID)
+	conversationID := seedSteerRun(t, s.db, "once", "open")
+	execSQL(t, s.db, `UPDATE conversations SET sdk_session_id='sess-once', worktree_path=?, model='m' WHERE id=?`, t.TempDir(), conversationID)
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/message", map[string]string{"text": "pick this back up"})
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/message", map[string]string{"text": "pick this back up"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
 
 	var role, content string
 	var delivered bool
-	if err := s.db.QueryRow(`SELECT role, delivered, content FROM messages WHERE conversation_id=?`, runID).Scan(&role, &delivered, &content); err != nil {
+	if err := s.db.QueryRow(`SELECT role, delivered, content FROM messages WHERE conversation_id=?`, conversationID).Scan(&role, &delivered, &content); err != nil {
 		t.Fatalf("read recorded message: %v", err)
 	}
 	if role != "user" || delivered || content != "pick this back up" {
 		t.Errorf("recorded message = {role:%q delivered:%v content:%q}, want the one undelivered user row", role, delivered, content)
 	}
-	if n := messageRowCount(t, s.db, runID); n != 1 {
+	if n := messageRowCount(t, s.db, conversationID); n != 1 {
 		t.Errorf("messages recorded = %d, want exactly 1 — the queue row is the transcript record", n)
 	}
 }
@@ -162,9 +162,9 @@ func TestHandleMessage_EmptyTextRejected(t *testing.T) {
 func TestHandleAgentStop_ParksAndLeavesBlueprintRunning(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	runID := seedSteerRun(t, s.db, "stop", "running")
+	conversationID := seedSteerRun(t, s.db, "stop", "running")
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/stop", nil)
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/stop", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (a run with no live process still stops — it parks)", rec.Code)
 	}
@@ -174,7 +174,7 @@ func TestHandleAgentStop_ParksAndLeavesBlueprintRunning(t *testing.T) {
 	if err := s.db.QueryRow(`
 		SELECT c.status, COALESCE(c.park_reason, ''), br.status, br.cancel_requested
 		  FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
-		 WHERE c.id = ?`, runID).Scan(&runStatus, &stopReason, &bpStatus, &cancelRequested); err != nil {
+		 WHERE c.id = ?`, conversationID).Scan(&runStatus, &stopReason, &bpStatus, &cancelRequested); err != nil {
 		t.Fatalf("read post-stop state: %v", err)
 	}
 	if runStatus != "open" || stopReason != "user_cancelled" {
@@ -192,10 +192,10 @@ func TestHandleAgentStop_ParksAndLeavesBlueprintRunning(t *testing.T) {
 func TestHandleAgentStop_RetiredPathsAreGone(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	runID := seedSteerRun(t, s.db, "retired", "running")
+	conversationID := seedSteerRun(t, s.db, "retired", "running")
 
 	for _, path := range []string{"cancel", "interrupt"} {
-		rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/"+path, nil)
+		rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/"+path, nil)
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("POST /%s status = %d, want 404 (route retired)", path, rec.Code)
 		}
@@ -231,12 +231,12 @@ func TestHandleAgentStop_UnknownRunNotFound(t *testing.T) {
 func TestHandleAgentStop_InternalFailureIsNot404(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	runID := seedSteerRun(t, s.db, "dberr", "running")
+	conversationID := seedSteerRun(t, s.db, "dberr", "running")
 	if err := s.db.Close(); err != nil {
 		t.Fatalf("close db: %v", err)
 	}
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/stop", nil)
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/stop", nil)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 (a failed stop is not a missing run)", rec.Code)
 	}
@@ -249,9 +249,9 @@ func TestHandleAgentStop_InternalFailureIsNot404(t *testing.T) {
 func TestHandleAgentPermission_NotPendingNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	runID := seedSteerRun(t, s.db, "noperm", "running")
+	conversationID := seedSteerRun(t, s.db, "noperm", "running")
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/permissions/req-ghost", map[string]string{"behavior": "allow"})
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/permissions/req-ghost", map[string]string{"behavior": "allow"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (no pending permission request)", rec.Code)
 	}
@@ -289,12 +289,12 @@ func TestHandleAgentPermission_ResolvesLiveRequest(t *testing.T) {
 	s := newTestServer(t)
 	spawner := delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6")
 	s.SetSpawner(spawner)
-	runID := seedSteerRun(t, s.db, "perm", "running")
+	conversationID := seedSteerRun(t, s.db, "perm", "running")
 
 	// Park a permission prompt for the run: the broker registers synchronously,
 	// then the handler blocks until resolved (or it times out).
 	got := make(chan agentproc.PermissionDecision, 1)
-	h := spawner.BrowserPermissionHandler(runmode.LocalDefaultOrgID, runID, "", delegate.AbsentAutoDeny{})
+	h := spawner.BrowserPermissionHandler(runmode.LocalDefaultOrgID, conversationID, "", delegate.AbsentAutoDeny{})
 	go func() { got <- h(agentproc.PermissionRequest{ToolCallID: "req-1", ToolName: "Bash"}) }()
 
 	// Registration races the POST, so retry until the broker has the entry (404
@@ -302,7 +302,7 @@ func TestHandleAgentPermission_ResolvesLiveRequest(t *testing.T) {
 	var code int
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		code = doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/permissions/req-1", map[string]string{"behavior": "allow"}).Code
+		code = doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/permissions/req-1", map[string]string{"behavior": "allow"}).Code
 		if code != http.StatusNotFound {
 			break
 		}

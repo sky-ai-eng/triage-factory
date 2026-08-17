@@ -21,7 +21,7 @@ import (
 // manipulate (backdate the heartbeat, bump attempts, request a cancel)
 // before calling ReapDeadExecutors.
 type reaperFixture struct {
-	runID          string
+	conversationID string
 	blueprintRunID string
 	executorID     string
 	orgID, userID  string
@@ -33,12 +33,12 @@ type reaperFixture struct {
 //
 // priorOutcomes is the claim history to lay down behind that live claim,
 // oldest first, one released claim per entry. Every entry is produced by the
-// production path that writes its outcome (each ClaimNextRun mints a real
+// production path that writes its outcome (each ClaimNextConversation mints a real
 // claims row; no raw INSERT), because the reaper counts an EPISODE — the
 // trailing run of handed-back claims — and only the real paths put the
 // boundaries where production puts them:
 //
-//	"requeued"  — RunQueueStore.RequeueRun: a hand-back, which keeps the
+//	"requeued"  — ConversationQueueStore.RequeueConversation: a hand-back, which keeps the
 //	              current episode open.
 //	"cancelled" — a deliberate stop and a resume: an engagement that
 //	              concluded, which ENDS the episode and starts the next one
@@ -92,36 +92,36 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, priorOutcomes ...string)
 		t.Fatalf("register executor: %v", err)
 	}
 
-	runID := uuid.New().String()
+	conversationID := uuid.New().String()
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
-		ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
+	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: blueprintRunID, BlueprintStepIndex: &step0,
 	}); err != nil {
-		t.Fatalf("EnqueueRun: %v", err)
+		t.Fatalf("EnqueueConversation: %v", err)
 	}
 	for i := 0; i <= len(priorOutcomes); i++ {
 		// The claim is cross-org and takes the globally-oldest eligible
 		// conversation, so a test seeding several fixtures must leave no
 		// older one claimable — assert the identity rather than let a
 		// mis-claim pass silently.
-		got, err := stores.RunQueue.ClaimNextRun(ctx, executorID, 1, db.ClaimPlacement{})
-		if err != nil || got == nil || got.ID != runID {
-			t.Fatalf("ClaimNextRun (claim %d): got=%v err=%v, want run %s", i+1, got, err, runID)
+		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, executorID, 1, db.ClaimPlacement{})
+		if err != nil || got == nil || got.ID != conversationID {
+			t.Fatalf("ClaimNextConversation (claim %d): got=%v err=%v, want run %s", i+1, got, err, conversationID)
 		}
 		if i == len(priorOutcomes) {
 			break // the live claim — left held, for the reaper to find
 		}
 		switch outcome := priorOutcomes[i]; outcome {
 		case "requeued":
-			if err := stores.RunQueue.RequeueRun(ctx, orgID, runID, "test churn"); err != nil {
-				t.Fatalf("RequeueRun (claim %d): %v", i+1, err)
+			if err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "test churn"); err != nil {
+				t.Fatalf("RequeueConversation (claim %d): %v", i+1, err)
 			}
 		case "cancelled":
-			if ok, err := stores.Conversations.ParkOpen(ctx, orgID, runID, db.ParkStopped("user_cancelled", "")); err != nil || !ok {
+			if ok, err := stores.Conversations.ParkOpen(ctx, orgID, conversationID, db.ParkStopped("user_cancelled", "")); err != nil || !ok {
 				t.Fatalf("ParkOpen (claim %d): ok=%v err=%v", i+1, ok, err)
 			}
-			if ok, err := stores.Conversations.MarkQueuedForResume(ctx, orgID, runID); err != nil || !ok {
+			if ok, err := stores.Conversations.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
 				t.Fatalf("MarkQueuedForResume (claim %d): ok=%v err=%v", i+1, ok, err)
 			}
 		default:
@@ -129,7 +129,7 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, priorOutcomes ...string)
 		}
 	}
 
-	return reaperFixture{runID: runID, blueprintRunID: blueprintRunID, executorID: executorID, orgID: orgID, userID: userID}
+	return reaperFixture{conversationID: conversationID, blueprintRunID: blueprintRunID, executorID: executorID, orgID: orgID, userID: userID}
 }
 
 func reaperFirstTeamForOrg(t *testing.T, h *pgtest.Harness, orgID string) string {
@@ -172,7 +172,7 @@ func TestReapDeadExecutors_RequeuesUnderAttemptBudget(t *testing.T) {
 
 	var status sql.NullString
 	if err := h.AdminDB.QueryRowContext(ctx,
-		`SELECT status FROM conversations WHERE id = $1`, fx.runID,
+		`SELECT status FROM conversations WHERE id = $1`, fx.conversationID,
 	).Scan(&status); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestReapDeadExecutors_RequeuesUnderAttemptBudget(t *testing.T) {
 	// the release carries the claim-level 'reaped' outcome.
 	var active int
 	if err := h.AdminDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.runID,
+		`SELECT COUNT(*) FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.conversationID,
 	).Scan(&active); err != nil {
 		t.Fatalf("count active claims: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestReapDeadExecutors_RequeuesUnderAttemptBudget(t *testing.T) {
 	var total int
 	if err := h.AdminDB.QueryRowContext(ctx,
 		`SELECT outcome, (SELECT COUNT(*) FROM claims WHERE conversation_id = $1)
-		   FROM claims WHERE conversation_id = $1 ORDER BY claimed_at DESC LIMIT 1`, fx.runID,
+		   FROM claims WHERE conversation_id = $1 ORDER BY claimed_at DESC LIMIT 1`, fx.conversationID,
 	).Scan(&outcome, &total); err != nil {
 		t.Fatalf("read released claim: %v", err)
 	}
@@ -230,11 +230,11 @@ func TestReapDeadExecutors_TerminalFailsExecutorLostPastAttemptBudget(t *testing
 
 	var status, failureKind string
 	if err := h.AdminDB.QueryRowContext(ctx,
-		`SELECT status, COALESCE(failure_kind, '') FROM conversations WHERE id = $1`, fx.runID,
+		`SELECT status, COALESCE(failure_kind, '') FROM conversations WHERE id = $1`, fx.conversationID,
 	).Scan(&status, &failureKind); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
-	if status != "failed" || failureKind != string(domain.RunFailureExecutorLost) {
+	if status != "failed" || failureKind != string(domain.ConversationFailureExecutorLost) {
 		t.Errorf("run (status=%q failure_kind=%q), want (failed, executor_lost)", status, failureKind)
 	}
 
@@ -264,11 +264,11 @@ func TestReapDeadExecutors_RequeuesAfterEngagementsThatConcluded(t *testing.T) {
 	backdateHeartbeat(t, h, fx.executorID, time.Hour)
 	// Stamp the dead executor as the placement preference, so the requeue's
 	// clearing of it is observable rather than vacuous.
-	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = $2 WHERE id = $1`, fx.runID, fx.executorID)
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = $2 WHERE id = $1`, fx.conversationID, fx.executorID)
 
 	var lifetime int
 	if err := h.AdminDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.runID,
+		`SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.conversationID,
 	).Scan(&lifetime); err != nil {
 		t.Fatalf("count lifetime claims: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestReapDeadExecutors_RequeuesAfterEngagementsThatConcluded(t *testing.T) {
 	var status sql.NullString
 	var preferred sql.NullString
 	if err := h.AdminDB.QueryRowContext(ctx,
-		`SELECT status, preferred_executor_id FROM conversations WHERE id = $1`, fx.runID,
+		`SELECT status, preferred_executor_id FROM conversations WHERE id = $1`, fx.conversationID,
 	).Scan(&status, &preferred); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
@@ -337,11 +337,11 @@ func TestReapDeadExecutors_TerminalFailsEpisodeBehindAConcludedEngagement(t *tes
 	if err := h.AdminDB.QueryRowContext(ctx,
 		`SELECT c.status, COALESCE(c.failure_kind, ''), br.status
 		   FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
-		  WHERE c.id = $1`, fx.runID,
+		  WHERE c.id = $1`, fx.conversationID,
 	).Scan(&status, &failureKind, &brStatus); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
-	if status != "failed" || failureKind != string(domain.RunFailureExecutorLost) || brStatus != "failed" {
+	if status != "failed" || failureKind != string(domain.ConversationFailureExecutorLost) || brStatus != "failed" {
 		t.Errorf("(run=%q failure_kind=%q blueprint_run=%q), want (failed, executor_lost, failed)", status, failureKind, brStatus)
 	}
 }
@@ -374,7 +374,7 @@ func TestReapDeadExecutors_CancelRequestedFinalizesCancelledNotRequeued(t *testi
 
 	var runStatus, brStatus string
 	var parked bool
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status, parked_at IS NOT NULL FROM conversations WHERE id = $1`, fx.runID).Scan(&runStatus, &parked); err != nil {
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status, parked_at IS NOT NULL FROM conversations WHERE id = $1`, fx.conversationID).Scan(&runStatus, &parked); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
 	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM blueprint_runs WHERE id = $1`, fx.blueprintRunID).Scan(&brStatus); err != nil {
@@ -417,7 +417,7 @@ func TestReapDeadExecutors_FreshHeartbeatNeverReaped(t *testing.T) {
 
 	var active int
 	if err := h.AdminDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.runID,
+		`SELECT COUNT(*) FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.conversationID,
 	).Scan(&active); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
@@ -463,7 +463,7 @@ func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID(t *test
 	}
 
 	var executorID string
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT executor_id FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.runID).Scan(&executorID); err != nil {
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT executor_id FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.conversationID).Scan(&executorID); err != nil {
 		t.Fatalf("read back claim after GC'd its executor: %v", err)
 	}
 	if executorID != fx.executorID {
@@ -497,7 +497,7 @@ func TestHealClaimDesyncs_ReleasesTerminalDanglingClaims(t *testing.T) {
 	// Crash-after-flip: the conversation committed terminal but its claim
 	// release never landed.
 	terminal := seedReaperFixture(t, h)
-	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = 'completed' WHERE id = $1`, terminal.runID)
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = 'completed' WHERE id = $1`, terminal.conversationID)
 
 	// Healthy: mid-flight with a live claim. Seeded BEFORE the claimless
 	// fixture below, because the claim is cross-org and takes the oldest
@@ -511,8 +511,8 @@ func TestHealClaimDesyncs_ReleasesTerminalDanglingClaims(t *testing.T) {
 	pgtest.MustExec(t, h.AdminDB, `
 		UPDATE claims SET released_at = now(), outcome = 'failed'
 		WHERE conversation_id = $1 AND released_at IS NULL
-	`, claimless.runID)
-	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = 'exec-dead' WHERE id = $1`, claimless.runID)
+	`, claimless.conversationID)
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = 'exec-dead' WHERE id = $1`, claimless.conversationID)
 
 	store := reaper.NewPostgresStore(h.AdminDB)
 	released, err := store.HealClaimDesyncs(ctx)
@@ -528,7 +528,7 @@ func TestHealClaimDesyncs_ReleasesTerminalDanglingClaims(t *testing.T) {
 	if err := h.AdminDB.QueryRowContext(ctx, `
 		SELECT released_at IS NOT NULL, COALESCE(outcome, '') FROM claims
 		WHERE conversation_id = $1 ORDER BY claimed_at DESC LIMIT 1
-	`, terminal.runID).Scan(&rel, &outcome); err != nil {
+	`, terminal.conversationID).Scan(&rel, &outcome); err != nil {
 		t.Fatalf("read terminal row's claim: %v", err)
 	}
 	if !rel || outcome != "completed" {
@@ -539,7 +539,7 @@ func TestHealClaimDesyncs_ReleasesTerminalDanglingClaims(t *testing.T) {
 	var pref any
 	if err := h.AdminDB.QueryRowContext(ctx, `
 		SELECT status, preferred_executor_id FROM conversations WHERE id = $1
-	`, claimless.runID).Scan(&status, &pref); err != nil {
+	`, claimless.conversationID).Scan(&status, &pref); err != nil {
 		t.Fatalf("read claimless row: %v", err)
 	}
 	if status.Valid {
@@ -551,7 +551,7 @@ func TestHealClaimDesyncs_ReleasesTerminalDanglingClaims(t *testing.T) {
 	if err := h.AdminDB.QueryRowContext(ctx, `
 		SELECT c.status, (SELECT COUNT(*) FROM claims WHERE conversation_id = c.id AND released_at IS NULL)
 		FROM conversations c WHERE c.id = $1
-	`, healthy.runID).Scan(&healthyStatus, &active); err != nil {
+	`, healthy.conversationID).Scan(&healthyStatus, &active); err != nil {
 		t.Fatalf("read healthy row: %v", err)
 	}
 	if healthyStatus.Valid || active != 1 {
@@ -804,11 +804,11 @@ func (fx *orphanFixture) enqueueChild(t *testing.T, h *pgtest.Harness, brID stri
 	idx := fx.nextStep
 	fx.nextStep++
 	convID := uuid.New().String()
-	if err := stores.RunQueue.EnqueueRun(context.Background(), fx.orgID, domain.Conversation{
+	if err := stores.ConversationQueue.EnqueueConversation(context.Background(), fx.orgID, domain.Conversation{
 		ID: convID, TaskID: fx.taskID, PromptID: fx.promptID, Model: "m",
 		TriggerType: "event", BlueprintRunID: brID, BlueprintStepIndex: &idx,
 	}); err != nil {
-		t.Fatalf("EnqueueRun: %v", err)
+		t.Fatalf("EnqueueConversation: %v", err)
 	}
 	return convID
 }

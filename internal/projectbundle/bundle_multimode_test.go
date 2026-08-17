@@ -105,7 +105,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed curator turn: %v", err)
 	}
-	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "src-exec", 1, db.ClaimPlacement{})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "src-exec", 1, db.ClaimPlacement{})
 	if err != nil || claimed == nil || claimed.ID != convID {
 		t.Fatalf("claim turn = (%+v, %v), want conversation %s", claimed, err, convID)
 	}

@@ -73,8 +73,8 @@ type hostOps struct{}
 // (netns_linux.go, iptables_linux.go) that together form the
 // "Network" privileged-op bucket (spec §5): netns/veth creation,
 // MASQUERADE, and the Part B egress allowlist.
-func (hostOps) SetupNetwork(ctx context.Context, runID string, subnetIdx uint8) (NetworkState, error) {
-	netSt, err := setupNetwork(ctx, runID, subnetIdx)
+func (hostOps) SetupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (NetworkState, error) {
+	netSt, err := setupNetwork(ctx, conversationID, subnetIdx)
 	state := networkStateFrom(netSt, subnetIdx)
 	if err != nil {
 		return state, err

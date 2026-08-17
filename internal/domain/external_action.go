@@ -386,7 +386,7 @@ func ExternalActionTypes() []string {
 }
 
 // BranchPushDedupKey builds the deterministic dedup key for a branch push:
-// "branch:<runID>:<ref>:<sha>". The git pre-push hook and the git-proxy
+// "branch:<conversationID>:<ref>:<sha>". The git pre-push hook and the git-proxy
 // receive-pack backstop both observe the SAME push (same run, ref, sha), so they
 // produce an identical key and the twin collapses under ON CONFLICT(org_id,
 // dedup_key) DO NOTHING — while a genuinely new push (a force-push to the same
@@ -394,8 +394,8 @@ func ExternalActionTypes() []string {
 // This is one of the two actions with a deterministic natural key (the other is
 // EgressDenialDedupKey); every other action leaves DedupKey empty (the store
 // fills a uuid) so it can never be deduped away.
-func BranchPushDedupKey(runID, ref, sha string) string {
-	return strings.Join([]string{"branch", runID, ref, sha}, ":")
+func BranchPushDedupKey(conversationID, ref, sha string) string {
+	return strings.Join([]string{"branch", conversationID, ref, sha}, ":")
 }
 
 // EgressDenialDedupKey builds the deterministic dedup key for a refused sandbox

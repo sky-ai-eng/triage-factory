@@ -14,13 +14,13 @@ import (
 
 // RemoveAt removes a worktree directory by path and prunes the bare's
 // stale registration. Callers pass the actual path rather than
-// deriving it from a runID — every previous "Remove(runID)" caller
-// had the path in scope already, and the runID-only convenience was
-// a footgun: it silently targeted runDir(runID) regardless of where
+// deriving it from a conversationID — every previous "Remove(conversationID)" caller
+// had the path in scope already, and the conversationID-only convenience was
+// a footgun: it silently targeted runDir(conversationID) regardless of where
 // the worktree actually lived.
 //
-// runID is used only for the log line; pass "" if not available.
-func RemoveAt(path, runID string) error {
+// conversationID is used only for the log line; pass "" if not available.
+func RemoveAt(path, conversationID string) error {
 	if path == "" {
 		return nil
 	}
@@ -41,8 +41,8 @@ func RemoveAt(path, runID string) error {
 	}
 	pruneAll(paths.BareCacheRoot(runmode.LocalDefaultOrgID))
 
-	if runID != "" {
-		worktreeLog.Info("removed", "run_id", runID, "path", path)
+	if conversationID != "" {
+		worktreeLog.Info("removed", "run_id", conversationID, "path", path)
 	} else {
 		worktreeLog.Info("removed", "path", path)
 	}
@@ -96,12 +96,12 @@ func CleanupWithOptions(opts CleanupOptions) {
 		for _, e := range entries {
 			if e.IsDir() {
 				fullPath := filepath.Join(runsBase, e.Name())
-				runID := strings.TrimSuffix(e.Name(), "-nocwd")
+				conversationID := strings.TrimSuffix(e.Name(), "-nocwd")
 				// Parked runs keep their worktree WHOLE — the dir and its
 				// session JSONL — as the warm resume cache, so skip them
 				// entirely (no project-dir delete, no dir removal). A swept one
 				// still resumes via snapshot rehydrate.
-				if opts.PreserveWorktreeFor[runID] {
+				if opts.PreserveWorktreeFor[conversationID] {
 					continue
 				}
 				// Project-dir deletion has one opt-out: a global SkipAll
@@ -211,7 +211,7 @@ func pruneAll(baseDir string) {
 // "initializing" marker; plain `git worktree prune` skips locked entries
 // so the branch stays pinned. git names that admin dir after the
 // basename of the worktree path, and our worktree paths are
-// runDir(runID) (basename == runID, globally unique), so the entry is
+// runDir(conversationID) (basename == conversationID, globally unique), so the entry is
 // deterministically worktrees/<basename(wtDir)>.
 //
 // Targeting by path — rather than sweeping every locked=initializing
@@ -247,7 +247,7 @@ func recordedWorktreePath(adminDir string) string {
 
 // isTFRunWorktreePath reports whether p is one of TF's own ephemeral run
 // worktrees — i.e. a child of the triagefactory-runs temp namespace
-// (runDir = <tmp>/triagefactory-runs/<runID>). Matched on the runsDir
+// (runDir = <tmp>/triagefactory-runs/<conversationID>). Matched on the runsDir
 // path segment rather than the full os.TempDir() prefix because $TMPDIR
 // can differ between the run that created the worktree and this restart;
 // the namespace itself is constant.

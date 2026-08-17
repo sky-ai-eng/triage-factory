@@ -35,7 +35,7 @@ type Store interface {
 	// internal/lease's discipline), restricted to runs whose owning
 	// blueprint_run is still 'running' (spec §4.3's candidate predicate — a
 	// row under an already-terminal blueprint_run belongs to
-	// RunQueueStore.ReconcileOrphanedRuns, not here). A draining-but-
+	// ConversationQueueStore.ReconcileOrphanedRuns, not here). A draining-but-
 	// heartbeating executor is never touched: draining is not death, and
 	// the predicate only looks at heartbeat staleness.
 	//
@@ -52,7 +52,7 @@ type Store interface {
 	//     blueprint_run), regardless of attempts — the existing
 	//     cancel-finalization semantics, just with no live owner to signal.
 	//   - not cancel-requested, episode below maxAttempts: requeue with the
-	//     same status/summary semantics as RunQueueStore.RequeueRun. The
+	//     same status/summary semantics as ConversationQueueStore.RequeueConversation. The
 	//     'reaped' release below is what carries this attempt into the next
 	//     claim's count.
 	//   - not cancel-requested, episode at maxAttempts: terminal-fail the
@@ -85,7 +85,7 @@ type Store interface {
 	// flip and claim release commit independently): a terminal conversation
 	// with a dangling active claim gets the claim released, outcome mapped
 	// from the status. The same arm runs at boot inside
-	// RunQueueStore.ReconcileOrphanedRuns; the periodic repeat here bounds
+	// ConversationQueueStore.ReconcileOrphanedRuns; the periodic repeat here bounds
 	// the desync's lifetime to a reaper tick instead of the next restart.
 	// Idempotent and safe against in-flight healthy writes.
 	//
@@ -110,7 +110,7 @@ type Store interface {
 	// it self-healing: the terminal write frees the index, and the firing
 	// intent already queued for the task drains into a fresh, fully-minted
 	// run. The same arm runs at boot inside
-	// RunQueueStore.ReconcileOrphanedRuns (both dialects — local mode has the
+	// ConversationQueueStore.ReconcileOrphanedRuns (both dialects — local mode has the
 	// same crash window and no reaper); the periodic repeat here bounds an
 	// orphan's lifetime to a reaper tick instead of the next restart.
 	FailBlueprintRunsOrphanedAtMint(ctx context.Context, grace time.Duration) (int, error)
@@ -242,7 +242,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	}
 
 	// 3. Not cancel-requested, this loss episode has room left: requeue. Same
-	// semantics as RunQueueStore.RequeueRun — releasing the claim (below) IS
+	// semantics as ConversationQueueStore.RequeueConversation — releasing the claim (below) IS
 	// the requeue, since the conversation is mid-flight and re-enters the
 	// needs-driving predicate the moment it has no claim. That release is also
 	// what keeps the episode open, so the next death counts this one.

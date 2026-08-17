@@ -30,7 +30,7 @@ import { ArtifactRow } from './ArtifactRow'
 // so this list never duplicates them. Every other kind (branch / issue /
 // comment), and any row when no handler is wired, just links out to `url`.
 interface Props {
-  runId: string
+  conversationId: string
   onOpenApproval?: (kind: 'review' | 'pr', artifactId: string) => void
   /** The run projection's authoritative unresolved set. Enables the
    *  attention-first sort and the per-row dismiss. */
@@ -40,13 +40,13 @@ interface Props {
    *  own rows regardless. */
   onResolved?: () => void
   /** Soft-refetch trigger — pass artifactSetKey(run) so the rows stay current
-   *  as the set changes shape. Unlike a runId change, this keeps the stale rows
+   *  as the set changes shape. Unlike a conversationId change, this keeps the stale rows
    *  in place until the new set lands (no loading flash). */
   refreshKey?: string
 }
 
 export default function ArtifactList({
-  runId,
+  conversationId,
   onOpenApproval,
   pendingArtifactIds,
   onResolved,
@@ -64,7 +64,7 @@ export default function ArtifactList({
   const load = useCallback(async () => {
     const gen = ++generation.current
     try {
-      const data = await apiJSON<Artifact[]>(`/api/agent/conversations/${runId}/artifacts`)
+      const data = await apiJSON<Artifact[]>(`/api/agent/conversations/${conversationId}/artifacts`)
       if (generation.current === gen) {
         setArtifacts(data ?? [])
         setError(null)
@@ -74,26 +74,26 @@ export default function ArtifactList({
         setError(httpErrorMessage(err, "Couldn't load this run's artifacts."))
       }
     }
-  }, [runId])
+  }, [conversationId])
 
   // A run change resets to the loading state; a refreshKey change (below) must
   // not — it re-pulls behind the rows already on screen. The bump here — not
   // just the one inside load() — is what invalidates the old run's in-flight
-  // response: the load effect skips a falsy runId, so without it a stale
+  // response: the load effect skips a falsy conversationId, so without it a stale
   // response could land after this reset and pass the guard.
   useEffect(() => {
     generation.current++
     setArtifacts(null)
     setError(null)
-  }, [runId])
+  }, [conversationId])
 
   // No unmount cleanup needed: each load() bumps the generation on entry, so a
   // newer load invalidates any in-flight predecessor, and a post-unmount
   // setState is a no-op.
   useEffect(() => {
-    if (!runId) return
+    if (!conversationId) return
     void load()
-  }, [runId, refreshKey, load])
+  }, [conversationId, refreshKey, load])
 
   const pendingSet = useMemo(() => new Set(pendingArtifactIds ?? []), [pendingArtifactIds])
 

@@ -89,8 +89,8 @@ func networkCondition(b NetworkBinding) map[string]any {
 // restricts it to 2–64 chars of [\w+=,.@-]. A run id (a uuid) already
 // satisfies the charset; the "tf-" prefix marks the session as TF-minted in
 // the customer's CloudTrail. Truncated to 64 for safety against non-uuid ids.
-func sessionNameForRun(runID string) string {
-	return clampSessionName("tf-" + sanitizeSessionName(runID))
+func sessionNameForRun(conversationID string) string {
+	return clampSessionName("tf-" + sanitizeSessionName(conversationID))
 }
 
 func sanitizeSessionName(s string) string {

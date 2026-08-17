@@ -25,7 +25,7 @@ func TestProcRegistry_RegisterGetDeregister(t *testing.T) {
 	if h == nil {
 		t.Fatal("expected a handle after register")
 	}
-	if h.lr != lr || h.runID != "run-1" || h.orgID != "org-1" {
+	if h.lr != lr || h.conversationID != "run-1" || h.orgID != "org-1" {
 		t.Errorf("handle mismatch: %+v", h)
 	}
 	s.deregisterProc("run-1")
@@ -95,7 +95,7 @@ func TestSpawnerExecutorIdentityIndependentPerInstance(t *testing.T) {
 // leaves the conversation unclaimed, never claiming under a fabricated id.
 func TestStampExecutor_WritesExecutorID(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-exec", "sess", "/tmp/wt")
+	seedConversation(t, database, "r-exec", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	// Unwired: the empty id releases rather than mints, so no active claim
@@ -125,7 +125,7 @@ func TestStampExecutor_WritesExecutorID(t *testing.T) {
 // controller rather than the DB-only path.
 func TestStop_ActiveRun_RoutesThroughController(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-active", "sess", "/tmp/wt") // status running
+	seedConversation(t, database, "r-active", "sess", "/tmp/wt") // status running
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	fired := make(chan struct{}, 1)
 	s.cancels["r-active"] = func() { fired <- struct{}{} }
@@ -351,7 +351,7 @@ func TestNoteCapSaturationTransitions(t *testing.T) {
 }
 
 // TestNoteCapSaturation_NilRunQueueSafe guards test/partial-wiring setups: a
-// spawner with no RunQueueStore must not panic when the dispatcher helpers
+// spawner with no ConversationQueueStore must not panic when the dispatcher helpers
 // fire.
 func TestNoteCapSaturation_NilRunQueueSafe(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")

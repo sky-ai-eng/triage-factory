@@ -278,7 +278,7 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 // regardless of how many further heartbeats observe the same supersession.
 //
 // Fence completion (spec §4.1(4), second half): kill every live sandbox
-// via the same cancel machinery Cancel(runID) uses, THEN invoke
+// via the same cancel machinery Cancel(conversationID) uses, THEN invoke
 // onSupersessionFence (wired by internal/app to a loud log + os.Exit with
 // a distinct code) — so a zombie's in-flight work can't keep running and
 // double the reaper-requeued attempt's external writes. Ordered
@@ -357,7 +357,7 @@ func (s *Spawner) PartitionFenced() bool {
 // control pod (which never populates s.cancels for delegated runs — it
 // runs no dispatcher) or an executor with nothing in flight kills zero,
 // harmlessly. The goroutine actually running each cancelled step observes
-// ctx.Err() and parks its own run (parkRunOpen) exactly as a
+// ctx.Err() and parks its own run (parkConversationOpen) exactly as a
 // user-initiated Cancel does; this function only fires the signal.
 func (s *Spawner) killAllLiveSandboxes() int {
 	s.mu.Lock()

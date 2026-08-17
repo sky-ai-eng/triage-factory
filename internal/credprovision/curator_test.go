@@ -48,12 +48,12 @@ type putCall struct {
 }
 
 type fakeRunCredentials struct {
-	db.RunCredentialsStore
+	db.ClaimCredentialsStore
 	puts []putCall
 }
 
-func (f *fakeRunCredentials) Put(_ context.Context, orgID, runID, executorID string, bootEpoch int64, sealed []byte) error {
-	f.puts = append(f.puts, putCall{orgID, runID, executorID, bootEpoch, sealed})
+func (f *fakeRunCredentials) Put(_ context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte) error {
+	f.puts = append(f.puts, putCall{orgID, conversationID, executorID, bootEpoch, sealed})
 	return nil
 }
 
@@ -77,11 +77,11 @@ func curatorTurnManager(t *testing.T, turn *domain.CuratorTurnProvision, project
 	rc := &fakeRunCredentials{}
 	m := &Manager{
 		stores: db.Stores{
-			Curator:         &fakeCurator{turn: turn, ok: turn != nil},
-			Instances:       &fakeInstances{inst: &domain.Instance{BootEpoch: 7}},
-			Projects:        &fakeProjects{project: project},
-			TeamGitHubRepos: &fakeTeamRepos{tracked: tracked},
-			RunCredentials:  rc,
+			Curator:          &fakeCurator{turn: turn, ok: turn != nil},
+			Instances:        &fakeInstances{inst: &domain.Instance{BootEpoch: 7}},
+			Projects:         &fakeProjects{project: project},
+			TeamGitHubRepos:  &fakeTeamRepos{tracked: tracked},
+			ClaimCredentials: rc,
 		},
 		ghResolver: &fakeScopedResolver{
 			base:    "https://ghe.example",

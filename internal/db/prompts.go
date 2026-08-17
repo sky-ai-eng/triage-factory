@@ -94,10 +94,10 @@ type PromptStore interface {
 	// Unhide reverses Hide.
 	Unhide(ctx context.Context, orgID string, id string) error
 
-	// CountRunReferences returns the number of conversations rows that reference
+	// CountConversationReferences returns the number of conversations rows that reference
 	// the given prompt. Used to surface execution history before a
 	// destructive edit / delete.
-	CountRunReferences(ctx context.Context, orgID string, id string) (int, error)
+	CountConversationReferences(ctx context.Context, orgID string, id string) (int, error)
 
 	// IncrementUsage bumps usage_count by 1. Called from the
 	// delegate spawner when a run picks the prompt; the count

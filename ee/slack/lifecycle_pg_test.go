@@ -230,14 +230,14 @@ func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 // slackRunFixture is what seedSlackMessageRun returns: the ids a run-status
 // test needs to fire synthetic sentinels against.
 type slackRunFixture struct {
-	EventID, TaskID, RunID string
-	Meta                   SlackMessageMetadata
+	EventID, TaskID, ConversationID string
+	Meta                            SlackMessageMetadata
 }
 
 // seedSlackMessageRun seeds the full chain resolveRunEntry walks: entity
 // (source='slack') -> event (slack:message, carrying SlackMessageMetadata)
 // -> task (event_type=slack:message, primary_event_id=event) -> run
-// (task_id=task). Mirrors exec_host_pg_test.go's seedNonSlackTask/seedRun
+// (task_id=task). Mirrors exec_host_pg_test.go's seedNonSlackTask/seedConversation
 // shape, but for the Slack-sourced case those tests deliberately avoid.
 func seedSlackMessageRun(t *testing.T, h *pgtest.Harness, orgID, creatorID, teamID, workspaceID, apiAppID, channel, ts, threadTS string) slackRunFixture {
 	t.Helper()
@@ -261,20 +261,20 @@ func seedSlackMessageRun(t *testing.T, h *pgtest.Harness, orgID, creatorID, team
 		t.Fatalf("seed task: %v", err)
 	}
 
-	runID := uuid.New().String()
+	conversationID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO conversations (id, org_id, team_id, task_id, trigger_type, origin, status, visibility)
 		VALUES ($1, $2, $3, $4, 'event', 'interactive', 'running', 'team')
-	`, runID, orgID, teamID, taskID); err != nil {
+	`, conversationID, orgID, teamID, taskID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 
-	return slackRunFixture{EventID: eventID, TaskID: taskID, RunID: runID, Meta: meta}
+	return slackRunFixture{EventID: eventID, TaskID: taskID, ConversationID: conversationID, Meta: meta}
 }
 
 // seedGitHubTaskAndRun seeds a plain GitHub-sourced task + run — the
 // non-Slack shape the cache tests need.
-func seedGitHubTaskAndRun(t *testing.T, h *pgtest.Harness, orgID, creatorID, teamID string) (taskID, runID string) {
+func seedGitHubTaskAndRun(t *testing.T, h *pgtest.Harness, orgID, creatorID, teamID string) (taskID, conversationID string) {
 	t.Helper()
 	entityID := uuid.New().String()
 	sourceID := "octo/repo#" + uuid.New().String()
@@ -298,14 +298,14 @@ func seedGitHubTaskAndRun(t *testing.T, h *pgtest.Harness, orgID, creatorID, tea
 	`, taskID, orgID, creatorID, teamID, entityID, domain.EventGitHubPRCICheckFailed, eventID); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	runID = uuid.New().String()
+	conversationID = uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO conversations (id, org_id, team_id, task_id, trigger_type, origin, status, visibility)
 		VALUES ($1, $2, $3, $4, 'event', 'interactive', 'running', 'team')
-	`, runID, orgID, teamID, taskID); err != nil {
+	`, conversationID, orgID, teamID, taskID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
-	return taskID, runID
+	return taskID, conversationID
 }
 
 // ---------- synthetic sentinel builders ----------
@@ -317,13 +317,13 @@ func dispositionEvent(orgID, eventID, eventType, disposition string) domain.Even
 	return domain.Event{OrgID: orgID, EventType: domain.EventSystemRoutingDisposition, MetadataJSON: string(meta)}
 }
 
-func runStatusEvent(orgID, runID, status string) domain.Event {
-	meta, _ := json.Marshal(events.SystemConversationStatusMetadata{ConversationID: runID, Status: status})
+func runStatusEvent(orgID, conversationID, status string) domain.Event {
+	meta, _ := json.Marshal(events.SystemConversationStatusMetadata{ConversationID: conversationID, Status: status})
 	return domain.Event{OrgID: orgID, EventType: domain.EventSystemConversationStatus, MetadataJSON: string(meta)}
 }
 
-func runActivityEvent(orgID, runID string, tools []events.ConversationActivityTool) domain.Event {
-	meta, _ := json.Marshal(events.SystemConversationActivityMetadata{ConversationID: runID, Tools: tools})
+func runActivityEvent(orgID, conversationID string, tools []events.ConversationActivityTool) domain.Event {
+	meta, _ := json.Marshal(events.SystemConversationActivityMetadata{ConversationID: conversationID, Tools: tools})
 	return domain.Event{OrgID: orgID, EventType: domain.EventSystemConversationActivity, MetadataJSON: string(meta)}
 }
 
@@ -365,7 +365,7 @@ func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
 // and any still-retiring predecessor (stop is fire-and-forget, so the join
 // is explicit here) — test cleanup so a worker goroutine doesn't keep
 // calling into a closed httptest server after the test itself has ended.
-func stopAllLifecycleWorkers(t *testing.T, runs map[string]*runEntry) {
+func stopAllLifecycleWorkers(t *testing.T, runs map[string]*conversationEntry) {
 	t.Helper()
 	joinWorkerDone := func(done chan struct{}, what string) {
 		select {
@@ -399,7 +399,7 @@ func TestLifecycleAdapter_Disposition_ExplicitMention_ReactsWithEyes(t *testing.
 			eventID, meta := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000100", "", true)
 
 			adapter := newTestLifecycleAdapter(stores, staticURL(""))
-			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
+			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*conversationEntry{})
 
 			calls := fake.reactionCalls()
 			if len(calls) != 1 {
@@ -429,7 +429,7 @@ func TestLifecycleAdapter_Disposition_UnmentionedFollowUp_NoReaction(t *testing.
 			eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000200", "1700000000.000100", false)
 
 			adapter := newTestLifecycleAdapter(stores, staticURL(""))
-			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
+			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*conversationEntry{})
 
 			if len(fake.reactionCalls()) != 0 {
 				t.Errorf("an un-mentioned engaged-thread follow-up must not react, got %+v", fake.reactionCalls())
@@ -452,7 +452,7 @@ func TestLifecycleAdapter_Disposition_AlreadyReacted_StillSuccess(t *testing.T) 
 	fake.reactionError = "already_reacted"
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, events.DispositionTaskCreated), map[string]*runEntry{})
+	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, events.DispositionTaskCreated), map[string]*conversationEntry{})
 
 	if len(fake.reactionCalls()) != 1 {
 		t.Fatalf("reactions.add calls = %d, want 1", len(fake.reactionCalls()))
@@ -469,7 +469,7 @@ func TestLifecycleAdapter_Disposition_TasklessNoHandlerOrOwner_PostsNotConfigure
 			eventID, meta := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000200", "1700000000.000100", true)
 
 			adapter := newTestLifecycleAdapter(stores, staticURL(""))
-			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
+			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*conversationEntry{})
 
 			posts := fake.postCalls()
 			if len(posts) != 1 {
@@ -502,7 +502,7 @@ func TestLifecycleAdapter_Disposition_UnmentionedFollowUp_NoNotConfiguredReply(t
 			eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000200", "1700000000.000100", false)
 
 			adapter := newTestLifecycleAdapter(stores, staticURL(""))
-			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
+			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*conversationEntry{})
 
 			if len(fake.postCalls()) != 0 {
 				t.Errorf("an un-mentioned follow-up must not draw a not-configured reply, got %+v", fake.postCalls())
@@ -523,7 +523,7 @@ func TestLifecycleAdapter_Disposition_TasklessNoHandler_RootMessage_RepliesInOwn
 	eventID, meta := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000300", "", true)
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, events.DispositionTasklessNoHandler), map[string]*runEntry{})
+	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, events.DispositionTasklessNoHandler), map[string]*conversationEntry{})
 
 	posts := fake.postCalls()
 	if len(posts) != 1 || posts[0].ThreadTS != meta.TS {
@@ -540,7 +540,7 @@ func TestLifecycleAdapter_Disposition_MissingWorkspace_NoCallNoPanic(t *testing.
 	eventID, _ := seedSlackMessageEvent(t, h, orgID, "T-missing", "A-missing", "C1", "1700000000.000400", "", true)
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, events.DispositionTaskCreated), map[string]*runEntry{})
+	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, events.DispositionTaskCreated), map[string]*conversationEntry{})
 
 	if len(fake.reactionCalls()) != 0 || len(fake.postCalls()) != 0 {
 		t.Errorf("expected no Slack calls with no connected workspace, got reactions=%v posts=%v", fake.reactionCalls(), fake.postCalls())
@@ -557,7 +557,7 @@ func TestLifecycleAdapter_Disposition_InertOutcomes_NoOp(t *testing.T) {
 			eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000500", "", true)
 
 			adapter := newTestLifecycleAdapter(stores, staticURL(""))
-			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
+			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*conversationEntry{})
 
 			if len(fake.reactionCalls()) != 0 || len(fake.postCalls()) != 0 {
 				t.Errorf("%s must be inert, got reactions=%v posts=%v", disp, fake.reactionCalls(), fake.postCalls())
@@ -573,7 +573,7 @@ func TestLifecycleAdapter_Disposition_InertOutcomes_NoOp(t *testing.T) {
 func TestLifecycleAdapter_Disposition_NonSlackEventType_Ignored(t *testing.T) {
 	_, stores, fake, orgID, _, _ := newLifecycleTestRig(t)
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	adapter.dispatch(context.Background(), dispositionEvent(orgID, "some-github-event-id", domain.EventGitHubPRCICheckFailed, events.DispositionTaskCreated), map[string]*runEntry{})
+	adapter.dispatch(context.Background(), dispositionEvent(orgID, "some-github-event-id", domain.EventGitHubPRCICheckFailed, events.DispositionTaskCreated), map[string]*conversationEntry{})
 
 	if len(fake.reactionCalls()) != 0 || len(fake.postCalls()) != 0 {
 		t.Error("a non-slack:message disposition must never call Slack")
@@ -589,11 +589,11 @@ func TestLifecycleAdapter_RunStatus_RunningThenActivity_SetsDescriptionDerivedTe
 	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), runs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 	first := fake.statusCalls()[0]
 	if first.Channel != fx.Meta.Channel || first.Status != slackLifecycleInitialStatusText {
@@ -603,7 +603,7 @@ func TestLifecycleAdapter_RunStatus_RunningThenActivity_SetsDescriptionDerivedTe
 		t.Errorf("initial loading_messages = %q, want [%q] (the bubble must show ours, not Slack's default rotation)", first.Loading, slackLifecycleInitialLoadingText)
 	}
 
-	adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.ConversationActivityTool{{Name: "Bash", Description: "Running go test ./..."}}), runs)
+	adapter.dispatch(ctx, runActivityEvent(orgID, fx.ConversationID, []events.ConversationActivityTool{{Name: "Bash", Description: "Running go test ./..."}}), runs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
 		if len(calls) == 0 {
@@ -627,18 +627,18 @@ func TestLifecycleAdapter_RunStatus_PreRunningPhases_ShowSetupProgress(t *testin
 	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "queued"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "queued"), runs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 	first := fake.statusCalls()[0]
 	if first.Status != "is queued…" || len(first.Loading) != 1 || first.Loading[0] != "Waiting for a free agent slot…" {
 		t.Errorf("queued status call = %+v, want the queued phase pair on both surfaces", first)
 	}
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "cloning"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "cloning"), runs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
 		if len(calls) == 0 {
@@ -649,7 +649,7 @@ func TestLifecycleAdapter_RunStatus_PreRunningPhases_ShowSetupProgress(t *testin
 			len(last.Loading) == 1 && last.Loading[0] == "Preparing a workspace…"
 	})
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), runs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
 		if len(calls) == 0 {
@@ -677,16 +677,16 @@ func TestLifecycleAdapter_RunStatus_ActivityBurst_DebounceCollapsesToOneCall(t *
 	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), runs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 	before := len(fake.statusCalls())
 
 	for i := 0; i < 5; i++ {
-		adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.ConversationActivityTool{{Name: fmt.Sprintf("tool_%d", i)}}), runs)
+		adapter.dispatch(ctx, runActivityEvent(orgID, fx.ConversationID, []events.ConversationActivityTool{{Name: fmt.Sprintf("tool_%d", i)}}), runs)
 	}
 
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) > before })
@@ -715,10 +715,10 @@ func TestLifecycleAdapter_RunStatus_TickerRefresh_Fires(t *testing.T) {
 	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
 
-	adapter.dispatch(context.Background(), runStatusEvent(orgID, fx.RunID, "running"), runs)
+	adapter.dispatch(context.Background(), runStatusEvent(orgID, fx.ConversationID, "running"), runs)
 	waitForCondition(t, 3*time.Second, func() bool { return len(fake.statusCalls()) >= 3 })
 
 	for _, c := range fake.statusCalls() {
@@ -739,14 +739,14 @@ func TestLifecycleAdapter_RunStatus_Failed_ClearsAndPostsFailureReplyWithURL(t *
 	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL("https://tf.example.com"))
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), runs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "failed"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "failed"), runs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
 		return len(calls) > 0 && calls[len(calls)-1].Status == "" && len(calls[len(calls)-1].Loading) == 0
@@ -755,11 +755,11 @@ func TestLifecycleAdapter_RunStatus_Failed_ClearsAndPostsFailureReplyWithURL(t *
 
 	posts := fake.postCalls()
 	last := posts[len(posts)-1]
-	wantURL := fmt.Sprintf("https://tf.example.com/orgs/%s/runs/%s", orgID, fx.RunID)
+	wantURL := fmt.Sprintf("https://tf.example.com/orgs/%s/runs/%s", orgID, fx.ConversationID)
 	if !strings.Contains(last.Text, "Something went wrong") || !strings.Contains(last.Text, wantURL) {
 		t.Errorf("failure reply = %q, want the failure copy + %q", last.Text, wantURL)
 	}
-	if entry := runs[fx.RunID]; entry.worker != nil {
+	if entry := runs[fx.ConversationID]; entry.worker != nil {
 		t.Error("worker should have been cleared from the run entry on terminal status")
 	}
 }
@@ -773,13 +773,13 @@ func TestLifecycleAdapter_RunStatus_Failed_NoPublicURL_NoURLFragment(t *testing.
 	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
 	ctx := context.Background()
 
 	// Never went "running" — a run that fails during setup still owes the
 	// failure note, via the worker-less direct path in handleRunStatus.
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "failed"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "failed"), runs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.postCalls()) >= 1 })
 
 	last := fake.postCalls()[len(fake.postCalls())-1]
@@ -800,14 +800,14 @@ func TestLifecycleAdapter_RunStatus_Parked_ClearsWithoutFailureReply(t *testing.
 	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), runs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "open"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "open"), runs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
 		return len(calls) > 0 && calls[len(calls)-1].Status == ""
@@ -848,16 +848,16 @@ func TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker(t *testing.T)
 	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), runs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 
 	fake.setStatusClearDelay(400 * time.Millisecond)
 	start := time.Now()
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "open"), runs) // parked — resumable
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "open"), runs) // parked — resumable
 	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
 		t.Errorf("terminal-status dispatch blocked %v on the retiring worker's Slack call; the dispatcher must never wait on Slack for a teardown", elapsed)
 	}
@@ -866,8 +866,8 @@ func TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker(t *testing.T)
 	// via an activity probe — both workers' plain lifecycle texts are
 	// identical ("is working on it…"), so ordering the retiring clear
 	// against "a successor call" needs a text only the successor can emit.
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
-	adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.ConversationActivityTool{{Name: "resumed_probe"}}), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), runs)
+	adapter.dispatch(ctx, runActivityEvent(orgID, fx.ConversationID, []events.ConversationActivityTool{{Name: "resumed_probe"}}), runs)
 
 	const probe = "is running: resumed probe"
 	waitForCondition(t, 2*time.Second, func() bool {
@@ -922,28 +922,28 @@ func TestLifecycleAdapter_RunStatus_GatedStopChainSurvivesChurn(t *testing.T) {
 	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
 	ctx := context.Background()
 
 	// W1: running, then park it with a slow trailing clear in flight.
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), runs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
 	fake.setStatusClearDelay(400 * time.Millisecond)
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "open"), runs) // W1 stops; its clear is now in flight
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "open"), runs) // W1 stops; its clear is now in flight
 
 	// W2: resume immediately (gates on W1's still-open done), then park it
 	// again immediately too — WHILE it is still gated on W1. This is the
 	// stop-while-gated race: W2 never got past the predecessor gate to make
 	// any Slack call of its own.
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "open"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "open"), runs)
 
 	// W3: resume again immediately — gates on entry.prevDone, which now
 	// traces W2 -> W1. A distinguishable activity probe marks W3's status
 	// unambiguously (its plain lifecycle text is identical to W1's/W2's).
-	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
-	adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.ConversationActivityTool{{Name: "w3_probe"}}), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.ConversationID, "running"), runs)
+	adapter.dispatch(ctx, runActivityEvent(orgID, fx.ConversationID, []events.ConversationActivityTool{{Name: "w3_probe"}}), runs)
 
 	const probe = "is running: w3 probe"
 	waitForCondition(t, 3*time.Second, func() bool {
@@ -995,22 +995,22 @@ func TestLifecycleAdapter_RunStatus_GatedStopChainSurvivesChurn(t *testing.T) {
 // ---------- run-status consumer: non-Slack cache ----------
 
 // TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup pins the
-// per-runID cache: after the first system:conversation:status resolves a run as
+// per-conversationID cache: after the first system:conversation:status resolves a run as
 // non-Slack, the underlying data is mutated to look Slack-shaped (entity
 // source flipped to 'slack', task's event_type flipped to slack:message) —
-// if resolution were re-run on a later sentinel for the SAME runID, it would
+// if resolution were re-run on a later sentinel for the SAME conversationID, it would
 // now (incorrectly) start a worker and call Slack. It must not: the cached
 // negative verdict is never re-queried.
 func TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup(t *testing.T) {
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
-	taskID, runID := seedGitHubTaskAndRun(t, h, orgID, owner, teamID)
+	taskID, conversationID := seedGitHubTaskAndRun(t, h, orgID, owner, teamID)
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 	ctx := context.Background()
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, runID, "running"), runs)
-	entry, ok := runs[runID]
+	adapter.dispatch(ctx, runStatusEvent(orgID, conversationID, "running"), runs)
+	entry, ok := runs[conversationID]
 	if !ok {
 		t.Fatal("expected a cache entry after the first system:conversation:status")
 	}
@@ -1033,14 +1033,14 @@ func TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup(t *testin
 		t.Fatalf("mutate task event_type: %v", err)
 	}
 
-	adapter.dispatch(ctx, runStatusEvent(orgID, runID, "running"), runs)
-	adapter.dispatch(ctx, runActivityEvent(orgID, runID, []events.ConversationActivityTool{{Name: "Bash"}}), runs)
+	adapter.dispatch(ctx, runStatusEvent(orgID, conversationID, "running"), runs)
+	adapter.dispatch(ctx, runActivityEvent(orgID, conversationID, []events.ConversationActivityTool{{Name: "Bash"}}), runs)
 
 	time.Sleep(50 * time.Millisecond)
 	if len(fake.statusCalls()) != 0 {
 		t.Errorf("cached isSlack=false must not be re-resolved, got Slack calls: %+v", fake.statusCalls())
 	}
-	if runs[runID].worker != nil {
+	if runs[conversationID].worker != nil {
 		t.Error("no worker should ever start for a cached non-Slack run")
 	}
 }
@@ -1048,13 +1048,13 @@ func TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup(t *testin
 // ---------- run-activity consumer: unknown run ----------
 
 // TestLifecycleAdapter_RunActivity_UnknownRun_Ignored covers activity
-// arriving for a runID this adapter has never seen a system:conversation:status for
+// arriving for a conversationID this adapter has never seen a system:conversation:status for
 // (the verdict-priming event) — it must be dropped, not trigger its own
 // resolution.
 func TestLifecycleAdapter_RunActivity_UnknownRun_Ignored(t *testing.T) {
 	_, stores, fake, orgID, _, _ := newLifecycleTestRig(t)
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 
 	adapter.dispatch(context.Background(), runActivityEvent(orgID, "unseen-run-id", []events.ConversationActivityTool{{Name: "Bash"}}), runs)
 

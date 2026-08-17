@@ -1,5 +1,5 @@
 import type { Conversation } from '../../types'
-import { chainPosition, completionKind, isActiveRun } from '../../lib/runStatus'
+import { chainPosition, completionKind, isActiveConversation } from '../../lib/conversationStatus'
 import { hasUnresolvedArtifacts } from '../../lib/approval'
 
 // stationStyle — the design system for the run-station HMI. It maps a run's
@@ -48,7 +48,7 @@ export const HMI_CYAN = 'var(--hmi-cyan)'
 // active status — each setup phase and running alike — reads as one thing: the
 // machine is hot and scanning.
 export function stationState(run: Conversation): StationState {
-  if (isActiveRun(run)) {
+  if (isActiveConversation(run)) {
     return {
       key: 'working',
       light: 'var(--color-delegate)',

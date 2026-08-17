@@ -9,10 +9,10 @@ import (
 )
 
 // stageMemoryFixture materializes a memory staging dir at the path the broker
-// derives for runID, the way the orchestrator does before issuing the launch RPC.
-func stageMemoryFixture(t *testing.T, runID string) string {
+// derives for conversationID, the way the orchestrator does before issuing the launch RPC.
+func stageMemoryFixture(t *testing.T, conversationID string) string {
 	t.Helper()
-	dir := TrustedMemorySourcePath(runID)
+	dir := TrustedMemorySourcePath(conversationID)
 	if err := os.MkdirAll(filepath.Join(dir, "this-run"), 0o755); err != nil {
 		t.Fatalf("stage memory fixture: %v", err)
 	}
@@ -32,7 +32,7 @@ func withMemoryMount(p LaunchParams, source string, options ...string) LaunchPar
 // mount of THIS launch's own materialized memory tree at the fixed destination.
 func TestValidateLaunchParams_AcceptsOwnMemoryMount(t *testing.T) {
 	p := validParams()
-	dir := stageMemoryFixture(t, p.RunID)
+	dir := stageMemoryFixture(t, p.ConversationID)
 	if err := ValidateLaunchParams(withMemoryMount(p, dir, "ro")); err != nil {
 		t.Fatalf("rejected this run's own read-only memory mount: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestValidateLaunchParams_AcceptsOwnMemoryMount(t *testing.T) {
 // permitted.
 func TestValidateLaunchParams_RejectsWritableMemoryMount(t *testing.T) {
 	p := validParams()
-	dir := stageMemoryFixture(t, p.RunID)
+	dir := stageMemoryFixture(t, p.ConversationID)
 	for _, opts := range [][]string{{"rw"}, {"ro", "rw"}, nil} {
 		if err := ValidateLaunchParams(withMemoryMount(p, dir, opts...)); err == nil {
 			t.Errorf("accepted a memory mount with options %v; want rejection", opts)
@@ -59,14 +59,14 @@ func TestValidateLaunchParams_RejectsWritableMemoryMount(t *testing.T) {
 // rendered for it" true at the boundary rather than only by convention.
 func TestValidateLaunchParams_RejectsForeignMemorySource(t *testing.T) {
 	p := validParams()
-	stageMemoryFixture(t, p.RunID) // this run's own dir exists; the mount still claims another
+	stageMemoryFixture(t, p.ConversationID) // this run's own dir exists; the mount still claims another
 	foreign := stageMemoryFixture(t, "some-other-run")
 
 	for name, source := range map[string]string{
 		"another runs staging dir": foreign,
 		"arbitrary host path":      t.TempDir(),
-		"relative path":            "triagefactory-memory/" + p.RunID,
-		"traversal":                filepath.Join(MemoryStagingBase(), p.RunID, "..", "some-other-run"),
+		"relative path":            "triagefactory-memory/" + p.ConversationID,
+		"traversal":                filepath.Join(MemoryStagingBase(), p.ConversationID, "..", "some-other-run"),
 	} {
 		if err := ValidateLaunchParams(withMemoryMount(p, source, "ro")); err == nil {
 			t.Errorf("accepted memory mount source (%s) %q; want rejection", name, source)
@@ -81,7 +81,7 @@ func TestValidateLaunchParams_RejectsSymlinkedMemorySource(t *testing.T) {
 	p := validParams()
 	elsewhere := stageMemoryFixture(t, "victim-run")
 
-	own := TrustedMemorySourcePath(p.RunID)
+	own := TrustedMemorySourcePath(p.ConversationID)
 	if err := os.MkdirAll(filepath.Dir(own), 0o755); err != nil {
 		t.Fatalf("mkdir staging base: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestValidateLaunchParams_RejectsSymlinkedMemorySource(t *testing.T) {
 // inconsistent and fails at the boundary rather than late inside runsc.
 func TestValidateLaunchParams_RejectsMissingMemorySource(t *testing.T) {
 	p := validParams()
-	if err := ValidateLaunchParams(withMemoryMount(p, TrustedMemorySourcePath(p.RunID), "ro")); err == nil {
+	if err := ValidateLaunchParams(withMemoryMount(p, TrustedMemorySourcePath(p.ConversationID), "ro")); err == nil {
 		t.Fatal("accepted a memory mount with no staging dir on disk; want rejection")
 	}
 }
@@ -111,10 +111,10 @@ func TestValidateLaunchParams_RejectsMissingMemorySource(t *testing.T) {
 // to the shared staging base — every run's memory at once — so it is refused.
 func TestValidateLaunchParams_RejectsMemoryMountWithoutRunID(t *testing.T) {
 	p := validParams()
-	stageMemoryFixture(t, p.RunID)
+	stageMemoryFixture(t, p.ConversationID)
 	base := MemoryStagingBase()
-	p.MemoryNamespace = p.RunID // keeps the worktree scope check satisfied
-	p.RunID = ""
+	p.MemoryNamespace = p.ConversationID // keeps the worktree scope check satisfied
+	p.ConversationID = ""
 	if err := ValidateLaunchParams(withMemoryMount(p, base, "ro")); err == nil {
 		t.Fatal("accepted a memory mount of the shared staging base with no run id; want rejection")
 	}

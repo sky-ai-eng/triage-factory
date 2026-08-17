@@ -29,14 +29,14 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 	setupGitTestEnv(t)
 	s := newStorageSpawner(t)
 
-	const runID = "wt-warm"
-	wtPath, owner, repo := setupTestWorktree(t, runID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+	const conversationID = "wt-warm"
+	wtPath, owner, repo := setupTestWorktree(t, conversationID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
 
 	const sessionID = "sess-warm"
 	writeSession(t, wtPath, sessionID, `{"type":"summary"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -45,7 +45,7 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 	marker := filepath.Join(wtPath, "_tfac", "ci-logs", "warm-marker.txt")
 	writeFile(t, marker, "warm")
 
-	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
+	run := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
 	got, prov, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{owner: owner, repo: repo})
 	if err != nil {
 		t.Fatalf("ensureWorkspace (warm): %v", err)
@@ -73,9 +73,9 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	setupGitTestEnv(t)
 	s := newStorageSpawner(t)
 
-	const runID = "wt-cold"
-	wtPath, owner, repo := setupTestWorktree(t, runID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+	const conversationID = "wt-cold"
+	wtPath, owner, repo := setupTestWorktree(t, conversationID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
 
 	// The agent commits work (advances the branch; rides in the bundle).
 	writeFile(t, filepath.Join(wtPath, "agent.txt"), "committed by agent")
@@ -94,7 +94,7 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	const sessionID = "sess-cold"
 	sessPath := writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"cold"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -115,7 +115,7 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	gitT(t, bareDir, "worktree", "prune")
 	gitT(t, bareDir, "branch", "-D", "feature")
 
-	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
+	run := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
 	got, prov, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{owner: owner, repo: repo})
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
@@ -151,26 +151,26 @@ func TestEnsureWorkspace_ColdPath_TranscriptBearingSnapshotIsResumable(t *testin
 	setupGitTestEnv(t)
 	s := newStorageSpawner(t)
 
-	const runID = "wt-has-transcript"
+	const conversationID = "wt-has-transcript"
 	// A non-git run-root keeps the focus on the session member (git delta is
 	// exercised by the fuller round-trip test above). Rooting it at the
 	// deterministic RunRoot(keyID) — where the cold path rebuilds — keeps
 	// wtDir == run.WorktreePath, so ensureWorkspace doesn't take the
 	// persist-new-path branch (SetWorktreePathSystem is unwired in this spawner).
-	wtPath := worktree.RunRoot(runID)
+	wtPath := worktree.RunRoot(conversationID)
 	t.Cleanup(func() { _ = os.RemoveAll(wtPath) })
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch survived")
 	const sessionID = "sess-present"
 	writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"present"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	if err := os.RemoveAll(wtPath); err != nil { // host loss: only the snapshot remains
 		t.Fatalf("rm worktree: %v", err)
 	}
 
-	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID, SessionID: sessionID}
+	run := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID, SessionID: sessionID}
 	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{})
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
@@ -191,21 +191,21 @@ func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testin
 	setupGitTestEnv(t)
 	s := newStorageSpawner(t)
 
-	const runID = "wt-no-transcript"
-	wtPath := worktree.RunRoot(runID)
+	const conversationID = "wt-no-transcript"
+	wtPath := worktree.RunRoot(conversationID)
 	t.Cleanup(func() { _ = os.RemoveAll(wtPath) })
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch survived")
 	const sessionID = "sess-lost"
 	// Deliberately NO writeSession: the run carries a session id but its
 	// transcript is not on disk when the snapshot is taken.
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	if err := os.RemoveAll(wtPath); err != nil {
 		t.Fatalf("rm worktree: %v", err)
 	}
 
-	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID, SessionID: sessionID}
+	run := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID, SessionID: sessionID}
 	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{})
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
@@ -233,12 +233,12 @@ func TestSnapshotWorkspace_StoresGzip(t *testing.T) {
 	wtPath := t.TempDir()
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch note")
 
-	const runID = "wt-gzip"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, ""); err != nil {
+	const conversationID = "wt-gzip"
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
-	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, runID))
+	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, conversationID))
 	if err != nil {
 		t.Fatalf("get snapshot blob: %v", err)
 	}
@@ -264,16 +264,16 @@ func TestEnsureWorkspace_ColdPath_CorruptGzipChecksumErrors(t *testing.T) {
 	setupGitTestEnv(t)
 	s := newStorageSpawner(t)
 
-	const runID = "wt-corrupt"
+	const conversationID = "wt-corrupt"
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "_tfac", "ci-logs", "x.log"), "log bytes the gzip trailer checksums over")
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, src, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, src, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
 	// Flip a byte in the gzip footer's CRC-32 (the last 8 bytes are CRC-32 +
 	// ISIZE) so the decompressed bytes no longer match the stored checksum.
-	key := snapshotKey(runmode.LocalDefaultOrgID, runID)
+	key := snapshotKey(runmode.LocalDefaultOrgID, conversationID)
 	rc, err := s.Storage().Get(context.Background(), key)
 	if err != nil {
 		t.Fatalf("get snapshot blob: %v", err)
@@ -293,7 +293,7 @@ func TestEnsureWorkspace_ColdPath_CorruptGzipChecksumErrors(t *testing.T) {
 
 	// Cold path: the warm worktree is absent, so the resume can only come from
 	// the (now corrupt) blob — which must surface as an error.
-	run := &domain.Conversation{ID: runID, WorktreePath: filepath.Join(t.TempDir(), "gone"), BlueprintRunID: runID}
+	run := &domain.Conversation{ID: conversationID, WorktreePath: filepath.Join(t.TempDir(), "gone"), BlueprintRunID: conversationID}
 	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{}); err == nil {
 		t.Fatal("ensureWorkspace accepted a snapshot with a corrupted gzip checksum; want an integrity error")
 	}
@@ -318,11 +318,11 @@ func TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "test.log"),
 		strings.Repeat("=== RUN   TestSomething\n--- PASS: TestSomething (0.01s)\n", 2000))
 
-	const runID = "wt-fat"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, sessionID); err != nil {
+	const conversationID = "wt-fat"
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
-	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, runID))
+	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, conversationID))
 	if err != nil {
 		t.Fatalf("get snapshot blob: %v", err)
 	}
@@ -353,9 +353,9 @@ func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
 	setupGitTestEnv(t)
 	s := newStorageSpawner(t)
 
-	const runID = "wt-detached"
-	wtPath, owner, repo := setupTestWorktree(t, runID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+	const conversationID = "wt-detached"
+	wtPath, owner, repo := setupTestWorktree(t, conversationID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
 
 	// Agent commits, then detaches HEAD at that commit.
 	writeFile(t, filepath.Join(wtPath, "agent.txt"), "committed by agent")
@@ -365,7 +365,7 @@ func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\ndetached edit\n")
 	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -380,7 +380,7 @@ func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
 	gitT(t, bareDir, "worktree", "prune")
 	gitT(t, bareDir, "branch", "-D", "feature")
 
-	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
+	run := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
 	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{owner: owner, repo: repo})
 	if err != nil {
 		t.Fatalf("ensureWorkspace (detached): %v", err)
@@ -404,15 +404,15 @@ func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
 	setupGitTestEnv(t)
 	s := newStorageSpawner(t)
 
-	const runID = "wt-nopush"
-	wtPath, owner, repo := setupTestWorktree(t, runID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+	const conversationID = "wt-nopush"
+	wtPath, owner, repo := setupTestWorktree(t, conversationID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
 
 	// No commits — only an uncommitted edit on the never-pushed "feature" branch.
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nwork in progress\n")
 	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -429,7 +429,7 @@ func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
 	gitT(t, bareDir, "worktree", "prune")
 	gitT(t, bareDir, "branch", "-D", "feature")
 
-	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
+	run := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
 	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{owner: owner, repo: repo})
 	if err != nil {
 		t.Fatalf("ensureWorkspace (never-pushed branch): %v", err)
@@ -459,11 +459,11 @@ func TestEnsureWorkspace_ColdPath_NoSnapshotErrors(t *testing.T) {
 
 // TestFailRun_DiscardsWorkspaceSnapshot: a parked run that then fails (e.g. an
 // open run whose resume errors mid-execution) drops its snapshot rather than
-// orphaning the blob. failRun is the single failure chokepoint covering the
+// orphaning the blob. failConversation is the single failure chokepoint covering the
 // resume goroutine's failure exits.
 func TestFailRun_DiscardsWorkspaceSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, _, runID, taskID := setupAdvanceFixture(t, "failrun-discard")
+	s, _, conversationID, taskID := setupAdvanceFixture(t, "failrun-discard")
 	blobs, err := storage.New()
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
@@ -471,17 +471,17 @@ func TestFailRun_DiscardsWorkspaceSnapshot(t *testing.T) {
 	s.SetStorage(blobs)
 
 	ctx := context.Background()
-	key := snapshotKey(runmode.LocalDefaultOrgID, runID)
+	key := snapshotKey(runmode.LocalDefaultOrgID, conversationID)
 	if err := blobs.Put(ctx, key, strings.NewReader("snapshot")); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 
-	// triggerType "event" so failRun routes through the admin-pool System
+	// triggerType "event" so failConversation routes through the admin-pool System
 	// methods (no synthetic-claims tx needed in the fixture).
-	s.failRun(runmode.LocalDefaultOrgID, runID, taskID, "", "event", "", "boom", domain.RunFailureUnclassified)
+	s.failConversation(runmode.LocalDefaultOrgID, conversationID, taskID, "", "event", "", "boom", domain.ConversationFailureUnclassified)
 
 	if ok, _ := blobs.Exists(ctx, key); ok {
-		t.Error("failRun did not discard the workspace snapshot — blob orphaned on failure")
+		t.Error("failConversation did not discard the workspace snapshot — blob orphaned on failure")
 	}
 }
 
@@ -505,7 +505,7 @@ func newStorageSpawner(t *testing.T) *Spawner {
 // "feature" branch via the production worktree path, so the snapshot/rehydrate
 // code exercises actual git plumbing. Returns the worktree path and its
 // owner/repo.
-func setupTestWorktree(t *testing.T, runID string) (wtPath, owner, repo string) {
+func setupTestWorktree(t *testing.T, conversationID string) (wtPath, owner, repo string) {
 	t.Helper()
 	owner, repo = "o", "r"
 
@@ -519,7 +519,7 @@ func setupTestWorktree(t *testing.T, runID string) (wtPath, owner, repo string) 
 	gitT(t, seed, "commit", "-m", "init")
 	gitT(t, seed, "push", "origin", "main")
 
-	wt, err := worktree.CreateForBranch(context.Background(), owner, repo, origin, "main", "feature", runID)
+	wt, err := worktree.CreateForBranch(context.Background(), owner, repo, origin, "main", "feature", conversationID)
 	if err != nil {
 		t.Fatalf("CreateForBranch: %v", err)
 	}

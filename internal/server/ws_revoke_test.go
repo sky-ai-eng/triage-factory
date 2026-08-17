@@ -83,7 +83,7 @@ func waitWSRegistered(t *testing.T, hub *websocket.Hub, conn *ws.Conn, orgID str
 	}()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		// viewing="board" satisfies PresentFor for any runID in the org.
+		// viewing="board" satisfies PresentFor for any conversationID in the org.
 		if hub.PresentFor(orgID, "registration-probe") {
 			return
 		}

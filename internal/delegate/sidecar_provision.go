@@ -39,11 +39,11 @@ type runSidecar struct {
 	conn *sidecarproto.Conn
 	res  *sidecarproto.StartProxiesResult
 
-	// runID is the key every per-run file under the socket root is named
+	// conversationID is the key every per-run file under the socket root is named
 	// after — the conversation id, for a delegated run and a curator turn
 	// alike. Held so teardown can clear this cell's files by the same
 	// derivation bring-up cleared them by.
-	runID string
+	conversationID string
 
 	// stopRelay stops the credential-refresh relay goroutine; closed once by
 	// Close. relayOnce guards the close against a double Close.
@@ -85,8 +85,8 @@ func (rs *runSidecar) Close() {
 		_ = rs.proc.Close()
 	}
 	if rs.net != nil {
-		if rs.runID != "" {
-			sandbox.ReleaseRunCellFiles(rs.runID, rs.net.Idx)
+		if rs.conversationID != "" {
+			sandbox.ReleaseRunCellFiles(rs.conversationID, rs.net.Idx)
 		}
 		_ = rs.net.Close()
 	}
@@ -97,7 +97,7 @@ func (rs *runSidecar) Close() {
 	// it took is worth having in the log next to the successor's first line.
 	if elapsed := time.Since(started); elapsed > slowCellTeardown {
 		dispatchLog.Warn("cell teardown was slow; the run's subnet index and sidecar uid stayed held for that long",
-			"run", rs.runID, "took", elapsed)
+			"run", rs.conversationID, "took", elapsed)
 	}
 }
 
@@ -184,22 +184,22 @@ func (rs *runSidecar) runNetwork() *sandbox.RunNetwork {
 // GHChannel when the sidecar bound the injector: its host:port + per-run
 // placeholder, plus the per-run cert source path the orchestrator bind-mounts
 // (the sidecar wrote it to the same deterministic path). nil when no injector
-// was bound (the run then keeps no gh binary/env). runID resolves the cert path.
-func (rs *runSidecar) ghChannel(runID string) *agentproc.GHChannelParams {
+// was bound (the run then keeps no gh binary/env). conversationID resolves the cert path.
+func (rs *runSidecar) ghChannel(conversationID string) *agentproc.GHChannelParams {
 	if rs == nil || rs.res == nil || rs.res.GHChannelHost == "" {
 		return nil
 	}
 	return &agentproc.GHChannelParams{
 		Host:           rs.res.GHChannelHost,
 		Token:          rs.res.GHChannelToken,
-		CertSourcePath: agenthost.CertPathFor(runID),
+		CertSourcePath: agenthost.CertPathFor(conversationID),
 	}
 }
 
 // GHChannel is the exported accessor the curator seam consumes (parallel to
 // Network / JailEnv), so a homed curator turn wires the same gh channel.
-func (rs *runSidecar) GHChannel(runID string) *agentproc.GHChannelParams {
-	return rs.ghChannel(runID)
+func (rs *runSidecar) GHChannel(conversationID string) *agentproc.GHChannelParams {
+	return rs.ghChannel(conversationID)
 }
 
 // Network / JailEnv / GitCloneAuth are the exported accessors the curator seam
@@ -301,7 +301,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 		return nil, fmt.Errorf("set up run network: %w", err)
 	}
 	scCtx, scSpan := tracer.Start(ctx, "sandbox.sidecar.launch")
-	sc, err := sandbox.LaunchSidecar(scCtx, sandbox.SidecarConfig{RunID: run.ID, SubnetIdx: net.Idx})
+	sc, err := sandbox.LaunchSidecar(scCtx, sandbox.SidecarConfig{ConversationID: run.ID, SubnetIdx: net.Idx})
 	recordSpanError(scSpan, err)
 	scSpan.End()
 	if err != nil {
@@ -311,10 +311,10 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 	}
 
 	stores, storesSet := s.getStores()
-	info := agenthost.RunInfo{
+	info := agenthost.ConversationInfo{
 		OrgID:            orgID,
 		UserID:           run.CreatorUserID,
-		RunID:            run.ID,
+		ConversationID:   run.ID,
 		TeamID:           run.TeamID,
 		IsEventTriggered: run.TriggerType == domain.TriggerTypeEvent,
 	}
@@ -351,7 +351,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 		Git:        git,
 		// The org-bound op server the sidecar's relay envelope dispatches to:
 		// the git proxy's push authz/audit (backed by the same git gate) plus
-		// the exec verb-trace DB ops, all identity-bound from RunInfo. Holds
+		// the exec verb-trace DB ops, all identity-bound from ConversationInfo. Holds
 		// the stores + secrets the capless sidecar cannot.
 		Relay:         relaySrv,
 		IdentityPairs: githooks.IdentityConfigPairs(identity.Name, identity.Email),
@@ -376,7 +376,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 			OrgID:          info.OrgID,
 			UserID:         info.UserID,
 			TeamID:         info.TeamID,
-			RunID:          info.RunID,
+			ConversationID: info.ConversationID,
 			EventTriggered: info.IsEventTriggered,
 		},
 	}
@@ -416,7 +416,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 		auditHost.SetGitHubCredential(res.GitHubCredential)
 	}
 
-	es := &runSidecar{runID: run.ID, net: net, proc: sc, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
+	es := &runSidecar{conversationID: run.ID, net: net, proc: sc, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
 	_, myBootEpoch := s.executorIdentity()
 
 	// A relayed `workspace add` widens this run's authorized repo set, which
@@ -561,7 +561,7 @@ func (s *Spawner) githubAPIUpstreamFor(ctx context.Context, orgID string) string
 // auditHost is the caller's — not built here — because the run's acting GitHub
 // credential is not known until the sidecar reports it, and the caller is the
 // half that holds both the client and that answer.
-func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.RunInfo, stores db.Stores, auditHost *agenthost.LocalClient) *agentproc.GitProxyConfig {
+func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.ConversationInfo, stores db.Stores, auditHost *agenthost.LocalClient) *agentproc.GitProxyConfig {
 	s.mu.Lock()
 	resolver := s.ghResolver
 	s.mu.Unlock()
@@ -578,7 +578,7 @@ func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.RunInfo, s
 	// during bring-up, but every callback below fires mid-run, on a git
 	// operation the agent performed. Same reason the permission handler
 	// captures at construction.
-	engagement := s.engagementSpanContext(info.RunID)
+	engagement := s.engagementSpanContext(info.ConversationID)
 	recordPush := gitPushRecorder(auditHost, info)
 	return &agentproc.GitProxyConfig{
 		Upstream: upstream,
@@ -587,7 +587,7 @@ func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.RunInfo, s
 			// slow one stalls a push with no other signal that it did.
 			// owner/repo are deliberately absent from the span: a repo name
 			// is tenant data, and the decision's shape is what matters here.
-			ctx, span := startPunctualLinked(ctx, engagement, info.RunID, "git.authorize", telemetry.OrgID(info.OrgID))
+			ctx, span := startPunctualLinked(ctx, engagement, info.ConversationID, "git.authorize", telemetry.OrgID(info.OrgID))
 			defer span.End()
 			dec, err := gitAuthorizeDecision(ctx, stores, info, owner, repo)
 			recordSpanError(span, err)
@@ -607,7 +607,7 @@ func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.RunInfo, s
 			// the span reports that the relay arrived and how long the write
 			// took, not whether it succeeded; the store spans beneath it carry
 			// that.
-			ctx, span := startPunctualLinked(ctx, engagement, info.RunID, "git.record_push", telemetry.OrgID(info.OrgID))
+			ctx, span := startPunctualLinked(ctx, engagement, info.ConversationID, "git.record_push", telemetry.OrgID(info.OrgID))
 			defer span.End()
 			recordPush(ctx, pushed)
 		},
@@ -640,7 +640,7 @@ func gitAuthorizeOutcome(dec gitproxy.Decision) string {
 // bring-up; the dispatcher then requeues the run's setup like any transient
 // setup failure. Only the executor role reaches here (bringUpRunSidecar
 // returns nil otherwise).
-func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProvisionFunc {
+func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.SidecarProvisionFunc {
 	myID, myBootEpoch := s.executorIdentity()
 	return func(provCtx context.Context, sidecarPubKeyB64 string) ([]byte, int64, error) {
 		// The awaiting-credentials park, measured from the run's side: how long
@@ -651,16 +651,16 @@ func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProv
 		// completion path, and a link would promise a 1:1 handoff that does not
 		// exist. Both sides carry conversation.id, which is the join.
 		provCtx, span := tracer.Start(provCtx, "engagement.credentials.await",
-			trace.WithAttributes(telemetry.ConversationID(runID), telemetry.OrgID(orgID)))
+			trace.WithAttributes(telemetry.ConversationID(conversationID), telemetry.OrgID(orgID)))
 		defer span.End()
 
 		// Publish the sidecar's per-run pubkey onto the claim + fire the
 		// cred_request doorbell. MarkAwaitingCredentials is the same call the
 		// old pre-sandbox gate used, now carrying the recipient key so the
 		// brain seals to it (credprovision reads claim.CredPubKey).
-		if _, err := s.runQueue.MarkAwaitingCredentials(provCtx, orgID, runID, sidecarPubKeyB64); err != nil {
+		if _, err := s.runQueue.MarkAwaitingCredentials(provCtx, orgID, conversationID, sidecarPubKeyB64); err != nil {
 			recordSpanError(span, err)
-			return nil, 0, fmt.Errorf("mark awaiting-credentials for run %s: %w", runID, err)
+			return nil, 0, fmt.Errorf("mark awaiting-credentials for run %s: %w", conversationID, err)
 		}
 
 		timeout, pollInterval := s.awaitingCredentialsKnobs()
@@ -670,9 +670,9 @@ func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProv
 		polls := 0
 		for {
 			polls++
-			b, ok, err := s.runCredentials.Get(provCtx, orgID, runID)
+			b, ok, err := s.runCredentials.Get(provCtx, orgID, conversationID)
 			if err != nil {
-				dispatchLog.Warn("read run credential bundle failed; retrying", "run", runID, "error", err)
+				dispatchLog.Warn("read run credential bundle failed; retrying", "conversation", conversationID, "error", err)
 			} else if ok && b.ExecutorID == myID && b.BootEpoch == myBootEpoch {
 				// Opaque ciphertext — the orchestrator relays it verbatim and
 				// never opens it (only the sidecar's private key can). Gate on the
@@ -695,7 +695,7 @@ func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProv
 				return nil, 0, provCtx.Err()
 			case <-ticker.C:
 				if time.Now().After(deadline) {
-					err := fmt.Errorf("timed out waiting for run %s credential bundle (brain not provisioning)", runID)
+					err := fmt.Errorf("timed out waiting for run %s credential bundle (brain not provisioning)", conversationID)
 					span.SetAttributes(telemetry.Count(polls))
 					recordSpanError(span, err)
 					return nil, 0, err

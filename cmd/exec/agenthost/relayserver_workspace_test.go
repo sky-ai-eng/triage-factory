@@ -18,7 +18,7 @@ import (
 // bring-up completes before the agent runs, so this only guards a regression in
 // that ordering.
 func TestRelayServer_CreateWorkspaceCheckout_FailsCleanWithoutProxy(t *testing.T) {
-	srv := NewRelayServer(db.Stores{}, RunInfo{OrgID: "org", RunID: "run"}, nil)
+	srv := NewRelayServer(db.Stores{}, ConversationInfo{OrgID: "org", ConversationID: "run"}, nil)
 	args, err := json.Marshal(createWorkspaceCheckoutArgs{Owner: "sky-ai-eng", Repo: "triage-factory"})
 	if err != nil {
 		t.Fatalf("marshal args: %v", err)

@@ -17,7 +17,7 @@ import (
 // react in real time.
 //
 // One sink per agentproc.Run call (initial invocation + each resume
-// own a fresh sink). The runID is captured at construction so every
+// own a fresh sink). The conversationID is captured at construction so every
 // row + broadcast is keyed correctly even when the spawner is
 // servicing many runs concurrently.
 //
@@ -30,12 +30,12 @@ import (
 // connection's transaction, which the agent subprocess would stream
 // past on the next OnMessage.
 type runSink struct {
-	spawner       *Spawner
-	orgID         string
-	runID         string
-	claimID       string
-	triggerType   string
-	creatorUserID string
+	spawner        *Spawner
+	orgID          string
+	conversationID string
+	claimID        string
+	triggerType    string
+	creatorUserID  string
 
 	// fenced records that the DB refused a transcript write because this
 	// engagement's claim is no longer live — a successor owns the
@@ -53,14 +53,14 @@ type runSink struct {
 	sessionDelivered bool
 }
 
-func newRunSink(s *Spawner, orgID, runID, claimID, triggerType, creatorUserID string) *runSink {
+func newRunSink(s *Spawner, orgID, conversationID, claimID, triggerType, creatorUserID string) *runSink {
 	return &runSink{
-		spawner:       s,
-		orgID:         orgID,
-		runID:         runID,
-		claimID:       claimID,
-		triggerType:   triggerType,
-		creatorUserID: creatorUserID,
+		spawner:        s,
+		orgID:          orgID,
+		conversationID: conversationID,
+		claimID:        claimID,
+		triggerType:    triggerType,
+		creatorUserID:  creatorUserID,
 	}
 }
 
@@ -86,7 +86,7 @@ func (k *runSink) OnSession(sessionID string) error {
 	bgCtx := context.Background()
 	switch {
 	case k.claimID != "":
-		if err := k.spawner.agentRuns.SetSessionForClaimSystem(bgCtx, k.orgID, k.runID, k.claimID, sessionID); err != nil {
+		if err := k.spawner.conversations.SetSessionForClaimSystem(bgCtx, k.orgID, k.conversationID, k.claimID, sessionID); err != nil {
 			if errors.Is(err, db.ErrClaimReleased) {
 				k.tripFence(err)
 				return err
@@ -95,16 +95,16 @@ func (k *runSink) OnSession(sessionID string) error {
 		}
 	case k.triggerType == "manual":
 		if err := k.spawner.tx.SyntheticClaimsWithTx(bgCtx, k.orgID, k.creatorUserID, func(ts db.TxStores) error {
-			return ts.Conversations.SetSession(bgCtx, k.orgID, k.runID, sessionID)
+			return ts.Conversations.SetSession(bgCtx, k.orgID, k.conversationID, sessionID)
 		}); err != nil {
 			return fmt.Errorf("persist session_id: %w", err)
 		}
 	default:
-		if err := k.spawner.agentRuns.SetSessionSystem(bgCtx, k.orgID, k.runID, sessionID); err != nil {
+		if err := k.spawner.conversations.SetSessionSystem(bgCtx, k.orgID, k.conversationID, sessionID); err != nil {
 			return fmt.Errorf("persist session_id: %w", err)
 		}
 	}
-	k.spawner.broadcastRunUpdate(k.orgID, k.runID, "running")
+	k.spawner.broadcastConversationUpdate(k.orgID, k.conversationID, "running")
 	return nil
 }
 
@@ -124,7 +124,7 @@ func (k *runSink) OnMessage(msg *domain.Message) error {
 		// The engagement writes as itself. Manual and event-triggered runs
 		// converge here: attribution rides on the claim, not on which pool
 		// the statement runs through.
-		i, ierr := k.spawner.agentRuns.InsertMessageForClaimSystem(bgCtx, k.orgID, k.claimID, msg)
+		i, ierr := k.spawner.conversations.InsertMessageForClaimSystem(bgCtx, k.orgID, k.claimID, msg)
 		if ierr != nil {
 			if errors.Is(ierr, db.ErrClaimReleased) {
 				k.tripFence(ierr)
@@ -145,14 +145,14 @@ func (k *runSink) OnMessage(msg *domain.Message) error {
 			return fmt.Errorf("insert message: %w", err)
 		}
 	default:
-		i, ierr := k.spawner.agentRuns.InsertMessageSystem(bgCtx, k.orgID, msg)
+		i, ierr := k.spawner.conversations.InsertMessageSystem(bgCtx, k.orgID, msg)
 		if ierr != nil {
 			return fmt.Errorf("insert message: %w", ierr)
 		}
 		id = i
 	}
 	msg.ID = int(id)
-	k.spawner.broadcastMessage(k.orgID, k.runID, msg)
+	k.spawner.broadcastMessage(k.orgID, k.conversationID, msg)
 	return nil
 }
 
@@ -171,10 +171,10 @@ func (k *runSink) tripFence(err error) {
 		return
 	}
 	delegateLog.Error("claim fence tripped — this executor no longer owns the conversation; abandoning the run without writing",
-		"run_id", k.runID, "claim_id", k.claimID, "org_id", k.orgID, "error", err)
+		"run_id", k.conversationID, "claim_id", k.claimID, "org_id", k.orgID, "error", err)
 	// Best-effort: no live handle means the process is already gone, which
 	// is the outcome this call was after.
-	k.spawner.getController().Cancel(k.runID)
+	k.spawner.getController().Cancel(k.conversationID)
 }
 
 // fenceTripped reports whether this engagement was fenced out mid-stream.

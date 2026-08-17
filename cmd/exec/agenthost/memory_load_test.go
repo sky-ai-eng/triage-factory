@@ -31,9 +31,9 @@ var memBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 // created_at so the read's composition and ordering are pinned. role is the
 // join row's classification (primary/produced/touched). human "" leaves
 // human_content NULL (agent-only composition).
-func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, runID, agent, human string, createdAt time.Time, role string) {
+func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, conversationID, agent, human string, createdAt time.Time, role string) {
 	t.Helper()
-	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, runID); err != nil {
+	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, conversationID); err != nil {
 		t.Fatalf("seed authoring run: %v", err)
 	}
 	var humanVal any
@@ -42,13 +42,13 @@ func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, runID, age
 	}
 	if _, err := conn.Exec(
 		`INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content, human_content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		uuid.New().String(), runID, entityID, agent, humanVal, createdAt,
+		uuid.New().String(), conversationID, entityID, agent, humanVal, createdAt,
 	); err != nil {
 		t.Fatalf("seed conversation_memory: %v", err)
 	}
 	if _, err := conn.Exec(
 		`INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role, created_at) VALUES (?, ?, ?, ?, ?)`,
-		orgID, runID, entityID, role, createdAt,
+		orgID, conversationID, entityID, role, createdAt,
 	); err != nil {
 		t.Fatalf("seed conversation_memory_entities: %v", err)
 	}
@@ -105,8 +105,8 @@ func TestLocalClient_MemoryLoad_HitComposesAndLimits(t *testing.T) {
 		t.Errorf("Memories[0].Content = %q, want the middle note (oldest dropped by the limit)", res.Memories[0].Content)
 	}
 	newest := res.Memories[1]
-	if newest.RunID != newestRun {
-		t.Errorf("Memories[1].RunID = %q, want the newest run %q", newest.RunID, newestRun)
+	if newest.ConversationID != newestRun {
+		t.Errorf("Memories[1].ConversationID = %q, want the newest run %q", newest.ConversationID, newestRun)
 	}
 	if !strings.Contains(newest.Content, "## Human feedback (post-run)") {
 		t.Errorf("newest Content = %q, want it composed with the human-feedback separator", newest.Content)
@@ -116,7 +116,7 @@ func TestLocalClient_MemoryLoad_HitComposesAndLimits(t *testing.T) {
 	}
 
 	// Loading IS an address: the reading run gets a durable touch on the entity.
-	if role := touchRole(t, conn, info.RunID, entityID); role != domain.MemoryRoleTouched {
+	if role := touchRole(t, conn, info.ConversationID, entityID); role != domain.MemoryRoleTouched {
 		t.Errorf("touch role = %q, want %q", role, domain.MemoryRoleTouched)
 	}
 }
@@ -156,7 +156,7 @@ func TestLocalClient_MemoryLoad_Miss_NoEntityNoTouch(t *testing.T) {
 	}
 	// No touch row for the reading run at all.
 	var n int
-	if err := conn.QueryRow(`SELECT count(*) FROM conversation_memory_entities WHERE conversation_id = ?`, info.RunID).Scan(&n); err != nil {
+	if err := conn.QueryRow(`SELECT count(*) FROM conversation_memory_entities WHERE conversation_id = ?`, info.ConversationID).Scan(&n); err != nil {
 		t.Fatalf("count touch rows: %v", err)
 	}
 	if n != 0 {
@@ -226,7 +226,7 @@ func TestServer_MemoryLoad_RoundTrip(t *testing.T) {
 	entityID := seedEntity(t, stores, orgID, "jira", "SKY-123", "A ticket")
 	seedAuthoringMemory(t, conn, orgID, entityID, uuid.New().String(), "prior narrative", "", memBase, domain.MemoryRolePrimary)
 
-	info := RunInfo{OrgID: orgID, TeamID: runmode.LocalDefaultTeamID, RunID: readerRun, IsEventTriggered: true}
+	info := ConversationInfo{OrgID: orgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: readerRun, IsEventTriggered: true}
 	sockPath := tempSocket(t)
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -285,7 +285,7 @@ func TestRelayRuntime_MemoryLoad_RoundTrips(t *testing.T) {
 	}
 	// The best-effort touch landed orchestrator-side (the write followed the
 	// read back over the wire's one op).
-	if role := touchRole(t, conn, info.RunID, entityID); role != domain.MemoryRoleTouched {
+	if role := touchRole(t, conn, info.ConversationID, entityID); role != domain.MemoryRoleTouched {
 		t.Errorf("relayed touch role = %q, want %q", role, domain.MemoryRoleTouched)
 	}
 }

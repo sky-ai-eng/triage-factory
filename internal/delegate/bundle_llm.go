@@ -10,7 +10,7 @@ import (
 // to resolve a delegated run's LLM material on the all/local path. Declared
 // here so tests can stub it; the production impl is *llmcred.Resolver.
 type bundleLLMResolver interface {
-	ResolveForBundle(ctx context.Context, orgID, runID string) (llmcred.Material, error)
+	ResolveForBundle(ctx context.Context, orgID, conversationID string) (llmcred.Material, error)
 }
 
 // llmResolverForRun builds the RunOptions.LLMResolver closure for a run: on
@@ -21,13 +21,13 @@ type bundleLLMResolver interface {
 // agentproc launches into the prebuilt network and never resolves credentials
 // (the sidecar holds them). A mint failure surfaces here and fails the run
 // (nothing to fall back to for a role org).
-func (s *Spawner) llmResolverForRun(orgID, runID string) func(ctx context.Context, orgID string) (map[string]string, error) {
+func (s *Spawner) llmResolverForRun(orgID, conversationID string) func(ctx context.Context, orgID string) (map[string]string, error) {
 	resolver := s.getLLMResolver()
 	if resolver == nil {
 		return nil
 	}
 	return func(ctx context.Context, _ string) (map[string]string, error) {
-		mat, err := resolver.ResolveForBundle(ctx, orgID, runID)
+		mat, err := resolver.ResolveForBundle(ctx, orgID, conversationID)
 		if err != nil {
 			return nil, err
 		}

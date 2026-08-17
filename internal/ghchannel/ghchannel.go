@@ -48,8 +48,8 @@ const shutdownTimeout = 3 * time.Second
 
 // Config is one run's channel inputs.
 type Config struct {
-	// RunID scopes the on-disk directory. Required.
-	RunID string
+	// ConversationID scopes the on-disk directory. Required.
+	ConversationID string
 
 	// Upstream is the org's real REST API base ("https://api.github.com" or a
 	// GHES "{host}/api/v3"). Empty defaults to api.github.com.
@@ -113,8 +113,8 @@ type Channel struct {
 // On any error nothing is left running and the run directory is removed —
 // callers degrade to no gh channel rather than to a half-built one.
 func Start(cfg Config) (*Channel, error) {
-	if cfg.RunID == "" {
-		return nil, fmt.Errorf("ghchannel: RunID is required")
+	if cfg.ConversationID == "" {
+		return nil, fmt.Errorf("ghchannel: ConversationID is required")
 	}
 	if cfg.BinDir == "" {
 		return nil, fmt.Errorf("ghchannel: BinDir is required")
@@ -133,7 +133,7 @@ func Start(cfg Config) (*Channel, error) {
 	if _, err := paths.StateRootErr(); err != nil {
 		return nil, fmt.Errorf("ghchannel: resolve state root: %w", err)
 	}
-	runDir := paths.GHChannelRunDir(cfg.RunID)
+	runDir := paths.GHChannelRunDir(cfg.ConversationID)
 	configDir := filepath.Join(runDir, "config")
 	// 0700 throughout: the agent runs as this same user in local mode, so the
 	// permissions are not a boundary against it — they keep the run's surface
@@ -166,7 +166,7 @@ func Start(cfg Config) (*Channel, error) {
 		Upstream:       upstream,
 		IncomingToken:  token,
 		Cert:           cert,
-		RunID:          cfg.RunID,
+		ConversationID: cfg.ConversationID,
 		TokenSource:    cfg.TokenSource,
 		Observe:        cfg.Observe,
 		ObserveWrite:   cfg.ObserveWrite,

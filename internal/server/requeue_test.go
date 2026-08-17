@@ -19,11 +19,11 @@ import (
 // pendingApprovalFixture installs the full FK chain for a task whose
 // delegated run has COMPLETED (terminal) while leaving an unresolved review
 // artifact in the approval column — a finalized pending review plus the
-// agent-side memory row. Returns (taskID, runID, reviewID). Centralized here so
+// agent-side memory row. Returns (taskID, conversationID, reviewID). Centralized here so
 // each teardown test exercises the shape the task-level resolve-all gesture is
 // meant to clean up: agent finished, wrote memory, prepared a review, the human
 // then dragged the card to Done / Queue / dismissed it instead of approving.
-func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, reviewID string) {
+func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversationID, reviewID string) {
 	t.Helper()
 	// The review-abandon path resolves a GitHub client (to delete the pending
 	// review), which is the first secret-backend resolution in some test orderings.
@@ -130,7 +130,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 func assertPendingApprovalCleanedUp(
 	t *testing.T,
 	database *sql.DB,
-	taskID, runID, reviewID string,
+	taskID, conversationID, reviewID string,
 	wantTaskStatus, wantHumanContentMarker string,
 ) {
 	t.Helper()
@@ -146,7 +146,7 @@ func assertPendingApprovalCleanedUp(
 	// The run is untouched by the resolve — it stays terminal (completed). A
 	// resolve must never flip conversations.status.
 	var runStatus string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&runStatus); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&runStatus); err != nil {
 		t.Fatalf("scan run: %v", err)
 	}
 	if runStatus != "completed" {
@@ -168,7 +168,7 @@ func assertPendingApprovalCleanedUp(
 
 	var agentContent, humanContent sql.NullString
 	if err := database.QueryRow(
-		`SELECT agent_content, human_content FROM conversation_memory WHERE conversation_id = ?`, runID,
+		`SELECT agent_content, human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID,
 	).Scan(&agentContent, &humanContent); err != nil {
 		t.Fatalf("scan conversation_memory: %v", err)
 	}
@@ -200,13 +200,13 @@ func assertPendingApprovalCleanedUp(
 	}
 	var mem *domain.TaskMemory
 	for i := range mems {
-		if mems[i].RunID == runID {
+		if mems[i].ConversationID == conversationID {
 			mem = &mems[i]
 			break
 		}
 	}
 	if mem == nil {
-		t.Fatalf("GetMemoriesForEntity returned no row for run %s after cleanup", runID)
+		t.Fatalf("GetMemoriesForEntity returned no row for run %s after cleanup", conversationID)
 	}
 	headingCount := strings.Count(mem.Content, "## Human feedback (post-run)")
 	if headingCount != 1 {
@@ -222,14 +222,14 @@ func assertPendingApprovalCleanedUp(
 // audit row should be recorded since this is a swipe undo.
 func TestHandleUndo_CleansUpPendingApprovalRun(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
 		"queued", "returned to the triage queue")
 
 	// /undo must record an 'undo' swipe_events row — that's the
@@ -252,14 +252,14 @@ func TestHandleUndo_CleansUpPendingApprovalRun(t *testing.T) {
 // gestures aren't swipes and shouldn't muddy the swipe analytics.
 func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
 		"queued", "returned to the triage queue")
 
 	// /requeue must NOT record a swipe_events row — this is a
@@ -290,7 +290,7 @@ func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
 // on the docket" from "the human walked away from this entity".
 func TestHandleSwipe_DismissCleansUpPendingApprovalRun(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/swipe",
 		map[string]any{"action": "dismiss", "hesitation_ms": 0})
@@ -298,7 +298,7 @@ func TestHandleSwipe_DismissCleansUpPendingApprovalRun(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
 		"dismissed", "dismissed the task entirely")
 }
 
@@ -316,7 +316,7 @@ func TestHandleSwipe_DismissCleansUpPendingApprovalRun(t *testing.T) {
 // from the entity entirely."
 func TestHandleSwipe_CompleteCleansUpPendingApprovalRun(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/swipe",
 		map[string]any{"action": "complete", "hesitation_ms": 0})
@@ -324,13 +324,13 @@ func TestHandleSwipe_CompleteCleansUpPendingApprovalRun(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
 		"done", "marked the task complete without submitting")
 }
 
 // TestHandleSwipe_ClaimCleansUpPendingApprovalRun guards the
 // race the PR #77 review flagged: Board's drag-Agent-to-You issues
-// /swipe claim, but the frontend's agentRuns map can be transiently
+// /swipe claim, but the frontend's conversations map can be transiently
 // empty during a fetchTasks refresh — so any frontend gating on a stale
 // run-status snapshot would silently skip the cleanup, stranding the prepared
 // review and leaving an unresolved artifact behind.
@@ -342,7 +342,7 @@ func TestHandleSwipe_CompleteCleansUpPendingApprovalRun(t *testing.T) {
 // requeue/dismiss/complete.
 func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/swipe",
 		map[string]any{"action": "claim", "hesitation_ms": 0})
@@ -354,7 +354,7 @@ func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
 	// 'queued' and claimed_by_user_id is set instead. The
 	// pending-approval cleanup invariants (run cancelled, review row
 	// removed, human_content marker) are unchanged.
-	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
 		"queued", "claimed the task to handle it themselves")
 	// Pin the claim col too — it's the actual responsibility signal
 	// post-B+.
@@ -1247,13 +1247,13 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 // never flips run lifecycle).
 func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, _ := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
 
 	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
 	var humanContentBefore sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, runID,
+		`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID,
 	).Scan(&humanContentBefore); err != nil {
 		t.Fatalf("scan after first call: %v", err)
 	}
@@ -1270,7 +1270,7 @@ func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 	if err := s.db.QueryRow(
 		`SELECT rm.human_content, r.status
 		 FROM conversation_memory rm JOIN conversations r ON r.id = rm.conversation_id
-		 WHERE rm.conversation_id = ?`, runID,
+		 WHERE rm.conversation_id = ?`, conversationID,
 	).Scan(&humanContentAfter, &runStatusAfter); err != nil {
 		t.Fatalf("scan after second call: %v", err)
 	}
@@ -1289,13 +1289,13 @@ func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 // (still pending) and the run untouched — a subsequent call retries cleanly.
 //
 // We force a failure by temporarily renaming the artifacts table — the teardown's
-// ListByRun (and the dismiss upsert) reference it by name and the whole tx rolls
+// ListByConversation (and the dismiss upsert) reference it by name and the whole tx rolls
 // back. After restoring it, a second call resolves the review.
 func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
-	// Sabotage: rename the artifacts table so the teardown's ListByRun fails with
+	// Sabotage: rename the artifacts table so the teardown's ListByConversation fails with
 	// "no such table" and the tx rolls back before any flip.
 	if _, err := s.db.Exec(`ALTER TABLE artifacts RENAME TO artifacts_temp`); err != nil {
 		t.Fatalf("rename artifacts table: %v", err)
@@ -1306,14 +1306,14 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 	// Run is untouched (it was never flipped — teardown doesn't touch run status),
 	// and human_content was rolled back with the rest of the batch.
 	var runStatus string
-	if err := s.db.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&runStatus); err != nil {
+	if err := s.db.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&runStatus); err != nil {
 		t.Fatalf("scan run after sabotaged teardown: %v", err)
 	}
 	if runStatus != "completed" {
 		t.Fatalf("run.status = %q after failure; want %q (run untouched)", runStatus, "completed")
 	}
 	var humanContent sql.NullString
-	if err := s.db.QueryRow(`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, runID).Scan(&humanContent); err != nil {
+	if err := s.db.QueryRow(`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID).Scan(&humanContent); err != nil {
 		t.Fatalf("scan conversation_memory after failure: %v", err)
 	}
 	if humanContent.Valid {
@@ -1344,13 +1344,13 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 // no INSERT-or-UPDATE branching is needed downstream).
 func TestTeardownTaskArtifacts_AgentContentNullSurvives(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, _ := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
 
 	// Force agent_content NULL to simulate a noncompliant gate
 	// (UpsertAgentMemory("") would have done this in
 	// production; we set it directly to skip the dependency).
 	if _, err := s.db.Exec(
-		`UPDATE conversation_memory SET agent_content = NULL WHERE conversation_id = ?`, runID,
+		`UPDATE conversation_memory SET agent_content = NULL WHERE conversation_id = ?`, conversationID,
 	); err != nil {
 		t.Fatalf("force null agent_content: %v", err)
 	}
@@ -1359,7 +1359,7 @@ func TestTeardownTaskArtifacts_AgentContentNullSurvives(t *testing.T) {
 
 	var agentContent, humanContent sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT agent_content, human_content FROM conversation_memory WHERE conversation_id = ?`, runID,
+		`SELECT agent_content, human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID,
 	).Scan(&agentContent, &humanContent); err != nil {
 		t.Fatalf("scan conversation_memory: %v", err)
 	}

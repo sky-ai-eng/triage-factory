@@ -160,10 +160,10 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	const executorID = "conformance-executor"
 
 	t.Run("run_queue_enqueue_and_claim", func(t *testing.T) {
-		runID := newUUID(t, h)
+		conversationID := newUUID(t, h)
 		step0 := 0
-		if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
-			ID:                 runID,
+		if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+			ID:                 conversationID,
 			TaskID:             taskID,
 			PromptID:           promptID,
 			Model:              "test-model",
@@ -172,89 +172,89 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			BlueprintRunID:     blueprintRunID,
 			BlueprintStepIndex: &step0,
 		}); err != nil {
-			t.Fatalf("RunQueue.EnqueueRun (dispatcher's own step enqueue): %v", err)
+			t.Fatalf("ConversationQueue.EnqueueConversation (dispatcher's own step enqueue): %v", err)
 		}
 
-		claimed, err := stores.RunQueue.ClaimNextRun(ctx, executorID, 1, db.ClaimPlacement{})
+		claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, executorID, 1, db.ClaimPlacement{})
 		if err != nil {
-			t.Fatalf("RunQueue.ClaimNextRun: %v", err)
+			t.Fatalf("ConversationQueue.ClaimNextConversation: %v", err)
 		}
-		if claimed == nil || claimed.ID != runID {
-			t.Fatalf("ClaimNextRun = %+v, want the just-enqueued run", claimed)
+		if claimed == nil || claimed.ID != conversationID {
+			t.Fatalf("ClaimNextConversation = %+v, want the just-enqueued run", claimed)
 		}
 
-		if err := stores.Conversations.SetExecutorSystem(ctx, orgID, runID, executorID, 1); err != nil {
+		if err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, executorID, 1); err != nil {
 			t.Errorf("Conversations.SetExecutorSystem: %v", err)
 		}
-		if _, err := stores.Conversations.ParkOpenSystem(ctx, orgID, runID, db.ParkIdle()); err != nil {
+		if _, err := stores.Conversations.ParkOpenSystem(ctx, orgID, conversationID, db.ParkIdle()); err != nil {
 			t.Errorf("Conversations.ParkOpenSystem: %v", err)
 		}
 		if _, err := stores.Conversations.InsertMessageSystem(ctx, orgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: "hello",
+			ConversationID: conversationID, Role: "assistant", Content: "hello",
 		}); err != nil {
 			t.Errorf("Conversations.InsertMessageSystem: %v", err)
 		}
-		if _, err := stores.Conversations.GetSystem(ctx, orgID, runID); err != nil {
+		if _, err := stores.Conversations.GetSystem(ctx, orgID, conversationID); err != nil {
 			t.Errorf("Conversations.GetSystem: %v", err)
 		}
-		if err := stores.Conversations.SetWorktreePathSystem(ctx, orgID, runID, "/tmp/conformance-wt"); err != nil {
+		if err := stores.Conversations.SetWorktreePathSystem(ctx, orgID, conversationID, "/tmp/conformance-wt"); err != nil {
 			t.Errorf("Conversations.SetWorktreePathSystem: %v", err)
 		}
 		// The nonzero cost exercises the terminal settle's messages UPDATE
 		// (claims SELECT + newest-row fallback) under the executor role's
 		// grant set.
-		if err := stores.Conversations.CompleteSystem(ctx, orgID, runID, "completed", 0.01, 1000, 3,
+		if err := stores.Conversations.CompleteSystem(ctx, orgID, conversationID, "completed", 0.01, 1000, 3,
 			"did the thing", "completed", "", ""); err != nil {
 			t.Errorf("Conversations.CompleteSystem: %v", err)
 		}
 
-		if _, err := stores.RunQueue.ResetProcessingRuns(ctx, executorID, 1); err != nil {
-			t.Errorf("RunQueue.ResetProcessingRuns: %v", err)
+		if _, err := stores.ConversationQueue.ResetProcessingConversations(ctx, executorID, 1); err != nil {
+			t.Errorf("ConversationQueue.ResetProcessingConversations: %v", err)
 		}
 	})
 
 	t.Run("conversation_worktrees", func(t *testing.T) {
-		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
+		conversationID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		// The registry row is seeded on the admin pool, not minted by the
 		// store: the executor's role holds SELECT and UPDATE on repositories
 		// and deliberately no INSERT, so a worktree reservation resolves the
 		// slug and never creates one. That IS part of this conformance —
 		// InsertSystem below has to reach the row through a SELECT alone.
 		SeedRepository(t, h, orgID, "octo", "repo")
-		if inserted, _, err := stores.RunWorktrees.InsertSystem(ctx, orgID, domain.RunWorktree{
-			RunID: runID, RepoID: "octo/repo", Path: "/tmp/conformance-wt", Ref: "main",
+		if inserted, _, err := stores.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
+			ConversationID: conversationID, RepoID: "octo/repo", Path: "/tmp/conformance-wt", Ref: "main",
 		}); err != nil || !inserted {
-			t.Errorf("RunWorktrees.InsertSystem: inserted=%v err=%v", inserted, err)
+			t.Errorf("ConversationWorktrees.InsertSystem: inserted=%v err=%v", inserted, err)
 		}
-		if _, err := stores.RunWorktrees.ListSystem(ctx, orgID, runID); err != nil {
-			t.Errorf("RunWorktrees.ListSystem: %v", err)
+		if _, err := stores.ConversationWorktrees.ListSystem(ctx, orgID, conversationID); err != nil {
+			t.Errorf("ConversationWorktrees.ListSystem: %v", err)
 		}
-		if err := stores.RunWorktrees.DeleteByRepoRefSystem(ctx, orgID, runID, "octo/repo", "main"); err != nil {
-			t.Errorf("RunWorktrees.DeleteByRepoRefSystem: %v", err)
+		if err := stores.ConversationWorktrees.DeleteByRepoRefSystem(ctx, orgID, conversationID, "octo/repo", "main"); err != nil {
+			t.Errorf("ConversationWorktrees.DeleteByRepoRefSystem: %v", err)
 		}
 	})
 
 	t.Run("artifacts", func(t *testing.T) {
-		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
+		conversationID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		art, err := stores.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
-			ConversationID: runID, TeamID: teamID, Provider: "github", Kind: "pull_request",
-			Target: "octo/repo#1", State: "open", DedupKey: "conformance-" + runID,
+			ConversationID: conversationID, TeamID: teamID, Provider: "github", Kind: "pull_request",
+			Target: "octo/repo#1", State: "open", DedupKey: "conformance-" + conversationID,
 		})
 		if err != nil {
 			t.Fatalf("Artifacts.UpsertSystem: %v", err)
 		}
-		if _, err := stores.Artifacts.ListByRunSystem(ctx, orgID, runID); err != nil {
-			t.Errorf("Artifacts.ListByRunSystem: %v", err)
+		if _, err := stores.Artifacts.ListByConversationSystem(ctx, orgID, conversationID); err != nil {
+			t.Errorf("Artifacts.ListByConversationSystem: %v", err)
 		}
 		_ = art
 	})
 
 	t.Run("conversation_memory", func(t *testing.T) {
-		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
-		if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, runID, entityID, blueprintRunID, "agent narrative"); err != nil {
+		conversationID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
+		if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, entityID, blueprintRunID, "agent narrative"); err != nil {
 			t.Errorf("TaskMemory.UpsertAgentMemorySystem: %v", err)
 		}
-		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, runID, entityID, domain.MemoryRolePrimary); err != nil {
+		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, domain.MemoryRolePrimary); err != nil {
 			t.Errorf("TaskMemory.RecordEntityTouchSystem: %v", err)
 		}
 		if _, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, teamID); err != nil {
@@ -266,10 +266,10 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("external_actions", func(t *testing.T) {
-		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
+		conversationID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		if err := stores.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 			TeamID: teamID, Provider: "jira", Action: "status_transition", Target: "SKY-1",
-			ConversationID: runID, Credential: "org", ToState: "In Progress",
+			ConversationID: conversationID, Credential: "org", ToState: "In Progress",
 		}); err != nil {
 			t.Errorf("ExternalActions.RecordSystem: %v", err)
 		}
@@ -305,13 +305,13 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("staged_injections", func(t *testing.T) {
-		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
+		conversationID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		if err := stores.StagedInjections.AppendSystem(ctx, orgID, &domain.StagedInjection{
-			RunID: runID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "new commits landed",
+			ConversationID: conversationID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "new commits landed",
 		}); err != nil {
 			t.Fatalf("StagedInjections.AppendSystem: %v", err)
 		}
-		if _, err := stores.StagedInjections.FlushPendingSystem(ctx, orgID, runID); err != nil {
+		if _, err := stores.StagedInjections.FlushPendingSystem(ctx, orgID, conversationID); err != nil {
 			t.Errorf("StagedInjections.FlushPendingSystem: %v", err)
 		}
 	})
@@ -325,39 +325,39 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("conversation_signals", func(t *testing.T) {
-		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
+		conversationID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		var sigID int64
 		if err := h.AdminDB.QueryRowContext(ctx, `
 			INSERT INTO conversation_signals (org_id, conversation_id, kind, target) VALUES ($1, $2, 'interrupt', $3) RETURNING id
-		`, orgID, runID, executorID).Scan(&sigID); err != nil {
+		`, orgID, conversationID, executorID).Scan(&sigID); err != nil {
 			t.Fatalf("seed conversation_signals: %v", err)
 		}
-		sigs, err := stores.RunSignals.ListUnackedForTarget(ctx, executorID)
+		sigs, err := stores.ConversationSignals.ListUnackedForTarget(ctx, executorID)
 		if err != nil {
-			t.Fatalf("RunSignals.ListUnackedForTarget: %v", err)
+			t.Fatalf("ConversationSignals.ListUnackedForTarget: %v", err)
 		}
 		if len(sigs) == 0 {
 			t.Fatalf("ListUnackedForTarget returned no rows, want the seeded signal")
 		}
-		if err := stores.RunSignals.Ack(ctx, sigID, "ok"); err != nil {
-			t.Errorf("RunSignals.Ack: %v", err)
+		if err := stores.ConversationSignals.Ack(ctx, sigID, "ok"); err != nil {
+			t.Errorf("ConversationSignals.Ack: %v", err)
 		}
 	})
 
 	t.Run("run_pending_input", func(t *testing.T) {
-		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
+		conversationID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		// Pending input is an undelivered plain user message on the
 		// conversation's own transcript now.
 		MustExec(t, h.AdminDB, `
 			INSERT INTO messages (conversation_id, org_id, user_id, role, content, subtype, delivered)
 			VALUES ($1, $2, $3, 'user', 'resume this', '', false)
-		`, runID, orgID, userID)
-		msg, _, ok, err := stores.RunPendingInput.Peek(ctx, orgID, runID)
+		`, conversationID, orgID, userID)
+		msg, _, ok, err := stores.ConversationPendingInput.Peek(ctx, orgID, conversationID)
 		if err != nil || !ok || msg == "" {
-			t.Fatalf("RunPendingInput.Peek: msg=%q ok=%v err=%v", msg, ok, err)
+			t.Fatalf("ConversationPendingInput.Peek: msg=%q ok=%v err=%v", msg, ok, err)
 		}
-		if _, _, ok, err := stores.RunPendingInput.Consume(ctx, orgID, runID); err != nil || !ok {
-			t.Errorf("RunPendingInput.Consume: ok=%v err=%v", ok, err)
+		if _, _, ok, err := stores.ConversationPendingInput.Consume(ctx, orgID, conversationID); err != nil || !ok {
+			t.Errorf("ConversationPendingInput.Consume: ok=%v err=%v", ok, err)
 		}
 	})
 
@@ -387,11 +387,11 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Blueprints.ActiveRunForTaskSystem(ctx, orgID, taskID); err != nil {
 			t.Errorf("Blueprints.ActiveRunForTaskSystem: %v", err)
 		}
-		if _, err := stores.Blueprints.RunsForBlueprintSystem(ctx, orgID, blueprintRunID); err != nil {
-			t.Errorf("Blueprints.RunsForBlueprintSystem: %v", err)
+		if _, err := stores.Blueprints.ConversationsForBlueprintSystem(ctx, orgID, blueprintRunID); err != nil {
+			t.Errorf("Blueprints.ConversationsForBlueprintSystem: %v", err)
 		}
-		if _, err := stores.Blueprints.ActiveStepRunIDsSystem(ctx, orgID, blueprintRunID); err != nil {
-			t.Errorf("Blueprints.ActiveStepRunIDsSystem: %v", err)
+		if _, err := stores.Blueprints.ActiveStepConversationIDsSystem(ctx, orgID, blueprintRunID); err != nil {
+			t.Errorf("Blueprints.ActiveStepConversationIDsSystem: %v", err)
 		}
 		if err := stores.Blueprints.SetRunCurrentStepSystem(ctx, orgID, blueprintRunID, 1); err != nil {
 			t.Errorf("Blueprints.SetRunCurrentStepSystem: %v", err)
@@ -464,29 +464,29 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("claim_credentials", func(t *testing.T) {
-		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
+		conversationID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		// The brain seals + writes bundles on its own pool (supabase_admin,
 		// never tf_system); seed the active claim + its bundle directly via
 		// AdminDB so this subtest isolates the executor's read side —
-		// RunCredentials.Get (a claims ⋈ claim_credentials SELECT), which the
+		// ClaimCredentials.Get (a claims ⋈ claim_credentials SELECT), which the
 		// awaiting-credentials wait polls.
 		var claimID string
 		if err := h.AdminDB.QueryRowContext(ctx, `
 			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch)
 			VALUES ($1, $2, $3, 1) RETURNING id
-		`, orgID, runID, executorID).Scan(&claimID); err != nil {
+		`, orgID, conversationID, executorID).Scan(&claimID); err != nil {
 			t.Fatalf("seed claim: %v", err)
 		}
 		MustExec(t, h.AdminDB, `
 			INSERT INTO claim_credentials (claim_id, org_id, executor_id, boot_epoch, sealed)
 			VALUES ($1, $2, $3, 1, $4)
 		`, claimID, orgID, executorID, []byte("sealed-bytes"))
-		_, ok, err := stores.RunCredentials.Get(ctx, orgID, runID)
+		_, ok, err := stores.ClaimCredentials.Get(ctx, orgID, conversationID)
 		if err != nil {
-			t.Fatalf("RunCredentials.Get: %v", err)
+			t.Fatalf("ClaimCredentials.Get: %v", err)
 		}
 		if !ok {
-			t.Errorf("RunCredentials.Get: ok=false, want the seeded bundle")
+			t.Errorf("ClaimCredentials.Get: ok=false, want the seeded bundle")
 		}
 	})
 
@@ -547,21 +547,21 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 }
 
 // seedQueuedRun mints a fresh conversations row via the tf_system-backed
-// RunQueue.EnqueueRun (the same INSERT the dispatcher's reactor performs
+// ConversationQueue.EnqueueConversation (the same INSERT the dispatcher's reactor performs
 // for every subsequent blueprint step), so each subtest below gets its
 // own run without re-running the claim subtest's side effects.
 func seedQueuedRun(t *testing.T, h *Harness, stores db.Stores, ctx context.Context, orgID, taskID, promptID, blueprintRunID string) string {
 	t.Helper()
-	runID := newUUID(t, h)
+	conversationID := newUUID(t, h)
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
-		ID: runID, TaskID: taskID, PromptID: promptID, Model: "test-model",
+	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "test-model",
 		TriggerType: "manual", CreatorUserID: "", BlueprintRunID: blueprintRunID,
 		BlueprintStepIndex: &step0,
 	}); err != nil {
-		t.Fatalf("seedQueuedRun EnqueueRun: %v", err)
+		t.Fatalf("seedQueuedRun EnqueueConversation: %v", err)
 	}
-	return runID
+	return conversationID
 }
 
 func newUUID(t *testing.T, h *Harness) string {

@@ -30,7 +30,7 @@ import (
 // by design).
 //
 // The per-task firing gate is composed at the call site (router)
-// from HasPendingForTask here + ConversationStore.HasActiveAutoRunForTask
+// from HasPendingForTask here + ConversationStore.HasActiveAutoConversationForTask
 // — strict ownership rather than threading a runs-shaped predicate
 // through this store.
 type PendingFiringsStore interface {
@@ -108,12 +108,12 @@ type PendingFiringsStore interface {
 	RequeueStaleDraining(ctx context.Context, orgID string, before time.Time) (int, error)
 
 	// MarkFired transitions a 'draining' firing to 'fired' and records the
-	// blueprint_run that resulted from it (runID is a blueprint_run id — the
+	// blueprint_run that resulted from it (conversationID is a blueprint_run id — the
 	// firing unit — which fired_run_id FKs to blueprint_runs). Guarded by
 	// status='draining' — only a row PopForTask actually claimed can be
 	// resolved this way — so a stray call against a 'pending' or already-
 	// terminal row is a no-op rather than a silent double-transition.
-	MarkFired(ctx context.Context, orgID string, firingID int64, runID string) error
+	MarkFired(ctx context.Context, orgID string, firingID int64, conversationID string) error
 
 	// MarkSkipped transitions a 'draining' firing to 'skipped_stale'
 	// with a reason describing a definitive stale outcome (task
@@ -125,7 +125,7 @@ type PendingFiringsStore interface {
 
 	// HasPendingForTask returns true iff the task has any
 	// pending_firings row in 'pending' OR 'draining' status. The router
-	// composes this with ConversationStore.HasActiveAutoRunForTask to
+	// composes this with ConversationStore.HasActiveAutoConversationForTask to
 	// enforce FIFO drainage — a new firing must queue behind older
 	// queued rows OR an active auto run on the same task. 'draining'
 	// counts as queued intent: a drain mid-flight (popped but not yet

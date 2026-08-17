@@ -11,12 +11,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedRunAction appends one external action to runID on the local-default
+// seedRunAction appends one external action to conversationID on the local-default
 // org/team. RecordSystem mirrors how the exec choke point records a bot run's
 // writes in production.
-func seedRunAction(t *testing.T, s *Server, runID string, a domain.ExternalAction) {
+func seedRunAction(t *testing.T, s *Server, conversationID string, a domain.ExternalAction) {
 	t.Helper()
-	a.ConversationID = runID
+	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	if err := sqlitestore.New(s.db).ExternalActions.RecordSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
@@ -31,15 +31,15 @@ func seedRunAction(t *testing.T, s *Server, runID string, a domain.ExternalActio
 // were these read as a run that did nothing.
 func TestHandleAgentActions(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "acts", "completed")
+	conversationID := seedSteerRun(t, s.db, "acts", "completed")
 
-	seedRunAction(t, s, runID, domain.ExternalAction{
+	seedRunAction(t, s, conversationID, domain.ExternalAction{
 		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionCommentPosted,
 		Target: "octo/repo#42", ExternalID: "777",
 		URL:        "https://github.com/octo/repo/pull/42#discussion_r777",
 		Credential: domain.CredentialGitHubApp, DetailJSON: `{"in_reply_to":555}`,
 	})
-	seedRunAction(t, s, runID, domain.ExternalAction{
+	seedRunAction(t, s, conversationID, domain.ExternalAction{
 		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionGHChannelWrite,
 		Target: "octo/repo", Credential: domain.CredentialGitHubPAT,
 		DetailJSON: `{"method":"PUT","path":"/repos/octo/repo/pulls/42/merge","http_status":404,"attempted":"pr_merged"}`,
@@ -52,7 +52,7 @@ func TestHandleAgentActions(t *testing.T) {
 	})
 
 	page := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
-		"/api/agent/conversations/"+runID+"/actions/list", map[string]any{}))
+		"/api/agent/conversations/"+conversationID+"/actions/list", map[string]any{}))
 	got := page.Items
 	if len(got) != 2 || page.Total() != 2 {
 		t.Fatalf("returned %d actions (total %d), want 2/2 (the other run's must not appear)",
@@ -94,8 +94,8 @@ func TestHandleAgentActions(t *testing.T) {
 // "no external actions yet" off it, which is itself an answer.
 func TestHandleAgentActions_Empty(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "noacts", "completed")
-	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/"+runID+"/actions/list", map[string]any{})
+	conversationID := seedSteerRun(t, s.db, "noacts", "completed")
+	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/"+conversationID+"/actions/list", map[string]any{})
 	page := decodeList[map[string]any](t, rec)
 	if len(page.Items) != 0 || page.Total() != 0 {
 		t.Errorf("empty run actions = %+v (total %d), want an empty page", page.Items, page.Total())
@@ -122,17 +122,17 @@ func TestHandleAgentActions_RunNotFound(t *testing.T) {
 // nothing at all.
 func TestHandleAgentActions_CorruptDetails(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "badacts", "completed")
-	seedRunAction(t, s, runID, domain.ExternalAction{
+	conversationID := seedSteerRun(t, s.db, "badacts", "completed")
+	seedRunAction(t, s, conversationID, domain.ExternalAction{
 		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionGHChannelWrite,
 		Target: "octo/repo", Credential: domain.CredentialGitHubApp,
 	})
-	if _, err := s.db.Exec(`UPDATE external_actions SET detail_json='{not valid json' WHERE conversation_id=?`, runID); err != nil {
+	if _, err := s.db.Exec(`UPDATE external_actions SET detail_json='{not valid json' WHERE conversation_id=?`, conversationID); err != nil {
 		t.Fatalf("corrupt detail: %v", err)
 	}
 
 	got := decodeList[map[string]any](t, doJSON(t, s, http.MethodPost,
-		"/api/agent/conversations/"+runID+"/actions/list", map[string]any{})).Items
+		"/api/agent/conversations/"+conversationID+"/actions/list", map[string]any{})).Items
 	if len(got) != 1 {
 		t.Fatalf("returned %d actions, want 1", len(got))
 	}

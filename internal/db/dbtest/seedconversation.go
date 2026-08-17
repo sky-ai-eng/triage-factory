@@ -12,7 +12,7 @@ import (
 
 // SeedConversation inserts a conversations row directly via raw SQLite SQL so
 // test fixtures outside internal/db can seed an agent run in any state.
-// Production mints conversation rows through RunQueueStore.EnqueueRun (there
+// Production mints conversation rows through ConversationQueueStore.EnqueueConversation (there
 // is no store-level Create), but most tests only need a row to hang
 // messages / artifacts / claims off — this helper is that fixture door.
 //

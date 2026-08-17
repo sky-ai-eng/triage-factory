@@ -46,15 +46,15 @@ import (
 //
 // The artifact passed must carry its post-resolution State (the handlers hand us
 // the flipped copy), so domain.ArtifactResolutionNote renders the right shape.
-func (s *Spawner) InjectArtifactNote(orgID, runID string, a domain.Artifact) bool {
+func (s *Spawner) InjectArtifactNote(orgID, conversationID string, a domain.Artifact) bool {
 	note := domain.ArtifactResolutionNote(a)
 	if note == "" {
 		return false // not one of the four reported resolution states
 	}
-	if s.getProc(runID) == nil {
+	if s.getProc(conversationID) == nil {
 		return false
 	}
-	s.deliverInjectionLive(orgID, runID, domain.WrapSystemNote(note))
+	s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(note))
 	return true
 }
 
@@ -71,11 +71,11 @@ func (s *Spawner) InjectArtifactNote(orgID, runID string, a domain.Artifact) boo
 // steer, and a steer that races the process closing is tolerated — the artifact
 // note re-derives via the ledger on resume, the staged injection re-fires on the next
 // head change.
-func (s *Spawner) deliverInjectionLive(orgID, runID, wrapped string) {
+func (s *Spawner) deliverInjectionLive(orgID, conversationID, wrapped string) {
 	go func() {
-		s.recordInjectedNote(orgID, runID, wrapped)
-		if err := s.Steer(context.Background(), runID, wrapped); err != nil {
-			delegateLog.Warn("deliver injection live: steer failed", "run", runID, "error", err)
+		s.recordInjectedNote(orgID, conversationID, wrapped)
+		if err := s.Steer(context.Background(), conversationID, wrapped); err != nil {
+			delegateLog.Warn("deliver injection live: steer failed", "conversation", conversationID, "error", err)
 		}
 	}()
 }
@@ -99,18 +99,18 @@ func (s *Spawner) deliverInjectionLive(orgID, runID, wrapped string) {
 // outside the human set renders as a system marker instead of an operator
 // line — so the tag is what keeps this from being attributed to whoever is
 // reading the screen.
-func (s *Spawner) recordInjectedNote(orgID, runID, content string) {
-	if s.agentRuns == nil {
+func (s *Spawner) recordInjectedNote(orgID, conversationID, content string) {
+	if s.conversations == nil {
 		return
 	}
-	msg := &domain.Message{ConversationID: runID, Role: "user", Subtype: "system_note", Content: content}
-	id, err := s.agentRuns.InsertMessageSystem(context.Background(), orgID, msg)
+	msg := &domain.Message{ConversationID: conversationID, Role: "user", Subtype: "system_note", Content: content}
+	id, err := s.conversations.InsertMessageSystem(context.Background(), orgID, msg)
 	if err != nil {
-		delegateLog.Warn("record injected artifact note failed", "run", runID, "error", err)
+		delegateLog.Warn("record injected artifact note failed", "conversation", conversationID, "error", err)
 		return
 	}
 	msg.ID = int(id)
-	s.broadcastMessage(orgID, runID, msg)
+	s.broadcastMessage(orgID, conversationID, msg)
 }
 
 // artifactLedgerForResume derives the bundled <system-note> block to prepend ahead
@@ -144,20 +144,20 @@ func (s *Spawner) recordInjectedNote(orgID, runID, content string) {
 //
 // Any read error degrades to "" — feedback never blocks a resume.
 func (s *Spawner) artifactLedgerForResume(ctx context.Context, orgID string, run *domain.Conversation) string {
-	if s.artifacts == nil || s.agentRuns == nil || run == nil {
+	if s.artifacts == nil || s.conversations == nil || run == nil {
 		return ""
 	}
-	watermark, ok, err := s.agentRuns.LastAgentActivityAtSystem(ctx, orgID, run.ID)
+	watermark, ok, err := s.conversations.LastAgentActivityAtSystem(ctx, orgID, run.ID)
 	if err != nil {
-		delegateLog.Warn("artifact ledger: read last-activity watermark failed", "run", run.ID, "error", err)
+		delegateLog.Warn("artifact ledger: read last-activity watermark failed", "conversation", run.ID, "error", err)
 		return ""
 	}
 	if !ok {
 		watermark = run.StartedAt
 	}
-	arts, err := s.artifacts.ListByRunSystem(ctx, orgID, run.ID)
+	arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, run.ID)
 	if err != nil {
-		delegateLog.Warn("artifact ledger: list artifacts failed", "run", run.ID, "error", err)
+		delegateLog.Warn("artifact ledger: list artifacts failed", "conversation", run.ID, "error", err)
 		return ""
 	}
 	resolved := make([]domain.Artifact, 0, len(arts))

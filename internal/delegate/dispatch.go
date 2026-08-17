@@ -52,7 +52,7 @@ const DefaultRunScanInterval = 2 * time.Second
 
 // WakeDispatcher is the exported form of wakeDispatcher, for callers outside
 // this package — the tf_wake NOTIFY listener (internal/app, TFAC-586) nudges
-// the dispatcher the moment a cross-process EnqueueRun/resume-enqueue lands,
+// the dispatcher the moment a cross-process EnqueueConversation/resume-enqueue lands,
 // instead of waiting out the scan interval backstop.
 func (s *Spawner) WakeDispatcher() {
 	s.wakeDispatcher()
@@ -75,10 +75,10 @@ func (s *Spawner) wakeDispatcher() {
 // worker. On boot it reconciles conversations/blueprint_runs stranded by a
 // crash, then
 // claims queued steps and drives each through runAgent + the reactor until ctx
-// is cancelled. A nil RunQueueStore makes this a logged no-op.
+// is cancelled. A nil ConversationQueueStore makes this a logged no-op.
 func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration) {
 	if s.runQueue == nil {
-		dispatchLog.Warn("run-queue dispatcher not started: no RunQueueStore wired")
+		dispatchLog.Warn("run-queue dispatcher not started: no ConversationQueueStore wired")
 		return
 	}
 
@@ -119,9 +119,9 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	//
 	// Ownership-scoped (TFAC-578): this only sweeps rows this instance itself
 	// claimed during an earlier boot (executorIdentity()), never a live
-	// sibling's claimed/running work — see RunQueueStore.ResetProcessingRuns.
+	// sibling's claimed/running work — see ConversationQueueStore.ResetProcessingConversations.
 	executorID, bootEpoch := s.executorIdentity()
-	n, err := s.runQueue.ResetProcessingRuns(ctx, executorID, bootEpoch)
+	n, err := s.runQueue.ResetProcessingConversations(ctx, executorID, bootEpoch)
 	if err != nil {
 		dispatchLog.Error("boot reconcile: reset in-flight runs failed", "error", err)
 		return
@@ -131,7 +131,7 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	}
 
 	// Mirror sweep for the opposite desync — child runs left
-	// non-terminal under an already-terminal blueprint_run. ResetProcessingRuns
+	// non-terminal under an already-terminal blueprint_run. ResetProcessingConversations
 	// above only requeues under a *running* parent, so these orphans are
 	// invisible to it; left alone, an orphan still reading as claimable keeps
 	// the dispatcher on phantom work and pins its feature branch in a worktree, requeuing any
@@ -217,7 +217,7 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 			}
 		}
 		executorID, bootEpoch := s.executorIdentity()
-		run, err := s.runQueue.ClaimNextRun(ctx, executorID, bootEpoch, s.claimPlacement())
+		run, err := s.runQueue.ClaimNextConversation(ctx, executorID, bootEpoch, s.claimPlacement())
 		if err != nil {
 			<-sem
 			dispatchLog.Warn("claim next run failed; retrying on the next scan", "error", err)
@@ -333,16 +333,16 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	if !blueprintDrivableForClaim(br, run.BlueprintStepIndex) {
 		closeGate(engagementCancelled, nil)
 		s.endEngagement(run.ID, engagementCancelled)
-		if _, mErr := s.agentRuns.ParkOpenForClaimSystem(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, db.ParkStopped(domain.ParkReasonBlueprintCancelled, "Blueprint cancelled by user")); errors.Is(mErr, db.ErrClaimReleased) {
+		if _, mErr := s.conversations.ParkOpenForClaimSystem(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, db.ParkStopped(domain.ParkReasonBlueprintCancelled, "Blueprint cancelled by user")); errors.Is(mErr, db.ErrClaimReleased) {
 			// This claim was released before it disposed of its own step, so
 			// a successor holds the run now. Everything below acts on it —
 			// consuming its pending input, broadcasting its state, finalizing
 			// its blueprint — so none of it runs.
 			dispatchLog.Error("claim fence refused the raced-cancel park — a successor owns this conversation; recording nothing",
-				"run", run.ID, "claim_id", run.ClaimID, "org_id", orgID, "error", mErr)
+				"conversation", run.ID, "claim_id", run.ClaimID, "org_id", orgID, "error", mErr)
 			return
 		} else if mErr != nil {
-			dispatchLog.Warn("park raced-cancel step failed", "run", run.ID, "error", mErr)
+			dispatchLog.Warn("park raced-cancel step failed", "conversation", run.ID, "error", mErr)
 		}
 		// This claim won't run the agent, so whatever was queued for it must
 		// not survive to be mis-delivered on a later reclaim — discard it.
@@ -352,10 +352,10 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 		// silently drop turns from a cancelled-then-restarted conversation.
 		if s.pendingInput != nil && run.Runtime != domain.ConversationRuntimeNative {
 			if _, _, _, cErr := s.pendingInput.Consume(context.WithoutCancel(ctx), orgID, run.ID); cErr != nil {
-				dispatchLog.Warn("clear pending input for raced-cancel step failed", "run", run.ID, "error", cErr)
+				dispatchLog.Warn("clear pending input for raced-cancel step failed", "conversation", run.ID, "error", cErr)
 			}
 		}
-		s.broadcastRunUpdate(orgID, run.ID, "open")
+		s.broadcastConversationUpdate(orgID, run.ID, "open")
 		if br.Status == domain.BlueprintRunStatusRunning {
 			cfg := runConfig{orgID: orgID, teamID: run.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != "" && task.EntitySource == "github"}
 			s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime, cfg,
@@ -384,7 +384,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// conversation to a path that resumes a Claude session it never had.
 	if s.pendingInput != nil && run.Runtime != domain.ConversationRuntimeNative {
 		if msg, userID, ok, perr := s.pendingInput.Peek(gateCtx, orgID, run.ID); perr != nil {
-			dispatchLog.Warn("peek pending input failed; falling through to the blueprint-step path", "run", run.ID, "error", perr)
+			dispatchLog.Warn("peek pending input failed; falling through to the blueprint-step path", "conversation", run.ID, "error", perr)
 		} else if ok {
 			// The resume path is this same engagement continuing, so it keeps
 			// the root: its own bring-up and rehydrate become children of it.
@@ -406,12 +406,12 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 		if br.Status != domain.BlueprintRunStatusRunning {
 			closeGate(engagementNoMessage, nil)
 			s.endEngagement(run.ID, engagementNoMessage)
-			if _, mErr := s.agentRuns.ParkOpenForClaimSystem(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, db.ParkIdle()); mErr != nil {
-				dispatchLog.Warn("park message-less follow-up claim failed", "run", run.ID, "error", mErr)
+			if _, mErr := s.conversations.ParkOpenForClaimSystem(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, db.ParkIdle()); mErr != nil {
+				dispatchLog.Warn("park message-less follow-up claim failed", "conversation", run.ID, "error", mErr)
 			}
 			dispatchLog.Warn("follow-up claim on a finished blueprint carried no message; parked without running the step",
-				"run", run.ID, "blueprint_run", br.ID, "org_id", orgID)
-			s.broadcastRunUpdate(orgID, run.ID, "open")
+				"conversation", run.ID, "blueprint_run", br.ID, "org_id", orgID)
+			s.broadcastConversationUpdate(orgID, run.ID, "open")
 			return
 		}
 	}
@@ -543,7 +543,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 			return
 		}
 		if err := skills.RemoveStagedSkills(cfg.skillsSourcePath); err != nil {
-			dispatchLog.Warn("remove staged step skill failed", "run", run.ID, "step", stepIdx, "error", err)
+			dispatchLog.Warn("remove staged step skill failed", "conversation", run.ID, "step", stepIdx, "error", err)
 		}
 		if agentproc.WillSandbox() {
 			removeStagedMemory(sandbox.TrustedMemorySourcePath(run.ID))
@@ -563,7 +563,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	mission := buildBlueprintStepWrapperPrompt(*task, step, stepPrompt, slug, len(plan), nextStepName)
 
 	toast.Info(s.wsHub, orgID, fmt.Sprintf("Blueprint step %d/%d: %s (%s)",
-		stepIdx+1, len(plan), truncateToastMsg(stepPrompt.Name, 60), shortRunID(run.ID)))
+		stepIdx+1, len(plan), truncateToastMsg(stepPrompt.Name, 60), shortConversationID(run.ID)))
 
 	// Per-step cancel handle so CancelBlueprint can SIGKILL the active subprocess.
 	stepCtx, stepCancel := context.WithCancel(ctx)
@@ -641,23 +641,23 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// WithoutCancel rather than Background: it drops cancellation exactly as
 	// before while keeping the engagement's span context, so the terminal
 	// bookkeeping still lands in the run's own trace.
-	stepRun, err := s.agentRuns.GetSystem(context.WithoutCancel(ctx), orgID, run.ID)
-	if err != nil || stepRun == nil {
+	stepConversation, err := s.conversations.GetSystem(context.WithoutCancel(ctx), orgID, run.ID)
+	if err != nil || stepConversation == nil {
 		s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime, cfg,
 			domain.BlueprintRunStatusFailed, fmt.Sprintf("read step %d run after agent: %v", stepIdx, err), &stepIdx, false)
 		return
 	}
-	// stepRun loses OrgID/Attempts through Get; carry the claim's identity fields
+	// stepConversation loses OrgID/Attempts through Get; carry the claim's identity fields
 	// the reactor needs (trigger type, creator, org) and the authoritative model
 	// (stable across the blueprint) so the next enqueued step inherits it.
-	stepRun.OrgID = orgID
-	stepRun.TriggerType = run.TriggerType
-	stepRun.CreatorUserID = run.CreatorUserID
-	stepRun.Model = run.Model
+	stepConversation.OrgID = orgID
+	stepConversation.TriggerType = run.TriggerType
+	stepConversation.CreatorUserID = run.CreatorUserID
+	stepConversation.Model = run.Model
 	// Same predicate reactToStepTerminal uses to leave the blueprint running: an
 	// `open` step is dormant, not done, so its staged skill stays for the resume.
-	stepParked = stepRun.Status == "open"
-	s.reactToStepTerminal(ctx, orgID, br, *stepRun, cfg, startTime)
+	stepParked = stepConversation.Status == "open"
+	s.reactToStepTerminal(ctx, orgID, br, *stepConversation, cfg, startTime)
 }
 
 // dispatchResumeClaim delivers a resume-by-enqueue claim's durably-recorded
@@ -680,7 +680,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	// disposed/defer pair exactly (see git history), just relocated to
 	// the claim path.
 	//
-	// The failure exits below assign it from failRun's fenced result, which
+	// The failure exits below assign it from failConversation's fenced result, which
 	// is the second reason to skip the re-finalize and a stronger one: a
 	// refused terminal means a successor engagement owns this conversation,
 	// so finalizing its blueprint would terminate work that is still running.
@@ -707,7 +707,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 
 	if run.SessionID == "" || run.WorktreePath == "" || run.Model == "" {
 		s.failEngagement(run.ID, errors.New("resume: claimed run missing session/worktree/model"))
-		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "resume: claimed run missing session/worktree/model", domain.RunFailureUnclassified)
+		disposed = s.failConversation(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "resume: claimed run missing session/worktree/model", domain.ConversationFailureUnclassified)
 		return
 	}
 
@@ -738,10 +738,10 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		stepCancel()
 	}()
 	if stepCtx.Err() != nil {
-		// No workspace rehydrated yet, so markRunOpen (the no-snapshot park)
-		// rather than parkRunOpen: there is nothing on disk to capture.
+		// No workspace rehydrated yet, so markConversationOpen (the no-snapshot park)
+		// rather than parkConversationOpen: there is nothing on disk to capture.
 		s.endEngagementIfStopped(run.ID, ctx, stepCtx)
-		disposed = s.markRunOpen(ctx, resumeParkContext(orgID, run, task, userID))
+		disposed = s.markConversationOpen(ctx, resumeParkContext(orgID, run, task, userID))
 		return
 	}
 
@@ -764,7 +764,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 			return
 		}
 		if msg, uid, ok, cErr := s.pendingInput.Consume(ctx, orgID, run.ID); cErr != nil {
-			dispatchLog.Warn("consume pending input before delivery failed", "run", run.ID, "error", cErr)
+			dispatchLog.Warn("consume pending input before delivery failed", "conversation", run.ID, "error", cErr)
 		} else if ok && msg != "" {
 			agentMessage = msg
 			if uid != "" {
@@ -787,7 +787,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 			// A stop, not a failure: cause is whatever the bring-up was doing
 			// when the cancel landed, which is not why this engagement ended.
 			s.endEngagementIfStopped(run.ID, ctx, stepCtx)
-			disposed = s.markRunOpen(ctx, resumeParkContext(orgID, run, task, userID))
+			disposed = s.markConversationOpen(ctx, resumeParkContext(orgID, run, task, userID))
 			return
 		}
 		s.failEngagement(run.ID, cause)
@@ -846,9 +846,9 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	if !sessionTranscriptExists(resumeCwd, run.SessionID) {
 		s.failEngagement(run.ID, errors.New("resume: session transcript did not survive"))
 		flushPendingInput()
-		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID,
+		disposed = s.failConversation(orgID, run.ID, task.ID, run.ClaimID, "manual", userID,
 			"This run's chat session could not be restored (its transcript did not survive — most often the executor was restarted or rebuilt), so the conversation can't be resumed. Start a new request to continue this work.",
-			domain.RunFailureSessionLost)
+			domain.ConversationFailureSessionLost)
 		return
 	}
 
@@ -887,15 +887,15 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		// the work survives the gesture.
 		park := resumeParkContext(orgID, run, task, userID)
 		park.namespace, park.claudeCwd = namespace, resumeCwd
-		disposed = s.parkRunOpen(ctx, park, run.SessionID)
+		disposed = s.parkConversationOpen(ctx, park, run.SessionID)
 		return
 	}
 	if rerr != nil {
-		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "resume failed: "+rerr.Error(), classifyFailureKind(rerr))
+		disposed = s.failConversation(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "resume failed: "+rerr.Error(), classifyFailureKind(rerr))
 		return
 	}
 	if outcome.Completion == nil {
-		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "resume produced no completion", domain.RunFailureNoResult)
+		disposed = s.failConversation(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "resume produced no completion", domain.ConversationFailureNoResult)
 		return
 	}
 
@@ -930,13 +930,13 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 // snapshotting — see the two call sites, which differ on exactly that.
 func resumeParkContext(orgID string, run *domain.Conversation, task *domain.Task, userID string) liveParkContext {
 	return liveParkContext{
-		orgID:         orgID,
-		runID:         run.ID,
-		taskID:        task.ID,
-		triggerType:   "manual",
-		creatorUserID: userID,
-		claimID:       run.ClaimID,
-		reason:        db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+		orgID:          orgID,
+		conversationID: run.ID,
+		taskID:         task.ID,
+		triggerType:    "manual",
+		creatorUserID:  userID,
+		claimID:        run.ClaimID,
+		reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
 	}
 }
 
@@ -947,18 +947,18 @@ func resumeParkContext(orgID string, run *domain.Conversation, task *domain.Task
 // open→leave parked — now driven by the DB rather than a
 // goroutine stack. It calls recomputeTaskBoardColumn on every transition so the
 // board stays live under the queue model.
-func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *domain.BlueprintRun, stepRun domain.Conversation, cfg runConfig, startTime time.Time) {
+func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *domain.BlueprintRun, stepConversation domain.Conversation, cfg runConfig, startTime time.Time) {
 	// The reactor's writes are detached on purpose (see dispatchClaimedRun's
 	// context split): the agent has run, so the blueprint MUST be advanced or
 	// finalized even if the dispatcher is shutting down. WithoutCancel is that
 	// same detachment with the caller's values kept, so the advance lands in
 	// the engagement's trace rather than as an unattributed orphan.
 	ctx = context.WithoutCancel(ctx)
-	triggerType := stepRun.TriggerType
-	creatorUserID := stepRun.CreatorUserID
+	triggerType := stepConversation.TriggerType
+	creatorUserID := stepConversation.CreatorUserID
 	stepIdx := 0
-	if stepRun.BlueprintStepIndex != nil {
-		stepIdx = *stepRun.BlueprintStepIndex
+	if stepConversation.BlueprintStepIndex != nil {
+		stepIdx = *stepConversation.BlueprintStepIndex
 	}
 
 	// Sequence-level cancel: a cancel requested while the step was running ends
@@ -987,9 +987,9 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 	// blueprint out from under it — none of it recoverable by a later pass. The
 	// claim gate refuses such a step; this is the far-side re-check, which
 	// catches an engagement already in flight when it did.
-	if !isCurrentBlueprintStep(br, stepRun.BlueprintStepIndex) {
+	if !isCurrentBlueprintStep(br, stepConversation.BlueprintStepIndex) {
 		dispatchLog.Error("reactor: terminal from a step the blueprint has moved past; ignoring it (no advance, no enqueue, no transition)",
-			"blueprint_run", br.ID, "run", stepRun.ID, "step", stepRun.BlueprintStepIndex, "current_step", br.CurrentStepIndex, "status", stepRun.Status)
+			"blueprint_run", br.ID, "conversation", stepConversation.ID, "step", stepConversation.BlueprintStepIndex, "current_step", br.CurrentStepIndex, "status", stepConversation.Status)
 		return
 	}
 	if br.CancelRequested {
@@ -1004,16 +1004,16 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 	// step that queued a draft PR / pending review completes normally and the
 	// orchestrator advances — the artifact is a sidecar, surfaced via the
 	// derived approval column below.
-	if stepRun.Status == "open" {
-		dispatchLog.Info("blueprint_run step paused; blueprint remains running", "blueprint_run", br.ID, "step", stepIdx, "status", stepRun.Status)
+	if stepConversation.Status == "open" {
+		dispatchLog.Info("blueprint_run step paused; blueprint remains running", "blueprint_run", br.ID, "step", stepIdx, "status", stepConversation.Status)
 		s.recomputeTaskBoardColumn(orgID, br.TaskID)
 		return
 	}
 
-	switch stepRun.Status {
+	switch stepConversation.Status {
 	case "failed":
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
-			domain.BlueprintRunStatusFailed, "step "+stepRun.Status, &stepIdx, false)
+			domain.BlueprintRunStatusFailed, "step "+stepConversation.Status, &stepIdx, false)
 		return
 	case "completed":
 		// fall through to the outcome decision below
@@ -1026,7 +1026,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		// Failing the blueprint here is how a successor's liveness got read as
 		// this engagement's corruption, unrecoverably.
 		dispatchLog.Error("reactor: the step's re-read shows a successor's state, not this engagement's terminal; writing no blueprint transition",
-			"blueprint_run", br.ID, "run", stepRun.ID, "step", stepIdx, "status", stepRun.Status)
+			"blueprint_run", br.ID, "conversation", stepConversation.ID, "step", stepIdx, "status", stepConversation.Status)
 		return
 	}
 
@@ -1040,7 +1040,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		return
 	}
 	isFinal := stepIdx >= len(plan)-1
-	decision, abortReason := blueprintDecisionForStepRun(stepRun.Outcome, isFinal)
+	decision, abortReason := blueprintDecisionForStepConversation(stepConversation.Outcome, isFinal)
 	switch decision {
 	case blueprintStepAdvance:
 		next := stepIdx + 1
@@ -1057,7 +1057,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		if err := s.blueprints.SetRunCurrentStepSystem(ctx, orgID, br.ID, next); err != nil {
 			dispatchLog.Warn("set current_step_index for blueprint_run failed", "blueprint_run", br.ID, "error", err)
 		}
-		if err := s.enqueueBlueprintStep(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepModelOrInherit(plan[next].Model, stepRun.Model), triggerType, br.TriggerID, creatorUserID, br.ActorAgentID); err != nil {
+		if err := s.enqueueBlueprintStep(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepModelOrInherit(plan[next].Model, stepConversation.Model), triggerType, br.TriggerID, creatorUserID, br.ActorAgentID); err != nil {
 			s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 				domain.BlueprintRunStatusFailed, fmt.Sprintf("enqueue step %d: %v", next, err), &stepIdx, false)
 			return
@@ -1073,7 +1073,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 	case blueprintStepAbort:
 		reason := abortReason
 		if reason == "" {
-			reason = stepRun.OutcomeReason
+			reason = stepConversation.OutcomeReason
 		}
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 			domain.BlueprintRunStatusAborted, reason, &stepIdx, false)
@@ -1153,16 +1153,16 @@ func stepModelOrInherit(stepModel, inherited string) string {
 // multi-step chain on the leftover conversations_event_trigger_fence index.
 func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunID string, task domain.Task, step domain.BlueprintStep, model, triggerType, triggerID, creatorUserID, actorAgentID string) error {
 	stepIdx := step.StepIndex
-	runID := uuid.New().String()
+	conversationID := uuid.New().String()
 	// Placement stamp (TFAC-587): the rendezvous winner for this run's
 	// (org, repo) key, computed over live registry members here on the
 	// enqueuing pod. Recomputed on every step (step 0 from Delegate, each
 	// advance from the reactor) so it re-stamps against current membership
 	// and never outlives one queue dwell. Empty = no affinity (placement off,
 	// non-repo task, or a failed read) → the claim treats it as unowned.
-	preferred := s.preferredExecutorFor(ctx, orgID, task, runID)
-	return s.runQueue.EnqueueRun(ctx, orgID, domain.Conversation{
-		ID:                  runID,
+	preferred := s.preferredExecutorFor(ctx, orgID, task, conversationID)
+	return s.runQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+		ID:                  conversationID,
 		TaskID:              task.ID,
 		PromptID:            step.StepPromptID,
 		Model:               model,
@@ -1284,7 +1284,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	// conversation this executor no longer has any standing to describe.
 	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, cfg.wtPath); err != nil && !errors.Is(err, db.ErrClaimReleased) {
 		dispatchLog.Warn("set worktree_path for blueprint step failed; a follow-up to this conversation will be refused",
-			"run", run.ID, "blueprint_run", br.ID, "error", err)
+			"conversation", run.ID, "blueprint_run", br.ID, "error", err)
 	}
 	return cfg, nil
 }
@@ -1311,19 +1311,19 @@ func parseGitHubTask(task domain.Task) (owner, repo string, prNumber int) {
 // first launch), while an un-jailed one keeps the released behavior of a
 // `.claude/skills` directory inside the worktree.
 //
-// runID is the step's own conversation id — the staging key, which is what makes
+// conversationID is the step's own conversation id — the staging key, which is what makes
 // each launch's mount hold exactly that step's skill.
-func (s *Spawner) materializeStepSkill(cfg *runConfig, runID, slug string, stepPrompt *domain.Prompt, brief string) error {
+func (s *Spawner) materializeStepSkill(cfg *runConfig, conversationID, slug string, stepPrompt *domain.Prompt, brief string) error {
 	if !agentproc.WillSandbox() {
 		// Wipe first so step N+1 doesn't inherit step N's SKILL.md from the shared
 		// worktree. Non-fatal, exactly as before: a stale sibling skill is a
 		// discovery nuisance, a failed blueprint is not.
 		if err := skills.WipeBlueprintSkills(cfg.wtPath); err != nil {
-			dispatchLog.Warn("wipe skills failed", "run", runID, "error", err)
+			dispatchLog.Warn("wipe skills failed", "conversation", conversationID, "error", err)
 		}
 		return skills.MaterializeStepSkill(cfg.wtPath, slug, stepPrompt, brief)
 	}
-	dir := sandbox.TrustedSkillsSourcePath(runID)
+	dir := sandbox.TrustedSkillsSourcePath(conversationID)
 	if err := skills.StageStepSkill(dir, slug, stepPrompt, brief); err != nil {
 		return err
 	}
@@ -1331,7 +1331,7 @@ func (s *Spawner) materializeStepSkill(cfg *runConfig, runID, slug string, stepP
 	return nil
 }
 
-// stagedStepSkillsSource returns runID's step-skill staging dir when one is
+// stagedStepSkillsSource returns conversationID's step-skill staging dir when one is
 // still on disk, else "". A resume re-invokes the agent in the same conversation
 // and deliberately runs none of the blueprint-step machinery, so it re-mounts
 // whatever the step's original claim staged rather than re-deriving the step
@@ -1339,11 +1339,11 @@ func (s *Spawner) materializeStepSkill(cfg *runConfig, runID, slug string, stepP
 // it, or after a startup sweep — the resumed agent continues from its transcript
 // without the skill file; the mount is a discovery convenience, not the
 // conversation's state.
-func stagedStepSkillsSource(runID string) string {
-	if runID == "" || !agentproc.WillSandbox() {
+func stagedStepSkillsSource(conversationID string) string {
+	if conversationID == "" || !agentproc.WillSandbox() {
 		return ""
 	}
-	dir := sandbox.TrustedSkillsSourcePath(runID)
+	dir := sandbox.TrustedSkillsSourcePath(conversationID)
 	if _, err := os.Stat(dir); err != nil {
 		return ""
 	}
@@ -1372,7 +1372,7 @@ type engagementDisposition struct {
 // Every one of those is infrastructure, and infrastructure fails
 // transiently: a broker restart, an exhausted subnet, stale runsc state, a
 // host briefly out of memory. So the answer is another attempt, through the
-// claim itself — RequeueRun releases the claim 'requeued', the conversation
+// claim itself — RequeueConversation releases the claim 'requeued', the conversation
 // stays claimable, and the next scan re-drives it a couple of seconds later.
 // Everything the engagement would have needed is untouched by construction,
 // because nothing tore it down: the workspace snapshot, the worktree, the
@@ -1391,9 +1391,9 @@ func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, r
 	if run.Attempts >= maxRunAttempts {
 		return s.disposeOfExhaustedRun(orgID, br, run, cause)
 	}
-	dispatchLog.Warn("engagement failed before the agent ran, requeuing", "run", run.ID, "attempt", run.Attempts, "error", cause)
-	if err := s.runQueue.RequeueRun(context.Background(), orgID, run.ID, cause.Error()); err != nil {
-		dispatchLog.Warn("requeue run after a pre-agent failure failed", "run", run.ID, "error", err)
+	dispatchLog.Warn("engagement failed before the agent ran, requeuing", "conversation", run.ID, "attempt", run.Attempts, "error", cause)
+	if err := s.runQueue.RequeueConversation(context.Background(), orgID, run.ID, cause.Error()); err != nil {
+		dispatchLog.Warn("requeue run after a pre-agent failure failed", "conversation", run.ID, "error", err)
 	}
 	return true
 }
@@ -1421,11 +1421,11 @@ func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, r
 func (s *Spawner) disposeOfExhaustedRun(orgID string, br *domain.BlueprintRun, run domain.Conversation, cause error) (survived bool) {
 	if br == nil || s.conversationHasTranscript(orgID, run.ID) {
 		dispatchLog.Error("the runtime failed to start on every attempt; parking the conversation instead of failing it",
-			"run", run.ID, "attempts", run.Attempts, "error", cause)
+			"conversation", run.ID, "attempts", run.Attempts, "error", cause)
 		s.parkAfterLaunchExhaustion(orgID, run, cause)
 		return true
 	}
-	dispatchLog.Error("workspace setup failed after attempts; failing blueprint", "run", run.ID, "attempts", run.Attempts, "error", cause)
+	dispatchLog.Error("workspace setup failed after attempts; failing blueprint", "conversation", run.ID, "attempts", run.Attempts, "error", cause)
 	s.terminateBlueprint(orgID, br.ID, run.TaskID, run.TriggerType, run.CreatorUserID, time.Now(),
 		runConfig{orgID: orgID, teamID: run.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
 		domain.BlueprintRunStatusFailed, cause.Error(), run.BlueprintStepIndex, false)
@@ -1440,14 +1440,14 @@ func (s *Spawner) disposeOfExhaustedRun(orgID string, br *domain.BlueprintRun, r
 // symmetric: treating a live conversation as fresh destroys its workspace and
 // fails its blueprint, while treating a fresh one as live costs a park nobody
 // resumes and a task that has to be re-fired by hand.
-func (s *Spawner) conversationHasTranscript(orgID, runID string) bool {
-	if s.agentRuns == nil {
+func (s *Spawner) conversationHasTranscript(orgID, conversationID string) bool {
+	if s.conversations == nil {
 		return false
 	}
-	rows, err := s.agentRuns.ListForAssemblySystem(context.Background(), orgID, runID)
+	rows, err := s.conversations.ListForAssemblySystem(context.Background(), orgID, conversationID)
 	if err != nil {
 		dispatchLog.Warn("read transcript to decide an exhausted run's disposition failed; treating it as work in progress",
-			"run", runID, "error", err)
+			"conversation", conversationID, "error", err)
 		return true
 	}
 	return len(rows) > 0
@@ -1473,7 +1473,7 @@ func (s *Spawner) conversationHasTranscript(orgID, runID string) bool {
 func (s *Spawner) parkAfterLaunchExhaustion(orgID string, run domain.Conversation, cause error) {
 	bgCtx := context.Background()
 	note := fmt.Sprintf("The runtime failed to start after %d attempts: %s. Send a message to retry.", run.Attempts, cause)
-	if _, err := s.agentRuns.InsertMessageForClaimSystem(bgCtx, orgID, run.ClaimID, &domain.Message{
+	if _, err := s.conversations.InsertMessageForClaimSystem(bgCtx, orgID, run.ClaimID, &domain.Message{
 		ConversationID: run.ID,
 		UserID:         run.CreatorUserID,
 		Role:           "user",
@@ -1482,28 +1482,28 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, run domain.Conversatio
 	}); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			dispatchLog.Error("claim fence refused the launch-failure note — a successor owns this conversation; recording nothing",
-				"run", run.ID, "claim_id", run.ClaimID, "org_id", orgID)
+				"conversation", run.ID, "claim_id", run.ClaimID, "org_id", orgID)
 			return
 		}
-		dispatchLog.Warn("record launch-failure note failed; the park still lands", "run", run.ID, "error", err)
+		dispatchLog.Warn("record launch-failure note failed; the park still lands", "conversation", run.ID, "error", err)
 	}
 	if s.pendingInput != nil {
 		if _, _, _, err := s.pendingInput.Consume(bgCtx, orgID, run.ID); err != nil {
-			dispatchLog.Warn("settle pending input before parking a run that could not start failed", "run", run.ID, "error", err)
+			dispatchLog.Warn("settle pending input before parking a run that could not start failed", "conversation", run.ID, "error", err)
 		}
 	}
-	if _, err := s.agentRuns.ParkOpenForClaimSystem(bgCtx, orgID, run.ID, run.ClaimID, db.ParkStopped(domain.ParkReasonLaunchFailed, "")); err != nil {
+	if _, err := s.conversations.ParkOpenForClaimSystem(bgCtx, orgID, run.ID, run.ClaimID, db.ParkStopped(domain.ParkReasonLaunchFailed, "")); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			dispatchLog.Error("claim fence refused the park after a launch failure — a successor owns this conversation",
-				"run", run.ID, "claim_id", run.ClaimID, "org_id", orgID)
+				"conversation", run.ID, "claim_id", run.ClaimID, "org_id", orgID)
 			return
 		}
-		dispatchLog.Warn("park run that could not start failed", "run", run.ID, "error", err)
+		dispatchLog.Warn("park run that could not start failed", "conversation", run.ID, "error", err)
 		return
 	}
-	s.broadcastRunUpdate(orgID, run.ID, "open")
+	s.broadcastConversationUpdate(orgID, run.ID, "open")
 	s.recomputeTaskBoardColumn(orgID, run.TaskID)
-	toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s could not start: %s", shortRunID(run.ID), truncateToastMsg(cause.Error(), 160)))
+	toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s could not start: %s", shortConversationID(run.ID), truncateToastMsg(cause.Error(), 160)))
 }
 
 // failClaimedRun marks an orphaned claimed run failed (its blueprint_run
@@ -1511,15 +1511,15 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, run domain.Conversatio
 // claim like every other terminal an engagement writes: if the claim is gone,
 // a successor holds the run and reaches this same branch itself.
 func (s *Spawner) failClaimedRun(orgID string, run *domain.Conversation, reason string) {
-	dispatchLog.Error("marking run failed", "run", run.ID, "reason", reason)
-	_, err := s.agentRuns.MarkFailedIfActiveForClaimSystem(context.Background(), orgID, run.ID, run.ClaimID, "")
+	dispatchLog.Error("marking run failed", "conversation", run.ID, "reason", reason)
+	_, err := s.conversations.MarkFailedIfActiveForClaimSystem(context.Background(), orgID, run.ID, run.ClaimID, "")
 	if errors.Is(err, db.ErrClaimReleased) {
 		dispatchLog.Error("claim fence refused the orphaned-run terminal — a successor owns this conversation; recording nothing",
-			"run", run.ID, "claim_id", run.ClaimID, "org_id", orgID, "error", err)
+			"conversation", run.ID, "claim_id", run.ClaimID, "org_id", orgID, "error", err)
 		return
 	}
 	if err != nil {
-		dispatchLog.Warn("mark orphaned run failed", "run", run.ID, "error", err)
+		dispatchLog.Warn("mark orphaned run failed", "conversation", run.ID, "error", err)
 	}
 }
 
@@ -1574,7 +1574,7 @@ func (s *Spawner) driveClaimedCuratorTurn(run *domain.Conversation) {
 // releasing the claim is the whole requeue, since the conversation is
 // mid-flight and still holds its undelivered turn.
 func (s *Spawner) releaseCuratorClaim(run *domain.Conversation, reason string) {
-	if err := s.runQueue.RequeueRun(context.Background(), run.OrgID, run.ID, reason); err != nil {
+	if err := s.runQueue.RequeueConversation(context.Background(), run.OrgID, run.ID, reason); err != nil {
 		dispatchLog.Warn("release curator claim failed", "conversation", run.ID, "error", err)
 	}
 }

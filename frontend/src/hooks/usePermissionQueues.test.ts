@@ -119,14 +119,14 @@ describe('usePermissionQueues', () => {
     expect(result.current.queues[RUN]).toBeUndefined()
   })
 
-  it('drops a run’s queue on dropRun', async () => {
+  it('drops a run’s queue on dropConversation', async () => {
     stubPermissions([{ ok: true, body: [prompt('toolu_1')] }])
     const { result } = renderHook(() => usePermissionQueues())
 
     act(() => result.current.refresh(RUN))
     await waitFor(() => expect(result.current.queues[RUN]).toHaveLength(1))
 
-    act(() => result.current.dropRun(RUN))
+    act(() => result.current.dropConversation(RUN))
     expect(result.current.queues[RUN]).toBeUndefined()
   })
 })

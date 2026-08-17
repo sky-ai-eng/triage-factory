@@ -140,7 +140,7 @@ func seedEntityEventTask(t *testing.T, conn *sql.DB, suffix string) *domain.Task
 }
 
 // TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip protects the 16-column
-// SELECT/Scan pair in RunsForBlueprint against silent column-order drift.
+// SELECT/Scan pair in ConversationsForBlueprint against silent column-order drift.
 func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints
@@ -180,9 +180,9 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
 		insertConversationForTest(t, conn, run)
 	}
 
-	runs, err := blueprints.RunsForBlueprint(ctx, org, "blueprint-run-rt")
+	runs, err := blueprints.ConversationsForBlueprint(ctx, org, "blueprint-run-rt")
 	if err != nil {
-		t.Fatalf("RunsForBlueprint: %v", err)
+		t.Fatalf("ConversationsForBlueprint: %v", err)
 	}
 	if len(runs) != 2 {
 		t.Fatalf("expected 2 runs, got %d", len(runs))
@@ -473,7 +473,7 @@ func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
 // TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome pins the
 // channel that replaced the old per-step verdict: a step run's terminal
 // conversations.outcome (and outcome_reason) round-trips through
-// RunsForBlueprint, which is what the run-detail handler renders and what
+// ConversationsForBlueprint, which is what the run-detail handler renders and what
 // the orchestrator advances on.
 func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
 	conn := openSQLiteForTest(t)
@@ -505,12 +505,12 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
 		t.Fatalf("complete step run: %v", err)
 	}
 
-	runs, err := blueprints.RunsForBlueprint(ctx, org, "op-blueprint-run")
+	runs, err := blueprints.ConversationsForBlueprint(ctx, org, "op-blueprint-run")
 	if err != nil {
-		t.Fatalf("RunsForBlueprint: %v", err)
+		t.Fatalf("ConversationsForBlueprint: %v", err)
 	}
 	if len(runs) != 1 {
-		t.Fatalf("RunsForBlueprint returned %d runs, want 1", len(runs))
+		t.Fatalf("ConversationsForBlueprint returned %d runs, want 1", len(runs))
 	}
 	if runs[0].Outcome != "continue" {
 		t.Errorf("step run outcome = %q, want continue (the orchestrator advances on this)", runs[0].Outcome)

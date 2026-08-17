@@ -60,9 +60,9 @@ const DefaultSocketPath = "/run/tf.sock"
 // silently misbehaving.
 const ProtocolVersion = 1
 
-// RunInfo is what LookupRun returns. Carries the routing-relevant
+// ConversationInfo is what LookupRun returns. Carries the routing-relevant
 // fields a subcommand needs to know about its own run — orgID for
-// every per-row read, userID for the synthetic-claims tx path, RunID
+// every per-row read, userID for the synthetic-claims tx path, ConversationID
 // for the foreign-key columns on writes, TeamID for the artifact
 // writers' NOT-NULL team_id stamp, and IsEventTriggered for any
 // caller that still wants to branch on routing shape (most don't,
@@ -80,10 +80,10 @@ const ProtocolVersion = 1
 // Mirrors runident.RunIdentity but lives in this package so the IPC
 // wire shape doesn't depend on runident's import graph (runident
 // imports db, which we don't want every IPC consumer dragging in).
-type RunInfo struct {
+type ConversationInfo struct {
 	OrgID            string `json:"org_id"`
 	UserID           string `json:"user_id"`
-	RunID            string `json:"run_id"`
+	ConversationID   string `json:"run_id"`
 	TeamID           string `json:"team_id"`
 	IsEventTriggered bool   `json:"is_event_triggered"`
 
@@ -169,7 +169,7 @@ type MemoryLoadResult struct {
 // spawn-time materializer composes it (agent content + a
 // "## Human feedback (post-run)" separator).
 type MemoryLoadEntry struct {
-	RunID          string    `json:"run_id"`
+	ConversationID string    `json:"run_id"`
 	BlueprintRunID string    `json:"blueprint_run_id,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	Content        string    `json:"content"`
@@ -192,7 +192,7 @@ type Client interface {
 	// run map; LocalClient resolves from TRIAGE_FACTORY_CONVERSATION_ID at
 	// construction time. Idempotent and cheap — the LocalClient
 	// returns its cached value, the IPCClient does one round-trip.
-	LookupRun(ctx context.Context) (RunInfo, error)
+	LookupRun(ctx context.Context) (ConversationInfo, error)
 
 	// --- review draft finalization (gh pr finalize-review) ---
 	//
@@ -238,10 +238,10 @@ type Client interface {
 	// gate `workspace add` applies (alongside the org-configured check) so it
 	// only materializes repos the proxy will then authorize pushes to.
 	TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error)
-	GetRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.RunWorktree, error)
-	ListRunWorktrees(ctx context.Context) ([]domain.RunWorktree, error)
-	InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (inserted bool, winningPath string, err error)
-	DeleteRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) error
+	GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error)
+	ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error)
+	InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (inserted bool, winningPath string, err error)
+	DeleteConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) error
 
 	// WorkspaceRoots returns the run root in both path namespaces: hostRoot is
 	// the directory as the HOST filesystem knows it (what conversation_worktrees rows

@@ -554,7 +554,7 @@ func (s *curatorStore) RevertTurnContext(ctx context.Context, orgID, conversatio
 // --- Boot sweeps ---
 //
 // Finding a claimable curator turn lives on the ONE claim loop
-// (RunQueueStore.ClaimNextRun), not here.
+// (ConversationQueueStore.ClaimNextConversation), not here.
 
 // CancelStrandedTurnsForHomeSystem is inert in SQLite (local uses the global
 // CancelOrphanedTurnsSystem boot sweep), but implemented for symmetry. An
@@ -777,7 +777,7 @@ func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID 
 	})
 }
 
-// importCuratorMessage mirrors agentRunStore.InsertMessage's column
+// importCuratorMessage mirrors conversationStore.InsertMessage's column
 // handling for a bundle row (delivered/window_state/seq preserved rather
 // than defaulted — a compacted or seq-overridden message must not reappear
 // active in assembly after a round-trip).

@@ -328,7 +328,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		Repo:    repo,
 		Number:  number,
 		Details: details,
-		Footer:  agentmeta.Build(ah.agentRuns, orgID, fresh.ConversationID, "review"),
+		Footer:  agentmeta.Build(ah.conversations, orgID, fresh.ConversationID, "review"),
 		WebBase: func() string {
 			base, baseErr := ah.ghResolver.BaseURLFor(cleanupCtx, orgID)
 			if baseErr != nil {
@@ -431,9 +431,9 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	if fresh.ConversationID != "" {
 		humanContent := FormatHumanFeedback(buildReviewHumanFeedbackInput(details, details.StagedComments))
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, fresh.ConversationID, humanContent)
+			return tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, fresh.ConversationID, humanContent)
 		}); err != nil {
-			artifactsLog.Warn("failed to record human verdict", "run", fresh.ConversationID, "error", err)
+			artifactsLog.Warn("failed to record human verdict", "conversation", fresh.ConversationID, "error", err)
 		}
 	}
 

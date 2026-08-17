@@ -24,12 +24,12 @@ import (
 
 // giveRunResumeState fills in the fields an SDK resume re-invokes a session
 // with, so the refusal ladder reaches the blueprint rungs under test.
-func giveRunResumeState(t *testing.T, database *sql.DB, runID string) {
+func giveRunResumeState(t *testing.T, database *sql.DB, conversationID string) {
 	t.Helper()
 	if _, err := database.Exec(
 		`UPDATE conversations SET sdk_session_id = ?, worktree_path = ? WHERE id = ?`,
-		"sess-"+runID, "/tmp/wt-"+runID, runID); err != nil {
-		t.Fatalf("give %s resume state: %v", runID, err)
+		"sess-"+conversationID, "/tmp/wt-"+conversationID, conversationID); err != nil {
+		t.Fatalf("give %s resume state: %v", conversationID, err)
 	}
 }
 
@@ -65,10 +65,10 @@ func TestFollowUp_ConcludedStepOfARunningBlueprintIsRefused(t *testing.T) {
 
 	// The reactor, a beat later, finds exactly the terminal this engagement
 	// wrote — so the blueprint advances and step 1 is enqueued.
-	stepRun := loadRun(t, s, run0)
-	stepRun.TriggerType = "manual"
-	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	stepConversation := loadRun(t, s, run0)
+	stepConversation.TriggerType = "manual"
+	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
 	if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
 		t.Fatalf("queued step runs = %v, want [1] — the next step must run", q)
@@ -97,10 +97,10 @@ func TestFollowUp_FinalStepAfterTheBlueprintFinishesStillLands(t *testing.T) {
 	s, database, brID, _, run0 := reactorFixture(t, "handoff-final", 1, "completed", "finish")
 	giveRunResumeState(t, database, run0)
 
-	stepRun := loadRun(t, s, run0)
-	stepRun.TriggerType = "manual"
-	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	stepConversation := loadRun(t, s, run0)
+	stepConversation.TriggerType = "manual"
+	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 	if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusCompleted {
 		t.Fatalf("blueprint status = %q, want completed before the follow-up", br.Status)
 	}
@@ -142,10 +142,10 @@ func TestFollowUp_StopResumeOfAMidBlueprintStepStillLands(t *testing.T) {
 		`UPDATE conversations SET status = 'completed', outcome = 'continue' WHERE id = ?`, run0); err != nil {
 		t.Fatalf("conclude the resumed step: %v", err)
 	}
-	stepRun := loadRun(t, s, run0)
-	stepRun.TriggerType = "manual"
-	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	stepConversation := loadRun(t, s, run0)
+	stepConversation.TriggerType = "manual"
+	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
 	if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
 		t.Fatalf("queued step runs = %v, want [1] — a resumed step's conclusion still advances", q)
@@ -179,7 +179,7 @@ func TestProcessCompletion_SnapshotLandsBeforeTheTerminalCommits(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
-	s, database, runID, taskID := setupAdvanceFixture(t, "snap-order")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "snap-order")
 
 	blobs, err := storage.New()
 	if err != nil {
@@ -189,10 +189,10 @@ func TestProcessCompletion_SnapshotLandsBeforeTheTerminalCommits(t *testing.T) {
 	var puts int
 	s.SetStorage(putHookStorage{Storage: blobs, before: func(string) {
 		puts++
-		statusAtPut = storedStatus(t, database, runID)
+		statusAtPut = storedStatus(t, database, conversationID)
 	}})
 
-	s.processCompletion(ctx, org, runID, "seedbpr-"+runID, "", loadTask(t, s, taskID),
+	s.processCompletion(ctx, org, conversationID, "seedbpr-"+conversationID, "", loadTask(t, s, taskID),
 		res(`{"outcome":"finish","summary":"done"}`), t.TempDir(), nil, "sess-snap-order", "event", "")
 
 	if puts != 1 {
@@ -201,7 +201,7 @@ func TestProcessCompletion_SnapshotLandsBeforeTheTerminalCommits(t *testing.T) {
 	if statusAtPut == "completed" {
 		t.Errorf("the conversation already read completed while the snapshot was still being written; a wake in that window resumes a torn blob")
 	}
-	if st := storedStatus(t, database, runID); st != "completed" {
+	if st := storedStatus(t, database, conversationID); st != "completed" {
 		t.Errorf("stored status = %q, want completed once both writes are done", st)
 	}
 }
@@ -216,10 +216,10 @@ func TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot(t *testing.T
 	paths.SetForTest(t, t.TempDir())
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
-	s, database, runID, taskID := setupAdvanceFixture(t, "snap-wake")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "snap-wake")
 	// A blueprint that already finished — the follow-up-on-concluded-work
 	// shape, where a turn's conclusion advances nothing.
-	settleRunBlueprint(t, database, runID, "completed")
+	settleRunBlueprint(t, database, conversationID, "completed")
 
 	blobs, err := storage.New()
 	if err != nil {
@@ -232,18 +232,18 @@ func TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot(t *testing.T
 	writeSession(t, cwd, sessionID, `{"type":"summary"}`)
 	writeFile(t, filepath.Join(cwd, "_tfac", "ci-logs", "build.log"), "the turn's work")
 
-	s.processCompletion(ctx, org, runID, "seedbpr-"+runID, "", loadTask(t, s, taskID),
+	s.processCompletion(ctx, org, conversationID, "seedbpr-"+conversationID, "", loadTask(t, s, taskID),
 		res(`{"outcome":"finish","summary":"done"}`), cwd, nil, sessionID, "event", "")
 
 	// The wake a person can fire the instant the status flips.
-	if err := s.SendMessage(ctx, org, runID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
+	if err := s.SendMessage(ctx, org, conversationID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
 		t.Fatalf("follow-up immediately after the conclusion: %v", err)
 	}
-	if st := storedStatus(t, database, runID); st != "" {
+	if st := storedStatus(t, database, conversationID); st != "" {
 		t.Errorf("stored status = %q, want none — the follow-up re-queued the row", st)
 	}
 
-	members := snapshotMembers(t, blobs, snapshotKey(org, "seedbpr-"+runID))
+	members := snapshotMembers(t, blobs, snapshotKey(org, "seedbpr-"+conversationID))
 	for _, want := range []string{snapSession, snapScratchPrefix + "ci-logs/build.log"} {
 		if !members[want] {
 			t.Errorf("snapshot member %q missing; the resume this follow-up queued would rehydrate an incomplete workspace (members: %v)", want, members)

@@ -154,7 +154,7 @@ func TestDriveLiveRun_ProcessExitCarriesResult(t *testing.T) {
 
 // TestDriveLiveRun_ProcessExitCarriesErr is the crash half of the proc.Done()
 // branch: an exit with no result surfaces the process error so the caller
-// routes through failRun.
+// routes through failConversation.
 func TestDriveLiveRun_ProcessExitCarriesErr(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	proc := newFakeLiveProc("sess")
@@ -176,7 +176,7 @@ func TestDriveLiveRun_ProcessExitCarriesErr(t *testing.T) {
 // its process and parks to `open`, keeping the worktree.
 func TestDriveLiveRun_IdleHibernates(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-idle", "sess-idle", "/tmp/wt-idle")
+	seedConversation(t, database, "r-idle", "sess-idle", "/tmp/wt-idle")
 	markEngaged(t, database, "r-idle")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
@@ -186,7 +186,7 @@ func TestDriveLiveRun_IdleHibernates(t *testing.T) {
 	}
 	proc := newFakeLiveProc("sess-idle")
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrgID, runID: "r-idle", taskID: taskID,
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-idle", taskID: taskID,
 		namespace: "seedbpr-r-idle", claudeCwd: "/tmp/wt-idle",
 		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
 	}
@@ -380,7 +380,7 @@ func TestDriveLiveRun_InvalidThenValidReturns(t *testing.T) {
 // records the conclusion via processCompletion, not here).
 func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-none", "sess-none", "/tmp/wt-none")
+	seedConversation(t, database, "r-none", "sess-none", "/tmp/wt-none")
 	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-none'`); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
 	results <- want
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrgID, runID: "r-none", taskID: taskID,
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-none", taskID: taskID,
 		namespace: "seedbpr-r-none", claudeCwd: "/tmp/wt-none",
 		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
 	}
@@ -421,7 +421,7 @@ func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
 // loop survived the pause.
 func TestDriveLiveRun_InterruptParksOpenNotTerminal(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-pause", "sess-pause", "/tmp/wt-pause")
+	seedConversation(t, database, "r-pause", "sess-pause", "/tmp/wt-pause")
 	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-pause'`); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestDriveLiveRun_InterruptParksOpenNotTerminal(t *testing.T) {
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
 	results <- want
 	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrgID, runID: "r-pause", taskID: taskID,
+		orgID: runmode.LocalDefaultOrgID, conversationID: "r-pause", taskID: taskID,
 		namespace: "seedbpr-r-pause", claudeCwd: "/tmp/wt-pause",
 		triggerType: "manual", creatorUserID: runmode.LocalDefaultUserID,
 	}
@@ -466,7 +466,7 @@ func TestDriveLiveRun_ErrorWithoutInterruptStaysTerminal(t *testing.T) {
 	r := &agentproc.Result{IsError: true, Subtype: "error_during_execution"}
 	results <- r
 
-	out := s.driveLiveRun(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, runID: "r-err"}, proc, results, make(chan struct{}), time.Minute)
+	out := s.driveLiveRun(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, conversationID: "r-err"}, proc, results, make(chan struct{}), time.Minute)
 	if out.result != r {
 		t.Fatalf("expected the error result back, got %+v", out)
 	}
@@ -484,7 +484,7 @@ func TestDriveLiveRun_InterruptBoundedResumeParksOpen(t *testing.T) {
 
 	results := make(chan *agentproc.Result, 1)
 	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
-	out := s.driveLiveRun(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, runID: "r-bounded"}, proc, results, make(chan struct{}), 0)
+	out := s.driveLiveRun(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, conversationID: "r-bounded"}, proc, results, make(chan struct{}), 0)
 	if !out.hibernated {
 		t.Fatalf("bounded-resume pause should park open (hibernated), got %+v", out)
 	}

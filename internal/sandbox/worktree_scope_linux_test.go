@@ -17,32 +17,32 @@ func TestWorktreeScope_AcceptsRunAndBlueprintKeys(t *testing.T) {
 	paths.SetForTest(t, t.TempDir()) // state root with no orgs/ subtree
 
 	const (
-		runID     = "run-aaaaaaaa"
-		blueprint = "bp-bbbbbbbb"
-		other     = "run-cccccccc"
+		conversationID = "run-aaaaaaaa"
+		blueprint      = "bp-bbbbbbbb"
+		other          = "run-cccccccc"
 	)
-	runTree := ensureRunTreeFixture(t, runID)
+	runTree := ensureRunTreeFixture(t, conversationID)
 	bpTree := ensureRunTreeFixture(t, blueprint)
 	otherTree := ensureRunTreeFixture(t, other)
 
 	t.Run("run-id-keyed tree (first launch)", func(t *testing.T) {
-		_, hasScope, err := worktreeScope(runID, blueprint, runTree)
+		_, hasScope, err := worktreeScope(conversationID, blueprint, runTree)
 		if err != nil || hasScope {
 			t.Fatalf("worktreeScope(run-id tree) = (hasScope=%v, %v), want (false, nil)", hasScope, err)
 		}
 	})
 
 	t.Run("blueprint-keyed tree (cold rehydrate)", func(t *testing.T) {
-		// The regression: worktree == RunTreeRoot(memoryNamespace) while runID
+		// The regression: worktree == RunTreeRoot(memoryNamespace) while conversationID
 		// differs. A resumed run's re-keyed tree must be accepted.
-		_, hasScope, err := worktreeScope(runID, blueprint, bpTree)
+		_, hasScope, err := worktreeScope(conversationID, blueprint, bpTree)
 		if err != nil || hasScope {
 			t.Fatalf("worktreeScope(blueprint tree) = (hasScope=%v, %v), want (false, nil)", hasScope, err)
 		}
 	})
 
 	t.Run("a third run's tree is rejected cleanly", func(t *testing.T) {
-		_, _, err := worktreeScope(runID, blueprint, otherTree)
+		_, _, err := worktreeScope(conversationID, blueprint, otherTree)
 		if err == nil {
 			t.Fatal("worktreeScope accepted a tree keyed by neither the run nor its blueprint")
 		}
@@ -52,10 +52,10 @@ func TestWorktreeScope_AcceptsRunAndBlueprintKeys(t *testing.T) {
 	})
 
 	t.Run("empty memory namespace falls back to the run id alone", func(t *testing.T) {
-		if _, _, err := worktreeScope(runID, "", runTree); err != nil {
-			t.Fatalf("worktreeScope(runID, \"\", run tree) = %v, want nil", err)
+		if _, _, err := worktreeScope(conversationID, "", runTree); err != nil {
+			t.Fatalf("worktreeScope(conversationID, \"\", run tree) = %v, want nil", err)
 		}
-		if _, _, err := worktreeScope(runID, "", bpTree); err == nil {
+		if _, _, err := worktreeScope(conversationID, "", bpTree); err == nil {
 			t.Fatal("worktreeScope accepted the blueprint tree with no memory namespace supplied")
 		}
 	})

@@ -149,7 +149,7 @@ func runToCompletion(t *testing.T, run LaunchedRun) ([]byte, error) {
 }
 
 // minimalConfig builds a Config for tests with sensible defaults +
-// a unique RunID. Caller can mutate Argv to choose the payload.
+// a unique ConversationID. Caller can mutate Argv to choose the payload.
 func minimalConfig(t *testing.T) Config {
 	t.Helper()
 	worktree := t.TempDir()
@@ -158,10 +158,10 @@ func minimalConfig(t *testing.T) Config {
 	}
 	sdkDir := t.TempDir() // empty stub for integration tests
 	return Config{
-		RunID:    "itest" + t.Name()[:min(len(t.Name()), 6)],
-		Worktree: worktree,
-		SDKDir:   sdkDir,
-		Argv:     []string{"/bin/echo", "hello"},
+		ConversationID: "itest" + t.Name()[:min(len(t.Name()), 6)],
+		Worktree:       worktree,
+		SDKDir:         sdkDir,
+		Argv:           []string{"/bin/echo", "hello"},
 		Env: []string{
 			"PATH=/usr/local/bin:/usr/bin:/bin",
 			"HOME=/work",
@@ -589,7 +589,7 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 		R json.RawMessage `json:"r,omitempty"`
 		E string          `json:"e,omitempty"`
 	}
-	sentinelRunID := "itest-agenthost-ipc"
+	sentinelConversationID := "itest-agenthost-ipc"
 	go func() {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -609,7 +609,7 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 		var r req
 		_ = json.Unmarshal(body, &r)
 		// Echo back a LookupRun-shaped response with our sentinel run id.
-		result := []byte(`{"info":{"org_id":"00000000-0000-0000-0000-000000000001","user_id":"","run_id":"` + sentinelRunID + `","is_event_triggered":false}}`)
+		result := []byte(`{"info":{"org_id":"00000000-0000-0000-0000-000000000001","user_id":"","run_id":"` + sentinelConversationID + `","is_event_triggered":false}}`)
 		respBody, _ := json.Marshal(resp{R: result})
 		var outHeader [4]byte
 		binary.BigEndian.PutUint32(outHeader[:], uint32(len(respBody)))
@@ -639,8 +639,8 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stub exec: %v (output: %s)", err, out)
 	}
-	if !strings.Contains(string(out), sentinelRunID) {
-		t.Errorf("expected stub stdout to echo run id %q, got: %s", sentinelRunID, out)
+	if !strings.Contains(string(out), sentinelConversationID) {
+		t.Errorf("expected stub stdout to echo run id %q, got: %s", sentinelConversationID, out)
 	}
 }
 

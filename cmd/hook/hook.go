@@ -16,7 +16,7 @@
 //
 // Like the exec subcommands, the work routes through agenthost — here always
 // the in-process LocalClient, since these verbs only ever fire on the host
-// (see buildHost) — so RunInfo + Stores are in scope.
+// (see buildHost) — so ConversationInfo + Stores are in scope.
 package hook
 
 import (

@@ -71,7 +71,7 @@ type FactorySeeder struct {
 	// for memory_missing. To insert a row with NULL agent_content,
 	// pass a sentinel (we use "<NULL>" by convention — the seeder
 	// implementation maps it to NULL).
-	SetRunMemory func(t *testing.T, runID, entityID, content string)
+	SetRunMemory func(t *testing.T, conversationID, entityID, content string)
 }
 
 // nullSentinel is the content string callers pass to SetRunMemory

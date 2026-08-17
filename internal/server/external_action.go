@@ -73,7 +73,7 @@ func githubCredentialForArtifact(ctx context.Context, resolver ghclient.Resolver
 }
 
 // githubApprovalAction builds the external_actions row for an artifact-backed
-// GitHub approval-lifecycle write. run_id is the drafting run (art.RunID),
+// GitHub approval-lifecycle write. run_id is the drafting run (art.ConversationID),
 // actor_user_id is the approving human (userID), team_id is the artifact's team,
 // and the object coordinates come from the artifact. from/to carry the lifecycle
 // transition (draft→open, pending→submitted, …). credential is the org

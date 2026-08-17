@@ -122,7 +122,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	if err != nil {
 		t.Fatalf("enqueue turn: %v", err)
 	}
-	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "fixture-exec", 1, db.ClaimPlacement{})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "fixture-exec", 1, db.ClaimPlacement{})
 	if err != nil || claimed == nil || claimed.ID != conv.ID {
 		t.Fatalf("claim turn = (%+v, %v), want conversation %s", claimed, err, conv.ID)
 	}

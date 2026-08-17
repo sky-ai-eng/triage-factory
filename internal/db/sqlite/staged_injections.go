@@ -40,7 +40,7 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 	res, err := s.q.ExecContext(ctx, `
 		INSERT INTO messages (org_id, conversation_id, role, content, subtype, metadata, delivered)
 		VALUES (?, ?, 'user', ?, ?, ?, 0)
-	`, orgID, n.RunID, n.Body, stagedInjectionSubtype, string(meta))
+	`, orgID, n.ConversationID, n.Body, stagedInjectionSubtype, string(meta))
 	if err != nil {
 		return err
 	}
@@ -52,14 +52,14 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 	return nil
 }
 
-func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, runID string) ([]domain.StagedInjection, error) {
+func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, conversationID string) ([]domain.StagedInjection, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	// The shared flush primitive, narrowed to this store's subtype: one
 	// definition of "consume a conversation's pending rows" serves every
 	// producer.
-	flushed, err := flushPendingInput(ctx, s.q, orgID, runID, stagedInjectionSubtype)
+	flushed, err := flushPendingInput(ctx, s.q, orgID, conversationID, stagedInjectionSubtype)
 	if err != nil {
 		return nil, err
 	}
@@ -101,11 +101,11 @@ func stagedInjectionsFromPending(flushed []pendingRow) []domain.StagedInjection 
 	var out []domain.StagedInjection
 	for _, r := range flushed {
 		n := domain.StagedInjection{
-			ID:        strconv.FormatInt(r.ID, 10),
-			RunID:     r.ConvID,
-			OrgID:     r.OrgID,
-			Body:      r.Content,
-			CreatedAt: r.CreatedAt,
+			ID:             strconv.FormatInt(r.ID, 10),
+			ConversationID: r.ConvID,
+			OrgID:          r.OrgID,
+			Body:           r.Content,
+			CreatedAt:      r.CreatedAt,
 		}
 		if r.Metadata != "" {
 			var meta struct {

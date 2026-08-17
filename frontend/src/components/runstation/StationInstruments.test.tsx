@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { TelemetryRail } from './StationInstruments'
 import { stationState } from './stationStyle'
-import { QUEUE_DWELL_VISIBLE_MS } from '../../lib/runStatus'
+import { QUEUE_DWELL_VISIBLE_MS } from '../../lib/conversationStatus'
 import type { Conversation, Message } from '../../types'
 
 const T0 = new Date('2026-06-25T00:00:00Z').getTime()

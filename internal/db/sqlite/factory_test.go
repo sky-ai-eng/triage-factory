@@ -147,14 +147,14 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 				t.Fatalf("close entity %s: %v", entityID, err)
 			}
 		},
-		SetRunMemory: func(t *testing.T, runID, entityID, content string) {
+		SetRunMemory: func(t *testing.T, conversationID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
 					INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content)
 					VALUES (?, ?, ?, NULL)
-				`, memID, runID, entityID); err != nil {
+				`, memID, conversationID, entityID); err != nil {
 					t.Fatalf("seed null conversation_memory: %v", err)
 				}
 				return
@@ -162,7 +162,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			if _, err := conn.Exec(`
 				INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content)
 				VALUES (?, ?, ?, ?)
-			`, memID, runID, entityID, content); err != nil {
+			`, memID, conversationID, entityID, content); err != nil {
 				t.Fatalf("seed conversation_memory: %v", err)
 			}
 		},

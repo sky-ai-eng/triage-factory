@@ -49,7 +49,7 @@ func seedBlueprintRunForRun(t *testing.T, conn *sql.DB, taskID string) string {
 }
 
 // insertConversationForTest inserts a conversations row directly — the test
-// fixture stand-in for the queue's EnqueueRun mint, staging rows in
+// fixture stand-in for the queue's EnqueueConversation mint, staging rows in
 // arbitrary status. The trigger_type↔creator CHECK is satisfied by pairing
 // 'manual' with the sentinel user and 'event' with NULL. Fields honored:
 // ID, TaskID, PromptID, Status, Model, TriggerType, TriggerID,

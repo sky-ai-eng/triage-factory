@@ -32,7 +32,7 @@ func (s *Spawner) HandlePRNewCommits(evt domain.Event) {
 	if evt.EventType != domain.EventGitHubPRNewCommits {
 		return
 	}
-	if s.artifacts == nil || s.agentRuns == nil {
+	if s.artifacts == nil || s.conversations == nil {
 		return
 	}
 	var meta events.GitHubPRNewCommitsMetadata
@@ -76,7 +76,7 @@ func (s *Spawner) HandlePRNewCommits(evt domain.Event) {
 		// the time one arrives anyway.
 		live := s.getProc(a.ConversationID) != nil
 		if !live {
-			run, err := s.agentRuns.GetSystem(ctx, evt.OrgID, a.ConversationID)
+			run, err := s.conversations.GetSystem(ctx, evt.OrgID, a.ConversationID)
 			if err != nil {
 				delegateLog.Warn("new-commits injection: load run failed", "run", a.ConversationID, "error", err)
 				continue

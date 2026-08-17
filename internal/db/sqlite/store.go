@@ -62,17 +62,17 @@ func New(conn *sql.DB) db.Stores {
 		// EventQueue holds the connection directly (it self-manages the
 		// Enqueue transaction); single-worker drain in local mode.
 		EventQueue: newEventQueueStore(conn),
-		// RunQueue holds the connection directly; single-worker dispatcher
+		// ConversationQueue holds the connection directly; single-worker dispatcher
 		// in local mode (no claim contention, so a plain claim suffices).
-		RunQueue: newRunQueueStore(conn),
+		ConversationQueue: newRunQueueStore(conn),
 		// TaskMemory wires both args to conn — SQLite has one
 		// connection so the dual-pool constructor collapses; the
 		// `...System` variants forward to the non-System bodies.
 		TaskMemory: newTaskMemoryStore(conn, conn),
-		// RunWorktrees wires both args to conn — SQLite has one
+		// ConversationWorktrees wires both args to conn — SQLite has one
 		// connection so the dual-pool constructor collapses; the
 		// `...System` variants forward to the non-System bodies.
-		RunWorktrees: newRunWorktreeStore(conn, conn),
+		ConversationWorktrees: newRunWorktreeStore(conn, conn),
 		// Orgs is dual-pool in Postgres; SQLite collapses to the one
 		// connection. Callers are background services iterating the
 		// active org set, settings reads/writes from request handlers,
@@ -162,14 +162,14 @@ func New(conn *sql.DB) db.Stores {
 		// suite, not because a local run has a cgroup.
 		SandboxStats: newSandboxStatStore(conn),
 		Operators:    newOperatorStore(conn),
-		// RunSignals is Postgres-only (TFAC-585): this is a stub returning
+		// ConversationSignals is Postgres-only (TFAC-585): this is a stub returning
 		// ErrNotApplicableInLocal from every method — local mode is always
 		// its own run's owner, so no code path may reach it.
-		RunSignals: newRunSignalStore(),
-		// RunPendingInput is dual-dialect (unlike RunSignals): local mode's
+		ConversationSignals: newRunSignalStore(),
+		// ConversationPendingInput is dual-dialect (unlike ConversationSignals): local mode's
 		// dispatcher claims its own resumed runs through the identical
 		// queue path.
-		RunPendingInput: newRunPendingInputStore(conn),
+		ConversationPendingInput: newRunPendingInputStore(conn),
 		// Permissions is split-pool in Postgres; SQLite collapses to the one
 		// connection (N=1, no RLS). This is the arm production uses — the
 		// browser permission round-trip is reached only by an unsandboxed
@@ -188,11 +188,11 @@ func New(conn *sql.DB) db.Stores {
 		// mode — the one process is always its own home — but present for
 		// store-interface + conformance symmetry. See spec §6.3.
 		CuratorHomes: newCuratorHomeStore(conn),
-		// RunCredentials is admin-pool only in Postgres; SQLite collapses
+		// ClaimCredentials is admin-pool only in Postgres; SQLite collapses
 		// to the one connection. Never populated in local mode (forced
 		// role=all, the bundle path is executor-role-only) — exists for
 		// store-interface + conformance-test symmetry. See TFAC-614.
-		RunCredentials: newRunCredentialsStore(conn),
+		ClaimCredentials: newRunCredentialsStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

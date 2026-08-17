@@ -18,7 +18,7 @@ import (
 // ProvisionForCuratorTurn resolves a homed curator turn's credentials and
 // seals them to the per-turn sidecar key its home executor published on the
 // conversation's active claim, writing the shared claim_credentials channel
-// (RunCredentials, keyed by the conversation id). The curator-turn analog of
+// (ClaimCredentials, keyed by the conversation id). The curator-turn analog of
 // ProvisionForRun — called synchronously off the executor's
 // curator_cred_request notification (the fast path) and by the backstop
 // sweep. Idempotent and safe to call repeatedly for the same turn.
@@ -110,7 +110,7 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversati
 	// Providers resolve their own sealed sets. A curator turn has no task, so
 	// TaskID is empty; the built-in resolvers key on org/team/run and tolerate it.
 	if providers, err := agenthost.ResolveProviderCredentials(ctx, m.stores, agenthost.ProvisionScope{
-		OrgID: orgID, TeamID: turn.TeamID, TaskID: "", RunID: conversationID,
+		OrgID: orgID, TeamID: turn.TeamID, TaskID: "", ConversationID: conversationID,
 	}); err != nil {
 		return fmt.Errorf("credprovision: resolve provider credentials for curator turn %s: %w", conversationID, err)
 	} else {
@@ -125,7 +125,7 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversati
 	if err != nil {
 		return fmt.Errorf("credprovision: seal bundle for curator turn %s: %w", conversationID, err)
 	}
-	if err := m.stores.RunCredentials.Put(ctx, orgID, conversationID, turn.HomeInstanceID, inst.BootEpoch, sealed); err != nil {
+	if err := m.stores.ClaimCredentials.Put(ctx, orgID, conversationID, turn.HomeInstanceID, inst.BootEpoch, sealed); err != nil {
 		return fmt.Errorf("credprovision: write bundle for curator turn %s: %w", conversationID, err)
 	}
 	log.Debug("provisioned curator turn credential bundle", "conversation", conversationID, "org", orgID, "home", turn.HomeInstanceID, "boot_epoch", inst.BootEpoch)

@@ -50,8 +50,8 @@ func TestSetupSlack_WorktreeLessAndNoClassificationWait(t *testing.T) {
 	s, _, task := slackTaskFixture(t, "shape")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
-	runID := "slack-run-shape"
-	rootKey := "slack-bp-shape" // run-root is blueprint-keyed, distinct from runID
+	conversationID := "slack-run-shape"
+	rootKey := "slack-bp-shape" // run-root is blueprint-keyed, distinct from conversationID
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
 
 	var classificationCalled atomic.Bool
@@ -59,7 +59,7 @@ func TestSetupSlack_WorktreeLessAndNoClassificationWait(t *testing.T) {
 		classificationCalled.Store(true)
 	})
 
-	cfg, err := s.setupSlack(ctx, org, runID, "", rootKey, task, nil)
+	cfg, err := s.setupSlack(ctx, org, conversationID, "", rootKey, task, nil)
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestSetupSlack_WorktreeLessAndNoClassificationWait(t *testing.T) {
 	// invariant a cold rehydrate (which rebuilds under the blueprint key) and
 	// the launch-time worktree pin both rely on.
 	if cfg.runRoot != worktree.RunRoot(rootKey) {
-		t.Errorf("run-root = %q, want it keyed by the blueprint run id (RunRoot(%q)=%q), not runID %q", cfg.runRoot, rootKey, worktree.RunRoot(rootKey), runID)
+		t.Errorf("run-root = %q, want it keyed by the blueprint run id (RunRoot(%q)=%q), not conversationID %q", cfg.runRoot, rootKey, worktree.RunRoot(rootKey), conversationID)
 	}
 	wantScope := "Slack thread: " + task.EntitySourceID
 	if cfg.scope != wantScope {
@@ -103,21 +103,21 @@ func TestSetupSlack_PersistsWorktreePath(t *testing.T) {
 	ensureTestPrompt(t, database, domain.Prompt{ID: "persist-prompt", Name: "T", Body: "x", Source: "user"})
 	brID := seedRunBlueprint(t, database, "persist", task.ID)
 	stepIdx := 0
-	runID := "slack-run-persist"
+	conversationID := "slack-run-persist"
 	rootKey := brID // the run-root keys by the blueprint run id
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
 	dbtest.SeedConversation(t, database, domain.Conversation{
-		ID: runID, TaskID: task.ID, PromptID: "persist-prompt", Status: "running",
+		ID: conversationID, TaskID: task.ID, PromptID: "persist-prompt", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
 	})
 
-	cfg, err := s.setupSlack(ctx, org, runID, "", rootKey, task, nil)
+	cfg, err := s.setupSlack(ctx, org, conversationID, "", rootKey, task, nil)
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
 
 	var wtPath string
-	if err := database.QueryRow(`SELECT COALESCE(worktree_path,'') FROM conversations WHERE id = ?`, runID).Scan(&wtPath); err != nil {
+	if err := database.QueryRow(`SELECT COALESCE(worktree_path,'') FROM conversations WHERE id = ?`, conversationID).Scan(&wtPath); err != nil {
 		t.Fatalf("read persisted worktree_path: %v", err)
 	}
 	if wtPath != cfg.wtPath {
@@ -133,11 +133,11 @@ func TestSetupSlack_ToolsRef_NoRegisteredReference(t *testing.T) {
 	s, _, task := slackTaskFixture(t, "notools")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
-	runID := "slack-run-notools"
-	rootKey := "slack-bp-notools" // run-root is blueprint-keyed, distinct from runID
+	conversationID := "slack-run-notools"
+	rootKey := "slack-bp-notools" // run-root is blueprint-keyed, distinct from conversationID
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
 
-	cfg, err := s.setupSlack(ctx, org, runID, "", rootKey, task, nil)
+	cfg, err := s.setupSlack(ctx, org, conversationID, "", rootKey, task, nil)
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
@@ -156,11 +156,11 @@ func TestSetupSlack_ToolsRef_ComposesRegisteredReference(t *testing.T) {
 	s, _, task := slackTaskFixture(t, "withtools")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
-	runID := "slack-run-withtools"
-	rootKey := "slack-bp-withtools" // run-root is blueprint-keyed, distinct from runID
+	conversationID := "slack-run-withtools"
+	rootKey := "slack-bp-withtools" // run-root is blueprint-keyed, distinct from conversationID
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
 
-	cfg, err := s.setupSlack(ctx, org, runID, "", rootKey, task, nil)
+	cfg, err := s.setupSlack(ctx, org, conversationID, "", rootKey, task, nil)
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}

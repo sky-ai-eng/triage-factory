@@ -71,16 +71,16 @@ const staleReservationAge = 5 * time.Minute
 // validation errors returned by materializeWorkspace. Callers translate
 // these into stderr messages + non-zero exit; tests assert on identity.
 var (
-	errMissingRunID        = errors.New("workspace add: TRIAGE_FACTORY_CONVERSATION_ID not set; this command must be invoked by the delegated agent")
-	errInvalidOwnerRepo    = errors.New("workspace add: invalid owner/repo")
-	errRunNotFound         = errors.New("workspace add: run not found")
-	errRepoNotConfigured   = errors.New("workspace add: repo is not configured in Triage Factory; add it on the Settings page first")
-	errRepoNotTracked      = errors.New("workspace add: repo is not tracked by this team; add it to the team on the Settings page first")
-	errRepoMissingCloneURL = errors.New("workspace add: repo has no clone URL on its repository row; try re-profiling from the Settings page")
-	errInvalidRef          = errors.New("workspace add: --ref contains characters disallowed for git refs")
-	errRefAndPR            = errors.New("workspace add: --ref and --pr are mutually exclusive")
-	errInvalidPR           = errors.New("workspace add: --pr requires a positive integer PR number")
-	errMissingOwnerRepo    = errors.New("workspace add: missing argument; expected owner/repo")
+	errMissingConversationID = errors.New("workspace add: TRIAGE_FACTORY_CONVERSATION_ID not set; this command must be invoked by the delegated agent")
+	errInvalidOwnerRepo      = errors.New("workspace add: invalid owner/repo")
+	errRunNotFound           = errors.New("workspace add: run not found")
+	errRepoNotConfigured     = errors.New("workspace add: repo is not configured in Triage Factory; add it on the Settings page first")
+	errRepoNotTracked        = errors.New("workspace add: repo is not tracked by this team; add it to the team on the Settings page first")
+	errRepoMissingCloneURL   = errors.New("workspace add: repo has no clone URL on its repository row; try re-profiling from the Settings page")
+	errInvalidRef            = errors.New("workspace add: --ref contains characters disallowed for git refs")
+	errRefAndPR              = errors.New("workspace add: --ref and --pr are mutually exclusive")
+	errInvalidPR             = errors.New("workspace add: --pr requires a positive integer PR number")
+	errMissingOwnerRepo      = errors.New("workspace add: missing argument; expected owner/repo")
 )
 
 // validateGitRef rejects a --ref value git would refuse (or misparse) at fetch
@@ -168,8 +168,8 @@ func parseAddArgs(args []string) (ownerRepo string, spec checkoutSpec, err error
 // mode they're the same string and the translation is the identity.
 //
 // Concurrency: the cross-process serialization point is the
-// conversation_worktrees PK insert (`InsertRunWorktree`'s INSERT OR IGNORE),
-// hidden behind host.InsertRunWorktree. Two concurrent invocations
+// conversation_worktrees PK insert (`InsertConversationWorktree`'s INSERT OR IGNORE),
+// hidden behind host.InsertConversationWorktree. Two concurrent invocations
 // both passing the idempotency precheck race at insert time; the
 // loser sees inserted=false and returns the winner's path without
 // touching git. Reserving BEFORE the create is load-bearing — if we
@@ -211,9 +211,9 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	ctx := context.Background()
 	info, err := host.LookupRun(ctx)
 	if err != nil {
-		// runID is empty at this point — LookupRun is what would have
+		// conversationID is empty at this point — LookupRun is what would have
 		// produced it. Only the ErrRunIdentityMissing branch fires here, and
-		// it ignores the runID argument.
+		// it ignores the conversationID argument.
 		return "", translateLookupErr("workspace add", "", err)
 	}
 
@@ -225,7 +225,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		return "", fmt.Errorf("workspace add: load run: %w", err)
 	}
 	if run == nil {
-		return "", fmt.Errorf("%w: %s", errRunNotFound, info.RunID)
+		return "", fmt.Errorf("%w: %s", errRunNotFound, info.ConversationID)
 	}
 
 	// Idempotent re-add. If a row exists for this (run, repo), prefer
@@ -243,7 +243,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	//
 	//  - Killed mid-create: the original creator was killed (SIGTERM,
 	//    process supervisor reaping, machine restart) after
-	//    InsertRunWorktree returned but before the create completed. The row
+	//    InsertConversationWorktree returned but before the create completed. The row
 	//    has no live owner; subsequent retries looping forever on a
 	//    never-realized path is the wrong answer.
 	//
@@ -251,7 +251,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	// inside the `staleReservationAge` window; killed-mid-create rows
 	// outlive it. Pre-staleness, trust the row. Past staleness with
 	// the path still missing, drop the row and re-reserve.
-	existing, err := host.GetRunWorktreeByRepoRef(ctx, repoID, ref)
+	existing, err := host.GetConversationWorktreeByRepoRef(ctx, repoID, ref)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: lookup existing worktree: %w", err)
 	}
@@ -278,8 +278,8 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 			}
 			// Stale: reservation outlived its creator without a
 			// completed worktree. Drop and fall through to re-reserve.
-			workspaceLog.Warn("dropping stale reservation; path missing and row age exceeds threshold", "run_id", info.RunID, "repo", repoID, "ref", ref, "path", existing.Path, "age", age, "threshold", staleReservationAge)
-			if delErr := host.DeleteRunWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
+			workspaceLog.Warn("dropping stale reservation; path missing and row age exceeds threshold", "run_id", info.ConversationID, "repo", repoID, "ref", ref, "path", existing.Path, "age", age, "threshold", staleReservationAge)
+			if delErr := host.DeleteConversationWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
 				return "", fmt.Errorf("workspace add: delete stale reservation: %w", delErr)
 			}
 		default:
@@ -329,13 +329,13 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	// touching git. Ref records the checkout intent — the PK discriminator and
 	// the path slug — and is what `workspace list` surfaces; the push gate reads
 	// the worktree's live current branch, never this row.
-	row := domain.RunWorktree{
-		RunID:  info.RunID,
-		RepoID: repoID,
-		Path:   wtPath,
-		Ref:    ref,
+	row := domain.ConversationWorktree{
+		ConversationID: info.ConversationID,
+		RepoID:         repoID,
+		Path:           wtPath,
+		Ref:            ref,
 	}
-	inserted, winningPath, err := host.InsertRunWorktree(ctx, row)
+	inserted, winningPath, err := host.InsertConversationWorktree(ctx, row)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: reserve worktree row: %w", err)
 	}
@@ -360,7 +360,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		// Release the reservation so the next attempt can retry.
 		// Delete failures are logged but don't shadow the create error
 		// the caller actually needs.
-		if delErr := host.DeleteRunWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
+		if delErr := host.DeleteConversationWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
 			workspaceLog.Warn("release reservation after create failure failed", "error", delErr)
 		}
 		return "", fmt.Errorf("workspace add: create worktree: %w", err)
@@ -370,7 +370,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		// repo, ref-slug); a divergence means the create's derivation and our
 		// reservation no longer match. Surface loudly rather than silently
 		// storing the wrong path.
-		workspaceLog.Warn("created path diverges from reserved; investigate", "got_path", gotPath, "reserved_path", wtPath, "run_id", info.RunID, "repo", repoID, "ref", ref)
+		workspaceLog.Warn("created path diverges from reserved; investigate", "got_path", gotPath, "reserved_path", wtPath, "run_id", info.ConversationID, "repo", repoID, "ref", ref)
 	}
 
 	return agentViewPath(hostRoot, agentRoot, wtPath), nil

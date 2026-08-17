@@ -10,15 +10,15 @@ import (
 )
 
 // ExecutorClaimsFactory is what a per-backend test file hands to
-// RunExecutorClaimsConformance. Returns the wired RunQueueStore and the seeder
+// RunExecutorClaimsConformance. Returns the wired ConversationQueueStore and the seeder
 // that stages the history the read projects.
-type ExecutorClaimsFactory func(t *testing.T) (store db.RunQueueStore, seed ExecutorClaimsSeeder)
+type ExecutorClaimsFactory func(t *testing.T) (store db.ConversationQueueStore, seed ExecutorClaimsSeeder)
 
 // ExecutorClaimRow is one claims row the seeder stages verbatim.
 type ExecutorClaimRow struct {
-	RunID      string
-	ExecutorID string
-	ClaimedAt  time.Time
+	ConversationID string
+	ExecutorID     string
+	ClaimedAt      time.Time
 	// ReleasedAt nil stages a LIVE claim — the shape whose sandbox may still
 	// be growing under the operator's eyes.
 	ReleasedAt *time.Time
@@ -39,7 +39,7 @@ type ExecutorClaimRow struct {
 type ExecutorClaimsSeeder struct {
 	// Run stages one conversation in the given terminal state and returns its
 	// id. failureKind may be empty (an unclassified or non-failed run).
-	Run func(t *testing.T, status, failureKind string) (runID string)
+	Run func(t *testing.T, status, failureKind string) (conversationID string)
 
 	// Claim stages one claims row and returns its id.
 	Claim func(t *testing.T, row ExecutorClaimRow) (claimID string)
@@ -61,19 +61,19 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("newest_first_scoped_to_the_executor_and_capped", func(t *testing.T) {
 		store, seed := mk(t)
-		runID := seed.Run(t, "completed", "")
+		conversationID := seed.Run(t, "completed", "")
 		// Three claims for ours, one for a neighbour executor on the same box's
 		// deployment — the neighbour must not appear.
 		var ids []string
 		for i, off := range []time.Duration{0, time.Minute, 2 * time.Minute} {
 			released := base.Add(off + 30*time.Second)
 			ids = append(ids, seed.Claim(t, ExecutorClaimRow{
-				RunID: runID, ExecutorID: "exec-a", ClaimedAt: base.Add(off),
+				ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base.Add(off),
 				ReleasedAt: &released, Outcome: "completed", PeakMemMB: iptr(100 + i),
 			}))
 		}
 		seed.Claim(t, ExecutorClaimRow{
-			RunID: runID, ExecutorID: "exec-b", ClaimedAt: base.Add(3 * time.Minute),
+			ConversationID: conversationID, ExecutorID: "exec-b", ClaimedAt: base.Add(3 * time.Minute),
 		})
 
 		got, err := store.RecentClaimsForExecutorSystem(ctx, "exec-a", 0)
@@ -103,10 +103,10 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("projects_actuals_lifetime_and_conversation_state", func(t *testing.T) {
 		store, seed := mk(t)
-		runID := seed.Run(t, "failed", "memory_limit")
+		conversationID := seed.Run(t, "failed", "memory_limit")
 		released := base.Add(90 * time.Second)
 		claimID := seed.Claim(t, ExecutorClaimRow{
-			RunID: runID, ExecutorID: "exec-a", ClaimedAt: base,
+			ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base,
 			ReleasedAt: &released, Outcome: "failed",
 			PeakMemMB: iptr(2048), CPUUsec: i64ptr(42_000_000),
 		})
@@ -119,7 +119,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 			t.Fatalf("expected 1 claim, got %d: %+v", len(got), got)
 		}
 		c := got[0]
-		if c.ID != claimID || c.ConversationID != runID {
+		if c.ID != claimID || c.ConversationID != conversationID {
 			t.Fatalf("identity wrong: %+v", c)
 		}
 		if c.OrgID == "" {
@@ -151,8 +151,8 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 		// A live claim: never released, never measured (the teardown that
 		// measures hasn't happened). It is still real occupancy on the box, so
 		// it must be listed rather than filtered out for lacking numbers.
-		runID := seed.Run(t, "running", "")
-		seed.Claim(t, ExecutorClaimRow{RunID: runID, ExecutorID: "exec-a", ClaimedAt: base})
+		conversationID := seed.Run(t, "running", "")
+		seed.Claim(t, ExecutorClaimRow{ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base})
 
 		got, err := store.RecentClaimsForExecutorSystem(ctx, "exec-a", 25)
 		if err != nil {
@@ -176,10 +176,10 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 	t.Run("partially_measured_claim_keeps_the_half_it_has", func(t *testing.T) {
 		// The pre-5.19 kernel shape: cpu.stat lands, memory.peak does not.
 		store, seed := mk(t)
-		runID := seed.Run(t, "completed", "")
+		conversationID := seed.Run(t, "completed", "")
 		released := base.Add(time.Minute)
 		seed.Claim(t, ExecutorClaimRow{
-			RunID: runID, ExecutorID: "exec-a", ClaimedAt: base,
+			ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base,
 			ReleasedAt: &released, Outcome: "completed", CPUUsec: i64ptr(7),
 		})
 
@@ -209,10 +209,10 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("ClaimByIDSystem_matches_the_list_projection", func(t *testing.T) {
 		store, seed := mk(t)
-		runID := seed.Run(t, "completed", "")
+		conversationID := seed.Run(t, "completed", "")
 		released := base.Add(time.Minute)
 		claimID := seed.Claim(t, ExecutorClaimRow{
-			RunID: runID, ExecutorID: "exec-a", ClaimedAt: base,
+			ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base,
 			ReleasedAt: &released, Outcome: "completed",
 			PeakMemMB: iptr(512), CPUUsec: i64ptr(1_500_000),
 		})

@@ -48,7 +48,7 @@ describe('ArtifactList', () => {
         url: 'https://gh/pr',
       }),
     ])
-    render(<ArtifactList runId="r1" onOpenApproval={vi.fn()} />)
+    render(<ArtifactList conversationId="r1" onOpenApproval={vi.fn()} />)
 
     // Targets + state badges for both rows render once the fetch resolves.
     expect(await screen.findByText('org/repo#18')).toBeInTheDocument()
@@ -75,7 +75,7 @@ describe('ArtifactList', () => {
       art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'org/repo#18' }),
       art({ id: 'rv1', kind: 'review', state: 'pending', target: 'org/repo#18' }),
     ])
-    render(<ArtifactList runId="r1" onOpenApproval={onOpen} />)
+    render(<ArtifactList conversationId="r1" onOpenApproval={onOpen} />)
 
     fireEvent.click(await screen.findByRole('button', { name: /Open pull request/ }))
     expect(onOpen).toHaveBeenCalledWith('pr', 'pr1')
@@ -102,7 +102,7 @@ describe('ArtifactList', () => {
         url: 'https://gh/pr',
       }),
     ])
-    render(<ArtifactList runId="r1" onOpenApproval={onOpen} />)
+    render(<ArtifactList conversationId="r1" onOpenApproval={onOpen} />)
 
     // The submitted review's row IS the link to the posted review on GitHub —
     // clicking it must not reopen the stale TF-side draft editor.
@@ -127,7 +127,7 @@ describe('ArtifactList', () => {
         url: 'https://jira/1',
       }),
     ])
-    render(<ArtifactList runId="r1" onOpenApproval={onOpen} />)
+    render(<ArtifactList conversationId="r1" onOpenApproval={onOpen} />)
 
     const branch = await screen.findByRole('link', { name: /Open branch/ })
     expect(branch).toHaveAttribute('href', 'https://gh/branch')
@@ -142,7 +142,13 @@ describe('ArtifactList', () => {
       art({ id: 'rv1', kind: 'review', state: 'pending', target: 'review-row' }),
       art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'pr-row' }),
     ])
-    render(<ArtifactList runId="r1" onOpenApproval={vi.fn()} pendingArtifactIds={['pr1', 'rv1']} />)
+    render(
+      <ArtifactList
+        conversationId="r1"
+        onOpenApproval={vi.fn()}
+        pendingArtifactIds={['pr1', 'rv1']}
+      />,
+    )
 
     // The projection's order (draft PRs first, then ready reviews) leads; the
     // rest keep the fetch order below.
@@ -169,7 +175,9 @@ describe('ArtifactList', () => {
         ...jsonBody([{ ...draft, state: 'closed' }]),
       })
     vi.stubGlobal('fetch', fetchMock)
-    render(<ArtifactList runId="r1" pendingArtifactIds={['pr1']} onResolved={onResolved} />)
+    render(
+      <ArtifactList conversationId="r1" pendingArtifactIds={['pr1']} onResolved={onResolved} />,
+    )
 
     fireEvent.click(await screen.findByRole('button', { name: /dismiss pull request/i }))
 
@@ -194,13 +202,13 @@ describe('ArtifactList', () => {
         ...jsonBody([{ ...draft, state: 'open' }]),
       })
     vi.stubGlobal('fetch', fetchMock)
-    const { rerender } = render(<ArtifactList runId="r1" refreshKey="2:pr1" />)
+    const { rerender } = render(<ArtifactList conversationId="r1" refreshKey="2:pr1" />)
     expect(await screen.findByText('draft')).toBeInTheDocument()
 
-    rerender(<ArtifactList runId="r1" refreshKey="2:" />)
+    rerender(<ArtifactList conversationId="r1" refreshKey="2:" />)
     expect(await screen.findByText('open')).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(2)
-    // A soft refetch never resets to the loading state — that's runId-change only.
+    // A soft refetch never resets to the loading state — that's conversationId-change only.
     expect(screen.queryByText(/Loading artifacts/)).not.toBeInTheDocument()
   })
 
@@ -215,10 +223,10 @@ describe('ArtifactList', () => {
         text: () => Promise.resolve(''),
       })
     vi.stubGlobal('fetch', fetchMock)
-    const { rerender } = render(<ArtifactList runId="r1" refreshKey="2:pr1" />)
+    const { rerender } = render(<ArtifactList conversationId="r1" refreshKey="2:pr1" />)
     expect(await screen.findByText('org/repo#18')).toBeInTheDocument()
 
-    rerender(<ArtifactList runId="r1" refreshKey="2:" />)
+    rerender(<ArtifactList conversationId="r1" refreshKey="2:" />)
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
 
     // The rows were true a moment ago — a transient failure must not blank an
@@ -235,11 +243,11 @@ describe('ArtifactList', () => {
       // r1's GET hangs until we resolve it by hand, after the run has changed.
       .mockImplementationOnce(() => new Promise((r) => (resolveOld = r)))
     vi.stubGlobal('fetch', fetchMock)
-    const { rerender } = render(<ArtifactList runId="r1" />)
+    const { rerender } = render(<ArtifactList conversationId="r1" />)
 
     // The run goes away (a cleared selection) with r1's fetch still in flight;
-    // the falsy runId means no new load ever runs to supersede it.
-    rerender(<ArtifactList runId="" />)
+    // the falsy conversationId means no new load ever runs to supersede it.
+    rerender(<ArtifactList conversationId="" />)
     resolveOld({ ok: true, ...jsonBody([oldRow]) })
     // Let the stale promise chain run to completion before asserting.
     await new Promise((r) => setTimeout(r, 0))
@@ -251,7 +259,7 @@ describe('ArtifactList', () => {
 
   it('shows a quiet empty state when the run produced no artifacts', async () => {
     mockArtifacts([])
-    render(<ArtifactList runId="r1" />)
+    render(<ArtifactList conversationId="r1" />)
     expect(await screen.findByText(/No artifacts yet/)).toBeInTheDocument()
   })
 
@@ -260,7 +268,7 @@ describe('ArtifactList', () => {
       status: 500,
       jsonBody: { errors: [{ reason: 'INTERNAL', message: 'boom' }] },
     })
-    render(<ArtifactList runId="r1" />)
+    render(<ArtifactList conversationId="r1" />)
     // The server's message reaches the user verbatim — no fallback prefix.
     await waitFor(() => expect(screen.getByText('boom')).toBeInTheDocument())
   })
@@ -268,7 +276,7 @@ describe('ArtifactList', () => {
   it('falls back to the caller sentence for a non-JSON error body', async () => {
     // The raw body ("<html>Bad Gateway</html>") must never reach the UI.
     failingFetch({ status: 502, textBody: '<html>Bad Gateway</html>' })
-    render(<ArtifactList runId="r1" />)
+    render(<ArtifactList conversationId="r1" />)
     await waitFor(() =>
       expect(screen.getByText("Couldn't load this run's artifacts.")).toBeInTheDocument(),
     )

@@ -55,7 +55,7 @@ type CuratorTurn struct {
 // (HomeInstanceID = the claim's executor → its current boot_epoch); the
 // conversation carries the project (GitHub authorized set = pinned ∩
 // tracked) and the owning-team snapshot. No active claim = nothing to seal
-// for. The curator-turn analog of the run path's AwaitingCredentialsRun.
+// for. The curator-turn analog of the run path's AwaitingCredentialsConversation.
 type CuratorTurnProvision struct {
 	ConversationID string
 	OrgID          string

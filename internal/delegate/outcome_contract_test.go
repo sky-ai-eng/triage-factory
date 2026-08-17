@@ -83,11 +83,11 @@ func TestNonterminalFragmentFramesContinueAsDefault(t *testing.T) {
 // and the invalid-envelope re-prompt. These tests feed processCompletion
 // directly (the one-shot / resume shape) to pin how it records each outcome.
 
-func loadRun(t *testing.T, s *Spawner, runID string) *domain.Conversation {
+func loadRun(t *testing.T, s *Spawner, conversationID string) *domain.Conversation {
 	t.Helper()
-	r, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrgID, runID)
+	r, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil || r == nil {
-		t.Fatalf("load run %s: err=%v", runID, err)
+		t.Fatalf("load run %s: err=%v", conversationID, err)
 	}
 	return r
 }
@@ -105,16 +105,16 @@ func loadTask(t *testing.T, s *Spawner, taskID string) domain.Task {
 // outcome=finish + status=completed. processCompletion does not close the task
 // — task disposition is the orchestrator's (terminateBlueprint).
 func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "finish")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "finish")
 	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, nil, "", "event", "")
 
-	run := loadRun(t, s, runID)
+	run := loadRun(t, s, conversationID)
 	if run.Status != "completed" {
 		t.Errorf("run.status = %q, want completed", run.Status)
 	}
@@ -130,18 +130,18 @@ func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
 // the reason in outcome_reason (distinct from result_summary) and never closes
 // the task.
 func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "abort")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "abort")
 	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 	task := loadTask(t, s, taskID)
 	before := readTaskStatus(t, database, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		res(`{"outcome":"abort","summary":"investigated the failure","reason":"needs a human to rotate the token"}`),
 		cwd, nil, "", "event", "")
 
-	run := loadRun(t, s, runID)
+	run := loadRun(t, s, conversationID)
 	if run.Status != "completed" {
 		t.Errorf("run.status = %q, want completed (abort is run-completed, task-open)", run.Status)
 	}
@@ -166,16 +166,16 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 // error → failed (with no recorded outcome), never a clean NULL-outcome
 // completion the orchestrator would read as finish.
 func TestProcessCompletion_AbortMissingReasonFails(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "abort-noreason")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "abort-noreason")
 	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`), cwd, nil, "", "event", "")
 
-	run := loadRun(t, s, runID)
+	run := loadRun(t, s, conversationID)
 	if run.Status != "failed" {
 		t.Errorf("run.status = %q, want failed (an abort with no reason is an invalid envelope)", run.Status)
 	}
@@ -190,18 +190,18 @@ func TestProcessCompletion_AbortMissingReasonFails(t *testing.T) {
 // a final step). This is the disposition for a one-shot/resume turn that ends
 // without concluding (the live driver consumes this in its loop instead).
 func TestProcessCompletion_NoConclusionParksOpen(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "open-noconcl")
-	bpr := blueprintRunIDForRun(t, database, runID)
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "open-noconcl")
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		res(`this is not a JSON envelope`), cwd, nil, "", "event", "")
 
 	if !parked {
 		t.Error("processCompletion(no-conclusion) = false; want true (open, not terminal)")
 	}
-	run := loadRun(t, s, runID)
+	run := loadRun(t, s, conversationID)
 	if run.Status != "open" {
 		t.Errorf("run.status = %q, want open (a no-conclusion turn parks open, not completed)", run.Status)
 	}
@@ -216,18 +216,18 @@ func TestProcessCompletion_NoConclusionParksOpen(t *testing.T) {
 // place; when a backend can't or the bound is exhausted, the unfixed result
 // lands here and fails (TestDriveLiveRun_InvalidRepromptsToBoundThenHandsBack).
 func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "invalid-fails")
-	bpr := blueprintRunIDForRun(t, database, runID)
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "invalid-fails")
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		res(`{"outcome":"finish"}`), cwd, nil, "", "event", "")
 
 	if parked {
 		t.Error("processCompletion(invalid) = true; want false (terminal failure, not parked)")
 	}
-	run := loadRun(t, s, runID)
+	run := loadRun(t, s, conversationID)
 	if run.Status != "failed" {
 		t.Errorf("run.status = %q, want failed (an invalid envelope is a knowable error)", run.Status)
 	}
@@ -241,8 +241,8 @@ func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
 // run never parks anymore — only an idle-hibernated `open` turn does,
 // covered elsewhere.
 func TestProcessCompletion_FinishReturnsNotParked(t *testing.T) {
-	s, _, runID, taskID := setupAdvanceFixture(t, "pc-finish")
-	if parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, "", "",
+	s, _, conversationID, taskID := setupAdvanceFixture(t, "pc-finish")
+	if parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "",
 		loadTask(t, s, taskID), res(`{"outcome":"finish","summary":"done"}`),
 		t.TempDir(), nil, "", "event", ""); parked {
 		t.Error("processCompletion(finish) = true; want false (terminal, not parked)")
@@ -253,9 +253,9 @@ func TestProcessCompletion_FinishReturnsNotParked(t *testing.T) {
 // finalizing a blueprint_run as completed closes its task (done +
 // close_reason=run_completed).
 func TestTerminateBlueprint_CompletedClosesTask(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "terminate-done")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "terminate-done")
 	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "manual", runmode.LocalDefaultUserID,
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
@@ -275,12 +275,12 @@ func TestTerminateBlueprint_CompletedClosesTask(t *testing.T) {
 // TestTerminateBlueprint_AbortLeavesTaskOpen: a non-completed terminal (abort)
 // leaves the task open for human attention.
 func TestTerminateBlueprint_AbortLeavesTaskOpen(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "terminate-abort")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "terminate-abort")
 	stampBotClaim(t, database, taskID)
 	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
 		t.Fatalf("park: %v", err)
 	}
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "manual", runmode.LocalDefaultUserID,
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)

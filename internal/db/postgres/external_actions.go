@@ -117,12 +117,12 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 	return out, total, err
 }
 
-// ListByRun reads one conversation's actions on the app pool, under the same
+// ListByConversation reads one conversation's actions on the app pool, under the same
 // org-scoped policy ListByTeam reads through — the run-visibility check the
 // handler already made is what narrows it to a run the caller may see. The
 // conversation_id bind casts to uuid so a malformed path value is a query error
 // rather than a text comparison against a uuid column.
-func (s *externalActionStore) ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
+func (s *externalActionStore) ListByConversation(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
 	total, err := countPgExternalActions(ctx, s.q, `org_id = $1 AND conversation_id = $2::uuid`, []any{orgID, conversationID}, opts)
 	if err != nil {
 		return nil, 0, err

@@ -10,7 +10,7 @@ import (
 
 // writeBundle constructs the per-run OCI bundle directory on disk:
 //
-//	$TMPDIR/tf-bundle-<runID>-<rand>/
+//	$TMPDIR/tf-bundle-<conversationID>-<rand>/
 //	├── config.json     (the OCI spec)
 //	├── resolv.conf     (1.1.1.1/8.8.8.8 — bind-mounted at /etc/resolv.conf)
 //	└── rootfs/         (symlink to the cached alpine minirootfs)
@@ -30,11 +30,11 @@ import (
 // mount slot empty and we fill it here.
 func writeBundle(cfg Config, spec *specs.Spec, rootfsPath string) (string, error) {
 	// Per-invocation unique bundle dir via MkdirTemp's random suffix.
-	// RunID isn't guaranteed unique per call (some callers pass fixed
-	// TraceIDs like "scorer-batch"), so a RunID-only path would let
-	// concurrent runs delete each other's bundle. RunID stays in the
+	// ConversationID isn't guaranteed unique per call (some callers pass fixed
+	// TraceIDs like "scorer-batch"), so a ConversationID-only path would let
+	// concurrent runs delete each other's bundle. ConversationID stays in the
 	// prefix purely for operator-grep-friendly naming.
-	bundleDir, err := os.MkdirTemp(os.TempDir(), "tf-bundle-"+sanitizeBundlePrefix(cfg.RunID)+"-")
+	bundleDir, err := os.MkdirTemp(os.TempDir(), "tf-bundle-"+sanitizeBundlePrefix(cfg.ConversationID)+"-")
 	if err != nil {
 		return "", fmt.Errorf("bundle: mkdtemp: %w", err)
 	}

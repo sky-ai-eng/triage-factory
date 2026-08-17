@@ -19,7 +19,7 @@ import (
 // routes through, so the SAME LocalClient logic runs in two placements:
 //
 //   - directRuntime (all/local, and the orchestrator serving a relayed op) —
-//     the effect hits db.Stores in-process under the run's RunInfo, with the
+//     the effect hits db.Stores in-process under the run's ConversationInfo, with the
 //     event-vs-manual pool/tx branch it always had.
 //   - relayRuntime (the capless per-run sidecar) — the effect is a narrow,
 //     org-bound relay to the orchestrator over the supervision channel; the
@@ -31,7 +31,7 @@ import (
 // so the transaction stays orchestrator-side — a tx closure cannot cross the
 // wire. Pure reads relay one-for-one.
 type Runtime interface {
-	Info() RunInfo
+	Info() ConversationInfo
 
 	// Reads.
 	ListRunArtifacts(ctx context.Context) ([]domain.Artifact, error)
@@ -45,8 +45,8 @@ type Runtime interface {
 	GetRepo(ctx context.Context, slug string) (*domain.Repository, error)
 
 	TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error)
-	GetRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.RunWorktree, error)
-	ListRunWorktrees(ctx context.Context) ([]domain.RunWorktree, error)
+	GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error)
+	ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error)
 	OrgJiraBaseURL(ctx context.Context) (string, error)
 	AgentFooter(ctx context.Context, kind string) (string, error)
 
@@ -59,7 +59,7 @@ type Runtime interface {
 	ReviewPosture(ctx context.Context, owner, repo string) (ReviewPostureResolution, error)
 
 	// Writes.
-	InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (inserted bool, winningPath string, err error)
+	InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (inserted bool, winningPath string, err error)
 	DeleteRunWorktree(ctx context.Context, repoID, ref string) error
 	UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error)
 	// UpdateReviewDetailsIfPending persists a review draft's mutated
@@ -132,7 +132,7 @@ type Runtime interface {
 // same handler runs over a direct runtime (all/local) or a relay runtime
 // (sidecar) unchanged.
 type ExtensionRuntime interface {
-	Info() RunInfo
+	Info() ConversationInfo
 	Relay(ctx context.Context, namespace, op string, args, out any) error
 	RelayNotify(ctx context.Context, namespace, op string, args any)
 	ProviderCredential(ctx context.Context, namespace string) (json.RawMessage, error)
@@ -222,7 +222,7 @@ type ReviewPostureResolution struct {
 
 // reviewPostureArgs is the review_posture op's payload — the repo whose acting
 // credential is being classified. Team + org identity is bound orchestrator-side
-// from the run's RunInfo, so the wire carries neither.
+// from the run's ConversationInfo, so the wire carries neither.
 type reviewPostureArgs struct {
 	Owner string `json:"owner"`
 	Repo  string `json:"repo"`
@@ -245,7 +245,7 @@ type recordExternalWriteArgs struct {
 
 // recordReadTouchArgs is the record_read_touch op's payload — the addressed
 // read's entity coordinates. Identity (org, run) is bound orchestrator-side
-// from the run's RunInfo, so the wire carries none.
+// from the run's ConversationInfo, so the wire carries none.
 type recordReadTouchArgs struct {
 	Provider string `json:"provider"`
 	Target   string `json:"target"`
@@ -256,11 +256,11 @@ type recordReadTouchArgs struct {
 
 // directRuntime is the all/local runtime AND the impl the orchestrator's
 // RelayServer serves a relayed core op through — the same DB logic in both
-// placements. Holds the run's stores + RunInfo; every method binds identity
+// placements. Holds the run's stores + ConversationInfo; every method binds identity
 // from info, never from a caller argument.
 type directRuntime struct {
 	stores db.Stores
-	info   RunInfo
+	info   ConversationInfo
 
 	// ghResolver classifies the acting GitHub credential for the review-posture
 	// decision (ReviewPosture). Seeded by NewServer with the Server's shared
@@ -277,7 +277,7 @@ type directRuntime struct {
 	ghCredential string
 }
 
-func newDirectRuntime(stores db.Stores, info RunInfo) *directRuntime {
+func newDirectRuntime(stores db.Stores, info ConversationInfo) *directRuntime {
 	return &directRuntime{stores: stores, info: info}
 }
 
@@ -291,18 +291,18 @@ func (r *directRuntime) githubResolver() ghclient.Resolver {
 	return ghclient.NewResolver(r.stores.Secrets, r.stores.GitHubApps, r.stores.Orgs, r.stores.Agents, nil)
 }
 
-func (r *directRuntime) Info() RunInfo { return r.info }
+func (r *directRuntime) Info() ConversationInfo { return r.info }
 
 // ListRunArtifacts respects the pool split: event-triggered runs read
 // admin-pool (no JWT claims); manual runs read under the kicking-off user's
 // synthetic claims. Mirrors withWriteInfo for the read side.
 func (r *directRuntime) ListRunArtifacts(ctx context.Context) ([]domain.Artifact, error) {
 	if r.info.IsEventTriggered {
-		return r.stores.Artifacts.ListByRunSystem(ctx, r.info.OrgID, r.info.RunID)
+		return r.stores.Artifacts.ListByConversationSystem(ctx, r.info.OrgID, r.info.ConversationID)
 	}
 	var out []domain.Artifact
 	err := r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
-		a, e := ts.Artifacts.ListByRun(ctx, r.info.OrgID, r.info.RunID)
+		a, e := ts.Artifacts.ListByConversation(ctx, r.info.OrgID, r.info.ConversationID)
 		out = a
 		return e
 	})
@@ -310,7 +310,7 @@ func (r *directRuntime) ListRunArtifacts(ctx context.Context) ([]domain.Artifact
 }
 
 func (r *directRuntime) GetConversation(ctx context.Context) (*domain.Conversation, error) {
-	return r.stores.Conversations.GetSystem(ctx, r.info.OrgID, r.info.RunID)
+	return r.stores.Conversations.GetSystem(ctx, r.info.OrgID, r.info.ConversationID)
 }
 
 func (r *directRuntime) GetTask(ctx context.Context, taskID string) (*domain.Task, error) {
@@ -334,12 +334,12 @@ func (r *directRuntime) TeamTracksRepo(ctx context.Context, owner, repo string) 
 	return r.stores.TeamGitHubRepos.TracksRepoSystem(ctx, r.info.TeamID, owner, repo)
 }
 
-func (r *directRuntime) GetRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.RunWorktree, error) {
-	return r.stores.RunWorktrees.GetByRepoRefSystem(ctx, r.info.OrgID, r.info.RunID, repoID, ref)
+func (r *directRuntime) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
+	return r.stores.ConversationWorktrees.GetByRepoRefSystem(ctx, r.info.OrgID, r.info.ConversationID, repoID, ref)
 }
 
-func (r *directRuntime) ListRunWorktrees(ctx context.Context) ([]domain.RunWorktree, error) {
-	return r.stores.RunWorktrees.ListSystem(ctx, r.info.OrgID, r.info.RunID)
+func (r *directRuntime) ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error) {
+	return r.stores.ConversationWorktrees.ListSystem(ctx, r.info.OrgID, r.info.ConversationID)
 }
 
 // OrgJiraBaseURL returns the org's configured Jira site URL (trailing slash
@@ -358,7 +358,7 @@ func (r *directRuntime) OrgJiraBaseURL(ctx context.Context) (string, error) {
 }
 
 func (r *directRuntime) AgentFooter(ctx context.Context, kind string) (string, error) {
-	return agentmeta.Build(r.stores.Conversations, r.info.OrgID, r.info.RunID, kind), nil
+	return agentmeta.Build(r.stores.Conversations, r.info.OrgID, r.info.ConversationID, kind), nil
 }
 
 // ReviewPosture reads the run team's posture and — only when the posture
@@ -396,23 +396,23 @@ func (r *directRuntime) ReviewPosture(ctx context.Context, owner, repo string) (
 	_, identity, err := ir.ClientForRepoWithIdentity(ctx, r.info.OrgID, owner, repo)
 	if err != nil {
 		agenthostLog.Warn("review posture: credential identity unresolved; treating as unknown (review will be staged)",
-			"run", r.info.RunID, "owner", owner, "repo", repo, "error", err)
+			"conversation", r.info.ConversationID, "owner", owner, "repo", repo, "error", err)
 		return out, nil
 	}
 	out.Identity = identity
 	return out, nil
 }
 
-func (r *directRuntime) InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (bool, string, error) {
+func (r *directRuntime) InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (bool, string, error) {
 	if r.info.IsEventTriggered {
-		return r.stores.RunWorktrees.InsertSystem(ctx, r.info.OrgID, row)
+		return r.stores.ConversationWorktrees.InsertSystem(ctx, r.info.OrgID, row)
 	}
 	var (
 		inserted    bool
 		winningPath string
 	)
 	err := r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
-		i, w, ierr := ts.RunWorktrees.Insert(ctx, r.info.OrgID, row)
+		i, w, ierr := ts.ConversationWorktrees.Insert(ctx, r.info.OrgID, row)
 		inserted = i
 		winningPath = w
 		return ierr
@@ -423,10 +423,10 @@ func (r *directRuntime) InsertRunWorktree(ctx context.Context, row domain.RunWor
 func (r *directRuntime) DeleteRunWorktree(ctx context.Context, repoID, ref string) error {
 	return withWriteInfo(ctx, r.stores, r.info,
 		func() error {
-			return r.stores.RunWorktrees.DeleteByRepoRefSystem(ctx, r.info.OrgID, r.info.RunID, repoID, ref)
+			return r.stores.ConversationWorktrees.DeleteByRepoRefSystem(ctx, r.info.OrgID, r.info.ConversationID, repoID, ref)
 		},
 		func(ts db.TxStores) error {
-			return ts.RunWorktrees.DeleteByRepoRef(ctx, r.info.OrgID, r.info.RunID, repoID, ref)
+			return ts.ConversationWorktrees.DeleteByRepoRef(ctx, r.info.OrgID, r.info.ConversationID, repoID, ref)
 		},
 	)
 }
@@ -438,7 +438,7 @@ func (r *directRuntime) DeleteRunWorktree(ctx context.Context, repoID, ref strin
 func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
-	a.ConversationID = r.info.RunID
+	a.ConversationID = r.info.ConversationID
 	act := branchPushActionInfo(a, r.info, r.githubCredential(ctx, a))
 	if r.info.IsEventTriggered {
 		stored, err := r.stores.Artifacts.UpsertSystem(ctx, r.info.OrgID, a)
@@ -447,7 +447,7 @@ func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (
 		}
 		if rerr := recordActionSystemInfo(ctx, r.stores, r.info, act); rerr != nil {
 			agenthostLog.Warn("branch external-action recording failed (push already applied)",
-				"run", r.info.RunID, "target", a.Target, "error", rerr)
+				"conversation", r.info.ConversationID, "target", a.Target, "error", rerr)
 		}
 		return stored, nil
 	}
@@ -571,7 +571,7 @@ func (r *directRuntime) ProviderCredential(ctx context.Context, namespace string
 	if !ok {
 		return nil, fmt.Errorf("agenthost: no credential resolver for provider %q", namespace)
 	}
-	raw, err := resolver(ctx, r.stores, ProvisionScope{OrgID: r.info.OrgID, TeamID: r.info.TeamID, RunID: r.info.RunID})
+	raw, err := resolver(ctx, r.stores, ProvisionScope{OrgID: r.info.OrgID, TeamID: r.info.TeamID, ConversationID: r.info.ConversationID})
 	if err != nil {
 		return nil, err
 	}
@@ -586,11 +586,11 @@ func (r *directRuntime) ProviderCredential(ctx context.Context, namespace string
 // relayRuntime is the capless per-run sidecar's runtime: every effect is a
 // narrow, org-bound relay to the orchestrator over the supervision channel. It
 // holds no db.Stores and opens no DB connection; identity is bound
-// orchestrator-side from the supervised run's RunInfo, so the args carry no
+// orchestrator-side from the supervised run's ConversationInfo, so the args carry no
 // org id and a sidecar cannot address another org's data.
 type relayRuntime struct {
 	conn relayConn
-	info RunInfo
+	info ConversationInfo
 	// providerCreds reads the current sealed bundle's keyed set for a provider
 	// namespace — a live accessor (not a snapshot) so a mid-run brain re-seal is
 	// picked up. nil when the sidecar was built with no provider credentials.
@@ -610,11 +610,11 @@ type relayConn interface {
 	notify(namespace, op string, args any)
 }
 
-func newRelayRuntime(conn relayConn, info RunInfo, providerCreds providerCredsFunc) *relayRuntime {
+func newRelayRuntime(conn relayConn, info ConversationInfo, providerCreds providerCredsFunc) *relayRuntime {
 	return &relayRuntime{conn: conn, info: info, providerCreds: providerCreds}
 }
 
-func (r *relayRuntime) Info() RunInfo { return r.info }
+func (r *relayRuntime) Info() ConversationInfo { return r.info }
 
 func (r *relayRuntime) ListRunArtifacts(ctx context.Context) ([]domain.Artifact, error) {
 	var res listRunArtifactsResult
@@ -664,16 +664,16 @@ func (r *relayRuntime) TeamTracksRepo(ctx context.Context, owner, repo string) (
 	return res.Tracks, nil
 }
 
-func (r *relayRuntime) GetRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.RunWorktree, error) {
-	var res runWorktreeResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetRunWorktreeByRepoRef, runWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, &res); err != nil {
+func (r *relayRuntime) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
+	var res conversationWorktreeResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetRunWorktreeByRepoRef, conversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, &res); err != nil {
 		return nil, err
 	}
 	return res.Worktree, nil
 }
 
-func (r *relayRuntime) ListRunWorktrees(ctx context.Context) ([]domain.RunWorktree, error) {
-	var res runWorktreesResult
+func (r *relayRuntime) ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error) {
+	var res conversationWorktreesResult
 	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opListRunWorktrees, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}
@@ -704,16 +704,16 @@ func (r *relayRuntime) ReviewPosture(ctx context.Context, owner, repo string) (R
 	return res, nil
 }
 
-func (r *relayRuntime) InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (bool, string, error) {
-	var res insertRunWorktreeResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opInsertRunWorktree, insertRunWorktreeArgs{Row: row}, &res); err != nil {
+func (r *relayRuntime) InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (bool, string, error) {
+	var res insertConversationWorktreeResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opInsertRunWorktree, insertConversationWorktreeArgs{Row: row}, &res); err != nil {
 		return false, "", err
 	}
 	return res.Inserted, res.WinningPath, nil
 }
 
 func (r *relayRuntime) DeleteRunWorktree(ctx context.Context, repoID, ref string) error {
-	return r.conn.call(ctx, agentproc.RelayNamespaceCore, opDeleteRunWorktree, deleteRunWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, nil)
+	return r.conn.call(ctx, agentproc.RelayNamespaceCore, opDeleteRunWorktree, deleteConversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, nil)
 }
 
 func (r *relayRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
@@ -819,10 +819,10 @@ func (c sidecarRelayConn) notify(namespace, op string, args any) {
 	}
 }
 
-// NewDirectRuntime builds the in-process runtime over db.Stores + RunInfo — the
+// NewDirectRuntime builds the in-process runtime over db.Stores + ConversationInfo — the
 // all/local runtime and the impl the orchestrator's RelayServer serves relayed
 // core ops through.
-func NewDirectRuntime(stores db.Stores, info RunInfo) Runtime {
+func NewDirectRuntime(stores db.Stores, info ConversationInfo) Runtime {
 	return newDirectRuntime(stores, info)
 }
 
@@ -830,6 +830,6 @@ func NewDirectRuntime(stores db.Stores, info RunInfo) Runtime {
 // every DB effect relays to the orchestrator, the sidecar holds no stores.
 // providerCreds reads the sidecar's held bundle for a provider's sealed keyed
 // set (nil when the run carries no provider credentials).
-func NewRelayRuntime(conn *sidecarproto.Conn, info RunInfo, providerCreds func(namespace string) (json.RawMessage, bool)) Runtime {
+func NewRelayRuntime(conn *sidecarproto.Conn, info ConversationInfo, providerCreds func(namespace string) (json.RawMessage, bool)) Runtime {
 	return newRelayRuntime(sidecarRelayConn{conn: conn}, info, providerCreds)
 }

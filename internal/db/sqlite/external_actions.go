@@ -113,11 +113,11 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 	return out, total, err
 }
 
-// ListByRun returns one conversation's actions, newest first. A detached row
+// ListByConversation returns one conversation's actions, newest first. A detached row
 // (conversation_id NULL after the run was purged) never matches, so a purged
 // run's actions survive in the org feed but no longer answer for a run that is
 // gone.
-func (s *externalActionStore) ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
+func (s *externalActionStore) ListByConversation(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
 	}

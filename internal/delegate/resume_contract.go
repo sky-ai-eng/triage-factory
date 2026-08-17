@@ -65,18 +65,18 @@ func missingResumeCoordinates(run domain.Conversation, at resumeCheckpoint) []st
 // conversations — their message rows are the resume state and none of these
 // fields is load-bearing. A row it cannot read is not a finding: a transient
 // read failure says nothing about what was written, so it goes to debug.
-func (s *Spawner) assertResumeCoordinates(ctx context.Context, orgID, runID string, at resumeCheckpoint) {
-	if s.agentRuns == nil {
+func (s *Spawner) assertResumeCoordinates(ctx context.Context, orgID, conversationID string, at resumeCheckpoint) {
+	if s.conversations == nil {
 		return
 	}
-	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
+	run, err := s.conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil || run == nil {
 		delegateLog.Debug("could not re-read the conversation to check its resume coordinates",
-			"run", runID, "org_id", orgID, "checkpoint", string(at), "error", err)
+			"conversation", conversationID, "org_id", orgID, "checkpoint", string(at), "error", err)
 		return
 	}
 	for _, field := range missingResumeCoordinates(*run, at) {
 		delegateLog.Warn("SDK conversation is missing a resume coordinate; resume will refuse this row",
-			"run", runID, "org_id", orgID, "checkpoint", string(at), "field", field)
+			"conversation", conversationID, "org_id", orgID, "checkpoint", string(at), "field", field)
 	}
 }

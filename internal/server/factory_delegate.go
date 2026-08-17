@@ -369,7 +369,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// task object; the actor is passed explicitly so the run's frozen
 	// blueprint_run actor matches it.
 	task.ClaimedByAgentID = a.ID
-	runID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
+	conversationID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: req.BlueprintID,
 		TriggerType:         "manual",
@@ -391,7 +391,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, factoryDelegateResponse{
 		TaskID:         task.ID,
-		ConversationID: runID,
+		ConversationID: conversationID,
 		ClaimStamped:   true,
 	})
 }

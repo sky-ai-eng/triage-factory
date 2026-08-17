@@ -21,7 +21,7 @@ import (
 )
 
 // lookupRun is the per-subcommand entry point for routing-sensitive
-// state access. The result carries OrgID / UserID / RunID + the
+// state access. The result carries OrgID / UserID / ConversationID + the
 // IsEventTriggered discriminator. Errors surface via the same
 // exitErr/os.Exit shape the rest of the file uses so the agent sees a
 // clear message and the subcommand exits non-zero.
@@ -31,7 +31,7 @@ import (
 // determines identity and LookupRun just round-trips. Either way the
 // subcommand body reads the routing-relevant fields from a single
 // in-process value.
-func lookupRun(host agenthost.Client) agenthost.RunInfo {
+func lookupRun(host agenthost.Client) agenthost.ConversationInfo {
 	info, err := host.LookupRun(context.Background())
 	if err != nil {
 		exitErr(err.Error())
@@ -794,7 +794,7 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 // reviewed PR's worktree). A list error is non-fatal: anchoring degrades to
 // cwd, never blocking the comment.
 func reviewedPRWorktreePath(host agenthost.Client, owner, repo string) string {
-	rows, err := host.ListRunWorktrees(context.Background())
+	rows, err := host.ListConversationWorktrees(context.Background())
 	if err != nil {
 		return ""
 	}

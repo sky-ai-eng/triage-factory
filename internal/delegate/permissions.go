@@ -118,7 +118,7 @@ func countOf(n int, unit string) string {
 const defaultPresencePollInterval = time.Second
 
 // ErrNoPendingPermission is returned by ResolvePermission when no in-flight
-// request matches (orgID, runID, toolCallID) — it was already answered, timed
+// request matches (orgID, conversationID, toolCallID) — it was already answered, timed
 // out, or never existed. The permission endpoint maps it to 404.
 var ErrNoPendingPermission = errors.New("no pending permission request")
 
@@ -136,8 +136,8 @@ type pendingPermission struct {
 // composite costs nothing and keeps each run's prompts isolated rather than
 // resting on that being true across runs. The NUL separator can't appear in a
 // run uuid or a tool_use id, so the composite is unambiguous.
-func permKey(runID, toolCallID string) string {
-	return runID + "\x00" + toolCallID
+func permKey(conversationID, toolCallID string) string {
+	return conversationID + "\x00" + toolCallID
 }
 
 // permTimeout is how long a surfaced prompt waits for an answer before denying.
@@ -241,12 +241,12 @@ func clampGrace(grace, full time.Duration) time.Duration {
 // reason (permDenyNoOperator), while a present, focused board/run tab extends
 // the wait to the full window. Either way the total wait never exceeds
 // permTimeout() and a 200-acknowledged decision is never dropped.
-func (s *Spawner) BrowserPermissionHandler(orgID, runID, claimID string, absent AbsentAutoDeny) agentproc.PermissionHandler {
+func (s *Spawner) BrowserPermissionHandler(orgID, conversationID, claimID string, absent AbsentAutoDeny) agentproc.PermissionHandler {
 	// The engagement's trace root, captured once when the handler is built —
 	// which is during setup, while the root is still live — rather than per
 	// prompt, since by the time a human is looking at a card the engagement
 	// has long since been deregistered.
-	engagement := s.engagementSpanContext(runID)
+	engagement := s.engagementSpanContext(conversationID)
 	return func(req agentproc.PermissionRequest) agentproc.PermissionDecision {
 		// A permission prompt is the one place a run stops for a person, and
 		// the run's own accounting deliberately discounts that wait — so
@@ -257,7 +257,7 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID, claimID string, absent 
 		// text, and the name alone is close enough to it that the hygiene rule
 		// (opaque ids and closed enums only) says no. What the span carries is
 		// how long the wait was and how it ended.
-		_, span := startPunctualLinked(context.Background(), engagement, runID, "permission.prompt",
+		_, span := startPunctualLinked(context.Background(), engagement, conversationID, "permission.prompt",
 			telemetry.OrgID(orgID))
 		decided := "denied"
 		defer func() {
@@ -265,7 +265,7 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID, claimID string, absent 
 			span.End()
 		}()
 
-		key := permKey(runID, req.ToolCallID)
+		key := permKey(conversationID, req.ToolCallID)
 		ch := make(chan agentproc.PermissionDecision, 1)
 		s.mu.Lock()
 		s.permPending[key] = &pendingPermission{ch: ch, orgID: orgID}
@@ -286,7 +286,7 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID, claimID string, absent 
 		// something that already exists: a client that refetches the instant it
 		// arrives finds the prompt, and a client that never saw the frame at
 		// all (refresh, second tab, cold load) finds it too.
-		s.recordPermissionRequest(orgID, runID, claimID, full, req)
+		s.recordPermissionRequest(orgID, conversationID, claimID, full, req)
 
 		// Hub.Broadcast is nil-receiver-safe, so no guard is needed for the
 		// hub-less test spawner. The payload is deliberately just the id: the
@@ -298,11 +298,11 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID, claimID string, absent 
 		s.wsHub.Broadcast(websocket.Event{
 			Type:           "permission_request",
 			OrgID:          orgID,
-			ConversationID: runID,
+			ConversationID: conversationID,
 			Data:           map[string]any{"tool_call_id": req.ToolCallID},
 		})
 
-		decision, got, reason, why := s.awaitPermission(ch, orgID, runID, full, absent)
+		decision, got, reason, why := s.awaitPermission(ch, orgID, conversationID, full, absent)
 		if got {
 			// A person answered. "allow" / "deny" come from the decision's own
 			// behavior field, which is a closed vocabulary the wrapper sets.
@@ -337,8 +337,8 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID, claimID string, absent 
 			// English that is free to be reworded — then tell every surface
 			// showing it to drop it now instead of waiting out its own client
 			// TTL (ResolvePermission already broadcasts for the answered case).
-			s.resolvePermissionRow(orgID, runID, req.ToolCallID, domain.PermissionStateDenied, why, "")
-			s.broadcastPermissionResolved(orgID, runID, req.ToolCallID)
+			s.resolvePermissionRow(orgID, conversationID, req.ToolCallID, domain.PermissionStateDenied, why, "")
+			s.broadcastPermissionResolved(orgID, conversationID, req.ToolCallID)
 			return agentproc.PermissionDecision{Behavior: "deny", Message: reason}
 		}
 	}
@@ -350,14 +350,14 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID, claimID string, absent 
 // but must never cost the agent its question — the broker has already parked
 // and the browser is about to be told, so returning early here would strand the
 // run for the full window over a bookkeeping failure.
-func (s *Spawner) recordPermissionRequest(orgID, runID, claimID string, full time.Duration, req agentproc.PermissionRequest) {
+func (s *Spawner) recordPermissionRequest(orgID, conversationID, claimID string, full time.Duration, req agentproc.PermissionRequest) {
 	if s.permissions == nil {
 		return
 	}
 	now := time.Now().UTC()
 	expires := now.Add(full)
 	err := s.permissions.Create(context.Background(), orgID, &domain.ConversationPermission{
-		ConversationID: runID,
+		ConversationID: conversationID,
 		ClaimID:        claimID,
 		ToolCallID:     req.ToolCallID,
 		ToolName:       req.ToolName,
@@ -369,7 +369,7 @@ func (s *Spawner) recordPermissionRequest(orgID, runID, claimID string, full tim
 	})
 	if err != nil {
 		delegateLog.Warn("record pending tool permission failed; prompt is live but not reloadable",
-			"run", runID, "tool_call_id", req.ToolCallID, "error", err)
+			"conversation", conversationID, "tool_call_id", req.ToolCallID, "error", err)
 	}
 }
 
@@ -378,13 +378,13 @@ func (s *Spawner) recordPermissionRequest(orgID, runID, claimID string, full tim
 // agent is already unblocked by the time this runs, so a failure loses an audit
 // row rather than changing what happened. decidedBy is set only for a human
 // answer.
-func (s *Spawner) resolvePermissionRow(orgID, runID, toolCallID, state, reason, decidedBy string) {
+func (s *Spawner) resolvePermissionRow(orgID, conversationID, toolCallID, state, reason, decidedBy string) {
 	if s.permissions == nil {
 		return
 	}
-	if err := s.permissions.Resolve(context.Background(), orgID, runID, toolCallID, state, reason, decidedBy); err != nil {
+	if err := s.permissions.Resolve(context.Background(), orgID, conversationID, toolCallID, state, reason, decidedBy); err != nil {
 		delegateLog.Warn("record tool permission resolution failed",
-			"run", runID, "tool_call_id", toolCallID, "state", state, "reason", reason, "error", err)
+			"conversation", conversationID, "tool_call_id", toolCallID, "state", state, "reason", reason, "error", err)
 	}
 }
 
@@ -424,7 +424,7 @@ func (s *Spawner) ExpirePermissionsForClaim(orgID, claimID string) {
 // to the full window (clears absentSince), and flipping back resets the grace
 // clock. The grace deadline never exceeds the full window (clampGrace), so the
 // total wait is bounded by permTimeout() in every branch.
-func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, runID string, full time.Duration, absent AbsentAutoDeny) (agentproc.PermissionDecision, bool, string, string) {
+func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, conversationID string, full time.Duration, absent AbsentAutoDeny) (agentproc.PermissionDecision, bool, string, string) {
 	if !absent.enabled {
 		select {
 		case d := <-ch:
@@ -447,7 +447,7 @@ func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, r
 	ticker := time.NewTicker(s.presencePollInterval())
 	defer ticker.Stop()
 
-	present := s.presentFor(orgID, runID)
+	present := s.presentFor(orgID, conversationID)
 	graceTimer := time.NewTimer(absent.grace)
 	defer graceTimer.Stop()
 	if present {
@@ -472,7 +472,7 @@ func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, r
 			// not from when the prompt was raised.
 			return agentproc.PermissionDecision{}, false, permDenyNoOperator(absent.grace), domain.PermissionReasonAbsent
 		case <-ticker.C:
-			now := s.presentFor(orgID, runID)
+			now := s.presentFor(orgID, conversationID)
 			switch {
 			case now && !present:
 				// became present: stop the absent clock, re-arm to full window.
@@ -518,14 +518,14 @@ func resetTimer(t *time.Timer, d time.Duration) {
 // counts. Otherwise (local mode, or before wiring) it falls back to the
 // hub directly, which is nil-receiver-safe (the hub-less test spawner
 // reads as "nobody present").
-func (s *Spawner) presentFor(orgID, runID string) bool {
+func (s *Spawner) presentFor(orgID, conversationID string) bool {
 	s.mu.Lock()
 	pc := s.presence
 	s.mu.Unlock()
 	if pc != nil {
-		return pc.PresentFor(context.Background(), orgID, runID)
+		return pc.PresentFor(context.Background(), orgID, conversationID)
 	}
-	return s.wsHub.PresentFor(orgID, runID)
+	return s.wsHub.PresentFor(orgID, conversationID)
 }
 
 // presencePollInterval is the absent-deny presence poll cadence, falling back to
@@ -553,11 +553,11 @@ func (s *Spawner) SetPresencePollInterval(d time.Duration) {
 // the board card and the run-detail dock, or two board tabs — drops it promptly
 // instead of waiting out its own client-side TTL. The client TTL stays as a
 // backstop for a dropped/missed event. Hub.Broadcast is nil-receiver-safe.
-func (s *Spawner) broadcastPermissionResolved(orgID, runID, toolCallID string) {
+func (s *Spawner) broadcastPermissionResolved(orgID, conversationID, toolCallID string) {
 	s.wsHub.Broadcast(websocket.Event{
 		Type:           "permission_resolved",
 		OrgID:          orgID,
-		ConversationID: runID,
+		ConversationID: conversationID,
 		Data: map[string]any{
 			"tool_call_id": toolCallID,
 		},
@@ -579,9 +579,9 @@ func (s *Spawner) broadcastPermissionResolved(orgID, runID, toolCallID string) {
 // unlock). Local-mode runs have no gVisor boundary, so they keep routing
 // through BrowserPermissionHandler — see the agentproc.WillSandbox() branch in
 // run.go/resume.go.
-func (s *Spawner) AutoApprovePermissionHandler(runID string) agentproc.PermissionHandler {
+func (s *Spawner) AutoApprovePermissionHandler(conversationID string) agentproc.PermissionHandler {
 	return func(req agentproc.PermissionRequest) agentproc.PermissionDecision {
-		delegateLog.Info("off-allowlist tool auto-approved in sandboxed run", "run", runID, "tool_call_id", req.ToolCallID, "tool", req.ToolName)
+		delegateLog.Info("off-allowlist tool auto-approved in sandboxed run", "conversation", conversationID, "tool_call_id", req.ToolCallID, "tool", req.ToolName)
 		return agentproc.PermissionDecision{Behavior: "allow"}
 	}
 }
@@ -611,12 +611,12 @@ func (s *Spawner) AutoApprovePermissionHandler(runID string) agentproc.Permissio
 // so it short-circuits before ever trying remote.
 // decidedBy is the answering user, stamped onto the audit row so an approval
 // names who granted it — the fact the old arrangement recorded nowhere at all.
-func (s *Spawner) ResolvePermission(orgID, runID, toolCallID, decidedBy string, d agentproc.PermissionDecision) error {
-	err := s.resolvePermissionLocal(orgID, runID, toolCallID, decidedBy, d)
+func (s *Spawner) ResolvePermission(orgID, conversationID, toolCallID, decidedBy string, d agentproc.PermissionDecision) error {
+	err := s.resolvePermissionLocal(orgID, conversationID, toolCallID, decidedBy, d)
 	if err == nil || !errors.Is(err, ErrNoPendingPermission) {
 		return err
 	}
-	if s.getProc(runID) != nil {
+	if s.getProc(conversationID) != nil {
 		return ErrNoPendingPermission
 	}
 	s.mu.Lock()
@@ -625,14 +625,14 @@ func (s *Spawner) ResolvePermission(orgID, runID, toolCallID, decidedBy string, 
 	if runSignals == nil {
 		return ErrNoPendingPermission
 	}
-	return s.routePermission(orgID, runID, toolCallID, decidedBy, d)
+	return s.routePermission(orgID, conversationID, toolCallID, decidedBy, d)
 }
 
 // resolvePermissionLocal is ResolvePermission's original N=1 body: resolve
 // the in-memory broker entry and buffer the decision.
-func (s *Spawner) resolvePermissionLocal(orgID, runID, toolCallID, decidedBy string, d agentproc.PermissionDecision) error {
+func (s *Spawner) resolvePermissionLocal(orgID, conversationID, toolCallID, decidedBy string, d agentproc.PermissionDecision) error {
 	s.mu.Lock()
-	p, ok := s.permPending[permKey(runID, toolCallID)]
+	p, ok := s.permPending[permKey(conversationID, toolCallID)]
 	if !ok || p.orgID != orgID {
 		s.mu.Unlock()
 		return ErrNoPendingPermission
@@ -649,11 +649,11 @@ func (s *Spawner) resolvePermissionLocal(orgID, runID, toolCallID, decidedBy str
 		if d.Behavior == "allow" {
 			state = domain.PermissionStateAllowed
 		}
-		s.resolvePermissionRow(orgID, runID, toolCallID, state, domain.PermissionReasonUser, decidedBy)
+		s.resolvePermissionRow(orgID, conversationID, toolCallID, state, domain.PermissionReasonUser, decidedBy)
 		// Tell other surfaces showing this prompt to drop it now — broadcast
 		// outside s.mu so the hub's own locking never nests under the broker
 		// mutex.
-		s.broadcastPermissionResolved(orgID, runID, toolCallID)
+		s.broadcastPermissionResolved(orgID, conversationID, toolCallID)
 		return nil
 	default:
 		// Slot already filled by a racing resolve — treat as no-longer-pending.
@@ -670,7 +670,7 @@ func (s *Spawner) resolvePermissionLocal(orgID, runID, toolCallID, decidedBy str
 // ErrNoPendingPermission: gone means no live process to answer (the same
 // user-facing outcome as never having been pending), stale means the
 // tool_call_id was already resolved on the owner.
-func (s *Spawner) routePermission(orgID, runID, toolCallID, decidedBy string, d agentproc.PermissionDecision) error {
+func (s *Spawner) routePermission(orgID, conversationID, toolCallID, decidedBy string, d agentproc.PermissionDecision) error {
 	payload, err := json.Marshal(permissionPayload{
 		ToolCallID:   toolCallID,
 		Behavior:     d.Behavior,
@@ -683,11 +683,11 @@ func (s *Spawner) routePermission(orgID, runID, toolCallID, decidedBy string, d 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultPermissionAckTimeout)
 	defer cancel()
-	result, live, err := s.sendSignalAndAwaitAck(ctx, orgID, runID, domain.RunSignalPermission, string(payload))
+	result, live, err := s.sendSignalAndAwaitAck(ctx, orgID, conversationID, domain.ConversationSignalPermission, string(payload))
 	if err != nil {
 		return err
 	}
-	if !live || result == domain.RunSignalAckGone || result == domain.RunSignalAckStale {
+	if !live || result == domain.ConversationSignalAckGone || result == domain.ConversationSignalAckStale {
 		return ErrNoPendingPermission
 	}
 	return nil

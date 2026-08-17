@@ -39,9 +39,9 @@ func TestTaskMemoryStore_Postgres(t *testing.T) {
 				t.Helper()
 				return seedPgBlueprintRunForTaskMemory(t, h, orgID, userID, suffix)
 			},
-			Role: func(t *testing.T, runID, entityID string) string {
+			Role: func(t *testing.T, conversationID, entityID string) string {
 				t.Helper()
-				return roleForPgJoinRow(t, h, runID, entityID)
+				return roleForPgJoinRow(t, h, conversationID, entityID)
 			},
 		}
 		return stores.TaskMemory, orgID, seed
@@ -52,10 +52,10 @@ func TestTaskMemoryStore_Postgres(t *testing.T) {
 // admin pool (bypasses RLS) — the store interface has no role-returning
 // read, so the RecordEntityTouchSystem precedence conformance subtest
 // needs a raw escape hatch. Returns "" if no row exists.
-func roleForPgJoinRow(t *testing.T, h *pgtest.Harness, runID, entityID string) string {
+func roleForPgJoinRow(t *testing.T, h *pgtest.Harness, conversationID, entityID string) string {
 	t.Helper()
 	var role string
-	err := h.AdminDB.QueryRow(`SELECT role FROM conversation_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, runID, entityID).Scan(&role)
+	err := h.AdminDB.QueryRow(`SELECT role FROM conversation_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, conversationID, entityID).Scan(&role)
 	if err == sql.ErrNoRows {
 		return ""
 	}
@@ -122,12 +122,12 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB read orgA run memory: %q", content)
 	}
 
-	// UpdateRunMemoryHumanContent under orgB on orgA's run is a
+	// UpdateConversationMemoryHumanContent under orgB on orgA's run is a
 	// no-op (no row matches the (org_id, conversation_id) predicate) and is
 	// logged-not-fatal — same shape as the missing-row case in the
 	// conformance suite.
-	if err := stores.TaskMemory.UpdateRunMemoryHumanContent(ctx, orgB, runA, "should-not-land"); err != nil {
-		t.Errorf("UpdateRunMemoryHumanContent orgB on orgA run errored: %v", err)
+	if err := stores.TaskMemory.UpdateConversationMemoryHumanContent(ctx, orgB, runA, "should-not-land"); err != nil {
+		t.Errorf("UpdateConversationMemoryHumanContent orgB on orgA run errored: %v", err)
 	}
 	// Confirm orgA's row is unchanged.
 	contentA, ok := queryRunMemoryAgentContent(t, h, orgA, runA)
@@ -141,15 +141,15 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 }
 
 // queryRunMemoryAgentContent reads conversation_memory.agent_content directly via
-// the admin pool for a (orgID, runID) pair — a raw-row escape hatch for
+// the admin pool for a (orgID, conversationID) pair — a raw-row escape hatch for
 // tests that need to pin the org_id filter independent of the
 // entity-scoped read path (GetMemoriesForEntity), now that GetRunMemory
 // (a direct conversation_id lookup) has been removed. Returns ("", false) when no
 // row matches.
-func queryRunMemoryAgentContent(t *testing.T, h *pgtest.Harness, orgID, runID string) (string, bool) {
+func queryRunMemoryAgentContent(t *testing.T, h *pgtest.Harness, orgID, conversationID string) (string, bool) {
 	t.Helper()
 	var content sql.NullString
-	err := h.AdminDB.QueryRow(`SELECT agent_content FROM conversation_memory WHERE org_id = $1 AND conversation_id = $2`, orgID, runID).Scan(&content)
+	err := h.AdminDB.QueryRow(`SELECT agent_content FROM conversation_memory WHERE org_id = $1 AND conversation_id = $2`, orgID, conversationID).Scan(&content)
 	if err == sql.ErrNoRows {
 		return "", false
 	}
@@ -395,12 +395,12 @@ func TestTaskMemoryStore_Postgres_BackfillProducesPrimaryJoinRows(t *testing.T) 
 
 	orgID, userID := seedPgTaskMemoryOrg(t, h)
 	promptID := seedPgTaskMemoryPrompt(t, h, orgID, userID)
-	runID, entityID := seedPgRunForTaskMemory(t, h, orgID, userID, promptID, "backfill")
+	conversationID, entityID := seedPgRunForTaskMemory(t, h, orgID, userID, promptID, "backfill")
 
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content, created_at)
 		VALUES (gen_random_uuid(), $1, $2, $3, 'pre-migration note', now())
-	`, orgID, runID, entityID); err != nil {
+	`, orgID, conversationID, entityID); err != nil {
 		t.Fatalf("seed pre-migration conversation_memory row: %v", err)
 	}
 
@@ -421,7 +421,7 @@ func TestTaskMemoryStore_Postgres_BackfillProducesPrimaryJoinRows(t *testing.T) 
 		t.Fatalf("run backfill: %v", err)
 	}
 
-	if role := roleForPgJoinRow(t, h, runID, entityID); role != domain.MemoryRolePrimary {
+	if role := roleForPgJoinRow(t, h, conversationID, entityID); role != domain.MemoryRolePrimary {
 		t.Errorf("backfilled role = %q, want %q", role, domain.MemoryRolePrimary)
 	}
 
@@ -496,7 +496,7 @@ func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetMemoriesForEntitySystem team1 %s: %v", name, err)
 		}
-		if len(mems) != 1 || mems[0].RunID != run1 || mems[0].Content != "team1 narrative" {
+		if len(mems) != 1 || mems[0].ConversationID != run1 || mems[0].Content != "team1 narrative" {
 			t.Errorf("team1 read of %s = %+v, want only run1's team1 narrative", name, mems)
 		}
 	}
@@ -507,7 +507,7 @@ func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntitySystem team2 produced B: %v", err)
 	}
-	if len(memsB2) != 1 || memsB2[0].RunID != run2 || memsB2[0].Content != "team2 narrative" {
+	if len(memsB2) != 1 || memsB2[0].ConversationID != run2 || memsB2[0].Content != "team2 narrative" {
 		t.Errorf("team2 read of produced B = %+v, want only run2's team2 narrative (no team1 bleed)", memsB2)
 	}
 
@@ -542,7 +542,7 @@ func seedPgSharedEntity(t *testing.T, h *pgtest.Harness, orgID, source, sourceID
 
 // seedPgTeamRunOnEntity seeds the event + task + blueprint + blueprint_run +
 // run FK chain for a run owned by teamID on a PRE-EXISTING entity, returning
-// the runID. Unlike seedPgRunForTaskMemory (which mints a fresh entity and
+// the conversationID. Unlike seedPgRunForTaskMemory (which mints a fresh entity and
 // defaults to the org's first team), this takes the entity + team explicitly
 // so two teams can own runs on the same shared entity. suffix discriminates
 // the task's dedup_key so the active-task partial unique index never collides.
@@ -584,14 +584,14 @@ func seedPgTeamRunOnEntity(t *testing.T, h *pgtest.Harness, orgID, userID, promp
 		t.Fatalf("seed blueprint_run: %v", err)
 	}
 
-	runID := uuid.New().String()
+	conversationID := uuid.New().String()
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id, blueprint_step_index)
 		VALUES ($1, $2, $3, $4, 'team', $5, $6, 'manual', 'completed', $7, $8)
-	`, runID, orgID, userID, teamID, taskID, promptID, brID, dbtest.TaskMemorySeedStepIndex); err != nil {
+	`, conversationID, orgID, userID, teamID, taskID, promptID, brID, dbtest.TaskMemorySeedStepIndex); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
-	return runID
+	return conversationID
 }
 
 // seedPgTaskMemoryOrg builds the auth user + public user + org +
@@ -643,7 +643,7 @@ func seedPgTaskMemoryPrompt(t *testing.T, h *pgtest.Harness, orgID, userID strin
 }
 
 // seedPgRunForTaskMemory seeds the entity + event + task + run FK
-// chain conversation_memory needs. Returns (runID, entityID).
+// chain conversation_memory needs. Returns (conversationID, entityID).
 func seedPgRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, promptID, suffix string) (string, string) {
 	t.Helper()
 	conn := h.AdminDB
@@ -700,16 +700,16 @@ func seedPgRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, prom
 		t.Fatalf("seed blueprint_run: %v", err)
 	}
 
-	runID := uuid.New().String()
+	conversationID := uuid.New().String()
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id, blueprint_step_index)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 		        'team', $4, $5, 'manual', 'completed', $6, $7)
-	`, runID, orgID, userID, taskID, promptID, brID, dbtest.TaskMemorySeedStepIndex); err != nil {
+	`, conversationID, orgID, userID, taskID, promptID, brID, dbtest.TaskMemorySeedStepIndex); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
-	return runID, entityID
+	return conversationID, entityID
 }
 
 // seedPgBlueprintRunForTaskMemory seeds the entity + event + task + blueprint +

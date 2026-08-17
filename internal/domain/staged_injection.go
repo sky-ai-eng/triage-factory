@@ -18,12 +18,12 @@ import (
 // queue does not interpret either, so a new consumer adds a producer tag and a
 // body string without touching the store.
 type StagedInjection struct {
-	ID        string    `json:"id"`
-	OrgID     string    `json:"org_id"`
-	RunID     string    `json:"run_id"`
-	Producer  string    `json:"producer"`
-	Body      string    `json:"body"`
-	CreatedAt time.Time `json:"created_at"`
+	ID             string    `json:"id"`
+	OrgID          string    `json:"org_id"`
+	ConversationID string    `json:"run_id"`
+	Producer       string    `json:"producer"`
+	Body           string    `json:"body"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // StagedInjectionProducer* tag a staged injection's origin. Free-text (no DB CHECK) so a

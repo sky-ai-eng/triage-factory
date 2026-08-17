@@ -66,7 +66,7 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		if run == nil {
 			return nil
 		}
-		counts, e := tx.Artifacts.CountByRun(r.Context(), orgID, []string{run.ID})
+		counts, e := tx.Artifacts.CountByConversation(r.Context(), orgID, []string{run.ID})
 		if e != nil {
 			return e
 		}
@@ -79,8 +79,8 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		// swallowed-error sweep leaves it swallowed deliberately.
 		var arts []domain.Artifact
 		if counts[run.ID] > 0 {
-			if a, lerr := tx.Artifacts.ListByRun(r.Context(), orgID, run.ID); lerr != nil {
-				serverLog.Warn("artifact lookup for has_unresolved_artifacts failed; omitting it (artifact_count unaffected)", "run", run.ID, "error", lerr)
+			if a, lerr := tx.Artifacts.ListByConversation(r.Context(), orgID, run.ID); lerr != nil {
+				serverLog.Warn("artifact lookup for has_unresolved_artifacts failed; omitting it (artifact_count unaffected)", "conversation", run.ID, "error", lerr)
 			} else {
 				arts = a
 			}
@@ -93,7 +93,7 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		var stepCount int
 		if run.BlueprintRunID != "" {
 			if lens, lerr := tx.Blueprints.StepPlanLengths(r.Context(), orgID, []string{run.BlueprintRunID}); lerr != nil {
-				serverLog.Warn("blueprint step-plan length lookup failed; omitting blueprint_step_count", "run", run.ID, "blueprint_run", run.BlueprintRunID, "error", lerr)
+				serverLog.Warn("blueprint step-plan length lookup failed; omitting blueprint_step_count", "conversation", run.ID, "blueprint_run", run.BlueprintRunID, "error", lerr)
 			} else {
 				stepCount = lens[run.BlueprintRunID]
 			}
@@ -155,7 +155,7 @@ func addResumability(ctx context.Context, resp map[string]any, orgID string, run
 // background per-org cycle. It runs the SAME reconcile path as Tier 1, bounded
 // to this one run's artifacts, and pushes any transition over the WS hub.
 //
-// Authorization rides the request-claims read: Conversations.Get + Artifacts.ListByRun
+// Authorization rides the request-claims read: Conversations.Get + Artifacts.ListByConversation
 // are RLS-scoped, so a user can only refresh a run their team can see. The GitHub
 // calls and the artifact/memory writes happen OUTSIDE that read tx (no network
 // I/O under a held transaction) — the reconciler writes via its admin-pool path.
@@ -189,7 +189,7 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 		if e != nil || run == nil {
 			return e
 		}
-		all, e := tx.Artifacts.ListByRun(r.Context(), orgID, conversationID)
+		all, e := tx.Artifacts.ListByConversation(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
@@ -268,7 +268,7 @@ func toArtifactJSON(a domain.Artifact) artifactJSON {
 
 // handleAgentArtifacts returns every artifact a run produced — branch, PR,
 // review, issue, comment — newest first (A·6, TFAC-465). It reuses
-// Artifacts.ListByRun and reads the run first under request claims, so a run
+// Artifacts.ListByConversation and reads the run first under request claims, so a run
 // the caller's team can't see is a 404 (RLS scopes both reads), never a leak;
 // a member of the owning team gets the list. Backs the run-detail surface
 // (TFAC-470); team-level aggregation is TFAC-449 C2, not here.
@@ -294,7 +294,7 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 		if run == nil {
 			return nil
 		}
-		arts, e = tx.Artifacts.ListByRun(r.Context(), orgID, conversationID)
+		arts, e = tx.Artifacts.ListByConversation(r.Context(), orgID, conversationID)
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -375,7 +375,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		if run == nil {
 			return nil
 		}
-		actions, total, e = tx.ExternalActions.ListByRun(r.Context(), orgID, conversationID,
+		actions, total, e = tx.ExternalActions.ListByConversation(r.Context(), orgID, conversationID,
 			domain.ExternalActionListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
@@ -406,7 +406,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 //
 // Pure projection — it does no I/O. The caller supplies every input, which is
 // what lets the run-list path batch its reads instead of issuing them per run:
-//   - artifactCount from Artifacts.CountByRun (the single-run path counts one
+//   - artifactCount from Artifacts.CountByConversation (the single-run path counts one
 //     run; the list path batches every run in one query — N+1 avoidance).
 //   - arts is the run's artifact set, which the caller reads best-effort (only
 //     for runs that have any artifact, so a run with none costs no list).
@@ -425,7 +425,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // runtime: under the SDK a terminal step reports `finish`, while the native
 // loop stamps `continue` on every ordinary completion, final and single-step
 // runs included (internal/agentloop, internal/delegate/blueprint.go's
-// blueprintDecisionForStepRun is what resolves it against position).
+// blueprintDecisionForStepConversation is what resolves it against position).
 //
 // The derived approval keys are emitted only when the answer is definitive: when
 // the run has no artifacts (artifactCount == 0, so nothing can be unresolved) or
@@ -930,26 +930,26 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 // has. Board's useWebSocket re-fetches on every status transition, so a per-run
 // read would scale with the task's run history.
 //
-//   - artifact_count for every run: one CountByRun (conversationID→count; a run with no
+//   - artifact_count for every run: one CountByConversation (conversationID→count; a run with no
 //     artifacts is absent → 0).
-//   - has_unresolved_artifacts for the runs that have artifacts: one ListByRuns
+//   - has_unresolved_artifacts for the runs that have artifacts: one ListByConversations
 //     over just those run ids (count>0), grouped per run. The derivation needs
 //     the actual artifacts, but a run with none can't have an unresolved one, so
 //     it costs no list.
 //   - blueprint_step_count for the runs that belong to a blueprint: one
 //     StepPlanLengths over the deduped blueprint_run ids.
 //
-// Deliberately best-effort: a ListByRuns or StepPlanLengths failure drops what
+// Deliberately best-effort: a ListByConversations or StepPlanLengths failure drops what
 // that read contributes (logged) but leaves counts and the rest intact. These
 // are display annotations on rows the caller can already see, so surfacing the
 // failure would fail a whole board refresh over a badge. Shared by the
 // single-task and batched (task_ids) run-list paths.
 func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) ([]map[string]any, error) {
-	runIDs := make([]string, len(runs))
+	conversationIDs := make([]string, len(runs))
 	for i := range runs {
-		runIDs[i] = runs[i].ID
+		conversationIDs[i] = runs[i].ID
 	}
-	counts, err := tx.Artifacts.CountByRun(ctx, orgID, runIDs)
+	counts, err := tx.Artifacts.CountByConversation(ctx, orgID, conversationIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -961,7 +961,7 @@ func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain
 	}
 	artsByRun := map[string][]domain.Artifact{}
 	if len(withArtifacts) > 0 {
-		if arts, lerr := tx.Artifacts.ListByRuns(ctx, orgID, withArtifacts); lerr != nil {
+		if arts, lerr := tx.Artifacts.ListByConversations(ctx, orgID, withArtifacts); lerr != nil {
 			serverLog.Warn("artifact batch lookup failed; omitting has_unresolved_artifacts (artifact_count unaffected)", "error", lerr)
 		} else {
 			for _, a := range arts {
@@ -1119,7 +1119,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 			}
 		}
 		if req.IncludeMessages && len(primaryRunIDs) > 0 {
-			msgs, e := tx.Conversations.MessagesForRuns(r.Context(), orgID, primaryRunIDs)
+			msgs, e := tx.Conversations.MessagesForConversations(r.Context(), orgID, primaryRunIDs)
 			if e != nil {
 				return e
 			}

@@ -146,7 +146,7 @@ func IsTerminalRunStatus(status string) bool {
 // per turn, on messages.stop_reason; this one is a per-conversation fact and
 // stays here.
 //
-// Not a failure kind: a park is not a failure. RunFailureKind owns "the
+// Not a failure kind: a park is not a failure. ConversationFailureKind owns "the
 // infrastructure died" and counting `user_cancelled` beside `memory_limit`
 // would make every failure count wrong. Not the claim's outcome either — that
 // records `parked` vs `cancelled` per engagement, and a conversation

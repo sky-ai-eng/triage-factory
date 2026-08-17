@@ -56,15 +56,15 @@ func withCaptureChildEnv(t *testing.T, fn func()) {
 //
 // Returns the worktree dir and its HEAD (the local-only commit, so the capture
 // exercises the bundle path too).
-func dirtyCaptureTree(t *testing.T, runID string) (wtDir, head string) {
+func dirtyCaptureTree(t *testing.T, conversationID string) (wtDir, head string) {
 	t.Helper()
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	wtDir, err := CreateForBranch(context.Background(), "acme", "repo", upstream, "main", "aa/feature", runID)
+	wtDir, err := CreateForBranch(context.Background(), "acme", "repo", upstream, "main", "aa/feature", conversationID)
 	if err != nil {
 		t.Fatalf("CreateForBranch: %v", err)
 	}
-	t.Cleanup(func() { _ = RemoveAt(wtDir, runID) })
+	t.Cleanup(func() { _ = RemoveAt(wtDir, conversationID) })
 
 	gitAt(t, wtDir, "config", "user.email", "test@example.com")
 	gitAt(t, wtDir, "config", "user.name", "Test")

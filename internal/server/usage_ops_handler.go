@@ -37,7 +37,7 @@ type opsFailureKind struct {
 }
 
 // handleUsageOrgOps serves GET /api/usage/org/ops — org-admin gated. Reuses the
-// usage window parsing and the RunQueue's org-scoped timing reads.
+// usage window parsing and the ConversationQueue's org-scoped timing reads.
 func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveCaller(w, r)
 	if !ok {

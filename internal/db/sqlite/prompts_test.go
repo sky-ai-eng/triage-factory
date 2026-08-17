@@ -88,12 +88,12 @@ func seedSQLiteRunsForStats(t *testing.T, conn *sql.DB, promptID string, statusB
 	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
 	ids := make([]string, 0, len(statusByOffset))
 	for i, status := range statusByOffset {
-		runID := uuid.New().String()
+		conversationID := uuid.New().String()
 		startedAt := now.AddDate(0, 0, -i)
 		if _, err := conn.Exec(`
 			INSERT INTO conversations (id, task_id, prompt_id, status, started_at, blueprint_run_id)
 			VALUES (?, ?, ?, ?, ?, ?)
-		`, runID, taskID, promptID, status, startedAt, blueprintRunID); err != nil {
+		`, conversationID, taskID, promptID, status, startedAt, blueprintRunID); err != nil {
 			t.Fatalf("seed run %d: %v", i, err)
 		}
 		// The accounting the stats read derives from: one cost-stamped
@@ -101,16 +101,16 @@ func seedSQLiteRunsForStats(t *testing.T, conn *sql.DB, promptID string, statusB
 		if _, err := conn.Exec(`
 			INSERT INTO messages (conversation_id, role, subtype, content, cost_usd, created_at)
 			VALUES (?, 'assistant', '', 'work', 0.01, ?)
-		`, runID, startedAt); err != nil {
+		`, conversationID, startedAt); err != nil {
 			t.Fatalf("seed run message %d: %v", i, err)
 		}
 		if _, err := conn.Exec(`
 			INSERT INTO claims (id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, duration_ms)
 			VALUES (?, ?, 'exec-p', 1, ?, ?, 'completed', 100)
-		`, uuid.New().String(), runID, startedAt, startedAt); err != nil {
+		`, uuid.New().String(), conversationID, startedAt, startedAt); err != nil {
 			t.Fatalf("seed run claim %d: %v", i, err)
 		}
-		ids = append(ids, runID)
+		ids = append(ids, conversationID)
 	}
 	return ids
 }

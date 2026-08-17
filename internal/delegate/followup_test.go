@@ -56,7 +56,7 @@ func taskStatus(t *testing.T, database *sql.DB, taskID string) string {
 // TestFollowUpOnFinishedBlueprint_IsClaimedAndDriven is the acceptance test for
 // the trap: a row that flips to claimable but is never CLAIMED fails silently
 // and permanently, and it would pass any assertion that only checked the resume
-// was accepted. So this claims for real, through the same ClaimNextRun the
+// was accepted. So this claims for real, through the same ClaimNextConversation the
 // dispatcher calls, and then drives the claim.
 //
 // The failure it guards is two-sided. Before the claim gate widened, the claim
@@ -72,7 +72,7 @@ func taskStatus(t *testing.T, database *sql.DB, taskID string) string {
 func TestFollowUpOnFinishedBlueprint_IsClaimedAndDriven(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-followup", "sess-followup", t.TempDir())
+	seedConversation(t, database, "r-followup", "sess-followup", t.TempDir())
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-followup'`); err != nil {
 		t.Fatalf("finish conversation: %v", err)
 	}
@@ -109,23 +109,23 @@ func TestFollowUpOnFinishedBlueprint_IsClaimedAndDriven(t *testing.T) {
 // exist already and nothing else stops someone removing one.
 func TestFollowUpOnFinishedBlueprint_LeavesTheBlueprintAndTaskAlone(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "followup-frozen")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "followup-frozen")
 	stampBotClaim(t, database, taskID)
 	if _, err := database.Exec(
 		`UPDATE conversations SET status='completed', outcome='finish', worktree_path=? WHERE id=?`,
-		t.TempDir(), runID,
+		t.TempDir(), conversationID,
 	); err != nil {
 		t.Fatalf("finish conversation: %v", err)
 	}
 	if _, err := database.Exec(`UPDATE tasks SET status='done' WHERE id=?`, taskID); err != nil {
 		t.Fatalf("close task: %v", err)
 	}
-	bpr := blueprintRunIDForRun(t, database, runID)
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 	finishBlueprint(t, database, bpr, "completed", 0)
 
 	wantStatus, wantStep := blueprintState(t, database, bpr)
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "one more thing"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	// The resume alone must not move anything.
@@ -168,7 +168,7 @@ func TestFollowUpOnANonFinalStepIsRefused(t *testing.T) {
 			t.Run(tc.blueprint+"/"+runtime, func(t *testing.T) {
 				paths.SetForTest(t, t.TempDir())
 				database := newDelegateTestDB(t)
-				seedRun(t, database, "r-earlier", "sess-earlier", t.TempDir())
+				seedConversation(t, database, "r-earlier", "sess-earlier", t.TempDir())
 				if _, err := database.Exec(
 					`UPDATE conversations SET status='completed', outcome=? WHERE id='r-earlier'`, tc.outcome,
 				); err != nil {
@@ -204,7 +204,7 @@ func TestFollowUpOnANonFinalStepIsRefused(t *testing.T) {
 func TestFollowUpOnTheAbortedStepItselfIsAccepted(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-aborted", "sess-aborted", t.TempDir())
+	seedConversation(t, database, "r-aborted", "sess-aborted", t.TempDir())
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-aborted'`); err != nil {
 		t.Fatalf("abort conversation: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestModelForClaim_FollowUpDoesNotInheritTheStepModel(t *testing.T) {
 // continuing after it closed.
 func TestFollowUpRecordsTaskEvent(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-timeline", "sess-timeline", t.TempDir())
+	seedConversation(t, database, "r-timeline", "sess-timeline", t.TempDir())
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-timeline'`); err != nil {
 		t.Fatalf("finish conversation: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestFollowUpRecordsTaskEvent(t *testing.T) {
 func TestDispatchClaimedRun_FinishedBlueprintWithoutAMessageParks(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-nomsg", "sess-nomsg", t.TempDir())
+	seedConversation(t, database, "r-nomsg", "sess-nomsg", t.TempDir())
 	bpr := blueprintRunIDForRun(t, database, "r-nomsg")
 	finishBlueprint(t, database, bpr, "completed", 0)
 	// Mid-flight with no staged message: what a crash between the resume

@@ -436,7 +436,7 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 
 // stopRunsOnClosedTask asks the spawner to stop the runs the close just ended
 // and cancel the blueprints behind them: the stop note on the transcript, the
-// kill signal, and the park. runIDs is the then-active set the close
+// kill signal, and the park. conversationIDs is the then-active set the close
 // transaction read and stamped, so this acts on exactly what closed rather
 // than on a second, later read.
 //
@@ -461,11 +461,11 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 // narrower reason than before: a replay could not repair it anyway (a replayed
 // close finds no active task and never walks back here), and now there is
 // nothing left for it to repair.
-func (r *Router) stopRunsOnClosedTask(orgID, taskID string, runIDs []string) {
+func (r *Router) stopRunsOnClosedTask(orgID, taskID string, conversationIDs []string) {
 	if r.spawner == nil {
 		return
 	}
-	for _, id := range runIDs {
+	for _, id := range conversationIDs {
 		if err := r.spawner.StopAndCancelBlueprint(orgID, id, "", delegate.StopCauseTaskClosed); err != nil {
 			routerLog.Error("stop run on task close failed", "run_id", id, "task_id", taskID, "error", err)
 		}

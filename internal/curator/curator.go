@@ -296,9 +296,9 @@ type TurnSidecar interface {
 	// (RunOptions.PrebuiltProxyEnv).
 	JailEnv() []string
 	// GHChannel is the real-gh channel params (RunOptions.GHChannel) when the
-	// turn's sidecar bound the injector; nil otherwise. runID is the
+	// turn's sidecar bound the injector; nil otherwise. conversationID is the
 	// conversation id (the cert path key).
-	GHChannel(runID string) *agentproc.GHChannelParams
+	GHChannel(conversationID string) *agentproc.GHChannelParams
 	// GitCloneAuth routes a host-side fetch of cloneURL through the turn's git
 	// proxy so the orchestrator holds no token (empty when the sidecar has no
 	// git proxy).

@@ -55,7 +55,7 @@ func TestIntegration_SidecarEviction_UIDBandVacates(t *testing.T) {
 	// there is something to evict.
 	for _, lr := range []*liveRun{a, b} {
 		if pids := sidecarPidsAtUID(t, lr.sidecarUID); len(pids) == 0 {
-			t.Fatalf("run %s: no tf-sidecar at uid %d while the run is up — the sidecar never came up", lr.runID, lr.sidecarUID)
+			t.Fatalf("run %s: no tf-sidecar at uid %d while the run is up — the sidecar never came up", lr.conversationID, lr.sidecarUID)
 		}
 	}
 

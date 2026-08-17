@@ -8,7 +8,7 @@ import {
   queueDwellMs,
   parkReasonLabel,
   workStartedAt,
-} from '../../lib/runStatus'
+} from '../../lib/conversationStatus'
 import { artifactSetKey } from '../../lib/approval'
 import { compactNum, tint, type StationState } from './stationStyle'
 import ArtifactList from '../ArtifactList'
@@ -41,7 +41,7 @@ export function TelemetryRail({
 }: Props) {
   // The token rollups ride the run row (the run read SUMs them per
   // conversation), so the rail shows the same authoritative numbers the usage
-  // dashboard does rather than re-summing the transcript — useRunDetail keeps
+  // dashboard does rather than re-summing the transcript — useConversationDetail keeps
   // them advancing mid-engagement by folding each streamed row's usage on top.
   const inputTokens = run.input_tokens ?? 0
   const outputTokens = run.output_tokens ?? 0
@@ -130,7 +130,7 @@ export function TelemetryRail({
       {(run.artifact_count ?? 0) > 0 && (
         <Section label="Artifacts">
           <ArtifactList
-            runId={run.ID}
+            conversationId={run.ID}
             pendingArtifactIds={run.pending_artifact_ids}
             refreshKey={artifactSetKey(run)}
             onOpenApproval={onOpenArtifact}
@@ -147,7 +147,7 @@ export function TelemetryRail({
           Refetched when the run's status or turn count moves, so a live run's
           list fills in without a request per streamed row. */}
       <Section label="Actions">
-        <ActionList runId={run.ID} refreshKey={`${run.Status}:${run.NumTurns ?? 0}`} />
+        <ActionList conversationId={run.ID} refreshKey={`${run.Status}:${run.NumTurns ?? 0}`} />
       </Section>
 
       {run.Status === 'completed' && run.ResultSummary && (

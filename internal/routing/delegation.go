@@ -140,7 +140,7 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 	// the wrapped prompt — identical to the pre-blueprint behavior).
 	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
 	breakerPromptID := r.breakerPromptID(ctx, orgID, trigger.BlueprintID)
-	failures, err := r.tasks.CountConsecutiveFailedRunsSystem(ctx, orgID, entityID, breakerPromptID)
+	failures, err := r.tasks.CountConsecutiveFailedConversationsSystem(ctx, orgID, entityID, breakerPromptID)
 	if err != nil {
 		routerLog.Error("breaker query failed", "entity", entityID, "prompt", breakerPromptID, "error", err)
 		return false, fmt.Errorf("breaker query: %w", err)
@@ -179,12 +179,12 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 	// The active-run read resolves the run's ID rather than a bool: a busy
 	// gate is the additive-injection path, and folding the new event into
 	// the run needs the run.
-	activeRunID, err := r.agentRuns.ActiveAutoRunIDForTaskSystem(ctx, orgID, task.ID)
+	activeConversationID, err := r.conversations.ActiveAutoConversationIDForTaskSystem(ctx, orgID, task.ID)
 	if err != nil {
 		routerLog.Error("task gate active-run query failed", "task_id", task.ID, "error", err)
 		return false, fmt.Errorf("task gate active-run query: %w", err)
 	}
-	hasActive := activeRunID != ""
+	hasActive := activeConversationID != ""
 	hasPending := false
 	if !hasActive {
 		hasPending, err = r.firings.HasPendingForTask(ctx, orgID, task.ID)
@@ -207,7 +207,7 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 			// claim is normally already the bot's and the stamp is a race-safe
 			// no-op; it moves only when the task was user-requeued while its
 			// run stayed live, which this new event re-commits.
-			if r.tryAdditiveInjection(ctx, orgID, entityID, activeRunID, task, trigger, triggeringEventID, claimStamp(agentID, actingTeamID)) {
+			if r.tryAdditiveInjection(ctx, orgID, entityID, activeConversationID, task, trigger, triggeringEventID, claimStamp(agentID, actingTeamID)) {
 				return false, nil
 			}
 			// The run went terminal between the gate read and the injection
@@ -313,7 +313,7 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 
 // tryAdditiveInjection folds a firing into its task's already-active auto
 // run via the cross-pod-aware injection seam, instead of deferring a second
-// run onto pending_firings. runID is that run, resolved by the caller from
+// run onto pending_firings. conversationID is that run, resolved by the caller from
 // the firing's own task — so it belongs to that task by construction, with
 // no separate ownership check to make. Returns true when the caller should
 // treat the firing as handled; false when the caller must fall through to
@@ -336,7 +336,7 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 // on that branch is the immediate, broadcast-carrying half — if it fails,
 // the owner's coupled write is what makes the claim durable, so the
 // commitment can no longer outlive it.
-func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string, claim dbpkg.AgentClaimStamp) bool {
+func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conversationID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string, claim dbpkg.AgentClaimStamp) bool {
 	// Best-effort: an empty metadataJSON still renders a body naming the
 	// event type alone, so a lookup failure degrades rather than drops the
 	// injection.
@@ -346,7 +346,7 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runI
 	}
 	body := domain.AdditiveEventInjection(trigger.EventType, metadataJSON)
 
-	outcome := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, runID, trigger.EventType, body, delegate.AdditiveFiringRef{
+	outcome := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, trigger.EventType, body, delegate.AdditiveFiringRef{
 		EntityID:          entityID,
 		TaskID:            task.ID,
 		TriggerID:         trigger.ID,
@@ -358,7 +358,7 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runI
 		return false
 	case delegate.InjectDeliveredRemote:
 		routerLog.Info("handed additive event to a live remote executor via conversation_signals",
-			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
+			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", conversationID, "event_type", trigger.EventType)
 		r.stampAgentClaim(ctx, orgID, task, claim)
 		return true
 	default: // InjectDeliveredLocal, InjectStagedResumable
@@ -369,12 +369,12 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runI
 		// falling through to the deferral would fire a second run for an event
 		// the agent has already been handed.
 		if claimed, err := r.tasks.MarkEventInjectedSystem(ctx, orgID, task.ID, triggeringEventID, claim); err != nil {
-			routerLog.Error("failed to mark injected task_event", "task_id", task.ID, "run_id", runID, "error", err)
+			routerLog.Error("failed to mark injected task_event", "task_id", task.ID, "run_id", conversationID, "error", err)
 		} else {
 			r.claimCommitted(orgID, task, claim.ActingTeamID, claim.AgentID, claimed)
 		}
 		routerLog.Info("injected additive event into active run",
-			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
+			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", conversationID, "event_type", trigger.EventType)
 		return true
 	}
 }
@@ -558,7 +558,7 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 		return "", fmt.Errorf("task %s disappeared before spawn", task.ID)
 	}
 
-	runID, err := r.spawner.Delegate(*fresh, delegate.DelegateOpts{
+	conversationID, err := r.spawner.Delegate(*fresh, delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: trigger.BlueprintID,
 		TriggerType:         "event",
@@ -587,9 +587,9 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 		}
 		return "", err
 	}
-	span.SetAttributes(telemetry.ConversationID(runID))
-	routerLog.InfoContext(ctx, "started run for task", "run_id", runID, "task_id", task.ID)
-	return runID, nil
+	span.SetAttributes(telemetry.ConversationID(conversationID))
+	routerLog.InfoContext(ctx, "started run for task", "run_id", conversationID, "task_id", task.ID)
+	return conversationID, nil
 }
 
 // DrainTask is the spawner's hook into the per-task firing queue.
@@ -639,7 +639,7 @@ func (r *Router) DrainTask(orgID, taskID string) {
 			return // queue empty
 		}
 
-		runID, skipReason, transientErr := r.attemptDrainOne(ctx, orgID, firing)
+		conversationID, skipReason, transientErr := r.attemptDrainOne(ctx, orgID, firing)
 		if transientErr != nil {
 			// Transient failure (DB read, Delegate). PopForTask already
 			// claimed this row into 'draining', so release it
@@ -666,8 +666,8 @@ func (r *Router) DrainTask(orgID, taskID string) {
 			}
 			return
 		}
-		if runID != "" {
-			if err := r.firings.MarkFired(ctx, orgID, firing.ID, runID); err != nil {
+		if conversationID != "" {
+			if err := r.firings.MarkFired(ctx, orgID, firing.ID, conversationID); err != nil {
 				// Durability race: the run was created (side-effect
 				// committed inside the spawner goroutine) but the UPDATE
 				// that records the firing→run association failed.
@@ -689,11 +689,11 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				// ListTasksWithPending don't see 'draining' rows
 				// either, so nothing would ever pick it up again.
 				routerLog.Error("mark firing fired failed, rolling back: tearing down run + reverting task to queued",
-					"firing_id", firing.ID, "run_id", runID, "error", err)
+					"firing_id", firing.ID, "run_id", conversationID, "error", err)
 				if r.spawner != nil {
-					if cerr := r.spawner.StopAndCancelBlueprint(orgID, runID, "", delegate.StopCauseFiringReverted); cerr != nil {
+					if cerr := r.spawner.StopAndCancelBlueprint(orgID, conversationID, "", delegate.StopCauseFiringReverted); cerr != nil {
 						routerLog.Warn("stop run after mark-fired failure (run may already be terminal, drain still triggers from its defer)",
-							"run_id", runID, "error", cerr)
+							"run_id", conversationID, "error", cerr)
 					}
 				}
 				r.revertTaskStatus(ctx, orgID, firing.TaskID, "queued")
@@ -800,7 +800,7 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 		// longer makes the sweeper step over every sibling task's queue on
 		// the same entity, which is how a stopped run used to halt triage
 		// for a whole pull request.
-		active, err := r.agentRuns.HasActiveAutoRunForTaskSystem(ctx, orgID, tid)
+		active, err := r.conversations.HasActiveAutoConversationForTaskSystem(ctx, orgID, tid)
 		if err != nil {
 			routerLog.Error("drain sweeper: active-check failed", "task_id", tid, "org", orgID, "error", err)
 			continue
@@ -815,7 +815,7 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 // attemptDrainOne validates a popped firing against current state and
 // fires it if everything still holds. Three outcomes:
 //
-//   - (runID, "", nil)         — fire succeeded; caller marks 'fired'.
+//   - (conversationID, "", nil)         — fire succeeded; caller marks 'fired'.
 //   - ("", skipReason, nil)    — definitive "no longer relevant"; caller
 //     marks 'skipped_stale'. Reserved for: task_closed (done /
 //     dismissed / snoozed — task isn't drain-eligible on the
@@ -837,7 +837,7 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 // intent is still valid and worth retrying. The breaker handles the
 // "actually broken, repeated failure" case via run-level failure counts —
 // but only once we've started enough runs to trip it. Until then, retry.
-func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *domain.PendingFiring) (runID, skipReason string, transientErr error) {
+func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *domain.PendingFiring) (conversationID, skipReason string, transientErr error) {
 	task, err := r.tasks.GetSystem(ctx, orgID, firing.TaskID)
 	if err != nil {
 		return "", "", fmt.Errorf("task lookup: %w", err)
@@ -874,7 +874,7 @@ func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *doma
 	}
 
 	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
-	failures, err := r.tasks.CountConsecutiveFailedRunsSystem(ctx, orgID, firing.EntityID, r.breakerPromptID(ctx, orgID, trigger.BlueprintID))
+	failures, err := r.tasks.CountConsecutiveFailedConversationsSystem(ctx, orgID, firing.EntityID, r.breakerPromptID(ctx, orgID, trigger.BlueprintID))
 	if err != nil {
 		return "", "", fmt.Errorf("breaker query: %w", err)
 	}

@@ -291,7 +291,7 @@ func startTestClaimLoop(t *testing.T, stores db.Stores, c *Curator) (stop func()
 			if ctx.Err() != nil {
 				return
 			}
-			claimed, err := stores.RunQueue.ClaimNextRun(ctx, "test-claim-loop", 1, db.ClaimPlacement{})
+			claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "test-claim-loop", 1, db.ClaimPlacement{})
 			if err != nil || claimed == nil {
 				select {
 				case <-ctx.Done():
@@ -307,7 +307,7 @@ func startTestClaimLoop(t *testing.T, stores db.Stores, c *Curator) (stop func()
 				defer inFlight.Done()
 				if !c.DriveClaimedTurn(claimed.OrgID, claimed.ProjectID, claimed.ID, claimed.ClaimID,
 					claimed.ClaimMessageID, claimed.CreatorUserID) {
-					_ = stores.RunQueue.RequeueRun(context.Background(), claimed.OrgID, claimed.ID, "test loop handoff refused")
+					_ = stores.ConversationQueue.RequeueConversation(context.Background(), claimed.OrgID, claimed.ID, "test loop handoff refused")
 				}
 			}()
 		}

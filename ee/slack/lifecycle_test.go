@@ -81,9 +81,9 @@ func TestPruneRunCache_EvictsOldestDownToTarget(t *testing.T) {
 	withLoweredLifecycleCacheBounds(t, 5, 3)
 
 	base := time.Now()
-	runs := map[string]*runEntry{}
+	runs := map[string]*conversationEntry{}
 	for i := 0; i < 6; i++ {
-		runs[fmt.Sprintf("run-%d", i)] = &runEntry{cachedAt: base.Add(time.Duration(i) * time.Minute)}
+		runs[fmt.Sprintf("run-%d", i)] = &conversationEntry{cachedAt: base.Add(time.Duration(i) * time.Minute)}
 	}
 
 	pruneRunCache(runs)
@@ -111,7 +111,7 @@ func TestPruneRunCache_NeverEvictsLiveWorker(t *testing.T) {
 	withLoweredLifecycleCacheBounds(t, 2, 1)
 
 	base := time.Now()
-	runs := map[string]*runEntry{
+	runs := map[string]*conversationEntry{
 		"old-with-worker": {cachedAt: base, worker: &runStatusWorker{}},
 		"newer-idle":      {cachedAt: base.Add(1 * time.Minute)},
 		"newest-idle":     {cachedAt: base.Add(2 * time.Minute)},
@@ -132,7 +132,7 @@ func TestPruneRunCache_NeverEvictsLiveWorker(t *testing.T) {
 func TestPruneRunCache_UnderCap_NoOp(t *testing.T) {
 	withLoweredLifecycleCacheBounds(t, 5, 3)
 
-	runs := map[string]*runEntry{
+	runs := map[string]*conversationEntry{
 		"a": {cachedAt: time.Now()},
 		"b": {cachedAt: time.Now()},
 	}
@@ -156,7 +156,7 @@ func TestPruneRunCache_KeepsMidTeardownEntry(t *testing.T) {
 
 	base := time.Now()
 	teardown := make(chan struct{}) // open = retiring worker still mid-flight
-	runs := map[string]*runEntry{
+	runs := map[string]*conversationEntry{
 		"oldest-mid-teardown": {cachedAt: base, prevDone: teardown},
 		"idle-1":              {cachedAt: base.Add(1 * time.Minute)},
 		"idle-2":              {cachedAt: base.Add(2 * time.Minute)},
@@ -175,9 +175,9 @@ func TestPruneRunCache_KeepsMidTeardownEntry(t *testing.T) {
 	// Teardown completes — the entry is ordinary now; a later over-cap prune
 	// evicts it like any other idle entry.
 	close(teardown)
-	runs["idle-4"] = &runEntry{cachedAt: base.Add(4 * time.Minute)}
-	runs["idle-5"] = &runEntry{cachedAt: base.Add(5 * time.Minute)}
-	runs["idle-6"] = &runEntry{cachedAt: base.Add(6 * time.Minute)}
+	runs["idle-4"] = &conversationEntry{cachedAt: base.Add(4 * time.Minute)}
+	runs["idle-5"] = &conversationEntry{cachedAt: base.Add(5 * time.Minute)}
+	runs["idle-6"] = &conversationEntry{cachedAt: base.Add(6 * time.Minute)}
 
 	pruneRunCache(runs)
 
@@ -200,7 +200,7 @@ func TestHandleRunStatus_CacheHit_RefreshesLRUStamp(t *testing.T) {
 	t.Cleanup(func() { slackLifecycleNow = origNow })
 
 	adapter := newLifecycleAdapter(db.Stores{}, slackHTTPClient, staticURL(""), nil)
-	runs := map[string]*runEntry{
+	runs := map[string]*conversationEntry{
 		"run-1": {isSlack: false, cachedAt: resolvedAt},
 	}
 

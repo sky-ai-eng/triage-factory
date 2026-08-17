@@ -17,7 +17,7 @@ import (
 
 // launchFixture is a claimed blueprint step with a worktree on disk — the
 // shape every pre-agent failure acts on. The conversation is claimed for real
-// (EnqueueRun + ClaimNextRun) so the claim id, the claim fence and the
+// (EnqueueConversation + ClaimNextConversation) so the claim id, the claim fence and the
 // re-claim all behave as they do in production.
 type launchFixture struct {
 	s        *Spawner
@@ -85,16 +85,16 @@ func newLaunchFixture(t *testing.T, suffix string) *launchFixture {
 	}
 
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
+	if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 		ID: "lfrun-" + suffix, TaskID: task.ID, PromptID: promptID, Model: "claude-sonnet-4-6",
 		TriggerType: "manual", CreatorUserID: runmode.LocalDefaultUserID,
 		BlueprintRunID: brID, BlueprintStepIndex: &step0, WorktreePath: wt,
 	}); err != nil {
-		t.Fatalf("EnqueueRun: %v", err)
+		t.Fatalf("EnqueueConversation: %v", err)
 	}
-	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "lf-exec", 1, db.ClaimPlacement{})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "lf-exec", 1, db.ClaimPlacement{})
 	if err != nil || claimed == nil {
-		t.Fatalf("ClaimNextRun: (%v, %v)", claimed, err)
+		t.Fatalf("ClaimNextConversation: (%v, %v)", claimed, err)
 	}
 
 	return &launchFixture{
@@ -195,7 +195,7 @@ func TestPreAgentFailure_HandsTheClaimBackAndDestroysNothing(t *testing.T) {
 		}
 	}
 
-	reclaimed, err := f.stores.RunQueue.ClaimNextRun(context.Background(), "lf-exec", 1, db.ClaimPlacement{})
+	reclaimed, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), "lf-exec", 1, db.ClaimPlacement{})
 	if err != nil || reclaimed == nil || reclaimed.ID != f.run.ID {
 		t.Fatalf("re-claim after requeue = (%v, %v), want the same conversation", reclaimed, err)
 	}
@@ -259,8 +259,8 @@ func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testin
 	// Nothing is left claimable: the queued follow-up was settled on the way
 	// down, so `open` is a rest state rather than an immediate re-claim that
 	// would make the budget buy nothing.
-	if got, err := f.stores.RunQueue.ClaimNextRun(context.Background(), "lf-exec", 1, db.ClaimPlacement{}); err != nil || got != nil {
-		t.Fatalf("ClaimNextRun after the park = (%v, %v), want nothing claimable", got, err)
+	if got, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), "lf-exec", 1, db.ClaimPlacement{}); err != nil || got != nil {
+		t.Fatalf("ClaimNextConversation after the park = (%v, %v), want nothing claimable", got, err)
 	}
 
 	// And the user's next message re-arms a whole fresh budget, which is what
@@ -271,7 +271,7 @@ func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testin
 	}); err != nil {
 		t.Fatalf("send the follow-up: %v", err)
 	}
-	reclaimed, err := f.stores.RunQueue.ClaimNextRun(context.Background(), "lf-exec", 1, db.ClaimPlacement{})
+	reclaimed, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), "lf-exec", 1, db.ClaimPlacement{})
 	if err != nil || reclaimed == nil || reclaimed.ID != f.run.ID {
 		t.Fatalf("re-claim after the follow-up = (%v, %v), want the same conversation", reclaimed, err)
 	}
@@ -384,8 +384,8 @@ func TestParkAfterLaunchExhaustion_FencedClaimRecordsNothing(t *testing.T) {
 	f := newLaunchFixture(t, "fenced")
 	f.speak(t, "user", "keep going")
 
-	fenced := &fencedConversationStore{ConversationStore: f.s.agentRuns}
-	f.s.agentRuns = fenced
+	fenced := &fencedConversationStore{ConversationStore: f.s.conversations}
+	f.s.conversations = fenced
 
 	spent := f.run
 	spent.Attempts = maxRunAttempts

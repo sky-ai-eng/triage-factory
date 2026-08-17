@@ -17,9 +17,9 @@ import (
 )
 
 // getPendingPermissions reads the endpoint under test.
-func getPendingPermissions(t *testing.T, s *Server, runID string) (int, []domain.PendingPermissionDTO) {
+func getPendingPermissions(t *testing.T, s *Server, conversationID string) (int, []domain.PendingPermissionDTO) {
 	t.Helper()
-	rec := doJSON(t, s, "GET", "/api/agent/conversations/"+runID+"/permissions", nil)
+	rec := doJSON(t, s, "GET", "/api/agent/conversations/"+conversationID+"/permissions", nil)
 	if rec.Code != http.StatusOK {
 		return rec.Code, nil
 	}
@@ -39,11 +39,11 @@ func TestHandleAgentPermissions_ReconstructsAParkedPrompt(t *testing.T) {
 	s := newTestServer(t)
 	spawner := delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6")
 	s.SetSpawner(spawner)
-	runID := seedSteerRun(t, s.db, "perms-read", "running")
-	claimID := dbtest.SeedActiveClaim(t, s.db, runID, "exec-1", 0)
+	conversationID := seedSteerRun(t, s.db, "perms-read", "running")
+	claimID := dbtest.SeedActiveClaim(t, s.db, conversationID, "exec-1", 0)
 
 	got := make(chan agentproc.PermissionDecision, 1)
-	h := spawner.BrowserPermissionHandler(runmode.LocalDefaultOrgID, runID, claimID, delegate.AbsentAutoDeny{})
+	h := spawner.BrowserPermissionHandler(runmode.LocalDefaultOrgID, conversationID, claimID, delegate.AbsentAutoDeny{})
 	go func() {
 		got <- h(agentproc.PermissionRequest{
 			ToolCallID: "toolu_1",
@@ -59,7 +59,7 @@ func TestHandleAgentPermissions_ReconstructsAParkedPrompt(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		var code int
-		code, pending = getPendingPermissions(t, s, runID)
+		code, pending = getPendingPermissions(t, s, conversationID)
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
 		}
@@ -89,7 +89,7 @@ func TestHandleAgentPermissions_ReconstructsAParkedPrompt(t *testing.T) {
 
 	// Answering it from this reconstructed view still unblocks the agent, and
 	// clears it for every other surface.
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/permissions/toolu_1",
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/permissions/toolu_1",
 		map[string]string{"behavior": "allow"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("resolve status = %d, want 200", rec.Code)
@@ -102,7 +102,7 @@ func TestHandleAgentPermissions_ReconstructsAParkedPrompt(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("handler never received the decision")
 	}
-	if _, after := getPendingPermissions(t, s, runID); len(after) != 0 {
+	if _, after := getPendingPermissions(t, s, conversationID); len(after) != 0 {
 		t.Fatalf("an answered prompt must be gone for every other surface too: %+v", after)
 	}
 }
@@ -113,9 +113,9 @@ func TestHandleAgentPermissions_ReconstructsAParkedPrompt(t *testing.T) {
 func TestHandleAgentPermissions_EmptyForAQuietRun(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	runID := seedSteerRun(t, s.db, "perms-quiet", "running")
+	conversationID := seedSteerRun(t, s.db, "perms-quiet", "running")
 
-	code, pending := getPendingPermissions(t, s, runID)
+	code, pending := getPendingPermissions(t, s, conversationID)
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", code)
 	}

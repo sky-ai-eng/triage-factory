@@ -38,19 +38,19 @@ func newRecorderStores(t *testing.T) (db.Stores, string) {
 // recorderInfo is the run identity a delegated run carries — event-triggered,
 // so UpsertArtifact takes the admin-pool branch (the common case for the proxy:
 // an auto-delegated run has no user identity).
-func recorderInfo(runID string) agenthost.RunInfo {
-	return agenthost.RunInfo{
+func recorderInfo(conversationID string) agenthost.ConversationInfo {
+	return agenthost.ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           runmode.LocalDefaultUserID,
 		TeamID:           runmode.LocalDefaultTeamID,
-		RunID:            runID,
+		ConversationID:   conversationID,
 		IsEventTriggered: true,
 	}
 }
 
 func TestGitPushRecorder_RecordsBranch(t *testing.T) {
-	stores, runID := newRecorderStores(t)
-	info := recorderInfo(runID)
+	stores, conversationID := newRecorderStores(t)
+	info := recorderInfo(conversationID)
 	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 
 	rec(context.Background(), gitproxy.PushedRef{
@@ -61,9 +61,9 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 		Status:  200,
 	})
 
-	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
+	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 1 {
 		t.Fatalf("got %d artifacts, want 1", len(arts))
@@ -78,7 +78,7 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 	if want := "git:branch:octo/repo:refs/heads/feature/x"; a.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
 	}
-	if a.ConversationID != runID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
+	if a.ConversationID != conversationID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
 		t.Errorf("identity not stamped: run=%q org=%q team=%q", a.ConversationID, a.OrgID, a.TeamID)
 	}
 	var d struct {
@@ -94,8 +94,8 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 }
 
 func TestGitPushRecorder_SkipsNonBranchAndMalformed(t *testing.T) {
-	stores, runID := newRecorderStores(t)
-	info := recorderInfo(runID)
+	stores, conversationID := newRecorderStores(t)
+	info := recorderInfo(conversationID)
 	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 
 	// A tag isn't a branch; a 3-segment repo path isn't owner/repo. Both make
@@ -103,9 +103,9 @@ func TestGitPushRecorder_SkipsNonBranchAndMalformed(t *testing.T) {
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/tags/v1", NewSHA: "abc", Created: false, Status: 200})
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo/extra", Ref: "refs/heads/main", NewSHA: "abc", Created: false, Status: 200})
 
-	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
+	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 0 {
 		t.Fatalf("got %d artifacts, want 0 (tag + malformed repo are skipped)", len(arts))
@@ -120,16 +120,16 @@ func TestGitPushRecorder_SkipsNonBranchAndMalformed(t *testing.T) {
 // push of the same ref then lands the artifact and the branch_pushed row as
 // usual (the failure row, having no dedup key, can't swallow it).
 func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
-	stores, runID := newRecorderStores(t)
-	info := recorderInfo(runID)
+	stores, conversationID := newRecorderStores(t)
+	info := recorderInfo(conversationID)
 	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 	ctx := context.Background()
 
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 403})
 
-	arts, err := stores.Artifacts.ListByRun(ctx, runmode.LocalDefaultOrgID, runID)
+	arts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 0 {
 		t.Fatalf("got %d artifacts for a refused push, want 0", len(arts))
@@ -142,8 +142,8 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 		t.Fatalf("got %d branch_push_failed actions, want 1", len(acts))
 	}
 	a := acts[0]
-	if a.Target != "octo/repo" || a.ExternalID != "refs/heads/feature/x" || a.ConversationID != runID {
-		t.Errorf("failure row = target %q external_id %q run %q; want octo/repo, refs/heads/feature/x, %s", a.Target, a.ExternalID, a.ConversationID, runID)
+	if a.Target != "octo/repo" || a.ExternalID != "refs/heads/feature/x" || a.ConversationID != conversationID {
+		t.Errorf("failure row = target %q external_id %q run %q; want octo/repo, refs/heads/feature/x, %s", a.Target, a.ExternalID, a.ConversationID, conversationID)
 	}
 	var d struct {
 		SHA        string `json:"sha"`
@@ -160,9 +160,9 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 	// The retry that lands: same (run, ref, sha), now a 2xx — the artifact and
 	// the success audit row both appear despite the earlier failure.
 	rec(ctx, gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/feature/x", NewSHA: "abc123", Created: true, Status: 200})
-	arts, err = stores.Artifacts.ListByRun(ctx, runmode.LocalDefaultOrgID, runID)
+	arts, err = stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun after retry: %v", err)
+		t.Fatalf("ListByConversation after retry: %v", err)
 	}
 	if len(arts) != 1 {
 		t.Fatalf("got %d artifacts after the successful retry, want 1", len(arts))
@@ -181,16 +181,16 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 // hook then the proxy would for a single push) upserts in place — updating the
 // volatile head — rather than minting a second artifact.
 func TestGitPushRecorder_DedupConvergesWithHook(t *testing.T) {
-	stores, runID := newRecorderStores(t)
-	info := recorderInfo(runID)
+	stores, conversationID := newRecorderStores(t)
+	info := recorderInfo(conversationID)
 	rec := gitPushRecorder(agenthost.NewLocal(stores, info), info)
 
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "aaa", Created: true, Status: 200})
 	rec(context.Background(), gitproxy.PushedRef{Repo: "octo/repo", Ref: "refs/heads/main", NewSHA: "bbb", Created: false, Status: 200})
 
-	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
+	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 1 {
 		t.Fatalf("got %d artifacts, want 1 (same dedup_key must upsert)", len(arts))

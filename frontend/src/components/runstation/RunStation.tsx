@@ -12,12 +12,12 @@ import {
   completionGloss,
   formatDurationMs,
   formatElapsed,
-  isActiveRun,
-  isResumableRun,
-  canResumeRun,
+  isActiveConversation,
+  isResumableConversation,
+  canResumeConversation,
   resumeBlockedCopy,
   workStartedAt,
-} from '../../lib/runStatus'
+} from '../../lib/conversationStatus'
 import {
   approvalAction,
   approvalCounts,
@@ -116,7 +116,7 @@ export default function RunStation({
   const reduce = !!useReducedMotion()
   const orgHref = useOrgHref()
   const st = stationState(run)
-  const active = isActiveRun(run)
+  const active = isActiveConversation(run)
 
   const lastMessageAt = useMemo(() => {
     if (messages.length === 0) return null
@@ -525,11 +525,11 @@ function IntakeDock({
   // `resumable` is the authority: whether the workspace survived and whether
   // anything would drive it are facts only it can see, and a run that looks
   // parked-and-warm from here may answer every message with a 409/410.
-  const steerable = active || canResumeRun(run)
+  const steerable = active || canResumeConversation(run)
   // The honest other half: a run whose status says "resumable" but whose
   // server verdict says otherwise gets the reason where the input would have
   // been, rather than a live composer that fails on send.
-  const resumeBlocked = !active && isResumableRun(run) && run.resumable === false
+  const resumeBlocked = !active && isResumableConversation(run) && run.resumable === false
   const hasPrompt = pending.length > 0
 
   const sublabel = hasUnresolved
@@ -699,7 +699,7 @@ function ApprovalAffordance({
             Artifacts
           </div>
           <ArtifactList
-            runId={run.ID}
+            conversationId={run.ID}
             pendingArtifactIds={run.pending_artifact_ids}
             refreshKey={artifactSetKey(run)}
             onOpenApproval={(kind, id) => {

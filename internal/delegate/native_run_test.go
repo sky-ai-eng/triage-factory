@@ -117,7 +117,7 @@ func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			database := newDelegateTestDB(t)
 			cwd := t.TempDir()
-			seedRun(t, database, "r-mem", "", cwd)
+			seedConversation(t, database, "r-mem", "", cwd)
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
 			if err := os.MkdirAll(filepath.Join(cwd, scratchDirName), 0755); err != nil {
@@ -128,7 +128,7 @@ func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
 			}
 			if tc.drive {
 				pending := false
-				if _, err := s.agentRuns.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+				if _, err := s.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
 					ConversationID: "r-mem",
 					UserID:         runmode.LocalDefaultUserID,
 					Role:           "user",
@@ -158,7 +158,7 @@ func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
 // TestMintOpeningTurn_QueuesThePendingInputShape pins the half of the input
 // contract the loop owns. The opening turn is queued as an undelivered plain
 // user row — the same shape a follow-up takes, and the shape
-// RunPendingInputStore's predicate is written against — so the engagement's
+// ConversationPendingInputStore's predicate is written against — so the engagement's
 // entry really is just its first drain, with no first-call special case.
 //
 // It also pins the idempotence the gate exists for: a re-claim of a
@@ -166,7 +166,7 @@ func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
 // insert and the first call cannot double the opening.
 func TestMintOpeningTurn_QueuesThePendingInputShape(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-open-turn", "", "/tmp/wt-open-turn")
+	seedConversation(t, database, "r-open-turn", "", "/tmp/wt-open-turn")
 	markEngaged(t, database, "r-open-turn")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	transcript := newNativeTranscript(s, runmode.LocalDefaultOrgID, "r-open-turn", "")
@@ -209,23 +209,23 @@ func TestExecutorChangedSince(t *testing.T) {
 
 	// Stages a conversation whose live claim belongs to self, preceded by a
 	// released claim on predecessor (skipped when empty — a first claim).
-	setup := func(t *testing.T, runID, predecessor, self string) (*Spawner, string) {
+	setup := func(t *testing.T, conversationID, predecessor, self string) (*Spawner, string) {
 		t.Helper()
 		database := newDelegateTestDB(t)
-		seedRun(t, database, runID, "sess", "/tmp/wt-"+runID)
+		seedConversation(t, database, conversationID, "sess", "/tmp/wt-"+conversationID)
 		s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 		if predecessor != "" {
 			s.SetExecutorID(predecessor, 1)
-			s.stampExecutor(org, runID, "")
-			if err := s.agentRuns.SetExecutorSystem(ctx, org, runID, "", 0); err != nil {
+			s.stampExecutor(org, conversationID, "")
+			if err := s.conversations.SetExecutorSystem(ctx, org, conversationID, "", 0); err != nil {
 				t.Fatalf("release the predecessor's claim: %v", err)
 			}
 		}
 		s.SetExecutorID(self, 2)
-		s.stampExecutor(org, runID, "")
+		s.stampExecutor(org, conversationID, "")
 		var claimID string
 		if err := database.QueryRow(
-			`SELECT id FROM claims WHERE conversation_id = ? AND released_at IS NULL`, runID,
+			`SELECT id FROM claims WHERE conversation_id = ? AND released_at IS NULL`, conversationID,
 		).Scan(&claimID); err != nil {
 			t.Fatalf("read the live claim: %v", err)
 		}
@@ -264,9 +264,9 @@ func TestExecutorChangedSince(t *testing.T) {
 	}
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runID := fmt.Sprintf("r-exec-changed-%d", i)
-			s, claimID := setup(t, runID, tc.predecessor, "exec-self")
-			if got := s.executorChangedSince(ctx, org, runID, claimID, tc.prov); got != tc.want {
+			conversationID := fmt.Sprintf("r-exec-changed-%d", i)
+			s, claimID := setup(t, conversationID, tc.predecessor, "exec-self")
+			if got := s.executorChangedSince(ctx, org, conversationID, claimID, tc.prov); got != tc.want {
 				t.Errorf("executorChangedSince = %v, want %v", got, tc.want)
 			}
 		})
@@ -279,9 +279,9 @@ func TestExecutorChangedSince(t *testing.T) {
 // nothing.
 func TestExecutorChangedSince_UnwiredIdentityStaysSilent(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-exec-unwired", "sess", "/tmp/wt-unwired")
+	seedConversation(t, database, "r-exec-unwired", "sess", "/tmp/wt-unwired")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if err := s.agentRuns.SetExecutorSystem(context.Background(), runmode.LocalDefaultOrgID, "r-exec-unwired", "exec-other", 1); err != nil {
+	if err := s.conversations.SetExecutorSystem(context.Background(), runmode.LocalDefaultOrgID, "r-exec-unwired", "exec-other", 1); err != nil {
 		t.Fatalf("mint the predecessor's claim: %v", err)
 	}
 	if s.executorChangedSince(context.Background(), runmode.LocalDefaultOrgID, "r-exec-unwired", "some-claim", domain.WorkspaceProvenanceRehydrated) {

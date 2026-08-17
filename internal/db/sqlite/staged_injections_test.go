@@ -28,9 +28,9 @@ func TestStagedInjectionStore_SQLite(t *testing.T) {
 				t.Helper()
 				return seedSQLiteRunForStagedInjection(t, conn, suffix)
 			},
-			DeleteRun: func(t *testing.T, runID string) {
+			DeleteRun: func(t *testing.T, conversationID string) {
 				t.Helper()
-				if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, runID); err != nil {
+				if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
 					t.Fatalf("delete run: %v", err)
 				}
 			},
@@ -46,7 +46,7 @@ func TestStagedInjectionStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 	const badOrg = "11111111-1111-1111-1111-111111111111"
 
-	if err := stores.StagedInjections.AppendSystem(ctx, badOrg, &domain.StagedInjection{RunID: "r", Producer: "p", Body: "b"}); err == nil {
+	if err := stores.StagedInjections.AppendSystem(ctx, badOrg, &domain.StagedInjection{ConversationID: "r", Producer: "p", Body: "b"}); err == nil {
 		t.Error("AppendSystem(non-local org) should error")
 	}
 	if _, err := stores.StagedInjections.FlushPendingSystem(ctx, badOrg, "r"); err == nil {

@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import Markdown from 'react-markdown'
 import { Check, Copy } from 'lucide-react'
 import type { Message, Conversation, ToolCall } from '../../types'
-import { isActiveRun } from '../../lib/runStatus'
+import { isActiveConversation } from '../../lib/conversationStatus'
 import { isSystemNotice } from '../../lib/messageVoice'
 import { stripWorktree } from '../../lib/worktree'
 import { toast } from '../Toast/toastStore'
@@ -113,7 +113,7 @@ function ScreenTranscript({ messages, run, hasOlder, loadingOlder, onLoadOlder }
   // The settled-run verdict renders outside buildRows so the row list doesn't
   // depend on the full run object (see above). Same visibility rule as before:
   // present once the run is settled and carries a summary.
-  const verdict = run.ResultSummary && !isActiveRun(run) ? <Verdict run={run} /> : null
+  const verdict = run.ResultSummary && !isActiveConversation(run) ? <Verdict run={run} /> : null
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden rounded-[5px]">
@@ -186,7 +186,7 @@ function ScreenTranscript({ messages, run, hasOlder, loadingOlder, onLoadOlder }
             </div>
           )}
           {rows.length === 0 && !verdict ? (
-            <EmptyReadout active={isActiveRun(run)} />
+            <EmptyReadout active={isActiveConversation(run)} />
           ) : (
             <>
               {rows}

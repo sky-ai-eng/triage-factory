@@ -368,7 +368,7 @@ func (a *App) buildExecution() error {
 	// executor just as much as an executor needs it to apply signals
 	// targeting itself.
 	if runmode.Current() == runmode.ModeMulti {
-		a.spawner.SetRunSignals(a.stores.RunSignals, a.database)
+		a.spawner.SetRunSignals(a.stores.ConversationSignals, a.database)
 		if ackTimeout, terr := delegate.ParseSignalAckTimeout(os.Getenv("TF_SIGNAL_ACK_TIMEOUT")); terr != nil {
 			appLog.Warn("signal ack timeout", "error", terr)
 		} else if ackTimeout != delegate.DefaultSignalAckTimeout {

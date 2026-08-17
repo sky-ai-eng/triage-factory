@@ -85,7 +85,7 @@ func PullRequestDedupKey(repoPath string, number int) string {
 //
 // This is the single source of truth for the PR-artifact shape, so the create
 // writer (the exec choke point) and any later reconciliation land on the same
-// deduped row. RunID/OrgID/TeamID are stamped by the recording client, not here.
+// deduped row. ConversationID/OrgID/TeamID are stamped by the recording client, not here.
 func NewPullRequestArtifact(repoPath string, number int, nodeID, head, base, htmlURL, title, body string, draft bool) Artifact {
 	state := ArtifactStatePROpen
 	if draft {
