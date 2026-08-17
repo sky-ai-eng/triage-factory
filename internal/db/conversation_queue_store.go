@@ -18,9 +18,9 @@ var ErrBlueprintStepUnindexed = errors.New("enqueue: blueprint conversation has 
 // AssertBlueprintStepIndexed is the guard both dialects' EnqueueConversation opens with.
 // A conversation with no blueprint parent passes — the gate never compares an
 // index for one.
-func AssertBlueprintStepIndexed(run domain.Conversation) error {
-	if run.BlueprintRunID != "" && run.BlueprintStepIndex == nil {
-		return fmt.Errorf("%w (conversation %s, blueprint_run %s)", ErrBlueprintStepUnindexed, run.ID, run.BlueprintRunID)
+func AssertBlueprintStepIndexed(conv domain.Conversation) error {
+	if conv.BlueprintRunID != "" && conv.BlueprintStepIndex == nil {
+		return fmt.Errorf("%w (conversation %s, blueprint_run %s)", ErrBlueprintStepUnindexed, conv.ID, conv.BlueprintRunID)
 	}
 	return nil
 }
@@ -93,7 +93,7 @@ type ConversationQueueStore interface {
 	// with no JWT-claims context; the row's creator_user_id is still stamped
 	// for audit and later RLS-scoped reads. The schema CHECK pairing
 	// trigger_type with creator_user_id nullability is the caller's contract.
-	EnqueueConversation(ctx context.Context, orgID string, run domain.Conversation) error
+	EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) error
 
 	// ClaimNextConversation claims the next conversation that needs driving, of ANY
 	// surface, and mints the claim that records the engagement (executor id,

@@ -173,34 +173,34 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
 
 	step0 := 0
 	step1 := 1
-	for _, run := range []domain.Conversation{
+	for _, conv := range []domain.Conversation{
 		{ID: "blueprint-step-run-0", TaskID: task.ID, PromptID: "step-prompt-1", Status: "running", Model: "claude-sonnet-4-6", BlueprintRunID: "blueprint-run-rt", BlueprintStepIndex: &step0},
 		{ID: "blueprint-step-run-1", TaskID: task.ID, PromptID: "step-prompt-2", Status: "running", Model: "claude-sonnet-4-6", BlueprintRunID: "blueprint-run-rt", BlueprintStepIndex: &step1},
 	} {
-		insertConversationForTest(t, conn, run)
+		insertConversationForTest(t, conn, conv)
 	}
 
-	runs, err := blueprints.ConversationsForBlueprint(ctx, org, "blueprint-run-rt")
+	convs, err := blueprints.ConversationsForBlueprint(ctx, org, "blueprint-run-rt")
 	if err != nil {
 		t.Fatalf("ConversationsForBlueprint: %v", err)
 	}
-	if len(runs) != 2 {
-		t.Fatalf("expected 2 runs, got %d", len(runs))
+	if len(convs) != 2 {
+		t.Fatalf("expected 2 runs, got %d", len(convs))
 	}
-	if runs[0].ID != "blueprint-step-run-0" || runs[1].ID != "blueprint-step-run-1" {
-		t.Errorf("unexpected order: %v", []string{runs[0].ID, runs[1].ID})
+	if convs[0].ID != "blueprint-step-run-0" || convs[1].ID != "blueprint-step-run-1" {
+		t.Errorf("unexpected order: %v", []string{convs[0].ID, convs[1].ID})
 	}
-	if runs[0].BlueprintStepIndex == nil || *runs[0].BlueprintStepIndex != 0 {
-		t.Errorf("run[0].BlueprintStepIndex = %v, want 0", runs[0].BlueprintStepIndex)
+	if convs[0].BlueprintStepIndex == nil || *convs[0].BlueprintStepIndex != 0 {
+		t.Errorf("run[0].BlueprintStepIndex = %v, want 0", convs[0].BlueprintStepIndex)
 	}
-	if runs[1].BlueprintStepIndex == nil || *runs[1].BlueprintStepIndex != 1 {
-		t.Errorf("run[1].BlueprintStepIndex = %v, want 1", runs[1].BlueprintStepIndex)
+	if convs[1].BlueprintStepIndex == nil || *convs[1].BlueprintStepIndex != 1 {
+		t.Errorf("run[1].BlueprintStepIndex = %v, want 1", convs[1].BlueprintStepIndex)
 	}
-	if runs[0].PromptID != "step-prompt-1" {
-		t.Errorf("run[0].PromptID = %q, want step-prompt-1", runs[0].PromptID)
+	if convs[0].PromptID != "step-prompt-1" {
+		t.Errorf("run[0].PromptID = %q, want step-prompt-1", convs[0].PromptID)
 	}
-	if runs[0].Model != "claude-sonnet-4-6" {
-		t.Errorf("run[0].Model = %q, want claude-sonnet-4-6", runs[0].Model)
+	if convs[0].Model != "claude-sonnet-4-6" {
+		t.Errorf("run[0].Model = %q, want claude-sonnet-4-6", convs[0].Model)
 	}
 }
 
@@ -505,15 +505,15 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
 		t.Fatalf("complete step run: %v", err)
 	}
 
-	runs, err := blueprints.ConversationsForBlueprint(ctx, org, "op-blueprint-run")
+	convs, err := blueprints.ConversationsForBlueprint(ctx, org, "op-blueprint-run")
 	if err != nil {
 		t.Fatalf("ConversationsForBlueprint: %v", err)
 	}
-	if len(runs) != 1 {
-		t.Fatalf("ConversationsForBlueprint returned %d runs, want 1", len(runs))
+	if len(convs) != 1 {
+		t.Fatalf("ConversationsForBlueprint returned %d runs, want 1", len(convs))
 	}
-	if runs[0].Outcome != "continue" {
-		t.Errorf("step run outcome = %q, want continue (the orchestrator advances on this)", runs[0].Outcome)
+	if convs[0].Outcome != "continue" {
+		t.Errorf("step run outcome = %q, want continue (the orchestrator advances on this)", convs[0].Outcome)
 	}
 }
 

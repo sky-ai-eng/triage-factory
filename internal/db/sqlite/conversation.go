@@ -534,15 +534,15 @@ func (s *conversationStore) ListForTask(ctx context.Context, orgID, taskID strin
 	}
 	defer rows.Close()
 
-	var runs []domain.Conversation
+	var convs []domain.Conversation
 	for rows.Next() {
 		var r domain.Conversation
 		if err := scanConversationRows(rows, &r); err != nil {
 			return nil, err
 		}
-		runs = append(runs, r)
+		convs = append(convs, r)
 	}
-	return runs, rows.Err()
+	return convs, rows.Err()
 }
 
 func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string, opts db.ListOpts) ([]domain.Conversation, int, error) {
@@ -579,7 +579,7 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 	// order; on the unwindowed chunked path the order ACROSS chunks is chunk
 	// order, which is all the caller — grouping by run.TaskID — relies on.
 	// Same projection as ListForTask.
-	var runs []domain.Conversation
+	var convs []domain.Conversation
 	for _, chunk := range chunkIDs(taskIDs) {
 		placeholders, args := inListArgs(chunk)
 		query := `
@@ -603,7 +603,7 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 				rows.Close()
 				return nil, 0, err
 			}
-			runs = append(runs, r)
+			convs = append(convs, r)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -611,7 +611,7 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 		}
 		rows.Close()
 	}
-	return runs, total, nil
+	return convs, total, nil
 }
 
 // inListArgs renders an id slice as a "?, ?, ?" placeholder list plus its

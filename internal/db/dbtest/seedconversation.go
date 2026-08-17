@@ -25,44 +25,44 @@ import (
 // mid-flight state, which is what an unconcluded conversation carries now
 // that "queued" and "running" are derived from the claim table rather than
 // stored (see SeedActiveClaim).
-func SeedConversation(tb testing.TB, database *sql.DB, run domain.Conversation) {
+func SeedConversation(tb testing.TB, database *sql.DB, conv domain.Conversation) {
 	tb.Helper()
 
-	orgID := run.OrgID
+	orgID := conv.OrgID
 	if orgID == "" {
 		orgID = runmode.LocalDefaultOrgID
 	}
-	teamID := run.TeamID
+	teamID := conv.TeamID
 	if teamID == "" {
 		teamID = runmode.LocalDefaultTeamID
 	}
-	triggerType := run.TriggerType
+	triggerType := conv.TriggerType
 	if triggerType == "" {
 		triggerType = "manual"
 	}
 	var creator any
 	if triggerType == "manual" {
-		if run.CreatorUserID != "" {
-			creator = run.CreatorUserID
+		if conv.CreatorUserID != "" {
+			creator = conv.CreatorUserID
 		} else {
 			creator = runmode.LocalDefaultUserID
 		}
 	}
 	origin := "interactive"
-	if run.BlueprintRunID != "" {
+	if conv.BlueprintRunID != "" {
 		origin = "blueprint"
 	}
 	var status any
-	if run.Status != "" {
-		status = run.Status
+	if conv.Status != "" {
+		status = conv.Status
 	}
 	var startedAt any
-	if !run.StartedAt.IsZero() {
-		startedAt = run.StartedAt
+	if !conv.StartedAt.IsZero() {
+		startedAt = conv.StartedAt
 	}
 	var stepIdx any
-	if run.BlueprintStepIndex != nil {
-		stepIdx = *run.BlueprintStepIndex
+	if conv.BlueprintStepIndex != nil {
+		stepIdx = *conv.BlueprintStepIndex
 	}
 
 	if _, err := database.Exec(`
@@ -78,54 +78,54 @@ func SeedConversation(tb testing.TB, database *sql.DB, run domain.Conversation) 
 		        ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, NULL,
 		        ?, ?, ?, ?, ?, ?)
 	`,
-		run.ID, orgID, creator, teamID, nullIfEmpty(run.TaskID),
-		nullIfEmpty(run.PromptID), nullIfEmpty(run.TriggerID), triggerType,
-		origin, status, nullIfEmpty(run.Model),
-		nullIfEmpty(run.SessionID), nullIfEmpty(run.WorktreePath),
-		nullIfEmpty(run.ResultSummary), nullIfEmpty(run.Outcome),
-		nullIfEmpty(run.OutcomeReason), nullIfEmpty(string(run.FailureKind)),
-		nullIfEmpty(string(run.ParkReason)), startedAt, run.CompletedAt,
-		nullIfEmpty(run.ActorAgentID), nullIfEmpty(run.BlueprintRunID),
-		stepIdx, nullIfEmpty(run.TriggeringEventID), run.QueuedAt,
-		nullIfEmpty(run.PreferredExecutorID)); err != nil {
-		tb.Fatalf("SeedConversation %s: %v", run.ID, err)
+		conv.ID, orgID, creator, teamID, nullIfEmpty(conv.TaskID),
+		nullIfEmpty(conv.PromptID), nullIfEmpty(conv.TriggerID), triggerType,
+		origin, status, nullIfEmpty(conv.Model),
+		nullIfEmpty(conv.SessionID), nullIfEmpty(conv.WorktreePath),
+		nullIfEmpty(conv.ResultSummary), nullIfEmpty(conv.Outcome),
+		nullIfEmpty(conv.OutcomeReason), nullIfEmpty(string(conv.FailureKind)),
+		nullIfEmpty(string(conv.ParkReason)), startedAt, conv.CompletedAt,
+		nullIfEmpty(conv.ActorAgentID), nullIfEmpty(conv.BlueprintRunID),
+		stepIdx, nullIfEmpty(conv.TriggeringEventID), conv.QueuedAt,
+		nullIfEmpty(conv.PreferredExecutorID)); err != nil {
+		tb.Fatalf("SeedConversation %s: %v", conv.ID, err)
 	}
 
 	// The fixture's accounting fields translate into the rows the read
 	// projections derive them from: cost/tokens become one settled ledger
 	// message, duration/turns a released claim's telemetry. A fixture with
 	// none of them seeds neither row.
-	if run.TotalCostUSD != nil || run.InputTokens != 0 || run.OutputTokens != 0 ||
-		run.CacheReadTokens != 0 || run.CacheCreationTokens != 0 {
+	if conv.TotalCostUSD != nil || conv.InputTokens != 0 || conv.OutputTokens != 0 ||
+		conv.CacheReadTokens != 0 || conv.CacheCreationTokens != 0 {
 		var cost any
-		if run.TotalCostUSD != nil {
-			cost = *run.TotalCostUSD
+		if conv.TotalCostUSD != nil {
+			cost = *conv.TotalCostUSD
 		}
 		if _, err := database.Exec(`
 			INSERT INTO messages (org_id, conversation_id, role, subtype, content, cost_usd,
 			                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 			                      created_at)
 			VALUES (?, ?, 'assistant', '', 'seeded work', ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
-		`, orgID, run.ID, cost, run.InputTokens, run.OutputTokens,
-			run.CacheReadTokens, run.CacheCreationTokens, startedAt); err != nil {
-			tb.Fatalf("SeedConversation %s ledger row: %v", run.ID, err)
+		`, orgID, conv.ID, cost, conv.InputTokens, conv.OutputTokens,
+			conv.CacheReadTokens, conv.CacheCreationTokens, startedAt); err != nil {
+			tb.Fatalf("SeedConversation %s ledger row: %v", conv.ID, err)
 		}
 	}
-	if run.DurationMs != nil || run.NumTurns != nil {
+	if conv.DurationMs != nil || conv.NumTurns != nil {
 		var duration, turns any
-		if run.DurationMs != nil {
-			duration = *run.DurationMs
+		if conv.DurationMs != nil {
+			duration = *conv.DurationMs
 		}
-		if run.NumTurns != nil {
-			turns = *run.NumTurns
+		if conv.NumTurns != nil {
+			turns = *conv.NumTurns
 		}
 		if _, err := database.Exec(`
 			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
 			                    claimed_at, released_at, outcome, duration_ms, num_turns)
 			VALUES (?, ?, ?, 'seed-exec', 0, COALESCE(?, CURRENT_TIMESTAMP),
 			        COALESCE(?, CURRENT_TIMESTAMP), 'completed', ?, ?)
-		`, uuid.New().String(), orgID, run.ID, startedAt, startedAt, duration, turns); err != nil {
-			tb.Fatalf("SeedConversation %s telemetry claim: %v", run.ID, err)
+		`, uuid.New().String(), orgID, conv.ID, startedAt, startedAt, duration, turns); err != nil {
+			tb.Fatalf("SeedConversation %s telemetry claim: %v", conv.ID, err)
 		}
 	}
 }

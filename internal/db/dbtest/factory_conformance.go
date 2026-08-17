@@ -230,45 +230,45 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, "", evID, "queued", now)
 
 		// One run per memory state we need to cover.
-		runNoRow := seed.Run(t, taskID, "running")
-		runNullContent := seed.Run(t, taskID, "running")
-		runEmptyContent := seed.Run(t, taskID, "running")
-		runWhitespace := seed.Run(t, taskID, "running")
-		runPopulated := seed.Run(t, taskID, "running")
-		runTerminal := seed.Run(t, taskID, "completed") // must NOT appear
+		conversationNoRow := seed.Run(t, taskID, "running")
+		conversationNullContent := seed.Run(t, taskID, "running")
+		conversationEmptyContent := seed.Run(t, taskID, "running")
+		conversationWhitespace := seed.Run(t, taskID, "running")
+		conversationPopulated := seed.Run(t, taskID, "running")
+		conversationTerminal := seed.Run(t, taskID, "completed") // must NOT appear
 
-		seed.SetRunMemory(t, runNullContent, ent, nullSentinel)
-		seed.SetRunMemory(t, runEmptyContent, ent, "")
-		seed.SetRunMemory(t, runWhitespace, ent, "  \t\n ")
-		seed.SetRunMemory(t, runPopulated, ent, "agent wrote real reasoning")
+		seed.SetRunMemory(t, conversationNullContent, ent, nullSentinel)
+		seed.SetRunMemory(t, conversationEmptyContent, ent, "")
+		seed.SetRunMemory(t, conversationWhitespace, ent, "  \t\n ")
+		seed.SetRunMemory(t, conversationPopulated, ent, "agent wrote real reasoning")
 
-		runs, err := store.ActiveConversations(ctx, orgID)
+		convs, err := store.ActiveConversations(ctx, orgID)
 		if err != nil {
 			t.Fatalf("ActiveConversations: %v", err)
 		}
 
 		gotMem := map[string]bool{}
 		gotIDs := map[string]bool{}
-		for _, fr := range runs {
+		for _, fr := range convs {
 			gotIDs[fr.Run.ID] = true
 			gotMem[fr.Run.ID] = fr.Run.MemoryMissing
 		}
 
-		if gotIDs[runTerminal] {
-			t.Errorf("terminal run %s leaked into ActiveConversations — status filter failed", runTerminal)
+		if gotIDs[conversationTerminal] {
+			t.Errorf("terminal run %s leaked into ActiveConversations — status filter failed", conversationTerminal)
 		}
-		for _, id := range []string{runNoRow, runNullContent, runEmptyContent, runWhitespace, runPopulated} {
+		for _, id := range []string{conversationNoRow, conversationNullContent, conversationEmptyContent, conversationWhitespace, conversationPopulated} {
 			if !gotIDs[id] {
 				t.Errorf("active run %s missing from ActiveConversations", id)
 			}
 		}
 
 		want := map[string]bool{
-			runNoRow:        true,
-			runNullContent:  true,
-			runEmptyContent: true,
-			runWhitespace:   true,
-			runPopulated:    false,
+			conversationNoRow:        true,
+			conversationNullContent:  true,
+			conversationEmptyContent: true,
+			conversationWhitespace:   true,
+			conversationPopulated:    false,
 		}
 		for id, expected := range want {
 			if gotMem[id] != expected {

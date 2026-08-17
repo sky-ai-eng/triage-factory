@@ -153,23 +153,23 @@ const runQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task
 // 'sdk': SQLite is local mode, which keeps the Claude Code SDK runtime.
 // The Postgres sibling stamps 'native' — the dialect IS the mode, so the
 // split lands where the row is written rather than as a caller-passed knob.
-func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, run domain.Conversation) error {
+func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	if err := db.AssertBlueprintStepIndexed(run); err != nil {
+	if err := db.AssertBlueprintStepIndexed(conv); err != nil {
 		return err
 	}
-	triggerType := run.TriggerType
+	triggerType := conv.TriggerType
 	if triggerType == "" {
 		triggerType = "manual"
 	}
-	if triggerType == "manual" && run.CreatorUserID == "" {
-		run.CreatorUserID = runmode.LocalDefaultUserID
+	if triggerType == "manual" && conv.CreatorUserID == "" {
+		conv.CreatorUserID = runmode.LocalDefaultUserID
 	}
 	var stepIdx any
-	if run.BlueprintStepIndex != nil {
-		stepIdx = *run.BlueprintStepIndex
+	if conv.BlueprintStepIndex != nil {
+		stepIdx = *conv.BlueprintStepIndex
 	}
 	_, err := s.conn.ExecContext(ctx, `
 		INSERT INTO conversations (id, type, runtime, task_id, prompt_id, model, worktree_path,
@@ -177,10 +177,10 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index,
 		                  preferred_executor_id, queued_at)
 		VALUES (?, 'delegation', 'sdk', ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?, NULLIF(?, ''), CURRENT_TIMESTAMP)
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Model, run.WorktreePath,
-		triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID,
-		nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.ActorAgentID),
-		nullIfEmpty(run.BlueprintRunID), stepIdx, run.PreferredExecutorID)
+	`, conv.ID, conv.TaskID, nullIfEmpty(conv.PromptID), conv.Model, conv.WorktreePath,
+		triggerType, nullIfEmpty(conv.TriggerID), runmode.LocalDefaultTeamID,
+		nullIfEmpty(conv.CreatorUserID), nullIfEmpty(conv.ActorAgentID),
+		nullIfEmpty(conv.BlueprintRunID), stepIdx, conv.PreferredExecutorID)
 	return err
 }
 
@@ -206,7 +206,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	//
 	// An empty executorID (the un-wired test-spawner path) stores the ''
 	// sentinel on the claim — claims.executor_id is NOT NULL by schema.
-	var run *domain.Conversation
+	var conv *domain.Conversation
 	claimedAt := time.Now().UTC()
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		row := q.QueryRowContext(ctx, `
@@ -262,13 +262,13 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		claimed.ExecutorID = executorID
 		claimed.ClaimedAt = &claimedAt
 		claimed.Attempts = attempts
-		run = claimed
+		conv = claimed
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return run, nil
+	return conv, nil
 }
 
 func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID, lastErr string) error {

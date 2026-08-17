@@ -194,17 +194,17 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 
 	t.Run("Consume_is_per_run_isolated", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
-		runA := seed.Run(t, "iso-a")
-		runB := seed.Run(t, "iso-b")
-		seed.StagePending(t, runA, userID, "for-A")
-		_, _, ok, err := store.Consume(ctx, orgID, runB)
+		convA := seed.Run(t, "iso-a")
+		convB := seed.Run(t, "iso-b")
+		seed.StagePending(t, convA, userID, "for-A")
+		_, _, ok, err := store.Consume(ctx, orgID, convB)
 		if err != nil {
 			t.Fatalf("consume B: %v", err)
 		}
 		if ok {
 			t.Error("run B consume found run A's input")
 		}
-		msg, _, ok, err := store.Consume(ctx, orgID, runA)
+		msg, _, ok, err := store.Consume(ctx, orgID, convA)
 		if err != nil {
 			t.Fatalf("consume A: %v", err)
 		}

@@ -62,13 +62,13 @@ type ConversationSeeder struct {
 	// hanging off it.
 	Task func(t *testing.T, entityID, eventType, primaryEventID string) string
 
-	// Run inserts a conversations row directly and returns its id (run.ID
+	// Run inserts a conversations row directly and returns its id (conv.ID
 	// when set, a fresh uuid otherwise). ConversationQueueStore.EnqueueConversation is the
 	// only production mint; the conformance suite stages rows in arbitrary
 	// status without driving the queue. Fields honored: ID, TaskID,
 	// PromptID, Status, Model, TriggerType (default manual), TriggerID,
 	// BlueprintRunID.
-	Run func(t *testing.T, run domain.Conversation) string
+	Run func(t *testing.T, conv domain.Conversation) string
 
 	// ClaimRows returns the conversation's claims rows oldest-first, so
 	// the suite can assert mint/release bookkeeping.
@@ -883,8 +883,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("re-call on open: ok=%v err=%v, want false/nil", ok, err)
 		}
 		// Terminal → ok=false.
-		runID2 := seedConversationForTest(t, orgID, seed, "completed")
-		ok, err = store.ParkOpen(ctx, orgID, runID2, db.ParkIdle())
+		conversationID2 := seedConversationForTest(t, orgID, seed, "completed")
+		ok, err = store.ParkOpen(ctx, orgID, conversationID2, db.ParkIdle())
 		if err != nil || ok {
 			t.Errorf("on completed: ok=%v err=%v, want false/nil", ok, err)
 		}
@@ -908,15 +908,15 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
 			t.Fatalf("from open: ok=%v err=%v, want true", ok, err)
 		}
-		run, err := store.GetSystem(ctx, orgID, conversationID)
+		conv, err := store.GetSystem(ctx, orgID, conversationID)
 		if err != nil {
 			t.Fatalf("get after requeue: %v", err)
 		}
-		if run.Status != "queued" {
-			t.Errorf("status = %q, want queued", run.Status)
+		if conv.Status != "queued" {
+			t.Errorf("status = %q, want queued", conv.Status)
 		}
-		if run.ExecutorID != "" {
-			t.Errorf("queued row carries an owner: executor_id=%q, want empty", run.ExecutorID)
+		if conv.ExecutorID != "" {
+			t.Errorf("queued row carries an owner: executor_id=%q, want empty", conv.ExecutorID)
 		}
 		// The CAS loser: a second flip on the now-queued row finds no
 		// resumable state and refuses — this is the guard that makes two
@@ -932,30 +932,30 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// workspace behind to follow up in. Settling the blueprint first is the
 		// order the reactor writes in; the window between the two writes is the
 		// subtest below.
-		abortRun, abortBR := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "stopped", "abort", "needs a human", ""); err != nil {
+		abortConversation, abortBR := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, abortConversation, "completed", 0, 0, 0, "stopped", "abort", "needs a human", ""); err != nil {
 			t.Fatalf("complete+abort: %v", err)
 		}
 		seed.SetBlueprintRunStatus(t, abortBR, "aborted")
-		if ok, err := store.MarkQueuedForResume(ctx, orgID, abortRun); err != nil || !ok {
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, abortConversation); err != nil || !ok {
 			t.Errorf("from completed+abort: ok=%v err=%v, want true", ok, err)
 		}
-		finishRun, finishBR := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "shipped", "finish", "", ""); err != nil {
+		finishConversation, finishBR := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, finishConversation, "completed", 0, 0, 0, "shipped", "finish", "", ""); err != nil {
 			t.Fatalf("complete+finish: %v", err)
 		}
 		seed.SetBlueprintRunStatus(t, finishBR, "completed")
-		if ok, err := store.MarkQueuedForResume(ctx, orgID, finishRun); err != nil || !ok {
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, finishConversation); err != nil || !ok {
 			t.Errorf("from completed+finish: ok=%v err=%v, want true — a follow-up on concluded work", ok, err)
 		}
 		// failed → refused. The infrastructure under it died, so there is no
 		// workspace to land a follow-up in; this is the one rest state the CAS
 		// still excludes.
-		failedRun := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, failedRun, "failed", 0, 0, 0, "", "", "", ""); err != nil {
+		failedConversation := seedConversationForTest(t, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, failedConversation, "failed", 0, 0, 0, "", "", "", ""); err != nil {
 			t.Fatalf("fail: %v", err)
 		}
-		if ok, _ := store.MarkQueuedForResume(ctx, orgID, failedRun); ok {
+		if ok, _ := store.MarkQueuedForResume(ctx, orgID, failedConversation); ok {
 			t.Errorf("from failed succeeded; want refused")
 		}
 	})
@@ -1012,20 +1012,20 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		// `open` is intentionally failable (a warm open run has no durable
 		// snapshot, so an infra error reaching failConversation must terminate it).
-		openRun := seedConversationForTest(t, orgID, seed, "running")
-		if _, err := store.ParkOpen(ctx, orgID, openRun, db.ParkIdle()); err != nil {
+		openConversation := seedConversationForTest(t, orgID, seed, "running")
+		if _, err := store.ParkOpen(ctx, orgID, openConversation, db.ParkIdle()); err != nil {
 			t.Fatalf("open: %v", err)
 		}
-		ok, err := store.MarkFailedIfActive(ctx, orgID, openRun, "")
+		ok, err := store.MarkFailedIfActive(ctx, orgID, openConversation, "")
 		if err != nil || !ok {
 			t.Fatalf("MarkFailedIfActive on open: ok=%v err=%v, want true (open is failable)", ok, err)
 		}
-		if got, _ := store.Get(ctx, orgID, openRun); got.Status != "failed" {
+		if got, _ := store.Get(ctx, orgID, openConversation); got.Status != "failed" {
 			t.Errorf("status = %q, want failed", got.Status)
 		}
 		// Already terminal → refused.
-		doneRun := seedConversationForTest(t, orgID, seed, "completed")
-		if ok, _ := store.MarkFailedIfActive(ctx, orgID, doneRun, ""); ok {
+		doneConversation := seedConversationForTest(t, orgID, seed, "completed")
+		if ok, _ := store.MarkFailedIfActive(ctx, orgID, doneConversation, ""); ok {
 			t.Errorf("MarkFailedIfActive flipped a completed run; want refused")
 		}
 	})
@@ -1066,8 +1066,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if ok, err := store.ParkOpen(ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
 			t.Errorf("re-cancel a parked run: ok=%v err=%v, want true/nil", ok, err)
 		}
-		doneRun := seedConversationForTest(t, orgID, seed, "completed")
-		if ok, err := store.ParkOpen(ctx, orgID, doneRun, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || ok {
+		doneConversation := seedConversationForTest(t, orgID, seed, "completed")
+		if ok, err := store.ParkOpen(ctx, orgID, doneConversation, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || ok {
 			t.Errorf("cancel a completed run: ok=%v err=%v, want false/nil", ok, err)
 		}
 	})
@@ -1857,11 +1857,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		claimID := seed.ClaimRows(t, conversationID)[0].ID
 
-		otherRun := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.SetExecutorSystem(ctx, orgID, otherRun, "exec-other", 2); err != nil {
+		otherConversation := seedConversationForTest(t, orgID, seed, "running")
+		if err := store.SetExecutorSystem(ctx, orgID, otherConversation, "exec-other", 2); err != nil {
 			t.Fatalf("SetExecutorSystem (other): %v", err)
 		}
-		otherClaim := seed.ClaimRows(t, otherRun)[0].ID
+		otherClaim := seed.ClaimRows(t, otherConversation)[0].ID
 
 		// A (conversation, claim) pair that does not agree writes neither row.
 		if err := store.SetExecutorForClaimSystem(ctx, orgID, conversationID, otherClaim, "exec-crossed", 9); err == nil {
@@ -1870,7 +1870,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got := seed.ClaimRows(t, conversationID); len(got) != 1 || got[0].ExecutorID != "exec-named" {
 			t.Errorf("named conversation's claim = %+v, want exec-named untouched", got)
 		}
-		if got := seed.ClaimRows(t, otherRun); len(got) != 1 || got[0].ExecutorID != "exec-other" || got[0].BootEpoch != 2 {
+		if got := seed.ClaimRows(t, otherConversation); len(got) != 1 || got[0].ExecutorID != "exec-other" || got[0].BootEpoch != 2 {
 			t.Errorf("other conversation's claim = %+v, want exec-other/2 untouched", got)
 		}
 
@@ -1881,7 +1881,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got := seed.ClaimRows(t, conversationID); len(got) != 1 || got[0].ExecutorID != "exec-named-live" || got[0].BootEpoch != 5 {
 			t.Errorf("claim after the go-live stamp = %+v, want exec-named-live/5", got)
 		}
-		if got := seed.ClaimRows(t, otherRun); len(got) != 1 || got[0].ExecutorID != "exec-other" {
+		if got := seed.ClaimRows(t, otherConversation); len(got) != 1 || got[0].ExecutorID != "exec-other" {
 			t.Errorf("other conversation's claim = %+v, want exec-other untouched", got)
 		}
 	})
@@ -2127,16 +2127,16 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		first := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
 		time.Sleep(1100 * time.Millisecond)
 		second := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		runs, err := store.ListForTask(ctx, orgID, taskID)
+		convs, err := store.ListForTask(ctx, orgID, taskID)
 		if err != nil {
 			t.Fatalf("ListForTask: %v", err)
 		}
-		if len(runs) != 2 {
-			t.Fatalf("len = %d, want 2", len(runs))
+		if len(convs) != 2 {
+			t.Fatalf("len = %d, want 2", len(convs))
 		}
-		if runs[0].ID != second || runs[1].ID != first {
+		if convs[0].ID != second || convs[1].ID != first {
 			t.Errorf("order = [%s, %s], want [%s, %s] (newest first)",
-				runs[0].ID, runs[1].ID, second, first)
+				convs[0].ID, convs[1].ID, second, first)
 		}
 	})
 
@@ -2160,12 +2160,12 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})
-		runs, err := store.ListForTask(ctx, orgID, taskID)
+		convs, err := store.ListForTask(ctx, orgID, taskID)
 		if err != nil {
 			t.Fatalf("ListForTask: %v", err)
 		}
-		gotByID := make(map[string]string, len(runs))
-		for _, r := range runs {
+		gotByID := make(map[string]string, len(convs))
+		for _, r := range convs {
 			gotByID[r.ID] = r.TriggerType
 		}
 		if gotByID[manualID] != "manual" {
@@ -2184,8 +2184,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 
-		if runs, _, err := store.ListForTasks(ctx, orgID, nil, db.ListOpts{Limit: 200}); err != nil || runs != nil {
-			t.Fatalf("ListForTasks(nil) = (%v, %v), want (nil, nil)", runs, err)
+		if convs, _, err := store.ListForTasks(ctx, orgID, nil, db.ListOpts{Limit: 200}); err != nil || convs != nil {
+			t.Fatalf("ListForTasks(nil) = (%v, %v), want (nil, nil)", convs, err)
 		}
 
 		entA := seed.Entity(t, "lft-a")
@@ -2195,19 +2195,19 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		evB := seed.Event(t, entB, domain.EventGitHubPROpened)
 		taskB := seed.Task(t, entB, domain.EventGitHubPROpened, evB)
 
-		runA1 := seedConversationForTaskTest(t, orgID, taskA, "running", seed)
-		runA2 := seedConversationForTaskTest(t, orgID, taskA, "completed", seed)
-		runB1 := seedConversationForTaskTest(t, orgID, taskB, "running", seed)
+		convA1 := seedConversationForTaskTest(t, orgID, taskA, "running", seed)
+		convA2 := seedConversationForTaskTest(t, orgID, taskA, "completed", seed)
+		convB1 := seedConversationForTaskTest(t, orgID, taskB, "running", seed)
 
 		// Mix in a valid-but-absent UUID and a non-UUID literal: both must be
 		// tolerated (no rows, no error). The non-UUID guards the Postgres path,
 		// where a uuid[] bind would otherwise 22P02 — filtered per uuid.go.
-		runs, total, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB, uuid.New().String(), "not-a-uuid"}, db.ListOpts{Limit: 200})
+		convs, total, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB, uuid.New().String(), "not-a-uuid"}, db.ListOpts{Limit: 200})
 		if err != nil {
 			t.Fatalf("ListForTasks: %v", err)
 		}
 		byTask := map[string][]string{}
-		for _, r := range runs {
+		for _, r := range convs {
 			byTask[r.TaskID] = append(byTask[r.TaskID], r.ID)
 		}
 		if len(byTask[taskA]) != 2 {
@@ -2222,7 +2222,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 				seen[id] = true
 			}
 		}
-		for _, want := range []string{runA1, runA2, runB1} {
+		for _, want := range []string{convA1, convA2, convB1} {
 			if !seen[want] {
 				t.Errorf("run %s missing from batched result", want)
 			}
@@ -2261,11 +2261,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("ActiveIDs with no runs: %v, want []", ids)
 		}
 		// One running + one terminal → ids=[running].
-		runRun := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		runningConversation := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
 		_ = seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
 		ids, _ = store.ActiveIDsForTask(ctx, orgID, taskID)
-		if len(ids) != 1 || ids[0] != runRun {
-			t.Errorf("ActiveIDs = %v, want [%s]", ids, runRun)
+		if len(ids) != 1 || ids[0] != runningConversation {
+			t.Errorf("ActiveIDs = %v, want [%s]", ids, runningConversation)
 		}
 	})
 
@@ -2397,8 +2397,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 
 		// open WITH a worktree path → included.
-		openRun := seedConversationForTest(t, orgID, seed, "open")
-		if err := store.SetWorktreePath(ctx, orgID, openRun, "/tmp/triagefactory-runs/open"); err != nil {
+		openConversation := seedConversationForTest(t, orgID, seed, "open")
+		if err := store.SetWorktreePath(ctx, orgID, openConversation, "/tmp/triagefactory-runs/open"); err != nil {
 			t.Fatalf("set worktree (open): %v", err)
 		}
 		// completed WITH a worktree → excluded by the status filter. A completed run
@@ -2485,8 +2485,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		taskB := seed.Task(t, entB, domain.EventGitHubPROpened, evB)
 
 		// A has an open run; B has only a running run.
-		runA := seedConversationForTaskTest(t, orgID, taskA, "running", seed)
-		if _, err := store.ParkOpen(ctx, orgID, runA, db.ParkIdle()); err != nil {
+		convA := seedConversationForTaskTest(t, orgID, taskA, "running", seed)
+		if _, err := store.ParkOpen(ctx, orgID, convA, db.ParkIdle()); err != nil {
 			t.Fatalf("open A: %v", err)
 		}
 		_ = seedConversationForTaskTest(t, orgID, taskB, "running", seed)
@@ -3338,35 +3338,35 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("MessagesForConversations(nil) = (%v, %v), want (nil, nil)", msgs, err)
 		}
 
-		runA := seedConversationForTest(t, orgID, seed, "running")
-		runB := seedConversationForTest(t, orgID, seed, "running")
+		convA := seedConversationForTest(t, orgID, seed, "running")
+		convB := seedConversationForTest(t, orgID, seed, "running")
 		for _, c := range []string{"a-first", "a-second"} {
 			if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
-				ConversationID: runA, Role: "assistant", Content: c,
+				ConversationID: convA, Role: "assistant", Content: c,
 			}); err != nil {
 				t.Fatalf("InsertMessage A: %v", err)
 			}
 		}
 		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: runB, Role: "assistant", Content: "b-only",
+			ConversationID: convB, Role: "assistant", Content: "b-only",
 		}); err != nil {
 			t.Fatalf("InsertMessage B: %v", err)
 		}
 
 		// A non-UUID id must be tolerated (no rows, no error) — guards the
 		// Postgres uuid[] bind path, same as ListForTasks above.
-		msgs, err := store.MessagesForConversations(ctx, orgID, []string{runA, runB, "not-a-uuid"})
+		msgs, err := store.MessagesForConversations(ctx, orgID, []string{convA, convB, "not-a-uuid"})
 		if err != nil {
 			t.Fatalf("MessagesForConversations: %v", err)
 		}
-		byRun := map[string][]string{}
+		byConversation := map[string][]string{}
 		for _, m := range msgs {
-			byRun[m.ConversationID] = append(byRun[m.ConversationID], m.Content)
+			byConversation[m.ConversationID] = append(byConversation[m.ConversationID], m.Content)
 		}
-		if got := byRun[runA]; len(got) != 2 || got[0] != "a-first" || got[1] != "a-second" {
+		if got := byConversation[convA]; len(got) != 2 || got[0] != "a-first" || got[1] != "a-second" {
 			t.Errorf("run A messages = %v, want [a-first a-second] (per-run order preserved)", got)
 		}
-		if got := byRun[runB]; len(got) != 1 || got[0] != "b-only" {
+		if got := byConversation[convB]; len(got) != 1 || got[0] != "b-only" {
 			t.Errorf("run B messages = %v, want [b-only]", got)
 		}
 	})
@@ -3617,22 +3617,22 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// One run per memory-content state. memory_missing should be
 		// true for no-row, NULL, "", whitespace; false for populated.
-		runNoRow := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		runNullContent := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		runEmpty := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		runWhitespace := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		runPopulated := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		seed.SetRunMemory(t, runNullContent, ent, NullMemorySentinel)
-		seed.SetRunMemory(t, runEmpty, ent, "")
-		seed.SetRunMemory(t, runWhitespace, ent, "  \t\n ")
-		seed.SetRunMemory(t, runPopulated, ent, "real reasoning text")
+		conversationNoRow := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		conversationNullContent := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		conversationEmpty := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		conversationWhitespace := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		conversationPopulated := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
+		seed.SetRunMemory(t, conversationNullContent, ent, NullMemorySentinel)
+		seed.SetRunMemory(t, conversationEmpty, ent, "")
+		seed.SetRunMemory(t, conversationWhitespace, ent, "  \t\n ")
+		seed.SetRunMemory(t, conversationPopulated, ent, "real reasoning text")
 
 		want := map[string]bool{
-			runNoRow:       true,
-			runNullContent: true,
-			runEmpty:       true,
-			runWhitespace:  true,
-			runPopulated:   false,
+			conversationNoRow:       true,
+			conversationNullContent: true,
+			conversationEmpty:       true,
+			conversationWhitespace:  true,
+			conversationPopulated:   false,
 		}
 		for id, expected := range want {
 			got, err := store.Get(ctx, orgID, id)

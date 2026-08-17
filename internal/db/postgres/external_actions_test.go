@@ -188,7 +188,7 @@ func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
 	h.Reset(t)
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	orgB, bob, _ := pgtest.SeedOrgWithUser(t, h, "bob")
-	runA := seedPgArtifactRun(t, h, orgA, teamA, alice)
+	convA := seedPgArtifactRun(t, h, orgA, teamA, alice)
 	ctx := context.Background()
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
@@ -197,7 +197,7 @@ func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
 	for _, act := range []domain.ExternalAction{
 		{
 			OrgID: orgA, TeamID: teamA, Provider: domain.ArtifactProviderGitHub,
-			Action: domain.ActionGHChannelWrite, Target: "octo/repo", ConversationID: runA,
+			Action: domain.ActionGHChannelWrite, Target: "octo/repo", ConversationID: convA,
 			Credential: domain.CredentialGitHubApp, DedupKey: "run-1",
 		},
 		{
@@ -212,7 +212,7 @@ func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
 	}
 
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByConversation(ctx, orgA, runA, domain.ExternalActionListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByConversation(ctx, orgA, convA, domain.ExternalActionListOpts{})
 		if err != nil {
 			return err
 		}
@@ -225,7 +225,7 @@ func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
 	}
 
 	if err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByConversation(ctx, orgA, runA, domain.ExternalActionListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByConversation(ctx, orgA, convA, domain.ExternalActionListOpts{})
 		if err != nil {
 			return err
 		}

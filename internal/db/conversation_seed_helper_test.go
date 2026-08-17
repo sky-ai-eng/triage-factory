@@ -61,36 +61,36 @@ func mintBlueprintRunForTest(t *testing.T, database *sql.DB, taskID string) stri
 // pre-D2 CreateConversation also tolerated via nullIfEmpty. Tests
 // that need a real prompt FK should seed one first and pass the
 // id explicitly.
-func createRunForTest(t *testing.T, database *sql.DB, run domain.Conversation) error {
+func createRunForTest(t *testing.T, database *sql.DB, conv domain.Conversation) error {
 	t.Helper()
-	triggerType := run.TriggerType
+	triggerType := conv.TriggerType
 	if triggerType == "" {
 		triggerType = "manual"
 	}
-	creator := run.CreatorUserID
+	creator := conv.CreatorUserID
 	if triggerType == "manual" && creator == "" {
 		creator = runmode.LocalDefaultUserID
 	}
 	var stepIdx any
-	if run.BlueprintStepIndex != nil {
-		stepIdx = *run.BlueprintStepIndex
+	if conv.BlueprintStepIndex != nil {
+		stepIdx = *conv.BlueprintStepIndex
 	}
 	// The origin CHECK requires blueprint_run_id — mint a blueprint_run for this run's
 	// task when the caller didn't supply one. This single fallback fixes the
 	// many package-db consumers that build a run fixture without caring about
 	// the blueprint layer.
-	blueprintRunID := run.BlueprintRunID
+	blueprintRunID := conv.BlueprintRunID
 	if blueprintRunID == "" {
-		blueprintRunID = mintBlueprintRunForTest(t, database, run.TaskID)
+		blueprintRunID = mintBlueprintRunForTest(t, database, conv.TaskID)
 	}
 	_, err := database.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility,
 		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?)
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
-		triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID,
-		nullIfEmpty(creator), nullIfEmpty(run.ActorAgentID),
+	`, conv.ID, conv.TaskID, nullIfEmpty(conv.PromptID), conv.Status, conv.Model, conv.WorktreePath,
+		triggerType, nullIfEmpty(conv.TriggerID), runmode.LocalDefaultTeamID,
+		nullIfEmpty(creator), nullIfEmpty(conv.ActorAgentID),
 		blueprintRunID, stepIdx)
 	return err
 }

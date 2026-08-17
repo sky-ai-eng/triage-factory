@@ -351,12 +351,12 @@ func TestArtifactStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
 	if _, err := h.AdminDB.Exec(`DELETE FROM conversations WHERE id = $1`, conversationID); err != nil {
 		t.Fatalf("purge run: %v", err)
 	}
-	var nullRun sql.NullString
-	if err := h.AdminDB.QueryRow(`SELECT conversation_id FROM artifacts WHERE id = $1`, art.ID).Scan(&nullRun); err != nil {
+	var nullConversation sql.NullString
+	if err := h.AdminDB.QueryRow(`SELECT conversation_id FROM artifacts WHERE id = $1`, art.ID).Scan(&nullConversation); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if nullRun.Valid {
-		t.Fatalf("conversation_id should be NULL after run purge, got %q", nullRun.String)
+	if nullConversation.Valid {
+		t.Fatalf("conversation_id should be NULL after run purge, got %q", nullConversation.String)
 	}
 
 	rows, _, err := stores.Artifacts.ListByTeam(ctx, orgID, teamID, db.ArtifactListOpts{})
@@ -612,9 +612,9 @@ func TestArtifactStore_Postgres_CountByRun(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runA := seedPgArtifactRun(t, h, orgID, teamID, userID)
-	runB := seedPgArtifactRun(t, h, orgID, teamID, userID)
-	runC := seedPgArtifactRun(t, h, orgID, teamID, userID) // no artifacts
+	convA := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	convB := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	convC := seedPgArtifactRun(t, h, orgID, teamID, userID) // no artifacts
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
@@ -627,22 +627,22 @@ func TestArtifactStore_Postgres_CountByRun(t *testing.T) {
 			t.Fatalf("seed %s: %v", key, err)
 		}
 	}
-	seed(runA, "a1")
-	seed(runA, "a2")
-	seed(runB, "b1")
+	seed(convA, "a1")
+	seed(convA, "a2")
+	seed(convB, "b1")
 
-	counts, err := stores.Artifacts.CountByConversation(ctx, orgID, []string{runA, runB, runC})
+	counts, err := stores.Artifacts.CountByConversation(ctx, orgID, []string{convA, convB, convC})
 	if err != nil {
 		t.Fatalf("CountByConversation: %v", err)
 	}
-	if counts[runA] != 2 {
-		t.Errorf("runA count = %d, want 2", counts[runA])
+	if counts[convA] != 2 {
+		t.Errorf("runA count = %d, want 2", counts[convA])
 	}
-	if counts[runB] != 1 {
-		t.Errorf("runB count = %d, want 1", counts[runB])
+	if counts[convB] != 1 {
+		t.Errorf("runB count = %d, want 1", counts[convB])
 	}
-	if _, ok := counts[runC]; ok {
-		t.Errorf("runC (no artifacts) should be absent, got %d", counts[runC])
+	if _, ok := counts[convC]; ok {
+		t.Errorf("runC (no artifacts) should be absent, got %d", counts[convC])
 	}
 
 	empty, err := stores.Artifacts.CountByConversation(ctx, orgID, nil)
@@ -717,9 +717,9 @@ func TestArtifactStore_Postgres_ListByRuns(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runA := seedPgArtifactRun(t, h, orgID, teamID, userID)
-	runB := seedPgArtifactRun(t, h, orgID, teamID, userID)
-	runC := seedPgArtifactRun(t, h, orgID, teamID, userID) // no artifacts
+	convA := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	convB := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	convC := seedPgArtifactRun(t, h, orgID, teamID, userID) // no artifacts
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
@@ -732,26 +732,26 @@ func TestArtifactStore_Postgres_ListByRuns(t *testing.T) {
 			t.Fatalf("seed %s: %v", key, err)
 		}
 	}
-	seed(runA, "a1")
-	seed(runA, "a2")
-	seed(runB, "b1")
+	seed(convA, "a1")
+	seed(convA, "a2")
+	seed(convB, "b1")
 
-	arts, err := stores.Artifacts.ListByConversations(ctx, orgID, []string{runA, runB, runC})
+	arts, err := stores.Artifacts.ListByConversations(ctx, orgID, []string{convA, convB, convC})
 	if err != nil {
 		t.Fatalf("ListByConversations: %v", err)
 	}
-	byRun := map[string]int{}
+	byConversation := map[string]int{}
 	for _, a := range arts {
 		if a.ConversationID == "" {
 			t.Errorf("artifact %s came back without its ConversationID", a.ID)
 		}
-		byRun[a.ConversationID]++
+		byConversation[a.ConversationID]++
 	}
-	if byRun[runA] != 2 || byRun[runB] != 1 {
-		t.Errorf("grouped counts = %v, want runA=2 runB=1", byRun)
+	if byConversation[convA] != 2 || byConversation[convB] != 1 {
+		t.Errorf("grouped counts = %v, want runA=2 runB=1", byConversation)
 	}
-	if _, ok := byRun[runC]; ok {
-		t.Errorf("runC (no artifacts) contributed %d rows, want 0", byRun[runC])
+	if _, ok := byConversation[convC]; ok {
+		t.Errorf("runC (no artifacts) contributed %d rows, want 0", byConversation[convC])
 	}
 
 	empty, err := stores.Artifacts.ListByConversations(ctx, orgID, nil)

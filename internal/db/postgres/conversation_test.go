@@ -137,12 +137,12 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 			}
 			return id
 		},
-		Run: func(t *testing.T, run domain.Conversation) string {
+		Run: func(t *testing.T, conv domain.Conversation) string {
 			t.Helper()
-			if run.CreatorUserID == "" && run.TriggerType != "event" {
-				run.CreatorUserID = userID
+			if conv.CreatorUserID == "" && conv.TriggerType != "event" {
+				conv.CreatorUserID = userID
 			}
-			return seedPgConversation(t, conn, orgID, run)
+			return seedPgConversation(t, conn, orgID, conv)
 		},
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
 			t.Helper()
@@ -328,29 +328,29 @@ func TestConversationStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		})
 		return taskID
 	}
-	runA := uuid.New().String()
-	runB := uuid.New().String()
-	taskA := mkChain(t, orgA, userA, "p_xleak_A", runA)
-	_ = mkChain(t, orgB, userB, "p_xleak_B", runB)
+	convA := uuid.New().String()
+	convB := uuid.New().String()
+	taskA := mkChain(t, orgA, userA, "p_xleak_A", convA)
+	_ = mkChain(t, orgB, userB, "p_xleak_B", convB)
 
 	// Org A's view must NOT see B's run.
-	if got, err := stores.Conversations.Get(ctx, orgA, runB); err != nil {
+	if got, err := stores.Conversations.Get(ctx, orgA, convB); err != nil {
 		t.Fatalf("Get cross-org: %v", err)
 	} else if got != nil {
-		t.Errorf("orgA Get returned orgB run %s; defense-in-depth filter leaked", runB)
+		t.Errorf("orgA Get returned orgB run %s; defense-in-depth filter leaked", convB)
 	}
-	if got, err := stores.Conversations.Get(ctx, orgB, runA); err != nil {
+	if got, err := stores.Conversations.Get(ctx, orgB, convA); err != nil {
 		t.Fatalf("Get cross-org reverse: %v", err)
 	} else if got != nil {
-		t.Errorf("orgB Get returned orgA run %s", runA)
+		t.Errorf("orgB Get returned orgA run %s", convA)
 	}
 
 	// ListForTask scoped to orgB looking at orgA's task must
 	// return nothing.
-	if runs, err := stores.Conversations.ListForTask(ctx, orgB, taskA); err != nil {
+	if convs, err := stores.Conversations.ListForTask(ctx, orgB, taskA); err != nil {
 		t.Fatalf("ListForTask cross-org: %v", err)
-	} else if len(runs) != 0 {
-		t.Errorf("orgB ListForTask(orgA task) returned %d runs; want 0", len(runs))
+	} else if len(convs) != 0 {
+		t.Errorf("orgB ListForTask(orgA task) returned %d runs; want 0", len(convs))
 	}
 }
 
@@ -377,7 +377,7 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	entityA := uuid.New().String()
 	eventA := uuid.New().String()
 	taskA := uuid.New().String()
-	runA := uuid.New().String()
+	convA := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
 		VALUES ($1, $2, 'github', $3, 'pr', 'RLS Cross-org', '', '{}'::jsonb, now())
@@ -404,18 +404,18 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 		        'p_rls_A', 'running', 'm', $4, 'manual', $5)
-	`, runA, orgA, taskA, alice, blueprintRunA); err != nil {
+	`, convA, orgA, taskA, alice, blueprintRunA); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	ctx := context.Background()
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			run, err := pgstore.NewForTx(tx, pgtest.SecretKey).Conversations.Get(ctx, orgA, runA)
+			conv, err := pgstore.NewForTx(tx, pgtest.SecretKey).Conversations.Get(ctx, orgA, convA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
-			if run == nil {
+			if conv == nil {
 				t.Errorf("alice Get(orgA, runA) returned nil; same-org RLS USING filter wrongly excluded the row")
 			}
 			return nil
@@ -427,12 +427,12 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			run, err := pgstore.NewForTx(tx, pgtest.SecretKey).Conversations.Get(ctx, orgA, runA)
+			conv, err := pgstore.NewForTx(tx, pgtest.SecretKey).Conversations.Get(ctx, orgA, convA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
-			if run != nil {
-				t.Errorf("bob Get(orgA, runA) returned %+v; RLS USING filter leaked orgA's run to orgB", run)
+			if conv != nil {
+				t.Errorf("bob Get(orgA, runA) returned %+v; RLS USING filter leaked orgA's run to orgB", conv)
 			}
 			return nil
 		})
@@ -447,13 +447,13 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// an UPDATE: bob's lifecycle write against orgA's run must be
 		// silently filtered by the USING clause — no rows touched.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx, pgtest.SecretKey).Conversations.SetWorktreePath(ctx, orgA, runA, "/tmp/bob-was-here")
+			return pgstore.NewForTx(tx, pgtest.SecretKey).Conversations.SetWorktreePath(ctx, orgA, convA, "/tmp/bob-was-here")
 		})
 		if err != nil {
 			t.Fatalf("cross-org SetWorktreePath: %v", err)
 		}
 		var wt sql.NullString
-		if err := h.AdminDB.QueryRow(`SELECT worktree_path FROM conversations WHERE id = $1`, runA).Scan(&wt); err != nil {
+		if err := h.AdminDB.QueryRow(`SELECT worktree_path FROM conversations WHERE id = $1`, convA).Scan(&wt); err != nil {
 			t.Fatalf("read back: %v", err)
 		}
 		if wt.Valid && wt.String == "/tmp/bob-was-here" {
@@ -623,23 +623,23 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 // fixture stand-in for the queue's EnqueueConversation mint, staging rows in
 // arbitrary status. The trigger_type↔creator CHECK is satisfied by the
 // caller: manual rows carry CreatorUserID, event rows leave it empty.
-func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, run domain.Conversation) string {
+func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, conv domain.Conversation) string {
 	t.Helper()
-	id := run.ID
+	id := conv.ID
 	if id == "" {
 		id = uuid.New().String()
 	}
-	trigger := run.TriggerType
+	trigger := conv.TriggerType
 	if trigger == "" {
 		trigger = "manual"
 	}
 	var stepIdx any
-	if run.BlueprintStepIndex != nil {
-		stepIdx = *run.BlueprintStepIndex
+	if conv.BlueprintStepIndex != nil {
+		stepIdx = *conv.BlueprintStepIndex
 	}
 	var creator any
-	if run.CreatorUserID != "" {
-		creator = run.CreatorUserID
+	if conv.CreatorUserID != "" {
+		creator = conv.CreatorUserID
 	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, org_id, task_id, team_id, prompt_id, status, model,
@@ -648,8 +648,8 @@ func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, run domain.Con
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 		        $4, $5, $6, $7, NULLIF($8, '')::uuid, 'team', $9, $10, $11)
-	`, id, orgID, run.TaskID, run.PromptID, run.Status, run.Model,
-		trigger, run.TriggerID, creator, run.BlueprintRunID, stepIdx); err != nil {
+	`, id, orgID, conv.TaskID, conv.PromptID, conv.Status, conv.Model,
+		trigger, conv.TriggerID, creator, conv.BlueprintRunID, stepIdx); err != nil {
 		t.Fatalf("seed conversation %s: %v", id, err)
 	}
 	return id

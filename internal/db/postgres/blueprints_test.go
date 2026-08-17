@@ -649,12 +649,12 @@ func TestBlueprintStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 
 	// ConversationsForBlueprintSystem on org A must not return cross-org step runs.
-	runsCrossOrg, err := blueprints.ConversationsForBlueprintSystem(ctx, orgA, crB)
+	convsCrossOrg, err := blueprints.ConversationsForBlueprintSystem(ctx, orgA, crB)
 	if err != nil {
 		t.Fatalf("ConversationsForBlueprintSystem cross-org: %v", err)
 	}
-	if len(runsCrossOrg) != 0 {
-		t.Errorf("ConversationsForBlueprintSystem(orgA, crB) leaked %d rows, want 0", len(runsCrossOrg))
+	if len(convsCrossOrg) != 0 {
+		t.Errorf("ConversationsForBlueprintSystem(orgA, crB) leaked %d rows, want 0", len(convsCrossOrg))
 	}
 
 	// MarkRunStatusSystem on org A against org B's blueprint run is a no-op.

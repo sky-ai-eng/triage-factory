@@ -54,9 +54,9 @@ func seedBlueprintRunForRun(t *testing.T, conn *sql.DB, taskID string) string {
 // 'manual' with the sentinel user and 'event' with NULL. Fields honored:
 // ID, TaskID, PromptID, Status, Model, TriggerType, TriggerID,
 // BlueprintRunID, BlueprintStepIndex.
-func insertConversationForTest(t *testing.T, conn *sql.DB, run domain.Conversation) {
+func insertConversationForTest(t *testing.T, conn *sql.DB, conv domain.Conversation) {
 	t.Helper()
-	trigger := run.TriggerType
+	trigger := conv.TriggerType
 	if trigger == "" {
 		trigger = "manual"
 	}
@@ -65,21 +65,21 @@ func insertConversationForTest(t *testing.T, conn *sql.DB, run domain.Conversati
 		creator = runmode.LocalDefaultUserID
 	}
 	var triggerID any
-	if run.TriggerID != "" {
-		triggerID = run.TriggerID
+	if conv.TriggerID != "" {
+		triggerID = conv.TriggerID
 	}
 	var stepIdx any
-	if run.BlueprintStepIndex != nil {
-		stepIdx = *run.BlueprintStepIndex
+	if conv.BlueprintStepIndex != nil {
+		stepIdx = *conv.BlueprintStepIndex
 	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, team_id, visibility,
 		                           creator_user_id, blueprint_run_id, blueprint_step_index)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?)
-	`, run.ID, run.TaskID, run.PromptID, run.Status, run.Model,
-		trigger, triggerID, runmode.LocalDefaultTeamID, creator, run.BlueprintRunID, stepIdx); err != nil {
-		t.Fatalf("insert conversation %s: %v", run.ID, err)
+	`, conv.ID, conv.TaskID, conv.PromptID, conv.Status, conv.Model,
+		trigger, triggerID, runmode.LocalDefaultTeamID, creator, conv.BlueprintRunID, stepIdx); err != nil {
+		t.Fatalf("insert conversation %s: %v", conv.ID, err)
 	}
 }
 

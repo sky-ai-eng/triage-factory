@@ -811,15 +811,15 @@ func (s *conversationStore) ListForTask(ctx context.Context, orgID, taskID strin
 	}
 	defer rows.Close()
 
-	var runs []domain.Conversation
+	var convs []domain.Conversation
 	for rows.Next() {
 		var r domain.Conversation
 		if err := scanConversationRows(rows, &r); err != nil {
 			return nil, err
 		}
-		runs = append(runs, r)
+		convs = append(convs, r)
 	}
-	return runs, rows.Err()
+	return convs, rows.Err()
 }
 
 func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string, opts db.ListOpts) ([]domain.Conversation, int, error) {
@@ -862,15 +862,15 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 	}
 	defer rows.Close()
 
-	var runs []domain.Conversation
+	var convs []domain.Conversation
 	for rows.Next() {
 		var r domain.Conversation
 		if err := scanConversationRows(rows, &r); err != nil {
 			return nil, 0, err
 		}
-		runs = append(runs, r)
+		convs = append(convs, r)
 	}
-	return runs, total, rows.Err()
+	return convs, total, rows.Err()
 }
 
 // HasActiveAutoConversationForTask: any non-terminal trigger_type='event' run on the

@@ -80,13 +80,13 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	promptA := seedPgTaskMemoryPrompt(t, h, orgA, userA)
 	promptB := seedPgTaskMemoryPrompt(t, h, orgB, userB)
 
-	runA, entA := seedPgRunForTaskMemory(t, h, orgA, userA, promptA, "cross-A")
+	convA, entA := seedPgRunForTaskMemory(t, h, orgA, userA, promptA, "cross-A")
 	_, entB := seedPgRunForTaskMemory(t, h, orgB, userB, promptB, "cross-B")
 	ctx := context.Background()
 
 	// Write the memory in orgA via the admin-pool variant (the
 	// delegate spawner's call site).
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, runA, entA, "", "orgA narrative"); err != nil {
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, convA, entA, "", "orgA narrative"); err != nil {
 		t.Fatalf("UpsertAgentMemorySystem orgA: %v", err)
 	}
 
@@ -118,7 +118,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// nothing — the same org_id filter GetMemoriesForEntity/System apply,
 	// pinned here at the raw-row level since GetRunMemory (which used to
 	// carry this check) is gone.
-	if content, ok := queryRunMemoryAgentContent(t, h, orgB, runA); ok {
+	if content, ok := queryRunMemoryAgentContent(t, h, orgB, convA); ok {
 		t.Errorf("orgB read orgA run memory: %q", content)
 	}
 
@@ -126,11 +126,11 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// no-op (no row matches the (org_id, conversation_id) predicate) and is
 	// logged-not-fatal — same shape as the missing-row case in the
 	// conformance suite.
-	if err := stores.TaskMemory.UpdateConversationMemoryHumanContent(ctx, orgB, runA, "should-not-land"); err != nil {
+	if err := stores.TaskMemory.UpdateConversationMemoryHumanContent(ctx, orgB, convA, "should-not-land"); err != nil {
 		t.Errorf("UpdateConversationMemoryHumanContent orgB on orgA run errored: %v", err)
 	}
 	// Confirm orgA's row is unchanged.
-	contentA, ok := queryRunMemoryAgentContent(t, h, orgA, runA)
+	contentA, ok := queryRunMemoryAgentContent(t, h, orgA, convA)
 	if !ok {
 		t.Fatalf("orgA conversation_memory row missing")
 	}
@@ -176,7 +176,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	promptA := seedPgTaskMemoryPrompt(t, h, orgA, alice)
 	promptB := seedPgTaskMemoryPrompt(t, h, orgB, bob)
 
-	runA, entA := seedPgRunForTaskMemory(t, h, orgA, alice, promptA, "rls-A")
+	convA, entA := seedPgRunForTaskMemory(t, h, orgA, alice, promptA, "rls-A")
 	_, _ = seedPgRunForTaskMemory(t, h, orgB, bob, promptB, "rls-B")
 
 	// Seed a memory row in orgA via admin so the row exists, plus its
@@ -184,10 +184,10 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	// GetMemoriesForEntity's join-based read needs it to find anything).
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, runA, entA, "", "orgA memory"); err != nil {
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, convA, entA, "", "orgA memory"); err != nil {
 		t.Fatalf("seed memory in orgA: %v", err)
 	}
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgA, runA, entA, domain.MemoryRolePrimary); err != nil {
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgA, convA, entA, domain.MemoryRolePrimary); err != nil {
 		t.Fatalf("seed join row in orgA: %v", err)
 	}
 
@@ -233,9 +233,9 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// (USING) — runA above already has a seeded memory row from
 		// line 141 above, which would route through ON CONFLICT and
 		// hit USING instead.
-		freshRun, freshEnt := seedPgRunForTaskMemory(t, h, orgA, alice, promptA, "rls-write")
+		freshConversation, freshEnt := seedPgRunForTaskMemory(t, h, orgA, alice, promptA, "rls-write")
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx, pgtest.SecretKey).TaskMemory.UpsertAgentMemory(ctx, orgA, freshRun, freshEnt, "", "cross-org write")
+			return pgstore.NewForTx(tx, pgtest.SecretKey).TaskMemory.UpsertAgentMemory(ctx, orgA, freshConversation, freshEnt, "", "cross-org write")
 		})
 		pgtest.AssertRLSViolation(t, err)
 	})
@@ -259,22 +259,22 @@ func TestTaskMemoryStore_Postgres_BlueprintRunCrossOrgFKRejected(t *testing.T) {
 	orgB, userB := seedPgTaskMemoryOrg(t, h)
 	promptA := seedPgTaskMemoryPrompt(t, h, orgA, userA)
 
-	runA, entA := seedPgRunForTaskMemory(t, h, orgA, userA, promptA, "fk-A")
+	convA, entA := seedPgRunForTaskMemory(t, h, orgA, userA, promptA, "fk-A")
 	blueprintRunB := seedPgBlueprintRunForTaskMemory(t, h, orgB, userB, "fk-B")
 
 	// orgA memory referencing orgB's blueprint_run → FK violation. The
 	// composite (blueprint_run_id, org_id) target (blueprintRunB, orgA) does
 	// not exist in blueprint_runs (that row is org_id=orgB).
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, runA, entA, blueprintRunB, "cross-org blueprint ref"); err == nil {
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, convA, entA, blueprintRunB, "cross-org blueprint ref"); err == nil {
 		t.Fatalf("expected FK violation writing orgA memory with orgB blueprint_run_id; got nil")
 	}
 
 	// Same-org blueprint_run is accepted — the FK only blocks cross-org refs.
 	blueprintRunA := seedPgBlueprintRunForTaskMemory(t, h, orgA, userA, "fk-A2")
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, runA, entA, blueprintRunA, "same-org blueprint ref"); err != nil {
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgA, convA, entA, blueprintRunA, "same-org blueprint ref"); err != nil {
 		t.Fatalf("same-org blueprint_run_id should be accepted: %v", err)
 	}
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgA, runA, entA, domain.MemoryRolePrimary); err != nil {
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgA, convA, entA, domain.MemoryRolePrimary); err != nil {
 		t.Fatalf("seed join row: %v", err)
 	}
 	mems, err := stores.TaskMemory.GetMemoriesForEntity(ctx, orgA, entA)
@@ -319,18 +319,18 @@ func TestTaskMemoryStore_Postgres_SystemReadTeamScoped(t *testing.T) {
 	// Each write is paired with the primary join row a real run's completion
 	// will carry once the run-end attach ticket lands — GetMemoriesForEntitySystem's
 	// join-based read needs it to find anything.
-	run1 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team1, entityID, "t1")
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, run1, entityID, "", "team1 narrative"); err != nil {
+	conv1 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team1, entityID, "t1")
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conv1, entityID, "", "team1 narrative"); err != nil {
 		t.Fatalf("UpsertAgentMemorySystem team1: %v", err)
 	}
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, run1, entityID, domain.MemoryRolePrimary); err != nil {
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conv1, entityID, domain.MemoryRolePrimary); err != nil {
 		t.Fatalf("RecordEntityTouchSystem team1: %v", err)
 	}
-	run2 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team2, entityID, "t2")
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, run2, entityID, "", "team2 narrative"); err != nil {
+	conv2 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team2, entityID, "t2")
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conv2, entityID, "", "team2 narrative"); err != nil {
 		t.Fatalf("UpsertAgentMemorySystem team2: %v", err)
 	}
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, run2, entityID, domain.MemoryRolePrimary); err != nil {
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conv2, entityID, domain.MemoryRolePrimary); err != nil {
 		t.Fatalf("RecordEntityTouchSystem team2: %v", err)
 	}
 
@@ -464,28 +464,28 @@ func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
 	// original motivating grain (source 'slack', kind 'thread'); both produce entB.
 	entA1 := seedPgSharedEntity(t, h, orgID, "slack", domain.SlackSourceID("C0125", "1700000000.000100"), "thread")
 	entA2 := seedPgSharedEntity(t, h, orgID, "slack", domain.SlackSourceID("C0999", "1700000000.000200"), "thread")
-	run1 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team1, entA1, "attach-t1")
-	run2 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team2, entA2, "attach-t2")
+	conv1 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team1, entA1, "attach-t1")
+	conv2 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team2, entA2, "attach-t2")
 
 	// The attach sequence run-end runs for each: memory upsert, then primary +
 	// produced (+ touched for run1) join rows.
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, run1, entA1, "", "team1 narrative"); err != nil {
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conv1, entA1, "", "team1 narrative"); err != nil {
 		t.Fatalf("upsert memory run1: %v", err)
 	}
 	for entID, role := range map[string]string{
 		entA1: domain.MemoryRolePrimary, entB: domain.MemoryRoleProduced, entC: domain.MemoryRoleTouched,
 	} {
-		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, run1, entID, role); err != nil {
+		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conv1, entID, role); err != nil {
 			t.Fatalf("attach run1 %s: %v", role, err)
 		}
 	}
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, run2, entA2, "", "team2 narrative"); err != nil {
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conv2, entA2, "", "team2 narrative"); err != nil {
 		t.Fatalf("upsert memory run2: %v", err)
 	}
 	for entID, role := range map[string]string{
 		entA2: domain.MemoryRolePrimary, entB: domain.MemoryRoleProduced,
 	} {
-		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, run2, entID, role); err != nil {
+		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conv2, entID, role); err != nil {
 			t.Fatalf("attach run2 %s: %v", role, err)
 		}
 	}
@@ -496,7 +496,7 @@ func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetMemoriesForEntitySystem team1 %s: %v", name, err)
 		}
-		if len(mems) != 1 || mems[0].ConversationID != run1 || mems[0].Content != "team1 narrative" {
+		if len(mems) != 1 || mems[0].ConversationID != conv1 || mems[0].Content != "team1 narrative" {
 			t.Errorf("team1 read of %s = %+v, want only run1's team1 narrative", name, mems)
 		}
 	}
@@ -507,18 +507,18 @@ func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntitySystem team2 produced B: %v", err)
 	}
-	if len(memsB2) != 1 || memsB2[0].ConversationID != run2 || memsB2[0].Content != "team2 narrative" {
+	if len(memsB2) != 1 || memsB2[0].ConversationID != conv2 || memsB2[0].Content != "team2 narrative" {
 		t.Errorf("team2 read of produced B = %+v, want only run2's team2 narrative (no team1 bleed)", memsB2)
 	}
 
 	// The recorded roles are what the attach wrote.
-	if role := roleForPgJoinRow(t, h, run1, entB); role != domain.MemoryRoleProduced {
+	if role := roleForPgJoinRow(t, h, conv1, entB); role != domain.MemoryRoleProduced {
 		t.Errorf("run1/B role = %q, want produced", role)
 	}
-	if role := roleForPgJoinRow(t, h, run1, entC); role != domain.MemoryRoleTouched {
+	if role := roleForPgJoinRow(t, h, conv1, entC); role != domain.MemoryRoleTouched {
 		t.Errorf("run1/C role = %q, want touched", role)
 	}
-	if role := roleForPgJoinRow(t, h, run1, entA1); role != domain.MemoryRolePrimary {
+	if role := roleForPgJoinRow(t, h, conv1, entA1); role != domain.MemoryRolePrimary {
 		t.Errorf("run1/A1 role = %q, want primary", role)
 	}
 }

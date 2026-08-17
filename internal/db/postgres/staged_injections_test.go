@@ -50,14 +50,14 @@ func TestStagedInjectionStore_Postgres_OrgScoped(t *testing.T) {
 
 	orgA, userA, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	otherOrg, _, _ := pgtest.SeedOrgWithUser(t, h, "bob")
-	runA := seedPgArtifactRun(t, h, orgA, teamA, userA)
+	convA := seedPgArtifactRun(t, h, orgA, teamA, userA)
 
 	if err := stores.StagedInjections.AppendSystem(ctx, orgA, &domain.StagedInjection{
-		ConversationID: runA, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "for org A",
+		ConversationID: convA, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "for org A",
 	}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	got, err := stores.StagedInjections.FlushPendingSystem(ctx, otherOrg, runA)
+	got, err := stores.StagedInjections.FlushPendingSystem(ctx, otherOrg, convA)
 	if err != nil {
 		t.Fatalf("flush other org: %v", err)
 	}

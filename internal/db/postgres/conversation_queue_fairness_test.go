@@ -92,7 +92,7 @@ func TestClaimFairness_BurstDoesNotStarveOtherOrg(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		a.enqueue(t, stores, "")
 	}
-	bRun := b.enqueue(t, stores, "")
+	bConv := b.enqueue(t, stores, "")
 	// Make every A run strictly older than B's so pure FIFO would drain all 100
 	// A runs before ever reaching B — isolating fairness as the reason B jumps
 	// the queue.
@@ -114,8 +114,8 @@ func TestClaimFairness_BurstDoesNotStarveOtherOrg(t *testing.T) {
 	// Claim 2: A now has 1 active, B has 0 → fairness picks B, NOT A's 2nd-oldest
 	// of 99 remaining. This is the whole point: B waits one slot, not a backlog.
 	c2 := claim()
-	if c2 == nil || c2.OrgID != b.orgID || c2.ID != bRun {
-		t.Fatalf("claim 2 = %+v, want org-B run %s (fewest-active wins over A's older backlog)", c2, bRun)
+	if c2 == nil || c2.OrgID != b.orgID || c2.ID != bConv {
+		t.Fatalf("claim 2 = %+v, want org-B run %s (fewest-active wins over A's older backlog)", c2, bConv)
 	}
 }
 

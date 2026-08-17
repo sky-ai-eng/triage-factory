@@ -54,7 +54,7 @@ func newSQLiteForConversationTest(t *testing.T) *sql.DB {
 	); err != nil {
 		t.Fatalf("seed local agent: %v", err)
 	}
-	// Conformance suite's run.PromptID points at this stable ID.
+	// Conformance suite's conv.PromptID points at this stable ID.
 	if _, err := conn.Exec(
 		`INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_agentrun_test', 'Test', 'body', ?, ?)`,
 		runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
@@ -69,13 +69,13 @@ func newSQLiteForConversationTest(t *testing.T) *sql.DB {
 // independent of the store under test; the trigger_type↔creator CHECK is
 // satisfied by pairing 'manual' with the sentinel user and 'event' with
 // NULL.
-func seedSQLiteConversation(t *testing.T, conn *sql.DB, run domain.Conversation) string {
+func seedSQLiteConversation(t *testing.T, conn *sql.DB, conv domain.Conversation) string {
 	t.Helper()
-	id := run.ID
+	id := conv.ID
 	if id == "" {
 		id = uuid.New().String()
 	}
-	trigger := run.TriggerType
+	trigger := conv.TriggerType
 	if trigger == "" {
 		trigger = "manual"
 	}
@@ -84,16 +84,16 @@ func seedSQLiteConversation(t *testing.T, conn *sql.DB, run domain.Conversation)
 		creator = runmode.LocalDefaultUserID
 	}
 	var triggerID any
-	if run.TriggerID != "" {
-		triggerID = run.TriggerID
+	if conv.TriggerID != "" {
+		triggerID = conv.TriggerID
 	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, team_id, visibility,
 		                           creator_user_id, blueprint_run_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?)
-	`, id, run.TaskID, run.PromptID, run.Status, run.Model,
-		trigger, triggerID, runmode.LocalDefaultTeamID, creator, run.BlueprintRunID); err != nil {
+	`, id, conv.TaskID, conv.PromptID, conv.Status, conv.Model,
+		trigger, triggerID, runmode.LocalDefaultTeamID, creator, conv.BlueprintRunID); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
 	return id
@@ -140,8 +140,8 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 			}
 			return id
 		},
-		Run: func(t *testing.T, run domain.Conversation) string {
-			return seedSQLiteConversation(t, conn, run)
+		Run: func(t *testing.T, conv domain.Conversation) string {
+			return seedSQLiteConversation(t, conn, conv)
 		},
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
 			t.Helper()

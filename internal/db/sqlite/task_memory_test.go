@@ -103,11 +103,11 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
-	run1, entityID := seedSQLiteRunForTaskMemory(t, conn, "count-1")
-	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, run1, entityID, "", "first"); err != nil {
+	conv1, entityID := seedSQLiteRunForTaskMemory(t, conn, "count-1")
+	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv1, entityID, "", "first"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, run1, entityID, domain.MemoryRolePrimary); err != nil {
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, conv1, entityID, domain.MemoryRolePrimary); err != nil {
 		t.Fatalf("RecordEntityTouchSystem: %v", err)
 	}
 
@@ -117,11 +117,11 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 		t.Errorf("Count = %d, want 1", n)
 	}
 
-	run2, _ := seedSQLiteRunForTaskMemory(t, conn, "count-2")
-	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, run2, entityID, "", "second"); err != nil {
+	conv2, _ := seedSQLiteRunForTaskMemory(t, conn, "count-2")
+	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv2, entityID, "", "second"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, run2, entityID, domain.MemoryRoleTouched); err != nil {
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, conv2, entityID, domain.MemoryRoleTouched); err != nil {
 		t.Fatalf("RecordEntityTouchSystem: %v", err)
 	}
 

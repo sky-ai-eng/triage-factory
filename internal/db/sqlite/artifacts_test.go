@@ -66,14 +66,14 @@ func TestArtifactStore_SQLite_RoundTrip(t *testing.T) {
 		t.Fatalf("Upsert branch: %v", err)
 	}
 	var extID, url, details sql.NullString
-	var nullRun sql.NullString
+	var nullConversation sql.NullString
 	if err := conn.QueryRow(
 		`SELECT conversation_id, external_id, url, details_json FROM artifacts WHERE dedup_key = 'git:branch:octo/repo:refs/heads/x'`,
-	).Scan(&nullRun, &extID, &url, &details); err != nil {
+	).Scan(&nullConversation, &extID, &url, &details); err != nil {
 		t.Fatalf("read back branch: %v", err)
 	}
-	if nullRun.Valid || extID.Valid || url.Valid || details.Valid {
-		t.Errorf("empty optionals should be NULL: run=%v ext=%v url=%v details=%v", nullRun, extID, url, details)
+	if nullConversation.Valid || extID.Valid || url.Valid || details.Valid {
+		t.Errorf("empty optionals should be NULL: run=%v ext=%v url=%v details=%v", nullConversation, extID, url, details)
 	}
 }
 
@@ -352,12 +352,12 @@ func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {
 		}
 	}
 
-	byRun, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID)
+	byConversation, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
-	if len(byRun) != 3 {
-		t.Errorf("ListByConversation len = %d, want 3", len(byRun))
+	if len(byConversation) != 3 {
+		t.Errorf("ListByConversation len = %d, want 3", len(byConversation))
 	}
 
 	byTeam, _, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
@@ -385,9 +385,9 @@ func TestArtifactStore_SQLite_CountByRun(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runA := seedArtifactRun(t, conn)
-	runB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
-	runC := seedArtifactRunWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
+	convA := seedArtifactRun(t, conn)
+	convB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	convC := seedArtifactRunWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
 
 	seed := func(conversationID, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
@@ -398,23 +398,23 @@ func TestArtifactStore_SQLite_CountByRun(t *testing.T) {
 			t.Fatalf("seed %s: %v", key, err)
 		}
 	}
-	seed(runA, "a1")
-	seed(runA, "a2")
-	seed(runA, "a3")
-	seed(runB, "b1")
+	seed(convA, "a1")
+	seed(convA, "a2")
+	seed(convA, "a3")
+	seed(convB, "b1")
 
-	counts, err := stores.Artifacts.CountByConversation(ctx, runmode.LocalDefaultOrgID, []string{runA, runB, runC, "nonexistent"})
+	counts, err := stores.Artifacts.CountByConversation(ctx, runmode.LocalDefaultOrgID, []string{convA, convB, convC, "nonexistent"})
 	if err != nil {
 		t.Fatalf("CountByConversation: %v", err)
 	}
-	if counts[runA] != 3 {
-		t.Errorf("runA count = %d, want 3", counts[runA])
+	if counts[convA] != 3 {
+		t.Errorf("runA count = %d, want 3", counts[convA])
 	}
-	if counts[runB] != 1 {
-		t.Errorf("runB count = %d, want 1", counts[runB])
+	if counts[convB] != 1 {
+		t.Errorf("runB count = %d, want 1", counts[convB])
 	}
-	if _, ok := counts[runC]; ok {
-		t.Errorf("runC (no artifacts) should be absent from the map, got %d", counts[runC])
+	if _, ok := counts[convC]; ok {
+		t.Errorf("runC (no artifacts) should be absent from the map, got %d", counts[convC])
 	}
 	if _, ok := counts["nonexistent"]; ok {
 		t.Error("unknown run id should be absent from the map")
@@ -438,9 +438,9 @@ func TestArtifactStore_SQLite_ListByRuns(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runA := seedArtifactRun(t, conn)
-	runB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
-	runC := seedArtifactRunWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
+	convA := seedArtifactRun(t, conn)
+	convB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	convC := seedArtifactRunWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
 
 	seed := func(conversationID, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
@@ -451,26 +451,26 @@ func TestArtifactStore_SQLite_ListByRuns(t *testing.T) {
 			t.Fatalf("seed %s: %v", key, err)
 		}
 	}
-	seed(runA, "a1")
-	seed(runA, "a2")
-	seed(runB, "b1")
+	seed(convA, "a1")
+	seed(convA, "a2")
+	seed(convB, "b1")
 
-	arts, err := stores.Artifacts.ListByConversations(ctx, runmode.LocalDefaultOrgID, []string{runA, runB, runC})
+	arts, err := stores.Artifacts.ListByConversations(ctx, runmode.LocalDefaultOrgID, []string{convA, convB, convC})
 	if err != nil {
 		t.Fatalf("ListByConversations: %v", err)
 	}
-	byRun := map[string]int{}
+	byConversation := map[string]int{}
 	for _, a := range arts {
 		if a.ConversationID == "" {
 			t.Errorf("artifact %s came back without its ConversationID (can't group)", a.ID)
 		}
-		byRun[a.ConversationID]++
+		byConversation[a.ConversationID]++
 	}
-	if byRun[runA] != 2 || byRun[runB] != 1 {
-		t.Errorf("grouped counts = %v, want runA=2 runB=1", byRun)
+	if byConversation[convA] != 2 || byConversation[convB] != 1 {
+		t.Errorf("grouped counts = %v, want runA=2 runB=1", byConversation)
 	}
-	if byRun[runC] != 0 {
-		t.Errorf("runC (no artifacts) contributed %d rows, want 0", byRun[runC])
+	if byConversation[convC] != 0 {
+		t.Errorf("runC (no artifacts) contributed %d rows, want 0", byConversation[convC])
 	}
 
 	empty, err := stores.Artifacts.ListByConversations(ctx, runmode.LocalDefaultOrgID, nil)
@@ -506,12 +506,12 @@ func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 	if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
 		t.Fatalf("purge run: %v", err)
 	}
-	var nullRun sql.NullString
-	if err := conn.QueryRow(`SELECT conversation_id FROM artifacts WHERE id = ?`, art.ID).Scan(&nullRun); err != nil {
+	var nullConversation sql.NullString
+	if err := conn.QueryRow(`SELECT conversation_id FROM artifacts WHERE id = ?`, art.ID).Scan(&nullConversation); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if nullRun.Valid {
-		t.Fatalf("conversation_id should be NULL after run purge, got %q", nullRun.String)
+	if nullConversation.Valid {
+		t.Fatalf("conversation_id should be NULL after run purge, got %q", nullConversation.String)
 	}
 
 	rows, _, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})

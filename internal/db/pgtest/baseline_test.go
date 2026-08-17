@@ -948,11 +948,11 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 	bobTask := seedTask(t, h, bobOrg, bob, bobEntity, "github:pr:opened")
 	bobPrompt := seedPrompt(t, h, bobOrg, bob, "p1")
 	bobBR := seedBlueprintRun(t, h, bobOrg, bob, bobTask)
-	var bobRun string
+	var bobConversation string
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id, status)
 		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4, $5, 'running') RETURNING id
-	`, bobOrg, bob, bobTask, bobPrompt, bobBR).Scan(&bobRun); err != nil {
+	`, bobOrg, bob, bobTask, bobPrompt, bobBR).Scan(&bobConversation); err != nil {
 		t.Fatalf("seed bob run: %v", err)
 	}
 
@@ -963,7 +963,7 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 		var v int
 		return tx.QueryRow(
 			`SELECT update_project_knowledge($1, $2, $3, $4)`,
-			pkID, 1, "v2-with-stolen-run", bobRun,
+			pkID, 1, "v2-with-stolen-run", bobConversation,
 		).Scan(&v)
 	})
 	if err == nil {

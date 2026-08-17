@@ -254,16 +254,16 @@ func TestRunQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for {
-				run, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{})
+				conv, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{})
 				if err != nil {
 					t.Errorf("ClaimNextConversation: %v", err)
 					return
 				}
-				if run == nil {
+				if conv == nil {
 					return // queue drained
 				}
 				mu.Lock()
-				claimed[run.ID]++
+				claimed[conv.ID]++
 				mu.Unlock()
 			}
 		}()
@@ -587,15 +587,15 @@ func TestRunQueueStore_Postgres_EnqueueStampsTheNativeEngine(t *testing.T) {
 	for i, trigger := range []string{"manual", "event"} {
 		step := i
 		convID := uuid.New().String()
-		run := domain.Conversation{
+		conv := domain.Conversation{
 			ID: convID, TaskID: taskID, PromptID: promptID, Model: "m",
 			TriggerType: trigger, BlueprintRunID: brID, BlueprintStepIndex: &step,
 		}
 		if trigger == "manual" {
 			// The schema CHECK pairs a manual trigger with a creator.
-			run.CreatorUserID = userID
+			conv.CreatorUserID = userID
 		}
-		if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, run); err != nil {
+		if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, conv); err != nil {
 			t.Fatalf("EnqueueConversation (%s): %v", trigger, err)
 		}
 		if got := storedRuntime(t, convID); got != domain.ConversationRuntimeNative {

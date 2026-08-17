@@ -177,7 +177,7 @@ func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string
 		var durationMs, numTurns sql.NullInt64
 		var failureKind, parkReason string
 
-		runTargets := []any{
+		convTargets := []any{
 			&r.ID, &r.TaskID, &r.PromptID,
 			&r.Status, &r.Model, &r.StartedAt, &completedAt,
 			&costUSD, &durationMs, &numTurns,
@@ -188,7 +188,7 @@ func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string
 			&failureKind,
 		}
 		var ts taskScanState
-		if err := rows.Scan(append(runTargets, ts.targets(&t)...)...); err != nil {
+		if err := rows.Scan(append(convTargets, ts.targets(&t)...)...); err != nil {
 			return nil, err
 		}
 		ts.finalize(&t)

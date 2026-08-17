@@ -324,27 +324,27 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// runs on the same entity with a sleep between them and pin
 		// the slice order.
 		s, orgID, seed := mk(t)
-		run1, entityID := seed.Run(t, "order-first")
-		if err := s.UpsertAgentMemory(ctx, orgID, run1, entityID, "", "first"); err != nil {
+		conv1, entityID := seed.Run(t, "order-first")
+		if err := s.UpsertAgentMemory(ctx, orgID, conv1, entityID, "", "first"); err != nil {
 			t.Fatalf("upsert first: %v", err)
 		}
-		seedPrimary(t, s, orgID, run1, entityID)
+		seedPrimary(t, s, orgID, conv1, entityID)
 		// Sleep so SQLite's second-resolution column doesn't tie. The
 		// Postgres impl binds ns-resolution createdAt from Go side
 		// (matches the EventStore precedent) so the sleep is belt +
 		// suspenders.
 		time.Sleep(1100 * time.Millisecond)
-		run2, _ := seed.Run(t, "order-second")
+		conv2, _ := seed.Run(t, "order-second")
 		// Re-use the same entity by overriding the seeded run's entity_id.
 		// The Run seeder returns a fresh entity per call; the test wants
 		// the second memory on the same entity. Seeder shape can't be
-		// changed mid-call, so write the second memory under run2 +
+		// changed mid-call, so write the second memory under conv2 +
 		// entityID (the first entity) by re-pointing — backends accept
 		// any entity_id that exists, and the first entity does.
-		if err := s.UpsertAgentMemory(ctx, orgID, run2, entityID, "", "second"); err != nil {
+		if err := s.UpsertAgentMemory(ctx, orgID, conv2, entityID, "", "second"); err != nil {
 			t.Fatalf("upsert second: %v", err)
 		}
-		seedPrimary(t, s, orgID, run2, entityID)
+		seedPrimary(t, s, orgID, conv2, entityID)
 		mems, err := s.GetMemoriesForEntity(ctx, orgID, entityID)
 		if err != nil {
 			t.Fatalf("GetMemoriesForEntity: %v", err)
@@ -470,12 +470,12 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 
 		// Standalone run: empty blueprintRunID canonicalizes to SQL NULL and
 		// reads back empty.
-		run2, ent2 := seed.Run(t, "bp-null")
-		if err := s.UpsertAgentMemory(ctx, orgID, run2, ent2, "", "standalone memory"); err != nil {
+		conv2, ent2 := seed.Run(t, "bp-null")
+		if err := s.UpsertAgentMemory(ctx, orgID, conv2, ent2, "", "standalone memory"); err != nil {
 			t.Fatalf("UpsertAgentMemory standalone: %v", err)
 		}
-		seedPrimary(t, s, orgID, run2, ent2)
-		mem2 := memoryForRun(t, ctx, s, orgID, ent2, run2)
+		seedPrimary(t, s, orgID, conv2, ent2)
+		mem2 := memoryForRun(t, ctx, s, orgID, ent2, conv2)
 		if mem2 == nil {
 			t.Fatalf("memoryForRun standalone returned nil")
 		}

@@ -97,12 +97,12 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 
 	t.Run("Flush_is_per_run_isolated", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		runA := seed.Run(t, "iso-a")
-		runB := seed.Run(t, "iso-b")
-		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{ConversationID: runA, Producer: "p", Body: "for-A"}); err != nil {
+		convA := seed.Run(t, "iso-a")
+		convB := seed.Run(t, "iso-b")
+		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{ConversationID: convA, Producer: "p", Body: "for-A"}); err != nil {
 			t.Fatalf("append A: %v", err)
 		}
-		got, err := store.FlushPendingSystem(ctx, orgID, runB)
+		got, err := store.FlushPendingSystem(ctx, orgID, convB)
 		if err != nil {
 			t.Fatalf("flush B: %v", err)
 		}
@@ -110,7 +110,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 			t.Errorf("run B flush leaked run A's injection: %+v", got)
 		}
 		// Run A's injection is still there (B's flush must not have drained it).
-		gotA, err := store.FlushPendingSystem(ctx, orgID, runA)
+		gotA, err := store.FlushPendingSystem(ctx, orgID, convA)
 		if err != nil {
 			t.Fatalf("flush A: %v", err)
 		}

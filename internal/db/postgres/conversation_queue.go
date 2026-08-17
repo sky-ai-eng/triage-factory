@@ -62,17 +62,17 @@ const runTerminalStatusesSQL = `'completed','failed'`
 // That is the whole enforcement — there is no claim-side exclusion, because
 // there is no row for one to exclude. Leaving either arm to the column
 // DEFAULT (still 'sdk', for the curator's sake) would quietly undo it.
-func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, run domain.Conversation) error {
-	if err := db.AssertBlueprintStepIndexed(run); err != nil {
+func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) error {
+	if err := db.AssertBlueprintStepIndexed(conv); err != nil {
 		return err
 	}
-	triggerType := run.TriggerType
+	triggerType := conv.TriggerType
 	if triggerType == "" {
 		triggerType = "manual"
 	}
 	var stepIdx any
-	if run.BlueprintStepIndex != nil {
-		stepIdx = *run.BlueprintStepIndex
+	if conv.BlueprintStepIndex != nil {
+		stepIdx = *conv.BlueprintStepIndex
 	}
 	// team_id is derived from the task in-SQL (multi-team). The dispatcher mints
 	// work items on the admin pool, which bypasses RLS, so both manual and
@@ -87,9 +87,9 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 			VALUES ($1, $2, 'delegation', 'native', $3, $4, $5, $6, 'event', $7,
 			        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
 			        'team', NULL, $8, $9, $10, NULLIF($11, ''), now())
-		`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), run.Model, run.WorktreePath,
-			nullIfEmpty(run.TriggerID), nullIfEmpty(run.ActorAgentID),
-			nullIfEmpty(run.BlueprintRunID), stepIdx, run.PreferredExecutorID)
+		`, conv.ID, orgID, conv.TaskID, nullIfEmpty(conv.PromptID), conv.Model, conv.WorktreePath,
+			nullIfEmpty(conv.TriggerID), nullIfEmpty(conv.ActorAgentID),
+			nullIfEmpty(conv.BlueprintRunID), stepIdx, conv.PreferredExecutorID)
 		if err != nil {
 			return err
 		}
@@ -100,7 +100,7 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 	// so the COALESCE walks to the org owner. There is no tf.current_user_id()
 	// on the admin pool, so the creator must arrive on the row or fall back to
 	// the org owner (the schema CHECK requires a non-NULL creator for manual).
-	creatorBind := run.CreatorUserID
+	creatorBind := conv.CreatorUserID
 	if creatorBind == runmode.LocalDefaultUserID {
 		creatorBind = ""
 	}
@@ -114,9 +114,9 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 		        'team',
 		        COALESCE(NULLIF($8, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $2)),
 		        $9, $10, $11, NULLIF($12, ''), now())
-	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), run.Model, run.WorktreePath,
-		nullIfEmpty(run.TriggerID), creatorBind, nullIfEmpty(run.ActorAgentID),
-		nullIfEmpty(run.BlueprintRunID), stepIdx, run.PreferredExecutorID)
+	`, conv.ID, orgID, conv.TaskID, nullIfEmpty(conv.PromptID), conv.Model, conv.WorktreePath,
+		nullIfEmpty(conv.TriggerID), creatorBind, nullIfEmpty(conv.ActorAgentID),
+		nullIfEmpty(conv.BlueprintRunID), stepIdx, conv.PreferredExecutorID)
 	if err != nil {
 		return err
 	}
@@ -472,17 +472,17 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	// is the index doing its job, not an error worth surfacing: re-scan and
 	// take the next eligible row instead.
 	for attempt := 0; ; attempt++ {
-		run, err := scanPgClaimedConversation(s.conn.QueryRowContext(ctx, query, args...))
+		conv, err := scanPgClaimedConversation(s.conn.QueryRowContext(ctx, query, args...))
 		if isActiveClaimConflict(err) && attempt < claimRetryAttempts {
 			continue
 		}
-		if run != nil {
-			run.ExecutorID = executorID
+		if conv != nil {
+			conv.ExecutorID = executorID
 		}
 		if isActiveClaimConflict(err) {
 			return nil, nil
 		}
-		return run, wrapAdminPoolPermErr(err, "run_queue.ClaimNextConversation")
+		return conv, wrapAdminPoolPermErr(err, "run_queue.ClaimNextConversation")
 	}
 }
 

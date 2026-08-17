@@ -288,8 +288,8 @@ func TestExternalActionStore_SQLite_EgressDenialDedupPerConversation(t *testing.
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runA := seedArtifactRun(t, conn)
-	runB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	convA := seedArtifactRun(t, conn)
+	convB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
 
 	const target = "api.github.com:443"
 	denial := func(conversationID string) domain.ExternalAction {
@@ -303,7 +303,7 @@ func TestExternalActionStore_SQLite_EgressDenialDedupPerConversation(t *testing.
 
 	// The retry loop: ten probes of one host from one conversation.
 	for i := 0; i < 10; i++ {
-		if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, denial(runA)); err != nil {
+		if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, denial(convA)); err != nil {
 			t.Fatalf("probe %d (should DO NOTHING after the first, not error): %v", i, err)
 		}
 	}
@@ -316,7 +316,7 @@ func TestExternalActionStore_SQLite_EgressDenialDedupPerConversation(t *testing.
 	}
 
 	// A different conversation probing the same host is its own signal.
-	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, denial(runB)); err != nil {
+	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, denial(convB)); err != nil {
 		t.Fatalf("second conversation Record: %v", err)
 	}
 	if err := conn.QueryRow(`SELECT COUNT(*) FROM external_actions`).Scan(&count); err != nil {
@@ -336,8 +336,8 @@ func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runA := seedArtifactRun(t, conn)
-	runB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	convA := seedArtifactRun(t, conn)
+	convB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
 
 	// Each row carries a caller-supplied id (the store honors one) so the two
 	// UPDATEs below address exactly the row they mean. Keying them on `action`
@@ -360,16 +360,16 @@ func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
 		return id
 	}
 	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
-	record("act-1", runA, domain.ActionBranchPushed, base)
-	record("act-2", runA, domain.ActionGHChannelWrite, base.Add(time.Minute))
-	record("act-3", runB, domain.ActionPRMerged, base.Add(2*time.Minute))
+	record("act-1", convA, domain.ActionBranchPushed, base)
+	record("act-2", convA, domain.ActionGHChannelWrite, base.Add(time.Minute))
+	record("act-3", convB, domain.ActionPRMerged, base.Add(2*time.Minute))
 	// A detached row: the run that produced it was purged (FK ON DELETE SET NULL).
-	detached := record("act-4", runA, domain.ActionEgressDenied, base.Add(3*time.Minute))
+	detached := record("act-4", convA, domain.ActionEgressDenied, base.Add(3*time.Minute))
 	if _, err := conn.Exec(`UPDATE external_actions SET conversation_id = NULL WHERE id = ?`, detached); err != nil {
 		t.Fatalf("detach: %v", err)
 	}
 
-	got, _, err := stores.ExternalActions.ListByConversation(ctx, runmode.LocalDefaultOrgID, runA, domain.ExternalActionListOpts{})
+	got, _, err := stores.ExternalActions.ListByConversation(ctx, runmode.LocalDefaultOrgID, convA, domain.ExternalActionListOpts{})
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestExternalActionStore_SQLite_ListByRun(t *testing.T) {
 
 	// The same opts the handler binds: a cap on how much of a runaway run's
 	// history the run view pulls.
-	capped, _, err := stores.ExternalActions.ListByConversation(ctx, runmode.LocalDefaultOrgID, runA, domain.ExternalActionListOpts{Limit: 1})
+	capped, _, err := stores.ExternalActions.ListByConversation(ctx, runmode.LocalDefaultOrgID, convA, domain.ExternalActionListOpts{Limit: 1})
 	if err != nil {
 		t.Fatalf("ListByConversation(limit): %v", err)
 	}
