@@ -135,6 +135,6 @@ test file and registered in `eslint.config.js`:
   literal `/api` path, `opaqueFetch` says the URL isn't visible to the lint. A
   genuinely-external fetch built from a variable needs an inline disable naming
   where it points; none exists today.
-- `run-status/no-ghost-run-status` — fails the lint when component code compares
+- `conversation-status/no-ghost-conversation-status` — fails the lint when component code compares
   a conversation status against a name outside the vocabulary in `src/types.ts`
   (mirrored from `internal/domain/conversation_status.go`).

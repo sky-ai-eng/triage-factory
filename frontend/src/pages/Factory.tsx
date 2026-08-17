@@ -552,7 +552,7 @@ function StationChassis({ info }: { info: ClickedStationInfo | null }) {
         emptyMessage="No runs in flight"
         items={runs.map((r) => ({
           key: r.run.ID,
-          dot: runStatusColor(r.run.Status),
+          dot: conversationStatusColor(r.run.Status),
           body: <RunRow run={r.run} task={r.task} />,
           // Clicking a run opens its full-screen station page in a new tab.
           href: orgHref(`/runs/${r.run.ID}`),
@@ -805,7 +805,7 @@ function RunRow({ run, task }: { run: Conversation; task: Task }) {
       {isOpen && (
         <span
           className="inline-flex items-center text-[12px] leading-none"
-          style={{ color: runStatusColor(run.Status) }}
+          style={{ color: conversationStatusColor(run.Status) }}
           title="Run is open — not concluded, not currently executing"
         >
           ◌
@@ -814,9 +814,9 @@ function RunRow({ run, task }: { run: Conversation; task: Task }) {
       <span className="font-mono text-[11px] text-text-primary">{ref}</span>
       <span
         className="text-[10px] uppercase tracking-wider"
-        style={{ color: runStatusColor(run.Status) }}
+        style={{ color: conversationStatusColor(run.Status) }}
       >
-        {runStatusLabel(run.Status)}
+        {conversationStatusLabel(run.Status)}
       </span>
       <span className="ml-auto font-mono text-[10px] text-text-tertiary">{formatRunMeta(run)}</span>
     </div>
@@ -837,7 +837,7 @@ function entityLabel(e: FactoryEntity): string {
 // The active arm is the shared predicate rather than a list of names, so
 // every claim phase — including a run parked awaiting its credential
 // bundle — reads as working instead of falling through to the inert grey.
-function runStatusColor(status: ConversationStatusValue): string {
+function conversationStatusColor(status: ConversationStatusValue): string {
   if (isActiveStatus(status)) return '#3f6b4d' // --color-claim (sage)
   switch (status) {
     case 'open':
@@ -851,7 +851,7 @@ function runStatusColor(status: ConversationStatusValue): string {
 
 // Shorter copy for the statuses whose raw name reads badly in a tray row;
 // everything else renders as itself.
-function runStatusLabel(status: ConversationStatusValue): string {
+function conversationStatusLabel(status: ConversationStatusValue): string {
   switch (status) {
     case 'agent_starting':
       return 'starting'

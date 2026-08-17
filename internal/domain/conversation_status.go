@@ -33,16 +33,16 @@ package domain
 // a phase added here and not taught to the stores fails on both backends.
 //
 // TypeScript can't import them either. The frontend mirror is hand-maintained
-// in frontend/src/types.ts (CLAIM_PHASES / TERMINAL_RUN_STATUSES /
-// RUN_STATUSES) — codegen buys less than it costs for eleven names that
-// change about once a year — and TestFrontendMirrorsRunStatusVocabulary in
+// in frontend/src/types.ts (CLAIM_PHASES / TERMINAL_CONVERSATION_STATUSES /
+// CONVERSATION_STATUSES) — codegen buys less than it costs for eleven names that
+// change about once a year — and TestFrontendMirrorsConversationStatusVocabulary in
 // the root package fails the build when the two sets diverge in either
 // direction. Both directions matter: the drift this replaced ran the other
 // way, with the frontend branching on three statuses the backend had never
 // heard of.
 //
 // That test pins the mirror's arrays, and the frontend's own
-// run-status/no-ghost-run-status ESLint rule pins the code that branches on
+// conversation-status/no-ghost-conversation-status ESLint rule pins the code that branches on
 // them — a status comparison or `case` arm naming something outside this file
 // fails the lint. The two together are what closes the loop: the arrays are
 // not what component code reads.
@@ -103,31 +103,31 @@ func IsClaimPhase(status string) bool {
 	return false
 }
 
-// AllTerminalRunStatuses returns the terminal display statuses. One set, and
+// AllTerminalConversationStatuses returns the terminal display statuses. One set, and
 // it describes stored rows as faithfully as it describes new writes: the
 // retired terminals were rewritten by migration rather than carried forward as
 // names every predicate has to remember (202608010002, SQLite; Postgres had no
 // rows to migrate). A stored status this doesn't list is a bug, not history.
-func AllTerminalRunStatuses() []string {
+func AllTerminalConversationStatuses() []string {
 	return []string{StatusCompleted, StatusFailed}
 }
 
-// AllRunStatuses returns every value a displayed Conversation.Status may
+// AllConversationStatuses returns every value a displayed Conversation.Status may
 // carry: the derived and parked states, every claim phase, every terminal.
-func AllRunStatuses() []string {
+func AllConversationStatuses() []string {
 	all := []string{StatusQueued, StatusRunning, StatusOpen}
 	all = append(all, AllClaimPhases()...)
-	return append(all, AllTerminalRunStatuses()...)
+	return append(all, AllTerminalConversationStatuses()...)
 }
 
-// IsTerminalRunStatus reports whether status is a terminal run state — one the
+// IsTerminalConversationStatus reports whether status is a terminal run state — one the
 // run never leaves.
 //
 // NB failed runs are terminal regardless of failure_kind: failure_kind is a
 // *classification* of the failure (memory_limit / crash / …) and is
 // legitimately empty on an unclassified or legacy failed row, so a failure
 // count keys on status=="failed", never on a non-empty failure_kind.
-func IsTerminalRunStatus(status string) bool {
+func IsTerminalConversationStatus(status string) bool {
 	switch status {
 	case StatusCompleted, StatusFailed:
 		return true
@@ -219,7 +219,7 @@ func IsParkReason(reason string) bool {
 	return false
 }
 
-// IsActiveRunStatus reports whether a run is in flight — claimed and setting
+// IsActiveConversationStatus reports whether a run is in flight — claimed and setting
 // up or executing, occupying an executor slot. So: `running`, or any claim
 // phase. `queued` (waiting, counted as queue depth instead) and `open`
 // (parked) are excluded, as is every terminal.
@@ -230,6 +230,6 @@ func IsParkReason(reason string) bool {
 // terminal") auto-classified each new phase correctly, but it could not tell
 // a phase apart from a typo or a raw NULL — and a miscount there silently
 // inflates the fleet console's live-slot number rather than failing loudly.
-func IsActiveRunStatus(status string) bool {
+func IsActiveConversationStatus(status string) bool {
 	return status == StatusRunning || IsClaimPhase(status)
 }

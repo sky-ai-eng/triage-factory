@@ -118,7 +118,7 @@ func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, conversationID str
 	if run == nil {
 		return ErrRunNotResumable
 	}
-	if run.Status == domain.StatusQueued || domain.IsActiveRunStatus(run.Status) {
+	if run.Status == domain.StatusQueued || domain.IsActiveConversationStatus(run.Status) {
 		return nil
 	}
 	delegateLog.Warn("resume: lost the wake race to a conversation that went terminal; the queued message will not be delivered",

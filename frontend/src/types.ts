@@ -100,7 +100,7 @@ export interface TeamBot {
 // spells a status name as a bare literal in a list.
 //
 // How this stays in sync with Go: by hand, plus a test. The names are owned by
-// internal/domain/conversation_status.go, and TestFrontendMirrorsRunStatusVocabulary
+// internal/domain/conversation_status.go, and TestFrontendMirrorsConversationStatusVocabulary
 // (feature_parity_test.go) parses the arrays below and fails when the two sets
 // diverge in EITHER direction — a phase added in Go and not here, or a name
 // here that Go never emits. Codegen was considered and rejected: it buys a
@@ -115,7 +115,7 @@ export interface TeamBot {
 // That test pins these arrays and nothing else, which bought about a week:
 // component code doesn't read the arrays, it compares a status against a bare
 // literal, and no amount of array-pinning can see a literal in a switch arm.
-// So the arrays have a second enforcer — the run-status/no-ghost-run-status
+// So the arrays have a second enforcer — the conversation-status/no-ghost-conversation-status
 // ESLint rule (frontend/eslint-rules/), which reads the vocabulary out of this
 // file and fails the lint on any comparison or `case` that tests a
 // conversation status against a name the arrays don't hold.
@@ -131,27 +131,27 @@ export const CLAIM_PHASES = [
 ] as const
 export type ClaimPhase = (typeof CLAIM_PHASES)[number]
 
-// TERMINAL_RUN_STATUSES are the states a conversation never leaves: the agent
+// TERMINAL_CONVERSATION_STATUSES are the states a conversation never leaves: the agent
 // concluded, or the infrastructure died. Stopping a run without concluding it
 // parks it `open` instead — cancellation is spelled at the task and blueprint
 // layers, never as a conversation status.
-export const TERMINAL_RUN_STATUSES = ['completed', 'failed'] as const
-export type TerminalRunStatus = (typeof TERMINAL_RUN_STATUSES)[number]
+export const TERMINAL_CONVERSATION_STATUSES = ['completed', 'failed'] as const
+export type TerminalConversationStatus = (typeof TERMINAL_CONVERSATION_STATUSES)[number]
 
-// RUN_STATUSES is the full display union: the two derived states (queued and
+// CONVERSATION_STATUSES is the full display union: the two derived states (queued and
 // running are never stored — they're computed from the claim/queue state),
 // the parked state, every claim phase, every terminal.
-export const RUN_STATUSES = [
+export const CONVERSATION_STATUSES = [
   'queued',
   'running',
   'open',
   ...CLAIM_PHASES,
-  ...TERMINAL_RUN_STATUSES,
+  ...TERMINAL_CONVERSATION_STATUSES,
 ] as const
-export type RunStatus = (typeof RUN_STATUSES)[number]
+export type ConversationStatus = (typeof CONVERSATION_STATUSES)[number]
 
 // ConversationStatusValue is a conversation status as it arrives over the wire: a plain
-// string, deliberately NOT the RunStatus union, so a server emitting a name
+// string, deliberately NOT the ConversationStatus union, so a server emitting a name
 // this build predates flows through the lib/conversationStatus predicates (which
 // classify it as unknown) instead of being a compile error at the boundary.
 //
@@ -160,7 +160,7 @@ export type RunStatus = (typeof RUN_STATUSES)[number]
 // projection; every other DTO in this file spells its own status lowercase, so
 // the case alone separates the curator-turn and blueprint-run vocabularies from
 // this one) and any value annotated with this alias. So a helper that takes a
-// status second-hand — `runStatusColor(status)`, a tone switch — says so in its
+// status second-hand — `conversationStatusColor(status)`, a tone switch — says so in its
 // signature and gets checked like the property access it came from.
 export type ConversationStatusValue = string
 
@@ -172,7 +172,7 @@ export interface Conversation {
   ID: string
   TaskID: string
   // Status is the coalesced display status. ConversationStatusValue (a string), not the
-  // RunStatus union, on purpose — see the alias for why the wire field stays
+  // ConversationStatus union, on purpose — see the alias for why the wire field stays
   // open-world and how the lint rule closes the branching over it.
   Status: ConversationStatusValue
   Model: string

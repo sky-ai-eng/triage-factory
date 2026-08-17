@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { Conversation } from '../types'
-import { CLAIM_PHASES, RUN_STATUSES, TERMINAL_RUN_STATUSES } from '../types'
+import { CLAIM_PHASES, CONVERSATION_STATUSES, TERMINAL_CONVERSATION_STATUSES } from '../types'
 import {
   ACTIVE_STATUSES,
   canResumeConversation,
@@ -30,9 +30,9 @@ const base = (over: Partial<Conversation>): Conversation =>
 const T = (iso: string) => new Date(iso).getTime()
 
 // The vocabulary itself is checked against Go by
-// TestFrontendMirrorsRunStatusVocabulary; these cover the sets derived from it.
+// TestFrontendMirrorsConversationStatusVocabulary; these cover the sets derived from it.
 describe('status classification', () => {
-  it('counts every claim phase as active, mirroring domain.IsActiveRunStatus', () => {
+  it('counts every claim phase as active, mirroring domain.IsActiveConversationStatus', () => {
     for (const phase of CLAIM_PHASES) {
       expect(isActiveStatus(phase), `${phase} should be active`).toBe(true)
       expect(isClaimPhase(phase)).toBe(true)
@@ -42,7 +42,7 @@ describe('status classification', () => {
   })
 
   it('leaves queued, open and the terminals out of the active set', () => {
-    for (const status of ['queued', 'open', ...TERMINAL_RUN_STATUSES]) {
+    for (const status of ['queued', 'open', ...TERMINAL_CONVERSATION_STATUSES]) {
       expect(isActiveStatus(status), `${status} should not be active`).toBe(false)
     }
   })
@@ -55,7 +55,7 @@ describe('status classification', () => {
   it.each(['initializing', 'worktree_created', ''])(
     'classifies the unknown value %j as neither active, terminal, nor a phase',
     (unknown) => {
-      expect(RUN_STATUSES as readonly string[]).not.toContain(unknown)
+      expect(CONVERSATION_STATUSES as readonly string[]).not.toContain(unknown)
       expect(isActiveStatus(unknown)).toBe(false)
       expect(isTerminalStatus(unknown)).toBe(false)
       expect(isClaimPhase(unknown)).toBe(false)
@@ -64,7 +64,7 @@ describe('status classification', () => {
 
   it('treats every terminal but completed as a failure for styling', () => {
     expect(isFailedStatus('completed')).toBe(false)
-    for (const status of TERMINAL_RUN_STATUSES.filter((s) => s !== 'completed')) {
+    for (const status of TERMINAL_CONVERSATION_STATUSES.filter((s) => s !== 'completed')) {
       expect(isFailedStatus(status), `${status} should style as failed`).toBe(true)
     }
     for (const status of ['queued', 'running', 'open', ...CLAIM_PHASES]) {
@@ -73,7 +73,7 @@ describe('status classification', () => {
   })
 
   it('drops parked permission prompts on every terminal and no other status', () => {
-    for (const status of TERMINAL_RUN_STATUSES) {
+    for (const status of TERMINAL_CONVERSATION_STATUSES) {
       expect(isPermissionTerminalStatus(status)).toBe(true)
     }
     for (const status of ['queued', 'running', 'open', ...CLAIM_PHASES]) {

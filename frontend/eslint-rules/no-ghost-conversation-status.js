@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 
-// no-ghost-run-status — fail the lint when component code branches on a
+// no-ghost-conversation-status — fail the lint when component code branches on a
 // conversation status the backend cannot emit.
 //
 // Why this exists on top of the Go mirror test: that test pins the three
@@ -44,7 +44,7 @@ import { readFileSync } from 'node:fs'
 // branches on the name.
 
 const VOCABULARY_SOURCE = new URL('../src/types.ts', import.meta.url)
-const VOCABULARY_DECLARATIONS = ['CLAIM_PHASES', 'TERMINAL_RUN_STATUSES', 'RUN_STATUSES']
+const VOCABULARY_DECLARATIONS = ['CLAIM_PHASES', 'TERMINAL_CONVERSATION_STATUSES', 'CONVERSATION_STATUSES']
 const STATUS_PROPERTY = 'Status'
 const STATUS_TYPE = 'ConversationStatusValue'
 
@@ -64,13 +64,13 @@ function readVocabulary() {
     const start = source.indexOf(open)
     if (start < 0) {
       throw new Error(
-        `no-ghost-run-status: src/types.ts has no \`${open}…]\` declaration — the run-status vocabulary lint has nothing to check against`,
+        `no-ghost-conversation-status: src/types.ts has no \`${open}…]\` declaration — the conversation-status vocabulary lint has nothing to check against`,
       )
     }
     const body = source.slice(start + open.length)
     const end = body.indexOf(']')
     if (end < 0) {
-      throw new Error(`no-ghost-run-status: src/types.ts declaration ${declaration} is unterminated`)
+      throw new Error(`no-ghost-conversation-status: src/types.ts declaration ${declaration} is unterminated`)
     }
     for (const match of body.slice(0, end).matchAll(/'([a-z_]+)'/g)) {
       statuses.add(match[1])
@@ -78,7 +78,7 @@ function readVocabulary() {
   }
   if (statuses.size === 0) {
     throw new Error(
-      'no-ghost-run-status: parsed the run-status declarations in src/types.ts but found no status names',
+      'no-ghost-conversation-status: parsed the conversation-status declarations in src/types.ts but found no status names',
     )
   }
   return statuses
@@ -97,7 +97,7 @@ function assertStatusTypeExists() {
   const source = readFileSync(VOCABULARY_SOURCE, 'utf8')
   if (!source.includes(`export type ${STATUS_TYPE} =`)) {
     throw new Error(
-      `no-ghost-run-status: src/types.ts exports no \`type ${STATUS_TYPE}\` — the annotation half of the run-status vocabulary lint would match nothing`,
+      `no-ghost-conversation-status: src/types.ts exports no \`type ${STATUS_TYPE}\` — the annotation half of the conversation-status vocabulary lint would match nothing`,
     )
   }
 }
@@ -106,9 +106,9 @@ assertStatusTypeExists()
 
 // Exported for the rule's own tests, which assert on the parsed set rather
 // than a second hand-written copy of it.
-export const RUN_STATUS_VOCABULARY = readVocabulary()
+export const CONVERSATION_STATUS_VOCABULARY = readVocabulary()
 
-const VOCABULARY = [...RUN_STATUS_VOCABULARY].join(', ')
+const VOCABULARY = [...CONVERSATION_STATUS_VOCABULARY].join(', ')
 
 const COMPARISON_OPERATORS = new Set(['===', '!==', '==', '!='])
 
@@ -118,14 +118,14 @@ export default {
     type: 'problem',
     docs: {
       description:
-        'disallow comparing a conversation status against a name outside the run-status vocabulary',
+        'disallow comparing a conversation status against a name outside the conversation-status vocabulary',
     },
     schema: [],
     messages: {
       ghost:
-        "'{{status}}' is not a conversation status, so this branch can never be taken. The vocabulary is owned by internal/domain/conversation_status.go and mirrored in src/types.ts (CLAIM_PHASES / TERMINAL_RUN_STATUSES / RUN_STATUSES): {{vocabulary}}.",
+        "'{{status}}' is not a conversation status, so this branch can never be taken. The vocabulary is owned by internal/domain/conversation_status.go and mirrored in src/types.ts (CLAIM_PHASES / TERMINAL_CONVERSATION_STATUSES / CONVERSATION_STATUSES): {{vocabulary}}.",
       ghostAlias:
-        "{{alias}} is '{{status}}', which is not a conversation status, so this branch can never be taken. The vocabulary is owned by internal/domain/conversation_status.go and mirrored in src/types.ts (CLAIM_PHASES / TERMINAL_RUN_STATUSES / RUN_STATUSES): {{vocabulary}}.",
+        "{{alias}} is '{{status}}', which is not a conversation status, so this branch can never be taken. The vocabulary is owned by internal/domain/conversation_status.go and mirrored in src/types.ts (CLAIM_PHASES / TERMINAL_CONVERSATION_STATUSES / CONVERSATION_STATUSES): {{vocabulary}}.",
     },
   },
 
@@ -249,7 +249,7 @@ export default {
     function report(subject, operand) {
       if (!isConversationStatusExpression(subject)) return
       const status = statusValue(operand)
-      if (!status || RUN_STATUS_VOCABULARY.has(status.value)) return
+      if (!status || CONVERSATION_STATUS_VOCABULARY.has(status.value)) return
       context.report({
         node: status.node,
         messageId: status.alias ? 'ghostAlias' : 'ghost',

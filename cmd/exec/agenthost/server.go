@@ -409,7 +409,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 	}
 
 	switch method {
-	case methodLookupConversation, legacyMethodLookupConversation:
+	case methodLookupConversation:
 		return lookupConversationResult{Info: s.info}, nil
 
 	case methodFinalizeReviewDraft:
@@ -495,7 +495,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return teamTracksRepoResult{Tracks: tracks}, nil
 
-	case methodGetConversationWorktreeByRepoRef, legacyMethodGetConversationWorktreeByRepoRef:
+	case methodGetConversationWorktreeByRepoRef:
 		var a conversationWorktreeByRepoRefArgs
 		if err := dec(&a); err != nil {
 			return nil, err
@@ -506,14 +506,14 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return conversationWorktreeResult{Worktree: w}, nil
 
-	case methodListConversationWorktrees, legacyMethodListConversationWorktrees:
+	case methodListConversationWorktrees:
 		w, err := client.ListConversationWorktrees(ctx)
 		if err != nil {
 			return nil, err
 		}
 		return conversationWorktreesResult{Worktrees: w}, nil
 
-	case methodInsertConversationWorktree, legacyMethodInsertConversationWorktree:
+	case methodInsertConversationWorktree:
 		var a insertConversationWorktreeArgs
 		if err := dec(&a); err != nil {
 			return nil, err
@@ -524,7 +524,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return insertConversationWorktreeResult{Inserted: inserted, WinningPath: winningPath}, nil
 
-	case methodDeleteConversationWorktreeByRepoRef, legacyMethodDeleteConversationWorktreeByRepoRef:
+	case methodDeleteConversationWorktreeByRepoRef:
 		var a deleteConversationWorktreeByRepoRefArgs
 		if err := dec(&a); err != nil {
 			return nil, err

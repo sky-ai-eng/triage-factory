@@ -184,7 +184,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// a completed step whose blueprint is still advancing would otherwise have
 	// its NEXT step cancelled by a click aimed at work that had already
 	// finished.
-	if domain.IsTerminalRunStatus(run.Status) {
+	if domain.IsTerminalConversationStatus(run.Status) {
 		return fmt.Errorf("%w %s", ErrNoActiveRun, conversationID)
 	}
 

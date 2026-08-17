@@ -139,7 +139,7 @@ func addResumability(ctx context.Context, resp map[string]any, orgID string, run
 	if spawner == nil || run == nil {
 		return
 	}
-	if domain.IsActiveRunStatus(run.Status) || run.Status == domain.StatusFailed {
+	if domain.IsActiveConversationStatus(run.Status) || run.Status == domain.StatusFailed {
 		return
 	}
 	ok, reason := spawner.ResumabilityFor(ctx, orgID, run)

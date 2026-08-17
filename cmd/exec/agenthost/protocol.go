@@ -695,26 +695,3 @@ const (
 
 	methodMemoryLoad = "MemoryLoad"
 )
-
-// The legacy* names are the wire names these five methods carried before the
-// conversation rename. The server still answers them; the client only ever
-// sends the current names.
-//
-// They are kept as insurance, not because a skew path is known to exist. The
-// three processes this socket runs between are one binary generation for any
-// given engagement: the sidecar that hosts the Server is spawned by the
-// orchestrator at bring-up, and the jailed client is a single-file bind of the
-// broker's own running executable (sandbox.TrustedTFBinaryPath), pinned at cell
-// build. A restart takes the supervision stream, the cell, and the engagement
-// with it — the reaper requeues the row rather than a new orchestrator adopting
-// a live cell — so an old client should never meet a new server here. Answering
-// both spellings costs five dispatch arms and removes the need to be right
-// about that; a wrong answer would fail an in-flight run's exec verbs with
-// ErrUnknownMethod. Retire them together with this analysis, not before it.
-const (
-	legacyMethodLookupConversation                  = "LookupRun"
-	legacyMethodGetConversationWorktreeByRepoRef    = "GetRunWorktreeByRepoRef"
-	legacyMethodListConversationWorktrees           = "ListRunWorktrees"
-	legacyMethodInsertConversationWorktree          = "InsertRunWorktree"
-	legacyMethodDeleteConversationWorktreeByRepoRef = "DeleteRunWorktreeByRepoRef"
-)

@@ -374,7 +374,7 @@ type conversationEntry struct {
 // awaiting-input "open" state — both stop the worker and clear the
 // indicator; only "failed" additionally posts the failure reply.
 func isTerminalRunStatus(status string) bool {
-	return domain.IsTerminalRunStatus(status) || status == domain.StatusOpen
+	return domain.IsTerminalConversationStatus(status) || status == domain.StatusOpen
 }
 
 // handleConversationStatus resolves (and caches) the run's Slack context on first

@@ -101,7 +101,7 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 				failureCounts[t.FailureKind]++
 			}
 		}
-		if domain.IsActiveRunStatus(t.Status) {
+		if domain.IsActiveConversationStatus(t.Status) {
 			resp.RunsActive++
 		}
 	}

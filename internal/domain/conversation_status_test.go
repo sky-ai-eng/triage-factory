@@ -3,11 +3,11 @@ package domain
 import "testing"
 
 func TestRunStatusClassification(t *testing.T) {
-	for _, s := range AllTerminalRunStatuses() {
-		if !IsTerminalRunStatus(s) {
+	for _, s := range AllTerminalConversationStatuses() {
+		if !IsTerminalConversationStatus(s) {
 			t.Errorf("%q should be terminal", s)
 		}
-		if IsActiveRunStatus(s) {
+		if IsActiveConversationStatus(s) {
 			t.Errorf("%q is terminal, must not be active", s)
 		}
 		if IsClaimPhase(s) {
@@ -19,20 +19,20 @@ func TestRunStatusClassification(t *testing.T) {
 	// phase counts, and so does running: a conversation setting up occupies
 	// an executor slot exactly like one calling the model.
 	for _, s := range append(AllClaimPhases(), StatusRunning) {
-		if IsTerminalRunStatus(s) {
+		if IsTerminalConversationStatus(s) {
 			t.Errorf("%q should not be terminal", s)
 		}
-		if !IsActiveRunStatus(s) {
+		if !IsActiveConversationStatus(s) {
 			t.Errorf("%q should be active", s)
 		}
 	}
 
 	// Neither active nor terminal: queued (not yet claimed) and open (parked).
 	for _, s := range []string{StatusQueued, StatusOpen} {
-		if IsTerminalRunStatus(s) {
+		if IsTerminalConversationStatus(s) {
 			t.Errorf("%q should not be terminal", s)
 		}
-		if IsActiveRunStatus(s) {
+		if IsActiveConversationStatus(s) {
 			t.Errorf("%q should NOT be active (queued/parked)", s)
 		}
 	}
@@ -50,8 +50,8 @@ func TestIsActiveRunStatus_ClosedWorld(t *testing.T) {
 		"RUNNING",          // case matters
 		"fetchin",          // typo
 	} {
-		if IsActiveRunStatus(s) {
-			t.Errorf("IsActiveRunStatus(%q) = true, want false — unrecognized values are not active", s)
+		if IsActiveConversationStatus(s) {
+			t.Errorf("IsActiveConversationStatus(%q) = true, want false — unrecognized values are not active", s)
 		}
 		if IsClaimPhase(s) {
 			t.Errorf("IsClaimPhase(%q) = true, want false", s)
@@ -59,26 +59,26 @@ func TestIsActiveRunStatus_ClosedWorld(t *testing.T) {
 	}
 }
 
-// AllRunStatuses is the union the frontend mirror is checked against, so it
+// AllConversationStatuses is the union the frontend mirror is checked against, so it
 // must stay exactly the three non-phase non-terminal names plus both sets,
 // with no duplicates.
 func TestAllRunStatuses_IsTheWholeVocabulary(t *testing.T) {
 	seen := map[string]bool{}
-	for _, s := range AllRunStatuses() {
+	for _, s := range AllConversationStatuses() {
 		if seen[s] {
-			t.Errorf("AllRunStatuses lists %q twice", s)
+			t.Errorf("AllConversationStatuses lists %q twice", s)
 		}
 		seen[s] = true
 	}
-	want := append(AllClaimPhases(), AllTerminalRunStatuses()...)
+	want := append(AllClaimPhases(), AllTerminalConversationStatuses()...)
 	want = append(want, StatusQueued, StatusRunning, StatusOpen)
 	for _, s := range want {
 		if !seen[s] {
-			t.Errorf("AllRunStatuses is missing %q", s)
+			t.Errorf("AllConversationStatuses is missing %q", s)
 		}
 	}
-	if len(AllRunStatuses()) != len(want) {
-		t.Errorf("AllRunStatuses has %d entries, want %d", len(AllRunStatuses()), len(want))
+	if len(AllConversationStatuses()) != len(want) {
+		t.Errorf("AllConversationStatuses has %d entries, want %d", len(AllConversationStatuses()), len(want))
 	}
 }
 

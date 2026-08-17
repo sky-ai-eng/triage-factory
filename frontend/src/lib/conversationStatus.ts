@@ -1,12 +1,17 @@
-import { CLAIM_PHASES, TERMINAL_RUN_STATUSES } from '../types'
-import type { ClaimPhase, Conversation, ConversationStatusValue, TerminalRunStatus } from '../types'
+import { CLAIM_PHASES, TERMINAL_CONVERSATION_STATUSES } from '../types'
+import type {
+  ClaimPhase,
+  Conversation,
+  ConversationStatusValue,
+  TerminalConversationStatus,
+} from '../types'
 
 // Every set here is derived from the vocabulary in types.ts, which is checked
 // against internal/domain/conversation_status.go by a Go test. Adding a claim phase in
 // one place therefore lands in every predicate below at once.
 
 // ACTIVE_STATUSES — the run is claimed and occupying an executor slot: setting
-// up, or executing a turn. Mirrors domain.IsActiveRunStatus, which is likewise
+// up, or executing a turn. Mirrors domain.IsActiveConversationStatus, which is likewise
 // `running` plus every claim phase. `queued` is excluded (waiting, not
 // working) and so is `open` (parked between turns).
 export const ACTIVE_STATUSES = ['running', ...CLAIM_PHASES] as const
@@ -15,10 +20,12 @@ export const ACTIVE_STATUSES = ['running', ...CLAIM_PHASES] as const
 // than neutral. Derived by excluding the one success rather than re-listing
 // the other three, so a renamed terminal can't quietly fall out of it; a
 // future terminal lands here by default, which is the safe direction.
-export const FAILED_STATUSES = TERMINAL_RUN_STATUSES.filter((s) => s !== 'completed')
+export const FAILED_STATUSES = TERMINAL_CONVERSATION_STATUSES.filter((s) => s !== 'completed')
 
-export function isTerminalStatus(status: ConversationStatusValue): status is TerminalRunStatus {
-  return (TERMINAL_RUN_STATUSES as readonly string[]).includes(status)
+export function isTerminalStatus(
+  status: ConversationStatusValue,
+): status is TerminalConversationStatus {
+  return (TERMINAL_CONVERSATION_STATUSES as readonly string[]).includes(status)
 }
 
 // A run that reached a terminal is no longer executing a turn, so any

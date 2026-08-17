@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { Conversation } from '../../types'
-import { RUN_STATUSES } from '../../types'
+import { CONVERSATION_STATUSES } from '../../types'
 import { isActiveStatus } from '../../lib/conversationStatus'
 import { HMI_CYAN, stationState, type StationKey } from './stationStyle'
 
@@ -47,7 +47,7 @@ describe('stationState', () => {
       completed: 'done',
       failed: 'failed',
     }
-    for (const status of RUN_STATUSES) {
+    for (const status of CONVERSATION_STATUSES) {
       const want = isActiveStatus(status) ? 'working' : expected[status]
       expect(want, `${status} has no decided station light`).toBeDefined()
       expect(stationState(run({ Status: status })).key, status).toBe(want)

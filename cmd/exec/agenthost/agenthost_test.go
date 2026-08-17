@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -292,59 +291,6 @@ func TestServer_UnknownMethod_RejectsCleanly(t *testing.T) {
 	}
 	if resp.Error == "" {
 		t.Errorf("expected error for unknown method, got result %s", resp.Result)
-	}
-}
-
-// TestServer_LegacyMethodNames_StillAnswered pins the upgrade-skew window the
-// conversation rename opened. A credential sidecar is per-run and outlives an
-// orchestrator restart, so a run launched before the rename keeps relaying under
-// the old wire names; if those stopped resolving, its exec verbs would fail
-// mid-run with "unknown method". Every renamed method is covered, because the
-// alias is easy to add on one arm and forget on the next four.
-func TestServer_LegacyMethodNames_StillAnswered(t *testing.T) {
-	stores, _ := newTestDB(t)
-	sockPath := tempSocket(t)
-	listener, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	srv := NewServer(stores, ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "run-1"}, nil)
-	go func() { _ = srv.Serve(listener) }()
-	t.Cleanup(func() {
-		_ = listener.Close()
-		_ = srv.Shutdown(context.Background())
-	})
-
-	for _, legacy := range []string{
-		legacyMethodLookupConversation,
-		legacyMethodGetConversationWorktreeByRepoRef,
-		legacyMethodListConversationWorktrees,
-		legacyMethodInsertConversationWorktree,
-		legacyMethodDeleteConversationWorktreeByRepoRef,
-	} {
-		t.Run(legacy, func(t *testing.T) {
-			conn, err := net.Dial("unix", sockPath)
-			if err != nil {
-				t.Fatalf("dial: %v", err)
-			}
-			defer conn.Close()
-
-			req := request{Version: ProtocolVersion, Method: legacy, Args: json.RawMessage("{}")}
-			if err := writeFrame(conn, req); err != nil {
-				t.Fatalf("writeFrame: %v", err)
-			}
-			var resp response
-			if err := readFrame(conn, &resp); err != nil {
-				t.Fatalf("readFrame: %v", err)
-			}
-			// The assertion is dispatch, not outcome: an empty-args call may
-			// still fail validation inside the handler. What must never come
-			// back is the unknown-method refusal, which is what a dropped
-			// alias looks like from inside the jail.
-			if strings.Contains(resp.Error, "unknown method") {
-				t.Errorf("legacy method %q was not dispatched: %q", legacy, resp.Error)
-			}
-		})
 	}
 }
 

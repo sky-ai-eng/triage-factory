@@ -6,7 +6,7 @@
 import { RuleTester } from 'eslint'
 import tseslint from 'typescript-eslint'
 import { describe, expect, it } from 'vitest'
-import rule, { RUN_STATUS_VOCABULARY } from './no-ghost-run-status.js'
+import rule, { CONVERSATION_STATUS_VOCABULARY } from './no-ghost-conversation-status.js'
 
 // The guard's own fixtures. The invalid cases are the reintroduced ghosts —
 // each one is a line that shipped in this codebase and survived a mirror test
@@ -27,19 +27,19 @@ const ruleTester = new RuleTester({
 
 // The message interpolates the whole vocabulary; taking it from the rule's own
 // parse keeps a status added in Go from rewriting this file.
-const vocabulary = [...RUN_STATUS_VOCABULARY].join(', ')
+const vocabulary = [...CONVERSATION_STATUS_VOCABULARY].join(', ')
 const ghost = (status) => ({ messageId: 'ghost', data: { status, vocabulary } })
 const ghostAlias = (status, alias) => ({
   messageId: 'ghostAlias',
   data: { status, alias, vocabulary },
 })
 
-describe('no-ghost-run-status', () => {
+describe('no-ghost-conversation-status', () => {
   it('reads the vocabulary out of the types.ts mirror', () => {
     // The parse is the rule's whole world: everything it does not find here is
     // a ghost. Pin both ends — a real status it must know, and a retired one it
     // must not.
-    expect([...RUN_STATUS_VOCABULARY].sort()).toEqual(
+    expect([...CONVERSATION_STATUS_VOCABULARY].sort()).toEqual(
       [
         'agent_starting',
         'awaiting_credentials',
@@ -55,7 +55,7 @@ describe('no-ghost-run-status', () => {
   })
 
   it('passes real statuses, and both look-alike vocabularies', () => {
-    ruleTester.run('no-ghost-run-status', rule, {
+    ruleTester.run('no-ghost-conversation-status', rule, {
       valid: [
         // Every branch a conversation status may legitimately take.
         "if (run.Status === 'open') park()",
@@ -88,7 +88,7 @@ describe('no-ghost-run-status', () => {
   })
 
   it('fails the build on every ghost the sweep removed', () => {
-    ruleTester.run('no-ghost-run-status', rule, {
+    ruleTester.run('no-ghost-conversation-status', rule, {
       valid: [],
       invalid: [
         {

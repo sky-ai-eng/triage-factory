@@ -39,7 +39,7 @@ var _ db.ConversationQueueStore = (*conversationQueueStore)(nil)
 // infrastructure died. It describes stored rows as faithfully as new writes,
 // because every retired status was rewritten by migration rather than carried
 // forward (202608010002, SQLite; Postgres had no rows to migrate). Mirrors
-// domain.AllTerminalRunStatuses.
+// domain.AllTerminalConversationStatuses.
 //
 // Every exclusion predicate in this package interpolates this rather than
 // re-spelling the literals. That matters more than the saved keystrokes: these

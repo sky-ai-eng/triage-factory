@@ -1,5 +1,5 @@
 import { memo, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react'
-import { TERMINAL_RUN_STATUSES } from '../types'
+import { TERMINAL_CONVERSATION_STATUSES } from '../types'
 import type {
   Task,
   Conversation,
@@ -1707,7 +1707,7 @@ const SortableTaskCard = memo(function SortableTaskCard({
 // terminals, and nothing else. A run still setting up or executing stays
 // anchored — the cancel button is the right intent there, and dragging
 // mid-run would race with the spawner's status transitions.
-const draggableRunStatuses: ReadonlySet<string> = new Set(TERMINAL_RUN_STATUSES)
+const draggableConversationStatuses: ReadonlySet<string> = new Set(TERMINAL_CONVERSATION_STATUSES)
 
 const SortableAgentCard = memo(function SortableAgentCard({
   task,
@@ -1748,7 +1748,7 @@ const SortableAgentCard = memo(function SortableAgentCard({
   // (behind the confirmation). An actively-executing turn stays anchored (cancel
   // is the right intent; dragging mid-run races the spawner).
   const draggable =
-    (draggableRunStatuses.has(run.Status) ||
+    (draggableConversationStatuses.has(run.Status) ||
       (hasUnresolvedArtifacts(run) && !isActiveConversation(run))) &&
     !botManaged
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({

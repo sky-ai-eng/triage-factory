@@ -303,7 +303,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, conversationID, userID
 	// yet acks "gone" and degrades to a 409, never a lost message. In local mode
 	// the controller is local-only, so an active run absent from this (sole)
 	// process's registry is a genuine race → ErrNoLiveProcess.
-	if run.Runtime != domain.ConversationRuntimeNative && domain.IsActiveRunStatus(run.Status) {
+	if run.Runtime != domain.ConversationRuntimeNative && domain.IsActiveConversationStatus(run.Status) {
 		if err := s.Steer(ctx, conversationID, text); err != nil {
 			return err
 		}
@@ -476,7 +476,7 @@ func drainsUndeliveredInput(run domain.Conversation) bool {
 	if run.Runtime != domain.ConversationRuntimeNative {
 		return false
 	}
-	return domain.IsActiveRunStatus(run.Status) || run.Status == domain.StatusQueued
+	return domain.IsActiveConversationStatus(run.Status) || run.Status == domain.StatusQueued
 }
 
 // followUpBlock is the whole read-only gate a follow-up passes before anything
@@ -545,7 +545,7 @@ func (s *Spawner) ResumabilityFor(ctx context.Context, orgID string, run *domain
 	if run == nil {
 		return false, ResumeBlockedNotSteerable
 	}
-	if domain.IsActiveRunStatus(run.Status) {
+	if domain.IsActiveConversationStatus(run.Status) {
 		return true, ""
 	}
 	block := s.followUpBlock(ctx, orgID, run)
