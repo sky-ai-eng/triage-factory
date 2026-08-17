@@ -784,9 +784,12 @@ func (s *runQueueStore) RecentRunTimingsForOrgSystem(ctx context.Context, orgID 
 	if limit <= 0 {
 		limit = 5000
 	}
-	// Raw string comparison on started_at — the house convention for the
-	// conversations table (ClaimNextRun orders/filters started_at raw); both
-	// the stored CURRENT_TIMESTAMP value and the bound serialize sortably.
+	// Raw string comparison on started_at, which is sound only because every
+	// writer is UTC: the driver renders a bound time.Time with its offset
+	// attached, so a local-zone value would compare as its own wall clock
+	// against a CURRENT_TIMESTAMP row's UTC. Bind .UTC() here and write .UTC()
+	// everywhere (the store-package ratchet enforces it) and the two shapes
+	// differ only in trailing width, which sorts as a tie the id breaks.
 	q := `SELECT org_id, ` + runTimingStatusSQL + `, COALESCE(failure_kind, ''),
 	             started_at, completed_at, ` + runTimingClaimCols + `
 	      FROM conversations WHERE type = 'delegation' AND org_id = ? AND started_at >= ?`

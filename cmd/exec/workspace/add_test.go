@@ -123,7 +123,7 @@ func TestParseAddArgs(t *testing.T) {
 // INSERT OR IGNORE on the conversation_worktrees PK, the actual queries).
 func newTestDB(t *testing.T) (db.Stores, *db.DB) {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

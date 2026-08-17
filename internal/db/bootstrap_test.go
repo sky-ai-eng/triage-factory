@@ -586,7 +586,7 @@ func TestBootstrapLocalTenancy_ConstantsMatchRows(t *testing.T) {
 // which assume the org/team rows already exist.
 func openInMemorySQLite(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -607,7 +607,7 @@ func openInMemorySQLite(t *testing.T) *sql.DB {
 // BootstrapSchemaForTest (which seeds the tenant as a convenience).
 func openTenantlessSQLite(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

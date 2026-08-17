@@ -277,7 +277,7 @@ func (r *Router) publishDisposition(orgID string, disp events.SystemRoutingDispo
 		OrgID:        orgID,
 		EventType:    domain.EventSystemRoutingDisposition,
 		MetadataJSON: string(raw),
-		OccurredAt:   time.Now(),
+		OccurredAt:   time.Now().UTC(),
 	})
 }
 
@@ -586,10 +586,12 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 	defer span.End()
 
 	// Task createdAt = OccurredAt when the source reported a time, falling back
-	// to time.Now(). Keeps the backfill path's "stamp the task with the PR's
+	// to now. Keeps the backfill path's "stamp the task with the PR's
 	// CreatedAt for week-old review requests" semantic — queue ordering reflects
-	// when the world said the event happened, not when we noticed.
-	createdAt := time.Now()
+	// when the world said the event happened, not when we noticed. UTC on both
+	// arms: domain.ParseTime already normalizes OccurredAt, and the fallback
+	// has to agree with it or one variable carries two zones.
+	createdAt := time.Now().UTC()
 	if !evt.OccurredAt.IsZero() {
 		createdAt = evt.OccurredAt
 	}

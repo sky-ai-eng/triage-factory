@@ -21,7 +21,7 @@ import (
 // exercised against the same store.
 func newRecorderStores(t *testing.T) (db.Stores, string) {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

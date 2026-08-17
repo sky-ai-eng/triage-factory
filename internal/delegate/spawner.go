@@ -657,7 +657,7 @@ func (s *Spawner) publishEvent(orgID, eventType string, metadata any) {
 		OrgID:        orgID,
 		EventType:    eventType,
 		MetadataJSON: string(raw),
-		OccurredAt:   time.Now(),
+		OccurredAt:   time.Now().UTC(),
 	})
 }
 

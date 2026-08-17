@@ -409,7 +409,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 	activeMembership := factoryEntityTrackedExists
 	closedMembership := factoryEntityTrackedExists
 	activeArgs := []any{orgID, limit}
-	closedArgs := []any{orgID, time.Now().Add(-db.FactoryClosedGracePeriod), db.FactoryClosedGraceLimit}
+	closedArgs := []any{orgID, time.Now().UTC().Add(-db.FactoryClosedGracePeriod), db.FactoryClosedGraceLimit}
 	if len(teamIDs) > 0 {
 		activePH := make([]string, len(teamIDs))
 		for i, id := range teamIDs {

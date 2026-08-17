@@ -53,7 +53,7 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 				mergedAt, err := time.Parse(time.RFC3339, snap.MergedAt)
 				if err == nil && mergedAt.After(since) {
 					stats.Merged++
-					mergedByDay[mergedAt.Format("2006-01-02")]++
+					mergedByDay[mergedAt.UTC().Format("2006-01-02")]++
 				}
 			case snap.State == "CLOSED":
 				closedAt, err := time.Parse(time.RFC3339, snap.ClosedAt)
@@ -133,9 +133,19 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID, username string, opts d
 	return prs, total, rows.Err()
 }
 
+// buildDashboardTimeline reshapes the per-day count map into a
+// continuous `days`-bucket slice ending today, filling zeros for
+// quiet days. Frontend renders 14 fixed buckets so the sparkline
+// stays the same width regardless of activity.
+//
+// The bucket keys are UTC days, because that is what the counting side
+// produces: the merged-at timestamps come off the snapshot as UTC. Built in
+// the process's local zone instead, the two sides name different days for
+// every instant within the offset of midnight, and the sparkline silently
+// reads zero for activity it counted.
 func buildDashboardTimeline(buckets map[string]int, days int) []domain.DashboardPoint {
 	points := make([]domain.DashboardPoint, 0, days)
-	now := time.Now()
+	now := time.Now().UTC()
 	for i := days - 1; i >= 0; i-- {
 		key := now.AddDate(0, 0, -i).Format("2006-01-02")
 		points = append(points, domain.DashboardPoint{Date: key, Count: buckets[key]})

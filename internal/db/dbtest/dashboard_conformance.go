@@ -115,6 +115,61 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 		}
 	})
 
+	t.Run("Stats_MergedOverTimeBucketsInUTCDaysNotLocalOnes", func(t *testing.T) {
+		// The bucket boundary, not the totals. Stats counts a merge by parsing
+		// the snapshot's RFC3339 mergedAt — a UTC instant — and keys it by that
+		// instant's UTC day; the 14-bucket skeleton it then looks those keys up
+		// in was built from the process's local clock. Wherever the two zones
+		// disagree about what day it is, the newest bucket names a day the
+		// counting side never produces and a real merge vanishes from the
+		// sparkline while still showing in the total beside it.
+		//
+		// forceDayBoundaryLocalZone makes them disagree on purpose, so this
+		// fails on the old behaviour in any runner zone rather than only in the
+		// few hours a day when a developer's own zone would have exposed it.
+		forceDayBoundaryLocalZone(t)
+		store, orgID, seed := factory(t)
+
+		// Just after the most recent UTC midnight: inside today's UTC bucket,
+		// and — west of UTC — inside yesterday's local one.
+		utcNow := time.Now().UTC()
+		justAfterUTCMidnight := time.Date(utcNow.Year(), utcNow.Month(), utcNow.Day(), 0, 30, 0, 0, time.UTC)
+		todayUTC := justAfterUTCMidnight.Format("2006-01-02")
+		seed(t, domain.PRSnapshot{
+			Number: 900, Author: username, State: "MERGED", Merged: true,
+			MergedAt: justAfterUTCMidnight.Format(time.RFC3339),
+		})
+
+		stats, err := store.Stats(context.Background(), orgID, username, statsSince)
+		if err != nil {
+			t.Fatalf("Stats: %v", err)
+		}
+		if len(stats.MergedOverTime) != 14 {
+			t.Fatalf("timeline len=%d want 14", len(stats.MergedOverTime))
+		}
+		keys := make([]string, len(stats.MergedOverTime))
+		for i, b := range stats.MergedOverTime {
+			keys[i] = b.Date
+		}
+		assertUTCDayKeys(t, "MergedOverTime", keys)
+
+		// …and the merge actually lands in it. The skeleton being right is only
+		// half the contract; a PR merged in the disputed window has to be found
+		// through it.
+		var bucketed int
+		for _, b := range stats.MergedOverTime {
+			bucketed += b.Count
+			if b.Date == todayUTC && b.Count != 1 {
+				t.Errorf("bucket %s count=%d, want 1 — a PR merged at %s is missing from its own day",
+					b.Date, b.Count, justAfterUTCMidnight.Format(time.RFC3339))
+			}
+		}
+		if bucketed != stats.Merged {
+			t.Errorf("buckets sum to %d but Merged=%d — the panel and the counter disagree, which is "+
+				"what a day key that misses looks like from the UI", bucketed, stats.Merged)
+		}
+	})
+
 	t.Run("Stats_ReviewsSplit", func(t *testing.T) {
 		// On our own PR, reviews by someone else count as "received."
 		// On someone else's PR, reviews by us count as "given."

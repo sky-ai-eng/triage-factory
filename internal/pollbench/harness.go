@@ -178,7 +178,7 @@ func Run(cfg RunConfig) (*Result, error) {
 	ctx := context.Background()
 	orgID := runmode.LocalDefaultOrgID
 
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}

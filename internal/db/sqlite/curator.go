@@ -749,7 +749,7 @@ func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID 
 			VALUES (?, ?, 'curator', ?, (SELECT team_id FROM projects WHERE id = ?),
 			        'private', 'manual', 'curator', 'sdk', NULL, ?, ?, ?)
 		`, conv.ID, orgID, conv.CreatorUserID, conv.ProjectID, conv.ProjectID,
-			sqliteNullStr(conv.SessionID), startedAt); err != nil {
+			sqliteNullStr(conv.SessionID), startedAt.UTC()); err != nil {
 			return fmt.Errorf("import curator conversation %s: %w", conv.ID, err)
 		}
 		for _, cl := range claims {

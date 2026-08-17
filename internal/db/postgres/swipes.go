@@ -92,7 +92,7 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		var closedAt any
 		var reason any
 		if terminal {
-			closedAt = time.Now()
+			closedAt = time.Now().UTC()
 			reason = closeReason
 		}
 		_, err := tx.ExecContext(ctx,

@@ -168,7 +168,7 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 			r.sweepStaleProcessing(ctx)
 			drain()
 		case <-prune.C:
-			if n, err := r.eventQueue.PruneDone(ctx, time.Now().Add(-pruneAge)); err != nil {
+			if n, err := r.eventQueue.PruneDone(ctx, time.Now().UTC().Add(-pruneAge)); err != nil {
 				routerLog.Error("event-queue prune failed", "error", err)
 			} else if n > 0 {
 				routerLog.Info("event-queue prune: removed done rows", "rows", n, "older_than", pruneAge)

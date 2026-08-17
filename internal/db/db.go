@@ -36,6 +36,39 @@ func Open() (*sql.DB, error) {
 	return OpenAt(dbPath)
 }
 
+// SQLiteTimeFormatParam selects how modernc.org/sqlite serializes a bound
+// time.Time. It is named rather than inlined because it decides the BYTES on
+// disk, and a connection that omits it stores a shape SQLite's own date
+// functions cannot read — so every opener, tests included, has to carry it or
+// it is reading a different database than production writes.
+//
+// "sqlite" renders "2006-01-02 15:04:05.999999999-07:00". The default renders
+// Go's time.String() ("2006-01-02 15:04:05 -0700 MST [m=+...]"), which
+// datetime()/strftime() return NULL for and which nothing reading the column
+// as TEXT can order.
+//
+// Note what it does NOT do: the offset in that layout is the WRITER's, so
+// binding a local-zone time.Time still stores a local wall clock beside
+// SQLite's own UTC CURRENT_TIMESTAMP rows. That is the caller's job — see the
+// ratchet in internal/db/timenow_ratchet_test.go.
+const SQLiteTimeFormatParam = "_time_format=sqlite"
+
+// TestDSNMemory is the DSN every in-repo test opens SQLite with. It exists so
+// a test cannot silently exercise a storage format production never writes:
+// the suite ran for months against the driver's default time layout, which is
+// why two timestamp-comparison defects were invisible to CI on a UTC runner
+// and unreachable by any test on a developer's laptop.
+//
+// Tests-only, alongside BootstrapSchemaForTest, and pinned against the
+// production DSN by TestDSN_TestMemoryMatchesProductionStorageParams.
+const TestDSNMemory = ":memory:?_pragma=foreign_keys(on)&" + SQLiteTimeFormatParam
+
+// TestDSNMemoryNoForeignKeys is TestDSNMemory with enforcement off, for the
+// migration tests that stage rows as an older schema held them — historical
+// data routinely does not satisfy constraints a later migration introduced,
+// and reproducing it is the whole point of those tests.
+const TestDSNMemoryNoForeignKeys = ":memory:?" + SQLiteTimeFormatParam
+
 // OpenAt returns a connection to the SQLite database at the given path.
 // The directory must already exist.
 func OpenAt(dbPath string) (*sql.DB, error) {
@@ -44,20 +77,11 @@ func OpenAt(dbPath string) (*sql.DB, error) {
 	// unlike mattn/go-sqlite3 which had implicit driver-level retries.
 	// 5s gives any rare contention plenty of room to resolve before
 	// surfacing an error.
-	//
-	// _time_format=sqlite forces modernc to serialize time.Time bind
-	// parameters as "2006-01-02 15:04:05.999999999-07:00" instead of
-	// the default Go time.String() form ("2006-01-02 15:04:05 -0700
-	// MST [m=+...]"), which is unparseable by SQLite date functions
-	// and by anyone reading the column as TEXT (e.g. via COALESCE in
-	// factory queries). Direct time.Time scans against legacy rows
-	// already in the old format still succeed — modernc's reader is
-	// permissive — so no data migration is needed.
 	db, err := OpenTraced("sqlite", dbPath+
 		"?_pragma=journal_mode(WAL)"+
 		"&_pragma=foreign_keys(on)"+
 		"&_pragma=busy_timeout(5000)"+
-		"&_time_format=sqlite", PoolLocal)
+		"&"+SQLiteTimeFormatParam, PoolLocal)
 	if err != nil {
 		return nil, err
 	}

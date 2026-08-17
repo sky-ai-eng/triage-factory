@@ -240,7 +240,7 @@ func nullTimeValue(t time.Time) any {
 	if t.IsZero() {
 		return nil
 	}
-	return t
+	return t.UTC()
 }
 
 // MarkInstallationRemoved soft-removes the installation and drops its grant

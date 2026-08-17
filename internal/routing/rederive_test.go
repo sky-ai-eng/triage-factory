@@ -33,7 +33,7 @@ func (noopScorer) Trigger(string) {}
 // newTestDB sets up an in-memory SQLite with schema + seed for integration tests.
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

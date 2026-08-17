@@ -124,3 +124,38 @@ func TestRewriteDSNCreds_PostgresqlScheme(t *testing.T) {
 		t.Errorf("unexpected output: %q", got)
 	}
 }
+
+// TestDSN_TestMemoryMatchesProductionStorageParams pins the one property that
+// makes the in-repo test DSN worth having: it selects the same on-disk
+// timestamp layout OpenAt does.
+//
+// The suite spent months on the driver's default layout — Go's time.String() —
+// while every shipped binary wrote the sqlite layout. Nothing failed, because
+// both sides of every assertion agreed with each other; the tests were simply
+// describing a database that did not exist. Two timestamp-comparison defects
+// lived under that gap.
+//
+// Only the storage-affecting parameter is compared. The production DSN also
+// carries WAL and busy_timeout, which are about a file on disk and mean
+// nothing to :memory:.
+func TestDSN_TestMemoryMatchesProductionStorageParams(t *testing.T) {
+	if !strings.Contains(TestDSNMemory, SQLiteTimeFormatParam) {
+		t.Fatalf("TestDSNMemory (%q) does not carry %q — tests would store a timestamp layout "+
+			"production never writes", TestDSNMemory, SQLiteTimeFormatParam)
+	}
+	// The production spelling, reconstructed the way OpenAt builds it, so a
+	// change to either side has to be made on both.
+	prod := "/tmp/x.db" +
+		"?_pragma=journal_mode(WAL)" +
+		"&_pragma=foreign_keys(on)" +
+		"&_pragma=busy_timeout(5000)" +
+		"&" + SQLiteTimeFormatParam
+	for _, param := range []string{"_pragma=foreign_keys(on)", SQLiteTimeFormatParam} {
+		if !strings.Contains(prod, param) {
+			t.Errorf("production DSN no longer carries %q; TestDSNMemory still does", param)
+		}
+		if !strings.Contains(TestDSNMemory, param) {
+			t.Errorf("TestDSNMemory no longer carries %q; the production DSN still does", param)
+		}
+	}
+}

@@ -155,13 +155,10 @@ func sqliteTaskListWhere(f db.TaskListFilter) (string, []any) {
 		// Terminal rows only: a closed_at window says nothing about an open
 		// task, so narrowing one on it would silently empty a mixed query.
 		//
-		// datetime(substr(...,1,19)) normalizes the several on-disk timestamp
-		// shapes to one comparable value: CURRENT_TIMESTAMP text, the driver's
-		// Go-bound rendering, and ISO-8601 all share a seconds-precision
-		// 19-character prefix, and datetime() parses each of those. A raw
-		// string compare against a bound value works only while every row
-		// happens to have been written in the same shape.
-		clauses = append(clauses, "(t.status NOT IN ('done', 'dismissed') OR (t.closed_at IS NOT NULL AND datetime(substr(t.closed_at, 1, 19)) >= datetime(?)))")
+		// datetime() on both sides so the two on-disk shapes — the schema's
+		// CURRENT_TIMESTAMP default and a Go-bound time.Time — compare as
+		// instants rather than as text of differing widths.
+		clauses = append(clauses, "(t.status NOT IN ('done', 'dismissed') OR (t.closed_at IS NOT NULL AND datetime(t.closed_at) >= datetime(?)))")
 		args = append(args, f.ClosedSince.UTC().Format("2006-01-02 15:04:05"))
 	}
 	teamClause, args := sqliteTaskTeamFilter(f.TeamIDs, args)
@@ -434,7 +431,7 @@ func (s *taskStore) EntityIDsWithActiveTasks(ctx context.Context, orgID, source 
 // --- Lifecycle ---
 
 func (s *taskStore) FindOrCreate(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error) {
-	return s.FindOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, time.Now())
+	return s.FindOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, time.Now().UTC())
 }
 
 func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
@@ -484,7 +481,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 		                   status, priority_score, scoring_status, created_at,
 		                   team_id, visibility)
 		VALUES (?, ?, ?, ?, ?, 'queued', ?, 'pending', ?, ?, 'team')
-	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, teamBind)
+	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt.UTC(), teamBind)
 	if err != nil {
 		var raced domain.Task
 		err2 := scanTaskFromRow(s.q.QueryRowContext(ctx, `
@@ -542,7 +539,7 @@ func closeTaskRows(ctx context.Context, q queryer, taskID, closeReason, closeEve
 		UPDATE tasks SET status = 'done', close_reason = ?, close_event_type = ?,
 		                 closed_at = ?
 		WHERE id = ? AND status NOT IN ('done', 'dismissed')
-	`, closeReason, cet, time.Now(), taskID)
+	`, closeReason, cet, time.Now().UTC(), taskID)
 	if err != nil {
 		return 0, err
 	}
@@ -591,7 +588,7 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 			if _, err := q.ExecContext(ctx, `
 				INSERT OR IGNORE INTO task_events (task_id, event_id, kind, created_at)
 				VALUES (?, ?, 'closed', ?)
-			`, taskID, closingEventID, time.Now()); err != nil {
+			`, taskID, closingEventID, time.Now().UTC()); err != nil {
 				return fmt.Errorf("record close audit: %w", err)
 			}
 		}
@@ -671,7 +668,7 @@ func (s *taskStore) RecordEvent(ctx context.Context, orgID, taskID, eventID, kin
 	_, err := s.q.ExecContext(ctx, `
 		INSERT OR IGNORE INTO task_events (task_id, event_id, kind, created_at)
 		VALUES (?, ?, ?, ?)
-	`, taskID, eventID, kind, time.Now())
+	`, taskID, eventID, kind, time.Now().UTC())
 	return err
 }
 

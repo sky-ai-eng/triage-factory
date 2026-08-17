@@ -83,7 +83,7 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 			    outcome_reason = ?,
 			    failure_kind = ?
 			WHERE id = ?
-		`, status, time.Now(), resultSummary,
+		`, status, time.Now().UTC(), resultSummary,
 			nullIfEmpty(outcome), nullIfEmpty(outcomeReason), nullIfEmpty(failureKind),
 			runID)
 		if err != nil {
@@ -761,23 +761,12 @@ func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cuto
 	// normalizes the mixed on-disk timestamp formats (CURRENT_TIMESTAMP text vs
 	// Go-bound values) so the MAX is consistent; the cutoff binds as a canonical
 	// UTC string.
-	//
-	// The substr is what makes that normalization actually work on a Go-bound
-	// value. The driver stores a time.Time as Go's own rendering —
-	// "2006-01-02 15:04:05.999999999 +0000 UTC" — which datetime() cannot parse
-	// at all: it returns NULL, the MAX goes NULL, the comparison goes NULL, and
-	// the row silently never reaps. Every parked_at and completed_at written
-	// from Go (MarkOpen, the cancel park, Complete) is in that form, so without
-	// this the retention sweep only ever saw rows whose timestamps happened to
-	// be written as SQL text. The first 19 characters are the seconds-precision
-	// prefix of every format in play — Go's, CURRENT_TIMESTAMP's, and ISO-8601's
-	// — and datetime() parses all three of those.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT org_id, blueprint_run_id
 		FROM conversations
 		WHERE status IN ('open', 'completed')
 		GROUP BY org_id, blueprint_run_id
-		HAVING MAX(datetime(substr(COALESCE(parked_at, completed_at, started_at), 1, 19))) < datetime(?)
+		HAVING MAX(datetime(COALESCE(parked_at, completed_at, started_at))) < datetime(?)
 	`, cutoff.UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, err
