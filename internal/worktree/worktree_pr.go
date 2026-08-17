@@ -28,13 +28,13 @@ import (
 // PR is from a fork, equal to upstreamCloneURL otherwise.
 //
 // The bare-local branch is run-namespaced for EVERY PR checkout —
-// triagefactory/<conversationID>/pr-<n> (prLocalBranch) — so two concurrent runs
+// triagefactory/<rootKey>/pr-<n> (prLocalBranch) — so two concurrent runs
 // reviewing the same PR off one shared bare never collide on a branch ref
 // (the fetch and `worktree add` would otherwise be refused). This is one
 // uniform scheme for fork AND own-repo PRs; only the push target differs.
 //
 // Push tracking (configurePRPushTracking) wires a per-run remote
-// tfpush-<conversationID>-<n> -> headCloneURL with an explicit push refspec
+// tfpush-<rootKey>-<n> -> headCloneURL with an explicit push refspec
 // (the run-namespaced local branch -> the real head branch), so `git
 // push` (no remote argument) lands on the fork's contributor branch
 // (fork PR) or the upstream head (own-repo PR). Agents must use `git
@@ -43,18 +43,18 @@ import (
 // push tracking and stays read-only.
 //
 // CleanupPRConfig should be called after the run terminates (with the
-// SAME conversationID) to remove the per-run remote + branch config — they live
+// SAME rootKey) to remove the per-run remote + branch config — they live
 // in the bare's shared config and would otherwise accumulate forever.
-func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, conversationID string, opts ...CloneOption) (string, error) {
+func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, rootKey string, opts ...CloneOption) (string, error) {
 	cfg := resolveCloneOptions(opts)
-	wtDir, err := makeWorktreeDir(conversationID)
+	wtDir, err := makeWorktreeDir(rootKey)
 	if err != nil {
 		return "", err
 	}
 	// Multi mode sandboxes the run, so it needs a self-contained clone whose
 	// .git doesn't point back into the (unmounted) bare; local mode runs on-host
 	// where the bare is reachable and keeps the zero-copy linked worktree.
-	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, conversationID, wtDir, cfg.auth, runmode.Current() == runmode.ModeMulti)
+	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, rootKey, wtDir, cfg.auth, runmode.Current() == runmode.ModeMulti)
 }
 
 // CreateForPRInRoot is the lazy-materialization variant of CreateForPR: the
@@ -73,7 +73,7 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 // Since TFAC-546 this runs HOST-SIDE in both modes (the agenthost daemon calls
 // it on the sandbox's behalf in multi), so WithCloneAuth is honored exactly as
 // in CreateForPR.
-func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, conversationID, runRoot string, opts ...CloneOption) (string, error) {
+func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, rootKey, runRoot string, opts ...CloneOption) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForPRInRoot: runRoot is required")
 	}
@@ -82,7 +82,7 @@ func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headC
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
 		return "", fmt.Errorf("mkdir repo subdir: %w", err)
 	}
-	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, conversationID, wtDir, cfg.auth, runmode.Current() == runmode.ModeMulti)
+	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, rootKey, wtDir, cfg.auth, runmode.Current() == runmode.ModeMulti)
 }
 
 // createPRWorktreeAt is the shared body of CreateForPR / CreateForPRInRoot —
@@ -93,7 +93,7 @@ func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headC
 // finishSelfContainedPRClone). The public callers differ in where wtDir lives on
 // disk, whether a host clone credential is threaded, and that selfContained
 // choice; wtDir's parent is created by the caller.
-func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch, baseBranch string, prNumber int, conversationID, wtDir string, auth CloneAuth, selfContained bool) (string, error) {
+func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch, baseBranch string, prNumber int, rootKey, wtDir string, auth CloneAuth, selfContained bool) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -118,7 +118,7 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 	// so concurrent same-PR runs never share a ref (TFAC-87/TFAC-502). The
 	// fetch refspecs below inherit that uniqueness, so the fetch no longer hits
 	// "refusing to fetch into branch ... checked out at ...".
-	localBranch := prLocalBranch(conversationID, prNumber)
+	localBranch := prLocalBranch(rootKey, prNumber)
 
 	branchRef := fmt.Sprintf("+refs/pull/%d/head:refs/heads/%s", prNumber, localBranch)
 	// Mirror the fetched tip into a remote-tracking ref alongside the local
@@ -164,7 +164,7 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 	// shared bare stays the object source; only this final per-run step differs.
 	// Local mode keeps the zero-copy worktree (the bare is reachable on-host).
 	if selfContained {
-		return finishSelfContainedPRClone(ctx, bareDir, wtDir, localBranch, baseBranch, upstreamCloneURL, headCloneURL, headBranch, conversationID, prNumber, hasHeadRepo, isFork, auth)
+		return finishSelfContainedPRClone(ctx, bareDir, wtDir, localBranch, baseBranch, upstreamCloneURL, headCloneURL, headBranch, rootKey, prNumber, hasHeadRepo, isFork, auth)
 	}
 
 	// Pass the bare branch name (not refs/heads/<name>) so git
@@ -180,7 +180,7 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 	// repo. origin is the upstream just cloned/fetched with this same auth.
 	if err := gitRunCtxAuth(ctx, bareDir, auth, "worktree", "add", wtDir, localBranch); err != nil {
 		// A cancelled/killed add (ctx cancel when the task closes mid-setup)
-		// leaves wtDir half-built and the bare's worktrees/<conversationID>/locked=
+		// leaves wtDir half-built and the bare's worktrees/<rootKey>/locked=
 		// initializing marker behind. Plain `worktree prune` skips locked
 		// entries, so without this the branch stays pinned as "checked out"
 		// and the next run for this PR fails its fetch. Reclaim only THIS
@@ -202,12 +202,12 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 		// Without it `git push` errors with "no upstream branch" and forces the
 		// `git push origin <branch>` form we discourage (wrong for fork PRs, a
 		// bug magnet across the codebase).
-		if err := configurePRPushTracking(ctx, bareDir, conversationID, prNumber, localBranch, headCloneURL, headBranch); err != nil {
+		if err := configurePRPushTracking(ctx, bareDir, rootKey, prNumber, localBranch, headCloneURL, headBranch); err != nil {
 			// Push tracking is part of the worktree's contract — without it
 			// `git push` lands in the wrong place. Roll back both the worktree
 			// AND any partial shared-bare config so a half-configured state
 			// isn't left for later runs to inherit.
-			rollbackPRSetupLocked(ctx, bareDir, wtDir, conversationID, prNumber)
+			rollbackPRSetupLocked(ctx, bareDir, wtDir, rootKey, prNumber)
 			return "", fmt.Errorf("configure PR push tracking: %w", err)
 		}
 	default:
@@ -229,7 +229,7 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 		// here keeps the fork/own-repo cases consistent — earlier
 		// rollbacks already clean up shared config, so this one
 		// shouldn't be the odd path that leaves it behind.
-		rollbackPRSetupLocked(ctx, bareDir, wtDir, conversationID, prNumber)
+		rollbackPRSetupLocked(ctx, bareDir, wtDir, rootKey, prNumber)
 		return "", fmt.Errorf("write local git excludes: %w", err)
 	}
 
@@ -253,7 +253,7 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 //     checkout needs it);
 //   - push tracking is written into the CLONE's config, not the bare's, so the
 //     `git push` wiring travels into the sandbox with the run root.
-func finishSelfContainedPRClone(ctx context.Context, bareDir, wtDir, localBranch, baseBranch, upstreamCloneURL, headCloneURL, headBranch, conversationID string, prNumber int, hasHeadRepo, isFork bool, auth CloneAuth) (string, error) {
+func finishSelfContainedPRClone(ctx context.Context, bareDir, wtDir, localBranch, baseBranch, upstreamCloneURL, headCloneURL, headBranch, rootKey string, prNumber int, hasHeadRepo, isFork bool, auth CloneAuth) (string, error) {
 	if err := materializeSelfContainedClone(ctx, bareDir, wtDir, localBranch, baseBranch, upstreamCloneURL, auth); err != nil {
 		_ = os.RemoveAll(wtDir)
 		dropBareRunRefs(ctx, bareDir, localBranch)
@@ -268,7 +268,7 @@ func finishSelfContainedPRClone(ctx context.Context, bareDir, wtDir, localBranch
 		// Fork OR own-repo PR — identical wiring to the worktree path, only the
 		// git dir differs: the config lives in the CLONE (wtDir) so it ships into
 		// the sandbox with the run root.
-		if err := configurePRPushTracking(ctx, wtDir, conversationID, prNumber, localBranch, headCloneURL, headBranch); err != nil {
+		if err := configurePRPushTracking(ctx, wtDir, rootKey, prNumber, localBranch, headCloneURL, headBranch); err != nil {
 			_ = os.RemoveAll(wtDir)
 			return "", fmt.Errorf("configure PR push tracking: %w", err)
 		}
@@ -358,8 +358,8 @@ func dropBareRunRefs(ctx context.Context, bareDir, localBranch string) {
 // rollbackPRSetupLocked undoes a partially-set-up PR worktree:
 // removes the worktree directory + bare's worktree registration,
 // then removes any shared-bare config that earlier steps already
-// wrote (the per-run tfpush-<conversationID>-<n> remote, the per-run
-// branch.triagefactory/<conversationID>/pr-<n>.* tracking, and the synthetic
+// wrote (the per-run tfpush-<rootKey>-<n> remote, the per-run
+// branch.triagefactory/<rootKey>/pr-<n>.* tracking, and the synthetic
 // local branch).
 //
 // Caller must hold the per-repo lock (CreateForPR's mu). Best-effort
@@ -371,20 +371,24 @@ func dropBareRunRefs(ctx context.Context, bareDir, localBranch string) {
 // SweepStaleForkPRConfig would eventually clean those up on next
 // bootstrap, but until then they'd sit in the config potentially
 // confusing later runs.
-func rollbackPRSetupLocked(ctx context.Context, bareDir, wtDir, conversationID string, prNumber int) {
-	if rmErr := RemoveAt(wtDir, conversationID); rmErr != nil {
+func rollbackPRSetupLocked(ctx context.Context, bareDir, wtDir, rootKey string, prNumber int) {
+	if rmErr := RemoveAt(wtDir, rootKey); rmErr != nil {
 		worktreeLog.Warn("rollback PR setup: remove worktree failed", "error", rmErr)
 	}
 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 
-	removePRConfigLocked(cleanupCtx, bareDir, prLocalBranch(conversationID, prNumber), prNumber)
+	removePRConfigLocked(cleanupCtx, bareDir, prLocalBranch(rootKey, prNumber), prNumber)
 }
 
 // prLocalBranch returns the bare-local branch name a PR checkout attaches in
-// the shared bare. Namespaced by run_id so two concurrent runs reviewing the
-// SAME PR (sharing one bare) never share a branch ref — git refuses to fetch
+// the shared bare. Namespaced by rootKey — the same key the worktree dir is
+// named after, which is the blueprint run id for a delegated run (so one
+// blueprint's steps share the branch, as they share the tree) and the
+// conversation's own id where there is no blueprint. The namespace exists so
+// two concurrent runs reviewing the SAME PR (sharing one bare) never share a
+// branch ref — git refuses to fetch
 // into, or `worktree add`, a local branch already checked out in another live
 // worktree of the same bare, so a per-PR-only name (the old triagefactory/pr-N)
 // would make the second run's materialization fail (TFAC-87/TFAC-502). One
@@ -393,16 +397,16 @@ func rollbackPRSetupLocked(ctx context.Context, bareDir, wtDir, conversationID s
 // reserves the namespace from any literal contributor branch. Centralized so
 // CreateForPR, the push-tracking config, and the cleanup paths can't drift on
 // the convention.
-func prLocalBranch(conversationID string, prNumber int) string {
-	return fmt.Sprintf("triagefactory/%s/pr-%d", conversationID, prNumber)
+func prLocalBranch(rootKey string, prNumber int) string {
+	return fmt.Sprintf("triagefactory/%s/pr-%d", rootKey, prNumber)
 }
 
-// parsePRLocalBranch reverses prLocalBranch, recovering the run id from a
-// per-run PR branch name (triagefactory/<conversationID>/pr-<N>). The sweep walks branch
+// parsePRLocalBranch reverses prLocalBranch, recovering the root key from a
+// per-run PR branch name (triagefactory/<rootKey>/pr-<N>). The sweep walks branch
 // markers — which carry the branch name, not the run id — so it needs this to
 // reconstruct the per-run push remote for reclamation. ok=false for any branch
 // that isn't one of ours (so the sweep skips it safely).
-func parsePRLocalBranch(branch string) (conversationID string, prNumber int, ok bool) {
+func parsePRLocalBranch(branch string) (rootKey string, prNumber int, ok bool) {
 	rest, ok := strings.CutPrefix(branch, "triagefactory/")
 	if !ok {
 		return "", 0, false
@@ -422,11 +426,11 @@ func parsePRLocalBranch(branch string) (conversationID string, prNumber int, ok 
 // through. Per (run, PR) — not per-PR — so two concurrent runs on the same PR
 // each own their own remote: inline cleanup of one run can then reclaim its
 // remote without yanking it out from under the other (a single shared per-PR
-// remote would break the surviving run). The conversationID/pr namespace is flattened
+// remote would break the surviving run). The rootKey/pr namespace is flattened
 // (remote names can't contain '/'). Derivable from the per-run branch alone via
 // parsePRLocalBranch, so the bootstrap sweep can reconstruct it for orphans.
-func prPushRemoteName(conversationID string, prNumber int) string {
-	return fmt.Sprintf("tfpush-%s-%d", conversationID, prNumber)
+func prPushRemoteName(rootKey string, prNumber int) string {
+	return fmt.Sprintf("tfpush-%s-%d", rootKey, prNumber)
 }
 
 // PRRefSlug is the conversation_worktrees ref and worktree-subdir name for a PR-head
@@ -438,11 +442,11 @@ func PRRefSlug(prNumber int) string {
 
 // trackedBranchMarkerKey is the per-branch config key that marks a
 // branch as triagefactory-managed. configurePRPushTracking writes it on
-// every per-run PR branch (triagefactory/<conversationID>/pr-<n>, fork and
+// every per-run PR branch (triagefactory/<rootKey>/pr-<n>, fork and
 // own-repo alike); the sweep reads it via `git config --get-regexp` to
 // find orphaned branches that need cleanup after a run's worktree is
 // gone. The value is the PR number — preserved as the source of truth
-// for reconstructing the per-run push remote (tfpush-<conversationID>-<n>) during
+// for reconstructing the per-run push remote (tfpush-<rootKey>-<n>) during
 // reclamation.
 //
 // Git lower-cases config variable names internally, so the regex
@@ -459,12 +463,12 @@ const trackedBranchMarkerKey = "tfprnumber"
 const cleanupTimeout = 30 * time.Second
 
 // CleanupPRConfig removes the per-PR config a bare repo accumulated for
-// one delegated PR run: the per-run tfpush-<conversationID>-<n> push remote, the
-// per-run branch.triagefactory/<conversationID>/pr-<n>.* tracking, the local
+// one delegated PR run: the per-run tfpush-<rootKey>-<n> push remote, the
+// per-run branch.triagefactory/<rootKey>/pr-<n>.* tracking, the local
 // branch ref itself, and its remote-tracking mirror. Idempotent —
 // anything already absent is a no-op.
 //
-// conversationID identifies the finishing run so it reclaims ITS OWN per-run
+// rootKey identifies the finishing run so it reclaims ITS OWN per-run
 // branch and remote, never a sibling's: a second concurrent run on the
 // same PR has a distinct run-namespaced branch/remote that this call
 // leaves untouched. No head branch is needed — every PR checkout (fork,
@@ -483,7 +487,7 @@ const cleanupTimeout = 30 * time.Second
 // individual git invocations are swallowed — cleanup is best-effort
 // and a partial failure shouldn't propagate up the run-finalization
 // path.
-func CleanupPRConfig(owner, repo string, prNumber int, conversationID string) {
+func CleanupPRConfig(owner, repo string, prNumber int, rootKey string) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -498,7 +502,7 @@ func CleanupPRConfig(owner, repo string, prNumber int, conversationID string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	removePRConfigLocked(ctx, bareDir, prLocalBranch(conversationID, prNumber), prNumber)
+	removePRConfigLocked(ctx, bareDir, prLocalBranch(rootKey, prNumber), prNumber)
 }
 
 // removePRConfigLocked is the config-removal sequence for a single PR
@@ -507,8 +511,8 @@ func CleanupPRConfig(owner, repo string, prNumber int, conversationID string) {
 // finalization) and SweepStaleForkPRConfig (bootstrap-time backstop) so
 // the cleanup steps stay in lockstep.
 //
-// localBranch is the run-namespaced branch (triagefactory/<conversationID>/pr-<n>):
-// the inline path computes it from (conversationID, prNumber); the sweep already
+// localBranch is the run-namespaced branch (triagefactory/<rootKey>/pr-<n>):
+// the inline path computes it from (rootKey, prNumber); the sweep already
 // has it verbatim from the branch marker it walked. The per-run push
 // remote is reconstructed from it via parsePRLocalBranch.
 //
@@ -523,8 +527,8 @@ func CleanupPRConfig(owner, repo string, prNumber int, conversationID string) {
 // section is absent, branch -D / update-ref -d error when the ref is
 // gone. Each error is a normal idempotent state.
 func removePRConfigLocked(ctx context.Context, bareDir, localBranch string, prNumber int) {
-	if conversationID, _, ok := parsePRLocalBranch(localBranch); ok {
-		_ = gitRunCtx(ctx, bareDir, "remote", "remove", prPushRemoteName(conversationID, prNumber))
+	if rootKey, _, ok := parsePRLocalBranch(localBranch); ok {
+		_ = gitRunCtx(ctx, bareDir, "remote", "remove", prPushRemoteName(rootKey, prNumber))
 	}
 	_ = gitRunCtx(ctx, bareDir, "config", "--remove-section", "branch."+localBranch)
 	_ = gitRunCtx(ctx, bareDir, "branch", "-D", localBranch)
@@ -545,7 +549,7 @@ func removePRConfigLocked(ctx context.Context, bareDir, localBranch string, prNu
 //
 // Walking markers (rather than per-run push remotes alone) is what
 // makes this cover every PR worktree uniformly: each marked branch is a
-// run-namespaced triagefactory/<conversationID>/pr-<n>, and removePRConfigLocked
+// run-namespaced triagefactory/<rootKey>/pr-<n>, and removePRConfigLocked
 // reconstructs the matching per-run push remote from the branch name.
 //
 // Safe to call while runs are still in flight because `git worktree
@@ -606,7 +610,7 @@ func SweepStaleForkPRConfig(owner, repo string) {
 			continue
 		}
 		// The marked branch IS the per-run local branch
-		// (triagefactory/<conversationID>/pr-<n>); removePRConfigLocked reclaims its
+		// (triagefactory/<rootKey>/pr-<n>); removePRConfigLocked reclaims its
 		// config section, the branch ref + mirror, and the per-run push
 		// remote it reconstructs from the branch name.
 		removePRConfigLocked(ctx, bareDir, branch, prNumber)
@@ -621,7 +625,7 @@ func SweepStaleForkPRConfig(owner, repo string) {
 // `git worktree list --porcelain` reports as checked out somewhere
 // (the bare itself if it has a HEAD, plus every linked worktree).
 // The sweep uses this to decide whether a per-run PR branch is still
-// actively backing a checkout — if its triagefactory/<conversationID>/pr-<n>
+// actively backing a checkout — if its triagefactory/<rootKey>/pr-<n>
 // branch is in this set, reclaiming its config would break that
 // worktree, so the sweep leaves it for the run's own cleanup.
 func liveWorktreeBranches(ctx context.Context, bareDir string) map[string]bool {
@@ -646,7 +650,7 @@ func liveWorktreeBranches(ctx context.Context, bareDir string) map[string]bool {
 // scheme for both: the only difference is pushURL (the fork's clone URL vs the
 // upstream's, which the caller already resolved as headCloneURL). Configures:
 //
-//   - A remote tfpush-<conversationID>-<n> -> pushURL (in gitDir). Per (run, PR), not
+//   - A remote tfpush-<rootKey>-<n> -> pushURL (in gitDir). Per (run, PR), not
 //     per-PR: two concurrent runs on the same PR own separate remotes so one
 //     run's cleanup can reclaim its remote without breaking the other.
 //   - refs/remotes/<remoteName>/<headBranch>, pointed at localBranch's tip —
@@ -661,7 +665,7 @@ func liveWorktreeBranches(ctx context.Context, bareDir string) map[string]bool {
 //     intact.
 //   - remote.<remoteName>.push as an explicit refspec mapping
 //     refs/heads/<localBranch> -> refs/heads/<headBranch>. Both the fork and
-//     own-repo paths now have local (triagefactory/<conversationID>/pr-<n>) differ from
+//     own-repo paths now have local (triagefactory/<rootKey>/pr-<n>) differ from
 //     the remote head branch, so under the default push.default ("simple")
 //     `git push` (no args) would error "names don't match"; the explicit
 //     refspec bypasses the check and pushes to the right place. Living on the
@@ -686,8 +690,8 @@ func liveWorktreeBranches(ctx context.Context, bareDir string) map[string]bool {
 // path, or the run's own self-contained clone for the sandboxed multi-mode path
 // (finishSelfContainedPRClone). The per-run namespacing of the remote/branch is
 // load-bearing only for the shared bare — harmless but redundant in a per-run clone.
-func configurePRPushTracking(ctx context.Context, gitDir, conversationID string, prNumber int, localBranch, pushURL, headBranch string) error {
-	remoteName := prPushRemoteName(conversationID, prNumber)
+func configurePRPushTracking(ctx context.Context, gitDir, rootKey string, prNumber int, localBranch, pushURL, headBranch string) error {
+	remoteName := prPushRemoteName(rootKey, prNumber)
 
 	// Add or update the per-run push remote. `git remote add` errors when the
 	// remote already exists; fall through to set-url in that case so repeat

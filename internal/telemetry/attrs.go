@@ -27,6 +27,7 @@ const (
 	keyEntityID       = attribute.Key("entity.id")
 	keyTaskID         = attribute.Key("task.id")
 	keyConversationID = attribute.Key("conversation.id")
+	keyBlueprintRunID = attribute.Key("blueprint_run.id")
 	keyClaimAttempt   = attribute.Key("claim.attempt")
 	keySource         = attribute.Key("source")
 	keyDisposition    = attribute.Key("disposition")
@@ -56,6 +57,13 @@ func EventID(id string) attribute.KeyValue        { return keyEventID.String(id)
 func EntityID(id string) attribute.KeyValue       { return keyEntityID.String(id) }
 func TaskID(id string) attribute.KeyValue         { return keyTaskID.String(id) }
 func ConversationID(id string) attribute.KeyValue { return keyConversationID.String(id) }
+
+// BlueprintRunID is the blueprint_runs row a span belongs to — a different
+// table from ConversationID, and the reason both exist: the firing path
+// spans a blueprint run whose steps are conversations minted later, so one
+// key cannot honestly carry both. Opaque like the rest; a blueprint's name
+// is not what it holds.
+func BlueprintRunID(id string) attribute.KeyValue { return keyBlueprintRunID.String(id) }
 
 // EventType is FK-constrained to the events catalog, which is what makes
 // it safe as a dimension in a way no other event field is.

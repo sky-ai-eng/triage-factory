@@ -108,12 +108,13 @@ type PendingFiringsStore interface {
 	RequeueStaleDraining(ctx context.Context, orgID string, before time.Time) (int, error)
 
 	// MarkFired transitions a 'draining' firing to 'fired' and records the
-	// blueprint_run that resulted from it (conversationID is a blueprint_run id — the
-	// firing unit — which fired_run_id FKs to blueprint_runs). Guarded by
+	// blueprint_run that resulted from it — the firing unit, which
+	// fired_run_id FKs to blueprint_runs, and NOT a conversation: the steps'
+	// conversations are minted later, by the dispatcher. Guarded by
 	// status='draining' — only a row PopForTask actually claimed can be
 	// resolved this way — so a stray call against a 'pending' or already-
 	// terminal row is a no-op rather than a silent double-transition.
-	MarkFired(ctx context.Context, orgID string, firingID int64, conversationID string) error
+	MarkFired(ctx context.Context, orgID string, firingID int64, blueprintRunID string) error
 
 	// MarkSkipped transitions a 'draining' firing to 'skipped_stale'
 	// with a reason describing a definitive stale outcome (task

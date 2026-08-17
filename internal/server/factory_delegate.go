@@ -369,7 +369,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// task object; the actor is passed explicitly so the run's frozen
 	// blueprint_run actor matches it.
 	task.ClaimedByAgentID = a.ID
-	conversationID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
+	blueprintRunID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: req.BlueprintID,
 		TriggerType:         "manual",
@@ -390,8 +390,10 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, factoryDelegateResponse{
-		TaskID:         task.ID,
-		ConversationID: conversationID,
+		TaskID: task.ID,
+		// TODO(TFAC-840): carries the blueprint_run id, not a conversation id —
+		// a wire contract, so correcting it is that ticket's call.
+		ConversationID: blueprintRunID,
 		ClaimStamped:   true,
 	})
 }

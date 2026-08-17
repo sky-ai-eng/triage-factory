@@ -377,16 +377,16 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		// (fired_run_id has FK with ON DELETE on (fired_run_id, org_id)
 		// referencing blueprint_runs(id, org_id)). The seeder's
 		// run-insert helpers produce valid blueprint_run ids.
-		conversationID := seed.RunForTask(t, tup.TaskID)
-		if err := s.MarkFired(ctx, orgID, row.ID, conversationID); err != nil {
+		blueprintRunID := seed.RunForTask(t, tup.TaskID)
+		if err := s.MarkFired(ctx, orgID, row.ID, blueprintRunID); err != nil {
 			t.Fatalf("MarkFired: %v", err)
 		}
 		rows, _ := s.ListForEntity(ctx, orgID, tup.EntityID)
 		if len(rows) != 1 || rows[0].Status != domain.PendingFiringStatusFired {
 			t.Errorf("expected one fired row, got %+v", rows)
 		}
-		if rows[0].FiredBlueprintRunID == nil || *rows[0].FiredBlueprintRunID != conversationID {
-			t.Errorf("fired_run_id = %v, want pointer to %q", rows[0].FiredBlueprintRunID, conversationID)
+		if rows[0].FiredBlueprintRunID == nil || *rows[0].FiredBlueprintRunID != blueprintRunID {
+			t.Errorf("fired_run_id = %v, want pointer to %q", rows[0].FiredBlueprintRunID, blueprintRunID)
 		}
 		if rows[0].DrainedAt == nil {
 			t.Errorf("drained_at should be set after MarkFired")
@@ -403,9 +403,9 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if err := s.MarkSkipped(ctx, orgID, row.ID, domain.PendingFiringSkipTaskClosed); err != nil {
 			t.Fatalf("MarkSkipped: %v", err)
 		}
-		conversationID := seed.RunForTask(t, tup.TaskID)
+		blueprintRunID := seed.RunForTask(t, tup.TaskID)
 		// Should silently no-op — guarded by WHERE status='pending'.
-		if err := s.MarkFired(ctx, orgID, row.ID, conversationID); err != nil {
+		if err := s.MarkFired(ctx, orgID, row.ID, blueprintRunID); err != nil {
 			t.Fatalf("MarkFired on terminal: %v", err)
 		}
 		rows, _ := s.ListForEntity(ctx, orgID, tup.EntityID)

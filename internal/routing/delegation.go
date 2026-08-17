@@ -558,7 +558,7 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 		return "", fmt.Errorf("task %s disappeared before spawn", task.ID)
 	}
 
-	conversationID, err := r.spawner.Delegate(*fresh, delegate.DelegateOpts{
+	blueprintRunID, err := r.spawner.Delegate(*fresh, delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: trigger.BlueprintID,
 		TriggerType:         "event",
@@ -587,9 +587,9 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 		}
 		return "", err
 	}
-	span.SetAttributes(telemetry.ConversationID(conversationID))
-	routerLog.InfoContext(ctx, "started run for task", "run_id", conversationID, "task_id", task.ID)
-	return conversationID, nil
+	span.SetAttributes(telemetry.BlueprintRunID(blueprintRunID))
+	routerLog.InfoContext(ctx, "started run for task", "blueprint_run", blueprintRunID, "task_id", task.ID)
+	return blueprintRunID, nil
 }
 
 // DrainTask is the spawner's hook into the per-task firing queue.
@@ -639,7 +639,7 @@ func (r *Router) DrainTask(orgID, taskID string) {
 			return // queue empty
 		}
 
-		conversationID, skipReason, transientErr := r.attemptDrainOne(ctx, orgID, firing)
+		blueprintRunID, skipReason, transientErr := r.attemptDrainOne(ctx, orgID, firing)
 		if transientErr != nil {
 			// Transient failure (DB read, Delegate). PopForTask already
 			// claimed this row into 'draining', so release it
@@ -666,8 +666,8 @@ func (r *Router) DrainTask(orgID, taskID string) {
 			}
 			return
 		}
-		if conversationID != "" {
-			if err := r.firings.MarkFired(ctx, orgID, firing.ID, conversationID); err != nil {
+		if blueprintRunID != "" {
+			if err := r.firings.MarkFired(ctx, orgID, firing.ID, blueprintRunID); err != nil {
 				// Durability race: the run was created (side-effect
 				// committed inside the spawner goroutine) but the UPDATE
 				// that records the firing→run association failed.
@@ -689,11 +689,16 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				// ListTasksWithPending don't see 'draining' rows
 				// either, so nothing would ever pick it up again.
 				routerLog.Error("mark firing fired failed, rolling back: tearing down run + reverting task to queued",
-					"firing_id", firing.ID, "run_id", conversationID, "error", err)
+					"firing_id", firing.ID, "blueprint_run", blueprintRunID, "error", err)
+				// TODO(TFAC-840): this teardown never fires. StopAndCancelBlueprint
+				// resolves its id against conversations, and what Delegate returned
+				// is the blueprint_run — so the call always comes back
+				// ErrNoActiveRun and the spawned run keeps executing while its task
+				// reverts to queued.
 				if r.spawner != nil {
-					if cerr := r.spawner.StopAndCancelBlueprint(orgID, conversationID, "", delegate.StopCauseFiringReverted); cerr != nil {
+					if cerr := r.spawner.StopAndCancelBlueprint(orgID, blueprintRunID, "", delegate.StopCauseFiringReverted); cerr != nil {
 						routerLog.Warn("stop run after mark-fired failure (run may already be terminal, drain still triggers from its defer)",
-							"run_id", conversationID, "error", cerr)
+							"blueprint_run", blueprintRunID, "error", cerr)
 					}
 				}
 				r.revertTaskStatus(ctx, orgID, firing.TaskID, "queued")
@@ -815,7 +820,7 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 // attemptDrainOne validates a popped firing against current state and
 // fires it if everything still holds. Three outcomes:
 //
-//   - (conversationID, "", nil)         — fire succeeded; caller marks 'fired'.
+//   - (blueprintRunID, "", nil)         — fire succeeded; caller marks 'fired'.
 //   - ("", skipReason, nil)    — definitive "no longer relevant"; caller
 //     marks 'skipped_stale'. Reserved for: task_closed (done /
 //     dismissed / snoozed — task isn't drain-eligible on the
@@ -837,7 +842,7 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 // intent is still valid and worth retrying. The breaker handles the
 // "actually broken, repeated failure" case via run-level failure counts —
 // but only once we've started enough runs to trip it. Until then, retry.
-func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *domain.PendingFiring) (conversationID, skipReason string, transientErr error) {
+func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *domain.PendingFiring) (blueprintRunID, skipReason string, transientErr error) {
 	task, err := r.tasks.GetSystem(ctx, orgID, firing.TaskID)
 	if err != nil {
 		return "", "", fmt.Errorf("task lookup: %w", err)

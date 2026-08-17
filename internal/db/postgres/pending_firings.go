@@ -149,12 +149,12 @@ func (s *pendingFiringsStore) RequeueStaleDraining(ctx context.Context, orgID st
 	return int(n), nil
 }
 
-func (s *pendingFiringsStore) MarkFired(ctx context.Context, orgID string, firingID int64, conversationID string) error {
+func (s *pendingFiringsStore) MarkFired(ctx context.Context, orgID string, firingID int64, blueprintRunID string) error {
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE pending_firings
 		SET status = 'fired', drained_at = now(), fired_run_id = $1
 		WHERE org_id = $2 AND id = $3 AND status = 'draining'
-	`, conversationID, orgID, firingID)
+	`, blueprintRunID, orgID, firingID)
 	return err
 }
 

@@ -759,7 +759,7 @@ func (s *Server) swipeTriggerDelegation(w http.ResponseWriter, r *http.Request, 
 	// The actor is the agent this swipe just claimed the task with (swipeDelegate
 	// stamped claimed_by_agent_id before this re-read, and Tasks.Get hydrates it).
 	// Pass it so the run's frozen blueprint_run actor matches the task claim.
-	conversationID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
+	blueprintRunID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: req.BlueprintID,
 		TriggerType:         "manual",
@@ -770,7 +770,10 @@ func (s *Server) swipeTriggerDelegation(w http.ResponseWriter, r *http.Request, 
 		writeDelegateSpawnError(w, err)
 		return false
 	}
-	response["conversation_id"] = conversationID
+	// TODO(TFAC-840): the field says conversation_id but Delegate returns the
+	// blueprint_run id, so following this into /api/agent/conversations/{id}
+	// 404s. Kept as-is here because the field name is a wire contract.
+	response["conversation_id"] = blueprintRunID
 	return true
 }
 

@@ -139,7 +139,7 @@ func (s *Server) launchSidecar(ctx context.Context, a launchSidecarArgs) (any, e
 		return nil, fmt.Errorf("capbroker: launch sidecar: %w", err)
 	}
 
-	entry := &conversationEntry{rt: rt, done: make(chan struct{})}
+	entry := &runEntry{rt: rt, done: make(chan struct{})}
 	s.runsMu.Lock()
 	if _, exists := s.runs[p.ContainerID]; exists {
 		s.runsMu.Unlock()

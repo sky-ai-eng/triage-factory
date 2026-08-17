@@ -97,7 +97,7 @@ func (rs *runSidecar) Close() {
 	// it took is worth having in the log next to the successor's first line.
 	if elapsed := time.Since(started); elapsed > slowCellTeardown {
 		dispatchLog.Warn("cell teardown was slow; the run's subnet index and sidecar uid stayed held for that long",
-			"run", rs.conversationID, "took", elapsed)
+			"conversation", rs.conversationID, "took", elapsed)
 	}
 }
 

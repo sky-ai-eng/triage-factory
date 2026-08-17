@@ -422,11 +422,12 @@ func cidrsOverlap(a, b *net.IPNet) bool {
 
 // --- id / netns / argv validation ---
 
-// validateConversationID rejects an id (run id or container id) that is empty,
-// over-long, or carries path structure. These ids seed the bundle dir
-// prefix, the netns name, and the cgroup name; a path-shaped id must never
-// be able to redirect any of those.
-func validateConversationID(kind, id string) error {
+// validateOpaqueID rejects an id that is empty, over-long, or carries path
+// structure. It takes no view on which id it is handed — callers pass a
+// conversation id, a container id, or a memory namespace, and name it in
+// kind. These ids seed the bundle dir prefix, the netns name, and the cgroup
+// name; a path-shaped id must never be able to redirect any of those.
+func validateOpaqueID(kind, id string) error {
 	if id == "" {
 		return fmt.Errorf("sandbox: %s is required", kind)
 	}
@@ -512,11 +513,11 @@ func validateArgv(argv []string) error {
 // worktree/mount source outside this run's own scope, a forged netns, or a
 // denylisted egress CIDR.
 func ValidateLaunchParams(p LaunchParams) error {
-	if err := validateConversationID("container id", p.ContainerID); err != nil {
+	if err := validateOpaqueID("container id", p.ContainerID); err != nil {
 		return err
 	}
 	if p.ConversationID != "" {
-		if err := validateConversationID("run id", p.ConversationID); err != nil {
+		if err := validateOpaqueID("run id", p.ConversationID); err != nil {
 			return err
 		}
 	}
@@ -524,7 +525,7 @@ func ValidateLaunchParams(p LaunchParams) error {
 	// run-tree key — see worktreeScope. Optional, but path-shape it when present
 	// so it can't smuggle a traversal into the RunTreeRoot join.
 	if p.MemoryNamespace != "" {
-		if err := validateConversationID("memory namespace", p.MemoryNamespace); err != nil {
+		if err := validateOpaqueID("memory namespace", p.MemoryNamespace); err != nil {
 			return err
 		}
 	}
@@ -594,7 +595,7 @@ func ValidateLaunchParams(p LaunchParams) error {
 // bounded even so: such an orchestrator already holds every host-side
 // credential a reachable sibling sidecar would mediate.
 func ValidateSidecarLaunchParams(p SidecarLaunchParams) error {
-	if err := validateConversationID("sidecar container id", p.ContainerID); err != nil {
+	if err := validateOpaqueID("sidecar container id", p.ContainerID); err != nil {
 		return err
 	}
 	if !strings.HasSuffix(p.ContainerID, SidecarContainerIDSuffix) {

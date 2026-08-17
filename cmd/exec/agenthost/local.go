@@ -772,7 +772,7 @@ func (c *LocalClient) InsertConversationWorktree(ctx context.Context, row domain
 }
 
 func (c *LocalClient) DeleteConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
-	return c.rt.DeleteRunWorktree(ctx, repoID, ref)
+	return c.rt.DeleteConversationWorktree(ctx, repoID, ref)
 }
 
 // --- agent run footer ---

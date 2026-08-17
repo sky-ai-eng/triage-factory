@@ -60,7 +60,7 @@ type Runtime interface {
 
 	// Writes.
 	InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (inserted bool, winningPath string, err error)
-	DeleteRunWorktree(ctx context.Context, repoID, ref string) error
+	DeleteConversationWorktree(ctx context.Context, repoID, ref string) error
 	UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error)
 	// UpdateReviewDetailsIfPending persists a review draft's mutated
 	// details_json, guarded on the draft still being state=pending. Returns
@@ -420,7 +420,7 @@ func (r *directRuntime) InsertConversationWorktree(ctx context.Context, row doma
 	return inserted, winningPath, err
 }
 
-func (r *directRuntime) DeleteRunWorktree(ctx context.Context, repoID, ref string) error {
+func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, repoID, ref string) error {
 	return withWriteInfo(ctx, r.stores, r.info,
 		func() error {
 			return r.stores.ConversationWorktrees.DeleteByRepoRefSystem(ctx, r.info.OrgID, r.info.ConversationID, repoID, ref)
@@ -712,7 +712,7 @@ func (r *relayRuntime) InsertConversationWorktree(ctx context.Context, row domai
 	return res.Inserted, res.WinningPath, nil
 }
 
-func (r *relayRuntime) DeleteRunWorktree(ctx context.Context, repoID, ref string) error {
+func (r *relayRuntime) DeleteConversationWorktree(ctx context.Context, repoID, ref string) error {
 	return r.conn.call(ctx, agentproc.RelayNamespaceCore, opDeleteRunWorktree, deleteConversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, nil)
 }
 

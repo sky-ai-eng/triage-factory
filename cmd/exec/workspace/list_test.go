@@ -10,7 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-func TestListWorkspaces_MissingRunID(t *testing.T) {
+func TestListWorkspaces_MissingConversationID(t *testing.T) {
 	stores, _ := newTestDB(t)
 	if _, err := listWorkspaces(hostFor(stores, "")); !errors.Is(err, errMissingConversationID) {
 		t.Errorf("err = %v, want errMissingConversationID", err)

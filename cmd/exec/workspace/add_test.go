@@ -330,7 +330,7 @@ func (s *stubCalls) deps() addDeps {
 	}
 }
 
-func TestMaterializeWorkspace_MissingRunID(t *testing.T) {
+func TestMaterializeWorkspace_MissingConversationID(t *testing.T) {
 	stores, _ := newTestDB(t)
 	stub := &stubCalls{}
 	_, err := materializeWorkspace(hostFor(stores, ""), "owner/repo", checkoutSpec{}, stub.deps())

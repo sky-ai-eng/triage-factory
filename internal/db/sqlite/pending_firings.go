@@ -123,7 +123,7 @@ func (s *pendingFiringsStore) RequeueStaleDraining(ctx context.Context, orgID st
 	return int(n), nil
 }
 
-func (s *pendingFiringsStore) MarkFired(ctx context.Context, orgID string, firingID int64, conversationID string) error {
+func (s *pendingFiringsStore) MarkFired(ctx context.Context, orgID string, firingID int64, blueprintRunID string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -131,7 +131,7 @@ func (s *pendingFiringsStore) MarkFired(ctx context.Context, orgID string, firin
 		UPDATE pending_firings
 		SET status = 'fired', drained_at = ?, fired_run_id = ?
 		WHERE id = ? AND status = 'draining'
-	`, time.Now(), conversationID, firingID)
+	`, time.Now(), blueprintRunID, firingID)
 	return err
 }
 

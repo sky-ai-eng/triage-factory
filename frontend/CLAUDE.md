@@ -73,7 +73,7 @@ rather than a convenience.
 suppressing the 401 funnel is the point. Otherwise **prefer branching in a
 `catch` on `HttpError.status`**, which keeps `apiJSON`'s parse for the success
 path — a 404 → not-found state has no funnel to suppress, so it wants the catch,
-not `allow`. `contexts/AuthContext.tsx`, `hooks/useRunDetail.ts`,
+not `allow`. `contexts/AuthContext.tsx`, `hooks/useConversationDetail.ts`,
 `pages/ProjectDetail.tsx` and `hooks/useInvites.ts` are the reference shape.
 
 ### Error strings
