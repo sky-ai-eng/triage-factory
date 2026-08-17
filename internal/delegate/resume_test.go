@@ -404,7 +404,7 @@ func TestFollowUp_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 
 // claimAndDispatch claims the globally-oldest queued run (mirroring the
 // dispatcher's own ClaimNextConversation call) and drives it synchronously through
-// dispatchClaimedConversation — the same entry a real drainRunQueue goroutine would
+// dispatchClaimedConversation — the same entry a real drainConversationQueue goroutine would
 // call, minus the goroutine wrapper, so resume-claim tests don't need to
 // poll for completion.
 func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {

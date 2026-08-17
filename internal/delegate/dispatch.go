@@ -1,6 +1,5 @@
-// The run-queue dispatcher + the blueprint state-machine reactor — the
-// queue-driven replacement for the in-memory runBlueprint for-loop. A blueprint
-// step is enqueued as a conversations row with no status at all — needing a
+// The conversation-queue dispatcher + the blueprint state-machine reactor. A
+// blueprint step is enqueued as a conversations row with no status at all — needing a
 // driver is derived, not stored; the dispatcher claims it,
 // rehydrates the shared workspace, runs the agent, and on terminal the reactor
 // advances the blueprint_run (enqueue the next step / finalize / leave parked).
@@ -93,16 +92,16 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 	scan := time.NewTicker(scanInterval)
 	defer scan.Stop()
 
-	s.drainRunQueue(ctx) // drain whatever survived the restart / boot reconcile
+	s.drainConversationQueue(ctx) // drain whatever survived the restart / boot reconcile
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-s.dispatchWake:
-			s.drainRunQueue(ctx)
+			s.drainConversationQueue(ctx)
 		case <-scan.C:
-			s.drainRunQueue(ctx)
+			s.drainConversationQueue(ctx)
 		}
 	}
 }
@@ -149,7 +148,7 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	}
 }
 
-// drainRunQueue claims queued runs and hands each to a goroutine, bounded by
+// drainConversationQueue claims queued runs and hands each to a goroutine, bounded by
 // the process-wide concurrency semaphore, until the queue is empty (or ctx is
 // cancelled). It acquires a slot BEFORE each claim, so at capacity it blocks on
 // a free slot rather than reserving a run it can't yet run (no claim held over
@@ -159,7 +158,7 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 // so this is the same mechanism a future N-worker dispatcher uses; the
 // semaphore is what keeps a burst of queued steps from fanning into an
 // unbounded number of agent subprocesses on one host.
-func (s *Spawner) drainRunQueue(ctx context.Context) {
+func (s *Spawner) drainConversationQueue(ctx context.Context) {
 	// Capture the semaphore once and use it for both acquire and release so a
 	// startup-time SetMaxConcurrentRuns can't strand a token on a replaced
 	// channel.
@@ -942,7 +941,7 @@ func resumeParkContext(orgID string, conv *domain.Conversation, task *domain.Tas
 
 // reactToStepTerminal is the blueprint state-machine reactor: given a step run
 // that has reached a terminal (or parked) state, advance the blueprint_run.
-// This is the post-step switch lifted out of the old runBlueprint loop —
+// The post-step switch:
 // continue→enqueue-next, finish→complete+close, abort→leave-open,
 // open→leave parked — now driven by the DB rather than a
 // goroutine stack. It calls recomputeTaskBoardColumn on every transition so the

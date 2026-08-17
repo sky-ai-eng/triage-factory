@@ -200,7 +200,7 @@ func TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen(t *tes
 	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	blueprintRunID := "bpr-" + conversationID
 	// The step completed and left a draft PR unresolved.
-	setRunStatus(t, database, conversationID, "completed")
+	setConversationStatus(t, database, conversationID, "completed")
 	seedDraftPRArtifact(t, s, conversationID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
@@ -220,7 +220,7 @@ func TestTerminateBlueprint_CompletedWithNoUnresolvedArtifactClosesTask(t *testi
 	stampBotClaim(t, database, taskID)
 	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	blueprintRunID := "bpr-" + conversationID
-	setRunStatus(t, database, conversationID, "completed")
+	setConversationStatus(t, database, conversationID, "completed")
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},

@@ -622,7 +622,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 			// about to disappear rather than after it already has.
 			//
 			// Ordering is load-bearing beyond that: container ids are
-			// tf-<runIDfrag>-<idx> and the subnet idx is RECYCLED, so a later
+			// tf-<conversationIDFrag>-<idx> and the subnet idx is RECYCLED, so a later
 			// run can legitimately mint this same id (some callers pass a
 			// fixed ConversationID — see Wrap). Deregistering here, ahead of the idx
 			// release in sb.Close() (or, on the executor path, in the

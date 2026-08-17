@@ -80,7 +80,7 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 					const conversationID = "r-resumability"
 					wt := t.TempDir()
 					seedConversation(t, database, conversationID, "sess-"+conversationID, wt)
-					setRunStatus(t, database, conversationID, "open")
+					setConversationStatus(t, database, conversationID, "open")
 					if _, err := database.Exec(`UPDATE blueprint_runs SET status=?, current_step_index=? WHERE id=?`,
 						tc.blueprintStatus, tc.currentStep, blueprintRunIDForConversation(t, database, conversationID)); err != nil {
 						t.Fatalf("set blueprint status: %v", err)
@@ -135,7 +135,7 @@ func TestResumabilityFor_FailedRunIsNotSteerable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	const conversationID = "r-failed-resumability"
 	seedConversation(t, database, conversationID, "sess", t.TempDir())
-	setRunStatus(t, database, conversationID, "failed")
+	setConversationStatus(t, database, conversationID, "failed")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
 	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
@@ -216,7 +216,7 @@ func TestParkConversationOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 	if len(published) != 1 {
 		t.Fatalf("published events = %d, want 1", len(published))
 	}
-	meta := decodeRunStatus(t, published[0].MetadataJSON)
+	meta := decodeConversationStatus(t, published[0].MetadataJSON)
 	if meta.ConversationID != conversationID || meta.Status != "open" {
 		t.Errorf("metadata = %+v, want the parked status for %s", meta, conversationID)
 	}

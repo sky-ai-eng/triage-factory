@@ -16,15 +16,15 @@ import (
 //   - the teamID Create should attribute prompts to. Every prompt is
 //     team-scoped, so the seeder threads it; SQLite pins the local sentinel,
 //     Postgres binds the test team.
-//   - a RunSeeder hook that lets the harness create conversations rows the
-//     Stats subtests need. The harness doesn't know how to create
-//     conversations directly (RunStore lands in wave 3b); the backend test
+//   - a conversation-seeder hook that lets the harness create conversations
+//     rows the Stats subtests need. The harness doesn't wire a
+//     db.ConversationStore of its own; the backend test
 //     owns that wiring against its own connection. Each backend
 //     translates a logical fixture (promptID + N runs at given
 //     timestamps) into its own schema's INSERT shape.
-type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID string, seedConversations RunSeederForStats)
+type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID string, seedConversations ConversationSeederForStats)
 
-// RunSeederForStats is a callback the harness invokes to populate
+// ConversationSeederForStats is a callback the harness invokes to populate
 // rows in the conversations table for Stats assertions. statusByOffset maps
 // row index → status string ("completed" / "failed" / "running"
 // etc.); the seeder generates one run per entry, with started_at
@@ -32,7 +32,7 @@ type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID 
 // the inserted run IDs in case the harness wants to clean them up
 // (it doesn't today — the per-test DB reset handles it). promptID is
 // the prompt's id the Stats subtests created via Create.
-type RunSeederForStats func(t *testing.T, promptID string, statusByOffset []string) []string
+type ConversationSeederForStats func(t *testing.T, promptID string, statusByOffset []string) []string
 
 // RunPromptStoreConformance runs the shared assertion suite against
 // any db.PromptStore impl. Each subtest gets a fresh store via
@@ -188,7 +188,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 	})
 
-	t.Run("Stats_AggregatesRuns", func(t *testing.T) {
+	t.Run("Stats_AggregatesConversations", func(t *testing.T) {
 		store, orgID, teamID, seedConversations := factory(t)
 		ctx := context.Background()
 		// Set up: a prompt + 5 runs (3 completed, 1 failed, 1 running).
@@ -218,7 +218,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 	})
 
-	t.Run("Stats_NoRuns_ReturnsZeros", func(t *testing.T) {
+	t.Run("Stats_NoConversations_ReturnsZeros", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		id := "unused-p"
@@ -263,7 +263,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 	})
 
-	t.Run("Delete_WithRunHistory_Succeeds", func(t *testing.T) {
+	t.Run("Delete_WithConversationHistory_Succeeds", func(t *testing.T) {
 		// Regression: a user prompt with run history must be
 		// deletable without hitting the conversations.prompt_id RESTRICT FK (a hard DELETE
 		// would 500). Soft-delete sidesteps the FK and keeps the audit trail.

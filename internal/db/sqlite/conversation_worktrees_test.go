@@ -26,7 +26,7 @@ func TestRunWorktreeStore_SQLite(t *testing.T) {
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 		seed := dbtest.ConversationWorktreeSeeder{
-			Run: func(t *testing.T, suffix string) string {
+			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()
 				return seedSQLiteConversationForWorktree(t, conn, suffix)
 			},
@@ -76,7 +76,7 @@ func TestRunWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 }
 
 // seedSQLiteConversationForWorktree seeds the entity + event + prompt + task
-// + run FK chain conversation_worktrees needs. Mirrors the seedSQLiteRunFor
+// + run FK chain conversation_worktrees needs. Mirrors the seedSQLiteConversationFor
 // TaskMemory shape so both stores' tests stay reading like siblings.
 func seedSQLiteConversationForWorktree(t *testing.T, conn *sql.DB, suffix string) string {
 	t.Helper()

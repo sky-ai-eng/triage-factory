@@ -23,12 +23,12 @@ type ClaimCredentialsSeeder struct {
 	// blueprint_run) and returns its id.
 	EnqueueConversation func(t *testing.T) (conversationID string)
 
-	// RunStatus reads the run's STORED conversations.status directly (SQL
+	// ConversationStatus reads the conversation's STORED conversations.status directly (SQL
 	// NULL as ""), so the suite can assert what the column does and does not
 	// carry: the phase park never touches the conversation row, and neither
 	// a claim nor a requeue writes a status onto it — mid-flight is the
 	// absence of an outcome, not a value.
-	RunStatus func(t *testing.T, conversationID string) string
+	ConversationStatus func(t *testing.T, conversationID string) string
 
 	// SetActivePhase rewrites the run's active claim's phase directly,
 	// bypassing the store's guards — the harness needs states that other
@@ -69,7 +69,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		return got
 	}
 
-	t.Run("ClaimNextRun_returns_the_minted_claim_id", func(t *testing.T) {
+	t.Run("ClaimNextConversation_returns_the_minted_claim_id", func(t *testing.T) {
 		// The executor stamps the engagement's measured sandbox cost by claim
 		// id at teardown, after the claim is released — so the claim it just
 		// minted has to come back with the run, per engagement. A requeue and
@@ -106,7 +106,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		// The park is claim-side only: the conversation row is untouched,
 		// which under the derived model means it carries no stored status
 		// at all.
-		if st := seed.RunStatus(t, conversationID); st != "" {
+		if st := seed.ConversationStatus(t, conversationID); st != "" {
 			t.Errorf("conversation status after park = %q, want no stored status", st)
 		}
 
@@ -196,7 +196,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		if matched, err := store.RequeueAwaitingCredentials(ctx, orgID, conversationID); err != nil || matched {
 			t.Fatalf("RequeueAwaitingCredentials before park = (%v, %v), want (false, nil)", matched, err)
 		}
-		if st := seed.RunStatus(t, conversationID); st != "" {
+		if st := seed.ConversationStatus(t, conversationID); st != "" {
 			t.Errorf("status after refused requeue = %q, want no stored status", st)
 		}
 
@@ -209,7 +209,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		}
 		// Releasing the claim IS the requeue: the row stays mid-flight and
 		// nothing writes a status.
-		if st := seed.RunStatus(t, conversationID); st != "" {
+		if st := seed.ConversationStatus(t, conversationID); st != "" {
 			t.Errorf("status after requeue = %q, want no stored status", st)
 		}
 		got, ok, err := store.GetClaim(ctx, orgID, conversationID)
@@ -228,7 +228,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		}
 	})
 
-	t.Run("RequeueRun_clears_key", func(t *testing.T) {
+	t.Run("RequeueConversation_clears_key", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.EnqueueConversation(t)
 		claim(t, store, conversationID)
@@ -255,7 +255,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		}
 	})
 
-	t.Run("RequeueRun_from_parked_claim_requeues", func(t *testing.T) {
+	t.Run("RequeueConversation_from_parked_claim_requeues", func(t *testing.T) {
 		// A sidecar bring-up that fails AFTER MarkAwaitingCredentials leaves
 		// the active claim parked, and the setup-failure path requeues via
 		// RequeueConversation (not the timeout-only RequeueAwaitingCredentials). The
@@ -287,7 +287,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		claim(t, store, conversationID)
 	})
 
-	t.Run("ResetProcessingRuns_clears_key", func(t *testing.T) {
+	t.Run("ResetProcessingConversations_clears_key", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.EnqueueConversation(t)
 		claim(t, store, conversationID)

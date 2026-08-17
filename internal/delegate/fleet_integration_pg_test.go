@@ -288,21 +288,21 @@ func TestFleet_Drain_DrainedInstanceStopsClaimingSurvivorDoesNot(t *testing.T) {
 		t.Fatal("A must read back draining=true from its own heartbeat")
 	}
 
-	sA.drainRunQueue(ctx)
+	sA.drainConversationQueue(ctx)
 	var claims int
 	if err := h.AdminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.conversationID).Scan(&claims); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
 	if claims != 0 {
-		t.Fatalf("claims = %d after A's (drained) drainRunQueue, want 0 — A must not claim", claims)
+		t.Fatalf("claims = %d after A's (drained) drainConversationQueue, want 0 — A must not claim", claims)
 	}
 
 	// B was never drained and claims normally.
-	sB.drainRunQueue(ctx)
+	sB.drainConversationQueue(ctx)
 	if err := h.AdminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.conversationID).Scan(&claims); err != nil {
-		t.Fatalf("read back run after B's drainRunQueue: %v", err)
+		t.Fatalf("read back run after B's drainConversationQueue: %v", err)
 	}
 	if claims != 1 {
-		t.Fatalf("claims = %d after B's drainRunQueue, want 1 — an undrained sibling must claim normally", claims)
+		t.Fatalf("claims = %d after B's drainConversationQueue, want 1 — an undrained sibling must claim normally", claims)
 	}
 }

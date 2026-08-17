@@ -32,7 +32,7 @@ func (f *fakeEventPublisher) eventsCopy() []domain.Event {
 	return out
 }
 
-func decodeRunStatus(t *testing.T, raw string) events.SystemConversationStatusMetadata {
+func decodeConversationStatus(t *testing.T, raw string) events.SystemConversationStatusMetadata {
 	t.Helper()
 	var meta events.SystemConversationStatusMetadata
 	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
@@ -41,7 +41,7 @@ func decodeRunStatus(t *testing.T, raw string) events.SystemConversationStatusMe
 	return meta
 }
 
-func decodeRunActivity(t *testing.T, raw string) events.SystemConversationActivityMetadata {
+func decodeConversationActivity(t *testing.T, raw string) events.SystemConversationActivityMetadata {
 	t.Helper()
 	var meta events.SystemConversationActivityMetadata
 	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
@@ -72,7 +72,7 @@ func TestBroadcastRunUpdate_PublishesRunStatus(t *testing.T) {
 	if evt.OrgID != "org-a" {
 		t.Errorf("org_id = %q, want org-a", evt.OrgID)
 	}
-	meta := decodeRunStatus(t, evt.MetadataJSON)
+	meta := decodeConversationStatus(t, evt.MetadataJSON)
 	if meta.ConversationID != "run-1" || meta.Status != "running" {
 		t.Errorf("metadata = %+v, want ConversationID=run-1 Status=running", meta)
 	}
@@ -95,7 +95,7 @@ func TestBroadcastRunFailed_PublishesFailureKind(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("published %d events, want 1", len(got))
 	}
-	meta := decodeRunStatus(t, got[0].MetadataJSON)
+	meta := decodeConversationStatus(t, got[0].MetadataJSON)
 	if meta.Status != "failed" {
 		t.Errorf("Status = %q, want failed", meta.Status)
 	}
@@ -114,7 +114,7 @@ func TestBroadcastRunFailed_UnclassifiedOmitsFailureKind(t *testing.T) {
 	s.broadcastConversationFailed("org-a", "run-1", domain.ConversationFailureUnclassified)
 
 	got := pub.eventsCopy()
-	meta := decodeRunStatus(t, got[0].MetadataJSON)
+	meta := decodeConversationStatus(t, got[0].MetadataJSON)
 	if meta.FailureKind != "" {
 		t.Errorf("FailureKind = %q, want empty for unclassified", meta.FailureKind)
 	}
@@ -144,7 +144,7 @@ func TestBroadcastMessage_ToolUsePublishesActivity(t *testing.T) {
 	if evt.EventType != domain.EventSystemConversationActivity {
 		t.Errorf("event_type = %q, want %q", evt.EventType, domain.EventSystemConversationActivity)
 	}
-	meta := decodeRunActivity(t, evt.MetadataJSON)
+	meta := decodeConversationActivity(t, evt.MetadataJSON)
 	if meta.ConversationID != "run-1" {
 		t.Errorf("ConversationID = %q, want run-1", meta.ConversationID)
 	}

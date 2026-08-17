@@ -59,7 +59,7 @@ func TestHandlePRNewCommits_ParkedBehindStages(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "run-parked", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	setRunStatus(t, database, "run-parked", "open") // resumable, no warm process
+	setConversationStatus(t, database, "run-parked", "open") // resumable, no warm process
 	seedPendingReview(t, s, "run-parked", "o/r", 7, "oldHead")
 
 	s.HandlePRNewCommits(newCommitsEvent("o/r", 7, "oldHead", "newHead"))
@@ -107,7 +107,7 @@ func TestHandlePRNewCommits_AtHeadSkips(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "run-current", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	setRunStatus(t, database, "run-current", "open")
+	setConversationStatus(t, database, "run-current", "open")
 	seedPendingReview(t, s, "run-current", "o/r", 7, "newHead") // anchor == the new head
 
 	s.HandlePRNewCommits(newCommitsEvent("o/r", 7, "oldHead", "newHead"))
@@ -124,7 +124,7 @@ func TestHandlePRNewCommits_ReconciledCommentHeadSkips(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "run-reconciled", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	setRunStatus(t, database, "run-reconciled", "open")
+	setConversationStatus(t, database, "run-reconciled", "open")
 	// Start head is old, but a staged comment already moved to newHead.
 	seedPendingReview(t, s, "run-reconciled", "o/r", 7, "oldHead", "newHead")
 
@@ -160,7 +160,7 @@ func TestHandlePRNewCommits_NoReviewNoOp(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "run-noreview", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	setRunStatus(t, database, "run-noreview", "open")
+	setConversationStatus(t, database, "run-noreview", "open")
 
 	s.HandlePRNewCommits(newCommitsEvent("o/r", 99, "oldHead", "newHead"))
 

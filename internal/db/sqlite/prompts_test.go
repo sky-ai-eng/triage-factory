@@ -19,7 +19,7 @@ import (
 // against the SQLite impl. Each subtest opens a fresh in-memory DB so
 // state doesn't leak between assertions.
 func TestPromptStore_SQLite(t *testing.T) {
-	dbtest.RunPromptStoreConformance(t, func(t *testing.T) (db.PromptStore, string, string, dbtest.RunSeederForStats) {
+	dbtest.RunPromptStoreConformance(t, func(t *testing.T) (db.PromptStore, string, string, dbtest.ConversationSeederForStats) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
@@ -54,8 +54,8 @@ func openSQLiteForTest(t *testing.T) *sql.DB {
 // started_at is staggered by `i` days back so the per-day grouping
 // has variation.
 //
-// RunStore hasn't migrated yet (wave 3b), so the seeder owns raw SQL
-// — the conformance harness is intentionally schema-blind.
+// The conformance harness is intentionally schema-blind, so the
+// seeder owns raw SQL.
 func seedSQLiteConversationsForStats(t *testing.T, conn *sql.DB, promptID string, statusByOffset []string) []string {
 	t.Helper()
 	now := time.Now().UTC()

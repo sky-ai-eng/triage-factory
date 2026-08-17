@@ -137,7 +137,7 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 			}
 			return id
 		},
-		Run: func(t *testing.T, conv domain.Conversation) string {
+		Conversation: func(t *testing.T, conv domain.Conversation) string {
 			t.Helper()
 			if conv.CreatorUserID == "" && conv.TriggerType != "event" {
 				conv.CreatorUserID = userID

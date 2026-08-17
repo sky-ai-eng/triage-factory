@@ -195,7 +195,7 @@ describe('AgentCard attention row', () => {
 
 describe('AgentCard failure-kind rendering', () => {
   it('renders the memory-limit verdict + knob copy for a summaryless killed run', () => {
-    // failRun writes no ResultSummary — the kind alone must surface the block.
+    // an infrastructure failure writes no ResultSummary — the kind alone must surface the block.
     renderCard({ Status: 'failed', ResultSummary: '', FailureKind: 'memory_limit' })
     expect(screen.getByText('Killed: memory limit')).toBeInTheDocument()
     expect(screen.getByText(/TF_RUN_MEMORY_LIMIT_MB/)).toBeInTheDocument()

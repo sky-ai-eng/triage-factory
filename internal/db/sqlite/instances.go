@@ -178,7 +178,7 @@ func (s *instanceStore) Get(ctx context.Context, id string) (*domain.Instance, e
 
 // --- Helpers ---
 
-// sqliteNullBool mirrors sqliteNullInt (agentrun.go) for the one *bool
+// sqliteNullBool mirrors sqliteNullInt (conversation.go) for the one *bool
 // heartbeat field.
 func sqliteNullBool(p *bool) sql.NullBool {
 	if p == nil {

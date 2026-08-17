@@ -165,7 +165,7 @@ func (rc *Reconciler) BackfillPRArtifactsForBranches(ctx context.Context, orgID 
 // state transition: PR draft/open/merged/closed, review submitted/dismissed,
 // branch deleted. On a TERMINAL transition it appends a final-outcome note to
 // the producing run's memory (β) and broadcasts the change over the WS hub (as
-// agent_run_update on the owning run, so the run view's artifact-derived surface
+// conversation_update on the owning run, so the run view's artifact-derived surface
 // refreshes). Returns the artifacts that transitioned, carrying their new state.
 //
 // Best-effort per artifact: a single GitHub or write failure is logged and
@@ -320,7 +320,7 @@ func (rc *Reconciler) recordConversationOutcome(ctx context.Context, orgID, conv
 }
 
 // broadcast pushes the transition to the frontend as a dedicated artifact_updated
-// event on the owning run. It deliberately does NOT reuse agent_run_update: that
+// event on the owning run. It deliberately does NOT reuse conversation_update: that
 // event's consumers (the Board) optimistically write run.Status = data.status, so
 // a payload carrying no real status would blank the card until a refetch. The
 // run's own status is unchanged here — only its artifact-derived surface (pending

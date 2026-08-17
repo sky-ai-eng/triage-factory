@@ -18,7 +18,7 @@ import (
 // connection serves the read. assertLocalOrg pins orgID to the local sentinel.
 //
 // Datetime filters wrap both sides in datetime() (the codebase idiom, see
-// agentrun.go) so a bound time.Time compares correctly against occurred_at
+// conversation.go) so a bound time.Time compares correctly against occurred_at
 // regardless of whether the underlying started_at/created_at was written by a
 // Go time.Time bind or a SQL CURRENT_TIMESTAMP default.
 type spendStore struct{ q queryer }

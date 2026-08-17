@@ -485,11 +485,11 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID
 	return stores, seedConversation, seedArt
 }
 
-// getRunMemory finds the memory row belonging to conversationID via
+// getConversationMemory finds the memory row belonging to conversationID via
 // GetMemoriesForEntity — the replacement for the removed GetRunMemory now
 // that reads are join-based (conversation_memory_entities) rather than a direct
 // run_id lookup.
-func getRunMemory(t *testing.T, stores db.Stores, ctx context.Context, orgID, entityID, conversationID string) *domain.TaskMemory {
+func getConversationMemory(t *testing.T, stores db.Stores, ctx context.Context, orgID, entityID, conversationID string) *domain.TaskMemory {
 	t.Helper()
 	mems, err := stores.TaskMemory.GetMemoriesForEntity(ctx, orgID, entityID)
 	if err != nil {
@@ -561,9 +561,9 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 	// ONE composed note covering all three artifacts, after the agent narrative
 	// (which is untouched). Overwrite, not append — but composed over the run's
 	// whole set, so nothing is clobbered.
-	mem := getRunMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-1", conversationID)
+	mem := getConversationMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-1", conversationID)
 	if mem == nil {
-		t.Fatalf("getRunMemory: nil")
+		t.Fatalf("getConversationMemory: nil")
 	}
 	if !strings.HasPrefix(mem.Content, "agent narrative") {
 		t.Errorf("agent narrative was trampled: %q", mem.Content)
@@ -611,7 +611,7 @@ func TestReconcile_PRClosed(t *testing.T) {
 	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewPending)
 
 	// The note covers the PR disposition; the un-reconciled review contributes none.
-	mem := getRunMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-2", conversationID)
+	mem := getConversationMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-2", conversationID)
 	if mem == nil || !strings.Contains(mem.Content, "closed without merging") {
 		t.Errorf("composed note missing the PR disposition; got: %v", mem)
 	}
@@ -653,7 +653,7 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 	assertState(t, stores, runmode.LocalDefaultOrgID, reviewArt.DedupKey, domain.ArtifactStateReviewPending)
 	assertState(t, stores, runmode.LocalDefaultOrgID, branchArt.DedupKey, domain.ArtifactStateBranchPushed)
 
-	mem := getRunMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-3", conversationID)
+	mem := getConversationMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-3", conversationID)
 	if mem != nil && strings.Contains(mem.Content, "Post-run outcome") {
 		t.Errorf("no terminal transition, but a post-run outcome note was written: %q", mem.Content)
 	}
@@ -752,9 +752,9 @@ func TestReconcile_OutcomeSupersedesVerdict(t *testing.T) {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}
 
-	mem := getRunMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-7", conversationID)
+	mem := getConversationMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-7", conversationID)
 	if mem == nil {
-		t.Fatalf("getRunMemory: nil")
+		t.Fatalf("getConversationMemory: nil")
 	}
 	if strings.Contains(mem.Content, "Human approved with a tweaked body.") {
 		t.Errorf("the approval verdict should have been superseded by the post-run outcome; got:\n%s", mem.Content)
@@ -860,7 +860,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 	}
 
 	assertState(t, stores, runmode.LocalDefaultOrgID, prArt.DedupKey, domain.ArtifactStatePRMerged)
-	mem := getRunMemory(t, stores, context.Background(), runmode.LocalDefaultOrgID, "ent-9", conversationID)
+	mem := getConversationMemory(t, stores, context.Background(), runmode.LocalDefaultOrgID, "ent-9", conversationID)
 	if mem == nil || !strings.Contains(mem.Content, "was merged on GitHub") {
 		t.Errorf("memory note was dropped on a cancelled caller ctx — the write-back must detach; got: %v", mem)
 	}

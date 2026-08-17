@@ -663,8 +663,8 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepConversationID, userID s
 }
 
 // blueprintTerminalForResumedStepConversation maps a resumed step run's terminal state +
-// position to the blueprint's terminal status. Mirrors runBlueprint's in-loop
-// disposition for the resume path: a clean completion routes through
+// position to the blueprint's terminal status. Mirrors reactToStepTerminal's
+// disposition, for the resume path: a clean completion routes through
 // blueprintDecisionForStepConversation (finish/advance/abort), and the
 // non-terminal-completed statuses map to the matching blueprint terminal.
 func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conversation, isFinal bool) (domain.BlueprintRunStatus, string) {

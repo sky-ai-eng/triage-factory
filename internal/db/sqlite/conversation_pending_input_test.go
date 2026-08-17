@@ -24,7 +24,7 @@ func TestRunPendingInputStore_SQLite(t *testing.T) {
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 		seed := dbtest.ConversationPendingInputSeeder{
-			Run: func(t *testing.T, suffix string) string {
+			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()
 				return seedSQLiteConversationForPendingInput(t, conn, suffix)
 			},

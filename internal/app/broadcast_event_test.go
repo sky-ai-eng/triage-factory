@@ -93,8 +93,8 @@ func waitForHubClient(t *testing.T, hub *websocket.Hub) {
 
 // TestBroadcastEvent_SkipsRunLifecycleSentinels pins the TFAC-592 guard: the
 // ws-broadcast subscriber must not re-forward system:conversation:* sentinels — the
-// spawner's two choke points already emit the dedicated agent_run_update /
-// agent_message websocket events, so forwarding the bus sentinel too would
+// spawner's two choke points already emit the dedicated conversation_update /
+// message websocket events, so forwarding the bus sentinel too would
 // double every tool call on the wire in a second shape. A system:poll:completed
 // event (existing behavior) must still go out.
 func TestBroadcastEvent_SkipsRunLifecycleSentinels(t *testing.T) {

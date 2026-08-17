@@ -31,10 +31,10 @@ type TaskCloseCancelIntentSeeder struct {
 	// closing event the audit row references.
 	Event func(t *testing.T, taskID string) (eventID string)
 
-	// Run stages a blueprint_run in blueprintStatus with one child
+	// BlueprintAndConversation stages a blueprint_run in blueprintStatus with one child
 	// conversation on taskID whose STORED status is convStatus (empty string
 	// = SQL NULL, the mid-flight state). Returns both ids.
-	Run func(t *testing.T, taskID, blueprintStatus, convStatus string) (blueprintRunID, convID string)
+	BlueprintAndConversation func(t *testing.T, taskID, blueprintStatus, convStatus string) (blueprintRunID, convID string)
 
 	// BareRun stages a conversation on taskID with NO blueprint parent, in
 	// the given stored status. Returns its id.
@@ -76,7 +76,7 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 		eventID := seed.Event(t, taskID)
-		brID, convID := seed.Run(t, taskID, "running", "")
+		brID, convID := seed.BlueprintAndConversation(t, taskID, "running", "")
 
 		closed, conversationIDs, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
@@ -106,7 +106,7 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 		eventID := seed.Event(t, taskID)
-		brID, _ := seed.Run(t, taskID, "completed", "completed")
+		brID, _ := seed.BlueprintAndConversation(t, taskID, "completed", "completed")
 
 		closed, conversationIDs, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
@@ -134,7 +134,7 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		if closed, _, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID); err != nil || !closed {
 			t.Fatalf("first close = (%v, %v), want (true, nil)", closed, err)
 		}
-		brID, _ := seed.Run(t, taskID, "running", "")
+		brID, _ := seed.BlueprintAndConversation(t, taskID, "running", "")
 
 		closed, conversationIDs, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {

@@ -31,7 +31,7 @@ func TestTaskMemoryStore_Postgres(t *testing.T) {
 		orgID, userID := seedPgTaskMemoryOrg(t, h)
 		promptID := seedPgTaskMemoryPrompt(t, h, orgID, userID)
 		seed := dbtest.TaskMemorySeeder{
-			Run: func(t *testing.T, suffix string) (string, string) {
+			Conversation: func(t *testing.T, suffix string) (string, string) {
 				t.Helper()
 				return seedPgConversationForTaskMemory(t, h, orgID, userID, promptID, suffix)
 			},

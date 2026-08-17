@@ -51,14 +51,14 @@ type FactorySeeder struct {
 	// Returns the task ID.
 	Task func(t *testing.T, entityID, eventType, dedupKey, primaryEventID, status string, createdAt time.Time) string
 
-	// Run inserts a run row against the given task in the given DISPLAY
+	// Conversation inserts a conversations row against the given task in the given DISPLAY
 	// status, which is not always a stored one: "running" means an
 	// engagement is driving the conversation, so the seeder writes a NULL
 	// stored status and mints an active claim, exactly as a real claim
 	// would. Every other value is written to the column verbatim. Returns
 	// the run ID. Tests covering memory_missing pair this with
 	// SetConversationMemory; tests covering status filtering do not.
-	Run func(t *testing.T, taskID, status string) string
+	Conversation func(t *testing.T, taskID, status string) string
 
 	// CloseEntity transitions an entity to state='closed' at the
 	// given moment. Bypasses any close-side-effects so tests can
@@ -230,12 +230,12 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, "", evID, "queued", now)
 
 		// One run per memory state we need to cover.
-		conversationNoRow := seed.Run(t, taskID, "running")
-		conversationNullContent := seed.Run(t, taskID, "running")
-		conversationEmptyContent := seed.Run(t, taskID, "running")
-		conversationWhitespace := seed.Run(t, taskID, "running")
-		conversationPopulated := seed.Run(t, taskID, "running")
-		conversationTerminal := seed.Run(t, taskID, "completed") // must NOT appear
+		conversationNoRow := seed.Conversation(t, taskID, "running")
+		conversationNullContent := seed.Conversation(t, taskID, "running")
+		conversationEmptyContent := seed.Conversation(t, taskID, "running")
+		conversationWhitespace := seed.Conversation(t, taskID, "running")
+		conversationPopulated := seed.Conversation(t, taskID, "running")
+		conversationTerminal := seed.Conversation(t, taskID, "completed") // must NOT appear
 
 		seed.SetConversationMemory(t, conversationNullContent, ent, nullSentinel)
 		seed.SetConversationMemory(t, conversationEmptyContent, ent, "")

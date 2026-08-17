@@ -24,7 +24,7 @@ func TestStagedInjectionStore_SQLite(t *testing.T) {
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 		seed := dbtest.StagedInjectionSeeder{
-			Run: func(t *testing.T, suffix string) string {
+			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()
 				return seedSQLiteConversationForStagedInjection(t, conn, suffix)
 			},

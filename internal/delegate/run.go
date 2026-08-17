@@ -825,7 +825,7 @@ func (s *Spawner) processCompletion(
 	// Every run is a step of a blueprint_run now (a single prompt is a 1-step
 	// blueprint), so this helper never owns task disposition: it persists
 	// outcome/status only and leaves advancement + task close to the orchestrator
-	// (runBlueprint / terminateBlueprint). blueprintRunID is always non-empty here.
+	// (reactToStepTerminal / terminateBlueprint). blueprintRunID is always non-empty here.
 
 	resultSummary := ""
 	status := "completed"
@@ -860,7 +860,7 @@ func (s *Spawner) processCompletion(
 
 	// The classification is settled; carry it onto the terminal span. A
 	// failed run additionally gets the failure kind, which is the closed
-	// domain.RunFailure* vocabulary rather than the free-text summary.
+	// domain.ConversationFailure* vocabulary rather than the free-text summary.
 	terminal = status
 	if status == "failed" {
 		terminal = status + "_" + string(failureKind)
@@ -943,7 +943,7 @@ func (s *Spawner) processCompletion(
 	s.updateBreakerCounter(task.ID, triggerType, status)
 
 	// Task disposition (close on finish, leave-open on abort) is the
-	// orchestrator's job now, not the step's: runBlueprint reads this run's
+	// orchestrator's job now, not the step's: reactToStepTerminal reads this run's
 	// terminal conversations.outcome and routes through terminateBlueprint,
 	// which owns the terminal column. A step completion must never close the
 	// task here — the next step may be about to run.

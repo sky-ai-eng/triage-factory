@@ -20,9 +20,9 @@ type StagedInjectionStoreFactory func(t *testing.T) (store db.StagedInjectionSto
 // StagedInjectionSeeder is a bag of callbacks the conformance suite uses to stage
 // fixture rows the StagedInjectionStore doesn't own.
 type StagedInjectionSeeder struct {
-	// Run inserts a run row and returns its id. suffix discriminates per-subtest
+	// Conversation inserts a conversations row and returns its id. suffix discriminates per-subtest
 	// seeds so unique indexes don't collide.
-	Run func(t *testing.T, suffix string) (conversationID string)
+	Conversation func(t *testing.T, suffix string) (conversationID string)
 
 	// DeleteConversation removes the run row so the FK ON DELETE CASCADE subtest can
 	// verify a purged run takes its undelivered injections with it.
@@ -38,7 +38,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 
 	t.Run("Append_then_Flush_returns_notes_sorted_and_drains", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.Run(t, "drain")
+		conversationID := seed.Conversation(t, "drain")
 
 		first := &domain.StagedInjection{ConversationID: conversationID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "first"}
 		if err := store.AppendSystem(ctx, orgID, first); err != nil {
@@ -85,7 +85,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 
 	t.Run("Flush_empty_when_nothing_staged", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.Run(t, "empty")
+		conversationID := seed.Conversation(t, "empty")
 		got, err := store.FlushPendingSystem(ctx, orgID, conversationID)
 		if err != nil {
 			t.Fatalf("flush: %v", err)
@@ -97,8 +97,8 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 
 	t.Run("Flush_is_per_run_isolated", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		convA := seed.Run(t, "iso-a")
-		convB := seed.Run(t, "iso-b")
+		convA := seed.Conversation(t, "iso-a")
+		convB := seed.Conversation(t, "iso-b")
 		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{ConversationID: convA, Producer: "p", Body: "for-A"}); err != nil {
 			t.Fatalf("append A: %v", err)
 		}
@@ -121,7 +121,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 
 	t.Run("Withdrawn_note_is_never_flushed", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.Run(t, "withdraw")
+		conversationID := seed.Conversation(t, "withdraw")
 
 		doomed := &domain.StagedInjection{ConversationID: conversationID, Producer: "p", Body: "withdrawn"}
 		if err := store.AppendSystem(ctx, orgID, doomed); err != nil {
@@ -157,9 +157,9 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 	})
 
-	t.Run("Run_delete_cascades_pending_notes", func(t *testing.T) {
+	t.Run("Conversation_delete_cascades_pending_notes", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.Run(t, "cascade")
+		conversationID := seed.Conversation(t, "cascade")
 		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{ConversationID: conversationID, Producer: "p", Body: "doomed"}); err != nil {
 			t.Fatalf("append: %v", err)
 		}

@@ -52,7 +52,7 @@ func TestTaskStore_CloseWithRunCancelIntent_Postgres(t *testing.T) {
 				}
 				return eventID
 			},
-			Run: func(t *testing.T, taskID, blueprintStatus, convStatus string) (string, string) {
+			BlueprintAndConversation: func(t *testing.T, taskID, blueprintStatus, convStatus string) (string, string) {
 				t.Helper()
 				brID := seedPgBlueprintRunForClose(t, conn, orgID, userID, taskID, blueprintStatus)
 				promptID := seedPgStepPromptForClose(t, conn, orgID, userID)

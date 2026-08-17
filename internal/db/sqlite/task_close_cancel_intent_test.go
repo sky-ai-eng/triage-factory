@@ -56,7 +56,7 @@ func TestTaskStore_CloseWithRunCancelIntent_SQLite(t *testing.T) {
 				}
 				return eventID
 			},
-			Run: func(t *testing.T, taskID, blueprintStatus, convStatus string) (string, string) {
+			BlueprintAndConversation: func(t *testing.T, taskID, blueprintStatus, convStatus string) (string, string) {
 				t.Helper()
 				brID := seedSQLiteBlueprintRun(t, conn, taskID, blueprintStatus)
 				convID := uuid.New().String()

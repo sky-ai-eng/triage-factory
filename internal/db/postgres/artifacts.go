@@ -12,7 +12,7 @@ import (
 // artifactStore is the Postgres impl of db.ArtifactStore. The artifacts_*
 // RLS policies scope reads/writes by team_id exactly like runs; org_id stays
 // in every WHERE/INSERT clause as defense in depth. Mirrors the runs store
-// (agentrun.go) for $N placeholders + scan conventions. See TFAC-455.
+// (conversation.go) for $N placeholders + scan conventions. See TFAC-455.
 //
 // Holds two pools, the same split Conversations / ConversationWorktrees use:
 //

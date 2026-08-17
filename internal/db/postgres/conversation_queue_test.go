@@ -634,7 +634,7 @@ func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
 				}
 				return conversationID
 			},
-			RunStatus: func(t *testing.T, conversationID string) string {
+			ConversationStatus: func(t *testing.T, conversationID string) string {
 				t.Helper()
 				var status sql.NullString
 				if err := h.AdminDB.QueryRow(`SELECT status FROM conversations WHERE id = $1`, conversationID).Scan(&status); err != nil {
@@ -913,7 +913,7 @@ func TestRunQueueStore_Postgres_ExecutorClaims(t *testing.T) {
 
 		nextStep := 0
 		seed := dbtest.ExecutorClaimsSeeder{
-			Run: func(t *testing.T, status, failureKind string) string {
+			Conversation: func(t *testing.T, status, failureKind string) string {
 				t.Helper()
 				idx := nextStep
 				nextStep++

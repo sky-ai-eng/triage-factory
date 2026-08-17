@@ -34,7 +34,7 @@ func TestRecomputeBoard_RunningSetsInProgress(t *testing.T) {
 func TestRecomputeBoard_OpenSetsInReview(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "ai")
 	stampBotClaim(t, database, taskID)
-	setRunStatus(t, database, conversationID, "open")
+	setConversationStatus(t, database, conversationID, "open")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
@@ -70,19 +70,19 @@ func TestRecomputeBoard_BouncesAcrossInteractionPoints(t *testing.T) {
 		t.Fatalf("initial: status = %q, want in_progress", got)
 	}
 
-	setRunStatus(t, database, conversationID, "open")
+	setConversationStatus(t, database, conversationID, "open")
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Fatalf("after open: status = %q, want in_review", got)
 	}
 
-	setRunStatus(t, database, conversationID, "running")
+	setConversationStatus(t, database, conversationID, "running")
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Fatalf("after resume: status = %q, want in_progress", got)
 	}
 
-	setRunStatus(t, database, conversationID, "open")
+	setConversationStatus(t, database, conversationID, "open")
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Fatalf("after second park: status = %q, want in_review", got)
@@ -97,7 +97,7 @@ func TestRecomputeBoard_MultiStepAggregate(t *testing.T) {
 	stampBotClaim(t, database, taskID)
 	brID := blueprintRunIDForConversation(t, database, conversationID)
 	// Step 0 (the seeded run) completed; add step 1, currently running.
-	setRunStatus(t, database, conversationID, "completed")
+	setConversationStatus(t, database, conversationID, "completed")
 	addStepConversation(t, database, brID, taskID, "step1-multi", 1, "running")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
@@ -106,7 +106,7 @@ func TestRecomputeBoard_MultiStepAggregate(t *testing.T) {
 	}
 
 	// Now step 1 parks open → in_review (any parked run flips the aggregate).
-	setRunStatus(t, database, "step1-multi", "open")
+	setConversationStatus(t, database, "step1-multi", "open")
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Errorf("step parked: status = %q, want in_review", got)
@@ -118,7 +118,7 @@ func TestRecomputeBoard_MultiStepAggregate(t *testing.T) {
 func TestRecomputeBoard_UserClaimedTaskNeutral(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "user-claim")
 	stampUserClaim(t, database, taskID)
-	setRunStatus(t, database, conversationID, "open")
+	setConversationStatus(t, database, conversationID, "open")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
@@ -145,7 +145,7 @@ func TestRecomputeBoard_AlreadyTerminalNeutral(t *testing.T) {
 	if _, err := database.Exec(`UPDATE tasks SET status = 'dismissed' WHERE id = ?`, taskID); err != nil {
 		t.Fatalf("park: %v", err)
 	}
-	setRunStatus(t, database, conversationID, "open")
+	setConversationStatus(t, database, conversationID, "open")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
@@ -168,7 +168,7 @@ func TestRecomputeBoard_NoActiveBlueprintRunNeutral(t *testing.T) {
 	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE id = ?`, brID); err != nil {
 		t.Fatalf("complete blueprint_run: %v", err)
 	}
-	setRunStatus(t, database, conversationID, "completed")
+	setConversationStatus(t, database, conversationID, "completed")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
@@ -242,7 +242,7 @@ func readTaskStatus(t *testing.T, database *sql.DB, taskID string) string {
 	return status
 }
 
-func setRunStatus(t *testing.T, database *sql.DB, conversationID, status string) {
+func setConversationStatus(t *testing.T, database *sql.DB, conversationID, status string) {
 	t.Helper()
 	if _, err := database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, conversationID); err != nil {
 		t.Fatalf("set run status: %v", err)

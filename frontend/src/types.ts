@@ -236,8 +236,8 @@ export interface Conversation {
   // draft PRs + unresolved_review_count ready reviews === pending_artifact_ids.length.
   unresolved_pr_count?: number
   unresolved_review_count?: number
-  // artifact_count is the number of artifacts this run produced (TFAC-465's
-  // runResponse projection — branch / PR / review / issue / comment, the
+  // artifact_count is the number of artifacts this run produced (the
+  // conversationResponse projection — branch / PR / review / issue / comment, the
   // primary gating one included). The Board card shows it as a footer
   // affordance without a per-card fetch; 0 / undefined hides the affordance.
   artifact_count?: number
@@ -1141,8 +1141,7 @@ export type WSEvent =
   // turns (the curator surface filters by project and appends to its active
   // turn). data is the shared snake_case Message DTO.
   | { type: 'message'; conversation_id?: string; project_id?: string; data: Message }
-  // Conversation lifecycle/status change (the former agent_run_update +
-  // curator_request_update). A delegated run carries conversation_id and a
+  // Conversation lifecycle/status change. A delegated run carries conversation_id and a
   // coalesced display status (fetching/cloning/agent_starting/
   // awaiting_credentials/running/terminal) plus failure_kind on a failure; a
   // curator turn carries project_id and { request_id, status }. failure_kind

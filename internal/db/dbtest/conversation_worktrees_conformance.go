@@ -21,11 +21,11 @@ type ConversationWorktreeStoreFactory func(t *testing.T) (store db.ConversationW
 // ConversationWorktreeSeeder is a bag of callbacks the conformance suite uses
 // to stage fixture rows the ConversationWorktreeStore doesn't own.
 type ConversationWorktreeSeeder struct {
-	// Run inserts the entity + event + prompt + task + run FK chain
+	// Conversation inserts the entity + event + prompt + task + conversation FK chain
 	// needed to attach a conversation_worktrees row, and returns the conversationID.
 	// suffix discriminates per-subtest seeds so the unique indexes on
 	// entities/runs don't collide.
-	Run func(t *testing.T, suffix string) (conversationID string)
+	Conversation func(t *testing.T, suffix string) (conversationID string)
 
 	// DeleteConversation removes the run row so the cascade-on-delete subtest
 	// can verify the FK ON DELETE CASCADE.
@@ -61,7 +61,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 
 	t.Run("Insert_returns_inserted_true_on_fresh_row", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.Run(t, "fresh")
+		conversationID := seed.Conversation(t, "fresh")
 		inserted, winning, err := insertWorktree(t, store, seed, orgID, domain.ConversationWorktree{
 			ConversationID: conversationID, RepoID: "owner/repo", Path: "/tmp/wt/" + conversationID + "/owner/repo/pr-1", Ref: "pr-1",
 		})
@@ -78,7 +78,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 
 	t.Run("Insert_idempotent_on_conflict_returns_winning_path", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.Run(t, "idem")
+		conversationID := seed.Conversation(t, "idem")
 		firstPath := "/tmp/wt/" + conversationID + "/owner/repo/pr-1"
 		if _, _, err := insertWorktree(t, store, seed, orgID, domain.ConversationWorktree{
 			ConversationID: conversationID, RepoID: "owner/repo", Path: firstPath, Ref: "pr-1",
@@ -106,7 +106,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		// repo (two PRs reviewed in one interactive run — TFAC-502). Both
 		// inserts must succeed and List must return both.
 		store, orgID, seed := mk(t)
-		conversationID := seed.Run(t, "tworef")
+		conversationID := seed.Conversation(t, "tworef")
 		for _, w := range []domain.ConversationWorktree{
 			{ConversationID: conversationID, RepoID: "owner/repo", Path: "/p/pr-1", Ref: "pr-1"},
 			{ConversationID: conversationID, RepoID: "owner/repo", Path: "/p/pr-2", Ref: "pr-2"},
@@ -130,7 +130,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 
 	t.Run("GetByRepoRef_returns_row_or_nil", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.Run(t, "getrepo")
+		conversationID := seed.Conversation(t, "getrepo")
 		if _, _, err := insertWorktree(t, store, seed, orgID, domain.ConversationWorktree{
 			ConversationID: conversationID, RepoID: "owner/repo", Path: "/p1", Ref: "pr-1",
 		}); err != nil {
@@ -165,8 +165,8 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 
 	t.Run("List_orders_by_created_at_then_repo_and_scopes_by_run", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		r1 := seed.Run(t, "list-r1")
-		r2 := seed.Run(t, "list-r2")
+		r1 := seed.Conversation(t, "list-r1")
+		r2 := seed.Conversation(t, "list-r2")
 		for _, w := range []domain.ConversationWorktree{
 			{ConversationID: r1, RepoID: "owner/a", Path: "/p1", Ref: "@default"},
 			{ConversationID: r1, RepoID: "owner/b", Path: "/p2", Ref: "@default"},
@@ -192,7 +192,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 
 	t.Run("DeleteByRepoRef_idempotent_on_missing_row", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.Run(t, "del-repo")
+		conversationID := seed.Conversation(t, "del-repo")
 		if err := store.DeleteByRepoRef(ctx, orgID, conversationID, "no/such-repo", "pr-1"); err != nil {
 			t.Errorf("DeleteByRepoRef(missing) = %v, want nil", err)
 		}
@@ -200,7 +200,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 
 	t.Run("DeleteByRepoRef_targets_only_the_matching_ref", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.Run(t, "del-ref")
+		conversationID := seed.Conversation(t, "del-ref")
 		for _, w := range []domain.ConversationWorktree{
 			{ConversationID: conversationID, RepoID: "owner/repo", Path: "/p1", Ref: "pr-1"},
 			{ConversationID: conversationID, RepoID: "owner/repo", Path: "/p2", Ref: "pr-2"},
@@ -223,7 +223,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 
 	t.Run("DeleteByPathSystem_removes_only_the_matching_row", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.Run(t, "del-path")
+		conversationID := seed.Conversation(t, "del-path")
 		if _, _, err := insertWorktree(t, store, seed, orgID, domain.ConversationWorktree{
 			ConversationID: conversationID, RepoID: "owner/a", Path: "/p1", Ref: "@default",
 		}); err != nil {
@@ -248,7 +248,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 
 	t.Run("Cascade_on_run_delete_removes_rows", func(t *testing.T) {
 		store, orgID, seed := mk(t)
-		conversationID := seed.Run(t, "cascade")
+		conversationID := seed.Conversation(t, "cascade")
 		if _, _, err := insertWorktree(t, store, seed, orgID, domain.ConversationWorktree{
 			ConversationID: conversationID, RepoID: "owner/a", Path: "/p1", Ref: "@default",
 		}); err != nil {

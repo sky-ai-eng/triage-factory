@@ -102,7 +102,7 @@ func queuedStepConversations(t *testing.T, database *sql.DB, brID string) []int 
 }
 
 // TestDrainRunQueue_DrainingSkipsClaim pins the drain verb's dispatcher-side
-// consequence (TFAC-586): drainRunQueue must not claim a queued row while
+// consequence (TFAC-586): drainConversationQueue must not claim a queued row while
 // Draining() is true, and must resume claiming the moment it flips back —
 // proving the gate, not fixture setup, is what blocked the first attempt.
 func TestDrainRunQueue_DrainingSkipsClaim(t *testing.T) {
@@ -112,15 +112,15 @@ func TestDrainRunQueue_DrainingSkipsClaim(t *testing.T) {
 	forceClaimable(t, database, "run-drain-skip")
 
 	s.SetDraining(true)
-	s.drainRunQueue(context.Background())
+	s.drainConversationQueue(context.Background())
 
 	if claims := claimCountFor(t, database, "run-drain-skip"); claims != 0 {
 		t.Errorf("claims = %d, want 0 — a draining instance must not claim", claims)
 	}
 
 	s.SetDraining(false)
-	s.drainRunQueue(context.Background())
-	// The claim is minted synchronously; drainRunQueue then dispatches the
+	s.drainConversationQueue(context.Background())
+	// The claim is minted synchronously; drainConversationQueue then dispatches the
 	// claimed run on a goroutine. This fixture's blueprint has an empty step
 	// plan, so that goroutine deterministically cancels the run — and may
 	// already have released the claim by the time we read (a race -race
@@ -162,7 +162,7 @@ func TestDrainRunQueue_PartitionFencedSkipsClaim(t *testing.T) {
 	forceClaimable(t, database, "run-pfence-skip")
 
 	s.partitionFenced.Store(true)
-	s.drainRunQueue(context.Background())
+	s.drainConversationQueue(context.Background())
 
 	if claims := claimCountFor(t, database, "run-pfence-skip"); claims != 0 {
 		t.Errorf("claims = %d, want 0 — a partition-fenced instance must not claim", claims)

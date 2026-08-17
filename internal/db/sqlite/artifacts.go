@@ -32,7 +32,7 @@ var artifactNonTerminalPredicate = fmt.Sprintf(`(
 // artifactStore is the SQLite impl of db.ArtifactStore. SQLite is
 // single-tenant (local mode, N=1) with no RLS — org_id exists for parity
 // with the Postgres baseline and every caller passes LocalDefaultOrgID
-// (asserted at each entry). Mirrors the runs store (agentrun.go) for the
+// (asserted at each entry). Mirrors the runs store (conversation.go) for the
 // single-queryer shape and scan conventions. See TFAC-455.
 type artifactStore struct{ q queryer }
 

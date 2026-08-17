@@ -62,13 +62,13 @@ type ConversationSeeder struct {
 	// hanging off it.
 	Task func(t *testing.T, entityID, eventType, primaryEventID string) string
 
-	// Run inserts a conversations row directly and returns its id (conv.ID
+	// Conversation inserts a conversations row directly and returns its id (conv.ID
 	// when set, a fresh uuid otherwise). ConversationQueueStore.EnqueueConversation is the
 	// only production mint; the conformance suite stages rows in arbitrary
 	// status without driving the queue. Fields honored: ID, TaskID,
 	// PromptID, Status, Model, TriggerType (default manual), TriggerID,
 	// BlueprintRunID.
-	Run func(t *testing.T, conv domain.Conversation) string
+	Conversation func(t *testing.T, conv domain.Conversation) string
 
 	// ClaimRows returns the conversation's claims rows oldest-first, so
 	// the suite can assert mint/release bookkeeping.
@@ -155,7 +155,7 @@ type ConversationSeeder struct {
 func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) {
 	t.Helper()
 
-	t.Run("SeededRun_GetReturnsIt", func(t *testing.T) {
+	t.Run("SeededConversation_GetReturnsIt", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
@@ -1177,7 +1177,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// has to reason about the blueprint rather than the row.
 		bpr := seed.BlueprintRun(t, taskID)
 		mkStep := func() string {
-			return seed.Run(t, domain.Conversation{
+			return seed.Conversation(t, domain.Conversation{
 				TaskID: taskID, PromptID: conversationTestPrompt(t), Status: "running",
 				Model: "m", BlueprintRunID: bpr,
 			})
@@ -2150,12 +2150,12 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ent := seed.Entity(t, "list-trigger")
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		manualID := seed.Run(t, domain.Conversation{
+		manualID := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "manual",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})
-		eventID := seed.Run(t, domain.Conversation{
+		eventID := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
@@ -2293,7 +2293,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 
 		// Add an active event-trigger run on the same task — gate flips true.
-		eventConversationID := seed.Run(t, domain.Conversation{
+		eventConversationID := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
@@ -2345,7 +2345,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Active event-trigger run → resolves to its run ID.
 		eventBR := seed.BlueprintRun(t, taskID)
-		eventConversationID := seed.Run(t, domain.Conversation{
+		eventConversationID := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: eventBR,
@@ -2422,7 +2422,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		orphanTaskID := seed.Task(t, seed.Entity(t, "parked-orphan"), domain.EventGitHubPROpened,
 			seed.Event(t, seed.Entity(t, "parked-orphan-ev"), domain.EventGitHubPROpened))
 		orphanBR := seed.BlueprintRun(t, orphanTaskID)
-		orphan := seed.Run(t, domain.Conversation{
+		orphan := seed.Conversation(t, domain.Conversation{
 			TaskID: orphanTaskID, PromptID: conversationTestPrompt(t), Status: "open", Model: "m",
 			BlueprintRunID: orphanBR,
 		})
@@ -3174,7 +3174,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		eq("fourth", contents("fourth", visible), nil)
 	})
 
-	t.Run("MarkDelivered_FlipsOnlyGivenIDsScopedToRun", func(t *testing.T) {
+	t.Run("MarkDelivered_FlipsOnlyGivenIDsScopedToConversation", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
@@ -3472,11 +3472,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Two runs sharing one blueprint_run — sibling steps. (The seeder
 		// mints a fresh blueprint_run per call, so we reuse brID directly
 		// to stage the multi-step shape the footer aggregates over.)
-		step1 := seed.Run(t, domain.Conversation{
+		step1 := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
-		step2 := seed.Run(t, domain.Conversation{
+		step2 := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
@@ -3525,7 +3525,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// stamps on its rows) contributes 0, not an error. Add a third,
 		// never-completed step and re-query for step2 — the settled total
 		// is unchanged (step1's 0.01 only).
-		_ = seed.Run(t, domain.Conversation{
+		_ = seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
@@ -3549,11 +3549,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Two runs sharing one blueprint_run — sibling steps. Duration lives
 		// on the claim Complete releases, so each step goes live (minting a
 		// claim) before it completes.
-		step1 := seed.Run(t, domain.Conversation{
+		step1 := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
-		step2 := seed.Run(t, domain.Conversation{
+		step2 := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
@@ -3595,7 +3595,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		// An unsettled sibling (seeded, never claimed nor completed → no
 		// claim telemetry) contributes 0: SUM skips it, COALESCE floors at 0.
-		_ = seed.Run(t, domain.Conversation{
+		_ = seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
@@ -3608,7 +3608,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("MemoryMissing_DerivedFromRunMemoryJOIN", func(t *testing.T) {
+	t.Run("MemoryMissing_DerivedFromConversationMemoryJOIN", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "mem")
@@ -3680,7 +3680,7 @@ func seedConversationWithBlueprintForTest(t *testing.T, orgID string, seed Conve
 	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 	brID := seed.BlueprintRun(t, taskID)
-	return seed.Run(t, domain.Conversation{
+	return seed.Conversation(t, domain.Conversation{
 		TaskID: taskID, PromptID: conversationTestPrompt(t), Status: status, Model: "m",
 		BlueprintRunID: brID,
 	}), brID
@@ -3693,7 +3693,7 @@ func seedConversationWithBlueprintForTest(t *testing.T, orgID string, seed Conve
 func seedConversationForTaskTest(t *testing.T, orgID, taskID, status string, seed ConversationSeeder) string {
 	t.Helper()
 	_ = orgID
-	return seed.Run(t, domain.Conversation{
+	return seed.Conversation(t, domain.Conversation{
 		TaskID: taskID, PromptID: conversationTestPrompt(t), Status: status, Model: "m",
 		BlueprintRunID: seed.BlueprintRun(t, taskID),
 	})

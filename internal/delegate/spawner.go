@@ -392,7 +392,7 @@ type Spawner struct {
 	snapshotRetentionTTL time.Duration
 	// memFloorMB is the dispatch memory guardrail: when available memory
 	// (hostmem.AvailableMB — cgroup-scoped when confined)
-	// drops below this, drainRunQueue defers claims (runs stay queued)
+	// drops below this, drainConversationQueue defers claims (runs stay queued)
 	// until memory recovers. Zero disables. Set once at startup via
 	// SetDispatchMemFloor; the probe is injectable for tests.
 	memFloorMB int
@@ -1399,7 +1399,7 @@ func (s *Spawner) broadcastConversationResumable(orgID, conversationID string) {
 }
 
 // broadcastConversationFailed is broadcastConversationUpdate's failure arm: the same
-// agent_run_update event with the machine-readable failure kind
+// conversation_update event with the machine-readable failure kind
 // alongside the status flip, so the frontend can render kind-specific
 // failure copy without a refetch. The key is omitted (not sent empty)
 // for an unclassified failure — consumers treat absence as "generic

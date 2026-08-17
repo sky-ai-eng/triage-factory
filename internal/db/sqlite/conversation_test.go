@@ -140,7 +140,7 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 			}
 			return id
 		},
-		Run: func(t *testing.T, conv domain.Conversation) string {
+		Conversation: func(t *testing.T, conv domain.Conversation) string {
 			return seedSQLiteConversation(t, conn, conv)
 		},
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {

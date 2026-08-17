@@ -279,7 +279,7 @@ func (s *promptStore) IncrementUsageSystem(ctx context.Context, orgID string, id
 // function shape was three statements and the conformance harness
 // covers both backends with identical assertions — a CTE optimization
 // is a future patch, not a port. Stats lives on PromptStore (vs
-// RunStore) because the queries key on prompt_id and the prompts
+// ConversationStore) because the queries key on prompt_id and the prompts
 // handler is the only consumer.
 func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) (*domain.PromptStats, error) {
 	if err := assertLocalOrg(orgID); err != nil {

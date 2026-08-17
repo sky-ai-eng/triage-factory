@@ -41,7 +41,7 @@ func TestConversationStore_NativeLoopReadsNeedNoRequestIdentity(t *testing.T) {
 	taskID := seeder.Task(t, entityID, string(domain.EventGitHubPRCICheckFailed), eventID)
 	blueprintRunID := seeder.BlueprintRun(t, taskID)
 	stepIdx := 0
-	conversationID := seeder.Run(t, domain.Conversation{
+	conversationID := seeder.Conversation(t, domain.Conversation{
 		TaskID:             taskID,
 		PromptID:           promptID,
 		Status:             "running",

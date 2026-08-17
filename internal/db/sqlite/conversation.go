@@ -1068,7 +1068,7 @@ func (s *conversationStore) InsertMessage(ctx context.Context, orgID string, msg
 
 	// SQLite uses AUTOINCREMENT on messages.id, so LastInsertId
 	// on the Result gives us the assigned row id. Postgres uses a
-	// sequence + RETURNING — see postgres/agentrun.go.
+	// sequence + RETURNING — see postgres/conversation.go.
 	result, err := s.q.ExecContext(ctx, `
 		INSERT INTO messages (conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id,
 		                      is_error, metadata, model,
@@ -1656,7 +1656,7 @@ func finalizeConversation(r *domain.Conversation, queuedAt sql.NullTime, claimed
 }
 
 // nullIfEmpty maps "" to a SQL NULL bind. Local mirror of the
-// helper that lives in postgres/agentrun.go; the two impls are
+// helper that lives in postgres/conversation.go; the two impls are
 // independent so neither imports the other's private helpers.
 func nullIfEmpty(s string) any {
 	if s == "" {

@@ -78,7 +78,7 @@ func (s *Spawner) HandlePRNewCommits(evt domain.Event) {
 		if !live {
 			conv, err := s.conversations.GetSystem(ctx, evt.OrgID, a.ConversationID)
 			if err != nil {
-				delegateLog.Warn("new-commits injection: load run failed", "run", a.ConversationID, "error", err)
+				delegateLog.Warn("new-commits injection: load run failed", "conversation", a.ConversationID, "error", err)
 				continue
 			}
 			if conv == nil || !injectionWillFlush(conv.Status, conv.Outcome) {

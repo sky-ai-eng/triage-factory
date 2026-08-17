@@ -305,7 +305,7 @@ func (r *slackExecRig) seedNonSlackTask(orgID, creatorID, teamID string) string 
 // seedConversation inserts a minimal run row the artifacts/external_actions FK can
 // point at, matching ConversationInfo.ConversationID, carrying a real task_id (seedNonSlackTask).
 // trigger_type/creator_user_id follow the conversations_creator_matches_trigger_type
-// CHECK (event ⇒ NULL creator, manual ⇒ non-NULL) — mirrors seedPgArtifactRun
+// CHECK (event ⇒ NULL creator, manual ⇒ non-NULL) — mirrors seedPgArtifactConversation
 // (internal/db/postgres/artifacts_test.go).
 func (r *slackExecRig) seedConversation(orgID, teamID, userID string, eventTriggered bool) string {
 	r.t.Helper()

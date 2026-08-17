@@ -54,13 +54,13 @@ func AssertTaskMemoryNamingFacts(t *testing.T, mem domain.TaskMemory) {
 // to stage fixture rows the TaskMemoryStore doesn't own. Each backend
 // implements them against its own SQL.
 type TaskMemorySeeder struct {
-	// Run inserts the entity + event + prompt + task + run FK chain
+	// Conversation inserts the entity + event + prompt + task + conversation FK chain
 	// needed to attach a conversation_memory row, and returns (conversationID, entityID).
 	// The conversation it inserts carries TaskMemorySeedPromptName as its
 	// prompt's name and TaskMemorySeedStepIndex as its blueprint step index.
 	// suffix discriminates per-subtest seeds so the unique indexes on
 	// entities/runs don't collide.
-	Run func(t *testing.T, suffix string) (conversationID, entityID string)
+	Conversation func(t *testing.T, suffix string) (conversationID, entityID string)
 
 	// BlueprintRun seeds a blueprint + blueprint_run row so a conversation_memory
 	// row can carry a valid blueprint_run_id (conversation_memory FKs it with ON
@@ -75,11 +75,10 @@ type TaskMemorySeeder struct {
 	Role func(t *testing.T, conversationID, entityID string) string
 }
 
-// memoryForConversation finds the memory row belonging to conversationID in the slice
-// GetMemoriesForEntity(entityID) returns — the replacement for the
-// removed GetRunMemory now that reads are join-based
-// (conversation_memory_entities) rather than a direct run_id lookup. Returns nil
-// if no row matches.
+// memoryForConversation finds the memory row belonging to conversationID in the
+// slice GetMemoriesForEntity(entityID) returns — reads are join-based
+// (conversation_memory_entities), so there is no direct by-conversation
+// point read to call instead. Returns nil if no row matches.
 func memoryForConversation(t *testing.T, ctx context.Context, s db.TaskMemoryStore, orgID, entityID, conversationID string) *domain.TaskMemory {
 	t.Helper()
 	mems, err := s.GetMemoriesForEntity(ctx, orgID, entityID)
@@ -139,7 +138,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 
 	t.Run("UpsertAgentMemory_writes_agent_content", func(t *testing.T) {
 		s, orgID, seed := mk(t)
-		conversationID, entityID := seed.Run(t, "upsert-agent")
+		conversationID, entityID := seed.Conversation(t, "upsert-agent")
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, "", "agent wrote this"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
@@ -168,7 +167,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				s, orgID, seed := mk(t)
-				conversationID, entityID := seed.Run(t, "empty-"+tc.name)
+				conversationID, entityID := seed.Conversation(t, "empty-"+tc.name)
 				if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, "", tc.content); err != nil {
 					t.Fatalf("UpsertAgentMemory: %v", err)
 				}
@@ -195,7 +194,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// human writer (review submit, swipe-discard) might land
 		// between the first agent attempt and the second.
 		s, orgID, seed := mk(t)
-		conversationID, entityID := seed.Run(t, "idempotent")
+		conversationID, entityID := seed.Conversation(t, "idempotent")
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, "", "first attempt"); err != nil {
 			t.Fatalf("first upsert: %v", err)
 		}
@@ -220,7 +219,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 
 	t.Run("UpdateConversationMemoryHumanContent_lands_on_existing_row", func(t *testing.T) {
 		s, orgID, seed := mk(t)
-		conversationID, entityID := seed.Run(t, "update-human")
+		conversationID, entityID := seed.Conversation(t, "update-human")
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, "", "agent self-report"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
@@ -245,7 +244,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 
 	t.Run("UpdateConversationMemoryHumanContent_empty_canonicalizes_to_null", func(t *testing.T) {
 		s, orgID, seed := mk(t)
-		conversationID, entityID := seed.Run(t, "update-blank")
+		conversationID, entityID := seed.Conversation(t, "update-blank")
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, "", "agent text"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
@@ -283,7 +282,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// leaves agent_content untouched, and materializes under the post-run
 		// heading.
 		s, orgID, seed := mk(t)
-		conversationID, entityID := seed.Run(t, "system-overwrite")
+		conversationID, entityID := seed.Conversation(t, "system-overwrite")
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, "", "agent narrative"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
@@ -324,7 +323,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// runs on the same entity with a sleep between them and pin
 		// the slice order.
 		s, orgID, seed := mk(t)
-		conv1, entityID := seed.Run(t, "order-first")
+		conv1, entityID := seed.Conversation(t, "order-first")
 		if err := s.UpsertAgentMemory(ctx, orgID, conv1, entityID, "", "first"); err != nil {
 			t.Fatalf("upsert first: %v", err)
 		}
@@ -334,7 +333,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// (matches the EventStore precedent) so the sleep is belt +
 		// suspenders.
 		time.Sleep(1100 * time.Millisecond)
-		conv2, _ := seed.Run(t, "order-second")
+		conv2, _ := seed.Conversation(t, "order-second")
 		// Re-use the same entity by overriding the seeded run's entity_id.
 		// The Run seeder returns a fresh entity per call; the test wants
 		// the second memory on the same entity. Seeder shape can't be
@@ -364,7 +363,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// relies on this shape to parse the boundary, so a regression
 		// here would silently corrupt memory replay.
 		s, orgID, seed := mk(t)
-		conversationID, entityID := seed.Run(t, "separator")
+		conversationID, entityID := seed.Conversation(t, "separator")
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, "", "agent reasoning"); err != nil {
 			t.Fatalf("upsert agent: %v", err)
 		}
@@ -398,7 +397,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// "## Human feedback (post-run)" section the next agent has
 		// to skip past.
 		s, orgID, seed := mk(t)
-		conversationID, entityID := seed.Run(t, "agent-only")
+		conversationID, entityID := seed.Conversation(t, "agent-only")
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, "", "agent reasoning only"); err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
@@ -421,8 +420,8 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// is A must still surface for entity B once a join row ties
 		// (run, B) at any role, even 'touched'.
 		s, orgID, seed := mk(t)
-		conversationID, entityA := seed.Run(t, "touch-join-a")
-		_, entityB := seed.Run(t, "touch-join-b")
+		conversationID, entityA := seed.Conversation(t, "touch-join-a")
+		_, entityB := seed.Conversation(t, "touch-join-b")
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityA, "", "cross-entity narrative"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
@@ -444,7 +443,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// the write and both read paths, and that an empty value
 		// canonicalizes to SQL NULL (the N=1 / standalone-run case).
 		s, orgID, seed := mk(t)
-		conversationID, entityID := seed.Run(t, "bp-roundtrip")
+		conversationID, entityID := seed.Conversation(t, "bp-roundtrip")
 		blueprintRunID := seed.BlueprintRun(t, "bp-roundtrip")
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, blueprintRunID, "step memory"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
@@ -470,7 +469,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 
 		// Standalone run: empty blueprintRunID canonicalizes to SQL NULL and
 		// reads back empty.
-		conv2, ent2 := seed.Run(t, "bp-null")
+		conv2, ent2 := seed.Conversation(t, "bp-null")
 		if err := s.UpsertAgentMemory(ctx, orgID, conv2, ent2, "", "standalone memory"); err != nil {
 			t.Fatalf("UpsertAgentMemory standalone: %v", err)
 		}
@@ -490,7 +489,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// project those two facts off the producing conversation, not just
 		// the memory row's own columns.
 		s, orgID, seed := mk(t)
-		conversationID, entityID := seed.Run(t, "naming-facts")
+		conversationID, entityID := seed.Conversation(t, "naming-facts")
 		if err := s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, "", "agent wrote this"); err != nil {
 			t.Fatalf("UpsertAgentMemory: %v", err)
 		}
@@ -511,7 +510,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// upgrades the row; a weaker one never downgrades it; re-recording
 		// the same (winning) role is a no-op.
 		s, orgID, seed := mk(t)
-		conversationID, entityID := seed.Run(t, "touch-precedence")
+		conversationID, entityID := seed.Conversation(t, "touch-precedence")
 
 		assertRole := func(want string) {
 			t.Helper()

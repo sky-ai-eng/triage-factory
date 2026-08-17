@@ -45,7 +45,7 @@ func newFenceFixture(t *testing.T, h *pgtest.Harness, executorID string) fenceFi
 	ent := seed.Entity(t, "fence")
 	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-	conversationID := seed.Run(t, domain.Conversation{
+	conversationID := seed.Conversation(t, domain.Conversation{
 		TaskID: taskID, PromptID: promptID, Status: "running", Model: "m",
 		BlueprintRunID: seed.BlueprintRun(t, taskID),
 	})
@@ -66,7 +66,7 @@ func seedSecondConversation(t *testing.T, fx fenceFixture) string {
 	ent := fx.seed.Entity(t, "fence-other")
 	ev := fx.seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID := fx.seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-	return fx.seed.Run(t, domain.Conversation{
+	return fx.seed.Conversation(t, domain.Conversation{
 		TaskID: taskID, PromptID: fx.promptID, Status: "running", Model: "m",
 		BlueprintRunID: fx.seed.BlueprintRun(t, taskID),
 	})

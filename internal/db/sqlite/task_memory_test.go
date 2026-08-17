@@ -26,7 +26,7 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 		seed := dbtest.TaskMemorySeeder{
-			Run: func(t *testing.T, suffix string) (conversationID, entityID string) {
+			Conversation: func(t *testing.T, suffix string) (conversationID, entityID string) {
 				t.Helper()
 				return seedSQLiteConversationForTaskMemory(t, conn, suffix)
 			},

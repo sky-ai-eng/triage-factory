@@ -36,7 +36,7 @@ import (
 func TestPromptStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunPromptStoreConformance(t, func(t *testing.T) (db.PromptStore, string, string, dbtest.RunSeederForStats) {
+	dbtest.RunPromptStoreConformance(t, func(t *testing.T) (db.PromptStore, string, string, dbtest.ConversationSeederForStats) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID := seedPgOrgAndUserForPrompts(t, h)

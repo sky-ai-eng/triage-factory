@@ -112,7 +112,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			}
 			return id
 		},
-		Run: func(t *testing.T, taskID, status string) string {
+		Conversation: func(t *testing.T, taskID, status string) string {
 			t.Helper()
 			id := uuid.New().String()
 			blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)

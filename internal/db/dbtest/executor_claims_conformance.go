@@ -37,9 +37,9 @@ type ExecutorClaimRow struct {
 // inside the same second) accumulate across a run's whole life through several
 // subsystems, and no single store call the suite could make reaches them.
 type ExecutorClaimsSeeder struct {
-	// Run stages one conversation in the given terminal state and returns its
+	// Conversation stages one conversation in the given terminal state and returns its
 	// id. failureKind may be empty (an unclassified or non-failed run).
-	Run func(t *testing.T, status, failureKind string) (conversationID string)
+	Conversation func(t *testing.T, status, failureKind string) (conversationID string)
 
 	// Claim stages one claims row and returns its id.
 	Claim func(t *testing.T, row ExecutorClaimRow) (claimID string)
@@ -61,7 +61,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("newest_first_scoped_to_the_executor_and_capped", func(t *testing.T) {
 		store, seed := mk(t)
-		conversationID := seed.Run(t, "completed", "")
+		conversationID := seed.Conversation(t, "completed", "")
 		// Three claims for ours, one for a neighbour executor on the same box's
 		// deployment — the neighbour must not appear.
 		var ids []string
@@ -103,7 +103,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("projects_actuals_lifetime_and_conversation_state", func(t *testing.T) {
 		store, seed := mk(t)
-		conversationID := seed.Run(t, "failed", "memory_limit")
+		conversationID := seed.Conversation(t, "failed", "memory_limit")
 		released := base.Add(90 * time.Second)
 		claimID := seed.Claim(t, ExecutorClaimRow{
 			ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base,
@@ -151,7 +151,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 		// A live claim: never released, never measured (the teardown that
 		// measures hasn't happened). It is still real occupancy on the box, so
 		// it must be listed rather than filtered out for lacking numbers.
-		conversationID := seed.Run(t, "running", "")
+		conversationID := seed.Conversation(t, "running", "")
 		seed.Claim(t, ExecutorClaimRow{ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base})
 
 		got, err := store.RecentClaimsForExecutorSystem(ctx, "exec-a", 25)
@@ -176,7 +176,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 	t.Run("partially_measured_claim_keeps_the_half_it_has", func(t *testing.T) {
 		// The pre-5.19 kernel shape: cpu.stat lands, memory.peak does not.
 		store, seed := mk(t)
-		conversationID := seed.Run(t, "completed", "")
+		conversationID := seed.Conversation(t, "completed", "")
 		released := base.Add(time.Minute)
 		seed.Claim(t, ExecutorClaimRow{
 			ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base,
@@ -197,7 +197,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("empty_for_an_executor_with_no_claims", func(t *testing.T) {
 		store, seed := mk(t)
-		_ = seed.Run(t, "completed", "")
+		_ = seed.Conversation(t, "completed", "")
 		got, err := store.RecentClaimsForExecutorSystem(ctx, "control-pod-1", 25)
 		if err != nil {
 			t.Fatalf("a control pod with no claims must read empty, not error: %v", err)
@@ -209,7 +209,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("ClaimByIDSystem_matches_the_list_projection", func(t *testing.T) {
 		store, seed := mk(t)
-		conversationID := seed.Run(t, "completed", "")
+		conversationID := seed.Conversation(t, "completed", "")
 		released := base.Add(time.Minute)
 		claimID := seed.Claim(t, ExecutorClaimRow{
 			ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base,
@@ -238,7 +238,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("ClaimByIDSystem_reports_an_unknown_id_as_absent", func(t *testing.T) {
 		store, seed := mk(t)
-		_ = seed.Run(t, "completed", "")
+		_ = seed.Conversation(t, "completed", "")
 		// A well-formed id that names nothing, and a malformed one — the
 		// operator can type either into a URL. Both are misses, not faults:
 		// on Postgres a non-uuid bind would otherwise surface as a 500.

@@ -18,9 +18,9 @@ type ConversationPendingInputStoreFactory func(t *testing.T) (store db.Conversat
 // stage fixture rows ConversationPendingInputStore doesn't own — which now includes the
 // queued rows themselves, since the store reads a queue it does not write.
 type ConversationPendingInputSeeder struct {
-	// Run inserts a run row and returns its id. suffix discriminates
+	// Conversation inserts a conversations row and returns its id. suffix discriminates
 	// per-subtest seeds so unique indexes don't collide.
-	Run func(t *testing.T, suffix string) (conversationID string)
+	Conversation func(t *testing.T, suffix string) (conversationID string)
 
 	// StagePending queues one message the way production does — the ordinary
 	// transcript insert, undelivered. Backends wire it to their own
@@ -52,7 +52,7 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 
 	t.Run("Store_then_Consume_returns_and_drains", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
-		conversationID := seed.Run(t, "drain")
+		conversationID := seed.Conversation(t, "drain")
 
 		seed.StagePending(t, conversationID, userID, "pick this back up")
 		msg, gotUser, ok, err := store.Consume(ctx, orgID, conversationID)
@@ -81,7 +81,7 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 
 	t.Run("Peek_returns_without_draining_then_Consume_deletes", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
-		conversationID := seed.Run(t, "peek")
+		conversationID := seed.Conversation(t, "peek")
 
 		seed.StagePending(t, conversationID, userID, "still here")
 		// Peek twice: both return the row (non-destructive).
@@ -105,7 +105,7 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 
 	t.Run("Consume_absent_is_ok_false_not_an_error", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
-		conversationID := seed.Run(t, "empty")
+		conversationID := seed.Conversation(t, "empty")
 		_, _, ok, err := store.Consume(ctx, orgID, conversationID)
 		if err != nil {
 			t.Fatalf("consume: %v", err)
@@ -120,7 +120,7 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 	// deleted the first one — no error, no log, nothing in the transcript.
 	t.Run("Store_appends_and_Consume_joins_in_order", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
-		conversationID := seed.Run(t, "append")
+		conversationID := seed.Conversation(t, "append")
 
 		seed.StagePending(t, conversationID, userID, "fix the null check")
 		seed.StagePending(t, conversationID, userID, "actually no, fix the test")
@@ -146,7 +146,7 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 	// the same rows a rehydrate apart, so they must read them the same way.
 	t.Run("Peek_and_Consume_agree_across_several_rows", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
-		conversationID := seed.Run(t, "agree")
+		conversationID := seed.Conversation(t, "agree")
 
 		for _, m := range []string{"one", "two", "three"} {
 			seed.StagePending(t, conversationID, userID, m)
@@ -174,7 +174,7 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 		if seed.SecondUser == nil {
 			t.Skip("backend seeder supplies no second user")
 		}
-		conversationID := seed.Run(t, "authors")
+		conversationID := seed.Conversation(t, "authors")
 		teammate := seed.SecondUser(t)
 
 		seed.StagePending(t, conversationID, userID, "my follow-up")
@@ -194,8 +194,8 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 
 	t.Run("Consume_is_per_run_isolated", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
-		convA := seed.Run(t, "iso-a")
-		convB := seed.Run(t, "iso-b")
+		convA := seed.Conversation(t, "iso-a")
+		convB := seed.Conversation(t, "iso-b")
 		seed.StagePending(t, convA, userID, "for-A")
 		_, _, ok, err := store.Consume(ctx, orgID, convB)
 		if err != nil {
@@ -213,9 +213,9 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 		}
 	})
 
-	t.Run("Run_delete_cascades_pending_input", func(t *testing.T) {
+	t.Run("Conversation_delete_cascades_pending_input", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
-		conversationID := seed.Run(t, "cascade")
+		conversationID := seed.Conversation(t, "cascade")
 		seed.StagePending(t, conversationID, userID, "doomed")
 		seed.DeleteConversation(t, conversationID)
 		_, _, ok, err := store.Consume(ctx, orgID, conversationID)

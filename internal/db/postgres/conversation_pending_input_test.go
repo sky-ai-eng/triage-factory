@@ -24,7 +24,7 @@ func TestRunPendingInputStore_Postgres(t *testing.T) {
 		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		seed := dbtest.ConversationPendingInputSeeder{
-			Run: func(t *testing.T, suffix string) string {
+			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()
 				return seedPgArtifactConversation(t, h, orgID, teamID, userID)
 			},

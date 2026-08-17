@@ -24,7 +24,7 @@ func TestStagedInjectionStore_Postgres(t *testing.T) {
 		h.Reset(t)
 		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
 		seed := dbtest.StagedInjectionSeeder{
-			Run: func(t *testing.T, suffix string) string {
+			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()
 				return seedPgArtifactConversation(t, h, orgID, teamID, userID)
 			},
