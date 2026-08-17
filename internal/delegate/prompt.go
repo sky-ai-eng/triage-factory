@@ -295,9 +295,9 @@ func (s *Spawner) collectExtraTools(promptAllowedTools string) string {
 }
 
 type agentResult struct {
-	// Outcome is the single terminal vocabulary (continue|finish|abort) —
-	// renamed from the legacy `status` field for clarity. See domain.ConversationOutcome
-	// and the completion block in internal/agentprompt.
+	// Outcome is the single terminal vocabulary (continue|finish|abort).
+	// See domain.ConversationOutcome and the completion block in
+	// internal/agentprompt.
 	Outcome string `json:"outcome"`
 	// Summary is the natural-language "what I did" — required on a
 	// finish/continue. Maps to conversations.result_summary.

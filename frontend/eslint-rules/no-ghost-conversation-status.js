@@ -91,8 +91,6 @@ function readVocabulary() {
 // stale — the `.Status` arm keeps firing, the rule's own fixtures name the type
 // as a bare string and so keep passing, and the only visible effect is that a
 // status reaching a comparison through a typed helper stops being checked.
-// That is exactly what happened when the alias was renamed in types.ts and the
-// name hardcoded here was left behind.
 function assertStatusTypeExists() {
   const source = readFileSync(VOCABULARY_SOURCE, 'utf8')
   if (!source.includes(`export type ${STATUS_TYPE} =`)) {

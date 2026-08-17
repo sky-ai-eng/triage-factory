@@ -144,13 +144,6 @@ type ExtensionRuntime interface {
 // namespace, alongside the git ops (agentproc.Op*). Both the sidecar's
 // relayRuntime (producer) and the orchestrator's RelayServer (consumer) live
 // in this package, so these are package-local.
-//
-// Unlike the method names in protocol.go, these carry no legacy aliases and
-// need none: the relay rides the supervision stream the orchestrator opened
-// when it launched the sidecar, held for the run's lifetime and closed with
-// it (agentproc.BringUpRunSidecar). Producer and consumer are therefore always
-// the same binary generation — a restart takes the stream, the cell, and the
-// engagement with it — so an op string may be renamed in place.
 const (
 	opGetConversation                  = "get_conversation"
 	opGetTask                          = "get_task"

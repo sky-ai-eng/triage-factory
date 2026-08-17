@@ -628,12 +628,15 @@ type memoryLoadResult struct {
 	Result *MemoryLoadResult `json:"result"`
 }
 
-// The method* constants are the wire names. Used by both client
-// and server so a rename here is the only edit needed to propagate —
-// within one binary version. A sidecar outlives an orchestrator restart
-// (it is per-run, launched with its agent), so its relay calls can reach
-// a newer orchestrator than the one that launched it; see the legacy*
-// constants below for the names that upgrade skew keeps alive.
+// The method* constants are the wire names, used by both client and
+// server, so a rename here is the only edit needed to propagate. That is
+// safe because both ends of this socket are one binary generation for any
+// given engagement: the sidecar hosting the Server is spawned by the
+// orchestrator at bring-up, the jailed client is a bind-mount of the
+// broker's own running executable (sandbox.TrustedTFBinaryPath), and a
+// restart takes the supervision stream, the cell, and the engagement with
+// it — the reaper requeues the row rather than a new orchestrator
+// adopting a live cell.
 const (
 	methodLookupConversation                  = "LookupConversation"
 	methodFinalizeReviewDraft                 = "FinalizeReviewDraft"
