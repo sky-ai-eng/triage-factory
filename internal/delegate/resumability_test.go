@@ -102,11 +102,11 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 						}
 					}
 
-					run, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
-					if err != nil || run == nil {
+					conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+					if err != nil || conv == nil {
 						t.Fatalf("load run: %v", err)
 					}
-					ok, reason := s.ResumabilityFor(context.Background(), runmode.LocalDefaultOrgID, run)
+					ok, reason := s.ResumabilityFor(context.Background(), runmode.LocalDefaultOrgID, conv)
 					if ok != tc.wantOK || reason != tc.wantReason {
 						t.Errorf("ResumabilityFor = (%v, %q), want (%v, %q)", ok, reason, tc.wantOK, tc.wantReason)
 					}
@@ -138,11 +138,11 @@ func TestResumabilityFor_FailedRunIsNotSteerable(t *testing.T) {
 	setRunStatus(t, database, conversationID, "failed")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	run, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
-	if err != nil || run == nil {
+	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
+	if err != nil || conv == nil {
 		t.Fatalf("load run: %v", err)
 	}
-	ok, reason := s.ResumabilityFor(context.Background(), runmode.LocalDefaultOrgID, run)
+	ok, reason := s.ResumabilityFor(context.Background(), runmode.LocalDefaultOrgID, conv)
 	if ok || reason != ResumeBlockedNotSteerable {
 		t.Errorf("ResumabilityFor = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedNotSteerable)
 	}

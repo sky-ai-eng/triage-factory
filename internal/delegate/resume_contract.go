@@ -39,15 +39,15 @@ const (
 // the refusal ladder's own order so the log reads the way the eventual refusal
 // will. Session id is checked only at rest, for the reason resumeCheckpoint
 // gives — asserting it at claim time would fire on every healthy run.
-func missingResumeCoordinates(run domain.Conversation, at resumeCheckpoint) []string {
+func missingResumeCoordinates(conv domain.Conversation, at resumeCheckpoint) []string {
 	var missing []string
-	if at == resumeCheckRest && run.SessionID == "" {
+	if at == resumeCheckRest && conv.SessionID == "" {
 		missing = append(missing, "sdk_session_id")
 	}
-	if run.WorktreePath == "" {
+	if conv.WorktreePath == "" {
 		missing = append(missing, "worktree_path")
 	}
-	if run.Model == "" {
+	if conv.Model == "" {
 		missing = append(missing, "model")
 	}
 	return missing
@@ -69,13 +69,13 @@ func (s *Spawner) assertResumeCoordinates(ctx context.Context, orgID, conversati
 	if s.conversations == nil {
 		return
 	}
-	run, err := s.conversations.GetSystem(ctx, orgID, conversationID)
-	if err != nil || run == nil {
+	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
+	if err != nil || conv == nil {
 		delegateLog.Debug("could not re-read the conversation to check its resume coordinates",
 			"conversation", conversationID, "org_id", orgID, "checkpoint", string(at), "error", err)
 		return
 	}
-	for _, field := range missingResumeCoordinates(*run, at) {
+	for _, field := range missingResumeCoordinates(*conv, at) {
 		delegateLog.Warn("SDK conversation is missing a resume coordinate; resume will refuse this row",
 			"conversation", conversationID, "org_id", orgID, "checkpoint", string(at), "field", field)
 	}

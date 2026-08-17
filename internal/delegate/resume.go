@@ -109,20 +109,20 @@ var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired a
 // conflict is right (nothing claims it while the reactor still owes it a
 // decision); only the log line's "went terminal" overstates what happened.
 func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, conversationID string) error {
-	run, err := s.conversations.GetSystem(ctx, orgID, conversationID)
+	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
 		delegateLog.Warn("resume: lost the wake race and could not re-read the conversation; reporting a conflict",
 			"conversation", conversationID, "org_id", orgID, "error", err)
 		return ErrRunNotResumable
 	}
-	if run == nil {
+	if conv == nil {
 		return ErrRunNotResumable
 	}
-	if run.Status == domain.StatusQueued || domain.IsActiveConversationStatus(run.Status) {
+	if conv.Status == domain.StatusQueued || domain.IsActiveConversationStatus(conv.Status) {
 		return nil
 	}
 	delegateLog.Warn("resume: lost the wake race to a conversation that went terminal; the queued message will not be delivered",
-		"conversation", conversationID, "org_id", orgID, "status", run.Status)
+		"conversation", conversationID, "org_id", orgID, "status", conv.Status)
 	return ErrRunNotResumable
 }
 
@@ -141,21 +141,21 @@ func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, conversationID str
 // row would turn a follow-up that worked into an error nobody can act on.
 // run carries the pre-flip state — the whole point of the row is which rest
 // state the follow-up woke.
-func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID string, run domain.Conversation) {
-	if s.events == nil || s.tasks == nil || run.TaskID == "" {
+func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID string, conv domain.Conversation) {
+	if s.events == nil || s.tasks == nil || conv.TaskID == "" {
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
 	meta, err := json.Marshal(events.SystemConversationResumedMetadata{
-		ConversationID: run.ID,
-		TaskID:         run.TaskID,
+		ConversationID: conv.ID,
+		TaskID:         conv.TaskID,
 		UserID:         userID,
-		BlueprintRunID: run.BlueprintRunID,
-		FromStatus:     run.Status,
-		FromOutcome:    run.Outcome,
+		BlueprintRunID: conv.BlueprintRunID,
+		FromStatus:     conv.Status,
+		FromOutcome:    conv.Outcome,
 	})
 	if err != nil {
-		delegateLog.Warn("marshal resume event metadata failed; the follow-up is not on the task timeline", "conversation", run.ID, "error", err)
+		delegateLog.Warn("marshal resume event metadata failed; the follow-up is not on the task timeline", "conversation", conv.ID, "error", err)
 		return
 	}
 	eventID, err := s.events.RecordSystem(ctx, orgID, domain.Event{
@@ -165,11 +165,11 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 		OccurredAt:   time.Now().UTC(),
 	})
 	if err != nil {
-		delegateLog.Warn("record resume event failed; the follow-up is not on the task timeline", "conversation", run.ID, "task", run.TaskID, "error", err)
+		delegateLog.Warn("record resume event failed; the follow-up is not on the task timeline", "conversation", conv.ID, "task", conv.TaskID, "error", err)
 		return
 	}
-	if err := s.tasks.RecordEventSystem(ctx, orgID, run.TaskID, eventID, "resumed"); err != nil {
-		delegateLog.Warn("link resume event to task failed", "conversation", run.ID, "task", run.TaskID, "event", eventID, "error", err)
+	if err := s.tasks.RecordEventSystem(ctx, orgID, conv.TaskID, eventID, "resumed"); err != nil {
+		delegateLog.Warn("link resume event to task failed", "conversation", conv.ID, "task", conv.TaskID, "event", eventID, "error", err)
 	}
 }
 
@@ -178,15 +178,15 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 // cold-rehydrate from. A check we can't complete (no storage wired, a blob
 // hiccup) counts as recoverable — a transient inability to verify must never
 // strand a resumable run as expired, and the claim path re-checks for real.
-func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *domain.Conversation) bool {
-	if run.WorktreePath != "" {
-		if _, err := os.Stat(run.WorktreePath); err == nil {
+func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *domain.Conversation) bool {
+	if conv.WorktreePath != "" {
+		if _, err := os.Stat(conv.WorktreePath); err == nil {
 			return true
 		} else if !os.IsNotExist(err) {
 			// A stat we couldn't complete (permission, I/O) is not proof the
 			// worktree is gone — count it as recoverable rather than emit a
 			// false 410 on a transient error.
-			delegateLog.Warn("resume: worktree stat inconclusive; treating as recoverable", "conversation", run.ID, "path", run.WorktreePath, "error", err)
+			delegateLog.Warn("resume: worktree stat inconclusive; treating as recoverable", "conversation", conv.ID, "path", conv.WorktreePath, "error", err)
 			return true
 		}
 	}
@@ -194,9 +194,9 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *d
 	if blobs == nil {
 		return true
 	}
-	ok, err := blobs.Exists(ctx, snapshotKey(orgID, memoryNamespace(run.BlueprintRunID)))
+	ok, err := blobs.Exists(ctx, snapshotKey(orgID, memoryNamespace(conv.BlueprintRunID)))
 	if err != nil {
-		delegateLog.Warn("resume: snapshot existence check failed", "conversation", run.ID, "error", err)
+		delegateLog.Warn("resume: snapshot existence check failed", "conversation", conv.ID, "error", err)
 		return true
 	}
 	return ok
@@ -208,7 +208,7 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *d
 // began with rather than re-resolving live state mid-run.
 type ResumeOptions struct {
 	// Model is the model the run started with. **Required** — a resume
-	// must reuse the model captured at run start (run.Model, captured by
+	// must reuse the model captured at run start (conv.Model, captured by
 	// dispatchResumeClaim), never a freshly-resolved one, or a config change
 	// the initial invocation and the resume would silently switch models
 	// mid-run. ResumeWithMessage rejects an empty Model with an error
@@ -237,14 +237,14 @@ type ResumeOptions struct {
 	// TRIAGE_FACTORY_BLUEPRINT_RUN_ID so per-run scratch paths resolve to the
 	// same place they did on the initial invocation. Required for the resume to
 	// stay consistent with the initial env; callers capture it from the run
-	// (dispatchResumeClaim → run.BlueprintRunID).
+	// (dispatchResumeClaim → conv.BlueprintRunID).
 	Namespace string
 
 	// TeamID is the run's owning team. Resolves the presence-gated
 	// absent-auto-deny policy for the resumed run's permission prompts
 	// (TFAC-392), and stamps the resumed run's agenthost.ConversationInfo.TeamID so
 	// the capture writers can attribute artifacts (TFAC-458). The claim
-	// captures it from the run row (run.TeamID, NOT NULL); empty falls back
+	// captures it from the run row (conv.TeamID, NOT NULL); empty falls back
 	// to the schema defaults for the absent-auto-deny resolve.
 	TeamID string
 
@@ -308,7 +308,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	// team) resolve — is what closes the mid-run model-drift gap: a config
 	// change between the initial invocation and this resume must never
 	// switch models underneath a single logical run. The resume claim captures
-	// and passes it (run.Model); an empty value is a wiring bug, surfaced loudly.
+	// and passes it (conv.Model); an empty value is a wiring bug, surfaced loudly.
 	if opts.Model == "" {
 		return nil, fmt.Errorf("resume: missing model (caller must pass the model captured at run start)")
 	}

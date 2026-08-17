@@ -1017,11 +1017,11 @@ func isTaskOwnRepo(ctx context.Context, stores db.Stores, info agenthost.Convers
 	if stores.Conversations == nil || stores.Tasks == nil || info.ConversationID == "" {
 		return false
 	}
-	run, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
-	if err != nil || run == nil || run.TaskID == "" {
+	conv, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
+	if err != nil || conv == nil || conv.TaskID == "" {
 		return false
 	}
-	task, err := stores.Tasks.GetSystem(ctx, info.OrgID, run.TaskID)
+	task, err := stores.Tasks.GetSystem(ctx, info.OrgID, conv.TaskID)
 	if err != nil || task == nil || task.EntitySource != "github" {
 		return false
 	}
@@ -1238,12 +1238,12 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 	if err != nil || br == nil {
 		return
 	}
-	runs, err := s.blueprints.ConversationsForBlueprintSystem(ctx, orgID, br.ID)
+	convs, err := s.blueprints.ConversationsForBlueprintSystem(ctx, orgID, br.ID)
 	if err != nil {
 		return
 	}
 	target := "in_progress"
-	for _, r := range runs {
+	for _, r := range convs {
 		if r.Status == "open" {
 			target = "in_review"
 			break
@@ -1256,8 +1256,8 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 	// (in_review), so the two checks are unordered as far as the result goes; the
 	// loop above runs first only as an optimization — the artifact reads are
 	// skipped once a parked-open run has already forced in_review (and reuse the
-	// runs slice already loaded above rather than re-fetching).
-	if target != "in_review" && s.conversationsHaveUnresolvedArtifacts(ctx, orgID, runs) {
+	// convs slice already loaded above rather than re-fetching).
+	if target != "in_review" && s.conversationsHaveUnresolvedArtifacts(ctx, orgID, convs) {
 		target = "in_review"
 	}
 	// Idempotent: skip the write + WS broadcast when already at the target.

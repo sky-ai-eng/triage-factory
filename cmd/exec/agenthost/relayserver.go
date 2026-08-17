@@ -228,11 +228,11 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		return json.Marshal(agentproc.AuthorizeGHWriteReply{Allowed: s.authorizeGHWrite(ctx, a)})
 
 	case opGetConversation:
-		run, err := s.rt.GetConversation(ctx)
+		conv, err := s.rt.GetConversation(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(agentRunResult{Run: run})
+		return json.Marshal(agentRunResult{Run: conv})
 
 	case opGetTask:
 		var a getTaskArgs

@@ -227,11 +227,11 @@ func TestFollowUpOnTheAbortedStepItselfIsAccepted(t *testing.T) {
 // decide follow-ups don't work.
 func TestModelForClaim_FollowUpDoesNotInheritTheStepModel(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "team-default-model")
-	run := domain.Conversation{Model: "cheap-aggregator", TeamID: runmode.LocalDefaultTeamID}
+	conv := domain.Conversation{Model: "cheap-aggregator", TeamID: runmode.LocalDefaultTeamID}
 	ctx := context.Background()
 
 	running := &domain.BlueprintRun{Status: domain.BlueprintRunStatusRunning}
-	if got := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, running, run); got != "cheap-aggregator" {
+	if got := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, running, conv); got != "cheap-aggregator" {
 		t.Errorf("step of a running blueprint = %q, want the step's own model (no mid-blueprint drift)", got)
 	}
 
@@ -240,7 +240,7 @@ func TestModelForClaim_FollowUpDoesNotInheritTheStepModel(t *testing.T) {
 		domain.BlueprintRunStatusAborted,
 		domain.BlueprintRunStatusFailed,
 	} {
-		if got := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: term}, run); got != "team-default-model" {
+		if got := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: term}, conv); got != "team-default-model" {
 			t.Errorf("follow-up under a %s blueprint = %q, want the configured default", term, got)
 		}
 	}
@@ -249,7 +249,7 @@ func TestModelForClaim_FollowUpDoesNotInheritTheStepModel(t *testing.T) {
 	// the turn — the step's is a worse answer than the default, never no answer.
 	s.SetRunCredentialResolvers(nil, nil, func(context.Context, string, string) string { return "" })
 	s.model = ""
-	if got := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: domain.BlueprintRunStatusCompleted}, run); got != "cheap-aggregator" {
+	if got := s.modelForClaim(ctx, runmode.LocalDefaultOrgID, &domain.BlueprintRun{Status: domain.BlueprintRunStatusCompleted}, conv); got != "cheap-aggregator" {
 		t.Errorf("unresolvable default = %q, want a fall back to the step's model", got)
 	}
 }

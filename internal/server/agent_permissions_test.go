@@ -39,7 +39,7 @@ func TestHandleAgentPermissions_ReconstructsAParkedPrompt(t *testing.T) {
 	s := newTestServer(t)
 	spawner := delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6")
 	s.SetSpawner(spawner)
-	conversationID := seedSteerRun(t, s.db, "perms-read", "running")
+	conversationID := seedSteerConversation(t, s.db, "perms-read", "running")
 	claimID := dbtest.SeedActiveClaim(t, s.db, conversationID, "exec-1", 0)
 
 	got := make(chan agentproc.PermissionDecision, 1)
@@ -113,7 +113,7 @@ func TestHandleAgentPermissions_ReconstructsAParkedPrompt(t *testing.T) {
 func TestHandleAgentPermissions_EmptyForAQuietRun(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	conversationID := seedSteerRun(t, s.db, "perms-quiet", "running")
+	conversationID := seedSteerConversation(t, s.db, "perms-quiet", "running")
 
 	code, pending := getPendingPermissions(t, s, conversationID)
 	if code != http.StatusOK {

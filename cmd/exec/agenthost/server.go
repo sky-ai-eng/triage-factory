@@ -449,11 +449,11 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		return emptyResult{}, client.DeleteStagedReviewComment(ctx, a.CommentID)
 
 	case methodGetConversation:
-		run, err := client.GetConversation(ctx)
+		conv, err := client.GetConversation(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return agentRunResult{Run: run}, nil
+		return agentRunResult{Run: conv}, nil
 
 	case methodGetTask:
 		var a getTaskArgs

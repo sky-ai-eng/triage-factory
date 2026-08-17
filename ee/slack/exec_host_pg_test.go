@@ -658,10 +658,10 @@ func TestSlackExecHandler_Edit_PreservesCreatingRunAndTeam_AcrossDifferentTeams(
 	r.trackChannel(orgID, owner, teamA, "C1")
 	r.trackChannel(orgID, owner, teamB, "C1")
 
-	runA := r.seedConversation(orgID, teamA, owner, true)
-	runB := r.seedConversation(orgID, teamB, owner, true)
-	infoA := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: runA, TeamID: teamA, IsEventTriggered: true}
-	infoB := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: runB, TeamID: teamB, IsEventTriggered: true}
+	convA := r.seedConversation(orgID, teamA, owner, true)
+	convB := r.seedConversation(orgID, teamB, owner, true)
+	infoA := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: convA, TeamID: teamA, IsEventTriggered: true}
+	infoB := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: convB, TeamID: teamB, IsEventTriggered: true}
 
 	sendOut, err := r.hdl.send(context.Background(), r.rt(infoA), slackSendArgs{Channel: "C1", Body: "posted by team A"})
 	if err != nil {
@@ -671,22 +671,22 @@ func TestSlackExecHandler_Edit_PreservesCreatingRunAndTeam_AcrossDifferentTeams(
 		t.Fatalf("edit: %v", err)
 	}
 
-	artsA := r.artifactsForRun(orgID, runA)
+	artsA := r.artifactsForRun(orgID, convA)
 	if len(artsA) != 1 {
 		t.Fatalf("want 1 artifact still attributed to the creating run A, got %d: %+v", len(artsA), artsA)
 	}
-	if artsA[0].ConversationID != runA || artsA[0].TeamID != teamA {
-		t.Errorf("artifact attribution drifted: run=%q team=%q, want run=%q team=%q", artsA[0].ConversationID, artsA[0].TeamID, runA, teamA)
+	if artsA[0].ConversationID != convA || artsA[0].TeamID != teamA {
+		t.Errorf("artifact attribution drifted: run=%q team=%q, want run=%q team=%q", artsA[0].ConversationID, artsA[0].TeamID, convA, teamA)
 	}
-	if artsB := r.artifactsForRun(orgID, runB); len(artsB) != 0 {
+	if artsB := r.artifactsForRun(orgID, convB); len(artsB) != 0 {
 		t.Errorf("editing run B must not have reassigned the artifact to itself, got %+v", artsB)
 	}
 
-	actsA := r.actionsForRun(orgID, runA)
+	actsA := r.actionsForRun(orgID, convA)
 	if len(actsA) != 1 || actsA[0].Action != domain.ActionSlackMessagePosted {
 		t.Errorf("run A's external_actions = %+v, want exactly one slack_message_posted", actsA)
 	}
-	actsB := r.actionsForRun(orgID, runB)
+	actsB := r.actionsForRun(orgID, convB)
 	if len(actsB) != 1 || actsB[0].Action != domain.ActionSlackMessageEdited {
 		t.Errorf("run B's external_actions = %+v, want exactly one slack_message_edited (the audit trail still credits the editing run)", actsB)
 	}

@@ -84,7 +84,7 @@ func TestCrossOrgHTTP_ProjectGet(t *testing.T) {
 func TestCrossOrgHTTP_ConversationGet(t *testing.T) {
 	r := newAuthRig(t)
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
-	runA := seedRunInOrg(t, r, orgA, alice, "run-get")
+	runA := seedConversationInOrg(t, r, orgA, alice, "run-get")
 
 	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA, sidA).StatusCode; got != http.StatusOK {
 		t.Errorf("alice GET /api/agent/conversations/%s = %d, want 200", runA, got)
@@ -101,7 +101,7 @@ func TestCrossOrgHTTP_ConversationGet(t *testing.T) {
 func TestCrossOrgHTTP_AgentArtifacts(t *testing.T) {
 	r := newAuthRig(t)
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
-	runA := seedRunInOrg(t, r, orgA, alice, "run-arts")
+	runA := seedConversationInOrg(t, r, orgA, alice, "run-arts")
 
 	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA+"/artifacts", sidA).StatusCode; got != http.StatusOK {
 		t.Errorf("alice GET /api/agent/conversations/%s/artifacts = %d, want 200", runA, got)
@@ -119,7 +119,7 @@ func TestCrossOrgHTTP_AgentArtifacts(t *testing.T) {
 func TestCrossOrgHTTP_AgentActions(t *testing.T) {
 	r := newAuthRig(t)
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
-	runA := seedRunInOrg(t, r, orgA, alice, "run-acts")
+	runA := seedConversationInOrg(t, r, orgA, alice, "run-acts")
 
 	path := "/api/agent/conversations/" + runA + "/actions/list"
 	if got := r.postJSONWithSid("POST", path, sidA, map[string]any{}).StatusCode; got != http.StatusOK {
@@ -198,10 +198,10 @@ func seedProjectInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, name st
 	return projectID
 }
 
-// seedRunInOrg inserts a full entity → event → task → prompt → run
+// seedConversationInOrg inserts a full entity → event → task → prompt → run
 // chain. Run is a manual trigger with the seeded user as creator and a
 // 'running' status so handleAgentStatus has live data to project.
-func seedRunInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix string) string {
+func seedConversationInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix string) string {
 	t.Helper()
 	taskID := seedTaskInOrg(t, r, orgID, userID, suffix)
 	// prompts.id is text (not uuid); pass the slug directly. conversations.prompt_id
@@ -236,7 +236,7 @@ func seedRunInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix stri
 // parent blueprint_run first. Manual trigger_type requires
 // creator_user_id NOT NULL (blueprint_runs_creator_matches_trigger_type).
 // The blueprint and blueprint_run inherit the task's team (first team in
-// the org), matching how seedTaskInOrg / seedRunInOrg resolve team_id.
+// the org), matching how seedTaskInOrg / seedConversationInOrg resolve team_id.
 func seedBlueprintRunInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, taskID string) string {
 	t.Helper()
 	blueprintID := uuid.NewString()

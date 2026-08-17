@@ -203,8 +203,8 @@ func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, stri
 		t.Fatalf("CreateRun: %v", err)
 	}
 
-	run := domain.Conversation{ID: "srun-" + suffix, TaskID: task.ID, BlueprintRunID: brID}
-	return s, database, brID, task, run
+	conv := domain.Conversation{ID: "srun-" + suffix, TaskID: task.ID, BlueprintRunID: brID}
+	return s, database, brID, task, conv
 }
 
 // TestBuildStepConfig_Slack_FirstClaim pins wire point 1 (dispatch.go's
@@ -213,17 +213,17 @@ func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, stri
 // tripping on — buildStepConfig routes it through setupSlack and stamps the
 // resolved worktree path onto the blueprint_run.
 func TestBuildStepConfig_Slack_FirstClaim(t *testing.T) {
-	s, database, brID, task, run := slackBlueprintFixture(t, "first")
+	s, database, brID, task, conv := slackBlueprintFixture(t, "first")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
-	t.Cleanup(func() { worktree.RemoveRunRoot(run.ID) })
+	t.Cleanup(func() { worktree.RemoveRunRoot(conv.ID) })
 
 	br, err := s.blueprints.GetRunSystem(ctx, org, brID)
 	if err != nil || br == nil {
 		t.Fatalf("GetRunSystem: (%v, %v)", br, err)
 	}
 
-	cfg, err := s.buildStepConfig(ctx, org, br, task, run, nil, nil)
+	cfg, err := s.buildStepConfig(ctx, org, br, task, conv, nil, nil)
 	if err != nil {
 		t.Fatalf("buildStepConfig: %v (slack must be a supported source)", err)
 	}
@@ -248,7 +248,7 @@ func TestBuildStepConfig_Slack_FirstClaim(t *testing.T) {
 // worktree-less run-root and recomposes scope/toolsRef identically to the
 // first claim.
 func TestBuildStepConfig_Slack_LaterStep(t *testing.T) {
-	s, database, brID, task, run := slackBlueprintFixture(t, "later")
+	s, database, brID, task, conv := slackBlueprintFixture(t, "later")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
@@ -265,7 +265,7 @@ func TestBuildStepConfig_Slack_LaterStep(t *testing.T) {
 		t.Fatalf("GetRunSystem: (%v, %v)", br, err)
 	}
 
-	cfg, err := s.buildStepConfig(ctx, org, br, task, run, nil, nil)
+	cfg, err := s.buildStepConfig(ctx, org, br, task, conv, nil, nil)
 	if err != nil {
 		t.Fatalf("buildStepConfig: %v", err)
 	}

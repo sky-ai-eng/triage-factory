@@ -123,18 +123,18 @@ func ResolveConversationIdentity(ctx context.Context, stores db.Stores, conversa
 	if orgID == "" {
 		return ConversationIdentity{}, fmt.Errorf("%w: %s", ErrConversationIdentityNotFound, conversationID)
 	}
-	run, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
+	conv, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
 		return ConversationIdentity{}, fmt.Errorf("lookup run %s: %w", conversationID, err)
 	}
-	if run == nil {
+	if conv == nil {
 		return ConversationIdentity{}, fmt.Errorf("%w: %s", ErrConversationIdentityNotFound, conversationID)
 	}
 	return ConversationIdentity{
 		OrgID:            orgID,
-		UserID:           run.CreatorUserID,
+		UserID:           conv.CreatorUserID,
 		ConversationID:   conversationID,
-		TeamID:           run.TeamID,
-		IsEventTriggered: run.TriggerType == domain.TriggerTypeEvent,
+		TeamID:           conv.TeamID,
+		IsEventTriggered: conv.TriggerType == domain.TriggerTypeEvent,
 	}, nil
 }

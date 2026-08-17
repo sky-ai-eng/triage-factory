@@ -60,12 +60,12 @@ func seedBlueprintRun(t *testing.T, database *sql.DB, taskID string) string {
 	return brID
 }
 
-// seedFooterRun installs the entity → event → task → prompt → run
+// seedFooterConversation installs the entity → event → task → prompt → run
 // chain required for the footer's run read to find a row, carrying the
 // columns the footer actually reads (model, started_at, completed_at,
 // duration_ms, total_cost_usd). Returns nothing — the test asserts via
 // Build.
-func seedFooterRun(t *testing.T, database *sql.DB, fix runFooterFixture) {
+func seedFooterConversation(t *testing.T, database *sql.DB, fix runFooterFixture) {
 	t.Helper()
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#"+fix.ID, "pr", "T", "https://x/"+fix.ID)
 	if err != nil {
@@ -137,7 +137,7 @@ func TestBuild_KindNounRendersInDisclaimer(t *testing.T) {
 	database := newTestDB(t)
 	for i, kind := range []string{"review", "PR", "issue"} {
 		conversationID := fmt.Sprintf("run-kind-%d", i)
-		seedFooterRun(t, database, runFooterFixture{
+		seedFooterConversation(t, database, runFooterFixture{
 			ID:        conversationID,
 			Model:     "claude-haiku-4-5",
 			StartedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
@@ -159,7 +159,7 @@ func TestBuild_HappyPath_UsesStoredCostAndDuration(t *testing.T) {
 	completedAt := time.Date(2026, 1, 1, 12, 1, 30, 0, time.UTC)
 	durationMs := 90_000
 	cost := 0.0123
-	seedFooterRun(t, database, runFooterFixture{
+	seedFooterConversation(t, database, runFooterFixture{
 		ID:           "r1",
 		Model:        "claude-sonnet-4-6",
 		StartedAt:    time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
@@ -190,7 +190,7 @@ func TestBuild_HappyPath_UsesStoredCostAndDuration(t *testing.T) {
 func TestBuild_LegacyFallback_FlagsApproximateCost(t *testing.T) {
 	database := newTestDB(t)
 	durationMs := 5_000
-	seedFooterRun(t, database, runFooterFixture{
+	seedFooterConversation(t, database, runFooterFixture{
 		ID:         "r2",
 		Model:      "claude-haiku-4-5",
 		StartedAt:  time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
@@ -218,7 +218,7 @@ func TestBuild_SumsCostAcrossBlueprintSteps(t *testing.T) {
 	// Seed step 1 to mint the shared blueprint_run, then read its id back
 	// so step 2 (the authoring step) attaches to the same run.
 	step1Cost := 0.01
-	seedFooterRun(t, database, runFooterFixture{
+	seedFooterConversation(t, database, runFooterFixture{
 		ID:           "bp-step-1",
 		Model:        "claude-haiku-4-5",
 		StartedAt:    time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
@@ -232,7 +232,7 @@ func TestBuild_SumsCostAcrossBlueprintSteps(t *testing.T) {
 	completedAt := time.Date(2026, 1, 1, 12, 1, 30, 0, time.UTC)
 	durationMs := 90_000
 	step2Cost := 0.02
-	seedFooterRun(t, database, runFooterFixture{
+	seedFooterConversation(t, database, runFooterFixture{
 		ID:             "bp-step-2",
 		Model:          "claude-opus-4-8",
 		StartedAt:      time.Date(2026, 1, 1, 12, 0, 30, 0, time.UTC),
@@ -266,7 +266,7 @@ func TestBuild_SumsTimeAcrossBlueprintSteps(t *testing.T) {
 	// Step 1 mints the shared blueprint_run; read its id back so step 2
 	// (the authoring step) attaches to the same run.
 	step1Dur := 30_000 // 30s
-	seedFooterRun(t, database, runFooterFixture{
+	seedFooterConversation(t, database, runFooterFixture{
 		ID:         "bpt-step-1",
 		Model:      "claude-haiku-4-5",
 		StartedAt:  time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
@@ -278,7 +278,7 @@ func TestBuild_SumsTimeAcrossBlueprintSteps(t *testing.T) {
 	}
 
 	step2Dur := 90_000 // 1m 30s
-	seedFooterRun(t, database, runFooterFixture{
+	seedFooterConversation(t, database, runFooterFixture{
 		ID:             "bpt-step-2",
 		Model:          "claude-opus-4-8",
 		StartedAt:      time.Date(2026, 1, 1, 12, 0, 30, 0, time.UTC),

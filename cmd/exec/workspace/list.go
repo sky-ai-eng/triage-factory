@@ -75,11 +75,11 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		return listOutput{}, translateLookupErr("workspace list", "", err)
 	}
 
-	run, err := host.GetConversation(ctx)
+	conv, err := host.GetConversation(ctx)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load run: %w", err)
 	}
-	if run == nil {
+	if conv == nil {
 		return listOutput{}, fmt.Errorf("%w: %s", errRunNotFound, info.ConversationID)
 	}
 

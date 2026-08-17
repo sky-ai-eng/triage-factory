@@ -11,10 +11,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedRunAction appends one external action to conversationID on the local-default
+// seedConversationAction appends one external action to conversationID on the local-default
 // org/team. RecordSystem mirrors how the exec choke point records a bot run's
 // writes in production.
-func seedRunAction(t *testing.T, s *Server, conversationID string, a domain.ExternalAction) {
+func seedConversationAction(t *testing.T, s *Server, conversationID string, a domain.ExternalAction) {
 	t.Helper()
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
@@ -31,22 +31,22 @@ func seedRunAction(t *testing.T, s *Server, conversationID string, a domain.Exte
 // were these read as a run that did nothing.
 func TestHandleAgentActions(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerRun(t, s.db, "acts", "completed")
+	conversationID := seedSteerConversation(t, s.db, "acts", "completed")
 
-	seedRunAction(t, s, conversationID, domain.ExternalAction{
+	seedConversationAction(t, s, conversationID, domain.ExternalAction{
 		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionCommentPosted,
 		Target: "octo/repo#42", ExternalID: "777",
 		URL:        "https://github.com/octo/repo/pull/42#discussion_r777",
 		Credential: domain.CredentialGitHubApp, DetailJSON: `{"in_reply_to":555}`,
 	})
-	seedRunAction(t, s, conversationID, domain.ExternalAction{
+	seedConversationAction(t, s, conversationID, domain.ExternalAction{
 		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionGHChannelWrite,
 		Target: "octo/repo", Credential: domain.CredentialGitHubPAT,
 		DetailJSON: `{"method":"PUT","path":"/repos/octo/repo/pulls/42/merge","http_status":404,"attempted":"pr_merged"}`,
 	})
 	// A second run's action, to pin the scoping.
-	other := seedSteerRun(t, s.db, "otheracts", "completed")
-	seedRunAction(t, s, other, domain.ExternalAction{
+	other := seedSteerConversation(t, s.db, "otheracts", "completed")
+	seedConversationAction(t, s, other, domain.ExternalAction{
 		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionBranchPushed,
 		Target: "octo/repo", Credential: domain.CredentialGitHubApp,
 	})
@@ -94,7 +94,7 @@ func TestHandleAgentActions(t *testing.T) {
 // "no external actions yet" off it, which is itself an answer.
 func TestHandleAgentActions_Empty(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerRun(t, s.db, "noacts", "completed")
+	conversationID := seedSteerConversation(t, s.db, "noacts", "completed")
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/"+conversationID+"/actions/list", map[string]any{})
 	page := decodeList[map[string]any](t, rec)
 	if len(page.Items) != 0 || page.Total() != 0 {
@@ -122,8 +122,8 @@ func TestHandleAgentActions_RunNotFound(t *testing.T) {
 // nothing at all.
 func TestHandleAgentActions_CorruptDetails(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerRun(t, s.db, "badacts", "completed")
-	seedRunAction(t, s, conversationID, domain.ExternalAction{
+	conversationID := seedSteerConversation(t, s.db, "badacts", "completed")
+	seedConversationAction(t, s, conversationID, domain.ExternalAction{
 		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionGHChannelWrite,
 		Target: "octo/repo", Credential: domain.CredentialGitHubApp,
 	})

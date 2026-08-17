@@ -76,12 +76,12 @@ func (s *Spawner) HandlePRNewCommits(evt domain.Event) {
 		// the time one arrives anyway.
 		live := s.getProc(a.ConversationID) != nil
 		if !live {
-			run, err := s.conversations.GetSystem(ctx, evt.OrgID, a.ConversationID)
+			conv, err := s.conversations.GetSystem(ctx, evt.OrgID, a.ConversationID)
 			if err != nil {
 				delegateLog.Warn("new-commits injection: load run failed", "run", a.ConversationID, "error", err)
 				continue
 			}
-			if run == nil || !injectionWillFlush(run.Status, run.Outcome) {
+			if conv == nil || !injectionWillFlush(conv.Status, conv.Outcome) {
 				continue
 			}
 		}

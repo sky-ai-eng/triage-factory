@@ -320,12 +320,12 @@ func (s *Spawner) gitHostBaseFor(ctx context.Context, orgID string) string {
 // one are the same directory, and what the agent is told about its own prior
 // work turns on the difference.
 //
-// run.ClaimID is read, not just carried: a cold rebuild re-stamps
+// conv.ClaimID is read, not just carried: a cold rebuild re-stamps
 // worktree_path, and that write is this engagement's to make only while it
 // still holds the conversation. Every caller is a claimed dispatch, so it is
 // populated at both — including the config the step builder synthesizes, which
 // copies it across for exactly this reason.
-func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain.Conversation, seed gitSeed) (_ string, prov domain.WorkspaceProvenance, err error) {
+func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domain.Conversation, seed gitSeed) (_ string, prov domain.WorkspaceProvenance, err error) {
 	// The provenance IS the interesting part of this span: a warm reuse is a
 	// stat call and a cold rehydrate is a blob fetch plus a git rebuild, and
 	// nothing downstream can tell them apart afterwards — past here they are
@@ -340,37 +340,37 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 		span.End()
 	}()
 
-	if run.WorktreePath != "" {
-		if _, err := os.Stat(run.WorktreePath); err == nil {
-			return run.WorktreePath, domain.WorkspaceProvenanceWarm, nil // warm: worktree still on disk
+	if conv.WorktreePath != "" {
+		if _, err := os.Stat(conv.WorktreePath); err == nil {
+			return conv.WorktreePath, domain.WorkspaceProvenanceWarm, nil // warm: worktree still on disk
 		}
 	}
 
 	blobs := s.Storage()
 	if blobs == nil {
-		return "", "", fmt.Errorf("worktree %q missing and no blob store to rehydrate from", run.WorktreePath)
+		return "", "", fmt.Errorf("worktree %q missing and no blob store to rehydrate from", conv.WorktreePath)
 	}
-	keyID := memoryNamespace(run.BlueprintRunID)
+	keyID := memoryNamespace(conv.BlueprintRunID)
 	rc, err := blobs.Get(ctx, snapshotKey(orgID, keyID))
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return "", "", fmt.Errorf("worktree %q missing and no snapshot for %s to rehydrate from", run.WorktreePath, keyID)
+			return "", "", fmt.Errorf("worktree %q missing and no snapshot for %s to rehydrate from", conv.WorktreePath, keyID)
 		}
 		return "", "", fmt.Errorf("rehydrate: get snapshot: %w", err)
 	}
 	defer func() { _ = rc.Close() }()
 
 	// Rebuild at the deterministic, host-local run-root for this key (equal to
-	// run.WorktreePath on the same host; a fresh path after landing elsewhere).
+	// conv.WorktreePath on the same host; a fresh path after landing elsewhere).
 	wtDir := worktree.RunRoot(keyID)
 	if rErr := s.rehydrateFromSnapshot(ctx, wtDir, seed, rc); rErr != nil {
 		return "", "", rErr
 	}
-	if wtDir != run.WorktreePath {
+	if wtDir != conv.WorktreePath {
 		// Point the run (and the cleanup paths that key off it) at the rebuilt
 		// worktree. System write — resume goroutines hold no JWT claims.
 		// Non-fatal: the rebuilt path is returned and this resume proceeds. But
-		// run.WorktreePath stays stale, so the NEXT resume won't find the
+		// conv.WorktreePath stays stale, so the NEXT resume won't find the
 		// warm copy and will cold-rehydrate again (correct, just slower) — log
 		// it distinctly so unexpected repeat rehydrates are diagnosable.
 		//
@@ -380,8 +380,8 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 		// has already logged the fact that actually happened — this executor
 		// lost the conversation — and saying anything further here would file
 		// a lost claim under slow rehydrates.
-		if wErr := s.setWorktreePath(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, wtDir); wErr != nil && !errors.Is(wErr, db.ErrClaimReleased) {
-			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "conversation", run.ID, "error", wErr)
+		if wErr := s.setWorktreePath(context.WithoutCancel(ctx), orgID, conv.ID, conv.ClaimID, wtDir); wErr != nil && !errors.Is(wErr, db.ErrClaimReleased) {
+			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "conversation", conv.ID, "error", wErr)
 		}
 	}
 	return wtDir, domain.WorkspaceProvenanceRehydrated, nil

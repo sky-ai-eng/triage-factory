@@ -506,16 +506,16 @@ func (a *lifecycleAdapter) handleConversationActivity(ctx context.Context, evt d
 func (a *lifecycleAdapter) resolveConversationEntry(ctx context.Context, orgID, conversationID string) *conversationEntry {
 	entry := &conversationEntry{cachedAt: slackLifecycleNow()}
 
-	run, err := a.stores.Conversations.GetSystem(ctx, orgID, conversationID)
+	conv, err := a.stores.Conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
 		slackLog.Warn("slack lifecycle: load run failed", "conversation", conversationID, "error", err)
 		return entry
 	}
-	if run == nil || run.TaskID == "" {
+	if conv == nil || conv.TaskID == "" {
 		return entry
 	}
 
-	task, err := a.stores.Tasks.GetSystem(ctx, orgID, run.TaskID)
+	task, err := a.stores.Tasks.GetSystem(ctx, orgID, conv.TaskID)
 	if err != nil {
 		slackLog.Warn("slack lifecycle: load task failed", "conversation", conversationID, "error", err)
 		return entry

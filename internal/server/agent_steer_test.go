@@ -21,7 +21,7 @@ func execSQL(t *testing.T, database *sql.DB, query string, args ...any) {
 	}
 }
 
-// seedSteerRun installs the entity → event → prompt → task → blueprint_run → run
+// seedSteerConversation installs the entity → event → prompt → task → blueprint_run → run
 // chain a steering endpoint needs, on the local-default org/team, and returns
 // the run id. status sets the run's lifecycle state.
 //
@@ -30,7 +30,7 @@ func execSQL(t *testing.T, database *sql.DB, query string, args ...any) {
 // drivability gate reads. A row that named no step would be undrivable, so a
 // fixture that left it NULL would silently make every steering test a test of
 // the refusal path.
-func seedSteerRun(t *testing.T, database *sql.DB, suffix, status string) string {
+func seedSteerConversation(t *testing.T, database *sql.DB, suffix, status string) string {
 	t.Helper()
 	const eventType = "github:pr:ci_check_failed"
 	e, ev, p, tk, rn := fixtureUUID("e_"+suffix), fixtureUUID("ev_"+suffix), fixtureUUID("p_"+suffix), fixtureUUID("t_"+suffix), fixtureUUID("r_"+suffix)
@@ -66,7 +66,7 @@ func messageRowCount(t *testing.T, database *sql.DB, conversationID string) int 
 func TestHandleMessage_TerminalConflictRecordsNothing(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	conversationID := seedSteerRun(t, s.db, "msg", "failed")
+	conversationID := seedSteerConversation(t, s.db, "msg", "failed")
 
 	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/message", map[string]string{"text": "pick this back up"})
 	if rec.Code != http.StatusConflict {
@@ -86,7 +86,7 @@ func TestHandleMessage_TerminalConflictRecordsNothing(t *testing.T) {
 func TestHandleMessage_OrphanedRunningConflictRecordsNothing(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	conversationID := seedSteerRun(t, s.db, "orphan", "running")
+	conversationID := seedSteerConversation(t, s.db, "orphan", "running")
 
 	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/message", map[string]string{"text": "how is it going?"})
 	if rec.Code != http.StatusConflict {
@@ -105,7 +105,7 @@ func TestHandleMessage_OrphanedRunningConflictRecordsNothing(t *testing.T) {
 func TestHandleMessage_ParkedSDKRecordsExactlyOnce(t *testing.T) {
 	s := newTestServer(t)
 	withEmptyBlobStore(t, s)
-	conversationID := seedSteerRun(t, s.db, "once", "open")
+	conversationID := seedSteerConversation(t, s.db, "once", "open")
 	execSQL(t, s.db, `UPDATE conversations SET sdk_session_id='sess-once', worktree_path=?, model='m' WHERE id=?`, t.TempDir(), conversationID)
 
 	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/message", map[string]string{"text": "pick this back up"})
@@ -162,7 +162,7 @@ func TestHandleMessage_EmptyTextRejected(t *testing.T) {
 func TestHandleAgentStop_ParksAndLeavesBlueprintRunning(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	conversationID := seedSteerRun(t, s.db, "stop", "running")
+	conversationID := seedSteerConversation(t, s.db, "stop", "running")
 
 	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/stop", nil)
 	if rec.Code != http.StatusOK {
@@ -192,7 +192,7 @@ func TestHandleAgentStop_ParksAndLeavesBlueprintRunning(t *testing.T) {
 func TestHandleAgentStop_RetiredPathsAreGone(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	conversationID := seedSteerRun(t, s.db, "retired", "running")
+	conversationID := seedSteerConversation(t, s.db, "retired", "running")
 
 	for _, path := range []string{"cancel", "interrupt"} {
 		rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/"+path, nil)
@@ -231,7 +231,7 @@ func TestHandleAgentStop_UnknownRunNotFound(t *testing.T) {
 func TestHandleAgentStop_InternalFailureIsNot404(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	conversationID := seedSteerRun(t, s.db, "dberr", "running")
+	conversationID := seedSteerConversation(t, s.db, "dberr", "running")
 	if err := s.db.Close(); err != nil {
 		t.Fatalf("close db: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestHandleAgentStop_InternalFailureIsNot404(t *testing.T) {
 func TestHandleAgentPermission_NotPendingNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	conversationID := seedSteerRun(t, s.db, "noperm", "running")
+	conversationID := seedSteerConversation(t, s.db, "noperm", "running")
 
 	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/permissions/req-ghost", map[string]string{"behavior": "allow"})
 	if rec.Code != http.StatusNotFound {
@@ -289,7 +289,7 @@ func TestHandleAgentPermission_ResolvesLiveRequest(t *testing.T) {
 	s := newTestServer(t)
 	spawner := delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6")
 	s.SetSpawner(spawner)
-	conversationID := seedSteerRun(t, s.db, "perm", "running")
+	conversationID := seedSteerConversation(t, s.db, "perm", "running")
 
 	// Park a permission prompt for the run: the broker registers synchronously,
 	// then the handler blocks until resolved (or it times out).

@@ -98,24 +98,24 @@ func (e *engagement) finish(outcome string, err error) {
 // everything this span covers is UPSTREAM of the runtime branch: a native
 // run's setup is traced here in full even though the loop it hands off to
 // is deliberately out of scope.
-func (s *Spawner) beginEngagement(ctx context.Context, run *domain.Conversation) (context.Context, func()) {
+func (s *Spawner) beginEngagement(ctx context.Context, conv *domain.Conversation) (context.Context, func()) {
 	attrs := []attribute.KeyValue{
-		telemetry.ConversationID(run.ID),
-		telemetry.OrgID(run.OrgID),
-		telemetry.ClaimAttempt(run.Attempts),
+		telemetry.ConversationID(conv.ID),
+		telemetry.OrgID(conv.OrgID),
+		telemetry.ClaimAttempt(conv.Attempts),
 	}
-	if run.TaskID != "" {
-		attrs = append(attrs, telemetry.TaskID(run.TaskID))
+	if conv.TaskID != "" {
+		attrs = append(attrs, telemetry.TaskID(conv.TaskID))
 	}
-	if run.Runtime != "" {
-		attrs = append(attrs, telemetry.Runtime(run.Runtime))
+	if conv.Runtime != "" {
+		attrs = append(attrs, telemetry.Runtime(conv.Runtime))
 	}
 	ctx, span := tracer.Start(ctx, "engagement.setup",
 		trace.WithNewRoot(), trace.WithAttributes(attrs...))
 
 	e := &engagement{span: span, sc: span.SpanContext()}
 	s.mu.Lock()
-	s.engagements[run.ID] = e
+	s.engagements[conv.ID] = e
 	s.mu.Unlock()
 
 	return ctx, func() {
@@ -127,8 +127,8 @@ func (s *Spawner) beginEngagement(ctx context.Context, run *domain.Conversation)
 		// have registered its own engagement by the time this teardown runs,
 		// and deleting by key alone would take the successor's link target
 		// with it.
-		if s.engagements[run.ID] == e {
-			delete(s.engagements, run.ID)
+		if s.engagements[conv.ID] == e {
+			delete(s.engagements, conv.ID)
 		}
 		s.mu.Unlock()
 	}

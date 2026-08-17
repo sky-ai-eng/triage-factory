@@ -80,9 +80,9 @@ func traceTestRun(id string) *domain.Conversation {
 func TestEngagementRootEndsAtAgentLive(t *testing.T) {
 	read := recordSpans(t)
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	run := traceTestRun("run-live")
+	conv := traceTestRun("run-live")
 
-	_, done := s.beginEngagement(context.Background(), run)
+	_, done := s.beginEngagement(context.Background(), conv)
 	if got := spansNamed(read(), "engagement.setup"); len(got) != 0 {
 		t.Fatalf("the root exported before agent-live (%d spans); it must not end until the phase clears", len(got))
 	}
@@ -90,7 +90,7 @@ func TestEngagementRootEndsAtAgentLive(t *testing.T) {
 	// The phase-clear to running IS agent-live, and it is the one signal both
 	// runtimes share. s.conversations is nil here, so updatePhase's write no-ops
 	// and this covers exactly the span half.
-	s.endEngagement(run.ID, engagementLive)
+	s.endEngagement(conv.ID, engagementLive)
 	done()
 
 	roots := spansNamed(read(), "engagement.setup")
@@ -101,14 +101,14 @@ func TestEngagementRootEndsAtAgentLive(t *testing.T) {
 	if got := spanAttr(t, root, "outcome").AsString(); got != engagementLive {
 		t.Errorf("outcome = %q, want %q — the deferred cleanup must not overwrite the agent-live end", got, engagementLive)
 	}
-	if got := spanAttr(t, root, "conversation.id").AsString(); got != run.ID {
-		t.Errorf("conversation.id = %q, want %q", got, run.ID)
+	if got := spanAttr(t, root, "conversation.id").AsString(); got != conv.ID {
+		t.Errorf("conversation.id = %q, want %q", got, conv.ID)
 	}
-	if got := spanAttr(t, root, "task.id").AsString(); got != run.TaskID {
-		t.Errorf("task.id = %q, want %q", got, run.TaskID)
+	if got := spanAttr(t, root, "task.id").AsString(); got != conv.TaskID {
+		t.Errorf("task.id = %q, want %q", got, conv.TaskID)
 	}
-	if got := spanAttr(t, root, "org.id").AsString(); got != run.OrgID {
-		t.Errorf("org.id = %q, want %q", got, run.OrgID)
+	if got := spanAttr(t, root, "org.id").AsString(); got != conv.OrgID {
+		t.Errorf("org.id = %q, want %q", got, conv.OrgID)
 	}
 	if got := spanAttr(t, root, "claim.attempt").AsInt64(); got != 2 {
 		t.Errorf("claim.attempt = %d, want 2", got)
@@ -131,10 +131,10 @@ func TestEngagementRootEndsAtAgentLive(t *testing.T) {
 func TestEngagementRootRecordsSetupFailure(t *testing.T) {
 	read := recordSpans(t)
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	run := traceTestRun("run-fail")
+	conv := traceTestRun("run-fail")
 
-	_, done := s.beginEngagement(context.Background(), run)
-	s.failEngagement(run.ID, errors.New("bring up credential sidecar: broker refused"))
+	_, done := s.beginEngagement(context.Background(), conv)
+	s.failEngagement(conv.ID, errors.New("bring up credential sidecar: broker refused"))
 	done()
 
 	roots := spansNamed(read(), "engagement.setup")
@@ -162,11 +162,11 @@ func TestEngagementDispositionsAreNotErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			read := recordSpans(t)
 			s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-			run := traceTestRun("run-" + tc.name)
+			conv := traceTestRun("run-" + tc.name)
 
-			_, done := s.beginEngagement(context.Background(), run)
+			_, done := s.beginEngagement(context.Background(), conv)
 			if tc.outcome != engagementNotStarted {
-				s.endEngagement(run.ID, tc.outcome)
+				s.endEngagement(conv.ID, tc.outcome)
 			}
 			done()
 
@@ -228,11 +228,11 @@ func TestStoppedEngagementNamesWhichCancellation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			read := recordSpans(t)
 			s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-			run := traceTestRun("run-stop-" + tc.name)
+			conv := traceTestRun("run-stop-" + tc.name)
 			parent, step := tc.ctxs()
 
-			_, done := s.beginEngagement(context.Background(), run)
-			s.endEngagementIfStopped(run.ID, parent, step)
+			_, done := s.beginEngagement(context.Background(), conv)
+			s.endEngagementIfStopped(conv.ID, parent, step)
 
 			if !tc.wantEnd {
 				// Nothing was cancelled, so this is not a stop and the root must
@@ -269,10 +269,10 @@ func TestRequeuedRunProducesSeparateTracesSharingConversationID(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 
 	for attempt := 1; attempt <= maxRunAttempts; attempt++ {
-		run := traceTestRun("run-requeued")
-		run.Attempts = attempt
-		_, done := s.beginEngagement(context.Background(), run)
-		s.failEngagement(run.ID, errors.New("transient"))
+		conv := traceTestRun("run-requeued")
+		conv.Attempts = attempt
+		_, done := s.beginEngagement(context.Background(), conv)
+		s.failEngagement(conv.ID, errors.New("transient"))
 		done()
 	}
 
@@ -304,18 +304,18 @@ func TestRequeuedRunProducesSeparateTracesSharingConversationID(t *testing.T) {
 func TestPunctualSpansLinkToTheEngagementRoot(t *testing.T) {
 	read := recordSpans(t)
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	run := traceTestRun("run-punctual")
+	conv := traceTestRun("run-punctual")
 
-	_, done := s.beginEngagement(context.Background(), run)
-	rootSC := s.engagementSpanContext(run.ID)
+	_, done := s.beginEngagement(context.Background(), conv)
+	rootSC := s.engagementSpanContext(conv.ID)
 	if !rootSC.IsValid() {
 		t.Fatal("the engagement's SpanContext was not retained; nothing after agent-live could link back")
 	}
-	s.endEngagement(run.ID, engagementLive)
+	s.endEngagement(conv.ID, engagementLive)
 
 	// After the root has ENDED, which is the real condition these spans run
 	// under.
-	_, span := s.startPunctual(context.Background(), run.ID, "permission.prompt")
+	_, span := s.startPunctual(context.Background(), conv.ID, "permission.prompt")
 	span.End()
 	done()
 
@@ -335,8 +335,8 @@ func TestPunctualSpansLinkToTheEngagementRoot(t *testing.T) {
 	}
 	// Links do not share the parent's sampling decision, so a punctual span
 	// has to be self-sufficient about which run it belongs to.
-	if got := spanAttr(t, p, "conversation.id").AsString(); got != run.ID {
-		t.Errorf("conversation.id = %q, want %q — a link may not survive, the attribute must", got, run.ID)
+	if got := spanAttr(t, p, "conversation.id").AsString(); got != conv.ID {
+		t.Errorf("conversation.id = %q, want %q — a link may not survive, the attribute must", got, conv.ID)
 	}
 }
 
@@ -369,23 +369,23 @@ func TestPunctualSpanWithoutAnEngagementIsUnlinked(t *testing.T) {
 func TestEngagementTeardownIsIdentityChecked(t *testing.T) {
 	recordSpans(t)
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	run := traceTestRun("run-reclaim")
+	conv := traceTestRun("run-reclaim")
 
-	_, firstDone := s.beginEngagement(context.Background(), run)
-	first := s.engagementSpanContext(run.ID)
+	_, firstDone := s.beginEngagement(context.Background(), conv)
+	first := s.engagementSpanContext(conv.ID)
 
-	_, secondDone := s.beginEngagement(context.Background(), run)
-	second := s.engagementSpanContext(run.ID)
+	_, secondDone := s.beginEngagement(context.Background(), conv)
+	second := s.engagementSpanContext(conv.ID)
 	if first.SpanID() == second.SpanID() {
 		t.Fatal("the successor did not replace the registered engagement")
 	}
 
 	firstDone() // the predecessor's teardown, arriving late
-	if got := s.engagementSpanContext(run.ID); got.SpanID() != second.SpanID() {
+	if got := s.engagementSpanContext(conv.ID); got.SpanID() != second.SpanID() {
 		t.Errorf("after the predecessor's teardown the registered engagement is %v, want the successor's %v", got.SpanID(), second.SpanID())
 	}
 	secondDone()
-	if s.engagementSpanContext(run.ID).IsValid() {
+	if s.engagementSpanContext(conv.ID).IsValid() {
 		t.Error("the successor's teardown left its engagement registered; the map would grow per run id")
 	}
 }

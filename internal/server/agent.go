@@ -55,18 +55,18 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	var run *domain.Conversation
+	var conv *domain.Conversation
 	var resp map[string]any
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
+		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
-		if run == nil {
+		if conv == nil {
 			return nil
 		}
-		counts, e := tx.Artifacts.CountByConversation(r.Context(), orgID, []string{run.ID})
+		counts, e := tx.Artifacts.CountByConversation(r.Context(), orgID, []string{conv.ID})
 		if e != nil {
 			return e
 		}
@@ -78,9 +78,9 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		// must not fail the status fetch or touch the count above. The
 		// swallowed-error sweep leaves it swallowed deliberately.
 		var arts []domain.Artifact
-		if counts[run.ID] > 0 {
-			if a, lerr := tx.Artifacts.ListByConversation(r.Context(), orgID, run.ID); lerr != nil {
-				serverLog.Warn("artifact lookup for has_unresolved_artifacts failed; omitting it (artifact_count unaffected)", "conversation", run.ID, "error", lerr)
+		if counts[conv.ID] > 0 {
+			if a, lerr := tx.Artifacts.ListByConversation(r.Context(), orgID, conv.ID); lerr != nil {
+				serverLog.Warn("artifact lookup for has_unresolved_artifacts failed; omitting it (artifact_count unaffected)", "conversation", conv.ID, "error", lerr)
 			} else {
 				arts = a
 			}
@@ -91,24 +91,24 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		// leaves the count at 0 and the projection unqualified, never a failed
 		// status fetch.
 		var stepCount int
-		if run.BlueprintRunID != "" {
-			if lens, lerr := tx.Blueprints.StepPlanLengths(r.Context(), orgID, []string{run.BlueprintRunID}); lerr != nil {
-				serverLog.Warn("blueprint step-plan length lookup failed; omitting blueprint_step_count", "conversation", run.ID, "blueprint_run", run.BlueprintRunID, "error", lerr)
+		if conv.BlueprintRunID != "" {
+			if lens, lerr := tx.Blueprints.StepPlanLengths(r.Context(), orgID, []string{conv.BlueprintRunID}); lerr != nil {
+				serverLog.Warn("blueprint step-plan length lookup failed; omitting blueprint_step_count", "conversation", conv.ID, "blueprint_run", conv.BlueprintRunID, "error", lerr)
 			} else {
-				stepCount = lens[run.BlueprintRunID]
+				stepCount = lens[conv.BlueprintRunID]
 			}
 		}
-		resp = runResponse(run, counts[run.ID], arts, stepCount)
+		resp = runResponse(conv, counts[conv.ID], arts, stepCount)
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
 		return
 	}
-	if run == nil {
+	if conv == nil {
 		notFound(w, "run")
 		return
 	}
-	addResumability(r.Context(), resp, orgID, run, ag.spawner())
+	addResumability(r.Context(), resp, orgID, conv, ag.spawner())
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -135,14 +135,14 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 // Runs outside the tx that read the row: the workspace probe stats the disk and
 // may reach blob storage, and no read should hold a transaction open across
 // that. A spawner that isn't wired (delegation disabled) omits the keys too.
-func addResumability(ctx context.Context, resp map[string]any, orgID string, run *domain.Conversation, spawner *delegate.Spawner) {
-	if spawner == nil || run == nil {
+func addResumability(ctx context.Context, resp map[string]any, orgID string, conv *domain.Conversation, spawner *delegate.Spawner) {
+	if spawner == nil || conv == nil {
 		return
 	}
-	if domain.IsActiveConversationStatus(run.Status) || run.Status == domain.StatusFailed {
+	if domain.IsActiveConversationStatus(conv.Status) || conv.Status == domain.StatusFailed {
 		return
 	}
-	ok, reason := spawner.ResumabilityFor(ctx, orgID, run)
+	ok, reason := spawner.ResumabilityFor(ctx, orgID, conv)
 	resp["resumable"] = ok
 	if !ok {
 		resp["resume_blocked_reason"] = reason
@@ -181,12 +181,12 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 	// Read the run + its reconcilable non-terminal artifacts under request
 	// claims (authorization + RLS scoping). Filter to the same working set the
 	// org-wide Tier-1 query selects so the two tiers reconcile identically.
-	var run *domain.Conversation
+	var conv *domain.Conversation
 	var arts []domain.Artifact
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
-		if e != nil || run == nil {
+		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
+		if e != nil || conv == nil {
 			return e
 		}
 		all, e := tx.Artifacts.ListByConversation(r.Context(), orgID, conversationID)
@@ -203,7 +203,7 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 		internalError(w, "agent", err)
 		return
 	}
-	if run == nil {
+	if conv == nil {
 		notFound(w, "run")
 		return
 	}
@@ -283,15 +283,15 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var run *domain.Conversation
+	var conv *domain.Conversation
 	var arts []domain.Artifact
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
+		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
-		if run == nil {
+		if conv == nil {
 			return nil
 		}
 		arts, e = tx.Artifacts.ListByConversation(r.Context(), orgID, conversationID)
@@ -300,7 +300,7 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 		internalError(w, "agent", err)
 		return
 	}
-	if run == nil {
+	if conv == nil {
 		notFound(w, "run")
 		return
 	}
@@ -362,17 +362,17 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 	}
 
 	var (
-		run     *domain.Conversation
+		conv    *domain.Conversation
 		actions []domain.ExternalAction
 		total   int
 	)
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
+		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
-		if run == nil {
+		if conv == nil {
 			return nil
 		}
 		actions, total, e = tx.ExternalActions.ListByConversation(r.Context(), orgID, conversationID,
@@ -382,7 +382,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		internalError(w, "agent", err)
 		return
 	}
-	if run == nil {
+	if conv == nil {
 		notFound(w, "run")
 		return
 	}
@@ -434,38 +434,38 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // OMITTED rather than reported as a misleading false, so a transient DB/RLS hiccup
 // can't hide approval-required work; the client treats their absence as "unknown"
 // and re-derives on the next refresh.
-func runResponse(run *domain.Conversation, artifactCount int, arts []domain.Artifact, stepCount int) map[string]any {
+func runResponse(conv *domain.Conversation, artifactCount int, arts []domain.Artifact, stepCount int) map[string]any {
 	out := map[string]any{
-		"ID":            run.ID,
-		"TaskID":        run.TaskID,
-		"PromptID":      run.PromptID,
-		"Status":        run.Status,
-		"Model":         run.Model,
-		"StartedAt":     run.StartedAt,
-		"QueuedAt":      run.QueuedAt,
-		"ClaimedAt":     run.ClaimedAt,
-		"CompletedAt":   run.CompletedAt,
-		"TotalCostUSD":  run.TotalCostUSD,
-		"DurationMs":    run.DurationMs,
-		"NumTurns":      run.NumTurns,
-		"ParkReason":    string(run.ParkReason),
-		"WorktreePath":  run.WorktreePath,
-		"ResultSummary": run.ResultSummary,
+		"ID":            conv.ID,
+		"TaskID":        conv.TaskID,
+		"PromptID":      conv.PromptID,
+		"Status":        conv.Status,
+		"Model":         conv.Model,
+		"StartedAt":     conv.StartedAt,
+		"QueuedAt":      conv.QueuedAt,
+		"ClaimedAt":     conv.ClaimedAt,
+		"CompletedAt":   conv.CompletedAt,
+		"TotalCostUSD":  conv.TotalCostUSD,
+		"DurationMs":    conv.DurationMs,
+		"NumTurns":      conv.NumTurns,
+		"ParkReason":    string(conv.ParkReason),
+		"WorktreePath":  conv.WorktreePath,
+		"ResultSummary": conv.ResultSummary,
 		// The terminal envelope's parsed outcome and its abort note. PascalCase
 		// with the legacy set they belong to; empty string when the run holds
 		// none (still executing, an infra failure, or an outcome gate that
 		// exhausted its retries).
-		"Outcome":              run.Outcome,
-		"OutcomeReason":        run.OutcomeReason,
-		"FailureKind":          string(run.FailureKind),
-		"SessionID":            run.SessionID,
-		"MemoryMissing":        run.MemoryMissing,
-		"TriggerType":          run.TriggerType,
-		"TriggerID":            run.TriggerID,
-		"actor_agent_id":       run.ActorAgentID,
-		"actor_agent_name":     run.ActorAgentName,
-		"blueprint_run_id":     run.BlueprintRunID,
-		"blueprint_step_index": run.BlueprintStepIndex,
+		"Outcome":              conv.Outcome,
+		"OutcomeReason":        conv.OutcomeReason,
+		"FailureKind":          string(conv.FailureKind),
+		"SessionID":            conv.SessionID,
+		"MemoryMissing":        conv.MemoryMissing,
+		"TriggerType":          conv.TriggerType,
+		"TriggerID":            conv.TriggerID,
+		"actor_agent_id":       conv.ActorAgentID,
+		"actor_agent_name":     conv.ActorAgentName,
+		"blueprint_run_id":     conv.BlueprintRunID,
+		"blueprint_step_index": conv.BlueprintStepIndex,
 		"blueprint_step_count": stepCount,
 		"artifact_count":       artifactCount,
 		// The token rollups the run read already SUMs, alongside the cost /
@@ -473,10 +473,10 @@ func runResponse(run *domain.Conversation, artifactCount int, arts []domain.Arti
 		// the legacy PascalCase set froze. Plain ints — 0 for a run that never
 		// streamed a usage-bearing message — so a consumer never has to
 		// distinguish absent from none.
-		"input_tokens":          run.InputTokens,
-		"output_tokens":         run.OutputTokens,
-		"cache_read_tokens":     run.CacheReadTokens,
-		"cache_creation_tokens": run.CacheCreationTokens,
+		"input_tokens":          conv.InputTokens,
+		"output_tokens":         conv.OutputTokens,
+		"cache_read_tokens":     conv.CacheReadTokens,
+		"cache_creation_tokens": conv.CacheCreationTokens,
 	}
 	if artifactCount == 0 || len(arts) > 0 {
 		prCount, reviewCount := domain.UnresolvedArtifactCounts(arts)
@@ -670,11 +670,11 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 func (ag *agentHandler) conversationVisible(ctx context.Context, orgID, userID, conversationID string) (bool, error) {
 	var exists bool
 	err := ag.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		run, e := tx.Conversations.Get(ctx, orgID, conversationID)
+		conv, e := tx.Conversations.Get(ctx, orgID, conversationID)
 		if e != nil {
 			return e
 		}
-		exists = run != nil
+		exists = conv != nil
 		return nil
 	})
 	return exists, err
@@ -903,11 +903,11 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 	var pending []domain.ConversationPermission
 	var exists bool
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		run, e := tx.Conversations.Get(r.Context(), orgID, conversationID)
+		conv, e := tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
-		if run == nil {
+		if conv == nil {
 			return nil
 		}
 		exists = true
@@ -944,28 +944,28 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 // are display annotations on rows the caller can already see, so surfacing the
 // failure would fail a whole board refresh over a badge. Shared by the
 // single-task and batched (task_ids) run-list paths.
-func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) ([]map[string]any, error) {
-	conversationIDs := make([]string, len(runs))
-	for i := range runs {
-		conversationIDs[i] = runs[i].ID
+func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, convs []domain.Conversation) ([]map[string]any, error) {
+	conversationIDs := make([]string, len(convs))
+	for i := range convs {
+		conversationIDs[i] = convs[i].ID
 	}
 	counts, err := tx.Artifacts.CountByConversation(ctx, orgID, conversationIDs)
 	if err != nil {
 		return nil, err
 	}
 	var withArtifacts []string
-	for i := range runs {
-		if counts[runs[i].ID] > 0 {
-			withArtifacts = append(withArtifacts, runs[i].ID)
+	for i := range convs {
+		if counts[convs[i].ID] > 0 {
+			withArtifacts = append(withArtifacts, convs[i].ID)
 		}
 	}
-	artsByRun := map[string][]domain.Artifact{}
+	artsByConv := map[string][]domain.Artifact{}
 	if len(withArtifacts) > 0 {
 		if arts, lerr := tx.Artifacts.ListByConversations(ctx, orgID, withArtifacts); lerr != nil {
 			serverLog.Warn("artifact batch lookup failed; omitting has_unresolved_artifacts (artifact_count unaffected)", "error", lerr)
 		} else {
 			for _, a := range arts {
-				artsByRun[a.ConversationID] = append(artsByRun[a.ConversationID], a)
+				artsByConv[a.ConversationID] = append(artsByConv[a.ConversationID], a)
 			}
 		}
 	}
@@ -975,8 +975,8 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, runs
 	// unknown" and costs the qualifier, not the row.
 	var blueprintRunIDs []string
 	seenBlueprints := map[string]bool{}
-	for i := range runs {
-		id := runs[i].BlueprintRunID
+	for i := range convs {
+		id := convs[i].BlueprintRunID
 		if id == "" || seenBlueprints[id] {
 			continue
 		}
@@ -991,9 +991,9 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, runs
 			stepCounts = lens
 		}
 	}
-	out := make([]map[string]any, len(runs))
-	for i := range runs {
-		out[i] = runResponse(&runs[i], counts[runs[i].ID], artsByRun[runs[i].ID], stepCounts[runs[i].BlueprintRunID])
+	out := make([]map[string]any, len(convs))
+	for i := range convs {
+		out[i] = runResponse(&convs[i], counts[convs[i].ID], artsByConv[convs[i].ID], stepCounts[convs[i].BlueprintRunID])
 	}
 	return out, nil
 }
@@ -1090,7 +1090,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		resp.Messages = map[string][]domain.MessageDTO{}
 	}
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		runs, total, e := tx.Conversations.ListForTasks(r.Context(), orgID, taskIDs,
+		convs, total, e := tx.Conversations.ListForTasks(r.Context(), orgID, taskIDs,
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		if e != nil {
 			return e
@@ -1099,14 +1099,14 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		// One enrichConversations over the whole page keeps the artifact reads O(1)
 		// regardless of task/run count; the index alignment lets us group the
 		// projected responses by task without re-projecting.
-		enriched, e := enrichConversations(r.Context(), tx, orgID, runs)
+		enriched, e := enrichConversations(r.Context(), tx, orgID, convs)
 		if e != nil {
 			return e
 		}
-		var primaryRunIDs []string
+		var primaryConversationIDs []string
 		seenTask := map[string]bool{}
-		for i := range runs {
-			tid := runs[i].TaskID
+		for i := range convs {
+			tid := convs[i].TaskID
 			resp.Runs[tid] = append(resp.Runs[tid], enriched[i])
 			// Runs come back started_at DESC within a task, so the first seen
 			// per task is its primary (newest) run — the one whose transcript
@@ -1115,11 +1115,11 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 			// thing as having no rows here.
 			if !seenTask[tid] {
 				seenTask[tid] = true
-				primaryRunIDs = append(primaryRunIDs, runs[i].ID)
+				primaryConversationIDs = append(primaryConversationIDs, convs[i].ID)
 			}
 		}
-		if req.IncludeMessages && len(primaryRunIDs) > 0 {
-			msgs, e := tx.Conversations.MessagesForConversations(r.Context(), orgID, primaryRunIDs)
+		if req.IncludeMessages && len(primaryConversationIDs) > 0 {
+			msgs, e := tx.Conversations.MessagesForConversations(r.Context(), orgID, primaryConversationIDs)
 			if e != nil {
 				return e
 			}

@@ -131,11 +131,11 @@ func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
 	s.StageOrDeliverInjection(runmode.LocalDefaultOrgID, "r-compose",
 		domain.StagedInjectionProducerPRNewCommits, "the staged injection body")
 
-	run, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-compose")
-	if err != nil || run == nil {
-		t.Fatalf("GetSystem: err=%v run=%v", err, run)
+	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-compose")
+	if err != nil || conv == nil {
+		t.Fatalf("GetSystem: err=%v run=%v", err, conv)
 	}
-	prefix := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, run)
+	prefix := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv)
 
 	inj := strings.Index(prefix, "the staged injection body")
 	ledger := strings.Index(prefix, "o/r#1")
@@ -157,11 +157,11 @@ func TestResumeSystemPrepends_EmptyWhenNothingPending(t *testing.T) {
 	seedConversation(t, database, "r-none", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	ctx := context.Background()
-	run, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-none")
-	if err != nil || run == nil {
-		t.Fatalf("GetSystem: err=%v run=%v", err, run)
+	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-none")
+	if err != nil || conv == nil {
+		t.Fatalf("GetSystem: err=%v run=%v", err, conv)
 	}
-	if got := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, run); got != "" {
+	if got := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv); got != "" {
 		t.Errorf("want empty prefix when nothing pending, got %q", got)
 	}
 }

@@ -160,22 +160,22 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// the read by orgID but go through the admin pool because there
 	// is no user identity to project.
 	var (
-		run          *domain.Conversation
+		conv         *domain.Conversation
 		preflightErr error
 	)
 	if userID != "" {
 		preflightErr = s.tx.SyntheticClaimsWithTx(context.Background(), orgID, userID, func(ts db.TxStores) error {
 			r, e := ts.Conversations.Get(context.Background(), orgID, conversationID)
-			run = r
+			conv = r
 			return e
 		})
 	} else {
-		run, preflightErr = s.conversations.GetSystem(context.Background(), orgID, conversationID)
+		conv, preflightErr = s.conversations.GetSystem(context.Background(), orgID, conversationID)
 	}
 	if preflightErr != nil {
 		return fmt.Errorf("load run: %w", preflightErr)
 	}
-	if run == nil {
+	if conv == nil {
 		return fmt.Errorf("%w %s", ErrNoActiveRun, conversationID)
 	}
 	// A run that already concluded has nothing to stop, and saying so here —
@@ -184,7 +184,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// a completed step whose blueprint is still advancing would otherwise have
 	// its NEXT step cancelled by a click aimed at work that had already
 	// finished.
-	if domain.IsTerminalConversationStatus(run.Status) {
+	if domain.IsTerminalConversationStatus(conv.Status) {
 		return fmt.Errorf("%w %s", ErrNoActiveRun, conversationID)
 	}
 
@@ -207,7 +207,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// last thing the transcript will ever say about why the work ended. Skip
 	// it there and a swiped or closed task silently ends a conversation with
 	// no explanation at all, which is the case this note exists for.
-	if cancelBlueprint || run.Status != domain.StatusOpen {
+	if cancelBlueprint || conv.Status != domain.StatusOpen {
 		s.insertStopNote(orgID, conversationID, userID, note)
 	}
 
@@ -219,7 +219,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 		// cancel_requested and finalizes the blueprint 'cancelled', and the
 		// claim gate stops handing this blueprint's steps out, so nothing
 		// re-claims the run in the window between the kill and the finalize.
-		s.requestBlueprintCancel(context.Background(), orgID, run.BlueprintRunID)
+		s.requestBlueprintCancel(context.Background(), orgID, conv.BlueprintRunID)
 	}
 
 	// Route the hard-kill through the control seam: at N=1 it resolves the
@@ -237,7 +237,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// truth and already works cross-pod, so a best-effort signal to a live
 	// remote owner only HASTENS the kill — never waited on, never affects
 	// this call's outcome.
-	s.signalCancelBestEffort(orgID, conversationID, run.ExecutorID)
+	s.signalCancelBestEffort(orgID, conversationID, conv.ExecutorID)
 
 	// No active goroutine — the run may be parked `open` with no subprocess to
 	// kill. Park it directly via DB.
@@ -254,7 +254,7 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// until some other run on that task terminated. The preflight
 	// above already loaded the run, so both the trigger type and the
 	// task the drain is keyed on are already in hand.
-	triggerType := run.TriggerType
+	triggerType := conv.TriggerType
 
 	// User-initiated stop: write under the stopping user's
 	// synthetic claims so RLS sees a legitimate user-attributed
@@ -333,11 +333,11 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 		// The plain stop verb skips this entirely — a frozen blueprint is the
 		// state it wants, and finalizing here is exactly what used to make a
 		// stopped conversation permanently unresumable.
-		s.finalizeParkedBlueprintOnCancel(bgCtx, orgID, run, userID)
+		s.finalizeParkedBlueprintOnCancel(bgCtx, orgID, conv, userID)
 	}
 	// The task's drain is keyed off the run's trigger type so the manual
 	// short-circuit holds.
-	s.notifyDrainer(orgID, triggerType, run.TaskID)
+	s.notifyDrainer(orgID, triggerType, conv.TaskID)
 	return nil
 }
 

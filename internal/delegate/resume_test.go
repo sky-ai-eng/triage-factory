@@ -286,12 +286,12 @@ func staleOpenOnce(inner db.ConversationStore) staleOpenConversations {
 }
 
 func (c staleOpenConversations) GetSystem(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error) {
-	run, err := c.ConversationStore.GetSystem(ctx, orgID, conversationID)
+	conv, err := c.ConversationStore.GetSystem(ctx, orgID, conversationID)
 	*c.reads++
-	if run != nil && *c.reads == 1 {
-		run.Status, run.Outcome = "open", ""
+	if conv != nil && *c.reads == 1 {
+		conv.Status, conv.Outcome = "open", ""
 	}
-	return run, err
+	return conv, err
 }
 
 // TestFollowUp_LostWakeRaceStillDelivers pins what append buys: a wake
@@ -410,15 +410,15 @@ func TestFollowUp_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
-	run, err := s.runQueue.ClaimNextConversation(ctx, "test-executor", 1, db.ClaimPlacement{})
+	conv, err := s.runQueue.ClaimNextConversation(ctx, "test-executor", 1, db.ClaimPlacement{})
 	if err != nil {
 		t.Fatalf("claim next run: %v", err)
 	}
-	if run == nil {
+	if conv == nil {
 		t.Fatal("claim next run: nothing claimable (is the row queued under a running blueprint_run?)")
 	}
-	run.OrgID = runmode.LocalDefaultOrgID
-	s.dispatchClaimedRun(ctx, run)
+	conv.OrgID = runmode.LocalDefaultOrgID
+	s.dispatchClaimedRun(ctx, conv)
 }
 
 // TestDispatchResumeClaim_DeliversRecordedInput proves the delivery half of
@@ -483,15 +483,15 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 // TTL rather than orphaned behind a blueprint stranded 'running' forever.
 func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, run, _ := setupAdvanceFixture(t, "open-strand")
-	bpr := blueprintRunIDForRun(t, database, run)
+	s, database, conversationID, _ := setupAdvanceFixture(t, "open-strand")
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 	wireBlobStore(t, s)
 	putTestSnapshot(t, s, bpr) // garbage blob: passes Exists, fails rehydrate
-	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-open-strand' WHERE id=?`, run); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-open-strand' WHERE id=?`, conversationID); err != nil {
 		t.Fatalf("park open: %v", err)
 	}
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, run, runmode.LocalDefaultUserID, "carry on"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
@@ -508,7 +508,7 @@ func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 		assertSnapshotPresent(t, s, bpr, true)
 	}
 
-	if st := storedStatus(t, database, run); st != domain.StatusOpen {
+	if st := storedStatus(t, database, conversationID); st != domain.StatusOpen {
 		t.Errorf("stored status = %q after the budget ran out, want open", st)
 	}
 	// Nothing is claimable any more: the queued follow-up was settled on the
@@ -528,27 +528,27 @@ func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 // seeing a clean 410.
 func TestFollowUp_ExpiredWorkspaceRefusedAtEnqueue(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, run, _ := setupAdvanceFixture(t, "expired")
-	bpr := blueprintRunIDForRun(t, database, run)
+	s, database, conversationID, _ := setupAdvanceFixture(t, "expired")
+	bpr := blueprintRunIDForRun(t, database, conversationID)
 	wireBlobStore(t, s) // storage present but empty: no snapshot to recover from
-	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-expired' WHERE id=?`, run); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-expired' WHERE id=?`, conversationID); err != nil {
 		t.Fatalf("park open: %v", err)
 	}
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, run, runmode.LocalDefaultUserID, "carry on")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on")
 	if !errors.Is(err, ErrWorkspaceExpired) {
 		t.Fatalf("SendMessage err = %v, want ErrWorkspaceExpired", err)
 	}
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id=?`, run).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&status); err != nil {
 		t.Fatalf("read run status: %v", err)
 	}
 	if status != "open" {
 		t.Errorf("run status = %q after refused wake; want unchanged 'open'", status)
 	}
 	var pending int
-	if err := database.QueryRow(`SELECT count(*) FROM messages WHERE conversation_id=? AND delivered=0`, run).Scan(&pending); err != nil {
+	if err := database.QueryRow(`SELECT count(*) FROM messages WHERE conversation_id=? AND delivered=0`, conversationID).Scan(&pending); err != nil {
 		t.Fatalf("count pending input: %v", err)
 	}
 	if pending != 0 {

@@ -243,14 +243,14 @@ func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agentho
 // nil), so a masked failure never silently falls through to the org-wide
 // fallback and replies as the wrong bot identity.
 func workspaceFromRunTaskMetadata(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo) (ws slackstore.Workspace, channel string, ok bool, err error) {
-	run, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
+	conv, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
 	if err != nil {
 		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load run: %w", err)
 	}
-	if run == nil || run.TaskID == "" {
+	if conv == nil || conv.TaskID == "" {
 		return slackstore.Workspace{}, "", false, nil
 	}
-	task, err := stores.Tasks.GetSystem(ctx, info.OrgID, run.TaskID)
+	task, err := stores.Tasks.GetSystem(ctx, info.OrgID, conv.TaskID)
 	if err != nil {
 		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load task: %w", err)
 	}

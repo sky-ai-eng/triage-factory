@@ -220,11 +220,11 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	// The run must exist (the reservation FKs it; a clear error beats an
 	// opaque FK failure later). No task is loaded — `workspace add` is now
 	// run-agnostic and serves taskless runs too.
-	run, err := host.GetConversation(ctx)
+	conv, err := host.GetConversation(ctx)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: load run: %w", err)
 	}
-	if run == nil {
+	if conv == nil {
 		return "", fmt.Errorf("%w: %s", errRunNotFound, info.ConversationID)
 	}
 

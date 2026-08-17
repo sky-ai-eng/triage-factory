@@ -765,11 +765,11 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		// failed on a network blip) must block closure rather than be silently
 		// skipped, so we never close the task with an unresolved draft PR / pending
 		// review sitting on GitHub.
-		runs, e := tx.Conversations.ListForTask(ctx, orgID, taskID)
+		convs, e := tx.Conversations.ListForTask(ctx, orgID, taskID)
 		if e != nil {
 			return fmt.Errorf("list runs for task: %w", e)
 		}
-		has, e := conversationsHaveUnresolvedArtifacts(ctx, tx, orgID, runs)
+		has, e := conversationsHaveUnresolvedArtifacts(ctx, tx, orgID, convs)
 		if e != nil {
 			return e
 		}
@@ -806,11 +806,11 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 // reading each run's artifacts under the caller's tx. One query per run, bounded
 // by a blueprint's step count. Shared by the terminal-on-last check so the
 // "blueprint still has unresolved work" definition lives next to its single use.
-func conversationsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) (bool, error) {
-	for i := range runs {
-		arts, err := tx.Artifacts.ListByConversation(ctx, orgID, runs[i].ID)
+func conversationsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, convs []domain.Conversation) (bool, error) {
+	for i := range convs {
+		arts, err := tx.Artifacts.ListByConversation(ctx, orgID, convs[i].ID)
 		if err != nil {
-			return false, fmt.Errorf("artifacts.ListByConversation(%s): %w", runs[i].ID, err)
+			return false, fmt.Errorf("artifacts.ListByConversation(%s): %w", convs[i].ID, err)
 		}
 		if domain.HasUnresolvedArtifacts(arts) {
 			return true, nil

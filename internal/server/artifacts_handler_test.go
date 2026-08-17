@@ -122,7 +122,7 @@ func TestArtifactApprove(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, conversationID, _ := seedDraftPRArtifactWithRun(t, srv, "appr", "acme", "api", 42)
+	artID, conversationID, _ := seedDraftPRArtifactWithConversation(t, srv, "appr", "acme", "api", 42)
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -266,7 +266,7 @@ func TestArtifactDismiss_PR(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, conversationID, _ := seedDraftPRArtifactWithRun(t, srv, "dis", "acme", "api", 42)
+	artID, conversationID, _ := seedDraftPRArtifactWithConversation(t, srv, "dis", "acme", "api", 42)
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -293,7 +293,7 @@ func TestArtifactDismiss_PR(t *testing.T) {
 func TestArtifactDismiss_TerminalArtifact409(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	artID, _, _ := seedDraftPRArtifactWithRun(t, srv, "dis409", "acme", "api", 42)
+	artID, _, _ := seedDraftPRArtifactWithConversation(t, srv, "dis409", "acme", "api", 42)
 	// Pre-resolve the artifact so the state guard fires before any GitHub call.
 	execSQL(t, srv.db, `UPDATE artifacts SET state = ? WHERE id = ?`, domain.ArtifactStatePRClosed, artID)
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
@@ -317,7 +317,7 @@ func TestArtifactDismiss_TerminalBlueprintLastArtifactClosesTask(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, taskID := seedDraftPRArtifactWithRun(t, srv, "tolc", "acme", "api", 42)
+	artID, _, taskID := seedDraftPRArtifactWithConversation(t, srv, "tolc", "acme", "api", 42)
 	// Drive the blueprint to a terminal status so resolving the only artifact is
 	// the last-on-terminal trigger.
 	execSQL(t, srv.db, `UPDATE blueprint_runs SET status = 'completed' WHERE task_id = ?`, taskID)
@@ -360,7 +360,7 @@ func TestArtifactDismiss_AbortedBlueprintLeavesTaskOpen(t *testing.T) {
 			t.Cleanup(stub.Close)
 			seedApp(t, srv, stub, acmeInstall())
 
-			artID, _, taskID := seedDraftPRArtifactWithRun(t, srv, "tolab-"+string(terminal), "acme", "api", 42)
+			artID, _, taskID := seedDraftPRArtifactWithConversation(t, srv, "tolab-"+string(terminal), "acme", "api", 42)
 			execSQL(t, srv.db, `UPDATE blueprint_runs SET status = ? WHERE task_id = ?`, string(terminal), taskID)
 
 			rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
@@ -436,8 +436,8 @@ func TestArtifactDismiss_LiveBlueprintLeavesTaskOpen(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	// seedDraftPRArtifactWithRun leaves the blueprint_run 'running' (live).
-	artID, _, taskID := seedDraftPRArtifactWithRun(t, srv, "tolo", "acme", "api", 42)
+	// seedDraftPRArtifactWithConversation leaves the blueprint_run 'running' (live).
+	artID, _, taskID := seedDraftPRArtifactWithConversation(t, srv, "tolo", "acme", "api", 42)
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -537,7 +537,7 @@ func TestArtifactApprove_MalformedDetails_PromotesFromLive(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ := seedDraftPRArtifactWithRun(t, srv, "appmal", "acme", "api", 42)
+	artID, _, _ := seedDraftPRArtifactWithConversation(t, srv, "appmal", "acme", "api", 42)
 	if _, err := srv.db.Exec(`UPDATE artifacts SET details_json='{not valid json' WHERE id=?`, artID); err != nil {
 		t.Fatalf("corrupt details: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestArtifactApprove_FooterIdempotent(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ := seedDraftPRArtifactWithRun(t, srv, "appftr", "acme", "api", 42)
+	artID, _, _ := seedDraftPRArtifactWithConversation(t, srv, "appftr", "acme", "api", 42)
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -611,7 +611,7 @@ func TestArtifactApprove_NonDraft_409(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ := seedDraftPRArtifactWithRun(t, srv, "appnd", "acme", "api", 42)
+	artID, _, _ := seedDraftPRArtifactWithConversation(t, srv, "appnd", "acme", "api", 42)
 	if _, err := srv.db.Exec(`UPDATE artifacts SET state=? WHERE id=?`, domain.ArtifactStatePROpen, artID); err != nil {
 		t.Fatalf("flip artifact to open: %v", err)
 	}
@@ -624,11 +624,11 @@ func TestArtifactApprove_NonDraft_409(t *testing.T) {
 	}
 }
 
-// seedDraftPRArtifactWithRun mints a completed (terminal) run chain (entity → … →
+// seedDraftPRArtifactWithConversation mints a completed (terminal) run chain (entity → … →
 // run) and a draft pull_request artifact hung off it, returning all three ids.
-func seedDraftPRArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo string, number int) (artifactID, conversationID, taskID string) {
+func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner, repo string, number int) (artifactID, conversationID, taskID string) {
 	t.Helper()
-	conversationID = seedSteerRun(t, s.db, suffix, "completed")
+	conversationID = seedSteerConversation(t, s.db, suffix, "completed")
 	taskID = fixtureUUID("t_" + suffix)
 	// conversation_memory row so the human-verdict UPDATE has a target (the termination
 	// upsert guarantees this in production).

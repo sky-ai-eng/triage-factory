@@ -740,12 +740,12 @@ func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskI
 
 	var prArtifacts []domain.Artifact
 	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		runs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
+		convs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
 		if err != nil {
 			return fmt.Errorf("list runs for task: %w", err)
 		}
-		for i := range runs {
-			conversationID := runs[i].ID
+		for i := range convs {
+			conversationID := convs[i].ID
 			arts, artErr := tx.Artifacts.ListByConversation(ctx, orgID, conversationID)
 			if artErr != nil {
 				return fmt.Errorf("artifacts.ListByConversation(%s): %w", conversationID, artErr)
@@ -829,12 +829,12 @@ func (s *Server) draftPRCredentials(ctx context.Context, orgID, userID, taskID s
 	type ownerRepo struct{ owner, repo string }
 	repos := map[string]ownerRepo{}
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		runs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
+		convs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
 		if err != nil {
 			return err
 		}
-		for i := range runs {
-			arts, artErr := tx.Artifacts.ListByConversation(ctx, orgID, runs[i].ID)
+		for i := range convs {
+			arts, artErr := tx.Artifacts.ListByConversation(ctx, orgID, convs[i].ID)
 			if artErr != nil {
 				return artErr
 			}

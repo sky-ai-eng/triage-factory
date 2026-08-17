@@ -288,18 +288,18 @@ func (s *Spawner) resolveLiveOwner(ctx context.Context, orgID, conversationID st
 	if s.instances == nil {
 		return "", false
 	}
-	run, err := s.conversations.GetSystem(ctx, orgID, conversationID)
-	if err != nil || run == nil || run.ExecutorID == "" {
+	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
+	if err != nil || conv == nil || conv.ExecutorID == "" {
 		return "", false
 	}
-	inst, err := s.instances.Get(ctx, run.ExecutorID)
+	inst, err := s.instances.Get(ctx, conv.ExecutorID)
 	if err != nil || inst == nil {
 		return "", false
 	}
 	if time.Since(inst.LastHeartbeatAt) > instanceStaleThreshold {
 		return "", false
 	}
-	return run.ExecutorID, true
+	return conv.ExecutorID, true
 }
 
 // sendSignalAndAwaitAck resolves a live remote owner for conversationID, inserts a
@@ -517,8 +517,8 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 	if !staged {
 		return InjectNotDelivered
 	}
-	run, err := s.conversations.GetSystem(ctx, orgID, conversationID)
-	if err != nil || run == nil || !injectionWillFlush(run.Status, run.Outcome) {
+	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
+	if err != nil || conv == nil || !injectionWillFlush(conv.Status, conv.Outcome) {
 		// The row staged above is now orphaned: the caller falls through to
 		// the normal deferral (enqueueBusyFiring), and a staged row nothing
 		// will ever flush is a permanent leak — worse, a double-delivery

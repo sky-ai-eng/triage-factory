@@ -107,12 +107,12 @@ func TestProcessCompletion_BlueprintStepDraftPRDoesNotPark(t *testing.T) {
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, "bpr-"+conversationID, "", task,
 		res(`{"outcome":"continue","summary":"opened a PR"}`), cwd, nil, "", "event", "")
 
-	run := loadRun(t, s, conversationID)
-	if run.Outcome != "continue" {
-		t.Errorf("run.outcome = %q, want continue (a queued draft PR no longer coerces the outcome)", run.Outcome)
+	conv := loadRun(t, s, conversationID)
+	if conv.Outcome != "continue" {
+		t.Errorf("run.outcome = %q, want continue (a queued draft PR no longer coerces the outcome)", conv.Outcome)
 	}
-	if run.Status != "completed" {
-		t.Errorf("run.status = %q, want completed (a draft PR is a sidecar; the step never parks)", run.Status)
+	if conv.Status != "completed" {
+		t.Errorf("run.status = %q, want completed (a draft PR is a sidecar; the step never parks)", conv.Status)
 	}
 }
 
@@ -129,12 +129,12 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, "bpr-"+conversationID, "", task,
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, nil, "", "event", "")
 
-	run := loadRun(t, s, conversationID)
-	if run.Outcome != "continue" {
-		t.Errorf("run.outcome = %q, want continue (no pending action → no coercion)", run.Outcome)
+	conv := loadRun(t, s, conversationID)
+	if conv.Outcome != "continue" {
+		t.Errorf("run.outcome = %q, want continue (no pending action → no coercion)", conv.Outcome)
 	}
-	if run.Status != "completed" {
-		t.Errorf("run.status = %q, want completed", run.Status)
+	if conv.Status != "completed" {
+		t.Errorf("run.status = %q, want completed", conv.Status)
 	}
 	// The blueprint orchestrator owns task lifecycle — a mid-blueprint step
 	// completion must not close the task.

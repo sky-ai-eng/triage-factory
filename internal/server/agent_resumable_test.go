@@ -11,8 +11,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 )
 
-// readRun issues the run detail read and decodes it.
-func readRun(t *testing.T, s *Server, conversationID string) map[string]any {
+// readConversation issues the run detail read and decodes it.
+func readConversation(t *testing.T, s *Server, conversationID string) map[string]any {
 	t.Helper()
 	rec := doJSON(t, s, "GET", "/api/agent/conversations/"+conversationID, nil)
 	if rec.Code != http.StatusOK {
@@ -49,12 +49,12 @@ func withEmptyBlobStore(t *testing.T, s *Server) *delegate.Spawner {
 func TestHandleAgentStatus_ResumableWorkspaceExpired(t *testing.T) {
 	s := newTestServer(t)
 	withEmptyBlobStore(t, s)
-	conversationID := seedSteerRun(t, s.db, "resgone", "open")
+	conversationID := seedSteerConversation(t, s.db, "resgone", "open")
 	// Native: the resume state is the transcript, so the ladder reaches the
 	// workspace question rather than stopping at a missing session id.
 	execSQL(t, s.db, `UPDATE conversations SET runtime='native', worktree_path='' WHERE id=?`, conversationID)
 
-	got := readRun(t, s, conversationID)
+	got := readConversation(t, s, conversationID)
 	if got["resumable"] != false {
 		t.Errorf("resumable = %v, want false", got["resumable"])
 	}
@@ -69,10 +69,10 @@ func TestHandleAgentStatus_ResumableWorkspaceExpired(t *testing.T) {
 func TestHandleAgentStatus_ResumableParkedRun(t *testing.T) {
 	s := newTestServer(t)
 	withEmptyBlobStore(t, s)
-	conversationID := seedSteerRun(t, s.db, "reswarm", "open")
+	conversationID := seedSteerConversation(t, s.db, "reswarm", "open")
 	execSQL(t, s.db, `UPDATE conversations SET runtime='native', worktree_path=? WHERE id=?`, t.TempDir(), conversationID)
 
-	got := readRun(t, s, conversationID)
+	got := readConversation(t, s, conversationID)
 	if got["resumable"] != true {
 		t.Errorf("resumable = %v, want true", got["resumable"])
 	}
@@ -87,12 +87,12 @@ func TestHandleAgentStatus_ResumableParkedRun(t *testing.T) {
 func TestHandleAgentStatus_ResumableBlueprintCancelled(t *testing.T) {
 	s := newTestServer(t)
 	withEmptyBlobStore(t, s)
-	conversationID := seedSteerRun(t, s.db, "rescancelled", "open")
+	conversationID := seedSteerConversation(t, s.db, "rescancelled", "open")
 	execSQL(t, s.db, `UPDATE conversations SET runtime='native', worktree_path=? WHERE id=?`, t.TempDir(), conversationID)
 	execSQL(t, s.db, `UPDATE blueprint_runs SET status='cancelled'
 		WHERE id = (SELECT blueprint_run_id FROM conversations WHERE id=?)`, conversationID)
 
-	got := readRun(t, s, conversationID)
+	got := readConversation(t, s, conversationID)
 	if got["resumable"] != false {
 		t.Errorf("resumable = %v, want false", got["resumable"])
 	}
@@ -113,7 +113,7 @@ func TestHandleAgentStatus_ResumabilityOmittedForActiveAndFailed(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			s := newTestServer(t)
 			withEmptyBlobStore(t, s)
-			conversationID := seedSteerRun(t, s.db, "resskip"+status, "running")
+			conversationID := seedSteerConversation(t, s.db, "resskip"+status, "running")
 			if status != "running" {
 				execSQL(t, s.db, `UPDATE conversations SET status=? WHERE id=?`, status, conversationID)
 			}
@@ -125,7 +125,7 @@ func TestHandleAgentStatus_ResumabilityOmittedForActiveAndFailed(t *testing.T) {
 					VALUES (?, ?, 'local-org', 'exec-1', 1, 'cloning')`, "cl_"+conversationID, conversationID)
 			}
 
-			got := readRun(t, s, conversationID)
+			got := readConversation(t, s, conversationID)
 			if got["Status"] != status {
 				t.Fatalf("display status = %v, want %s — the fixture didn't produce the shape under test", got["Status"], status)
 			}

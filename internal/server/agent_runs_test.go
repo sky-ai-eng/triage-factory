@@ -24,14 +24,14 @@ func TestHandleConversations_Batched(t *testing.T) {
 	s := newTestServer(t)
 
 	// Task A: a primary (newest) run plus an older run on the same task.
-	primaryA := seedSteerRun(t, s.db, "ba", "completed") // run r_ba on task t_ba, started_at≈now
+	primaryA := seedSteerConversation(t, s.db, "ba", "completed") // run r_ba on task t_ba, started_at≈now
 	taskA := fixtureUUID("t_ba")
 	olderA := fixtureUUID("r_ba_old")
 	brOld := seedBlueprintRunSQLite(t, s.db, taskA)
 	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, started_at) VALUES (?, ?, ?, 'completed', 'manual', ?, 0, '2020-01-01 00:00:00')`, olderA, taskA, fixtureUUID("p_ba"), brOld)
 
 	// Task B: a single run.
-	primaryB := seedSteerRun(t, s.db, "bb", "running") // run r_bb on task t_bb
+	primaryB := seedSteerConversation(t, s.db, "bb", "running") // run r_bb on task t_bb
 	taskB := fixtureUUID("t_bb")
 
 	store := sqlitestore.New(s.db)
@@ -125,7 +125,7 @@ func TestHandleConversations_MissingParams(t *testing.T) {
 // stopped reading at 500".
 func TestHandleConversations_BatchedCap(t *testing.T) {
 	s := newTestServer(t)
-	_ = seedSteerRun(t, s.db, "cap", "running") // run on task t_cap
+	_ = seedSteerConversation(t, s.db, "cap", "running") // run on task t_cap
 	taskID := fixtureUUID("t_cap")
 
 	pad := func(n int) []string {
@@ -198,7 +198,7 @@ func TestHandleConversations_RejectsUnknownField(t *testing.T) {
 // param must never buy.
 func TestHandleMessages_SinceID(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerRun(t, s.db, "since", "running")
+	conversationID := seedSteerConversation(t, s.db, "since", "running")
 
 	store := sqlitestore.New(s.db)
 	ids := map[string]int{}
@@ -265,7 +265,7 @@ func TestHandleMessages_SinceID(t *testing.T) {
 // snake_case ints — a run with no usage-bearing message reads 0, never absent.
 func TestRunResponse_TokenSums(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerRun(t, s.db, "tok", "running")
+	conversationID := seedSteerConversation(t, s.db, "tok", "running")
 
 	store := sqlitestore.New(s.db)
 	usage := func(in, out, cacheRead, cacheWrite int) {
@@ -312,7 +312,7 @@ func TestRunResponse_TokenSums(t *testing.T) {
 	}
 
 	// A run that never streamed a usage-bearing message reads 0 on all four.
-	bare := seedSteerRun(t, s.db, "tokbare", "queued")
+	bare := seedSteerConversation(t, s.db, "tokbare", "queued")
 	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+bare, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET bare conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -341,7 +341,7 @@ func TestRunResponse_TokenSums(t *testing.T) {
 // cannot say whether the chain moves on.
 func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerRun(t, s.db, "chainpos", "running")
+	conversationID := seedSteerConversation(t, s.db, "chainpos", "running")
 
 	// Step 0 of a three-step plan, concluded the way processCompletion does.
 	var blueprintRunID string
@@ -390,20 +390,20 @@ func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("decode list: %v; body=%s", err, rec.Body.String())
 	}
-	runs := list.Runs[fixtureUUID("t_chainpos")]
-	if len(runs) != 1 {
-		t.Fatalf("listed runs = %d, want 1", len(runs))
+	convs := list.Runs[fixtureUUID("t_chainpos")]
+	if len(convs) != 1 {
+		t.Fatalf("listed runs = %d, want 1", len(convs))
 	}
-	if n, isNum := runs[0]["blueprint_step_count"].(float64); !isNum || n != 3 {
-		t.Errorf("listed blueprint_step_count = %v, want 3", runs[0]["blueprint_step_count"])
+	if n, isNum := convs[0]["blueprint_step_count"].(float64); !isNum || n != 3 {
+		t.Errorf("listed blueprint_step_count = %v, want 3", convs[0]["blueprint_step_count"])
 	}
-	if runs[0]["Outcome"] != "continue" {
-		t.Errorf("listed Outcome = %v, want continue", runs[0]["Outcome"])
+	if convs[0]["Outcome"] != "continue" {
+		t.Errorf("listed Outcome = %v, want continue", convs[0]["Outcome"])
 	}
 
 	// The single-prompt shape — every delegated run is a blueprint step, and a
 	// plain one is a plan of exactly one, which is what says "no chain here".
-	single := seedSteerRun(t, s.db, "chainless", "queued")
+	single := seedSteerConversation(t, s.db, "chainless", "queued")
 	var singleBlueprintRunID string
 	if err := s.db.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, single).Scan(&singleBlueprintRunID); err != nil {
 		t.Fatalf("read single blueprint_run_id: %v", err)

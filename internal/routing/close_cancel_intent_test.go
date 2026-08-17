@@ -107,11 +107,11 @@ func cancelRequested(t *testing.T, database *sql.DB, blueprintRunID string) bool
 // keeps a run nothing killed from being picked back up.
 func claimNext(t *testing.T, database *sql.DB) *domain.Conversation {
 	t.Helper()
-	run, err := sqlitestore.New(database).ConversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{})
+	conv, err := sqlitestore.New(database).ConversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{})
 	if err != nil {
 		t.Fatalf("ClaimNextConversation: %v", err)
 	}
-	return run
+	return conv
 }
 
 // seedCIFailedTaskOnEntity drains a ci_check_failed event so the entity ends
@@ -164,8 +164,8 @@ func TestCloseCancelIntent_KillFailureStillLeavesTheRunCalledOff(t *testing.T) {
 	if !cancelRequested(t, database, brID) {
 		t.Fatal("cancel_requested = false; a failed kill has forgotten a run the system meant to stop")
 	}
-	if run := claimNext(t, database); run != nil {
-		t.Errorf("ClaimNextConversation returned %s; a called-off blueprint must not be driven again", run.ID)
+	if conv := claimNext(t, database); conv != nil {
+		t.Errorf("ClaimNextConversation returned %s; a called-off blueprint must not be driven again", conv.ID)
 	}
 }
 
@@ -203,9 +203,9 @@ func TestCloseCancelIntent_FinishedBlueprintStaysResumable(t *testing.T) {
 	if err != nil || !flipped {
 		t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", flipped, err)
 	}
-	run := claimNext(t, database)
-	if run == nil || run.ID != convID {
-		t.Fatalf("ClaimNextConversation = %v, want the resumed run %s — a closed task must not block a resume", run, convID)
+	conv := claimNext(t, database)
+	if conv == nil || conv.ID != convID {
+		t.Fatalf("ClaimNextConversation = %v, want the resumed run %s — a closed task must not block a resume", conv, convID)
 	}
 }
 

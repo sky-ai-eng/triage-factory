@@ -143,21 +143,21 @@ func (s *Spawner) recordInjectedNote(orgID, conversationID, content string) {
 // place a note can be dropped, and it's accepted there.
 //
 // Any read error degrades to "" — feedback never blocks a resume.
-func (s *Spawner) artifactLedgerForResume(ctx context.Context, orgID string, run *domain.Conversation) string {
-	if s.artifacts == nil || s.conversations == nil || run == nil {
+func (s *Spawner) artifactLedgerForResume(ctx context.Context, orgID string, conv *domain.Conversation) string {
+	if s.artifacts == nil || s.conversations == nil || conv == nil {
 		return ""
 	}
-	watermark, ok, err := s.conversations.LastAgentActivityAtSystem(ctx, orgID, run.ID)
+	watermark, ok, err := s.conversations.LastAgentActivityAtSystem(ctx, orgID, conv.ID)
 	if err != nil {
-		delegateLog.Warn("artifact ledger: read last-activity watermark failed", "conversation", run.ID, "error", err)
+		delegateLog.Warn("artifact ledger: read last-activity watermark failed", "conversation", conv.ID, "error", err)
 		return ""
 	}
 	if !ok {
-		watermark = run.StartedAt
+		watermark = conv.StartedAt
 	}
-	arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, run.ID)
+	arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, conv.ID)
 	if err != nil {
-		delegateLog.Warn("artifact ledger: list artifacts failed", "conversation", run.ID, "error", err)
+		delegateLog.Warn("artifact ledger: list artifacts failed", "conversation", conv.ID, "error", err)
 		return ""
 	}
 	resolved := make([]domain.Artifact, 0, len(arts))

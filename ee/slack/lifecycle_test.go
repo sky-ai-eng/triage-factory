@@ -81,23 +81,23 @@ func TestPruneRunCache_EvictsOldestDownToTarget(t *testing.T) {
 	withLoweredLifecycleCacheBounds(t, 5, 3)
 
 	base := time.Now()
-	runs := map[string]*conversationEntry{}
+	convs := map[string]*conversationEntry{}
 	for i := 0; i < 6; i++ {
-		runs[fmt.Sprintf("run-%d", i)] = &conversationEntry{cachedAt: base.Add(time.Duration(i) * time.Minute)}
+		convs[fmt.Sprintf("run-%d", i)] = &conversationEntry{cachedAt: base.Add(time.Duration(i) * time.Minute)}
 	}
 
-	pruneConversationCache(runs)
+	pruneConversationCache(convs)
 
-	if len(runs) != 3 {
-		t.Fatalf("len(runs) = %d, want 3 (pruned down to target)", len(runs))
+	if len(convs) != 3 {
+		t.Fatalf("len(runs) = %d, want 3 (pruned down to target)", len(convs))
 	}
 	for i := 0; i < 3; i++ {
-		if _, ok := runs[fmt.Sprintf("run-%d", i)]; ok {
+		if _, ok := convs[fmt.Sprintf("run-%d", i)]; ok {
 			t.Errorf("run-%d should have been evicted (one of the 3 oldest)", i)
 		}
 	}
 	for i := 3; i < 6; i++ {
-		if _, ok := runs[fmt.Sprintf("run-%d", i)]; !ok {
+		if _, ok := convs[fmt.Sprintf("run-%d", i)]; !ok {
 			t.Errorf("run-%d should have survived (one of the 3 newest)", i)
 		}
 	}
@@ -111,19 +111,19 @@ func TestPruneRunCache_NeverEvictsLiveWorker(t *testing.T) {
 	withLoweredLifecycleCacheBounds(t, 2, 1)
 
 	base := time.Now()
-	runs := map[string]*conversationEntry{
+	convs := map[string]*conversationEntry{
 		"old-with-worker": {cachedAt: base, worker: &conversationStatusWorker{}},
 		"newer-idle":      {cachedAt: base.Add(1 * time.Minute)},
 		"newest-idle":     {cachedAt: base.Add(2 * time.Minute)},
 	}
 
-	pruneConversationCache(runs)
+	pruneConversationCache(convs)
 
-	if _, ok := runs["old-with-worker"]; !ok {
+	if _, ok := convs["old-with-worker"]; !ok {
 		t.Error("a run with a live worker must never be evicted, even when it's the oldest entry")
 	}
-	if len(runs) != 1 {
-		t.Errorf("len(runs) = %d, want 1 (both idle entries evicted trying to reach target=1; the worker entry can't be evicted so the loop stops there)", len(runs))
+	if len(convs) != 1 {
+		t.Errorf("len(runs) = %d, want 1 (both idle entries evicted trying to reach target=1; the worker entry can't be evicted so the loop stops there)", len(convs))
 	}
 }
 
@@ -132,14 +132,14 @@ func TestPruneRunCache_NeverEvictsLiveWorker(t *testing.T) {
 func TestPruneRunCache_UnderCap_NoOp(t *testing.T) {
 	withLoweredLifecycleCacheBounds(t, 5, 3)
 
-	runs := map[string]*conversationEntry{
+	convs := map[string]*conversationEntry{
 		"a": {cachedAt: time.Now()},
 		"b": {cachedAt: time.Now()},
 	}
-	pruneConversationCache(runs)
+	pruneConversationCache(convs)
 
-	if len(runs) != 2 {
-		t.Errorf("len(runs) = %d, want 2 (under the cap, nothing pruned)", len(runs))
+	if len(convs) != 2 {
+		t.Errorf("len(runs) = %d, want 2 (under the cap, nothing pruned)", len(convs))
 	}
 }
 
@@ -156,32 +156,32 @@ func TestPruneRunCache_KeepsMidTeardownEntry(t *testing.T) {
 
 	base := time.Now()
 	teardown := make(chan struct{}) // open = retiring worker still mid-flight
-	runs := map[string]*conversationEntry{
+	convs := map[string]*conversationEntry{
 		"oldest-mid-teardown": {cachedAt: base, prevDone: teardown},
 		"idle-1":              {cachedAt: base.Add(1 * time.Minute)},
 		"idle-2":              {cachedAt: base.Add(2 * time.Minute)},
 		"idle-3":              {cachedAt: base.Add(3 * time.Minute)},
 	}
 
-	pruneConversationCache(runs)
+	pruneConversationCache(convs)
 
-	if _, ok := runs["oldest-mid-teardown"]; !ok {
+	if _, ok := convs["oldest-mid-teardown"]; !ok {
 		t.Fatal("an entry with an unclosed prevDone must never be evicted, even as the oldest")
 	}
-	if len(runs) != 1 {
-		t.Errorf("len(runs) = %d, want 1 (all three idle entries evicted; the mid-teardown one protected)", len(runs))
+	if len(convs) != 1 {
+		t.Errorf("len(runs) = %d, want 1 (all three idle entries evicted; the mid-teardown one protected)", len(convs))
 	}
 
 	// Teardown completes — the entry is ordinary now; a later over-cap prune
 	// evicts it like any other idle entry.
 	close(teardown)
-	runs["idle-4"] = &conversationEntry{cachedAt: base.Add(4 * time.Minute)}
-	runs["idle-5"] = &conversationEntry{cachedAt: base.Add(5 * time.Minute)}
-	runs["idle-6"] = &conversationEntry{cachedAt: base.Add(6 * time.Minute)}
+	convs["idle-4"] = &conversationEntry{cachedAt: base.Add(4 * time.Minute)}
+	convs["idle-5"] = &conversationEntry{cachedAt: base.Add(5 * time.Minute)}
+	convs["idle-6"] = &conversationEntry{cachedAt: base.Add(6 * time.Minute)}
 
-	pruneConversationCache(runs)
+	pruneConversationCache(convs)
 
-	if _, ok := runs["oldest-mid-teardown"]; ok {
+	if _, ok := convs["oldest-mid-teardown"]; ok {
 		t.Error("once prevDone has closed, the entry is evictable again — it should have gone first as the oldest")
 	}
 }
@@ -200,13 +200,13 @@ func TestHandleRunStatus_CacheHit_RefreshesLRUStamp(t *testing.T) {
 	t.Cleanup(func() { slackLifecycleNow = origNow })
 
 	adapter := newLifecycleAdapter(db.Stores{}, slackHTTPClient, staticURL(""), nil)
-	runs := map[string]*conversationEntry{
+	convs := map[string]*conversationEntry{
 		"run-1": {isSlack: false, cachedAt: resolvedAt},
 	}
 
-	adapter.dispatch(context.Background(), runStatusEvent("org-1", "run-1", "running"), runs)
+	adapter.dispatch(context.Background(), runStatusEvent("org-1", "run-1", "running"), convs)
 
-	if got := runs["run-1"].cachedAt; !got.Equal(touchedAt) {
+	if got := convs["run-1"].cachedAt; !got.Equal(touchedAt) {
 		t.Errorf("cachedAt = %v, want the touch time %v (refreshed on cache hit)", got, touchedAt)
 	}
 }

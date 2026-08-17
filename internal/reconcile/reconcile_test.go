@@ -686,15 +686,15 @@ func TestReconcile_UnknownBranchNotDeleted(t *testing.T) {
 func TestReconcile_SingleRunScope(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
-	const runA = "55555555-5555-5555-5555-555555555555"
-	const runB = "66666666-6666-6666-6666-666666666666"
-	seedConversation("ent-a", runA, "a")
-	seedConversation("ent-b", runB, "b")
+	const convA = "55555555-5555-5555-5555-555555555555"
+	const convB = "66666666-6666-6666-6666-666666666666"
+	seedConversation("ent-a", convA, "a")
+	seedConversation("ent-b", convB, "b")
 
 	prA := domain.NewPullRequestArtifact("octo/repo", 7, "PR_7", "x", "main", "u", "t", "b", false)
-	prA.ConversationID = runA
+	prA.ConversationID = convA
 	prB := domain.NewPullRequestArtifact("octo/repo", 8, "PR_8", "y", "main", "u", "t", "b", false)
-	prB.ConversationID = runB
+	prB.ConversationID = convB
 	seedArt(prA)
 	seedArt(prB)
 
@@ -705,11 +705,11 @@ func TestReconcile_SingleRunScope(t *testing.T) {
 	}}
 	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.TaskMemory, nil)
 
-	runAArts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, runA)
+	convAArts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, convA)
 	if err != nil {
 		t.Fatalf("ListByConversation: %v", err)
 	}
-	updated, err := rc.Reconcile(ctx, runmode.LocalDefaultOrgID, runAArts)
+	updated, err := rc.Reconcile(ctx, runmode.LocalDefaultOrgID, convAArts)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}

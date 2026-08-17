@@ -537,20 +537,20 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 // This path only runs with no live goroutine, so the blueprint is sequentially
 // paused (no other step is executing) and finalizing the whole blueprint_run on
 // the single cancelled step is correct.
-func (s *Spawner) finalizeParkedBlueprintOnCancel(ctx context.Context, orgID string, run *domain.Conversation, userID string) {
-	if s.blueprints == nil || run.BlueprintRunID == "" {
+func (s *Spawner) finalizeParkedBlueprintOnCancel(ctx context.Context, orgID string, conv *domain.Conversation, userID string) {
+	if s.blueprints == nil || conv.BlueprintRunID == "" {
 		return
 	}
-	if cr, err := s.blueprints.GetRunSystem(ctx, orgID, run.BlueprintRunID); err == nil && cr != nil &&
+	if cr, err := s.blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID); err == nil && cr != nil &&
 		cr.Status == domain.BlueprintRunStatusRunning {
 		reason := "user_cancelled"
 		if userID == "" {
 			reason = "system_cancelled"
 		}
 		if userID != "" {
-			_, _ = s.markBlueprintRunStatusAsUser(ctx, orgID, userID, cr.ID, domain.BlueprintRunStatusCancelled, reason, run.BlueprintStepIndex)
+			_, _ = s.markBlueprintRunStatusAsUser(ctx, orgID, userID, cr.ID, domain.BlueprintRunStatusCancelled, reason, conv.BlueprintStepIndex)
 		} else {
-			_, _ = s.blueprints.MarkRunStatusSystem(ctx, orgID, cr.ID, domain.BlueprintRunStatusCancelled, reason, run.BlueprintStepIndex)
+			_, _ = s.blueprints.MarkRunStatusSystem(ctx, orgID, cr.ID, domain.BlueprintRunStatusCancelled, reason, conv.BlueprintStepIndex)
 		}
 		// Reconstruct just enough cfg for the worktree cleanup (mirrors
 		// CancelBlueprint — owner/repo/prNumber
@@ -713,12 +713,12 @@ func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, bl
 	if s.artifacts == nil || s.blueprints == nil || blueprintRunID == "" {
 		return false
 	}
-	runs, err := s.blueprints.ConversationsForBlueprintSystem(ctx, orgID, blueprintRunID)
+	convs, err := s.blueprints.ConversationsForBlueprintSystem(ctx, orgID, blueprintRunID)
 	if err != nil {
 		blueprintLog.Warn("list step runs for unresolved-artifact check failed; treating as unresolved (fail open)", "blueprint_run", blueprintRunID, "error", err)
 		return true
 	}
-	return s.conversationsHaveUnresolvedArtifacts(ctx, orgID, runs)
+	return s.conversationsHaveUnresolvedArtifacts(ctx, orgID, convs)
 }
 
 // conversationsHaveUnresolvedArtifacts reports whether any of the given runs produced an
@@ -728,11 +728,11 @@ func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, bl
 // a per-run read error returns true rather than risk under-reporting. The read is
 // one query per run; the run set is a single blueprint_run's steps, so it is
 // bounded by step count, not blueprint history.
-func (s *Spawner) conversationsHaveUnresolvedArtifacts(ctx context.Context, orgID string, runs []domain.Conversation) bool {
+func (s *Spawner) conversationsHaveUnresolvedArtifacts(ctx context.Context, orgID string, convs []domain.Conversation) bool {
 	if s.artifacts == nil {
 		return false
 	}
-	for _, r := range runs {
+	for _, r := range convs {
 		arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, r.ID)
 		if err != nil {
 			blueprintLog.Warn("list artifacts for unresolved check failed; treating as unresolved (fail open)", "step_conversation", r.ID, "error", err)

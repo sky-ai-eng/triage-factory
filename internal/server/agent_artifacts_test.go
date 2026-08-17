@@ -12,10 +12,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedRunArtifact stamps an artifact onto conversationID on the local-default org/team
+// seedConversationArtifact stamps an artifact onto conversationID on the local-default org/team
 // and returns the stored row (with its generated id). UpsertSystem mirrors how
 // the exec choke point records artifacts in production.
-func seedRunArtifact(t *testing.T, s *Server, conversationID string, a domain.Artifact) domain.Artifact {
+func seedConversationArtifact(t *testing.T, s *Server, conversationID string, a domain.Artifact) domain.Artifact {
 	t.Helper()
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
@@ -32,12 +32,12 @@ func seedRunArtifact(t *testing.T, s *Server, conversationID string, a domain.Ar
 // and details parsed — an object for a PR, null for a detail-less comment.
 func TestHandleAgentArtifacts(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerRun(t, s.db, "arts", "completed")
+	conversationID := seedSteerConversation(t, s.db, "arts", "completed")
 
-	pr := seedRunArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
+	pr := seedConversationArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
 		"octo/repo", 42, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/42", "Add thing", "Body.", true))
-	comment := seedRunArtifact(t, s, conversationID, domain.Artifact{
+	comment := seedConversationArtifact(t, s, conversationID, domain.Artifact{
 		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
 		Target: "octo/repo#42", ExternalID: "555",
 		URL:      "https://github.com/octo/repo/pull/42#issuecomment-555",
@@ -96,8 +96,8 @@ func TestHandleAgentArtifacts(t *testing.T) {
 // never a 500 from a failed response marshal.
 func TestHandleAgentArtifacts_CorruptDetails(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerRun(t, s.db, "corrupt", "completed")
-	art := seedRunArtifact(t, s, conversationID, domain.Artifact{
+	conversationID := seedSteerConversation(t, s.db, "corrupt", "completed")
+	art := seedConversationArtifact(t, s, conversationID, domain.Artifact{
 		Provider: "github", Kind: "comment", Target: "octo/repo#1",
 		State: domain.ArtifactStateCommentPosted, DedupKey: "corrupt1",
 	})
@@ -126,7 +126,7 @@ func TestHandleAgentArtifacts_CorruptDetails(t *testing.T) {
 // without special-casing.
 func TestHandleAgentArtifacts_Empty(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerRun(t, s.db, "noarts", "completed")
+	conversationID := seedSteerConversation(t, s.db, "noarts", "completed")
 	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID+"/artifacts", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -151,12 +151,12 @@ func TestHandleAgentArtifacts_RunNotFound(t *testing.T) {
 // (GET /api/agent/conversations/{id}).
 func TestRunResponse_ArtifactCount(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerRun(t, s.db, "cnt", "completed")
-	seedRunArtifact(t, s, conversationID, domain.Artifact{
+	conversationID := seedSteerConversation(t, s.db, "cnt", "completed")
+	seedConversationArtifact(t, s, conversationID, domain.Artifact{
 		Provider: "github", Kind: "comment", Target: "octo/repo",
 		State: domain.ArtifactStateCommentPosted, DedupKey: "c1",
 	})
-	seedRunArtifact(t, s, conversationID, domain.Artifact{
+	seedConversationArtifact(t, s, conversationID, domain.Artifact{
 		Provider: "github", Kind: "comment", Target: "octo/repo",
 		State: domain.ArtifactStateCommentPosted, DedupKey: "c2",
 	})
@@ -180,11 +180,11 @@ func TestRunResponse_ArtifactCount(t *testing.T) {
 // successor to the legacy pending_kind overlay.
 func TestRunResponse_ArtifactCount_Unresolved(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerRun(t, s.db, "park", "completed")
-	seedRunArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
+	conversationID := seedSteerConversation(t, s.db, "park", "completed")
+	seedConversationArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
 		"octo/repo", 7, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/7", "T", "B", true))
-	seedRunArtifact(t, s, conversationID, domain.Artifact{
+	seedConversationArtifact(t, s, conversationID, domain.Artifact{
 		Provider: "github", Kind: "comment", Target: "octo/repo#7",
 		State: domain.ArtifactStateCommentPosted, DedupKey: "pk1",
 	})
@@ -214,19 +214,19 @@ func TestRunResponse_ArtifactCount_Unresolved(t *testing.T) {
 // has_unresolved_artifacts regression.
 func TestRunResponse_HasUnresolved_List(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerRun(t, s.db, "pklist", "completed")
-	seedRunArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
+	conversationID := seedSteerConversation(t, s.db, "pklist", "completed")
+	seedConversationArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
 		"octo/repo", 9, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/9", "T", "B", true))
 
-	runs := listConversations(t, s, fixtureUUID("t_pklist"))
-	if len(runs) != 1 {
-		t.Fatalf("listed %d runs, want 1", len(runs))
+	convs := listConversations(t, s, fixtureUUID("t_pklist"))
+	if len(convs) != 1 {
+		t.Fatalf("listed %d runs, want 1", len(convs))
 	}
-	if got := runs[0]["has_unresolved_artifacts"]; got != true {
+	if got := convs[0]["has_unresolved_artifacts"]; got != true {
 		t.Errorf("has_unresolved_artifacts = %v, want true", got)
 	}
-	if got := runs[0]["unresolved_pr_count"]; got != float64(1) {
+	if got := convs[0]["unresolved_pr_count"]; got != float64(1) {
 		t.Errorf("unresolved_pr_count = %v, want 1", got)
 	}
 }
@@ -236,13 +236,13 @@ func TestRunResponse_HasUnresolved_List(t *testing.T) {
 // get their own correct counts from the single CountByConversation batch.
 func TestRunResponse_ArtifactCount_List(t *testing.T) {
 	s := newTestServer(t)
-	// seedSteerRun mints task t_lst with run r_lst and prompt p_lst; add a
+	// seedSteerConversation mints task t_lst with run r_lst and prompt p_lst; add a
 	// second run on the same task so the list path counts more than one run.
-	run1 := seedSteerRun(t, s.db, "lst", "completed")
+	conv1 := seedSteerConversation(t, s.db, "lst", "completed")
 	taskID := fixtureUUID("t_lst")
-	run2 := fixtureUUID("r_lst2")
+	conv2 := fixtureUUID("r_lst2")
 	brID := seedBlueprintRunSQLite(t, s.db, taskID)
-	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES (?, ?, ?, 'completed', 'manual', ?, 0)`, run2, taskID, fixtureUUID("p_lst"), brID)
+	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES (?, ?, ?, 'completed', 'manual', ?, 0)`, conv2, taskID, fixtureUUID("p_lst"), brID)
 
 	mkComment := func(key string) domain.Artifact {
 		return domain.Artifact{
@@ -250,16 +250,16 @@ func TestRunResponse_ArtifactCount_List(t *testing.T) {
 			State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		}
 	}
-	seedRunArtifact(t, s, run1, mkComment("l1"))
-	seedRunArtifact(t, s, run1, mkComment("l2"))
-	seedRunArtifact(t, s, run2, mkComment("l3"))
+	seedConversationArtifact(t, s, conv1, mkComment("l1"))
+	seedConversationArtifact(t, s, conv1, mkComment("l2"))
+	seedConversationArtifact(t, s, conv2, mkComment("l3"))
 
-	runs := listConversations(t, s, taskID)
-	if len(runs) != 2 {
-		t.Fatalf("listed %d runs, want 2", len(runs))
+	convs := listConversations(t, s, taskID)
+	if len(convs) != 2 {
+		t.Fatalf("listed %d runs, want 2", len(convs))
 	}
-	want := map[string]float64{run1: 2, run2: 1}
-	for _, m := range runs {
+	want := map[string]float64{conv1: 2, conv2: 1}
+	for _, m := range convs {
 		id, _ := m["ID"].(string)
 		if got := m["artifact_count"]; got != want[id] {
 			t.Errorf("run %s artifact_count = %v, want %v", id, got, want[id])

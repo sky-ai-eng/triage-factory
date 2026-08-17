@@ -114,12 +114,12 @@ func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, nil, "", "event", "")
 
-	run := loadRun(t, s, conversationID)
-	if run.Status != "completed" {
-		t.Errorf("run.status = %q, want completed", run.Status)
+	conv := loadRun(t, s, conversationID)
+	if conv.Status != "completed" {
+		t.Errorf("run.status = %q, want completed", conv.Status)
 	}
-	if run.Outcome != "finish" {
-		t.Errorf("run.outcome = %q, want finish", run.Outcome)
+	if conv.Outcome != "finish" {
+		t.Errorf("run.outcome = %q, want finish", conv.Outcome)
 	}
 	if got := readTaskStatus(t, database, taskID); got == "done" {
 		t.Errorf("task.status = %q; processCompletion must not close the task (terminateBlueprint does)", got)
@@ -141,18 +141,18 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 		res(`{"outcome":"abort","summary":"investigated the failure","reason":"needs a human to rotate the token"}`),
 		cwd, nil, "", "event", "")
 
-	run := loadRun(t, s, conversationID)
-	if run.Status != "completed" {
-		t.Errorf("run.status = %q, want completed (abort is run-completed, task-open)", run.Status)
+	conv := loadRun(t, s, conversationID)
+	if conv.Status != "completed" {
+		t.Errorf("run.status = %q, want completed (abort is run-completed, task-open)", conv.Status)
 	}
-	if run.Outcome != "abort" {
-		t.Errorf("run.outcome = %q, want abort", run.Outcome)
+	if conv.Outcome != "abort" {
+		t.Errorf("run.outcome = %q, want abort", conv.Outcome)
 	}
-	if run.OutcomeReason != "needs a human to rotate the token" {
-		t.Errorf("run.outcome_reason = %q", run.OutcomeReason)
+	if conv.OutcomeReason != "needs a human to rotate the token" {
+		t.Errorf("run.outcome_reason = %q", conv.OutcomeReason)
 	}
-	if run.ResultSummary != "investigated the failure" {
-		t.Errorf("run.result_summary = %q; reason must stay distinct from summary", run.ResultSummary)
+	if conv.ResultSummary != "investigated the failure" {
+		t.Errorf("run.result_summary = %q; reason must stay distinct from summary", conv.ResultSummary)
 	}
 	if got := readTaskStatus(t, database, taskID); got == "done" {
 		t.Errorf("task.status = %q (was %q); abort must leave the task open", got, before)
@@ -175,12 +175,12 @@ func TestProcessCompletion_AbortMissingReasonFails(t *testing.T) {
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, bpr, "", task,
 		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`), cwd, nil, "", "event", "")
 
-	run := loadRun(t, s, conversationID)
-	if run.Status != "failed" {
-		t.Errorf("run.status = %q, want failed (an abort with no reason is an invalid envelope)", run.Status)
+	conv := loadRun(t, s, conversationID)
+	if conv.Status != "failed" {
+		t.Errorf("run.status = %q, want failed (an abort with no reason is an invalid envelope)", conv.Status)
 	}
-	if run.Outcome != "" {
-		t.Errorf("run.outcome = %q, want empty (an abort with no reason is not a valid conclusion)", run.Outcome)
+	if conv.Outcome != "" {
+		t.Errorf("run.outcome = %q, want empty (an abort with no reason is not a valid conclusion)", conv.Outcome)
 	}
 }
 
@@ -201,12 +201,12 @@ func TestProcessCompletion_NoConclusionParksOpen(t *testing.T) {
 	if !parked {
 		t.Error("processCompletion(no-conclusion) = false; want true (open, not terminal)")
 	}
-	run := loadRun(t, s, conversationID)
-	if run.Status != "open" {
-		t.Errorf("run.status = %q, want open (a no-conclusion turn parks open, not completed)", run.Status)
+	conv := loadRun(t, s, conversationID)
+	if conv.Status != "open" {
+		t.Errorf("run.status = %q, want open (a no-conclusion turn parks open, not completed)", conv.Status)
 	}
-	if run.Outcome != "" {
-		t.Errorf("run.outcome = %q, want \"\" (no conclusion was recorded)", run.Outcome)
+	if conv.Outcome != "" {
+		t.Errorf("run.outcome = %q, want \"\" (no conclusion was recorded)", conv.Outcome)
 	}
 }
 
@@ -227,12 +227,12 @@ func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
 	if parked {
 		t.Error("processCompletion(invalid) = true; want false (terminal failure, not parked)")
 	}
-	run := loadRun(t, s, conversationID)
-	if run.Status != "failed" {
-		t.Errorf("run.status = %q, want failed (an invalid envelope is a knowable error)", run.Status)
+	conv := loadRun(t, s, conversationID)
+	if conv.Status != "failed" {
+		t.Errorf("run.status = %q, want failed (an invalid envelope is a knowable error)", conv.Status)
 	}
-	if run.Outcome != "" {
-		t.Errorf("run.outcome = %q, want \"\" (an invalid attempt records no outcome)", run.Outcome)
+	if conv.Outcome != "" {
+		t.Errorf("run.outcome = %q, want \"\" (an invalid attempt records no outcome)", conv.Outcome)
 	}
 }
 

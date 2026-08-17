@@ -139,8 +139,8 @@ func (f stepFixture) blueprintRun(t *testing.T) *domain.BlueprintRun {
 // exactly as dispatchClaimedRun does, and returns the config it resolved.
 func (f stepFixture) claimStep(t *testing.T, br *domain.BlueprintRun, step int) runConfig {
 	t.Helper()
-	run := domain.Conversation{ID: f.conversationIDs[step], TaskID: f.task.ID, BlueprintRunID: f.brID}
-	cfg, err := f.s.buildStepConfig(context.Background(), runmode.LocalDefaultOrgID, br, f.task, run, nil, nil)
+	conv := domain.Conversation{ID: f.conversationIDs[step], TaskID: f.task.ID, BlueprintRunID: f.brID}
+	cfg, err := f.s.buildStepConfig(context.Background(), runmode.LocalDefaultOrgID, br, f.task, conv, nil, nil)
 	if err != nil {
 		t.Fatalf("buildStepConfig for step %d: %v", step, err)
 	}
@@ -336,11 +336,11 @@ func TestFinishedThreeStepBlueprint_RefusesEarlierStepsHonestlyAndResumesTheLast
 	finishBlueprint(t, f.database, f.brID, "completed", len(f.conversationIDs)-1)
 
 	for step, conversationID := range f.conversationIDs {
-		run, err := f.s.conversations.GetSystem(ctx, org, conversationID)
-		if err != nil || run == nil {
+		conv, err := f.s.conversations.GetSystem(ctx, org, conversationID)
+		if err != nil || conv == nil {
 			t.Fatalf("load step %d: %v", step, err)
 		}
-		ok, reason := f.s.ResumabilityFor(ctx, org, run)
+		ok, reason := f.s.ResumabilityFor(ctx, org, conv)
 		if step == len(f.conversationIDs)-1 {
 			if !ok {
 				t.Fatalf("final step: ResumabilityFor = (false, %q), want resumable", reason)

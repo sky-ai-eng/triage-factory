@@ -329,14 +329,14 @@ func TestAttachRunMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) {
 	entA := attachEntityBySource(t, database, "github", "owner/repo#r-step1")
 
 	// A second step-run on the same task (same entity).
-	run1, err := s.conversations.GetSystem(ctx, org, "r-step1")
-	if err != nil || run1 == nil {
-		t.Fatalf("GetSystem(r-step1): err=%v run=%v", err, run1)
+	conv1, err := s.conversations.GetSystem(ctx, org, "r-step1")
+	if err != nil || conv1 == nil {
+		t.Fatalf("GetSystem(r-step1): err=%v run=%v", err, conv1)
 	}
-	brID := seedRunBlueprint(t, database, "r-step2", run1.TaskID)
+	brID := seedRunBlueprint(t, database, "r-step2", conv1.TaskID)
 	stepIdx := 1
 	dbtest.SeedConversation(t, database, domain.Conversation{
-		ID: "r-step2", TaskID: run1.TaskID, PromptID: "test-prompt",
+		ID: "r-step2", TaskID: conv1.TaskID, PromptID: "test-prompt",
 		Status: "running", Model: "claude-sonnet-4-6",
 		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
 	})
@@ -354,8 +354,8 @@ func TestAttachRunMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) {
 	if role := attachRoleFor(t, database, "r-step2", entA.ID); role != domain.MemoryRolePrimary {
 		t.Errorf("step2 role = %q, want primary", role)
 	}
-	runs := attachMemoryRunIDs(t, s, entA.ID)
-	if !runs["r-step1"] || !runs["r-step2"] {
-		t.Errorf("entity should reach both step-runs, got %v", runs)
+	conversationIDs := attachMemoryRunIDs(t, s, entA.ID)
+	if !conversationIDs["r-step1"] || !conversationIDs["r-step2"] {
+		t.Errorf("entity should reach both step-runs, got %v", conversationIDs)
 	}
 }

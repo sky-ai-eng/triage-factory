@@ -107,12 +107,12 @@ func RunRefreshSweep(ctx context.Context, mgr *Manager, interval, refreshAfter t
 }
 
 func sweepRefresh(ctx context.Context, mgr *Manager, refreshAfter time.Duration) {
-	runs, err := mgr.stores.ConversationQueue.ListActiveNeedingCredentialRefresh(ctx, time.Now().Add(-refreshAfter))
+	convs, err := mgr.stores.ConversationQueue.ListActiveNeedingCredentialRefresh(ctx, time.Now().Add(-refreshAfter))
 	if err != nil {
 		log.Warn("list runs needing credential refresh failed; retrying next tick", "error", err)
 		return
 	}
-	for _, r := range runs {
+	for _, r := range convs {
 		if err := mgr.ProvisionForConversation(ctx, r.OrgID, r.ConversationID); err != nil {
 			log.Warn("refresh-sweep provision failed", "conversation", r.ConversationID, "error", err)
 		}

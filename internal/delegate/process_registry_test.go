@@ -323,7 +323,7 @@ func TestParsePlatformReserveMB(t *testing.T) {
 // utilization is not a backlog), a blocked acquire with queued work opens
 // the episode exactly once, and an immediate acquire closes it.
 func TestNoteCapSaturationTransitions(t *testing.T) {
-	s, database, _, _, run0 := reactorFixture(t, "capsat", 1, "completed", "finish")
+	s, database, _, _, step0ConversationID := reactorFixture(t, "capsat", 1, "completed", "finish")
 	ctx := context.Background()
 
 	s.noteCapAcquireBlocked(ctx, 4)
@@ -331,7 +331,7 @@ func TestNoteCapSaturationTransitions(t *testing.T) {
 		t.Error("blocked acquire with an empty queue must not open a saturation episode")
 	}
 
-	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, run0); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, step0ConversationID); err != nil {
 		t.Fatalf("force queued: %v", err)
 	}
 	s.noteCapAcquireBlocked(ctx, 4)

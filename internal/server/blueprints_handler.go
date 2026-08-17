@@ -1378,18 +1378,18 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 		}
 	}
 
-	runByStep := map[int]*domain.Conversation{}
+	convByStep := map[int]*domain.Conversation{}
 	for i := range stepConversations {
 		if stepConversations[i].BlueprintStepIndex != nil {
-			runByStep[*stepConversations[i].BlueprintStepIndex] = &stepConversations[i]
+			convByStep[*stepConversations[i].BlueprintStepIndex] = &stepConversations[i]
 		}
 	}
 
 	views := make([]blueprintRunStepView, 0, len(steps))
 	for _, step := range steps {
 		view := blueprintRunStepView{Step: step}
-		if run, ok := runByStep[step.StepIndex]; ok {
-			view.Run = run
+		if conv, ok := convByStep[step.StepIndex]; ok {
+			view.Run = conv
 		}
 		views = append(views, view)
 	}

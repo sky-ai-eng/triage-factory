@@ -81,13 +81,13 @@ func Build(conversations db.ConversationStore, orgID, conversationID, kind strin
 	bare := "\n\n---\n" + disclaimer
 
 	ctx := context.Background()
-	run, err := conversations.GetSystem(ctx, orgID, conversationID)
-	if err != nil || run == nil {
+	conv, err := conversations.GetSystem(ctx, orgID, conversationID)
+	if err != nil || conv == nil {
 		return bare
 	}
 
-	elapsed := elapsedFromConversation(ctx, conversations, orgID, conversationID, run)
-	cost, costPrefix := costFromConversation(ctx, conversations, orgID, conversationID, run)
+	elapsed := elapsedFromConversation(ctx, conversations, orgID, conversationID, conv)
+	cost, costPrefix := costFromConversation(ctx, conversations, orgID, conversationID, conv)
 
 	return fmt.Sprintf(
 		"\n\n---\n%s\n\nTime: %s | Cost: %s$%.3f",
@@ -134,14 +134,14 @@ func StripFooter(body string) string {
 //
 // "?" only on a run with no own duration AND no StartedAt, which
 // shouldn't happen in practice.
-func elapsedFromConversation(ctx context.Context, conversations db.ConversationStore, orgID, conversationID string, run *domain.Conversation) string {
-	own, ok := ownDurationMs(run)
+func elapsedFromConversation(ctx context.Context, conversations db.ConversationStore, orgID, conversationID string, conv *domain.Conversation) string {
+	own, ok := ownDurationMs(conv)
 	if !ok {
 		return "?"
 	}
 	total := own
-	if run.BlueprintRunID != "" {
-		if siblings, err := conversations.BlueprintSiblingDurationMsSystem(ctx, orgID, run.BlueprintRunID, conversationID); err == nil {
+	if conv.BlueprintRunID != "" {
+		if siblings, err := conversations.BlueprintSiblingDurationMsSystem(ctx, orgID, conv.BlueprintRunID, conversationID); err == nil {
 			total += siblings
 		}
 	}
@@ -153,15 +153,15 @@ func elapsedFromConversation(ctx context.Context, conversations db.ConversationS
 // telemetry); falls back to CompletedAt-StartedAt; final fallback is
 // "now - StartedAt" for the still-running standalone-CLI case. ok=false
 // only when the run has no duration and no StartedAt.
-func ownDurationMs(run *domain.Conversation) (int, bool) {
-	if run.DurationMs != nil {
-		return *run.DurationMs, true
+func ownDurationMs(conv *domain.Conversation) (int, bool) {
+	if conv.DurationMs != nil {
+		return *conv.DurationMs, true
 	}
-	if run.CompletedAt != nil {
-		return int(run.CompletedAt.Sub(run.StartedAt).Milliseconds()), true
+	if conv.CompletedAt != nil {
+		return int(conv.CompletedAt.Sub(conv.StartedAt).Milliseconds()), true
 	}
-	if !run.StartedAt.IsZero() {
-		return int(time.Since(run.StartedAt).Milliseconds()), true
+	if !conv.StartedAt.IsZero() {
+		return int(time.Since(conv.StartedAt).Milliseconds()), true
 	}
 	return 0, false
 }
@@ -182,9 +182,9 @@ func ownDurationMs(run *domain.Conversation) (int, bool) {
 // all terminal by the time a footer is built (the blueprint advanced
 // past them), so their total_cost_usd is settled; a failed sibling-cost
 // read just omits their contribution rather than blocking the submit.
-func costFromConversation(ctx context.Context, conversations db.ConversationStore, orgID, conversationID string, run *domain.Conversation) (cost float64, prefix string) {
-	if run.TotalCostUSD != nil {
-		cost = *run.TotalCostUSD
+func costFromConversation(ctx context.Context, conversations db.ConversationStore, orgID, conversationID string, conv *domain.Conversation) (cost float64, prefix string) {
+	if conv.TotalCostUSD != nil {
+		cost = *conv.TotalCostUSD
 	} else {
 		// The authoring run's own cost is unsettled — the rendered figure
 		// is approximate regardless of whether the token-estimate read
@@ -193,14 +193,14 @@ func costFromConversation(ctx context.Context, conversations db.ConversationStor
 		if totals, err := conversations.TokenTotalsSystem(ctx, orgID, conversationID); err == nil {
 			model := totals.Model
 			if model == "" {
-				model = run.Model
+				model = conv.Model
 			}
 			cost = ai.CalculateCostUSD(model, totals.InputTokens, totals.OutputTokens, totals.CacheReadTokens, totals.CacheCreationTokens)
 		}
 	}
 
-	if run.BlueprintRunID != "" {
-		if siblings, err := conversations.BlueprintSiblingCostUSDSystem(ctx, orgID, run.BlueprintRunID, conversationID); err == nil {
+	if conv.BlueprintRunID != "" {
+		if siblings, err := conversations.BlueprintSiblingCostUSDSystem(ctx, orgID, conv.BlueprintRunID, conversationID); err == nil {
 			cost += siblings
 		}
 	}

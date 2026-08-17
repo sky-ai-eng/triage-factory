@@ -265,7 +265,7 @@ func loopRunsInJail(runtime string) bool {
 //
 // On any error the partial state (network, sidecar) is already torn down; the
 // caller does not Close a nil return.
-func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *domain.Conversation, task domain.Task) (*runSidecar, error) {
+func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *domain.Conversation, task domain.Task) (*runSidecar, error) {
 	if runmode.Current() != runmode.ModeMulti {
 		return nil, nil
 	}
@@ -283,7 +283,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 	// root is sticky. This process can (it owns that directory), and doing it
 	// here, ahead of the launch, is what makes an immediate re-claim that
 	// races the previous cell's teardown come up instead of failing.
-	sandbox.ClearRunCellFiles(run.ID)
+	sandbox.ClearRunCellFiles(conv.ID)
 
 	// The four-process choreography, from the executor's viewpoint. Every leg
 	// below is a round trip into a process that exports nothing itself — the
@@ -293,7 +293,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 	defer bringUpSpan.End()
 
 	netCtx, netSpan := tracer.Start(ctx, "sandbox.network.setup")
-	net, err := sandbox.SetupRunNetwork(netCtx, run.ID)
+	net, err := sandbox.SetupRunNetwork(netCtx, conv.ID)
 	recordSpanError(netSpan, err)
 	netSpan.End()
 	if err != nil {
@@ -301,7 +301,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 		return nil, fmt.Errorf("set up run network: %w", err)
 	}
 	scCtx, scSpan := tracer.Start(ctx, "sandbox.sidecar.launch")
-	sc, err := sandbox.LaunchSidecar(scCtx, sandbox.SidecarConfig{ConversationID: run.ID, SubnetIdx: net.Idx})
+	sc, err := sandbox.LaunchSidecar(scCtx, sandbox.SidecarConfig{ConversationID: conv.ID, SubnetIdx: net.Idx})
 	recordSpanError(scSpan, err)
 	scSpan.End()
 	if err != nil {
@@ -313,10 +313,10 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 	stores, storesSet := s.getStores()
 	info := agenthost.ConversationInfo{
 		OrgID:            orgID,
-		UserID:           run.CreatorUserID,
-		ConversationID:   run.ID,
-		TeamID:           run.TeamID,
-		IsEventTriggered: run.TriggerType == domain.TriggerTypeEvent,
+		UserID:           conv.CreatorUserID,
+		ConversationID:   conv.ID,
+		TeamID:           conv.TeamID,
+		IsEventTriggered: conv.TriggerType == domain.TriggerTypeEvent,
 	}
 
 	// Git gate for the sidecar's git proxy: the DB-backed authorize/denial the
@@ -340,14 +340,14 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 	// sandbox's single GIT_CONFIG_* block alongside the proxy routing — resolved
 	// here because on the executor path agentproc runs no ConfigureProxies to
 	// fold them itself.
-	identity := s.resolveCommitIdentity(ctx, orgID, run.TriggerType, run.CreatorUserID)
+	identity := s.resolveCommitIdentity(ctx, orgID, conv.TriggerType, conv.CreatorUserID)
 
 	// Held so its proxy coords can be set once bring-up returns them (below):
 	// the relayed workspace-add materialization clones through the run's proxies.
 	relaySrv := agenthost.NewRelayServer(stores, info, git)
 	params := agentproc.SidecarBringUpParams{
 		HostVethIP: net.HostIP,
-		SandboxLLM: loopRunsInJail(run.Runtime),
+		SandboxLLM: loopRunsInJail(conv.Runtime),
 		Git:        git,
 		// The org-bound op server the sidecar's relay envelope dispatches to:
 		// the git proxy's push authz/audit (backed by the same git gate) plus
@@ -381,7 +381,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 		},
 	}
 
-	res, conn, err := agentproc.BringUpRunSidecar(ctx, sc, s.sidecarProvisionFor(orgID, run.ID), params)
+	res, conn, err := agentproc.BringUpRunSidecar(ctx, sc, s.sidecarProvisionFor(orgID, conv.ID), params)
 	if err != nil {
 		recordSpanError(bringUpSpan, err)
 		_ = sc.Close()
@@ -392,7 +392,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 	// later dispatches can link back to the setup that created it. Captured
 	// rather than propagated: the sidecar frames carry no trace context by
 	// design, and this server already knows which run it belongs to.
-	relaySrv.SetEngagementSpanContext(s.engagementSpanContext(run.ID))
+	relaySrv.SetEngagementSpanContext(s.engagementSpanContext(conv.ID))
 	// Hand the relay server the run's now-known proxy coords so a relayed
 	// `workspace add` clones + fetches PRs through them — the orchestrator holds
 	// no real credential for either. Set before the agent runs, so always ready
@@ -416,7 +416,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 		auditHost.SetGitHubCredential(res.GitHubCredential)
 	}
 
-	es := &runSidecar{conversationID: run.ID, net: net, proc: sc, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
+	es := &runSidecar{conversationID: conv.ID, net: net, proc: sc, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
 	_, myBootEpoch := s.executorIdentity()
 
 	// A relayed `workspace add` widens this run's authorized repo set, which
@@ -426,7 +426,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 	// orchestrator still never opens a bundle.
 	relaySrv.SetCredentialRefresh(&agenthost.CredentialRefresh{
 		SealedAt: func(ctx context.Context) (time.Time, bool, error) {
-			b, ok, err := s.runCredentials.Get(ctx, orgID, run.ID)
+			b, ok, err := s.runCredentials.Get(ctx, orgID, conv.ID)
 			if err != nil || !ok || b.BootEpoch != myBootEpoch {
 				return time.Time{}, false, err
 			}
@@ -442,8 +442,8 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, run *doma
 	// with no DB access, so it can't pull them — this goroutine relays each new
 	// sealed blob down (the sidecar idempotently re-accepts it) so a long run
 	// keeps signing with live credentials instead of 502-ing on expiry.
-	go s.relayCredentialRefreshes(run.ID, func(ctx context.Context) (int64, []byte, bool, error) {
-		b, ok, err := s.runCredentials.Get(ctx, orgID, run.ID)
+	go s.relayCredentialRefreshes(conv.ID, func(ctx context.Context) (int64, []byte, bool, error) {
+		b, ok, err := s.runCredentials.Get(ctx, orgID, conv.ID)
 		return b.BootEpoch, b.Sealed, ok, err
 	}, myBootEpoch, conn, es.credNudge, es.stopRelay)
 	return es, nil

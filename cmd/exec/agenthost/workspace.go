@@ -56,13 +56,13 @@ var (
 // the value the resume path maintains. The derivation is only the fallback for
 // a run whose worktree_path write failed at setup.
 func (c *LocalClient) WorkspaceRoots(ctx context.Context) (hostRoot, agentRoot string, err error) {
-	run, err := c.GetConversation(ctx)
+	conv, err := c.GetConversation(ctx)
 	if err != nil {
 		return "", "", fmt.Errorf("load run for workspace roots: %w", err)
 	}
 	root := ""
-	if run != nil {
-		root = run.WorktreePath
+	if conv != nil {
+		root = conv.WorktreePath
 	}
 	if root == "" {
 		root = worktree.RunRoot(c.info.ConversationID)
