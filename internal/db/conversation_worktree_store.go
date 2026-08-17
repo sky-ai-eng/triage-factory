@@ -9,7 +9,7 @@ import (
 //go:generate go run github.com/vektra/mockery/v2 --name=ConversationWorktreeStore --output=./mocks --case=underscore --with-expecter
 
 // ConversationWorktreeStore owns the conversation_worktrees table — one row per
-// (run_id, repository, ref) reservation tracking the lazy worktree
+// (conversation_id, repository, ref) reservation tracking the lazy worktree
 // materializations a run accumulates as the agent calls
 // `triagefactory exec workspace add` against each repo it needs. The
 // ref discriminator (TFAC-502) lets a single run hold several worktrees
@@ -53,7 +53,7 @@ type ConversationWorktreeStore interface {
 	// create on disk. Used as the cross-process serialization point:
 	// two concurrent `workspace add owner/repo` invocations for the
 	// same (run, repo, ref) that both passed the GetByRepoRef "not
-	// found" check race here, and the PK conflict on (run_id, repo_id,
+	// found" check race here, and the PK conflict on (conversation_id, repo_id,
 	// ref) deterministically picks one winner.
 	//
 	// On PK conflict the winning row's path is returned with
@@ -62,7 +62,7 @@ type ConversationWorktreeStore interface {
 	// caller supplied.
 	Insert(ctx context.Context, orgID string, w domain.ConversationWorktree) (inserted bool, winningPath string, err error)
 
-	// GetByRepoRef fetches the worktree row for a (run_id, repo_id,
+	// GetByRepoRef fetches the worktree row for a (conversation_id, repo_id,
 	// ref) triple, or (nil, nil) if none exists. Used by the workspace
 	// CLI to short-circuit the create+insert path when the agent
 	// re-invokes `workspace add` against an already-materialized
@@ -81,7 +81,7 @@ type ConversationWorktreeStore interface {
 	// — no JWT claims in scope.
 	ListSystem(ctx context.Context, orgID, conversationID string) ([]domain.ConversationWorktree, error)
 
-	// DeleteByRepoRef removes the row for a (run_id, repo_id, ref)
+	// DeleteByRepoRef removes the row for a (conversation_id, repo_id, ref)
 	// triple. Used by the workspace CLI to release a reservation after
 	// worktree materialization fails, or to clear a stale row whose on-disk
 	// path was reaped (e.g. startup orphan sweep) so a subsequent
@@ -89,7 +89,7 @@ type ConversationWorktreeStore interface {
 	// that doesn't exist is a no-op (no error).
 	DeleteByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) error
 
-	// DeleteByPathSystem removes the row for a (run_id, path)
+	// DeleteByPathSystem removes the row for a (conversation_id, path)
 	// pair. Used by the spawner cleanup defer that iterates List
 	// and removes worktree rows one-by-one as their on-disk dirs
 	// are reaped, so a per-path failure to remove from disk leaves

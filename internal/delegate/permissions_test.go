@@ -618,7 +618,7 @@ func TestHumanWait(t *testing.T) {
 
 // readPermissionResolved reads frames until a permission_resolved event arrives
 // (skipping the permission_request the handler emits on registration), and
-// returns its run_id + tool_call_id. A bounded read deadline turns a missing
+// returns its conversation_id + tool_call_id. A bounded read deadline turns a missing
 // broadcast into a clean failure instead of a hang.
 func readPermissionResolved(t *testing.T, conn *ws.Conn) (conversationID, toolCallID string) {
 	t.Helper()

@@ -23,7 +23,7 @@ import {
   appendToFeed,
   feedFromMessages,
   EMPTY_FEED,
-  type RunCardFeed,
+  type ConversationCardFeed,
 } from '../lib/conversationFeed'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
@@ -202,7 +202,9 @@ export default function Board() {
   // ID. Bounded by construction — the board used to accumulate every run's
   // full message array here, growing without limit for the lifetime of the
   // page while each card re-derived its stats from scratch per render.
-  const [conversationFeeds, setConversationFeeds] = useState<Record<string, RunCardFeed>>({})
+  const [conversationFeeds, setConversationFeeds] = useState<Record<string, ConversationCardFeed>>(
+    {},
+  )
   const [chainStepConversations, setChainStepConversations] = useState<
     Record<string, Conversation[]>
   >({})
@@ -488,7 +490,7 @@ export default function Board() {
       // iteration). Chains need a second per-chain fetch for their blueprint
       // step structure; resolve those concurrently rather than serially.
       const nextConversations: Record<string, Conversation> = {}
-      const nextFeeds: Record<string, RunCardFeed> = {}
+      const nextFeeds: Record<string, ConversationCardFeed> = {}
       const chainSeeds: Array<Promise<{ taskID: string; steps: Conversation[] } | null>> = []
 
       for (const task of withConversations) {
@@ -1572,7 +1574,7 @@ function ColumnContents({
   colId: ColumnId
   tasks: Task[]
   conversations: Record<string, Conversation>
-  conversationFeeds: Record<string, RunCardFeed>
+  conversationFeeds: Record<string, ConversationCardFeed>
   chainStepConversations: Record<string, Conversation[]>
   permQueues: Record<string, PendingPermission[]>
   onResolvePermission: (
@@ -1743,7 +1745,7 @@ const SortableAgentCard = memo(function SortableAgentCard({
   task: Task
   conversation: Conversation
   chainSteps?: Conversation[]
-  feed?: RunCardFeed
+  feed?: ConversationCardFeed
   pendingPermissions?: PendingPermission[]
   onResolvePermission: (
     conversationID: string,

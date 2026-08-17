@@ -153,7 +153,7 @@ func (r *usageRig) activityReq(caller, teamID, body string) *http.Request {
 
 // seedArtifacts stages the bot-activity rows the feed reads: two on teamA (a PR
 // + a comment) and one on teamB (a branch), so the org feed is cross-team and
-// the team feed is teamA-only. run_id is left NULL — the feed reads artifacts
+// the team feed is teamA-only. conversation_id is left NULL — the feed reads artifacts
 // directly, not through a run.
 func (r *usageRig) seedArtifacts(t *testing.T) {
 	t.Helper()

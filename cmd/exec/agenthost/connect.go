@@ -52,7 +52,7 @@ func dialSandbox(ctx context.Context, socketPath string) (Client, error) {
 // that needs stores at all.
 //
 // It never probes for a socket. /run/tf.sock is a jail-only path — the host
-// side of the pair lives at /run/tf/<run_id>.sock — so on this identity there
+// side of the pair lives at /run/tf/<conversation_id>.sock — so on this identity there
 // is nothing to detect.
 func NewLocalFromEnv(ctx context.Context, stores db.Stores) (Client, error) {
 	ident, err := convident.ResolveConversationIdentityFromEnv(ctx, stores)
@@ -63,7 +63,7 @@ func NewLocalFromEnv(ctx context.Context, stores db.Stores) (Client, error) {
 		if errors.Is(err, convident.ErrConversationIdentityMissing) || errors.Is(err, convident.ErrConversationIdentityNotFound) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("agenthost: resolve run identity: %w", err)
+		return nil, fmt.Errorf("agenthost: resolve conversation identity: %w", err)
 	}
 	return NewLocal(stores, ConversationInfo{
 		OrgID:            ident.OrgID,

@@ -41,7 +41,7 @@ func reviewDiffServer(t *testing.T, headSHA *string) *httptest.Server {
 // start-review lands one run-scoped `review` artifact with ZERO GitHub writes:
 // state=pending (no ready sentinel), empty ExternalID (no GitHub review until
 // approval), the head SHA pinned into details, deduped on
-// github:review:owner/repo#<number>:<run_id> — across both write paths. The
+// github:review:owner/repo#<number>:<conversation_id> — across both write paths. The
 // returned handle is the artifact id.
 func TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {

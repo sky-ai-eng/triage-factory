@@ -22,7 +22,7 @@ func translateLookupErr(cmdPrefix, conversationID string, err error) error {
 	case errors.Is(err, convident.ErrConversationIdentityMissing):
 		return errMissingConversationID
 	case errors.Is(err, convident.ErrConversationIdentityNotFound):
-		return fmt.Errorf("%w: %s", errRunNotFound, conversationID)
+		return fmt.Errorf("%w: %s", errConversationNotFound, conversationID)
 	default:
 		return fmt.Errorf("%s: %w", cmdPrefix, err)
 	}

@@ -970,7 +970,7 @@ func (s *Spawner) processCompletion(
 
 	// Workspace-snapshot cleanup is owned by terminateBlueprint, keyed by
 	// blueprint_run_id (the shared workspace's key) — every run is a blueprint
-	// step now, so there is no standalone run_id-keyed snapshot to drop here. A
+	// step now, so there is no standalone conversation-id-keyed snapshot to drop here. A
 	// parked run keeps its snapshot for the eventual resume.
 	return parked, false
 }

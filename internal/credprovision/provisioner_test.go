@@ -97,12 +97,12 @@ func (f *fakeTasks) GetSystem(context.Context, string, string) (*domain.Task, er
 	return f.task, nil
 }
 
-type fakeRunWorktrees struct {
+type fakeConversationWorktrees struct {
 	db.ConversationWorktreeStore
 	rows []domain.ConversationWorktree
 }
 
-func (f *fakeRunWorktrees) ListSystem(context.Context, string, string) ([]domain.ConversationWorktree, error) {
+func (f *fakeConversationWorktrees) ListSystem(context.Context, string, string) ([]domain.ConversationWorktree, error) {
 	return f.rows, nil
 }
 
@@ -132,7 +132,7 @@ func TestManager_resolveGitHub_MintsScopedTokensForAuthorizedRepos(t *testing.T)
 			Tasks:           &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
 			// A repo the run touched but the team does NOT track — must be
 			// filtered out of the mint set.
-			ConversationWorktrees: &fakeRunWorktrees{rows: []domain.ConversationWorktree{{RepoID: "acme/secret"}}},
+			ConversationWorktrees: &fakeConversationWorktrees{rows: []domain.ConversationWorktree{{RepoID: "acme/secret"}}},
 		},
 		ghResolver: res,
 	}
@@ -234,7 +234,7 @@ func TestManager_resolveGitHub_PATFallback(t *testing.T) {
 		stores: db.Stores{
 			TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
 			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
-			ConversationWorktrees: &fakeRunWorktrees{},
+			ConversationWorktrees: &fakeConversationWorktrees{},
 		},
 		ghResolver: res,
 	}
@@ -275,7 +275,7 @@ func TestManager_resolveGitHub_SkipsUnmintableRepoInAuthorizedSet(t *testing.T) 
 		stores: db.Stores{
 			TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true, "globex/gadgets": true}},
 			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
-			ConversationWorktrees: &fakeRunWorktrees{rows: []domain.ConversationWorktree{{RepoID: "globex/gadgets"}}},
+			ConversationWorktrees: &fakeConversationWorktrees{rows: []domain.ConversationWorktree{{RepoID: "globex/gadgets"}}},
 		},
 		ghResolver: res,
 	}
@@ -322,7 +322,7 @@ func TestManager_resolveGitHub_HardMintErrorFailsBundle(t *testing.T) {
 		stores: db.Stores{
 			TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
 			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
-			ConversationWorktrees: &fakeRunWorktrees{},
+			ConversationWorktrees: &fakeConversationWorktrees{},
 		},
 		ghResolver: res,
 	}
@@ -384,7 +384,7 @@ func TestManager_resolveGitHub_GHChannelMintFailureIsNonFatal(t *testing.T) {
 				stores: db.Stores{
 					TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
 					Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
-					ConversationWorktrees: &fakeRunWorktrees{},
+					ConversationWorktrees: &fakeConversationWorktrees{},
 				},
 				ghResolver: res,
 			}

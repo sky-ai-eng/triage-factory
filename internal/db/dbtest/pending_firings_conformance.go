@@ -80,7 +80,7 @@ type PendingFiringsSeeder struct {
 //     sibling task's queue.
 //   - Release reverts a 'draining' row back to 'pending'; no-op against
 //     a row that's since reached a terminal state.
-//   - MarkFired flips 'draining' → 'fired' with run_id; idempotent
+//   - MarkFired flips 'draining' → 'fired' with fired_run_id; idempotent
 //     against already-terminal rows (guarded by status='draining').
 //   - MarkSkipped flips 'draining' → 'skipped_stale' with reason;
 //     same idempotency guard.

@@ -358,8 +358,8 @@ func TestMaterializeWorkspace_RunNotFound(t *testing.T) {
 	stores, _ := newTestDB(t)
 	stub := &stubCalls{}
 	_, err := materializeWorkspace(hostFor(stores, "missing-run"), "owner/repo", checkoutSpec{}, stub.deps())
-	if !errors.Is(err, errRunNotFound) {
-		t.Errorf("err = %v, want errRunNotFound", err)
+	if !errors.Is(err, errConversationNotFound) {
+		t.Errorf("err = %v, want errConversationNotFound", err)
 	}
 	if stub.createCalls != 0 {
 		t.Errorf("checkout called for missing run")

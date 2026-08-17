@@ -19,8 +19,8 @@ func TestListWorkspaces_MissingConversationID(t *testing.T) {
 
 func TestListWorkspaces_RunNotFound(t *testing.T) {
 	stores, _ := newTestDB(t)
-	if _, err := listWorkspaces(hostFor(stores, "missing-run")); !errors.Is(err, errRunNotFound) {
-		t.Errorf("err = %v, want errRunNotFound", err)
+	if _, err := listWorkspaces(hostFor(stores, "missing-run")); !errors.Is(err, errConversationNotFound) {
+		t.Errorf("err = %v, want errConversationNotFound", err)
 	}
 }
 

@@ -63,7 +63,7 @@ type TaskMemoryStore interface {
 	// so the materializer can fold each step's file into a shared
 	// namespace folder.
 	//
-	// Idempotent on (run_id) via ON CONFLICT — re-running the gate
+	// Idempotent on (conversation_id) via ON CONFLICT — re-running the gate
 	// after a retry overwrites agent_content but preserves the row's
 	// id, created_at, and any human_content the user has already
 	// attached.
@@ -158,7 +158,7 @@ type TaskMemoryStore interface {
 	// resolve a non-positive request to a default before calling.
 	GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string, limit int) ([]domain.TaskMemory, error)
 
-	// RecordEntityTouchSystem upserts a (run_id, entity_id) row in
+	// RecordEntityTouchSystem upserts a (conversation_id, entity_id) row in
 	// conversation_memory_entities with role-precedence upgrade: insert if
 	// absent; on conflict, set role only if the new role outranks the
 	// stored one (domain.MemoryRoleOutranks — primary > produced >

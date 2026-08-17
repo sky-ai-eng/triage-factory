@@ -253,7 +253,7 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 	} else if cfg.runRoot != "" {
 		// Jira blueprints materialize worktrees lazily via `workspace add`, which
 		// keys conversation_worktrees rows AND the on-disk run-root (runDir) by each
-		// *step's* run_id (the agent's TRIAGE_FACTORY_CONVERSATION_ID), not the
+		// *step's* conversation_id (the agent's TRIAGE_FACTORY_CONVERSATION_ID), not the
 		// blueprint_run_id. Iterate every step run so we find + remove their
 		// worktrees and their run-root dirs.
 		stepConversations, err := s.blueprints.ConversationsForBlueprintSystem(context.Background(), cfg.orgID, blueprintRunID)
@@ -301,7 +301,7 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 
 // reclaimWorkspaceAddPRConfig reclaims the per-run PR branch + push remote a
 // `workspace add --pr N` worktree left in the shared bare, keyed off the
-// conversation_worktrees row's ref (pr-<N>) and run_id (the run that created it, so the
+// conversation_worktrees row's ref (pr-<N>) and conversation_id (the conversation that created it, so the
 // per-run branch namespace matches). A no-op for non-PR refs (@default, branch
 // slugs) — those leave detached checkouts with no per-PR config. Folds the
 // eager path's inline cleanup into the lazy teardown so the bootstrap sweep
@@ -434,7 +434,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	s.requestBlueprintCancel(context.Background(), orgID, blueprintRunID)
 
 	// Kill the active step's subprocess, if one is running. The dispatcher
-	// registers a per-step cancel under the step run_id; sweep every active step
+	// registers a per-step cancel under the step conversation_id; sweep every active step
 	// run and cancel its handle.
 	//
 	// anyActive tracks whether at least one live subprocess got killed. If

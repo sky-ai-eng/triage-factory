@@ -197,7 +197,7 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info Conver
 
 // recordEntityTouch resolves-or-creates the touched entity for (provider,
 // target, url) and, when it maps to a real entity, persists a durable
-// (run_id, entity_id, role='touched') row. Shared by the write funnel
+// (conversation_id, entity_id, role='touched') row. Shared by the write funnel
 // (recordTouchInfo) and the addressed-read path (Runtime.RecordReadTouch).
 //
 // Best-effort throughout: a resolve or record failure is logged and swallowed

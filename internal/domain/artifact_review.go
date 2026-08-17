@@ -115,7 +115,7 @@ func ReviewTarget(repoPath string, number int) string {
 }
 
 // ReviewDedupKey is the stable key a run's review-draft upserts on:
-// github:review:owner/repo#<number>:<run_id>. It is **run-scoped** (TFAC-494):
+// github:review:owner/repo#<number>:<conversation_id>. It is **conversation-scoped** (TFAC-494):
 // the review is staged entirely TF-side, so two runs (different teams, a
 // re-delegate, interactive steering) reviewing the same PR each own an
 // independent draft row instead of colliding on one org+PR-scoped row. A run

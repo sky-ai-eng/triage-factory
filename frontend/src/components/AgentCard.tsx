@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import * as Popover from '@radix-ui/react-popover'
 import type { Conversation, Task } from '../types'
-import { EMPTY_FEED, type FeedLine, type RunCardFeed } from '../lib/conversationFeed'
+import { EMPTY_FEED, type FeedLine, type ConversationCardFeed } from '../lib/conversationFeed'
 import { useOrgHref } from '../hooks/useOrgHref'
 import ArtifactList from './ArtifactList'
 import RequestedReviewerBadge from './RequestedReviewerBadge'
@@ -47,7 +47,7 @@ interface Props {
   // Bounded live-feed projection for this run (running stats + last few ticker
   // lines) — see lib/conversationFeed. The board maintains it incrementally instead of
   // holding every run's full message array in state.
-  feed?: RunCardFeed
+  feed?: ConversationCardFeed
   // Unanswered tool-permission prompts for this run, head-first. When non-empty
   // the card renders an inline Allow/Deny control and takes the attention tone.
   pendingPermissions?: PendingPermission[]

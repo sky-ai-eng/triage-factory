@@ -114,7 +114,7 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 	// and deleted-fork alike. The own-repo path used to attach the head branch
 	// name itself and the fork path a per-PR triagefactory/pr-<n>; both collided
 	// when two runs shared one bare (git refuses to fetch into / check out a
-	// local branch live in another worktree). prLocalBranch namespaces by run_id
+	// local branch live in another worktree). prLocalBranch namespaces by rootKey
 	// so concurrent same-PR runs never share a ref (TFAC-87/TFAC-502). The
 	// fetch refspecs below inherit that uniqueness, so the fetch no longer hits
 	// "refusing to fetch into branch ... checked out at ...".

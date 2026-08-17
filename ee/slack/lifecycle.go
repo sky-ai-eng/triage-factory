@@ -403,7 +403,7 @@ func isTerminalConversationStatus(status string) bool {
 func (a *lifecycleAdapter) handleConversationStatus(ctx context.Context, evt domain.Event, conversations map[string]*conversationEntry) {
 	var meta events.SystemConversationStatusMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-		slackLog.Warn("slack lifecycle: decode run status failed", "error", err)
+		slackLog.Warn("slack lifecycle: decode conversation status failed", "error", err)
 		return
 	}
 
@@ -484,7 +484,7 @@ func (a *lifecycleAdapter) handleConversationStatus(ctx context.Context, evt dom
 func (a *lifecycleAdapter) handleConversationActivity(ctx context.Context, evt domain.Event, conversations map[string]*conversationEntry) {
 	var meta events.SystemConversationActivityMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-		slackLog.Warn("slack lifecycle: decode run activity failed", "error", err)
+		slackLog.Warn("slack lifecycle: decode conversation activity failed", "error", err)
 		return
 	}
 	entry, ok := conversations[meta.ConversationID]
@@ -508,7 +508,7 @@ func (a *lifecycleAdapter) resolveConversationEntry(ctx context.Context, orgID, 
 
 	conv, err := a.stores.Conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
-		slackLog.Warn("slack lifecycle: load run failed", "conversation", conversationID, "error", err)
+		slackLog.Warn("slack lifecycle: load conversation failed", "conversation", conversationID, "error", err)
 		return entry
 	}
 	if conv == nil || conv.TaskID == "" {

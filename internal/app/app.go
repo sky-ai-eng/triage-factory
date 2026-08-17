@@ -185,7 +185,7 @@ type App struct {
 	// credProvisioner is the brain-side sealed-credential-bundle
 	// provisioner (TFAC-614, spec's "channel") — resolves a run's LLM/
 	// GitHub/Jira credentials, seals them to the claiming executor's
-	// published pubkey, and writes run_credentials. Non-nil only for
+	// published pubkey, and writes claim_credentials. Non-nil only for
 	// brain-capable roles in multi mode (buildCredProvisioner), started/
 	// stopped alongside the rest of the brain in startBrain/stopBrain,
 	// nil-checked the same way a.reaperStore is.

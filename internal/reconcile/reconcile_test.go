@@ -486,9 +486,8 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID
 }
 
 // getConversationMemory finds the memory row belonging to conversationID via
-// GetMemoriesForEntity — the replacement for the removed GetRunMemory now
-// that reads are join-based (conversation_memory_entities) rather than a direct
-// run_id lookup.
+// GetMemoriesForEntity — reads are join-based (conversation_memory_entities),
+// so there is no direct by-conversation point read to call instead.
 func getConversationMemory(t *testing.T, stores db.Stores, ctx context.Context, orgID, entityID, conversationID string) *domain.TaskMemory {
 	t.Helper()
 	mems, err := stores.TaskMemory.GetMemoriesForEntity(ctx, orgID, entityID)

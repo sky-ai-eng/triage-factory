@@ -558,7 +558,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		openArt.DetailsJSON = domain.MarshalPRArtifactDetails(details)
 	}
 	// Compose the audit row with the flip (TFAC-483): the org-App MarkPRReady is a
-	// human-authorized, org-executed write — run_id is the drafting run, actor is
+	// human-authorized, org-executed write — conversation_id is the drafting conversation, actor is
 	// the approver. Recording inside the flip tx keeps the audit row and the
 	// artifact state atomic (both land or neither).
 	if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {

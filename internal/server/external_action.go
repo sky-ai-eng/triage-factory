@@ -12,7 +12,7 @@ import (
 // approval lifecycle (TFAC-483). These are writes a human triggers from the
 // approval UI / board but that TF performs under the ORG GitHub credential —
 // so they belong in the audit log of record alongside the bot's own writes. The
-// drafting run is run_id (who proposed the change); the approving/dragging human
+// drafting conversation is conversation_id (who proposed the change); the approving/dragging human
 // is actor_user_id (who authorized it).
 //
 // Two shapes, by whether the action also flips an artifact's state:
@@ -73,7 +73,7 @@ func githubCredentialForArtifact(ctx context.Context, resolver ghclient.Resolver
 }
 
 // githubApprovalAction builds the external_actions row for an artifact-backed
-// GitHub approval-lifecycle write. run_id is the drafting run (art.ConversationID),
+// GitHub approval-lifecycle write. ConversationID is the drafting conversation (art.ConversationID),
 // actor_user_id is the approving human (userID), team_id is the artifact's team,
 // and the object coordinates come from the artifact. from/to carry the lifecycle
 // transition (draft→open, pending→submitted, …). credential is the org

@@ -20,21 +20,21 @@ export interface FeedLine {
   text: string
 }
 
-export interface RunCardFeed {
+export interface ConversationCardFeed {
   /** Total tokens (input + output) across every message seen. */
   tokens: number
   /** The most recent ticker lines, oldest-first, capped at FEED_LINE_CAP. */
   lines: FeedLine[]
 }
 
-export const EMPTY_FEED: RunCardFeed = { tokens: 0, lines: [] }
+export const EMPTY_FEED: ConversationCardFeed = { tokens: 0, lines: [] }
 
 // The card's LiveFeed shows the last 5 lines; keep a small buffer beyond that
 // so the cap never changes what's displayed.
 const FEED_LINE_CAP = 8
 
 /** Build a feed from a full message array (the aggregated board fetch). */
-export function feedFromMessages(messages: Message[]): RunCardFeed {
+export function feedFromMessages(messages: Message[]): ConversationCardFeed {
   let feed = EMPTY_FEED
   for (const msg of messages) feed = appendToFeed(feed, msg)
   return feed
@@ -47,7 +47,10 @@ export function feedFromMessages(messages: Message[]): RunCardFeed {
  * Callers rely on that identity to skip the state write entirely, so a
  * display-no-op message doesn't re-render the board.
  */
-export function appendToFeed(prev: RunCardFeed | undefined, msg: Message): RunCardFeed {
+export function appendToFeed(
+  prev: ConversationCardFeed | undefined,
+  msg: Message,
+): ConversationCardFeed {
   const base = prev ?? EMPTY_FEED
   const lines = linesForMessage(msg)
   const tokens = (msg.output_tokens ?? 0) + (msg.input_tokens ?? 0)

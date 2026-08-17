@@ -639,11 +639,12 @@ func TestSlackExecHandler_Edit_UpsertsSameArtifactRow(t *testing.T) {
 }
 
 // TestSlackExecHandler_Edit_PreservesCreatingConversationAndTeam_AcrossDifferentTeams
-// pins the artifacts-upsert fix: both run_id and team_id stay pinned to the
-// message's CREATING run, even when a different team's run (both tracking
-// the same channel) later edits it. The edit's own external_action row still
-// attributes to the EDITING run/team — that's the audit trail's job — but
-// the artifact itself must not silently migrate to a different team's reads.
+// pins the artifacts-upsert fix: both conversation_id and team_id stay pinned
+// to the message's CREATING conversation, even when a different team's
+// conversation (both tracking the same channel) later edits it. The edit's own
+// external_action row still attributes to the EDITING conversation/team —
+// that's the audit trail's job — but the artifact itself must not silently
+// migrate to a different team's reads.
 func TestSlackExecHandler_Edit_PreservesCreatingConversationAndTeam_AcrossDifferentTeams(t *testing.T) {
 	r := newSlackExecRig(t)
 	orgID, owner, teamA := pgtest.SeedOrgWithUser(t, r.h, "slack-cross-team")

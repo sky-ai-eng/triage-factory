@@ -21,7 +21,7 @@ import (
 type ArtifactStore interface {
 	// Upsert inserts the artifact or, on a (org_id, dedup_key) conflict,
 	// updates the existing row's mutable fields (state, target,
-	// details_json, run_id, team_id, updated_at). This is the one writer all
+	// details_json, conversation_id, team_id, updated_at). This is the one writer all
 	// of Sub-epic A shares: the same PR seen via exec and again via
 	// reconciliation lands on one row. Returns the stored row with id and
 	// timestamps populated. a.ID may be empty (both impls generate a uuid); a
@@ -163,7 +163,7 @@ type ArtifactStore interface {
 	// (RLS-active, so the count is team-scoped exactly like the rows it
 	// counts — a non-member counts zero), the one connection in SQLite.
 	// orgID stays bound as defense in depth. Detached artifacts (run purged →
-	// run_id NULL) never match and are correctly excluded.
+	// conversation_id NULL) never match and are correctly excluded.
 	CountByConversation(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error)
 
 	// ListByConversations returns the artifacts for every given run as one flat slice,
@@ -177,12 +177,12 @@ type ArtifactStore interface {
 	//
 	// Mirrors ListByConversation's pool/RLS conventions: app pool in Postgres
 	// (RLS-active, team-scoped), the one connection in SQLite. orgID stays
-	// bound as defense in depth. Detached artifacts (run_id NULL) never match.
+	// bound as defense in depth. Detached artifacts (conversation_id NULL) never match.
 	ListByConversations(ctx context.Context, orgID string, conversationIDs []string) ([]domain.Artifact, error)
 
 	// ListByTeam returns the team's artifacts, newest first (the
 	// team_created index order). Backs team-level C2 (TFAC-449) through the
-	// shared A·6 API. Detached rows (run purged → run_id NULL) are still
+	// shared A·6 API. Detached rows (run purged → conversation_id NULL) are still
 	// the team's and are included.
 	ListByTeam(ctx context.Context, orgID, teamID string, opts ArtifactListOpts) ([]domain.Artifact, int, error)
 

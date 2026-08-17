@@ -73,7 +73,7 @@ const staleReservationAge = 5 * time.Minute
 var (
 	errMissingConversationID = errors.New("workspace add: TRIAGE_FACTORY_CONVERSATION_ID not set; this command must be invoked by the delegated agent")
 	errInvalidOwnerRepo      = errors.New("workspace add: invalid owner/repo")
-	errRunNotFound           = errors.New("workspace add: run not found")
+	errConversationNotFound  = errors.New("workspace add: conversation not found")
 	errRepoNotConfigured     = errors.New("workspace add: repo is not configured in Triage Factory; add it on the Settings page first")
 	errRepoNotTracked        = errors.New("workspace add: repo is not tracked by this team; add it to the team on the Settings page first")
 	errRepoMissingCloneURL   = errors.New("workspace add: repo has no clone URL on its repository row; try re-profiling from the Settings page")
@@ -178,7 +178,7 @@ func parseAddArgs(args []string) (ownerRepo string, spec checkoutSpec, err error
 // fail on "directory exists" before ever reaching the PK conflict.
 //
 // Order:
-//  1. Run validation (the run must exist; no Jira/task gate).
+//  1. Conversation validation (the conversation must exist; no Jira/task gate).
 //  2. Idempotent re-add check: if a row exists AND its path is a
 //     live directory, return it. If the row exists but the path is
 //     missing/not-a-dir (e.g. wiped by startup orphan sweep), drop
@@ -217,15 +217,15 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		return "", translateLookupErr("workspace add", "", err)
 	}
 
-	// The run must exist (the reservation FKs it; a clear error beats an
-	// opaque FK failure later). No task is loaded — `workspace add` is now
-	// run-agnostic and serves taskless runs too.
+	// The conversation must exist (the reservation FKs it; a clear error beats an
+	// opaque FK failure later). No task is loaded — `workspace add` is
+	// conversation-agnostic and serves taskless conversations too.
 	conv, err := host.GetConversation(ctx)
 	if err != nil {
-		return "", fmt.Errorf("workspace add: load run: %w", err)
+		return "", fmt.Errorf("workspace add: load conversation: %w", err)
 	}
 	if conv == nil {
-		return "", fmt.Errorf("%w: %s", errRunNotFound, info.ConversationID)
+		return "", fmt.Errorf("%w: %s", errConversationNotFound, info.ConversationID)
 	}
 
 	// Idempotent re-add. If a row exists for this (run, repo), prefer

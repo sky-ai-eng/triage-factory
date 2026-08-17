@@ -160,7 +160,7 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	if inst.BootEpoch != claim.BootEpoch {
 		// The claiming executor has restarted since it claimed this run —
 		// a new boot, a new ephemeral keypair, a new epoch. Nothing in
-		// this boot is waiting on this run_id; the reaper's stale-
+		// this boot is waiting on this conversation; the reaper's stale-
 		// heartbeat sweep is what recovers it (TFAC-586), not this
 		// function. Sealing against the new epoch here would be wrong:
 		// the executor compares a bundle's epoch against its OWN current

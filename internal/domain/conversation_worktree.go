@@ -8,7 +8,7 @@ import "time"
 // because it's passed across packages (cmd/exec/workspace,
 // internal/delegate).
 //
-// Keyed (run_id, repo_id, ref): a single run can materialize several
+// Keyed (conversation_id, repo_id, ref): a single run can materialize several
 // worktrees in one repo (e.g. two PRs reviewed in one interactive run),
 // so ref discriminates them. Ref is the materialization selector AND the
 // worktree's path-slug subdirectory:

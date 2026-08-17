@@ -102,7 +102,7 @@ func (a *App) openStores(ctx context.Context) error {
 		// (TFAC-402). Required in every role EXCEPT executor (TFAC-614):
 		// an executor never holds the secret-decryption key — all per-run
 		// credential material arrives pre-resolved via sealed
-		// run_credentials bundles instead (see internal/credprovision and
+		// claim_credentials bundles instead (see internal/credprovision and
 		// the awaiting-credentials wait in internal/delegate). If the var
 		// is set on an executor anyway (a stale compose file, an operator
 		// override) it is logged once and ignored, never loaded — the

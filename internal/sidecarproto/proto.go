@@ -46,7 +46,7 @@ const (
 	KindHello Kind = "hello"
 
 	// KindSealedBundle relays one run's opaque sealed credential bundle from
-	// the orchestrator (which read it out of run_credentials but cannot open
+	// the orchestrator (which read it out of claim_credentials but cannot open
 	// it) to the sidecar (which holds the private key). Repeatable: the
 	// orchestrator re-sends whenever the brain re-seals (refresh sweep), and
 	// the sidecar's proxies pick up the newer material. A Call so the sidecar

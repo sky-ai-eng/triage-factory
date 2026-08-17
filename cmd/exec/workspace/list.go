@@ -59,9 +59,9 @@ type listMaterialized struct {
 // extracted from runList so it returns errors instead of os.Exit-ing.
 // Mirrors the runAdd / materializeWorkspace split for testability.
 //
-// Run-agnostic (TFAC-498), mirroring materializeWorkspace: it serves any run
-// — Jira, GitHub, or taskless — since `workspace add` now does too. It only
-// needs the run identity (for scoping the materialized list) plus the
+// Conversation-agnostic (TFAC-498), mirroring materializeWorkspace: it serves any
+// conversation — Jira, GitHub, or taskless — since `workspace add` does too. It only
+// needs the conversation identity (for scoping the materialized list) plus the
 // org-configured repos, not the task.
 //
 // All reads route through the agenthost client — in local mode the
@@ -77,10 +77,10 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 
 	conv, err := host.GetConversation(ctx)
 	if err != nil {
-		return listOutput{}, fmt.Errorf("workspace list: load run: %w", err)
+		return listOutput{}, fmt.Errorf("workspace list: load conversation: %w", err)
 	}
 	if conv == nil {
-		return listOutput{}, fmt.Errorf("%w: %s", errRunNotFound, info.ConversationID)
+		return listOutput{}, fmt.Errorf("%w: %s", errConversationNotFound, info.ConversationID)
 	}
 
 	configured, err := host.ListRepos(ctx)

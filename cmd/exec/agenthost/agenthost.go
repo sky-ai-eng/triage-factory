@@ -48,7 +48,7 @@ import (
 
 // DefaultSocketPath is the in-sandbox bind-mount destination for the
 // per-run unix socket. The host side creates the listener at
-// /run/tf/<run_id>.sock (see internal/agentproc) and bind-mounts it
+// /run/tf/<conversation_id>.sock (see internal/agentproc) and bind-mounts it
 // here; from the sandbox's perspective there's exactly one socket
 // and its path is fixed. DialSandbox is bound to this path.
 const DefaultSocketPath = "/run/tf.sock"
@@ -137,7 +137,7 @@ var ErrProtocolVersion = errors.New("agenthost: protocol version mismatch")
 // Deliberately posture-neutral: the first call may have staged the review for
 // approval or posted it, and this error is raised without knowing which, so
 // naming an outcome here would mislead whichever way it guessed.
-var ErrReviewAlreadyFinalized = errors.New("agenthost: this run's review has already been finalized; do not call finalize-review again")
+var ErrReviewAlreadyFinalized = errors.New("agenthost: this conversation's review has already been finalized; do not call finalize-review again")
 
 // ReviewFinalizeResult is what FinalizeReviewDraft actually did.
 // Posted is false when the draft was staged for human approval — today's
@@ -284,7 +284,7 @@ type Client interface {
 	// UpsertArtifact records one durable run artifact (a pushed branch, a
 	// Jira write, a GitHub action) at the host-side choke point. The
 	// caller supplies the polymorphic fields (Provider/Kind/Target/State/
-	// DedupKey/...); the client stamps run_id/org_id/team_id off the run
+	// DedupKey/...); the client stamps conversation_id/org_id/team_id off the conversation
 	// identity, so the agent never has to know them. Routed admin-pool for
 	// event-triggered runs and synthetic-claims for manual runs, exactly
 	// like the pending-PR writer. Returns the stored row; best-effort

@@ -382,7 +382,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// submitted review finally has both — a never-published draft had neither) and
 	// the actual submitted event into details, and compose the audit row with the
 	// stamp (TFAC-483). The org-App submit is a human-authorized, org-executed
-	// write — run_id is the drafting run, actor is the approver. The state is
+	// write — conversation_id is the drafting conversation, actor is the approver. The state is
 	// already submitted (the claim), so this is a submitted→submitted CAS carrying
 	// the coordinates; retried once, and a double failure is loud — until the
 	// stamp lands the row shows submitted with no URL, which is why this must not

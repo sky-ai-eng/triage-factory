@@ -47,12 +47,12 @@ type putCall struct {
 	sealed                            []byte
 }
 
-type fakeRunCredentials struct {
+type fakeClaimCredentials struct {
 	db.ClaimCredentialsStore
 	puts []putCall
 }
 
-func (f *fakeRunCredentials) Put(_ context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte) error {
+func (f *fakeClaimCredentials) Put(_ context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte) error {
 	f.puts = append(f.puts, putCall{orgID, conversationID, executorID, bootEpoch, sealed})
 	return nil
 }
@@ -65,7 +65,7 @@ func (f *fakeLLM) ResolveForBundle(context.Context, string, string) (llmcred.Mat
 
 // curatorTurnManager builds a Manager wired with the curator fakes plus a
 // keypair the test can unseal the written bundle with.
-func curatorTurnManager(t *testing.T, turn *domain.CuratorTurnProvision, project *domain.Project, tracked map[string]bool) (*Manager, *fakeRunCredentials, *credseal.KeyPair) {
+func curatorTurnManager(t *testing.T, turn *domain.CuratorTurnProvision, project *domain.Project, tracked map[string]bool) (*Manager, *fakeClaimCredentials, *credseal.KeyPair) {
 	t.Helper()
 	kp, err := credseal.GenerateKeyPair()
 	if err != nil {
@@ -74,7 +74,7 @@ func curatorTurnManager(t *testing.T, turn *domain.CuratorTurnProvision, project
 	if turn != nil && turn.CredPubKey == "seal-to-me" {
 		turn.CredPubKey = base64.StdEncoding.EncodeToString(kp.Public[:])
 	}
-	rc := &fakeRunCredentials{}
+	rc := &fakeClaimCredentials{}
 	m := &Manager{
 		stores: db.Stores{
 			Curator:          &fakeCurator{turn: turn, ok: turn != nil},

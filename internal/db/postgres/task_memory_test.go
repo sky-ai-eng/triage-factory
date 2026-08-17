@@ -116,8 +116,8 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 
 	// A direct (org_id, conversation_id) lookup of orgA's run under orgB returns
 	// nothing — the same org_id filter GetMemoriesForEntity/System apply,
-	// pinned here at the raw-row level since GetRunMemory (which used to
-	// carry this check) is gone.
+	// pinned here at the raw-row level because the store exposes no
+	// by-conversation point read to pin it through.
 	if content, ok := queryConversationMemoryAgentContent(t, h, orgB, convA); ok {
 		t.Errorf("orgB read orgA run memory: %q", content)
 	}
@@ -143,9 +143,8 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 // queryConversationMemoryAgentContent reads conversation_memory.agent_content directly via
 // the admin pool for a (orgID, conversationID) pair — a raw-row escape hatch for
 // tests that need to pin the org_id filter independent of the
-// entity-scoped read path (GetMemoriesForEntity), now that GetRunMemory
-// (a direct conversation_id lookup) has been removed. Returns ("", false) when no
-// row matches.
+// entity-scoped read path (GetMemoriesForEntity), the only read the store
+// exposes. Returns ("", false) when no row matches.
 func queryConversationMemoryAgentContent(t *testing.T, h *pgtest.Harness, orgID, conversationID string) (string, bool) {
 	t.Helper()
 	var content sql.NullString

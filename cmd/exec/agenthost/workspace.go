@@ -58,7 +58,7 @@ var (
 func (c *LocalClient) WorkspaceRoots(ctx context.Context) (hostRoot, agentRoot string, err error) {
 	conv, err := c.GetConversation(ctx)
 	if err != nil {
-		return "", "", fmt.Errorf("load run for workspace roots: %w", err)
+		return "", "", fmt.Errorf("load conversation for workspace roots: %w", err)
 	}
 	root := ""
 	if conv != nil {
@@ -156,7 +156,7 @@ func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, o
 	if tracks, err := c.TeamTracksRepo(ctx, profile.Owner, profile.Repo); err != nil {
 		return "", fmt.Errorf("create workspace checkout: check team tracking: %w", err)
 	} else if !tracks {
-		return "", fmt.Errorf("create workspace checkout: repo %s is not tracked by this run's team", repoID)
+		return "", fmt.Errorf("create workspace checkout: repo %s is not tracked by this conversation's team", repoID)
 	}
 	if profile.CloneURL == "" {
 		return "", fmt.Errorf("create workspace checkout: repo %s has no clone URL on its repository row", repoID)

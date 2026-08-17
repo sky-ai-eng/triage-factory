@@ -12,7 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// The TFAC-623 touch-capture tests prove the durable (run_id, entity_id,
+// The TFAC-623 touch-capture tests prove the durable (conversation_id, entity_id,
 // role='touched') rows land for both halves of the touched-entity rule: the
 // write funnel (every org-credential write) and the addressed reads. The
 // LocalClient is the one seam the multi daemon dispatches through, so proving

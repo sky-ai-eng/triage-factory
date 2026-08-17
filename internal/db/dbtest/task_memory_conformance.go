@@ -102,7 +102,7 @@ func memoryForConversation(t *testing.T, ctx context.Context, s db.TaskMemorySto
 // What's covered:
 //
 //   - UpsertAgentMemory writes agent_content and is idempotent on
-//     (run_id); a retry overwrites agent_content but never tramples
+//     (conversation_id); a retry overwrites agent_content but never tramples
 //     human_content.
 //   - Empty / whitespace-only content canonicalizes to SQL NULL
 //     (factory's memory_missing derivation depends on the truth
@@ -264,7 +264,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 	})
 
 	t.Run("UpdateConversationMemoryHumanContent_missing_row_logged_not_fatal", func(t *testing.T) {
-		// The handler skips this call when run_id is empty, but if
+		// The handler skips this call when the conversation id is empty, but if
 		// some other caller hits it with a conversationID that has no row,
 		// returning an error would push a 5xx after the GitHub submit
 		// already succeeded. Logged-and-nil is the right shape.

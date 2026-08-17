@@ -172,11 +172,11 @@ func (c *LocalClient) conversationReviewArtifact(ctx context.Context, reviewID s
 		if art := domain.PendingReviewArtifactByID(arts, reviewID); art != nil {
 			return art, nil
 		}
-		return nil, fmt.Errorf("review %s is not a pending review for this run — run `gh pr start-review` first", reviewID)
+		return nil, fmt.Errorf("review %s is not a pending review for this conversation — run `gh pr start-review` first", reviewID)
 	}
 	art := domain.FirstPendingReviewArtifact(arts)
 	if art == nil {
-		return nil, fmt.Errorf("no pending review for this run — run `gh pr start-review` first")
+		return nil, fmt.Errorf("no pending review for this conversation — run `gh pr start-review` first")
 	}
 	return art, nil
 }
@@ -508,7 +508,7 @@ func (c *LocalClient) claimedReviewDetails(ctx context.Context, artifactID strin
 		}
 		return details, nil
 	}
-	return domain.ReviewArtifactDetails{}, fmt.Errorf("claimed review %s is no longer readable on this run", artifactID)
+	return domain.ReviewArtifactDetails{}, fmt.Errorf("claimed review %s is no longer readable on this conversation", artifactID)
 }
 
 // reconcileStagedCommentsToHead forward-maps every staged comment from the commit
@@ -2200,7 +2200,7 @@ func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifac
 // artifact upsert (the audit log of record for every org-credential write). The
 // credential is the org GitHub App / org Jira service account / Slack bot
 // token by construction — exec resolves the org's system credential, never a
-// user's own — so every bot write qualifies. run_id is this run, actor_user_id
+// user's own — so every bot write qualifies. conversation_id is this conversation, actor_user_id
 // is the kicking-off user (empty → NULL for an event-triggered run, an
 // autonomous system action).
 //
