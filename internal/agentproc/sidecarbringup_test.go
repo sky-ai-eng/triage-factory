@@ -70,7 +70,7 @@ func TestBringUpSidecar_HandshakeAndProxyEnv(t *testing.T) {
 	sc.conn = sidecarproto.New(sidecarEnd, sc)
 	// The sidecar announces its key first, exactly like the real runtime.
 	// Fire it concurrently: net.Pipe is unbuffered, so the write blocks until
-	// bringUpSidecar (below) constructs the orchestrator Conn and starts
+	// bringUpRunSidecar (below) constructs the orchestrator Conn and starts
 	// reading — a real broker socket is buffered and does not.
 	go func() {
 		_ = sc.conn.Notify(sidecarproto.KindHello, sidecarproto.HelloBody{PubKey: base64.StdEncoding.EncodeToString(kp.Public[:])})

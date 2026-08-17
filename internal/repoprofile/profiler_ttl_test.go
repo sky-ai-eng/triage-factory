@@ -75,9 +75,9 @@ func (s *ttlRepositoryStore) GetByRefSystem(context.Context, string, domain.Repo
 	return s.profile, nil
 }
 
-func (s *ttlRepositoryStore) UpsertSystem(context.Context, string, domain.Repository) error {
+func (s *ttlRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
 	s.upserts.Add(1)
-	return nil
+	return storedRepoRow(p), nil
 }
 
 // countingResolver counts ClientFor calls and always errors, so a forced

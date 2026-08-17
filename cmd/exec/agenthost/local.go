@@ -1049,7 +1049,7 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([
 // created/updated state, which can't distinguish a transition from an assign from
 // a field edit. toState carries a transition's target status (the Jira status the
 // agent moved the ticket to), empty otherwise; the agent's exec transition can't
-// cheaply know the prior status, so fromState stays empty.
+// cheaply know the prior status, so no from-state is recorded.
 func (c *LocalClient) recordJiraIssue(ctx context.Context, key, action, state, toState, detailsJSON string) {
 	// Folded before it reaches target/external_id/dedup_key: the artifact row
 	// is deduped on the key, so two spellings of one issue would otherwise
@@ -1353,7 +1353,7 @@ func (c *LocalClient) scopedRepoClient(ctx context.Context, owner, repo string) 
 // legacyRepoClient is the pre-scoping resolution: the App/PAT client + its
 // identity, unscoped. Used in local mode and as the fallback for a resolver
 // that doesn't implement ScopedRepoResolver. Mirrors the original
-// githubClientAndIdentityForRepo (RepoIdentityResolver, else ClientForRepo +
+// githubClientForRepo (RepoIdentityResolver, else ClientForRepo +
 // IdentityUnknown).
 func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
 	if ir, ok := c.githubResolver().(ghclient.RepoIdentityResolver); ok {

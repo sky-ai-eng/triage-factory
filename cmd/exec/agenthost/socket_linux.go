@@ -41,7 +41,7 @@ const hostSocketRoot = "/run/tf"
 // One HostDaemon per delegated run. The spawner's deferred-cleanup
 // chain looks like:
 //
-//	hd, mount, err := Start(stores, info, bundleFunc)
+//	hd, mount, err := Start(stores, info, proxyCreds)
 //	if err != nil { ... }
 //	defer hd.Close()
 //	// add `mount` to sandbox.Config.ExtraMounts; sb.Wrap; cmd.Wait

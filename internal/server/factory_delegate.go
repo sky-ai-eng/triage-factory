@@ -155,7 +155,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// Spawner availability gate runs after every request + state
 	// validation (400/404/409) so callers learn about bad input
 	// before they hit the infrastructure gap. Sits before the
-	// FindOrCreateTask + RecordSwipe writes so a missing spawner
+	// Tasks.FindOrCreate + RecordSwipe writes so a missing spawner
 	// can't leave a half-applied delegate (task + swipe row but no
 	// run). Tests rely on this ordering to exercise the 404/409/400
 	// paths without installing a spawner.

@@ -14,7 +14,7 @@ interface JiraStatus {
  * JiraProjectRulesGroup is the team-scope Jira project-tracking field group:
  * the list of tracked projects and, per project, the pickup / in-progress /
  * done status rules. A controlled component — the container owns the
- * projects array (`value`) and the actual POST /api/settings/team/{id} — so
+ * projects array (`value`) and the actual PUT /api/teams/{id}/jira-projects — so
  * the same editor serves the team Settings tab and the setup wizard's
  * team steps.
  *

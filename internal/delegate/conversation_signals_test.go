@@ -374,7 +374,7 @@ func TestStop_SignalsRemoteOwnerBestEffort(t *testing.T) {
 	}
 }
 
-// TestCancel_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic:
+// TestStop_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic:
 // signalCancelBestEffort must not dereference a nil s.instances — a
 // deployment can wire runSignals without an instance store (e.g. a
 // misconfigured role), and the fire-and-forget hastening path must simply

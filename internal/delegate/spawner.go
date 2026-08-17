@@ -850,7 +850,7 @@ func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo,
 // account-wide App installation token, a bundle's RepoTokens are scoped
 // per-repo, so an owner alone is ambiguous whenever a run's authorized set
 // covers more than one repo under the same account — passing "" there
-// would let bundleRepoToken's map iteration pick an arbitrary sibling
+// would let credbundle.ResolveRepoToken's map iteration pick an arbitrary sibling
 // repo's token, which then 403s every call it's used for.
 func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string) *ghclient.Client {
 	// TF_ROLE=executor never reaches here for a run's GetPR — setupGitHub
@@ -878,8 +878,8 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string
 // the worktree's LIVE current branch mapped through its configured push
 // refspec — "you may push where a bare `git push` from your checkout lands"
 // (TFAC-498, refspec-aware) — read fresh from disk per call rather than a
-// prescribed conversation_worktrees.FeatureBranch. The refspec mapping matters for PR
-// worktrees: the checkout is the run-namespaced triagefactory/<conversationID>/pr-<n>
+// branch prescribed when the worktree was reserved. The refspec mapping matters for PR
+// worktrees: the checkout is the run-namespaced triagefactory/<rootKey>/pr-<n>
 // while push tracking maps it to the PR's real head branch, and the
 // receive-pack command block the ref gate inspects carries that REMOTE ref —
 // comparing against the local name rejected every PR push with a 403

@@ -34,7 +34,7 @@ func TestOrgSettingsPost_BaseURLValidated(t *testing.T) {
 				"https://github.example.com#frag", // fragment
 				"   ",                             // whitespace only
 			} {
-				rec := doJSON(t, s, "POST", "/api/settings/org", map[string]any{field: bad})
+				rec := patchOrgSettings(t, s, map[string]any{field: bad})
 				if rec.Code != http.StatusBadRequest {
 					t.Errorf("POST %s=%q = %d, want 400; body=%s", field, bad, rec.Code, rec.Body.String())
 					continue
@@ -54,7 +54,7 @@ func TestOrgSettingsPost_BaseURLCanonicalized(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	postJSONResp(t, s, "/api/settings/org", map[string]any{
+	patchOrgSettingsOK(t, s, map[string]any{
 		"github_base_url": "  https://github.example.com/  ",
 		"jira_base_url":   "https://jira.example.com/context/",
 	})

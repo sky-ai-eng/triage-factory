@@ -57,7 +57,7 @@ type RepoRenameSeeder struct {
 	ReferenceRows func(t *testing.T) []string
 }
 
-// oldSlug/newSlug are the rename under test throughout. neighbourSlug shares
+// oldSlug/newSlug are the rename under test throughout. renameNeighbourSlug shares
 // oldSlug as a string prefix and must never be touched: it is the whole reason
 // the rewrite matches on a slug boundary instead of on a substring.
 const (

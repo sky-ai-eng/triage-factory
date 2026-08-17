@@ -23,7 +23,7 @@ import (
 //
 // The variants:
 //
-//	no cookie       — most basic gate; requireAuth not wired at all
+//	no cookie       — most basic gate; withSession not wired at all
 //	garbage value   — cookie present but value isn't a UUID
 //	unknown sid     — well-formed UUID with no matching session row
 //

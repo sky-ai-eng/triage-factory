@@ -170,10 +170,10 @@ func TestServer_JiraGetIssue_RoutesHostSide(t *testing.T) {
 // is disabled — every SecretStore method returns db.ErrSecretStoreUnavailable
 // — so the ForSystem-resolver path JiraGetIssue used to build its client
 // through unconditionally never resolved: Jira verbs failed outright on an
-// executor. With a bundle attached to ctx — the shape server.dispatch
-// attaches once the spawner wires an executor's bundleFunc — the same call
-// must instead build its client from the bundle's Jira credential and never
-// consult the (disabled) secret store.
+// executor. With the run's ProxyCredentials set — the shape the spawner
+// installs via SetProxyCreds once sidecar bring-up returns — the same call
+// must instead route through the sidecar's Jira proxy and never consult the
+// (disabled) secret store.
 func TestLocalClient_JiraGetIssue_ExecutorBundleFirst(t *testing.T) {
 	jira := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

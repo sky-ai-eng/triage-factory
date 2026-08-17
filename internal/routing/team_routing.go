@@ -195,7 +195,7 @@ func handlerTeamID(h domain.EventHandler) string {
 // matched rules, defaulting to the 0.5 trigger-fallback when none carry one.
 // Used for review_requested, whose owner/visibility teams come from the
 // requested identity rather than the rule's team — so the per-owner-team
-// teamScore can't supply the priority; the matched rule(s) do.
+// teamRulePriorityScores can't supply the priority; the matched rule(s) do.
 func maxRuleDefaultPriority(rules []domain.EventHandler) float64 {
 	s := 0.5
 	for _, rule := range rules {

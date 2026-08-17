@@ -268,8 +268,8 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// whichever executor holds the run — it even signals the remote owner
 	// best-effort above — so gating it on claim ownership would break the
 	// feature. The claim-fenced variants exist for the executor's own
-	// self-park (parkConversationOpen with a claim in scope, parkCancelledAfterResume);
-	// do not route this path through them.
+	// self-park (parkConversationOpen with a claim in scope);
+	// do not route this path through it.
 	//
 	// No snapshot is taken here, and in the split that is a sequencing
 	// contract rather than an absence. Two situations reach this write. The

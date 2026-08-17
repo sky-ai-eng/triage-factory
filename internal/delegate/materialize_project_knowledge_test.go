@@ -136,7 +136,7 @@ func TestMaterializeProjectKnowledge_MissingKnowledgeDir_NoOp(t *testing.T) {
 }
 
 // TestLookupEntityProjectID_RoundTrips guards against the silent
-// regression where db.GetEntity's SELECT omits project_id and
+// regression where Entities.Get's SELECT omits project_id and
 // e.ProjectID always reads as nil — making materializeProjectKnowledge
 // a no-op for every assigned entity.
 func TestLookupEntityProjectID_RoundTrips(t *testing.T) {

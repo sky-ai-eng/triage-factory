@@ -12,6 +12,7 @@ import {
 import { useNavigate } from 'react-router'
 import { useCuratorChat } from '../hooks/useCuratorChat'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { useApiOrgId } from '../hooks/useApiOrgId'
 import { linkifyMarkdown, type LinkifyContext } from '../lib/linkify'
 import { toast } from './Toast/toastStore'
 import PromptPicker from './PromptPicker'
@@ -121,9 +122,13 @@ export default function CuratorChat({ project, onPatch }: Props) {
   // AbortController gates the setter against unmount/remount
   // so a slow response can't land on a stale view.
   const [jiraBaseURL, setJiraBaseURL] = useState<string | undefined>(undefined)
+  const apiOrgId = useApiOrgId()
   useEffect(() => {
+    if (!apiOrgId) return
     const ac = new AbortController()
-    apiJSON<{ jira_base_url?: string }>('/api/settings/org', { signal: ac.signal })
+    apiJSON<{ jira_base_url?: string }>(`/api/orgs/${encodeURIComponent(apiOrgId)}/settings`, {
+      signal: ac.signal,
+    })
       .then((d) => {
         if (ac.signal.aborted) return
         setJiraBaseURL(d?.jira_base_url || undefined)
@@ -134,7 +139,7 @@ export default function CuratorChat({ project, onPatch }: Props) {
         // didn't ask for anything that depends on this.
       })
     return () => ac.abort()
-  }, [])
+  }, [apiOrgId])
   const linkifyCtx: LinkifyContext = useMemo(() => ({ jiraBaseURL }), [jiraBaseURL])
 
   const scrollRef = useRef<HTMLDivElement>(null)

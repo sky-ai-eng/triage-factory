@@ -1259,7 +1259,7 @@ func projectsToJSON(ctx context.Context, repos db.RepositoryStore, orgID string,
 // linear_project_key is rejected outright until the Linear integration
 // ships. The Jira key is normalized via normalizeJiraProjectKey
 // (TrimSpace + ToUpper) to match the canonical form persisted by
-// handleSettingsPost — without ToUpper, a stored "SKY" would silently
+// handleTeamJiraProjectsPut — without ToUpper, a stored "SKY" would silently
 // fail to match an inbound "sky".
 //
 // Takes the team's rules as a parameter so the function is testable in

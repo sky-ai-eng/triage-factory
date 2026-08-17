@@ -338,7 +338,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	// --- Active entities ----------------------------------------------------
 	// Pending tasks per entity, grouped by event_type. Drives the
 	// drawer's drag-to-delegate flow. Uses the minimal
-	// ListActiveTaskRefsForEntities projection (id + entity_id +
+	// ListActiveRefsForEntities projection (id + entity_id +
 	// event_type + dedup_key) rather than the full Task struct so
 	// /api/factory/snapshot doesn't pay for the entity JOIN and the
 	// snapshot_json json_extract on every poll.

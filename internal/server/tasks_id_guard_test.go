@@ -28,6 +28,40 @@ func assertFirstError(t *testing.T, rec *httptest.ResponseRecorder, wantReason, 
 	}
 }
 
+// errorFields decodes the error envelope off rec and returns every item's
+// field — for the accumulating validators, where the contract is that a body
+// with three bad fields reports three rather than only the first one hit.
+func errorFields(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var body struct {
+		Errors []struct {
+			Field string `json:"field"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode envelope: %v (body=%s)", err, rec.Body.String())
+	}
+	if len(body.Errors) == 0 {
+		t.Fatalf("empty errors list; body=%s", rec.Body.String())
+	}
+	out := make([]string, 0, len(body.Errors))
+	for _, e := range body.Errors {
+		out = append(out, e.Field)
+	}
+	return out
+}
+
+// containsString is the membership check errorFields' callers want; the
+// accumulator's ORDER is not part of the contract, only its contents.
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
 // firstErrorMessage decodes the error envelope off rec and returns the first
 // item's message — the prose half of the contract, for tests that assert on
 // what the response says rather than on its reason code.

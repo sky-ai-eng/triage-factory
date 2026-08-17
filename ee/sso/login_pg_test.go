@@ -78,7 +78,7 @@ func (r *authRig) deleteSSOConnection(providerID string) {
 // must IGNORE it and key on its signed state, so the isolation test deliberately
 // passes a value that differs from the state's provider_id. user_metadata
 // carries a preferred_username (an Entra UPN, NOT a github handle) to prove
-// upsertUserFromClaims won't mint a github identity row from it.
+// the SSO login path won't mint a github identity row from it.
 func validSAMLClaimsFor(userID uuid.UUID, jwtProviderID string) jwt.MapClaims {
 	return jwt.MapClaims{
 		"sub":            userID.String(),

@@ -191,9 +191,9 @@ func TestTeamArchive_BlocksTeamSettingsWrite(t *testing.T) {
 		t.Fatalf("archive = %d, want 200; body=%s", arc.Code, arc.Body.String())
 	}
 
-	// A team-settings POST (gated on user_is_team_admin) must now be blocked by
+	// A team-settings PATCH (gated on user_is_team_admin) must now be blocked by
 	// VerifyTeamNotArchived with a clear archived 403.
-	wreq := httptest.NewRequest(http.MethodPost, "/api/settings/team/"+r.teamID, strings.NewReader(`{"ai_model":"opus"}`))
+	wreq := httptest.NewRequest(http.MethodPatch, "/api/teams/"+r.teamID+"/settings", strings.NewReader(`{"ai_model":"opus"}`))
 	wreq.Header.Set("Content-Type", "application/json")
 	wreq.SetPathValue("team_id", r.teamID)
 	ctx := httpx.WithClaims(wreq.Context(), &verify.Claims{Subject: r.owner})
@@ -201,7 +201,7 @@ func TestTeamArchive_BlocksTeamSettingsWrite(t *testing.T) {
 	wreq = wreq.WithContext(ctx)
 
 	wrec := httptest.NewRecorder()
-	r.s.handleTeamSettingsPost(wrec, wreq)
+	r.s.handleTeamSettingsPatch(wrec, wreq)
 	if wrec.Code != http.StatusForbidden {
 		t.Fatalf("team-settings write on archived team = %d, want 403; body=%s", wrec.Code, wrec.Body.String())
 	}

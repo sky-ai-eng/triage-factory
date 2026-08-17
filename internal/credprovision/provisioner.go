@@ -391,7 +391,7 @@ func cliChannelScope(primaryRepo string, repoIDs []string) (owner string, repoNa
 // because provisioning happens BEFORE the run's very first clone —
 // conversation_worktrees has no rows yet for a fresh claim, only for a resumed run
 // or one that already cloned before a refresh — so without it, a fresh
-// run's initial host-side clone (setupGitHub's resolveCloneToken, before
+// run's initial host-side clone (setupGitHub's clone auth, before
 // any worktree exists) would get no token at all.
 //
 // A run with no GitHub anchor — a Slack mention, a Jira issue, a taskless
@@ -456,7 +456,7 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 
 // taskPrimaryRepo resolves a GitHub task's own target repo as "owner/repo"
 // from its entity source id ("owner/repo#42" for a PR/issue task) — the
-// same parse delegate.ownerForTask/setupGitHub use, duplicated here rather
+// same parse delegate.ownerRepoForTask uses, duplicated here rather
 // than exported since it's a two-line string split and importing
 // internal/delegate from here would be a layering inversion (delegate is
 // the executor-side consumer, not something the brain-side provisioner

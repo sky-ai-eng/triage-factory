@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -389,22 +388,24 @@ func (s *Server) kickGitHubChanged(r *http.Request, orgID string) {
 	go s.onGitHubChanged(orgID)
 }
 
+// kickJiraChanged re-dues Jira polling under a changed Jira credential — the
+// Jira half of the pair above, and the half a credential BIND owed and did not
+// pay. The unbind has always kicked; the bind used to get its restart
+// second-hand, from the fused setup route that carried the Jira credential
+// alongside the GitHub one and kicked the GitHub path (which rebuilds both
+// pollers). With that route gone, an org connecting Jira has to kick here or it
+// polls nothing until the next scheduled cycle.
+func (s *Server) kickJiraChanged(r *http.Request, orgID string) {
+	if s.onJiraChanged == nil {
+		return
+	}
+	s.MarkJiraRestarted(r.Context(), orgID)
+	go s.onJiraChanged(orgID)
+}
+
 // badRequestField is a 400 that names the offending input, matching the
 // {error, field} shape the credential surfaces already return on a 422 so the
 // frontend can highlight one control either way.
 func badRequestField(w http.ResponseWriter, msg, field string) {
 	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidBody, Message: msg, Field: field})
-}
-
-// recordOrgCredentialClear writes the credential_removed rows for a bulk
-// "clear all tokens" sweep — one per credential that was actually stored.
-func recordOrgCredentialClear(ctx context.Context, tx db.TxStores, orgID, userID string, creds auth.Credentials) error {
-	var kinds []string
-	if creds.GitHubPAT != "" {
-		kinds = append(kinds, domain.CredentialKindGitHubPAT)
-	}
-	if creds.JiraPAT != "" || creds.JiraAPIToken != "" {
-		kinds = append(kinds, domain.CredentialKindJiraOrg)
-	}
-	return recordCredentialRemovals(ctx, tx, orgID, userID, kinds)
 }

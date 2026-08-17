@@ -45,7 +45,7 @@ type runSink struct {
 
 	// sessionDelivered suppresses repeated OnSession handling within
 	// this runSink instance. Some streams can emit system/init more
-	// than once for the same session_id; while SetConversationSession is
+	// than once for the same session_id; while SetSession is
 	// idempotent at the DB layer, skipping duplicate handling also
 	// avoids an extra running-status broadcast from the same stream.
 	// Because each agentproc.Run call gets a fresh sink, this does

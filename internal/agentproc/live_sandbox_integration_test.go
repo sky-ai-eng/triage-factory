@@ -164,7 +164,7 @@ func assertNoNewNetns(t *testing.T, before map[string]bool) {
 
 // TestIntegration_InteractiveSandbox_SteerAndTeardown is the headline probe:
 // a sandboxed run streams a first turn, takes a second steering message on the
-// same warm process (proving streamInput over the gVisor channel and survival
+// same warm process (proving LiveRun.Send over the gVisor channel and survival
 // of the inter-turn idle), then closes cleanly with no netns/veth left behind.
 // That an assistant turn surfaces BEFORE Close is also the per-line-flush
 // regression (gotcha 2): a coalesced channel would only flush at process exit.

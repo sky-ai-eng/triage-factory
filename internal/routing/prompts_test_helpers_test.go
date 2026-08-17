@@ -168,7 +168,7 @@ func floatPtr(v float64) *float64 { return &v }
 // seedHandlerFKTargets seeds the prompts AND blueprints that shipped triggers
 // reference so EventHandlerStore.Seed's trigger rows resolve their FK to a
 // same-team blueprint (a trigger fires a blueprint, not a prompt
-// directly). Production's SeedTeamDefaults seeds prompts → blueprints (each
+// directly). Production's SeedShippedIntoTeam seeds prompts → blueprints (each
 // wrapping its prompt as a 1-step list) → handlers; tests that call Seed
 // directly replicate that ordering here. Returns the system_slug →
 // blueprint-id map the caller threads into Seed (the id is a random UUID per

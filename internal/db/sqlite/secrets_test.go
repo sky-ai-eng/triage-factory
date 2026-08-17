@@ -141,7 +141,7 @@ func TestSecretStore_SQLite_GetSystemEqualsGet(t *testing.T) {
 // returns the env value even when the keychain row doesn't exist, so
 // probing with GetSecret would lie ("yes, I removed it") when in
 // truth DeleteSecret can't touch env vars. The implementation uses
-// auth.HasKeychainEntry to bypass the overlay — this test pins that
+// auth.HasStoredSecret to bypass the overlay — this test pins that
 // behavior so a regression to the GetSecret probe surfaces.
 func TestSecretStore_SQLite_DeleteWithOnlyEnvOverlay(t *testing.T) {
 	keyring.MockInit()

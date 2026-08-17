@@ -628,12 +628,12 @@ type memoryLoadResult struct {
 	Result *MemoryLoadResult `json:"result"`
 }
 
-// methodCallNames are the wire-name constants. Used by both client
+// The method* constants are the wire names. Used by both client
 // and server so a rename here is the only edit needed to propagate —
 // within one binary version. A sidecar outlives an orchestrator restart
 // (it is per-run, launched with its agent), so its relay calls can reach
-// a newer orchestrator than the one that launched it; see legacyMethodNames
-// for the names that upgrade skew keeps alive.
+// a newer orchestrator than the one that launched it; see the legacy*
+// constants below for the names that upgrade skew keeps alive.
 const (
 	methodLookupConversation                  = "LookupConversation"
 	methodFinalizeReviewDraft                 = "FinalizeReviewDraft"

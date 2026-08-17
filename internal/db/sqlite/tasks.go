@@ -351,7 +351,7 @@ func (s *taskStore) FindActiveByEntity(ctx context.Context, orgID, entityID stri
 
 // listActiveRefsChunkSize is the chunk applied to the IN clause when
 // fanning out across many entities, kept conservatively below SQLite's
-// historical bound-variable limit. Same shape ListRecentEventsByEntity
+// historical bound-variable limit. Same shape RecentEventsByEntity
 // uses.
 const listActiveRefsChunkSize = 500
 

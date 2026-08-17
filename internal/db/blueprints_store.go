@@ -152,7 +152,7 @@ func DedupPreserveOrder(ids []string) []string {
 //   - blueprints          — the triggerable, team-scoped header (header CRUD
 //     modeled on PromptStore: Create / Get / List / GetBySystemSlug).
 //   - blueprint_steps      — ordered membership list for a blueprint.
-//   - blueprint_runs       — one row per multi-step delegateBlueprint instance,
+//   - blueprint_runs       — one row per multi-step blueprint run,
 //     owning the worktree shared across every step.
 //   - conversations       — read-only here (per-step state lives on
 //     conversations; ConversationsForBlueprint returns the slice of step rows linked
@@ -520,12 +520,8 @@ type BlueprintStore interface {
 	// find a terminal blueprint and never advance/close it. Returns (true, nil)
 	// when it re-opened the row, (false, nil) when the blueprint was not aborted
 	// (already running for an `open` resume, or finalized by a racing
-	// path). Runs inside the same tx as MarkResuming so the run flip and
-	// the blueprint re-open commit atomically.
-	// TODO(TFAC-828): MarkResuming exists nowhere in the tree — the
-	// conversation lifecycle writes are Complete / ParkOpen (+ System /
-	// ForClaimSystem). Establish whether this is a rename or a stale
-	// atomicity claim before trusting the same-tx guarantee stated here.
+	// path). Runs inside the same tx as ConversationStore.MarkQueuedForResume
+	// so the run flip and the blueprint re-open commit atomically.
 	ReopenRunForResume(ctx context.Context, orgID string, id string) (reopened bool, err error)
 
 	// SetRunCurrentStepSystem stamps the blueprint_run's durable

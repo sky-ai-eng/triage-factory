@@ -22,7 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// appRepoStub stands in for GitHub's REST API for the App-mode repo picker: it
+// newAppRepoStub stands in for GitHub's REST API for the App-mode repo picker: it
 // mints a per-installation token (encoding the installation id into the token
 // value) and serves GET /installation/repositories scoped to whichever token
 // the client presents. That lets one stub model multiple installations, each

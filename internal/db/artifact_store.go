@@ -147,7 +147,7 @@ type ArtifactStore interface {
 	// system-service readers that hold a real (org_id) identity but no
 	// JWT-claims context — chiefly the delegate spawner's post-completion
 	// artifact check, which reads a run's artifacts from a goroutine detached
-	// from any request. Mirrors reviews.ByRunIDSystem. Identical to ListByConversation
+	// from any request. Identical to ListByConversation
 	// in SQLite (single-tenant, no RLS).
 	ListByConversationSystem(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error)
 

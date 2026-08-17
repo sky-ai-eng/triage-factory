@@ -55,7 +55,7 @@ func TestGitAuthorizeDecision(t *testing.T) {
 	}
 	// A profile for acme/api so the protected-branch filter has a default to
 	// compare against (it must not reject the agent's own feature branch).
-	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
@@ -149,7 +149,7 @@ func TestGitAuthorizeDecision_TaskOwnRepoReadableBeforeLedger(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("track repos: %v", err)
 	}
-	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		Owner: "owner", Repo: "repo", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
@@ -189,7 +189,7 @@ func TestGitAuthorizeDecision_ProtectedAndDetached(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("track repo: %v", err)
 	}
-	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
@@ -201,7 +201,7 @@ func TestGitAuthorizeDecision_ProtectedAndDetached(t *testing.T) {
 	if err != nil || row == nil {
 		t.Fatalf("GetByRef: got=%v err=%v", row, err)
 	}
-	if err := stores.Repos.UpdateBaseBranch(ctx, runmode.LocalDefaultOrgID, row.ID, "develop"); err != nil {
+	if _, err := stores.Repos.UpdateBaseBranch(ctx, runmode.LocalDefaultOrgID, row.ID, "develop"); err != nil {
 		t.Fatalf("set base branch: %v", err)
 	}
 	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
@@ -256,7 +256,7 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("track repo: %v", err)
 	}
-	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
@@ -330,7 +330,7 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping_DubiousOwnership(t *testi
 	}); err != nil {
 		t.Fatalf("track repo: %v", err)
 	}
-	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
@@ -474,7 +474,7 @@ func TestGitAuthorizeDecision_BaseBranchPushPolicy(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("track repo: %v", err)
 	}
-	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)

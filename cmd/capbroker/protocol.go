@@ -247,7 +247,7 @@ type captureRunDeltaResult struct {
 	StderrTail string `json:"stderr_tail,omitempty"`
 }
 
-// methodCallNames are the wire-name constants shared by client and server.
+// The method* constants are the wire names shared by client and server.
 const (
 	methodPing            = "Ping"
 	methodSetupNetwork    = "SetupNetwork"

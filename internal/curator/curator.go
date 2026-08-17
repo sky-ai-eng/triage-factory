@@ -80,7 +80,7 @@ type Curator struct {
 	// BringUpCuratorSidecar, wired via SetTurnSidecar on a multi-mode executor
 	// pod only. nil on control/all/local keeps the in-process
 	// agenthost.Start path byte-identical. Defined as a curator-local func type
-	// (not a delegate import) to avoid a dependency cycle, exactly how admitTurn
+	// (not a delegate import) to avoid a dependency cycle, exactly how TurnSidecar
 	// avoids importing delegate.
 	bringUpTurnSidecar BringUpTurnSidecarFunc
 
@@ -287,7 +287,7 @@ func (c *Curator) SetDoorbell(fn func(kind, orgID, projectID string)) {
 // later, from the coordinates below. Returned by the SetTurnSidecar seam (the
 // delegation spawner's BringUpCuratorSidecar); *delegate.runSidecar
 // satisfies it. Curator defines the interface rather than importing delegate to
-// avoid a dependency cycle, mirroring how admitTurn avoids it.
+// avoid a dependency cycle, mirroring how BringUpTurnSidecarFunc avoids it.
 type TurnSidecar interface {
 	// Network is the prebuilt run network agentproc launches the jail into
 	// (RunOptions.PrebuiltNetwork).
@@ -415,7 +415,7 @@ func (c *Curator) ringDoorbell(kind, orgID, projectID string) {
 
 // cloneTokenFor resolves the App installation token for a host-side fetch of
 // a pinned repo owned by owner, via the GitHub resolver. Multi-mode only, to
-// match the spawner (Spawner.resolveCloneToken) and keep local pinned-repo
+// match the spawner (runSidecar.GitCloneAuth) and keep local pinned-repo
 // refreshes on their existing path (operator SSH key / anonymous HTTPS) —
 // local behavior is unchanged by this ticket. Returns "" when local, when no
 // resolver is wired, or when resolution fails; the refresh then runs with no
@@ -633,14 +633,14 @@ func (c *Curator) DriveClaimedTurn(orgID, projectID, conversationID, claimID str
 // exists — the typical race between user click and goroutine
 // scheduling means "nothing to cancel" is a routine outcome rather
 // than an error. Caller decides whether to surface it as 404 by
-// checking InFlightCuratorRequestForProject first.
+// checking CuratorStore.InFlightTurn first.
 //
 // Cross-pod (curator homing, spec §6.3): on a control pod the live session runs
 // on the home executor, not here, so the local cancelInFlight is usually a
 // no-op. The "curator_cancel" doorbell reaches the home executor's own Cancel
 // (broadcast + self-filter: only the pod holding the project's session has
 // something to kill), which SIGKILLs the subprocess promptly. The handler's
-// DB-level MarkRequestCancelledIfActive is the backstop if the doorbell is
+// DB-level ReleaseActiveTurnSystem is the backstop if the doorbell is
 // dropped — the turn then runs to completion and its terminal write is a no-op
 // (cancelled wins). A local session (role=all, or the control in-process
 // fallback) is cancelled directly, so both paths always fire.

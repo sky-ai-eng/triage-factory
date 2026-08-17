@@ -298,8 +298,8 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			// than against nothing.
 			t.Run("FinishedBlueprint", func(t *testing.T) {
 				// stage conducts both conversations to a completed terminal and
-				// settles the blueprint at currentStep, then re-queues the one
-				// named by resumeStep. It returns the two conversation ids in
+				// settles the blueprint at currentStep; resume re-queues whichever
+				// one it is handed. stage returns the two conversation ids in
 				// step order.
 				stage := func(t *testing.T, h ClaimPredicateHarness, blueprintStatus string, currentStep int) (string, string) {
 					t.Helper()
@@ -380,7 +380,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				//
 				// Only the CLAIM path's Attempts. The display reads return a
 				// lifetime engagement count under the same field name —
-				// deliberately, and pinned in RunAgentRunConformance. See
+				// deliberately, and pinned in RunConversationStoreConformance. See
 				// domain.Conversation.Attempts for which is which.
 				h := mk(t)
 				convID := h.EnqueueDelegation(t, runtime)

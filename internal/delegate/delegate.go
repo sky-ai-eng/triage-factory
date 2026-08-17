@@ -168,14 +168,11 @@ type DelegateOpts struct {
 	// path). Paired with TriggerID it drives the conversations_event_trigger_fence:
 	// the event-path insert is conflict-aware, so a replayed event whose
 	// first run already committed returns ErrAlreadyFired instead of
-	// spawning a duplicate. Required on the event path — CreateIfNotFiredSystem
-	// rejects an empty value (it would bind NULL and silently skip the fence)
-	// with ErrFenceRequiresEventAndTrigger. Manual delegation never sets this
-	// field; it uses the unfenced Create, which doesn't write the column.
-	// TODO(TFAC-828): CreateIfNotFiredSystem names nothing in the tree —
-	// BlueprintStore.CreateRunIfNotFiredSystem is the nearest real method.
-	// Resolve the name (and which store owns the fenced insert) here and at
-	// the domain.Conversation twin.
+	// spawning a duplicate. Required on the event path —
+	// BlueprintStore.CreateRunIfNotFiredSystem rejects an empty value (it would
+	// bind NULL and silently skip the fence) with
+	// ErrBlueprintRunFenceRequiresEventAndTrigger. Manual delegation never sets
+	// this field; it uses the unfenced Create, which doesn't write the column.
 	TriggeringEventID string
 
 	// CreatorUserID is the user who initiated this Delegate call.

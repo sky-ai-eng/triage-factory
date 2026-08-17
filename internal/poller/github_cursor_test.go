@@ -267,7 +267,7 @@ func TestRunGitHubCycleForOrg_CursorSurvivesRepoRemoval(t *testing.T) {
 		if repo == "octo/d" {
 			// d never succeeds — models "d was removed"; if the poller ever
 			// tried to reach it again after removal, this would still 200 it
-			// fine, but ListConfiguredNamesSystem won't hand it back once
+			// fine, but ListConfiguredNames won't hand it back once
 			// removed, so a request here would indicate a bug regardless.
 			w.Header().Set("X-RateLimit-Remaining", "0")
 			w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", resetAt.Unix()))

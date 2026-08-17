@@ -66,7 +66,7 @@ type authDeps struct {
 
 	// gotrueSSO drives the SP-initiated SAML start: POST gotrue's public
 	// /sso and return the 303 Location (the IdP redirect) to forward to
-	// the browser. Called from handleSAMLStart. SAML-only; the GitHub flow
+	// the browser. Called from StartSSO. SAML-only; the GitHub flow
 	// uses a plain /authorize browser redirect, not this.
 	gotrueSSO func(ctx context.Context, providerID, redirectTo, codeChallenge string) (location string, err error)
 

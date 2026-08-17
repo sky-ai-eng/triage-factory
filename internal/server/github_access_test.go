@@ -750,7 +750,7 @@ func TestOrgSettingsSave_CarriesNoCredential(t *testing.T) {
 	s := newTestServer(t)
 	seedLocalApp(t, s, true)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/settings/org", map[string]any{"github_pat": "ghp_new"})
+	rec := patchOrgSettings(t, s, map[string]any{"github_pat": "ghp_new"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("settings save = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -879,7 +879,7 @@ type orgCredentialViewJSON struct {
 
 func orgCredentialView(t *testing.T, s *Server) orgCredentialViewJSON {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodGet, "/api/settings/org", nil)
+	rec := doJSON(t, s, http.MethodGet, orgSettingsPath(), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/settings/org = %d: %s", rec.Code, rec.Body.String())
 	}

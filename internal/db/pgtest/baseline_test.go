@@ -2448,12 +2448,12 @@ func TestRLS_OrgMembershipsBootstrapStillWorks(t *testing.T) {
 //   - Stale state: an org_memberships row was deleted but the
 //     corresponding memberships rows weren't cascaded.
 //   - Privilege confusion: code path that adds a memberships row
-//     without going through the canonical addOrgMember flow.
+//     without going through the canonical AddOrgMember flow.
 //   - Attacker-controlled team_id: someone discovers a team_id in
 //     orgA and tries to use a memberships row to read it.
 //
 // In all cases the policies must deny. This test fabricates the state
-// directly via AdminDB (bypassing the addOrgMember helper that pairs
+// directly via AdminDB (bypassing the AddOrgMember helper that pairs
 // the two rows) and verifies the deny path on every swept table.
 func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	h := Shared(t)
@@ -2463,7 +2463,7 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 
 	// Mallory has a memberships row for teamA (orgA's team) but no
 	// org_memberships row in orgA. Constructed with raw INSERTs so we
-	// bypass the addOrgMember helper that pairs the two rows.
+	// bypass the AddOrgMember helper that pairs the two rows.
 	mallory := SeedUser(t, h, "mallory")
 	MustExec(t, h.AdminDB,
 		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, mallory, teamA)

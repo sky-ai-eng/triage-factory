@@ -16,7 +16,7 @@ import (
 // for the manual user transition: only user-claimed tasks may move
 // through Claimed → In Progress → In Review via /advance. Bot-claimed
 // tasks transition automatically via the spawner (see
-// internal/delegate/spawner.go advanceTaskFromRunStatus); allowing
+// internal/delegate/spawner.go recomputeTaskBoardColumn); allowing
 // the user to flip them by hand would race the run lifecycle.
 func TestHandleAdvance_RejectsBotClaimedTask(t *testing.T) {
 	s := newTestServer(t)

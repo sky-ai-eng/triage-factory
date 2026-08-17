@@ -1265,7 +1265,7 @@ func TestSlackExecHandler_Download_NoChannels_Refused(t *testing.T) {
 
 // TestSlackExecHandler_Download_FallbackPath_StillAuthorizes is the direct
 // regression test for the gap: a run with NO Slack task context (so
-// resolveWorkspaceForDownload takes the "org's sole connected workspace"
+// opResolveWorkspaceForDownload takes the "org's sole connected workspace"
 // fallback, which — before this fix — returned a token with zero channel
 // authorization at all) must still be refused when the requested file
 // belongs only to a channel this team doesn't track.

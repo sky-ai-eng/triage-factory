@@ -11,7 +11,7 @@ import (
 )
 
 // SSHHostFromBaseURL turns a GitHub HTTPS base URL (the value stored in
-// auth.Credentials.GitHubURL / config.GitHubConfig.BaseURL) into the
+// auth.Credentials.GitHubURL / OrgSettings.GitHubBaseURL) into the
 // SSH probe target — e.g. "https://github.example.com" → "git@github.example.com".
 //
 // Defaults to "git@github.com" when the input is empty or unparseable

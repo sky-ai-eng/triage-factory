@@ -6,7 +6,7 @@
 // rebuilds from the snapshot — never a brick.
 //
 // Two snapshot triggers are wired today: idle hibernation to `open`
-// (hibernatePark, live.go) and every non-failed terminal — which after the
+// (markConversationOpen, live.go) and every non-failed terminal — which after the
 // terminal vocabulary shrank to completed|failed is `completed`, whatever the
 // outcome (processCompletion). A third — an executor-drain/scale-down trigger —
 // is a forward seam for the execution-plane split: there are no executors to

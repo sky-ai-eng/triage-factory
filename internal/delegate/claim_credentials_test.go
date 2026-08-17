@@ -48,14 +48,14 @@ type fakeResolver struct {
 	// noreply form passing through the delegate seam verbatim (TFAC-474).
 	orgEmail string
 	// noCredential drives HasAnyCredential: when true the org has no GitHub
-	// credential, so gitProxyConfigFor wires no git proxy. Independent of err
+	// credential, so credprovision's resolveGitHub wires no git proxy. Independent of err
 	// (a per-call resolve failure) so a fixture can exercise "config built but
 	// TokenSource surfaces the typed no-cred error" vs "no proxy at all".
 	noCredential bool
 }
 
 // TokenForRepoScoped + HasAnyCredential satisfy ghclient.ScopedResolver, the
-// optional extension gitProxyConfigFor type-asserts for. The scoped token is
+// optional extension credprovision's resolveGitHub type-asserts for. The scoped token is
 // the same f.token the unscoped TokenFor hands back (the fake doesn't model
 // per-repo narrowing — the proxy/gate tests cover that).
 func (f *fakeResolver) TokenForRepoScoped(ctx context.Context, orgID, owner, repo string, permissions map[string]string) (githubapp.Token, error) {

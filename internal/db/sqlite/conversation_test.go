@@ -47,7 +47,7 @@ func newSQLiteForConversationTest(t *testing.T) *sql.DB {
 	}
 	// agents row backs conversations.actor_agent_id and task claim stamps —
 	// migration seeds the sentinel user/team but not the agent row
-	// itself (production does that via BootstrapLocalAgent).
+	// itself (production does that via BootstrapAgentForOrg).
 	if _, err := conn.Exec(
 		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
 		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,

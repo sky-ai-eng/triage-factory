@@ -16,7 +16,7 @@ import (
 
 // finishBlueprint settles a seeded blueprint_run on the step its conversation
 // ran — the shape a blueprint leaves behind when its plan completes. Only
-// AdvanceStep writes current_step_index and no terminal write touches it, so a
+// SetRunCurrentStepSystem writes current_step_index and no terminal write touches it, so a
 // blueprint that stopped at step N really does leave the column at N; the
 // fixture writes both directly because the guarded store method refuses a
 // non-running row.

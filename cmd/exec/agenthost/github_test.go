@@ -76,7 +76,7 @@ func (f fakeGitHubResolver) OrgIdentityFor(_ context.Context, _ string) (string,
 }
 
 // baseOnlyResolver implements ghclient.Resolver WITHOUT the optional
-// RepoIdentityResolver capability, so githubClientAndIdentityForRepo's type
+// RepoIdentityResolver capability, so githubClientForRepo's type
 // assertion fails and it falls back to IdentityUnknown — the conservative
 // branch the production resolver (which always reports an identity) never hits.
 type baseOnlyResolver struct {
@@ -322,7 +322,7 @@ func TestServer_GithubDownloadArtifact_404Reconstructs(t *testing.T) {
 }
 
 // TestServer_GithubGetPRDiff_406Reconstructs pins the other status-discriminating
-// fallback: GitHub rejects an oversized diff with 406, and getDiffShapes keys
+// fallback: GitHub rejects an oversized diff with 406, and hostDiffHunks keys
 // the per-file fallback off IsHTTP406 — which only works if the typed error
 // crosses the RPC.
 func TestServer_GithubGetPRDiff_406Reconstructs(t *testing.T) {
@@ -470,11 +470,10 @@ func TestServer_GithubCreatePR_ReturnsNodeID(t *testing.T) {
 // used to build its client through unconditionally never resolved: gh verbs
 // failed outright on an executor. poisoned stands in for that resolver
 // (errOnRepo mirrors the exact failure a disabled secret store produces
-// underneath the real resolver's App/PAT resolution). With a bundle attached
-// to ctx — the shape server.dispatch attaches once the spawner wires an
-// executor's bundleFunc (Server.bundleFunc) — the same call must instead
-// build its client from the bundle's repo-scoped token and never consult the
-// resolver at all.
+// underneath the real resolver's App/PAT resolution). With the run's
+// ProxyCredentials set — the shape the spawner installs via SetProxyCreds once
+// sidecar bring-up returns — the same call must instead route through the
+// sidecar's REST proxy and never consult the resolver at all.
 func TestLocalClient_GithubCreatePR_ExecutorBundleFirst(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 

@@ -98,6 +98,36 @@ var (
 // edge parser for the surfaces that still speak one — HTTP path segments, an
 // agent's argv, a bundle's pinned list — and each of those resolves once, at
 // its own boundary, next to whatever access gate it already runs.
+//
+// # Every single-row write returns the row it persisted
+//
+// Upsert, UpdateBaseBranch, SeedCloneURL and UpdateCloneStatusByRef all hand
+// back the stored row, read off RETURNING on the write statement itself rather
+// than from a follow-up SELECT. This store is the reason the rule exists:
+//
+//   - The writes deliberately do not persist what the caller passed. Upsert
+//     COALESCEs external_id, preserves the user's base_branch and the clone
+//     status, and keeps the stored casing of owner/repo; SeedCloneURL keeps a
+//     URL already on file. A caller's input struct is designed to be wrong as
+//     a picture of the row, so anything that renders, publishes or caches it
+//     after the write is holding a lie.
+//   - RETURNING is atomic where a read-back races. The row that comes back is
+//     the one the statement produced, not whatever answers the same key a
+//     moment later.
+//
+// The RETURNING list and the scan function are the point read's, shared rather
+// than restated, so the write shape cannot drift from the read shape as columns
+// are added. Miss semantics are unchanged: an id-keyed write that matches
+// nothing is ErrNoSuchRepository, a ref-keyed one is (nil, nil).
+//
+// A caller may ignore the returned row. A caller must never re-read to learn
+// what the write already returned.
+//
+// Exempt, each said so at the method: SetConfigured (set reconciliation, no
+// single row to return), FillMissingExternalIDsSystem (bulk), and
+// SetPullsPollStateByRefSystem (per-repo-per-cycle bookkeeping nobody reads
+// back). GetOrCreateSystem returns a row already, but by a re-read, because
+// its INSERT is ON CONFLICT DO NOTHING and returns nothing when it loses.
 type RepositoryStore interface {
 	// Upsert inserts or updates a repository row. On conflict it
 	// refreshes profiling metadata (description, has_readme,
@@ -113,8 +143,12 @@ type RepositoryStore interface {
 	// same /repos/{owner}/{repo} response it takes default_branch and
 	// clone_url from, and a caller with no id has learned nothing to write.
 	//
-	// TODO(TFAC-837): return the persisted row (RETURNING), UpsertSystem too.
-	Upsert(ctx context.Context, orgID string, p domain.Repository) error
+	// Returns the persisted row, which is the only way to see any of the
+	// above: p is an input, and every rule in this doc is a rule about how
+	// the row differs from it. The row also carries the id p never had — a
+	// caller that upserts a repository it has not read holds no other handle
+	// to it.
+	Upsert(ctx context.Context, orgID string, p domain.Repository) (domain.Repository, error)
 
 	// List returns one page of the org's configured repos plus the unpaged
 	// total, including repos without profile text. Ordered by (owner, repo)
@@ -154,6 +188,10 @@ type RepositoryStore interface {
 	// text); entries no longer in the list are deleted. Single
 	// transaction so the table can't observe a partial mid-sync
 	// state.
+	//
+	// Exempt from the returned-row rule: it reconciles a set, so there is no
+	// single row a return value could name. What it wrote is read back through
+	// ListConfiguredNames.
 	SetConfigured(ctx context.Context, orgID string, repoNames []string) error
 
 	// ListConfiguredNames returns just the "owner/repo" IDs of
@@ -166,16 +204,17 @@ type RepositoryStore interface {
 	CountConfigured(ctx context.Context, orgID string) (int, error)
 
 	// UpdateBaseBranch sets the user-configured base branch for the
-	// repository with this registry id. Empty string stores SQL NULL → falls
-	// back to the detected default_branch at use-site.
+	// repository with this registry id and returns the updated row. Empty
+	// string stores SQL NULL → falls back to the detected default_branch at
+	// use-site.
 	//
 	// ErrNoSuchRepository when no row carries the id, rather than the silent
 	// zero-rows the slug-keyed predecessor produced. The caller is the PATCH
 	// handler, which resolved the id from its path segment moments earlier
-	// and would otherwise answer "updated" for a write that did nothing.
-	// TODO(TFAC-837): return the updated row so the PATCH answers with the
-	// resource instead of a status stub.
-	UpdateBaseBranch(ctx context.Context, orgID, id, baseBranch string) error
+	// and would otherwise answer "updated" for a write that did nothing — and
+	// which answers with the returned row, so the response is the resource
+	// rather than a status stub or an echo of the request body.
+	UpdateBaseBranch(ctx context.Context, orgID, id, baseBranch string) (domain.Repository, error)
 
 	// SeedCloneURL sets clone_url for the repository with this registry id
 	// ONLY when the stored value is NULL/empty — the project-bundle import's
@@ -183,7 +222,12 @@ type RepositoryStore interface {
 	// importing org's own GitHub client). Never clobbers a URL the
 	// profiler/clone hooks already wrote, and leaving one in place is a
 	// success, not a miss. ErrNoSuchRepository when no row carries the id.
-	SeedCloneURL(ctx context.Context, orgID, id, cloneURL string) error
+	//
+	// The returned row is what makes the never-clobber rule observable: it
+	// carries the URL that is now on file, which is cloneURL only when the
+	// column was empty. A blank cloneURL writes nothing and still resolves
+	// the row.
+	SeedCloneURL(ctx context.Context, orgID, id, cloneURL string) (domain.Repository, error)
 
 	// Get returns the repository with this registry id, or
 	// ErrNoSuchRepository. Its ref-keyed sibling is GetByRef.
@@ -252,7 +296,12 @@ type RepositoryStore interface {
 	// selection, so the row is normally there, and a repo dropped between the
 	// hook firing and this UPDATE landing is a race whose loser has nothing
 	// left to record against.
-	UpdateCloneStatusByRef(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) error
+	//
+	// Returns the stamped row, or nil for that no-op — the ref-keyed miss
+	// shape, same as GetByRef. The caller is a websocket emit site keyed on
+	// the registry id, and the row is where the id comes from; nil is exactly
+	// the case with nothing for a client to merge into.
+	UpdateCloneStatusByRef(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error)
 
 	// --- Admin-pool variants (`...System`) ---
 	//
@@ -286,13 +335,11 @@ type RepositoryStore interface {
 	// one. Handing back ids would make all four resolve straight back to the
 	// name, and the ids would be dead weight in the poll loop's hot path.
 	ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error)
-	// TODO(TFAC-837): return the updated row; the clone-status publish path
-	// re-reads it today just to learn the id and slug.
-	UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) error
+	UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error)
 	CountConfiguredSystem(ctx context.Context, orgID string) (int, error)
 	GetSystem(ctx context.Context, orgID, id string) (*domain.Repository, error)
 	GetByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
-	UpsertSystem(ctx context.Context, orgID string, p domain.Repository) error
+	UpsertSystem(ctx context.Context, orgID string, p domain.Repository) (domain.Repository, error)
 
 	// FillMissingExternalIDsSystem records the provider's repository id for
 	// tracked repos that do not have one yet, and returns how many rows it
@@ -310,6 +357,11 @@ type RepositoryStore interface {
 	// that response carries the ids, so this costs no GitHub request. Matching
 	// is case-insensitive, like every other slug lookup here. A ref with an
 	// empty ExternalID is ignored rather than written: absent is not an id.
+	//
+	// Exempt from the returned-row rule: it writes a batch, and the count is
+	// what its caller reports. Returning the rows would hand a poll cycle every
+	// repository it filled, which nothing reads and the steady state makes
+	// empty anyway.
 	FillMissingExternalIDsSystem(ctx context.Context, orgID string, refs []domain.RepoRef) (int, error)
 
 	// ListIdentitiesSystem returns the provider identity — source, slug, and
@@ -380,5 +432,11 @@ type RepositoryStore interface {
 	// a successful open-PR list. On a 304 the caller passes the stored
 	// etag back unchanged (only polledAt advances); on a 200 it passes
 	// the fresh etag. No-ops silently when nothing answers to the name.
+	//
+	// Exempt from the returned-row rule: this fires once per tracked repo per
+	// poll cycle to stamp a cache cursor the poller reads back through
+	// GetPullsPollStateByRefSystem on the next cycle and nowhere else. Handing
+	// a whole row to a write nobody reads the answer of is cost without a
+	// reader.
 	SetPullsPollStateByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, etag string, polledAt time.Time) error
 }

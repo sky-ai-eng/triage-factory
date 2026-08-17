@@ -72,7 +72,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	const slug = "sky-ai-eng/triage-factory"
 	const cloneURL = "https://github.com/sky-ai-eng/triage-factory.git"
 
-	if err := sqlitestore.New(database).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := sqlitestore.New(database).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		Owner:       "sky-ai-eng",
 		Repo:        "triage-factory",
 		CloneURL:    cloneURL,

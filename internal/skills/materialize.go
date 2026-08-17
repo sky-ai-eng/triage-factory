@@ -148,7 +148,7 @@ func ensureFrontmatterName(body, slug, promptName, brief string) string {
 	if frontmatter == "" {
 		// No frontmatter — wrap the body in a synthesized one. This
 		// handles imported prompts whose body is the markdown payload
-		// only (the importer's parseSkillFile may have already stripped
+		// only (the importer's importSkillFile may have already stripped
 		// frontmatter when the caller stored the parsed body).
 		return synthesizeSkillFile(slug, promptName, body, brief)
 	}

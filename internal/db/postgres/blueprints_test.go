@@ -482,7 +482,7 @@ func TestBlueprintStore_Postgres_StepPlanLengths(t *testing.T) {
 //     the manual blueprint run reads back with the JWT-claimed user as
 //     creator_user_id.
 //
-// Mirrors TestConversationStore_Postgres_Create_UnderAppPoolRLS — same
+// Mirrors TestConversationStore_Postgres_CrossOrgRLSDenied — same
 // fix-against-actual-RLS shape.
 func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 	h := pgtest.Shared(t)

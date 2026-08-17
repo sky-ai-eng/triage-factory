@@ -202,10 +202,10 @@ func (s *batchRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref d
 	return &domain.Repository{ID: "repo-id-" + ref.Repo, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
 
-func (s *batchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) error {
+func (s *batchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
 	n := int(s.calls.Add(1))
 	if s.failUpsert != nil && s.failUpsert(n) {
-		return errUpsertDown
+		return domain.Repository{}, errUpsertDown
 	}
 	s.mu.Lock()
 	if s.last == nil {
@@ -213,7 +213,18 @@ func (s *batchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domai
 	}
 	s.last[p.Slug()] = p
 	s.mu.Unlock()
-	return nil
+	return storedRepoRow(p), nil
+}
+
+// storedRepoRow is what these doubles hand back from UpsertSystem — the row the
+// real store persists, which differs from the input in the way the profiler
+// depends on: it carries the registry id, minted by the store rather than
+// supplied by the caller. It is the same id GetByRefSystem answers with, so a
+// double's write and its read agree about the repository the way the real
+// store's do.
+func storedRepoRow(p domain.Repository) domain.Repository {
+	p.ID = "repo-id-" + p.Repo
+	return p
 }
 
 // TestRunOrg_BatchFailLeavesProfiledAtUnset pins that a transient batch
@@ -272,9 +283,12 @@ func (s *changeRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref 
 	return &domain.Repository{ID: "repo-id-" + ref.Repo, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
 
-func (s *changeRepositoryStore) UpsertSystem(context.Context, string, domain.Repository) error {
+func (s *changeRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
 	s.upserts.Add(1)
-	return s.upsertErr
+	if s.upsertErr != nil {
+		return domain.Repository{}, s.upsertErr
+	}
+	return storedRepoRow(p), nil
 }
 
 // TestRunOrg_RowGoneMidPass_SkipsRepo pins what a missing registry row means
@@ -333,9 +347,9 @@ func (s *goneRepositoryStore) GetByRefSystem(context.Context, string, domain.Rep
 	return nil, s.getErr
 }
 
-func (s *goneRepositoryStore) UpsertSystem(context.Context, string, domain.Repository) error {
+func (s *goneRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
 	s.upserts.Add(1)
-	return nil
+	return storedRepoRow(p), nil
 }
 
 var (
