@@ -154,7 +154,7 @@ type Server struct {
 	// jiraResolver's OAuth branch. Retained on the Server (not just handed to
 	// the resolver) so the connect callback + a paste-over-OAuth re-bind can
 	// Invalidate the stale cached token — mirrors how ghTokenCache is reachable
-	// via onInstallationRemoved. Built in New, never nil.
+	// via onInstallationTokensInvalid. Built in New, never nil.
 	jiraTokenCache *jiraoauth.TokenCache
 	// Change callbacks accept the orgID of the tenant whose integration
 	// creds just rotated, so the closure can re-resolve via SecretStore.
@@ -1231,7 +1231,7 @@ func (s *Server) routes() {
 	// so it rides apiMutating (CSRF). Org-admin (gated inside the handler).
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/import", s.handleGitHubAppImport)
 	// Read-only status + install deep-link for the Workspace Settings panel.
-	// Any org member (read), so requireOrgMember rather than requireOrgAdmin.
+	// Any org member (read), so RequireOrgMember rather than RequireOrgAdmin.
 	s.api("GET /api/orgs/{org_id}/github/app", s.handleGitHubAppStatus)
 	s.api("GET /api/orgs/{org_id}/github/app/install-url", s.handleGitHubAppInstallURL)
 	// On-demand installation reconcile — the "UI panel refresh" half of D11

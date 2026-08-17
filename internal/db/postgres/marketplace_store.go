@@ -289,7 +289,7 @@ func fetchEventTypesForListingsPG(ctx context.Context, q queryer, orgID string, 
 //
 // The viewer is $1 and the WHERE's own args start at $2. That offset is
 // load-bearing for List's count query, which reuses the WHERE without these
-// joins and so must NOT bind $1 — see listingCountWhereArgs.
+// joins and so must NOT bind $1 — see shiftPlaceholdersDownOne.
 const listingSummaryQueryPG = `
 	SELECT ` + listingColumnsLPG + `,
 		COALESCE(v.vote_count, 0), COALESCE(i.install_count, 0),

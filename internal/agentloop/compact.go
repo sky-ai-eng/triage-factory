@@ -56,8 +56,8 @@ const (
 	providerCacheTTL = 5 * time.Minute
 )
 
-// compactionFailureReason is the machine-readable discriminator settled into
-// the request row's metadata when a warm attempt is discarded.
+// The compactionFail* constants are the machine-readable discriminator values
+// settled into the request row's metadata when a warm attempt is discarded.
 const (
 	compactionFailToolCalls = "tool-calls-in-reply"
 	compactionFailNoSummary = "no-parseable-summary"

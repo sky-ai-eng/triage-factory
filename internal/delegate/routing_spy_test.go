@@ -146,7 +146,7 @@ func TestResolvePrompt_EventStaysOnAdminPool(t *testing.T) {
 	}
 }
 
-// TestCancel_UserInitiated_PreflightUsesSyntheticClaims pins the
+// TestStop_UserInitiated_PreflightUsesSyntheticClaims pins the
 // active-goroutine gate for user-initiated cancels. The cancels map
 // inside Spawner is keyed only by runID, so without an org-scoped
 // preflight a cross-org caller who learns an active runID could fire
@@ -180,7 +180,7 @@ func TestStop_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
 	}
 }
 
-// TestCancel_SystemInitiated_PreflightSkipsSynthClaims pins the other
+// TestStop_SystemInitiated_PreflightSkipsSynthClaims pins the other
 // side of the gate: router-driven cancels (DrainTask rollback,
 // task-close cleanup) pass userID="" because they're system actors
 // with no user identity to project. Those must still scope by orgID

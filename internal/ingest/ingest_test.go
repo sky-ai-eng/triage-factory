@@ -265,7 +265,7 @@ func TestIngestor_EnqueueFailure_DropsNoBusPhantom(t *testing.T) {
 	}
 }
 
-// TestIngestor_RegisteredSource_DurablyEnqueued pins the routerBound seam: an
+// TestIngestor_RegisteredSource_DurablyEnqueued pins the routing.RouterBound seam: an
 // event from a source registered with internal/routing (standing in for an
 // ee/ package's "slack:" prefix) gets the same durable-outbox treatment as a
 // built-in github:/jira: event — without this, a registered source's events

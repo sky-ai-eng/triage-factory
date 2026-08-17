@@ -262,7 +262,7 @@ var reconcilableNonTerminal = map[string]map[string]bool{
 // in the reconciler's working set: non-terminal AND backed by a fetchable
 // GitHub object. The Tier-2 run-scoped refresh filters a run's artifacts
 // through this so it reconciles exactly what the org-wide Tier-1 query would;
-// TestReconcilableNonTerminal pins it equal to the store's SQL predicate.
+// the ListNonTerminal store tests pin it equal to the store's SQL predicate.
 func IsReconcilableNonTerminal(kind, state string) bool {
 	return reconcilableNonTerminal[kind][state]
 }

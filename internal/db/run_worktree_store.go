@@ -83,7 +83,7 @@ type RunWorktreeStore interface {
 
 	// DeleteByRepoRef removes the row for a (run_id, repo_id, ref)
 	// triple. Used by the workspace CLI to release a reservation after
-	// createWorktree fails, or to clear a stale row whose on-disk
+	// worktree materialization fails, or to clear a stale row whose on-disk
 	// path was reaped (e.g. startup orphan sweep) so a subsequent
 	// `workspace add` can re-reserve. Idempotent: deleting a row
 	// that doesn't exist is a no-op (no error).

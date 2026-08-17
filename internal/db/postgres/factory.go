@@ -405,7 +405,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 	// team tracks. The team placeholders appear before LIMIT in the text
 	// but bind by number, which Postgres resolves regardless of order —
 	// active args start the teams at $3 (after orgID, limit), closed at $4
-	// (after orgID, cutoff, graceLimit).
+	// (after orgID, cutoff, FactoryClosedGraceLimit).
 	activeMembership := factoryEntityTrackedExists
 	closedMembership := factoryEntityTrackedExists
 	activeArgs := []any{orgID, limit}

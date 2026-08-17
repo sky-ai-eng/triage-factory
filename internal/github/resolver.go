@@ -989,7 +989,7 @@ func (r *resolver) installationToken(ctx context.Context, orgID string, app *dom
 
 // minterFor builds a githubapp.Minter from the org's stored App PEM + App ID,
 // pinned at the org's API base. Shared by the cached full-install mint
-// (installationToken) and the uncached repo-scoped mint (mintScopedToken).
+// (installationToken) and the uncached repo-scoped mint (appScopedToken).
 func (r *resolver) minterFor(ctx context.Context, orgID string, app *domain.OrgGitHubApp, base string) (*githubapp.Minter, error) {
 	pem, err := r.secrets.GetSystem(ctx, orgID, app.PEMRef)
 	if err != nil {

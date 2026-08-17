@@ -65,7 +65,7 @@ func TestManager_RunGitHubCycle_StopHaltsMidCycle(t *testing.T) {
 	}
 }
 
-// TestManager_RunJiraCycle_IteratesActiveOrgs mirrors the GitHub-side
+// TestManager_RunJiraCycle_OrgsStoreError mirrors the GitHub-side
 // test for the Jira path. The Jira loop is thinner than GitHub
 // (no per-org repo gate), so we record orgIDs via a tracker
 // substitute — but tracker.Tracker is a concrete type, so instead we

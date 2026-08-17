@@ -87,7 +87,7 @@ type Repository struct {
 	HasClaudeMd    bool
 	HasAgentsMd    bool
 	ProfileText    string
-	CloneURL       string // chosen clone URL (HTTPS or SSH form, per GitHubConfig.CloneProtocol)
+	CloneURL       string // chosen clone URL (HTTPS or SSH form, per OrgSettings.GitHubCloneProtocol)
 	DefaultBranch  string // repo's default branch (detected during profiling)
 	BaseBranch     string // user-configured branch to base feature work on (empty = use default)
 	ProfiledAt     *time.Time

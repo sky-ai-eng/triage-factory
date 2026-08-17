@@ -41,7 +41,7 @@ func TestRepositoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	stores := sqlitestore.New(conn)
 
 	const bogusOrg = "11111111-1111-1111-1111-111111111111"
-	if err := stores.Repos.Upsert(t.Context(), bogusOrg, anyRepository()); err == nil {
+	if _, err := stores.Repos.Upsert(t.Context(), bogusOrg, anyRepository()); err == nil {
 		t.Errorf("Upsert with non-local orgID should error")
 	}
 	if _, err := stores.Repos.GetByRef(t.Context(), bogusOrg, domain.RepoRefFromSlug("any/repo")); err == nil {

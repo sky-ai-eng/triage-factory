@@ -465,12 +465,9 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 // TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims
 // pins the routing the delegate spawner uses for manual-run
 // bookkeeping: lifecycle writes (Complete, ParkOpen,
-// MarkResuming) wrapped in SyntheticClaimsWithTx must pass RLS under
+// MarkQueuedForResume) wrapped in SyntheticClaimsWithTx must pass RLS under
 // tf_app and land the expected status. Mirrors the spawner's per-call-site
 // branch:
-//
-// TODO(TFAC-828): MarkResuming names nothing in the tree; resolve it to
-// the lifecycle write this test actually exercises.
 //
 //	if triggerType == "manual" {
 //	    s.tx.SyntheticClaimsWithTx(...) // this path
@@ -491,7 +488,7 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	seedPgConversationPromptIn(t, h, "p_lc_test", orgID, userID)
 
 	// FK chain on admin (same pattern as
-	// TestConversationStore_Postgres_Create_UnderAppPoolRLS).
+	// TestConversationStore_Postgres_CrossOrgRLSDenied).
 	entityID := uuid.New().String()
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()

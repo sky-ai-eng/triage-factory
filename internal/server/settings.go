@@ -68,7 +68,7 @@ const secretKeyAnthropicAPIKey = "anthropic_api_key"
 var jiraProjectKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*$`)
 
 // normalizeJiraProjectKey trims whitespace and uppercases. Used at
-// the HTTP boundary in handleSettingsPost (the write path) and in
+// the HTTP boundary in handleTeamJiraProjectsPut (the write path) and in
 // validateTrackerKeys (the read/compare path) so lookups match
 // regardless of how the user typed the key.
 func normalizeJiraProjectKey(s string) string {
@@ -192,7 +192,7 @@ func jiraProjectsEqual(a, b []jiraProjectConfig) bool {
 }
 
 // projectConfigsToRules is the inverse of rulesToProjectConfigsOrdered. Used
-// by handleSettingsPost when persisting the team's project list back
+// by handleTeamJiraProjectsPut when persisting the team's project list back
 // to jira_project_status_rules via JiraStatusRulesStore.ReplaceForTeam.
 func projectConfigsToRules(projects []jiraProjectConfig) []domain.JiraProjectStatusRules {
 	out := make([]domain.JiraProjectStatusRules, 0, len(projects))

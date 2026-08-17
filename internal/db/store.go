@@ -15,8 +15,13 @@ import (
 // The bundle exists for main.go wiring and for the WithTx wrapper —
 // nothing else. See docs/for-agents/specs/sky-246-d2-store-abstraction.html §5.
 //
-// TODO(TFAC-838): converge the remaining single-row store writes on the
-// returned-row standard (TFAC-837); don't add new writes in the old shape.
+// Every single-row Insert/Update/Upsert in here returns the row it persisted,
+// off RETURNING on the write statement, sharing the point read's column list
+// and scanner. RepositoryStore's doc states the rule and its exemptions in
+// full; ArtifactStore is the other converted store.
+//
+// TODO(TFAC-838): converge the remaining single-row store writes on that
+// standard; don't add new writes in the old shape.
 type Stores struct {
 	// Scores is the first store to land on the D2 wave 0 pilot.
 	// Subsequent waves add the remaining 21 fields here.
@@ -562,7 +567,7 @@ type TxRunner interface {
 }
 
 // ErrNotApplicableInLocal is returned by SQLite impls of multi-only
-// store methods (SessionStore.Insert, MembershipStore.Add, …). The
+// store methods (InvitesStore.Create, OrgMembershipsStore.RoleFor, …). The
 // auth path is gated behind runmode.ModeMulti, so this should never
 // reach a production user; the error is the safety net for code that
 // escapes that gate.

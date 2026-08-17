@@ -41,7 +41,7 @@ type RelayServer struct {
 
 	// audit is the host-side client the relayed audit-only ops record through —
 	// the same seam the in-process git gate uses (executorGitGate's
-	// denialHost), so a sandbox's denial and a local run's land the identical
+	// auditHost), so a sandbox's denial and a local run's land the identical
 	// row through the identical method.
 	audit *LocalClient
 
@@ -52,7 +52,7 @@ type RelayServer struct {
 
 	// proxyCreds are the run's per-run proxy coordinates (REST + git proxy, with
 	// placeholder tokens), set once the sidecar bring-up returns them (SetProxyCreds).
-	// The workspace materialization served here clones + GetPRs through them, so the
+	// The workspace materialization served here clones + fetches PRs through them, so the
 	// orchestrator holds no real credential for either. nil until bring-up completes.
 	proxyCreds *ProxyCredentials
 

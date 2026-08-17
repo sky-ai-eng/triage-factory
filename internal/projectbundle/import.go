@@ -532,7 +532,10 @@ func trackImportedRepos(ctx context.Context, tx db.TxStores, orgID, teamID strin
 		if row == nil {
 			continue
 		}
-		if err := tx.Repos.SeedCloneURL(ctx, orgID, row.ID, cloneURL); err != nil {
+		// The seeded row is not spent here: the import's answer is the project
+		// it created, and whether this warm-cache hint landed or was outranked
+		// by a URL already on file changes nothing the caller can see.
+		if _, err := tx.Repos.SeedCloneURL(ctx, orgID, row.ID, cloneURL); err != nil {
 			return fmt.Errorf("seed clone url for %s: %w", slug, err)
 		}
 	}

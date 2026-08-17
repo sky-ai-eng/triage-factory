@@ -25,7 +25,7 @@ import (
 //
 // Callers always pass orgID + userID explicitly. D7 will replace the
 // explicit pass with extraction from a request-scoped context (e.g.
-// authctx.ClaimsFromContext(ctx)), but the WithTx shape stays the same.
+// httpx.ClaimsFrom(ctx)), but the WithTx shape stays the same.
 //
 // Closures that need to bypass RLS (system services) shouldn't use
 // WithTx at all — they should call store methods directly on the

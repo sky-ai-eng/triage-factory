@@ -14,7 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestDecodeJSON_RejectsTrailingData pins the contract that DecodeJSON
+// TestDecodeJSONStrict_RejectsTrailingData pins the contract that DecodeJSON
 // accepts exactly one top-level JSON value (optionally followed by
 // whitespace) and rejects anything trailing it with a 400. The trailing
 // `}` / `]` cases are the ones dec.More() alone misses, since More()

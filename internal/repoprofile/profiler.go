@@ -89,7 +89,10 @@ func (p *Profiler) SetRecipients(recipients repoevent.RecipientsFunc) {
 	p.notify = repoevent.NewNotifier(p.ws, recipients)
 }
 
-// repoWithDocs groups a repository row with the documentation text to send to the LLM.
+// repoWithDocs groups the repository fields a cycle gathered with the
+// documentation text to send to the LLM. profile is the pass's own input to a
+// later Upsert, not a row it read — it carries no registry id, and the id the
+// batch's events are keyed on comes back from that Upsert.
 type repoWithDocs struct {
 	profile domain.Repository
 	docs    string
@@ -213,7 +216,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 
 	// Resolve the clone protocol once for the whole run rather than
 	// re-reading per-org settings inside the per-repo loop. The setting
-	// can't change mid-run — handleSettingsPost serializes the org-
+	// can't change mid-run — handleOrgSettingsPatch serializes the org-
 	// settings write behind the same `onGitHubChanged` callback that
 	// owns this goroutine — so capturing it here matches actual
 	// semantics and avoids N redundant DB reads.
@@ -327,11 +330,11 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			cloneURL = meta.SSHURL
 		}
 
-		// ID is carried, not written: UpsertSystem keys on the identity
-		// columns below and ignores it. It rides along because prof travels
-		// into the batch path, and both emit sites key their event on it.
+		// No ID: UpsertSystem keys on the identity columns below and hands
+		// back the row it wrote, which is where the id both emit sites key
+		// their event on comes from. Carrying one here would only invite a
+		// reader to believe this struct describes a row.
 		prof := domain.Repository{
-			ID:     existing.ID,
 			Owner:  owner,
 			Repo:   repo,
 			Source: domain.RepoSourceGitHub,
@@ -363,20 +366,28 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			prof.ProfiledAt = &now
 		}
 
-		// Persist docs flags immediately so the UI can show them before profiling completes
-		if err := p.repos.UpsertSystem(ctx, orgID, prof); err != nil {
+		// Persist docs flags immediately so the UI can show them before
+		// profiling completes.
+		stored, err := p.repos.UpsertSystem(ctx, orgID, prof)
+		if err != nil {
+			// Nothing landed, so nothing is announced: the event's job is to
+			// tell clients what the row now says, and a failed write left it
+			// saying what it said before. The repo still goes on into the
+			// batch below, whose own write is another attempt at the row.
 			repoprofileLog.Error("upsert docs flags failed", "repo", name, "error", err)
 		} else {
 			touched = true
+			// The row the upsert returned, not the struct handed to it: the
+			// flags agree either way, but the id and the slug are the row's —
+			// the stored casing, and an id this pass never read.
+			p.notify.Publish(ctx, orgID, repoevent.Update{
+				ID:          stored.ID,
+				Slug:        stored.Slug(),
+				HasReadme:   repoevent.Ptr(stored.HasReadme),
+				HasClaudeMd: repoevent.Ptr(stored.HasClaudeMd),
+				HasAgentsMd: repoevent.Ptr(stored.HasAgentsMd),
+			})
 		}
-		// TODO(TFAC-837): publish the row the upsert returns, not the input.
-		p.notify.Publish(ctx, orgID, repoevent.Update{
-			ID:          prof.ID,
-			Slug:        prof.Slug(),
-			HasReadme:   repoevent.Ptr(prof.HasReadme),
-			HasClaudeMd: repoevent.Ptr(prof.HasClaudeMd),
-			HasAgentsMd: repoevent.Ptr(prof.HasAgentsMd),
-		})
 
 		if docs == "" {
 			withoutDocs = append(withoutDocs, prof)
@@ -423,8 +434,11 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 				p.fireBatchFailureToast(ctx, orgID, batch)
 			}
 			// Fallback: upsert without profile_text so the row at least exists.
+			// Nothing is published — the doc-flags emission above already said
+			// everything this write persists, and there is no profile text yet
+			// to announce.
 			for _, d := range batch {
-				if uErr := p.repos.UpsertSystem(ctx, orgID, d.profile); uErr != nil {
+				if _, uErr := p.repos.UpsertSystem(ctx, orgID, d.profile); uErr != nil {
 					repoprofileLog.Error("upsert fallback failed", "repo", d.profile.Slug(), "error", uErr)
 				} else {
 					touched = true
@@ -450,17 +464,20 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			// fallback path above, which leaves profiled_at unset so the repo
 			// retries next cycle — error ≠ absence.)
 			prof.ProfiledAt = &now
-			if err := p.repos.UpsertSystem(ctx, orgID, prof); err != nil {
+			stored, err := p.repos.UpsertSystem(ctx, orgID, prof)
+			if err != nil {
 				repoprofileLog.Error("upsert profile failed", "repo", prof.Slug(), "error", err)
 				continue
 			}
 			touched = true
-			if prof.ProfileText != "" {
+			// Off the stored row, so the text a client merges is the text the
+			// column holds and the key it merges under is the registry id.
+			if stored.ProfileText != "" {
 				profiled++
 				p.notify.Publish(ctx, orgID, repoevent.Update{
-					ID:          prof.ID,
-					Slug:        prof.Slug(),
-					ProfileText: repoevent.Ptr(prof.ProfileText),
+					ID:          stored.ID,
+					Slug:        stored.Slug(),
+					ProfileText: repoevent.Ptr(stored.ProfileText),
 				})
 			}
 		}

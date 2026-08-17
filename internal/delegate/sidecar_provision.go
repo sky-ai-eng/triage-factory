@@ -457,8 +457,8 @@ const credRefreshRelayInterval = 30 * time.Second
 
 // credBundleGetter reads the current sealed bundle for a run or a curator turn:
 // its boot_epoch, the ciphertext, whether a row exists, and any read error. The
-// run variant wraps runCredentials.Get; the curator variant wraps
-// curatorTurnCredentials.Get. relayCredentialRefreshes never unseals the bytes.
+// run variant keys runCredentials.Get by run id, the curator variant by
+// conversation id. relayCredentialRefreshes never unseals the bytes.
 type credBundleGetter func(ctx context.Context) (bootEpoch int64, sealed []byte, ok bool, err error)
 
 // credRelayStepTimeout bounds one read-and-push through the sealed-bundle

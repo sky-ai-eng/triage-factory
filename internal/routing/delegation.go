@@ -166,7 +166,7 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 	// pending_firings rows are already queued for it (FIFO fairness).
 	// Compose the gate from its two halves: ConversationStore owns the
 	// runs-shaped predicate, PendingFiringsStore owns the queue-shaped one.
-	// canFire = neither side blocks.
+	// The gate opens only when neither side blocks.
 	//
 	// The task is the unit, not the entity. A task is one situation needing
 	// attention — that is what its (entity, event type, discriminator) dedup

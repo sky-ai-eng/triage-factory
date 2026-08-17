@@ -53,7 +53,7 @@ func newTestServer(t *testing.T) *Server {
 	}
 	// Handlers now re-check team_agents.enabled before
 	// stamping the bot claim (the spec's bot-disabled-team handling).
-	// Production seeds this via BootstrapLocalAgent; tests need the
+	// Production seeds this via BootstrapTeamAgent; tests need the
 	// same row or every delegate gesture 409s.
 	if _, err := database.Exec(
 		`INSERT OR IGNORE INTO team_agents (team_id, agent_id, enabled) VALUES (?, ?, 1)`,
@@ -168,7 +168,7 @@ func doJSON(t *testing.T, s *Server, method, path string, body any) *httptest.Re
 func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
 	ctx := context.Background()
-	if err := sqlitestore.New(s.db).Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := sqlitestore.New(s.db).Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		Owner:         owner,
 		Repo:          repo,
 		DefaultBranch: "main",
@@ -203,7 +203,7 @@ func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) string {
 // separates "no such repository" from "not yours to pin".
 func seedUntrackedRepo(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
-	if err := sqlitestore.New(s.db).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := sqlitestore.New(s.db).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		Owner:         owner,
 		Repo:          repo,
 		DefaultBranch: "main",

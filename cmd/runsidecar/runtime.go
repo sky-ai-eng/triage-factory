@@ -624,7 +624,7 @@ func randomToken() (string, error) {
 }
 
 // llmSource is the SigV4 proxy's live re-read of the newest sealed bundle's
-// LLM triple (RunOptions.LLMCredentialSource's shape): each request reads the
+// LLM triple (StartRunProxies' llmSource shape): each request reads the
 // held bundle so a role-mode run whose STS session credentials the brain
 // re-mints mid-run keeps signing with fresh material. A missing or expired
 // bundle surfaces an error so the proxy 502s with the refresh-lagging hint

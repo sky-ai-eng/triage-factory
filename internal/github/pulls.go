@@ -17,7 +17,7 @@ import (
 // by construction the repo where /pulls/<n> lives, which is always
 // the upstream. SSHURL and BaseSSHURL are the SSH forms of the same
 // URLs (git@github.com:owner/repo.git). Callers (the spawner, mostly)
-// pick HTTPS or SSH based on the user's GitHubConfig.CloneProtocol.
+// pick HTTPS or SSH based on the org's OrgSettings.GitHubCloneProtocol.
 // Use the *Base* variants when configuring a bare clone's origin;
 // the head URL is only for fork-PR push tracking.
 type PRView struct {
@@ -505,7 +505,7 @@ func (c *Client) GetReviewDetail(ctx context.Context, owner, repo string, number
 	return detail, nil
 }
 
-// SubmitReviewInput is a comment to include when submitting a review.
+// SubmitReviewComment is a comment to include when submitting a review.
 type SubmitReviewComment struct {
 	Path      string `json:"path"`
 	Line      int    `json:"line"`

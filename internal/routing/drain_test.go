@@ -225,7 +225,7 @@ func TestRevertTaskStatus_PreservesClaim(t *testing.T) {
 	// 'delegated'; post-B+ the status stays 'queued' on commit, but
 	// we're testing revert independently of the caller path, so set
 	// status to something visibly distinct so the assertion catches
-	// a regression where SetTaskStatus isn't called either.)
+	// a regression where SetStatus isn't called either.)
 	if err := testTaskStore(database).SetStatus(t.Context(), runmode.LocalDefaultOrgID, taskID, "snoozed"); err != nil {
 		t.Fatalf("pre-stage status: %v", err)
 	}

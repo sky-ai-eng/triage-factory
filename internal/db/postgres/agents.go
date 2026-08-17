@@ -24,7 +24,7 @@ import (
 //     transaction as the agents row — at the agents-insert moment,
 //     tf.user_is_org_admin() returns false and the agents_insert
 //     policy would refuse. Same pool-split pattern as PromptStore
-//     and TaskRuleStore.
+//     and EventHandlerStore.
 //
 // Inside WithTx both fields point at the same *sql.Tx, and inTx is
 // true. Create inside WithTx is rejected — escaping to the admin pool
@@ -83,7 +83,7 @@ func getAgentForOrg(ctx context.Context, q queryer, orgID string) (*domain.Agent
 
 func (s *agentStore) Create(ctx context.Context, orgID string, a domain.Agent) (string, error) {
 	if s.inTx {
-		// Same justification as TaskRuleStore.Seed / TriggerStore.Seed:
+		// Same justification as EventHandlerStore.Seed:
 		// admin-pool escape from inside a caller's tx silently breaks
 		// the caller's transaction scope. Production bootstrap runs
 		// outside any user tx (the org-create handler will open its

@@ -34,7 +34,7 @@ func (r tokenResolver) TokenFor(_ context.Context, _, _ string) (githubapp.Token
 func seedWorkspaceRepo(t *testing.T, stores db.Stores, owner, repo, cloneURL string) {
 	t.Helper()
 	ctx := context.Background()
-	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		Owner: owner, Repo: repo,
 		CloneURL: cloneURL, DefaultBranch: "main", ProfileText: "test profile",
 	}); err != nil {
@@ -192,7 +192,7 @@ func TestLocalClient_CreateWorkspaceCheckout_Gates(t *testing.T) {
 	}
 
 	// Org-configured but team-untracked: profile only, no team row.
-	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		Owner: "sky", Repo: "untracked",
 		CloneURL: "https://x", DefaultBranch: "main", ProfileText: "t",
 	}); err != nil {

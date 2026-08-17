@@ -809,14 +809,17 @@ export default function Repos() {
 
   const handleBranchChange = (profile: Repository) => async (branch: string) => {
     try {
-      await apiFetch(`/api/repos/${encodeURIComponent(profile.id)}`, {
+      // The PATCH answers with the updated row, so the card renders what the
+      // server stored rather than what this call sent — and without a refetch
+      // of the whole list to find out. The two are the same for base_branch
+      // today; they are not for a field the write normalizes, and the row is
+      // the half that is true either way.
+      const updated = await apiJSON<Repository>(`/api/repos/${encodeURIComponent(profile.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ base_branch: branch || null }),
       })
-      setProfiles((prev) =>
-        prev.map((p) => (p.id === profile.id ? { ...p, base_branch: branch } : p)),
-      )
+      setProfiles((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
     } catch (err) {
       toast.error(httpErrorMessage(err, 'Could not update the base branch.'))
     }

@@ -18,7 +18,7 @@ import (
 )
 
 // The drag-to-delegate handler chains an existing helper trio:
-// db.GetEntity → LatestEventForEntityAndType → FindOrCreateTask →
+// Entities.Get → Events.LatestForEntityTypeAndDedupKey → Tasks.FindOrCreate →
 // spawner.Delegate. The first three are covered at the db level; what
 // the handler adds is request validation and HTTP status mapping.
 // These tests pin the latter without depending on a real Spawner —

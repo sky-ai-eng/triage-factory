@@ -25,7 +25,7 @@ import (
 	"time"
 )
 
-// acceptOnce serves a tiny "I'm here" listener: every accepted connection
+// acceptEcho serves a tiny "I'm here" listener: every accepted connection
 // gets one byte and is closed, so a busybox `nc` probe that connects exits
 // 0 (REACHABLE) and one that's dropped times out non-zero (BLOCKED).
 func acceptEcho(t *testing.T, ln net.Listener) {
