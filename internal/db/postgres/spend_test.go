@@ -51,9 +51,11 @@ func TestSpendStore_Postgres(t *testing.T) {
 // view's security_invoker=true makes the base tables' RLS apply under the
 // querying user. It proves the spine doesn't leak spend across the RLS boundary:
 //
-//   - runs are TEAM-scoped: a teamA member sees teamA's run, not teamB's.
-//   - curator is CREATOR-scoped (curator_requests_select gates on
-//     creator_user_id): a user sees their own curator turns, not a peer's.
+//   - 'run' rows are TEAM-scoped: a teamA member sees teamA's conversation,
+//     not teamB's.
+//   - curator is CREATOR-scoped (conversations_select's visibility='private'
+//     arm gates on creator_user_id): a user sees their own curator turns, not
+//     a peer's.
 //     (The epic's "org scope" shorthand for curator is looser than the actual
 //     policy; the view faithfully inherits whatever the base RLS is.)
 //   - system is ORG-scoped: every org member sees the system_overhead row.

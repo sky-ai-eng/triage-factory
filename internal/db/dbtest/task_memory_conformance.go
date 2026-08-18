@@ -22,8 +22,9 @@ import (
 type TaskMemoryStoreFactory func(t *testing.T) (store db.TaskMemoryStore, orgID string, seed TaskMemorySeeder)
 
 // TaskMemorySeedPromptName and TaskMemorySeedStepIndex are the producing-
-// conversation facts every backend's Run seeder must stamp on the conversation
-// it creates. The entity reads project both back onto TaskMemory (they are what
+// conversation facts every backend's Conversation seeder must stamp on the
+// conversation it creates. The entity reads project both back onto
+// TaskMemory (they are what
 // lets a materializer name a memory after the work it records), so the suite
 // asserts them against these values — pinning them here rather than per-backend
 // keeps the two SQL trees answering the same question. The step index is
@@ -337,7 +338,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		time.Sleep(1100 * time.Millisecond)
 		conv2, _ := seed.Conversation(t, "order-second")
 		// Re-use the same entity by overriding the seeded conversation's entity_id.
-		// The Run seeder returns a fresh entity per call; the test wants
+		// The Conversation seeder returns a fresh entity per call; the test wants
 		// the second memory on the same entity. Seeder shape can't be
 		// changed mid-call, so write the second memory under conv2 +
 		// entityID (the first entity) by re-pointing — backends accept

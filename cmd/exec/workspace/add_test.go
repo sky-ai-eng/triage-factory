@@ -25,7 +25,7 @@ import (
 
 // hostFor wraps a Stores + conversationID into a LocalClient with the routing
 // identity tests want. Used by the materializeWorkspace cases below
-// where the test seeds a run row and then drives materialization
+// where the test seeds a conversation row and then drives materialization
 // against its id. Equivalent to what agenthost.NewLocalFromEnv produces in
 // local mode.
 func hostFor(stores db.Stores, conversationID string) agenthost.Client {

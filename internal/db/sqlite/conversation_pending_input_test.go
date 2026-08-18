@@ -66,8 +66,9 @@ func TestConversationPendingInputStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	}
 }
 
-// seedSQLiteConversationForPendingInput inserts a bare run row (origin='interactive',
-// so no blueprint_run FK chain is required) the run_pending_input FK needs.
+// seedSQLiteConversationForPendingInput inserts a bare conversation row
+// (origin='interactive', so no blueprint_run FK chain is required) for the
+// pending-input message's conversation_id FK to land on.
 func seedSQLiteConversationForPendingInput(t *testing.T, conn *sql.DB, suffix string) string {
 	t.Helper()
 	id := uuid.New().String()

@@ -11,7 +11,7 @@ import "time"
 const awaitingCredentialsTimeout = 2 * time.Minute
 
 // awaitingCredentialsPollInterval is how often the wait re-checks
-// run_credentials. A doorbell (the cred_request tf_ctl notification fired by
+// claim_credentials. A doorbell (the cred_request tf_ctl notification fired by
 // MarkAwaitingCredentials) makes the common case near-instant; this poll is the
 // backstop for a dropped notification, bounded by awaitingCredentialsTimeout
 // either way.

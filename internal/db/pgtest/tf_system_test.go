@@ -344,7 +344,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 	})
 
-	t.Run("run_pending_input", func(t *testing.T) {
+	t.Run("conversation_pending_input", func(t *testing.T) {
 		conversationID := seedQueuedConversation(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		// Pending input is an undelivered plain user message on the
 		// conversation's own transcript now.

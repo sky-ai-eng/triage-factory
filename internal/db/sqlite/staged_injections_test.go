@@ -54,8 +54,9 @@ func TestStagedInjectionStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	}
 }
 
-// seedSQLiteConversationForStagedInjection inserts a bare run row (origin='interactive', so no
-// blueprint_run FK chain is required) the staged_agent_injections FK needs.
+// seedSQLiteConversationForStagedInjection inserts a bare conversation row
+// (origin='interactive', so no blueprint_run FK chain is required) for the
+// staged injection's messages.conversation_id FK to land on.
 func seedSQLiteConversationForStagedInjection(t *testing.T, conn *sql.DB, suffix string) string {
 	t.Helper()
 	id := uuid.New().String()

@@ -1,7 +1,8 @@
 // Package fleet is the Enterprise-Edition sandbox-fleet administration console
 // — the Fleet page's rich backend (TFAC-589, spec §8). It reads the core
 // operability substrate (the instances registry, the instance_stats telemetry
-// samples, the runs timing columns, and llm_spend) and serves it as the
+// samples, the conversations timing columns, and llm_spend) and serves it as
+// the
 // operator-gated /api/fleet/* surfaces.
 //
 // EE module shape (docs/ee-feature-packaging.md): core never imports this
