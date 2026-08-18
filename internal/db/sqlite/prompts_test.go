@@ -49,7 +49,7 @@ func openSQLiteForTest(t *testing.T) *sql.DB {
 	return conn
 }
 
-// seedSQLiteConversationsForStats inserts entity+task+run rows for each entry
+// seedSQLiteConversationsForStats inserts entity+task+conversation rows for each entry
 // in statusByOffset so PromptStore.Stats has data to aggregate.
 // started_at is staggered by `i` days back so the per-day grouping
 // has variation.

@@ -635,7 +635,7 @@ func TestBlueprintStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun B: %v", err)
 	}
-	// Seed a step run under each blueprint so the cross-org
+	// Seed a step conversation under each blueprint so the cross-org
 	// ConversationsForBlueprintSystem check below has rows to (not) leak.
 	seedPgStepConversation(t, h, orgA, userA, taskA, stepIDA, crA, 0)
 	seedPgStepConversation(t, h, orgB, userB, taskB, stepIDB, crB, 0)

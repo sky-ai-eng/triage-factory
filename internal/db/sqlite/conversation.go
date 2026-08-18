@@ -626,9 +626,9 @@ func inListArgs(ids []string) (string, []any) {
 	return strings.Join(placeholders, ", "), args
 }
 
-// HasActiveAutoConversationForTask: any non-terminal trigger_type='event' run on the
-// task. Manual delegations are excluded. Used by the router's per-task firing
-// gate.
+// HasActiveAutoConversationForTask reports whether any non-terminal trigger_type='event'
+// conversation exists on the task. Manual delegations are excluded. Used by the router's
+// per-task firing gate.
 func (s *conversationStore) HasActiveAutoConversationForTask(ctx context.Context, orgID, taskID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err

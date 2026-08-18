@@ -134,7 +134,7 @@ func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrph
 		}
 	})
 
-	t.Run("Terminal_childless_run_keeps_its_own_verdict", func(t *testing.T) {
+	t.Run("Terminal_childless_blueprint_run_keeps_its_own_verdict", func(t *testing.T) {
 		// Every terminal is a settled account of what happened, including the
 		// abort_reason a cancel or an abort already wrote. The arm may only
 		// claim a run that is still 'running'.
@@ -147,7 +147,7 @@ func RunReconcileOrphanedConversationsConformance(t *testing.T, mk ReconcileOrph
 			t.Fatalf("ReconcileOrphanedConversations: %v", err)
 		}
 		if n != 0 {
-			t.Errorf("healed count = %d, want 0 (terminal runs are settled)", n)
+			t.Errorf("healed count = %d, want 0 (terminal blueprint runs are settled)", n)
 		}
 		status, reason, _ := seed.BlueprintRunState(t, brID)
 		if status != string(domain.BlueprintRunStatusCancelled) || reason != "user_cancelled" {

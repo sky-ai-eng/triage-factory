@@ -20,10 +20,11 @@ import (
 )
 
 // blueprintStepDecision is the orchestrator's decision after a completed
-// blueprint step, derived from the step run's conversations.outcome and the
-// step's position. Named a decision, not an outcome: an outcome is what the
-// agent reported (domain.ConversationOutcome, on the conversation), and this is what the
-// orchestrator does about it — the two appear in the same scope below.
+// blueprint step, derived from the step conversation's conversations.outcome
+// and the step's position. Named a decision, not an outcome: an outcome is what
+// the agent reported (domain.ConversationOutcome, on the conversation), and
+// this is what the orchestrator does about it — the two appear in the same
+// scope below.
 type blueprintStepDecision int
 
 const (
@@ -662,8 +663,9 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepConversationID, userID s
 		status, reason, stepIdx, false)
 }
 
-// blueprintTerminalForResumedStepConversation maps a resumed step run's terminal state +
-// position to the blueprint's terminal status. Mirrors reactToStepTerminal's
+// blueprintTerminalForResumedStepConversation maps a resumed step
+// conversation's terminal state + position to the blueprint's terminal status.
+// Mirrors reactToStepTerminal's
 // disposition, for the resume path: a clean completion routes through
 // blueprintDecisionForStepConversation (finish/advance/abort), and the
 // non-terminal-completed statuses map to the matching blueprint terminal.

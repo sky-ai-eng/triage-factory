@@ -74,7 +74,7 @@ func (s outageTaskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID
 
 // outageDelegator fails the fire itself, standing in for the delegation tail
 // behind fireMatchedTriggers. Delegating for real is fenceStubDelegator's job
-// — it mints the fenced blueprint_run + run rows the replay assertions read.
+// — it mints the fenced blueprint_run + conversation rows the replay assertions read.
 type outageDelegator struct {
 	*fenceStubDelegator
 	o *outage

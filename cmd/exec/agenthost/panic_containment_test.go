@@ -52,7 +52,7 @@ func TestServer_PanickingVerb_FailsRPCAndKeepsServing(t *testing.T) {
 		t.Fatalf("next RPC after the panic: %v", err)
 	}
 	if got.ConversationID != info.ConversationID {
-		t.Errorf("LookupConversation after the panic returned %+v, want run %q", got, info.ConversationID)
+		t.Errorf("LookupConversation after the panic returned %+v, want conversation %q", got, info.ConversationID)
 	}
 }
 
@@ -93,7 +93,7 @@ func TestHandleConn_NilMethodSeenServesNormally(t *testing.T) {
 		t.Fatalf("decode result: %v", err)
 	}
 	if res.Info.ConversationID != info.ConversationID {
-		t.Errorf("LookupConversation returned %+v, want run %q", res.Info, info.ConversationID)
+		t.Errorf("LookupConversation returned %+v, want conversation %q", res.Info, info.ConversationID)
 	}
 	_ = cliSide.Close()
 	<-served

@@ -160,7 +160,7 @@ func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task 
 
 	// Seed the "already active" run the busy-task gate will see —
 	// mirrors the immediate-fire path's own bookkeeping (a fenced
-	// blueprint_run + a running event-triggered run row) without going
+	// blueprint_run + a running event-triggered conversation row) without going
 	// through the full HandleEvent dispatch.
 	blueprintRunID, err := stubDelegateRun(database, *task, delegate.DelegateOpts{
 		ExplicitBlueprintID: trigger.BlueprintID,
@@ -174,10 +174,10 @@ func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task 
 	// stubDelegateRun returns the blueprint_run id, not the conversations.id
 	// the injection seam targets (a staged injection is an undelivered
 	// messages row, whose conversation_id FKs conversations(id)) — resolve
-	// the real run row it minted (one run per blueprint_run in the stub,
+	// the real conversation row it minted (one conversation per blueprint_run in the stub,
 	// step_index 0).
 	if err := database.QueryRow(`SELECT id FROM conversations WHERE blueprint_run_id = ?`, blueprintRunID).Scan(&activeConversationID); err != nil {
-		t.Fatalf("resolve seeded run id: %v", err)
+		t.Fatalf("resolve seeded conversation id: %v", err)
 	}
 	return
 }

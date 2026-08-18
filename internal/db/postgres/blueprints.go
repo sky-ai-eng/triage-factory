@@ -781,7 +781,7 @@ const blueprintRunsOneActivePerTaskConstraint = "blueprint_runs_one_active_auto_
 //     contract: a replay is permanently satisfied, task-busy is a
 //     deferral — the caller must queue the intent, not drop it.
 //
-// The run row and the task's agent claim commit together — see
+// The blueprint run row and the task's agent claim commit together — see
 // db.AgentClaimStamp for why they are inseparable. A stamp refusal is not an
 // error and leaves the run committed; a stamp *failure* rolls the run back,
 // so the firing path retries the pair rather than committing half of it.
