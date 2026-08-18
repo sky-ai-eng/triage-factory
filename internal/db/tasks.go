@@ -483,9 +483,9 @@ type TaskStore interface {
 	//
 	// claim rides the same transaction: folding an event into a live
 	// conversation is the bot committing to that task, so the claim is written
-	// with the fold
-	// or not at all (see AgentClaimStamp). Returns claimed=true only when the
-	// stamp actually moved the claim — a refusal commits the fold anyway.
+	// with the fold or not at all (see AgentClaimStamp). Returns claimed=true
+	// only when the stamp actually moved the claim — a refusal commits the
+	// fold anyway.
 	MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string, claim AgentClaimStamp) (claimed bool, err error)
 	CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
 	StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error)

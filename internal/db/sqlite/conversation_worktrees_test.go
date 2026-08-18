@@ -77,8 +77,8 @@ func TestConversationWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 
 // seedSQLiteConversationForWorktree seeds the entity + event + prompt + task
 // + conversation FK chain conversation_worktrees needs. Mirrors the
-// seedSQLiteConversationFor
-// TaskMemory shape so both stores' tests stay reading like siblings.
+// seedSQLiteConversationFor TaskMemory shape so both stores' tests stay
+// reading like siblings.
 func seedSQLiteConversationForWorktree(t *testing.T, conn *sql.DB, suffix string) string {
 	t.Helper()
 	now := time.Now().UTC()

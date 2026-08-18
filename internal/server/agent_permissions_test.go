@@ -109,8 +109,7 @@ func TestHandleAgentPermissions_ReconstructsAParkedPrompt(t *testing.T) {
 
 // TestHandleAgentPermissions_EmptyForAQuietConversation: a conversation nobody is
 // waiting on answers with an empty list, not a 404 — "nothing pending" and "no
-// such conversation"
-// are different answers and the board reads both.
+// such conversation" are different answers and the board reads both.
 func TestHandleAgentPermissions_EmptyForAQuietConversation(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))

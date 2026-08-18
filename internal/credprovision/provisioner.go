@@ -43,10 +43,9 @@ var log = slog.Default().With("component", "credprovision")
 
 // DefaultAwaitingSweepInterval is the backstop-sweep cadence for
 // conversations whose active claim is parked in phase='awaiting_credentials'
-// — the fast path is the
-// executor's cred_request tf_ctl notification; this recovers anything that
-// notification dropped (the relay is lossy by design). Short, because it
-// gates conversation START latency.
+// — the fast path is the executor's cred_request tf_ctl notification; this
+// recovers anything that notification dropped (the relay is lossy by
+// design). Short, because it gates conversation START latency.
 const DefaultAwaitingSweepInterval = 5 * time.Second
 
 // DefaultRefreshSweepInterval is the cadence the refresh sweep runs at.
@@ -390,10 +389,9 @@ func cliChannelScope(primaryRepo string, repoIDs []string) (owner string, repoNa
 // be pointless (the proxy would 403 it anyway). The task-repo half exists
 // because provisioning happens BEFORE the conversation's very first clone —
 // conversation_worktrees has no rows yet for a fresh claim, only for a resumed
-// conversation
-// or one that already cloned before a refresh — so without it, a fresh
-// conversation's initial host-side clone (setupGitHub's clone auth, before
-// any worktree exists) would get no token at all.
+// conversation or one that already cloned before a refresh — so without it, a
+// fresh conversation's initial host-side clone (setupGitHub's clone auth,
+// before any worktree exists) would get no token at all.
 //
 // A conversation with no GitHub anchor — a Slack mention, a Jira issue, a taskless
 // conversation — has neither a GitHub task-repo nor any worktree, so the set above is

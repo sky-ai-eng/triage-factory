@@ -12,10 +12,9 @@ import (
 
 // conversationSignalStore is the Postgres impl of db.ConversationSignalStore —
 // the cross-pod conversation-control outbox (TFAC-585). Admin-pool only:
-// conversation_signals carries no
-// app-pool policy (RLS enabled, REVOKE ALL from the app roles — see the
-// migration), so every statement here runs against the admin/BYPASSRLS
-// pool, mirroring InstanceStore's shape.
+// conversation_signals carries no app-pool policy (RLS enabled, REVOKE ALL
+// from the app roles — see the migration), so every statement here runs
+// against the admin/BYPASSRLS pool, mirroring InstanceStore's shape.
 type conversationSignalStore struct{ admin queryer }
 
 func newConversationSignalStore(admin queryer) db.ConversationSignalStore {

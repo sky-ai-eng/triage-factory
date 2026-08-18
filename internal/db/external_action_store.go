@@ -73,11 +73,10 @@ type ExternalActionStore interface {
 
 	// ListByConversation returns one conversation's actions, newest first —
 	// what a single conversation did to the outside world, the sibling of
-	// Artifacts.ListByConversation. App pool
-	// in Postgres under the same org-scoped policy as ListByTeam; the handler
-	// reads the conversation first, so a conversation the caller's team cannot
-	// see is a
-	// 404 before this runs. Bounded + filtered by opts.
+	// Artifacts.ListByConversation. App pool in Postgres under the same
+	// org-scoped policy as ListByTeam; the handler reads the conversation
+	// first, so a conversation the caller's team cannot see is a 404 before
+	// this runs. Bounded + filtered by opts.
 	//
 	// It is a separate read rather than a filter on ListByTeam because the two
 	// answer different questions and are reached from different surfaces: this

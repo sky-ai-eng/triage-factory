@@ -106,10 +106,10 @@ function ScreenTranscript({ messages, conversation, hasOlder, loadingOlder, onLo
 
   // Key the rows off conversation.WorktreePath — the only conversation field
   // they read — rather than the conversation object itself, whose identity
-  // churns on every status refetch
-  // and artifact poll. Rebuilding here is cheap element creation; the heavy
-  // work (markdown parsing, tool panes) bails out per-row via the memoized
-  // leaf components when a row's inputs are unchanged.
+  // churns on every status refetch and artifact poll. Rebuilding here is
+  // cheap element creation; the heavy work (markdown parsing, tool panes)
+  // bails out per-row via the memoized leaf components when a row's inputs
+  // are unchanged.
   const rows = useMemo(
     () => buildRows(messages, conversation.WorktreePath),
     [messages, conversation.WorktreePath],

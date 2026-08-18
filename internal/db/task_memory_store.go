@@ -59,10 +59,9 @@ type TaskMemoryStore interface {
 	//
 	// blueprintRunID is the conversation's blueprint run (denormalized from
 	// the conversation, like entityID); pass empty for a standalone
-	// conversation, where it
-	// canonicalizes to SQL NULL. It groups one blueprint run's memory
-	// so the materializer can fold each step's file into a shared
-	// namespace folder.
+	// conversation, where it canonicalizes to SQL NULL. It groups one
+	// blueprint run's memory so the materializer can fold each step's file
+	// into a shared namespace folder.
 	//
 	// Idempotent on (conversation_id) via ON CONFLICT — re-running the gate
 	// after a retry overwrites agent_content but preserves the row's
@@ -79,10 +78,9 @@ type TaskMemoryStore interface {
 
 	// UpdateConversationMemoryHumanContent records the human's verdict on a
 	// conversation's agent draft into the conversation_memory row keyed by
-	// conversationID. The
-	// gate-teardown upsert at termination guarantees the row exists
-	// by the time the human writes a verdict, so this is a plain
-	// UPDATE with no INSERT-or-UPDATE branching.
+	// conversationID. The gate-teardown upsert at termination guarantees
+	// the row exists by the time the human writes a verdict, so this is a
+	// plain UPDATE with no INSERT-or-UPDATE branching.
 	//
 	// Empty / whitespace-only content canonicalizes to NULL, matching
 	// UpsertAgentMemory's agent_content handling.
@@ -109,10 +107,10 @@ type TaskMemoryStore interface {
 	// version, superseding any approval-time account. The reconciler composes
 	// the note over the conversation's WHOLE artifact set each time one
 	// resolves, so a branch-then-PR conversation accumulates correctly without
-	// an append and a repeated
-	// cycle is idempotent. Same empty→NULL + missing-row-logged-not-fatal
-	// contract as the app-pool variant. org_id stays bound as defense in depth;
-	// SQLite collapses onto the one connection.
+	// an append and a repeated cycle is idempotent. Same empty→NULL +
+	// missing-row-logged-not-fatal contract as the app-pool variant. org_id
+	// stays bound as defense in depth; SQLite collapses onto the one
+	// connection.
 	UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) error
 
 	// GetMemoriesForEntity returns every conversation_memory row reachable for
@@ -135,33 +133,31 @@ type TaskMemoryStore interface {
 	// context. org_id stays in the WHERE clause as defense in depth.
 	//
 	// teamID is the materializing conversation's owning team
-	// (conversations.team_id).
-	// The admin pool bypasses RLS, so the app-pool variant's team
-	// scoping (conversation_memory_all → conversations_select) is
-	// hand-rolled here: the result is restricted to memory whose parent
-	// conversation that team can see — team-visible conversations owned by
-	// teamID plus any org-visible conversation —
+	// (conversations.team_id). The admin pool bypasses RLS, so the
+	// app-pool variant's team scoping (conversation_memory_all →
+	// conversations_select) is hand-rolled here: the result is restricted
+	// to memory whose parent conversation that team can see — team-visible
+	// conversations owned by teamID plus any org-visible conversation —
 	// matching what a member of that team sees in the UI (TFAC-506).
-	// Without this, the System path returned ALL of the org's memory
-	// for the entity, leaking other teams' conversation narratives into a
+	// Without this, the System path returned ALL of the org's memory for
+	// the entity, leaking other teams' conversation narratives into a
 	// conversation they don't own. Private-visibility conversations are
-	// excluded: they're
-	// creator-scoped and the System path carries no user to match.
-	// SQLite (N=1, single team) ignores teamID — no cross-team bleed is
-	// possible locally.
+	// excluded: they're creator-scoped and the System path carries no user
+	// to match. SQLite (N=1, single team) ignores teamID — no cross-team
+	// bleed is possible locally.
 	GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error)
 
 	// GetRecentMemoriesForEntitySystem is GetMemoriesForEntitySystem capped to
 	// the most recent `limit` rows, with the cap pushed INTO the query (ORDER BY
 	// created_at DESC LIMIT) rather than fetched-all-then-sliced — so an
 	// on-demand read on an entity with a long conversation history doesn't
-	// transfer and
-	// materialize its entire memory just to keep the tail. Returns oldest-first
-	// (ASC), identical to the unbounded read's ordering, so callers compose the
-	// same way. Same team-visibility scope as GetMemoriesForEntitySystem. limit
-	// must be positive — a non-positive limit returns no rows (the store never
-	// treats it as unbounded, and Postgres rejects a negative LIMIT); callers
-	// resolve a non-positive request to a default before calling.
+	// transfer and materialize its entire memory just to keep the tail. Returns
+	// oldest-first (ASC), identical to the unbounded read's ordering, so
+	// callers compose the same way. Same team-visibility scope as
+	// GetMemoriesForEntitySystem. limit must be positive — a non-positive limit
+	// returns no rows (the store never treats it as unbounded, and Postgres
+	// rejects a negative LIMIT); callers resolve a non-positive request to a
+	// default before calling.
 	GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string, limit int) ([]domain.TaskMemory, error)
 
 	// RecordEntityTouchSystem upserts a (conversation_id, entity_id) row in

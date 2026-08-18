@@ -13,12 +13,11 @@ import (
 )
 
 // seedPgConversationWithMemory inserts a completed conversation (visibility
-// as given) plus one
-// authored conversation_memory row and its primary conversation_memory_entities join on entityID.
-// origin='interactive' sidesteps conversations_origin_requires_parents
-// so no task / prompt / blueprint parentage is needed — MemoryLoad
-// reads only conversations.visibility + conversations.team_id off the
-// conversation, never its lineage.
+// as given) plus one authored conversation_memory row and its primary
+// conversation_memory_entities join on entityID. origin='interactive' sidesteps
+// conversations_origin_requires_parents so no task / prompt / blueprint
+// parentage is needed — MemoryLoad reads only conversations.visibility +
+// conversations.team_id off the conversation, never its lineage.
 func seedPgConversationWithMemory(t *testing.T, h *pgtest.Harness, stores db.Stores, orgID, teamID, creatorID, entityID, visibility, narrative string) string {
 	t.Helper()
 	conversationID := uuid.New().String()
@@ -50,11 +49,11 @@ func contentsOf(mems []MemoryLoadEntry) map[string]bool {
 // TestLocalClient_MemoryLoad_Postgres_TeamScoped pins that MemoryLoad threads the
 // reading conversation's owning team into the memory read (admin-pool,
 // BYPASSRLS): on one SHARED org-wide entity, a team-1 conversation sees its
-// own team-visible memory plus any
-// org-visible memory — never team-2's team-visible memory — and Count matches
-// that same filter. A regression that passed "" instead of info.TeamID would
-// leak team-2's narrative here. The team-scoping semantics themselves are the
-// store's; this proves MemoryLoad wires the reading team into them.
+// own team-visible memory plus any org-visible memory — never team-2's
+// team-visible memory — and Count matches that same filter. A regression that
+// passed "" instead of info.TeamID would leak team-2's narrative here. The
+// team-scoping semantics themselves are the store's; this proves MemoryLoad
+// wires the reading team into them.
 func TestLocalClient_MemoryLoad_Postgres_TeamScoped(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -73,8 +72,7 @@ func TestLocalClient_MemoryLoad_Postgres_TeamScoped(t *testing.T) {
 
 	// team-1's own team-visible memory; team-2's team-visible memory (must be
 	// excluded from team-1's read); an org-visible conversation owned by team-2
-	// (included
-	// via the visibility='org' arm, NOT the team arm).
+	// (included via the visibility='org' arm, NOT the team arm).
 	seedPgConversationWithMemory(t, h, stores, orgID, team1, owner, entityID, "team", "team1 narrative")
 	seedPgConversationWithMemory(t, h, stores, orgID, team2, owner, entityID, "team", "team2 narrative")
 	seedPgConversationWithMemory(t, h, stores, orgID, team2, owner, entityID, "org", "org-wide narrative")

@@ -752,12 +752,11 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	//
 	// Prefer the PR's worktree resolved from the conversation's
 	// (conversation, repo, ref) registry over cwd: in a multi-PR conversation
-	// cwd may sit in a DIFFERENT PR's checkout
-	// (TFAC-494/TFAC-502), which would anchor this comment to the wrong commit.
-	// Falls back to cwd HEAD when the registry has no unambiguous PR worktree for
-	// this repo (single-PR conversations, or a path the CLI can't rev-parse),
-	// preserving
-	// prior behavior.
+	// cwd may sit in a DIFFERENT PR's checkout (TFAC-494/TFAC-502), which would
+	// anchor this comment to the wrong commit. Falls back to cwd HEAD when the
+	// registry has no unambiguous PR worktree for this repo (single-PR
+	// conversations, or a path the CLI can't rev-parse), preserving prior
+	// behavior.
 	cwd, err := os.Getwd()
 	if err != nil {
 		exitErr(fmt.Sprintf("resolve cwd: %v", err))
@@ -793,10 +792,9 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 //
 // Returns "" when there is no such row, or more than one (two PRs reviewed in
 // the SAME repo within one conversation is ambiguous without the PR number,
-// so the
-// caller falls back to cwd — the agent is expected to have cd'd into the
-// reviewed PR's worktree). A list error is non-fatal: anchoring degrades to
-// cwd, never blocking the comment.
+// so the caller falls back to cwd — the agent is expected to have cd'd into
+// the reviewed PR's worktree). A list error is non-fatal: anchoring degrades
+// to cwd, never blocking the comment.
 func reviewedPRWorktreePath(host agenthost.Client, owner, repo string) string {
 	rows, err := host.ListConversationWorktrees(context.Background())
 	if err != nil {

@@ -198,8 +198,7 @@ func TestConversationQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	}
 
 	// Now the conversation is 'running' again (mid-flight).
-	// ResetProcessingConversations should
-	// flip it back to 'queued'.
+	// ResetProcessingConversations should flip it back to 'queued'.
 	n, err := stores.ConversationQueue.ResetProcessingConversations(ctx, sqliteRQExecutorID, sqliteRQBootEpoch+1)
 	if err != nil {
 		t.Fatalf("ResetProcessingConversations: %v", err)

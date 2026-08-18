@@ -278,9 +278,8 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 // depth guarantee: even with the org_id filter as the only line of
 // defense (AdminDB bypasses RLS), org A's queries can't see org B's
 // conversations. In production the RLS policies add a second layer; this
-// test
-// validates the WHERE-clause filter on its own so a regression there
-// can't silently rely on RLS to compensate.
+// test validates the WHERE-clause filter on its own so a regression
+// there can't silently rely on RLS to compensate.
 func TestConversationStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -519,8 +518,8 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	ctx := context.Background()
 
 	// Seed a manual conversation row owned by userID — the queue's
-	// EnqueueConversation does
-	// this in production before any lifecycle write runs.
+	// EnqueueConversation does this in production before any lifecycle
+	// write runs.
 	lcBlueprintRun := seedPgBlueprintRun(t, h, orgID, userID, taskID)
 	conversationID := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
 		TaskID: taskID, PromptID: "p_lc_test", Status: "running", Model: "m",
@@ -663,10 +662,9 @@ func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, conv domain.Co
 // CHECK's blueprint_run_id FK (→ blueprint_runs(id)). Mirrors the
 // conformance seeder's BlueprintRun, but exposed as a plain helper for
 // the RLS/cross-org tests that seed conversations outside the conformance
-// suite.
-// Postgres requires org_id on both rows; trigger_type='manual' also
-// requires a non-NULL creator_user_id (blueprint_runs_creator_matches_trigger_type
-// CHECK).
+// suite. Postgres requires org_id on both rows; trigger_type='manual' also
+// requires a non-NULL creator_user_id
+// (blueprint_runs_creator_matches_trigger_type CHECK).
 func seedPgBlueprintRun(t *testing.T, h *pgtest.Harness, orgID, userID, taskID string) string {
 	t.Helper()
 	bpID := uuid.New().String()

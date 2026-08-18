@@ -49,9 +49,8 @@ func mintBlueprintRunForTest(t *testing.T, database *sql.DB, taskID string) stri
 // createConversationForTest inserts a conversations row directly via raw SQL so
 // package-db CRUD tests (pending_firings, conversation_worktrees, ...) have
 // a conversation to FK-point to without reaching for the ConversationStore
-// impl
-// (which lives in internal/db/sqlite and would form a circular
-// import if pulled into package db).
+// impl (which lives in internal/db/sqlite and would form a circular import if
+// pulled into package db).
 //
 // Mirrors the post-D2 raw-SQL test seeders (seedTaskForTest in
 // task_seed_helper_test.go). Each consumer here is testing a
@@ -77,11 +76,9 @@ func createConversationForTest(t *testing.T, database *sql.DB, conv domain.Conve
 		stepIdx = *conv.BlueprintStepIndex
 	}
 	// The origin CHECK requires blueprint_run_id — mint a blueprint_run for
-	// this conversation's
-	// task when the caller didn't supply one. This single fallback fixes the
-	// many package-db consumers that build a conversation fixture without
-	// caring about
-	// the blueprint layer.
+	// this conversation's task when the caller didn't supply one. This
+	// single fallback fixes the many package-db consumers that build a
+	// conversation fixture without caring about the blueprint layer.
 	blueprintRunID := conv.BlueprintRunID
 	if blueprintRunID == "" {
 		blueprintRunID = mintBlueprintRunForTest(t, database, conv.TaskID)

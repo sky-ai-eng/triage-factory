@@ -104,13 +104,11 @@ type Stores struct {
 
 	// Artifacts owns the artifacts table — the durable,
 	// conversation-attributed, polymorphic record of everything a conversation
-	// produces externally (branch,
-	// PR, review, issue, comment). Deduped per (org_id, dedup_key) so all
-	// of TFAC-454's capture writers UPSERT to one row. App pool in
-	// Postgres (team-scoped RLS via team_id, like conversations); consumers
-	// are the exec choke point + reconciliation (writers) and
-	// conversation-detail / C2
-	// (readers). See TFAC-455.
+	// produces externally (branch, PR, review, issue, comment). Deduped per
+	// (org_id, dedup_key) so all of TFAC-454's capture writers UPSERT to one
+	// row. App pool in Postgres (team-scoped RLS via team_id, like
+	// conversations); consumers are the exec choke point + reconciliation
+	// (writers) and conversation-detail / C2 (readers). See TFAC-455.
 	Artifacts ArtifactStore
 
 	// Entities owns the entities table — the long-lived source
@@ -159,23 +157,21 @@ type Stores struct {
 	EventQueue EventQueueStore
 
 	// ConversationQueue owns the conversation queue — the work list the
-	// delegation dispatcher
-	// drains to drive blueprints through their steps (sibling of EventQueue).
-	// A blueprint step is enqueued as a conversations row with no stored
-	// status — the absence of an outcome is what makes it claimable;
-	// a worker claims it (minting a claims row), runs the agent, and the
-	// reactor advances the blueprint_run.
-	// A system-service store (admin pool in Postgres): the dispatcher runs as
-	// a background worker with no per-user identity.
+	// delegation dispatcher drains to drive blueprints through their steps
+	// (sibling of EventQueue). A blueprint step is enqueued as a
+	// conversations row with no stored status — the absence of an outcome is
+	// what makes it claimable; a worker claims it (minting a claims row),
+	// runs the agent, and the reactor advances the blueprint_run. A
+	// system-service store (admin pool in Postgres): the dispatcher runs as a
+	// background worker with no per-user identity.
 	ConversationQueue ConversationQueueStore
 
 	// TaskMemory owns the conversation_memory table — per-conversation agent
-	// narrative
-	// + human verdict, read back by the delegate spawner to
-	// materialize prior context into fresh worktrees. Holds both
-	// pools: app for request-handler equivalents (review/PR submit,
-	// swipe-discard cleanup, factory/conversation-summary reads) and admin
-	// for the spawner's runAgent goroutine (post-completion upsert +
+	// narrative + human verdict, read back by the delegate spawner to
+	// materialize prior context into fresh worktrees. Holds both pools: app
+	// for request-handler equivalents (review/PR submit, swipe-discard
+	// cleanup, factory/conversation-summary reads) and admin for the
+	// spawner's runAgent goroutine (post-completion upsert +
 	// engagement-start materializer, both without a JWT-claims context).
 	TaskMemory TaskMemoryStore
 
@@ -400,19 +396,18 @@ type Stores struct {
 	Operators OperatorStore
 
 	// ConversationSignals owns the conversation_signals table — the cross-pod
-	// conversation-control
-	// outbox (TFAC-585). Postgres only: the SQLite impl is a stub
-	// returning ErrNotApplicableInLocal from every method, mirroring
-	// MarketplaceStore/InvitesStore — local mode owns every live conversation
-	// itself, so no code path may reach this store there.
+	// conversation-control outbox (TFAC-585). Postgres only: the SQLite impl
+	// is a stub returning ErrNotApplicableInLocal from every method,
+	// mirroring MarketplaceStore/InvitesStore — local mode owns every live
+	// conversation itself, so no code path may reach this store there.
 	ConversationSignals ConversationSignalStore
 
 	// ConversationPendingInput is the durable half of resume-by-enqueue (TFAC-585):
 	// the message recorded before a parked conversation's continuation is
-	// re-queued
-	// as ordinary claimable work, stored as an undelivered user messages
-	// row. Both dialects (unlike ConversationSignals): local mode's dispatcher
-	// claims its own resumed conversations through the identical queue path.
+	// re-queued as ordinary claimable work, stored as an undelivered user
+	// messages row. Both dialects (unlike ConversationSignals): local mode's
+	// dispatcher claims its own resumed conversations through the identical
+	// queue path.
 	ConversationPendingInput ConversationPendingInputStore
 
 	// Permissions owns the conversation_permissions table — the durable

@@ -292,12 +292,11 @@ func WriteInjectorCert(conversationID string, certPEM []byte) error {
 // StartWithServer applies to the socket, for the same reason and one more.
 //
 // The path is keyed by conversation id, so sequential engagements of one
-// conversation
-// share it, and a truncate-in-place would hand the new injector the previous
-// engagement's file: wrong mode, wrong owner, and — under a mid-teardown
-// overlap — a window where the cert the jail mounts is not the one the serving
-// injector holds. Creating it fresh makes the file belong to whoever is
-// serving it, whatever uid that is.
+// conversation share it, and a truncate-in-place would hand the new injector
+// the previous engagement's file: wrong mode, wrong owner, and — under a
+// mid-teardown overlap — a window where the cert the jail mounts is not the
+// one the serving injector holds. Creating it fresh makes the file belong to
+// whoever is serving it, whatever uid that is.
 //
 // It is NOT the mechanism that makes a stale predecessor survivable, and must
 // not be mistaken for one. The socket root is sticky (cmd/capbroker's listen /

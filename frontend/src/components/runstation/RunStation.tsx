@@ -49,8 +49,7 @@ export interface StationActions {
    *  resume). */
   onMessage?: (text: string) => void
   /** Stop the conversation (→ open, resumable). Same operation as onCancel;
-   *  the two
-   *  controls are not merged yet. */
+   *  the two controls are not merged yet. */
   onInterrupt?: () => void
   /** Answer a pending tool-permission prompt. The promise settles when the
    *  resolve POST finishes — PermissionPrompt awaits it to hold its
@@ -61,9 +60,8 @@ export interface StationActions {
 
 // What a chain segment is called: the step prompt's name, with the step's brief
 // as the secondary line. A conversation whose blueprint plan predates named
-// steps (or
-// that fell back to the live steps) has neither, and the track degrades to
-// "step N".
+// steps (or that fell back to the live steps) has neither, and the track
+// degrades to "step N".
 export interface ChainStepLabel {
   name: string
   brief: string
@@ -209,9 +207,9 @@ export default function RunStation({
 
 // ── State frame ────────────────────────────────────────────────────────────
 // The single status light. An emissive inner ring + outward bloom in the
-// conversation's
-// tone, breathing while a turn executes, steady otherwise. The machine wears
-// exactly one color so the board's "lit by state, not chrome" reads full-bleed.
+// conversation's tone, breathing while a turn executes, steady otherwise. The
+// machine wears exactly one color so the board's "lit by state, not chrome"
+// reads full-bleed.
 function StateFrame({ light, live }: { light: string; live: boolean }) {
   return (
     <>
@@ -448,8 +446,7 @@ function stepTitle(s: ChainStep, i: number): string {
 // ── Conveyor lane ──────────────────────────────────────────────────────────
 // A thin chevron belt running down the machine's intake edge — ambient transit.
 // Speed tracks the conversation state (fast while working, idling while
-// open, parked when
-// settled). Motion is the point, not literal item counts.
+// open, parked when settled). Motion is the point, not literal item counts.
 function ConveyorLane({ speed }: { speed: number }) {
   const moving = speed > 0.01
   const duration = moving ? Math.max(0.6, 2.4 / speed) : 0
@@ -515,8 +512,7 @@ function IntakeDock({
 }) {
   // Approval is derived from the unresolved-artifact set, not a conversation
   // status: a card surfaces "your move" whenever has_unresolved_artifacts is
-  // true, whether
-  // the conversation is live or terminal (TFAC-382/TFAC-492).
+  // true, whether the conversation is live or terminal (TFAC-382/TFAC-492).
   const counts = approvalCounts(conversation)
   const hasUnresolved = hasUnresolvedArtifacts(conversation)
   const isTerminal = isTerminalStatus(conversation.Status)
@@ -527,17 +523,15 @@ function IntakeDock({
   // leaves the conversation here now.
   const isParked = conversation.Status === 'open'
   // A conversation takes steering when a turn is executing, or when a
-  // follow-up would
-  // actually be accepted. Status is the cheap first cut and the server's
-  // `resumable` is the authority: whether the workspace survived and whether
-  // anything would drive it are facts only it can see, and a conversation
-  // that looks
-  // parked-and-warm from here may answer every message with a 409/410.
+  // follow-up would actually be accepted. Status is the cheap first cut and
+  // the server's `resumable` is the authority: whether the workspace
+  // survived and whether anything would drive it are facts only it can see,
+  // and a conversation that looks parked-and-warm from here may answer every
+  // message with a 409/410.
   const steerable = active || canResumeConversation(conversation)
   // The honest other half: a conversation whose status says "resumable" but
   // whose server verdict says otherwise gets the reason where the input would
-  // have
-  // been, rather than a live composer that fails on send.
+  // have been, rather than a live composer that fails on send.
   const resumeBlocked =
     !active && isResumableConversation(conversation) && conversation.resumable === false
   const hasPrompt = pending.length > 0
@@ -663,9 +657,9 @@ function IntakeDock({
 // detour; pending_artifact_ids lists draft PRs first, then ready reviews, so
 // unresolved_pr_count discriminates the head's kind). A plural/mixed set — or
 // a transiently absent id set — raises a popover with the conversation's
-// artifact list,
-// unresolved rows sorted first: the same list the board card and the telemetry
-// rail use, so there is one approval surface, not a separate roster.
+// artifact list, unresolved rows sorted first: the same list the board card
+// and the telemetry rail use, so there is one approval surface, not a separate
+// roster.
 function ApprovalAffordance({
   conversation,
   counts,
@@ -731,11 +725,10 @@ function ApprovalAffordance({
 
 // DockComposer — the steering input. An auto-resizing textarea (Enter sends,
 // Shift+Enter inserts a newline), with a send key lit in the conversation's
-// state tone.
-// State is local; the sent text round-trips back as an `message` event, so there's
-// no optimistic insert here. `hidden` collapses it out of view and disables
-// interaction (e.g. while a permission prompt is up) without unmounting it —
-// unmounting would drop whatever the user had drafted.
+// state tone. State is local; the sent text round-trips back as an `message`
+// event, so there's no optimistic insert here. `hidden` collapses it out of
+// view and disables interaction (e.g. while a permission prompt is up) without
+// unmounting it — unmounting would drop whatever the user had drafted.
 function DockComposer({
   state,
   placeholder,

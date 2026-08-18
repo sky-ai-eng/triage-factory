@@ -35,9 +35,9 @@ type fleetQueueShareDTO struct {
 // handleFleetQueue surfaces one org's conversation-queue share against its
 // concurrency cap: active vs queued runs, the configured cap, and whether the
 // org is at cap (its queued runs invisible to claims until an active one
-// finishes). This is
-// the org-facing read-out of the per-org cap + fair-claim feature — an org
-// admin (or the org owner) checking their own tenant's standing.
+// finishes). This is the org-facing read-out of the per-org cap + fair-claim
+// feature — an org admin (or the org owner) checking their own tenant's
+// standing.
 //
 // Org-scoped by design: the FleetQueueShares store read is fleet-wide, but this
 // endpoint returns only the caller's own ?org= row, so no tenant sees another's

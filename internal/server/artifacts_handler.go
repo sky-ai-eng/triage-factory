@@ -588,8 +588,8 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// Step 3: terminal-on-last task closure. Approval is a decoupled sidecar — it
 	// never flips conversation status or resumes/terminates a blueprint. The
 	// only lifecycle effect is closing the task when this was the LAST
-	// unresolved artifact on an
-	// already-terminal blueprint (§3); otherwise a no-op.
+	// unresolved artifact on an already-terminal blueprint (§3); otherwise a
+	// no-op.
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 
 	// Step 4: tell the drafting agent its PR was approved — live if the
@@ -615,12 +615,11 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 // handleArtifactDismiss resolves ONE artifact as a decoupled sidecar operation,
 // the per-item counterpart to approve: it abandons the GitHub object and flips
 // the artifact's state, never touching the conversation's lifecycle. A draft
-// PR is closed
-// on GitHub (best-effort) and flipped to closed; a pending review has its GitHub
-// pending review deleted and is flipped to dismissed. Branches are never touched.
-// An already-terminal artifact (a non-draft PR / non-pending review) is a 409 —
-// there is nothing left to resolve. After the flip it runs the shared
-// terminal-on-last task-closure check.
+// PR is closed on GitHub (best-effort) and flipped to closed; a pending review
+// has its GitHub pending review deleted and is flipped to dismissed. Branches
+// are never touched. An already-terminal artifact (a non-draft PR / non-pending
+// review) is a 409 — there is nothing left to resolve. After the flip it runs
+// the shared terminal-on-last task-closure check.
 func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -769,11 +768,10 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		}
 		// Step 2: unresolved check scoped to the TASK (all its conversations),
 		// matching teardownTaskArtifacts — not just the current blueprint's step
-		// conversations. A
-		// stranded artifact from a prior attempt (e.g. a teardown that partially
-		// failed on a network blip) must block closure rather than be silently
-		// skipped, so we never close the task with an unresolved draft PR / pending
-		// review sitting on GitHub.
+		// conversations. A stranded artifact from a prior attempt (e.g. a
+		// teardown that partially failed on a network blip) must block closure
+		// rather than be silently skipped, so we never close the task with an
+		// unresolved draft PR / pending review sitting on GitHub.
 		convs, e := tx.Conversations.ListForTask(ctx, orgID, taskID)
 		if e != nil {
 			return fmt.Errorf("list conversations for task: %w", e)

@@ -371,8 +371,7 @@ func (r *slackExecRig) touchRole(conversationID, entityID string) string {
 }
 
 // touchRowCount counts every conversation_memory_entities row for a
-// conversation — a set-returning
-// read must leave this at 0.
+// conversation — a set-returning read must leave this at 0.
 func (r *slackExecRig) touchRowCount(conversationID string) int {
 	r.t.Helper()
 	var n int
@@ -440,9 +439,9 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 
 // TestSlackExecHandler_Send_RootPostMintsThreadKind pins exec slack send's
 // thread-engagement half: a channel-root post (no --thread-ts) is the
-// conversation's
-// own thread, so its entity is minted kind="thread" — titled from the
-// posted text — the same engagement signal a root mention gets at ingest.
+// conversation's own thread, so its entity is minted kind="thread" —
+// titled from the posted text — the same engagement signal a root mention
+// gets at ingest.
 func TestSlackExecHandler_Send_RootPostMintsThreadKind(t *testing.T) {
 	r := newSlackExecRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-send-root-kind")
@@ -1246,12 +1245,10 @@ func TestSlackExecHandler_Download_NoChannels_Refused(t *testing.T) {
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-dl-nochan")
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
 	// The team tracks a home channel in T1 so the claim's bundle holds a
-	// sealed token for
-	// that workspace (a conversation with NO tracked channel has no Slack
-	// authorization
-	// at all and is refused before files.info — a separate, stricter path). The
-	// file below is shared NOWHERE channel-scoped, so the file-channel gate is
-	// what must refuse it.
+	// sealed token for that workspace (a conversation with NO tracked channel
+	// has no Slack authorization at all and is refused before files.info — a
+	// separate, stricter path). The file below is shared NOWHERE
+	// channel-scoped, so the file-channel gate is what must refuse it.
 	r.seedChannel(orgID, "T1", "C-home")
 	r.trackChannel(orgID, owner, teamID, "C-home")
 	conversationID := r.seedConversation(orgID, teamID, owner, true)
@@ -1280,12 +1277,12 @@ func TestSlackExecHandler_Download_FallbackPath_StillAuthorizes(t *testing.T) {
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test") // exactly one connected workspace
 	r.seedChannel(orgID, "T1", "C-untracked")
 	// The team tracks a DIFFERENT (home) channel in T1, so the claim's bundle
-	// holds a
-	// sealed token for that workspace — but NOT for the file's channel. This
-	// conversation's seeded task is a plain GitHub task (seedNonSlackTask), so the
-	// resolve-workspace-for-download op reports "no Slack context" and falls
-	// through to the org-wide sole-workspace path; the file-channel gate is what
-	// must then refuse the download of a file in the untracked channel.
+	// holds a sealed token for that workspace — but NOT for the file's channel.
+	// This conversation's seeded task is a plain GitHub task
+	// (seedNonSlackTask), so the resolve-workspace-for-download op reports "no
+	// Slack context" and falls through to the org-wide sole-workspace path; the
+	// file-channel gate is what must then refuse the download of a file in the
+	// untracked channel.
 	r.seedChannel(orgID, "T1", "C-home")
 	r.trackChannel(orgID, owner, teamID, "C-home")
 	conversationID := r.seedConversation(orgID, teamID, owner, true)

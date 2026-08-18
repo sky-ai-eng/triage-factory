@@ -195,9 +195,8 @@ func TestBlueprintStore_Postgres_ReplaceAndListSteps(t *testing.T) {
 // TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild pins the
 // atomic guarantee: flipping a blueprint_run to a terminal status parks any
 // still-mid-flight child conversation in the same transaction (stamping
-// parked_at), so
-// a terminal parent is never observed alongside a live child. Mirrors the
-// SQLite coverage to prevent Postgres/SQLite divergence.
+// parked_at), so a terminal parent is never observed alongside a live
+// child. Mirrors the SQLite coverage to prevent Postgres/SQLite divergence.
 func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

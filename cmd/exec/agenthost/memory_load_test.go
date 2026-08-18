@@ -28,10 +28,10 @@ var memBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // seedAuthoringMemory inserts one prior conversation + its
 // conversation_memory row + the conversation_memory_entities join row on
-// entityID, with explicit content and
-// created_at so the read's composition and ordering are pinned. role is the
-// join row's classification (primary/produced/touched). human "" leaves
-// human_content NULL (agent-only composition).
+// entityID, with explicit content and created_at so the read's composition
+// and ordering are pinned. role is the join row's classification
+// (primary/produced/touched). human "" leaves human_content NULL
+// (agent-only composition).
 func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, conversationID, agent, human string, createdAt time.Time, role string) {
 	t.Helper()
 	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, conversationID); err != nil {

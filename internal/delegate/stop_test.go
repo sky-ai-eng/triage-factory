@@ -449,9 +449,8 @@ func TestStop_MidBlueprintStep_ResumesAndIsDriven(t *testing.T) {
 // which threw the workspace away at exactly the moment a user who just killed
 // a wedged conversation is most likely to want it back. Now the conversation
 // parks `open`, the snapshot is written BEFORE the flip (so a resume that lands
-// without the warm
-// worktree can still rebuild it), and the warm tree is left for the
-// blueprint's own cleanup.
+// without the warm worktree can still rebuild it), and the warm tree is left
+// for the blueprint's own cleanup.
 func TestParkConversationOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
@@ -510,13 +509,12 @@ func TestParkConversationOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 //
 // In the control/executor split, EVERY stop of a live native-runtime
 // conversation takes the DB-only park: the process registry Spawner.stop
-// consults first is per-pod,
-// and control never holds the process. So control parks the row, releases the
-// claim, and fires the cancel signal at the executor as best-effort
-// hastening; the executor's own teardown lands seconds later, holding a claim
-// that is already released. Every write it makes is refused — which leaves
-// the unfenced workspace snapshot as the only thing it still has to
-// contribute, and the only thing a follow-up needs.
+// consults first is per-pod, and control never holds the process. So control
+// parks the row, releases the claim, and fires the cancel signal at the
+// executor as best-effort hastening; the executor's own teardown lands
+// seconds later, holding a claim that is already released. Every write it
+// makes is refused — which leaves the unfenced workspace snapshot as the only
+// thing it still has to contribute, and the only thing a follow-up needs.
 //
 // That is the sequence this test pins, because it used to be broken end to
 // end: the engine classified a ctx kill observed inside a store write as a

@@ -24,12 +24,11 @@ type TaskMemoryStoreFactory func(t *testing.T) (store db.TaskMemoryStore, orgID 
 // TaskMemorySeedPromptName and TaskMemorySeedStepIndex are the producing-
 // conversation facts every backend's Conversation seeder must stamp on the
 // conversation it creates. The entity reads project both back onto
-// TaskMemory (they are what
-// lets a materializer name a memory after the work it records), so the suite
-// asserts them against these values — pinning them here rather than per-backend
-// keeps the two SQL trees answering the same question. The step index is
-// deliberately non-zero so a column that never made it into the SELECT can't
-// pass as an unset one.
+// TaskMemory (they are what lets a materializer name a memory after the work it
+// records), so the suite asserts them against these values — pinning them here
+// rather than per-backend keeps the two SQL trees answering the same question.
+// The step index is deliberately non-zero so a column that never made it into
+// the SELECT can't pass as an unset one.
 const (
 	TaskMemorySeedPromptName = "Task Memory Test"
 	TaskMemorySeedStepIndex  = 2
@@ -124,9 +123,8 @@ func memoryForConversation(t *testing.T, ctx context.Context, s db.TaskMemorySto
 // RecordEntityTouchSystem(..., domain.MemoryRolePrimary) call — the
 // join row a real conversation's completion will write once the
 // completion-attach ticket lands. Without it, GetMemoriesForEntity's
-// join-based read
-// would see nothing (this ticket does not touch UpsertAgentMemorySystem
-// itself; see the migration's non-goals).
+// join-based read would see nothing (this ticket does not touch
+// UpsertAgentMemorySystem itself; see the migration's non-goals).
 func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 	t.Helper()
 	ctx := context.Background()

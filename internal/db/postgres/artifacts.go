@@ -129,13 +129,12 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 	// conversation_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
 	// the artifact belongs to its CREATING conversation (domain.Artifact's doc),
 	// and team_id is denormalized off THAT SAME conversation — not off whichever
-	// writer
-	// happens to touch the row later — so a later writer touching the same
-	// dedup key (e.g. a different conversation editing a Slack message, or a
-	// re-delegate updating a GitHub comment) must not reassign either. Letting
-	// team_id follow the last writer while conversation_id stayed pinned to the first
-	// would desync the two and mis-scope the artifact out of its owning
-	// team's reads.
+	// writer happens to touch the row later — so a later writer touching the
+	// same dedup key (e.g. a different conversation editing a Slack message, or
+	// a re-delegate updating a GitHub comment) must not reassign either.
+	// Letting team_id follow the last writer while conversation_id stayed
+	// pinned to the first would desync the two and mis-scope the artifact out
+	// of its owning team's reads.
 	row := q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, target,

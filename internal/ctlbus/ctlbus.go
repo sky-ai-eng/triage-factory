@@ -9,8 +9,7 @@
 // dispatcher (internal/app/ctl.go) — one dedicated connection per pod
 // serving every tf_ctl consumer (relay messages, conversation-signal
 // doorbells, session kicks), with the "only the brain acts on relay traffic"
-// rule
-// enforced by a holder gate at dispatch (internal/app/relay.go's
+// rule enforced by a holder gate at dispatch (internal/app/relay.go's
 // handleCtlMessage) rather than by lease-scoped subscription.
 //
 // The relay is deliberately lossy — the spec is explicit: "a dropped

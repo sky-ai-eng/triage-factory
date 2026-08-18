@@ -286,9 +286,8 @@ func TestConversationQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 
 // TestConversationQueueStore_Postgres_ReconcileOrphanedConversations heals the desync where a
 // child conversation is left non-terminal under an already-terminal
-// blueprint_run: the
-// boot sweep cancels it (stamping completed_at) and only it, leaving a child
-// under a still-running parent untouched.
+// blueprint_run: the boot sweep cancels it (stamping completed_at) and only it,
+// leaving a child under a still-running parent untouched.
 func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

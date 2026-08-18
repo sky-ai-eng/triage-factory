@@ -25,9 +25,9 @@ func childConversationStatusDB(t *testing.T, conn *sql.DB, id string) string {
 // TestMarkRunStatus_ParksOrphanedChild_OnTerminal pins the atomic
 // guarantee: flipping a blueprint_run to a terminal status must park any
 // still-mid-flight child conversation in the same call, so a cancel that
-// raced the
-// dispatcher can't strand a child mid-flight (which keeps the dispatcher on
-// phantom work and pins its feature branch in a worktree, requeuing forever).
+// raced the dispatcher can't strand a child mid-flight (which keeps the
+// dispatcher on phantom work and pins its feature branch in a worktree,
+// requeuing forever).
 func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)

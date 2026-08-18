@@ -75,8 +75,7 @@ const (
 	// ConversationFailureExecutorLost — the conversation's owning executor's
 	// registry heartbeat went stale past the leader reaper's threshold and
 	// the conversation had already exhausted TF_MAX_CLAIM_ATTEMPTS, so the
-	// reaper
-	// terminal-failed it instead of requeuing (TFAC-586, spec §4.3).
+	// reaper terminal-failed it instead of requeuing (TFAC-586, spec §4.3).
 	// A conversation that still had attempts left is requeued and re-claimed
 	// instead — this kind only marks the case that ran out of retries.
 	ConversationFailureExecutorLost ConversationFailureKind = "executor_lost"
@@ -267,12 +266,12 @@ type Conversation struct {
 	// TriggeringEventID is the event instance that auto-fired this
 	// conversation. Set only on the event path; empty (→ SQL NULL) for manual
 	// conversations and blueprint-step conversations. Paired with TriggerID it
-	// forms the
-	// conversations_event_trigger_fence partial unique index, which makes
-	// event-triggered auto-delegation exactly-once under the at-least-once
-	// router queue: a replayed event whose first conversation already committed
-	// conflicts on the fence and is skipped. Forward-only provenance —
-	// written via BlueprintStore.CreateRunIfNotFiredSystem, not hydrated by Get.
+	// forms the conversations_event_trigger_fence partial unique index, which
+	// makes event-triggered auto-delegation exactly-once under the
+	// at-least-once router queue: a replayed event whose first conversation
+	// already committed conflicts on the fence and is skipped. Forward-only
+	// provenance — written via BlueprintStore.CreateRunIfNotFiredSystem, not
+	// hydrated by Get.
 	TriggeringEventID string
 
 	// ActorAgentID is the agents.id the spawner stamped when the conversation

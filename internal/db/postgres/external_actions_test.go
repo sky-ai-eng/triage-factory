@@ -182,8 +182,7 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 // pool: one conversation's rows, and — because the read runs under the same
 // org-scoped policy as ListByTeam — nothing at all for a member of another org
 // who guesses a conversation id. The handler's own conversation-visibility
-// check is what narrows
-// this within an org; RLS is the backstop across orgs.
+// check is what narrows this within an org; RLS is the backstop across orgs.
 func TestExternalActionStore_Postgres_ListByConversation(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

@@ -43,8 +43,7 @@ const maxCompletionRetries = 3
 // the current run rather than to history. It is the blueprint_run_id the
 // conversation belongs to. Every conversation is a blueprint step now (a
 // single prompt is a 1-step blueprint), so there is no conversation-id
-// fallback — the value is always the
-// blueprint_run_id.
+// fallback — the value is always the blueprint_run_id.
 //
 // It stays a named function over an identity return because the name is what
 // tells a call site which of the two ids in scope keys the workspace: a

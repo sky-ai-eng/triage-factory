@@ -29,8 +29,8 @@ func seedConversationArtifact(t *testing.T, s *Server, conversationID string, a 
 
 // TestHandleAgentArtifacts pins the conversation-scoped artifact read
 // (TFAC-465): every artifact a conversation produced, across kinds, projected
-// with its stable coordinates
-// and details parsed — an object for a PR, null for a detail-less comment.
+// with its stable coordinates and details parsed — an object for a PR, null
+// for a detail-less comment.
 func TestHandleAgentArtifacts(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "arts", "completed")
@@ -213,8 +213,7 @@ func TestConversationResponse_ArtifactCount_Unresolved(t *testing.T) {
 // TestConversationResponse_HasUnresolved_List pins that the derived approval
 // signal propagates through the conversation-LIST endpoint — the batched
 // ListByConversations path, distinct from the single-conversation path. Guards
-// the list endpoint against a silent
-// has_unresolved_artifacts regression.
+// the list endpoint against a silent has_unresolved_artifacts regression.
 func TestConversationResponse_HasUnresolved_List(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "pklist", "completed")
@@ -236,8 +235,8 @@ func TestConversationResponse_HasUnresolved_List(t *testing.T) {
 
 // TestConversationResponse_ArtifactCount_List pins that the batched count flows
 // through the conversation-list path (POST /api/agent/conversations/list): two
-// conversations on one task
-// get their own correct counts from the single CountByConversation batch.
+// conversations on one task get their own correct counts from the single
+// CountByConversation batch.
 func TestConversationResponse_ArtifactCount_List(t *testing.T) {
 	s := newTestServer(t)
 	// seedSteerConversation mints task t_lst with conversation r_lst and prompt

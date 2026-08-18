@@ -48,12 +48,12 @@ export default function RunDetail() {
   const [now, setNow] = useState(() => Date.now())
   const [stopPending, setStopPending] = useState(false)
   // Approval is derived now, not a stored conversation status: the
-  // conversation's unresolved
-  // artifact set (draft PRs + ready reviews) surfaces at the top of the
-  // station's artifact lists (the dock popover + the telemetry rail).
-  // `activeArtifact` is the one per-item editor currently open (you edit one at
-  // a time — ReviewOverlay / PendingPROverlay key off a single artifact id);
-  // `confirmRequeueOpen` gates the destructive resolve-all on Return-to-queue.
+  // conversation's unresolved artifact set (draft PRs + ready reviews) surfaces
+  // at the top of the station's artifact lists (the dock popover + the
+  // telemetry rail). `activeArtifact` is the one per-item editor currently open
+  // (you edit one at a time — ReviewOverlay / PendingPROverlay key off a single
+  // artifact id); `confirmRequeueOpen` gates the destructive resolve-all on
+  // Return-to-queue.
   const [activeArtifact, setActiveArtifact] = useState<{
     kind: 'review' | 'pr'
     id: string
@@ -137,8 +137,8 @@ export default function RunDetail() {
 
   // Steer a conversation: a free-form message lands on the live process (or
   // wakes an `open` conversation via resume). The backend records +
-  // broadcasts it as an
-  // `message` event, so useConversationDetail's append renders it — no optimistic insert.
+  // broadcasts it as an `message` event, so useConversationDetail's append
+  // renders it — no optimistic insert.
   const handleMessage = useCallback(
     async (text: string) => {
       if (!conversation) return
@@ -174,8 +174,7 @@ export default function RunDetail() {
 
   // handleRequeue gates the destructive teardown behind the confirmation modal
   // whenever the conversation still has unresolved artifacts; otherwise it
-  // requeues
-  // straight away (nothing to resolve).
+  // requeues straight away (nothing to resolve).
   const handleRequeue = useCallback(() => {
     if (!conversation) return
     if (hasUnresolvedArtifacts(conversation)) {

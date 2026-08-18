@@ -160,9 +160,9 @@ func NewReviewArtifact(repoPath string, number int, headSHA, conversationID stri
 // review id (ExternalID), its web URL, and state=submitted. It shares
 // NewReviewArtifact's conversation-scoped dedup key, so if the same
 // conversation had also staged a TF-side draft for this PR the gh submit
-// upserts onto that one row
-// (draft → submitted) instead of minting a second. conversationID scopes the key;
-// reviewID / state / htmlURL come from the POST response, number from its path.
+// upserts onto that one row (draft → submitted) instead of minting a second.
+// conversationID scopes the key; reviewID / state / htmlURL come from the POST
+// response, number from its path.
 func NewSubmittedReviewArtifact(repoPath string, number, reviewID int, state, htmlURL, conversationID string) Artifact {
 	details, err := json.Marshal(ReviewArtifactDetails{Number: number, ReviewEvent: state})
 	if err != nil {
@@ -257,9 +257,9 @@ func FirstPendingReviewArtifact(arts []Artifact) *Artifact {
 // matches handle (Kind==review, State==pending), or nil. A single conversation
 // can hold several review drafts at once — dedup is conversation-scoped per PR
 // (TFAC-494), so a conversation reviewing multiple PRs gets one draft row each
-// — so add-review-comment /
-// finalize-review must locate the specific draft the agent named by its handle, not
-// just the first pending review (which could be a different PR's draft).
+// — so add-review-comment / finalize-review must locate the specific draft the
+// agent named by its handle, not just the first pending review (which could be
+// a different PR's draft).
 func PendingReviewArtifactByID(arts []Artifact, handle string) *Artifact {
 	for i := range arts {
 		if arts[i].ID == handle && arts[i].Kind == ArtifactKindReview && arts[i].State == ArtifactStateReviewPending {

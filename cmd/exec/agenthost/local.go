@@ -2564,10 +2564,9 @@ func jiraAction(a domain.Artifact, action, from, to string) *domain.ExternalActi
 // git-proxy backstop, which both observe the same push, collapse to one row; a
 // force-push (new sha) is recorded distinctly. The push lands on GitHub under
 // whichever org credential the conversation's git path carries, which is why
-// the caller supplies it.
-// Free-function form (the counterpart of the LocalClient method) so the direct
-// runtime — which owns UpsertArtifact but holds no LocalClient — can build it
-// from a ConversationInfo directly.
+// the caller supplies it. Free-function form (the counterpart of the
+// LocalClient method) so the direct runtime — which owns UpsertArtifact but
+// holds no LocalClient — can build it from a ConversationInfo directly.
 func branchPushActionInfo(a domain.Artifact, info ConversationInfo, credential string) *domain.ExternalAction {
 	if a.Kind != domain.ArtifactKindBranch {
 		return nil

@@ -62,10 +62,9 @@ func seedBlueprintRun(t *testing.T, database *sql.DB, taskID string) string {
 
 // seedFooterConversation installs the entity → event → task → prompt →
 // conversation chain required for the footer's conversation read to find a
-// row, carrying the
-// columns the footer actually reads (model, started_at, completed_at,
-// duration_ms, total_cost_usd). Returns nothing — the test asserts via
-// Build.
+// row, carrying the columns the footer actually reads (model, started_at,
+// completed_at, duration_ms, total_cost_usd). Returns nothing — the test
+// asserts via Build.
 func seedFooterConversation(t *testing.T, database *sql.DB, fix conversationFooterFixture) {
 	t.Helper()
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#"+fix.ID, "pr", "T", "https://x/"+fix.ID)

@@ -214,8 +214,8 @@ export function isResumableConversation(conversation: Conversation): boolean {
 }
 
 // canResumeConversation is the composer's gate for a conversation with no live
-// turn: the cheap
-// status cut above, then the server's answer, which is authoritative.
+// turn: the cheap status cut above, then the server's answer, which is
+// authoritative.
 //
 // `!== false` rather than `=== true` is the compatibility rule the field is
 // specified with: the conversation read omits `resumable` for rows it doesn't compute it

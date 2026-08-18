@@ -507,9 +507,8 @@ func getConversationMemory(t *testing.T, stores db.Stores, ctx context.Context, 
 // conversation's outcome memory is ONE composed note covering both (proving
 // multi-artifact conversations accumulate, not clobber), with the merged PR
 // diffed against the agent's draft; and a terminal artifact already in the set
-// is never re-queried. A
-// review-draft artifact is seeded too and must stay pending — reviews are staged
-// TF-side and never reconciled (TFAC-494 §8).
+// is never re-queried. A review-draft artifact is seeded too and must stay
+// pending — reviews are staged TF-side and never reconciled (TFAC-494 §8).
 func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
 	ctx := context.Background()

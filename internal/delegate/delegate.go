@@ -577,9 +577,9 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	}
 	// rootKey (the blueprint run id), not this step's conversation id, keys the
 	// worktree dir + its per-run push config — the PR worktree IS the shared
-	// run-root, and
-	// a cold rehydrate rebuilds it under the same key. CleanupPRConfig reclaims
-	// via filepath.Base(wtPath), so it follows this key automatically.
+	// run-root, and a cold rehydrate rebuilds it under the same key.
+	// CleanupPRConfig reclaims via filepath.Base(wtPath), so it follows this
+	// key automatically.
 	cloneCtx, cloneSpan := tracer.Start(ctx, "engagement.clone")
 	wtPath, err := worktree.CreateForPR(cloneCtx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, rootKey,
 		worktree.WithCloneAuth(cloneAuth),

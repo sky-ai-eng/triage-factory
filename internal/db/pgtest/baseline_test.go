@@ -1588,8 +1588,7 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 // org_id, leaking metadata across users in the same org. EXISTS-on-parent
 // inherits the parent table's RLS. (artifacts is excluded: it scopes
 // directly on team_id like conversations, not via EXISTS-on-conversation,
-// so it has its
-// own team-visibility coverage in artifacts_test.go.)
+// so it has its own team-visibility coverage in artifacts_test.go.)
 func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)

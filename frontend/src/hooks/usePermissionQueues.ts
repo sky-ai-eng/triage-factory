@@ -42,8 +42,7 @@ function timerKey(conversationID: string, toolCallID: string): string {
 // timers (arm-once, clear-on-resolve/drop/unmount). It's the single
 // implementation behind both the board (all visible conversations) and
 // useConversationDetail (filtered to one conversation), so neither the fetch nor
-// the TTL behavior can diverge
-// between the two surfaces.
+// the TTL behavior can diverge between the two surfaces.
 //
 // The queue is a projection of the pending-set endpoint, not an accumulation of
 // websocket frames. That inversion is the whole point: a frame is fire-once, so
@@ -81,8 +80,8 @@ export function usePermissionQueues(): PermissionQueues {
   // dropPermission removes one prompt from a conversation's queue and cancels
   // its timer. The conversation's key is removed entirely when its last prompt
   // clears, so the map only ever holds conversations with live prompts (and
-  // `conversationID in queues` reads true
-  // exactly when a card should light up).
+  // `conversationID in queues` reads true exactly when a card should light
+  // up).
   const dropPermission = useCallback(
     (conversationID: string, toolCallID: string) => {
       clearTimer(conversationID, toolCallID)

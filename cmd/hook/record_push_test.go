@@ -134,9 +134,8 @@ func TestRecordPush_RepushUpsertsOneRow(t *testing.T) {
 
 // TestRecordPush_EventTriggeredUsesSystemPool exercises the admin-pool
 // branch (an auto-delegated conversation has no user identity). In SQLite
-// both pools
-// are the one connection, so success here just confirms the branch writes a
-// row rather than erroring.
+// both pools are the one connection, so success here just confirms the
+// branch writes a row rather than erroring.
 func TestRecordPush_EventTriggeredUsesSystemPool(t *testing.T) {
 	stores, conversationID := newTestStores(t)
 	host := hostFor(stores, conversationID, true)

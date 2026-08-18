@@ -37,8 +37,8 @@ const ExitRefused = 3
 // Every outcome other than a positive "this ref is protected and the policy
 // says no" allows the push: no conversation context, an unreadable database,
 // a remote that isn't the org's GitHub host, an unparseable line. A
-// mistake-guard that
-// fails closed on a dead database is a broken tool, not a safer one.
+// mistake-guard that fails closed on a dead database is a broken tool, not a
+// safer one.
 func runCheckPush(host agenthost.Client, stores db.Stores, args []string, refsIn io.Reader) int {
 	fs := flag.NewFlagSet("hook check-push", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)

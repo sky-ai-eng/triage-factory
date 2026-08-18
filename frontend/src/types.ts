@@ -245,8 +245,8 @@ export interface Conversation {
   // conversation (conversations.actor_agent_id), denormalized from
   // agents.display_name via a JOIN on the conversation read projections. The card
   // renders "Ran as: {name}" when a name is present; both are absent/empty for a
-  // conversation with no actor (spawned before
-  // agent bootstrap, or after the agent row was deleted).
+  // conversation with no actor (spawned before agent bootstrap, or after the
+  // agent row was deleted).
   actor_agent_id?: string
   actor_agent_name?: string
   blueprint_run_id?: string
@@ -280,11 +280,10 @@ export interface Conversation {
   // Detail read only (GET /api/agent/conversations/{id}) and only for a
   // conversation that is neither active nor failed — the board shows no composer,
   // an active conversation is steered through its live process, and a failed one
-  // has no workspace.
-  // ABSENT therefore means "the server didn't answer", not false: consumers
-  // fall back to the status-only reading, which is correct for the conversations that
-  // skip it. It is a read, not a promise — the send's own 409/410 stays the
-  // enforcement.
+  // has no workspace. ABSENT therefore means "the server didn't answer", not
+  // false: consumers fall back to the status-only reading, which is correct for
+  // the conversations that skip it. It is a read, not a promise — the send's
+  // own 409/410 stays the enforcement.
   resumable?: boolean
   // resume_blocked_reason names the rung that refused, present only when
   // resumable is false: 'workspace_expired' | 'blueprint_concluded' |

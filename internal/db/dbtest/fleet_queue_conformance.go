@@ -68,8 +68,7 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 		// 2 active + 1 still queued. Active is an engagement now, so the two
 		// active conversations are made active by actually claiming them —
 		// which is also the only way to reach the state, the conversation row
-		// itself
-		// carrying no "running" any more.
+		// itself carrying no "running" any more.
 		seed.EnqueueConversation(t)
 		seed.EnqueueConversation(t)
 		seed.EnqueueConversation(t)

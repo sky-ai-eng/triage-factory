@@ -71,8 +71,7 @@ func readPreferred(t *testing.T, h *pgtest.Harness, conversationID string) (stri
 
 // TestPlacementClaim_TierOneExclusiveToOwner is the warm-cache property: a
 // fresh conversation whose live preferred owner exists is claimable ONLY by
-// that owner
-// — a non-owner executor sees nothing (skips it) until it ages.
+// that owner — a non-owner executor sees nothing (skips it) until it ages.
 func TestPlacementClaim_TierOneExclusiveToOwner(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -106,8 +105,8 @@ func TestPlacementClaim_TierOneExclusiveToOwner(t *testing.T) {
 }
 
 // TestPlacementClaim_AgesToSpillover: once a conversation ages past the
-// tier-2 window,
-// any executor may claim it — affinity loses to capacity.
+// tier-2 window, any executor may claim it — affinity loses to
+// capacity.
 func TestPlacementClaim_AgesToSpillover(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -126,9 +125,8 @@ func TestPlacementClaim_AgesToSpillover(t *testing.T) {
 }
 
 // TestPlacementClaim_DeadPreferredSpillsImmediately: a fresh conversation
-// whose
-// preferred owner's heartbeat is stale spills at once, without waiting out the
-// aging window — the "dead preferred" tier-2 branch.
+// whose preferred owner's heartbeat is stale spills at once, without waiting
+// out the aging window — the "dead preferred" tier-2 branch.
 func TestPlacementClaim_DeadPreferredSpillsImmediately(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -181,9 +179,8 @@ func TestPlacementClaim_DrainingAndGatedPreferredSpill(t *testing.T) {
 }
 
 // TestPlacementClaim_NullPreferredClaimableImmediately: a conversation with
-// no stamp
-// (unowned) is claimable by anyone at once — no aging wait. This is what makes
-// requeue-to-NULL a correct, no-latency recovery.
+// no stamp (unowned) is claimable by anyone at once — no aging wait. This is
+// what makes requeue-to-NULL a correct, no-latency recovery.
 func TestPlacementClaim_NullPreferredClaimableImmediately(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -202,8 +199,8 @@ func TestPlacementClaim_NullPreferredClaimableImmediately(t *testing.T) {
 
 // TestPlacementClaim_OwnerPrefersOwnFirst: with both its own fresh
 // conversation and an older aged foreign conversation claimable, an executor
-// takes its OWN first (tier 1
-// before tier 2) — warm cache wins over pure FIFO.
+// takes its OWN first (tier 1 before tier 2) — warm cache wins over pure
+// FIFO.
 func TestPlacementClaim_OwnerPrefersOwnFirst(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -233,8 +230,7 @@ func TestPlacementClaim_OwnerPrefersOwnFirst(t *testing.T) {
 // TestPlacementClaim_DisabledIgnoresPreferred is the feature-flag-off parity
 // case: a disabled ClaimPlacement claims the globally-oldest conversation
 // regardless of its stamp — dropping the placement layer changes nothing
-// about which conversation a
-// dispatcher gets.
+// about which conversation a dispatcher gets.
 func TestPlacementClaim_DisabledIgnoresPreferred(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -244,8 +240,7 @@ func TestPlacementClaim_DisabledIgnoresPreferred(t *testing.T) {
 
 	registerLiveExecutor(t, stores, "exec-a")
 	// Fresh conversation stamped to exec-a; a DIFFERENT executor claims with
-	// placement
-	// OFF and must still get it (global-oldest, stamp ignored).
+	// placement OFF and must still get it (global-oldest, stamp ignored).
 	conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 
 	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-other", 1, db.ClaimPlacement{})
@@ -256,8 +251,7 @@ func TestPlacementClaim_DisabledIgnoresPreferred(t *testing.T) {
 
 // TestPlacementClaim_RequeueClearsPreferred: the requeue/reset paths clear the
 // stamp so a requeued conversation never carries a stale preference toward
-// the executor
-// that just failed it.
+// the executor that just failed it.
 func TestPlacementClaim_RequeueClearsPreferred(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

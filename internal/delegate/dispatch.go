@@ -72,10 +72,9 @@ func (s *Spawner) wakeDispatcher() {
 
 // RunDispatcher is the conversation-queue drain loop — the queue-driven
 // orchestrator's worker. On boot it reconciles conversations/blueprint_runs
-// stranded by a
-// crash, then
-// claims queued steps and drives each through runAgent + the reactor until ctx
-// is cancelled. A nil ConversationQueueStore makes this a logged no-op.
+// stranded by a crash, then claims queued steps and drives each through
+// runAgent + the reactor until ctx is cancelled. A nil ConversationQueueStore
+// makes this a logged no-op.
 func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration) {
 	if s.conversationQueue == nil {
 		dispatchLog.Warn("conversation-queue dispatcher not started: no ConversationQueueStore wired")

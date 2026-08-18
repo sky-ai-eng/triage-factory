@@ -14,8 +14,7 @@ import (
 // injection from a durable row of its own (the new-commits notifier)
 // appends here when the target conversation has no warm process, and the
 // delegate spawner flushes the conversation's pending injections ahead of the
-// user's text on
-// the next resume.
+// user's text on the next resume.
 //
 // All methods are admin-pool (`...System`) only, mirroring the read/write
 // paths that touch it: the producer runs in an eventbus subscriber goroutine

@@ -16,9 +16,8 @@ import (
 
 // fairnessFixture is one org's ready-to-enqueue conversation-queue fixture: a
 // blueprint + task + prompt every conversation enqueued under that org hangs
-// off, plus the org's
-// creator user id. Each conversation gets its own blueprint_run — see
-// enqueue.
+// off, plus the org's creator user id. Each conversation gets its own
+// blueprint_run — see enqueue.
 type fairnessFixture struct {
 	orgID, userID          string
 	bpID, taskID, promptID string
@@ -40,9 +39,8 @@ func newFairnessFixture(t *testing.T, h *pgtest.Harness) fairnessFixture {
 //
 // One blueprint_run per conversation, each on step 0: fairness is about many
 // conversations competing for slots at the same instant, and a blueprint only
-// ever offers the
-// one step its current_step_index names — sibling steps of a single blueprint
-// are queued in sequence, never together.
+// ever offers the one step its current_step_index names — sibling steps of a
+// single blueprint are queued in sequence, never together.
 func (f *fairnessFixture) enqueue(t *testing.T, stores db.Stores, preferred string) string {
 	t.Helper()
 	conversationID := uuid.New().String()
@@ -68,10 +66,9 @@ func setPgOrgCap(t *testing.T, h *pgtest.Harness, orgID string, cap *int) {
 }
 
 // forcePgRunning makes a conversation occupy a slot the way the real system
-// does —
-// by minting an unreleased claim on it. "Active" is an engagement now, not a
-// stored status, so this is both what the fairness CTE counts and what makes
-// the conversation un-claimable.
+// does — by minting an unreleased claim on it. "Active" is an engagement
+// now, not a stored status, so this is both what the fairness CTE counts and
+// what makes the conversation un-claimable.
 func forcePgRunning(t *testing.T, h *pgtest.Harness, conversationID string) {
 	t.Helper()
 	pgtest.MustExec(t, h.AdminDB, `
@@ -83,8 +80,8 @@ func forcePgRunning(t *testing.T, h *pgtest.Harness, conversationID string) {
 // TestClaimFairness_BurstDoesNotStarveOtherOrg is the headline acceptance: org
 // A floods 100 queued conversations (all older), org B enqueues 1 (newer).
 // Pure FIFO would claim B's conversation 101st — after A's entire backlog.
-// Fairness (fewest-active
-// org first) instead hands the very next free slot after A's first claim to B.
+// Fairness (fewest-active org first) instead hands the very next free slot
+// after A's first claim to B.
 func TestClaimFairness_BurstDoesNotStarveOtherOrg(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -100,8 +97,7 @@ func TestClaimFairness_BurstDoesNotStarveOtherOrg(t *testing.T) {
 	bConv := b.enqueue(t, stores, "")
 	// Make every A conversation strictly older than B's so pure FIFO would
 	// drain all 100 A conversations before ever reaching B — isolating fairness
-	// as the reason B jumps
-	// the queue.
+	// as the reason B jumps the queue.
 	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET started_at = now() - interval '1 hour' WHERE org_id = $1`, a.orgID)
 
 	claim := func() *domain.Conversation {
@@ -201,9 +197,8 @@ func TestClaimFairness_ComposesWithinPlacementTiers(t *testing.T) {
 		b = newFairnessFixture(t, h)
 		registerLiveExecutor(t, stores, "exec-a")
 		// Org A carries an active conversation; both A and B have a fresh tier-1
-		// conversation
-		// (preferred = exec-a). Within tier 1, fairness gives B (0 active) the
-		// slot over A (1 active).
+		// conversation (preferred = exec-a). Within tier 1, fairness gives B (0
+		// active) the slot over A (1 active).
 		forcePgRunning(t, h, a.enqueue(t, stores, ""))
 		aTier1 := a.enqueue(t, stores, "exec-a")
 		bTier1 := b.enqueue(t, stores, "exec-a")

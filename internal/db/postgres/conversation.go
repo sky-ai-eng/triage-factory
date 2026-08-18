@@ -350,12 +350,11 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 // 'requeued' (ownership is re-established when ClaimNextConversation mints a fresh
 // claim, exactly like a fresh EnqueueConversation'd row). preferred_executor_id is
 // cleared: a long-parked conversation's old stamp is exactly the
-// outlives-a-dwell
-// case placement calls out — NULL re-queues it as unowned/
-// immediately-claimable, and the claiming executor re-warms and re-earns
-// affinity on the next enqueue. queued_at is NOT re-stamped: it records when
-// the conversation first entered the queue and is display-only (the
-// scheduler orders by started_at).
+// outlives-a-dwell case placement calls out — NULL re-queues it as
+// unowned/immediately-claimable, and the claiming executor re-warms and
+// re-earns affinity on the next enqueue. queued_at is NOT re-stamped: it
+// records when the conversation first entered the queue and is display-only
+// (the scheduler orders by started_at).
 func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE conversations SET status = NULL,
@@ -394,9 +393,9 @@ func (s *conversationStore) ListReapableSnapshotKeysSystem(ctx context.Context, 
 	// reapable once its newest such conversation last parked or concluded before
 	// the cutoff. The timestamp is COALESCE(parked_at, completed_at,
 	// started_at): parked_at for an open conversation (re-stamped each park, so
-	// resumes don't age it), completed_at for a
-	// terminal, started_at a legacy fallback. Admin pool — the retention sweep is
-	// a tenant-spanning system job with no JWT claims.
+	// resumes don't age it), completed_at for a terminal, started_at a legacy
+	// fallback. Admin pool — the retention sweep is a tenant-spanning system
+	// job with no JWT claims.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT org_id, blueprint_run_id
 		FROM conversations
@@ -643,8 +642,8 @@ func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context
 func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, failureKind string) (bool, error) {
 	// 'open' is deliberately failable here — see
 	// ConversationStore.MarkFailedIfActive: a warm 'open' conversation has no
-	// durable
-	// snapshot yet, so an infra error reaching failConversation must terminate it.
+	// durable snapshot yet, so an infra error reaching failConversation must
+	// terminate it.
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, $1),
 		    failure_kind = NULLIF($2, '')
@@ -830,8 +829,7 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 	// task_id is a uuid column: a non-UUID id (these are client-supplied on the
 	// batched conversation-list path) would fail Postgres parsing with 22P02 →
 	// 500 before the row filter runs, so drop invalid ids up front and treat
-	// them
-	// as "no rows" — the read-method convention in uuid.go.
+	// them as "no rows" — the read-method convention in uuid.go.
 	taskIDs = filterValidUUIDs(taskIDs)
 	if len(taskIDs) == 0 {
 		return nil, 0, nil
@@ -879,9 +877,8 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 }
 
 // HasActiveAutoConversationForTask: any non-terminal trigger_type='event'
-// conversation on the
-// task. Manual delegations are excluded. Used by the router's per-task firing
-// gate.
+// conversation on the task. Manual delegations are excluded. Used by the
+// router's per-task firing gate.
 func (s *conversationStore) HasActiveAutoConversationForTask(ctx context.Context, orgID, taskID string) (bool, error) {
 	return hasActiveAutoConversationForTask(ctx, s.q, orgID, taskID)
 }
@@ -982,12 +979,12 @@ func (s *conversationStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, t
 // ListParkedWorktreePathsSystem returns the worktree dirs the startup sweep
 // must keep warm — parked `open` conversations whose owning blueprint_run is
 // still 'running'. A parked conversation under an already-terminal
-// blueprint_run is NOT
-// resumable (every resume path gates on cr.Status == running), so its
-// worktree must NOT be preserved: preserving it would leave a checked-out
-// branch on disk that the boot reconcile then orphans by cancelling the row,
-// reviving the "refusing to fetch into a branch checked out in a worktree"
-// loop. Admin pool — the startup sweep has no JWT-claims context.
+// blueprint_run is NOT resumable (every resume path gates on cr.Status ==
+// running), so its worktree must NOT be preserved: preserving it would leave
+// a checked-out branch on disk that the boot reconcile then orphans by
+// cancelling the row, reviving the "refusing to fetch into a branch checked
+// out in a worktree" loop. Admin pool — the startup sweep has no JWT-claims
+// context.
 func (s *conversationStore) ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT r.worktree_path FROM conversations r
@@ -1075,12 +1072,10 @@ func (s *conversationStore) InsertMessageForClaimSystem(ctx context.Context, org
 }
 
 // LastAgentActivityAtSystem returns the created_at of the conversation's
-// newest non-user
-// message (the artifact-change ledger watermark). Ordered by id DESC
-// (the monotonic sequence) so the watermark is the genuinely last-inserted agent
-// row. Admin pool: the resume path holds no JWT claims. ok=false when the
-// conversation has
-// no agent message yet.
+// newest non-user message (the artifact-change ledger watermark). Ordered by id
+// DESC (the monotonic sequence) so the watermark is the genuinely last-inserted
+// agent row. Admin pool: the resume path holds no JWT claims. ok=false when the
+// conversation has no agent message yet.
 func (s *conversationStore) LastAgentActivityAtSystem(ctx context.Context, orgID, conversationID string) (time.Time, bool, error) {
 	var at time.Time
 	err := s.admin.QueryRowContext(ctx, `
@@ -1410,8 +1405,7 @@ func (s *conversationStore) MessagesForConversations(ctx context.Context, orgID 
 	// artifactStore.ListByConversations. Ordering on (conversation_id, the effective
 	// assembly key) so the caller groups by ConversationID with each
 	// conversation's messages in the same order the single-conversation display
-	// read gives them.
-	// Withdrawn-pending rows are hidden, same as Messages.
+	// read gives them. Withdrawn-pending rows are hidden, same as Messages.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
@@ -1428,11 +1422,10 @@ func (s *conversationStore) MessagesForConversations(ctx context.Context, orgID 
 
 // ListForAssemblySystem returns every row a native loop needs to rebuild this
 // conversation's exact LLM context, ordered by the effective assembly key
-// COALESCE(seq,
-// id). window_state='inactive' rows are excluded (superseded by
-// compaction); 'elided' and undelivered rows are included — see the
-// interface doc for the full contract. Pure read over messages; no
-// other table or in-process state feeds in.
+// COALESCE(seq, id). window_state='inactive' rows are excluded (superseded by
+// compaction); 'elided' and undelivered rows are included — see the interface
+// doc for the full contract. Pure read over messages; no other table or
+// in-process state feeds in.
 //
 // Admin pool, org bound by argument: the only caller is the native loop, which
 // drives a claimed conversation on an executor with no request identity to

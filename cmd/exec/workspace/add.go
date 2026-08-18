@@ -401,13 +401,12 @@ func agentViewPath(hostRoot, agentRoot, p string) string {
 
 // refForSpec computes the conversation_worktrees ref for a checkout spec — the
 // (conversation, repo, ref) PK discriminator AND the worktree path-slug
-// subdirectory.
-// "pr-<N>" for a PR, the slugified branch for --ref, or "@default" for a
-// detached default-branch checkout. It uses the same slug helpers the InRoot
-// create funcs land the worktree at, so the reserved path and the created path
-// agree. The push gate reads the worktree's live current branch, never this
-// value, so it carries no authorization — only the checkout intent `workspace
-// list` surfaces.
+// subdirectory. "pr-<N>" for a PR, the slugified branch for --ref, or
+// "@default" for a detached default-branch checkout. It uses the same slug
+// helpers the InRoot create funcs land the worktree at, so the reserved path
+// and the created path agree. The push gate reads the worktree's live current
+// branch, never this value, so it carries no authorization — only the checkout
+// intent `workspace list` surfaces.
 func refForSpec(spec checkoutSpec) string {
 	switch {
 	case spec.pr > 0:

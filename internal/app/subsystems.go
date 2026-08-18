@@ -95,9 +95,9 @@ func (a *App) buildAI() {
 			// WithoutCancel, not Background: the cycle that scheduled this
 			// returns immediately (and its ctx dies with it), but the work
 			// this fires — deferred triggers, conversations, claims — must
-			// finish,
-			// while the cycle's values stay attached so the re-derive is
-			// still recognizably part of the scoring that caused it.
+			// finish, while the cycle's values stay attached so the
+			// re-derive is still recognizably part of the scoring that
+			// caused it.
 			if a.router != nil {
 				go a.router.ReDeriveAfterScoring(context.WithoutCancel(ctx), orgID, taskIDs)
 			}
@@ -484,11 +484,11 @@ func (a *App) buildCuratorRuntime() error {
 
 	// One claim loop drives both surfaces: the dispatcher claims a curator
 	// conversation exactly as it claims a delegated conversation, then hands
-	// it here.
-	// Capacity comes with that — the loop holds its concurrency slot for the
-	// whole turn, so a curator turn passes the same memory guardrail and
-	// occupies the same semaphore (and the same heartbeat occupancy
-	// snapshot) a delegated run does, with no separate admission gate.
+	// it here. Capacity comes with that — the loop holds its concurrency
+	// slot for the whole turn, so a curator turn passes the same memory
+	// guardrail and occupies the same semaphore (and the same heartbeat
+	// occupancy snapshot) a delegated run does, with no separate admission
+	// gate.
 	a.spawner.SetCuratorTurnDriver(a.curator.DriveClaimedTurn)
 	// And the local doorbell: an enqueued turn nudges this pod's claim loop
 	// instead of waiting out its backstop tick.

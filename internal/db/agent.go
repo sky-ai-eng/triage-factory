@@ -248,16 +248,15 @@ type ConversationStore interface {
 	// status stands.
 	//
 	// `open` is intentionally NOT in the protected set: an `open` conversation
-	// reaches failConversation only in the warm
-	// window after a no-conclusion turn flipped it open but before idle
-	// hibernation took its workspace snapshot (e.g. a proc.Send error on the
-	// next correction attempt). With no durable snapshot yet, the conversation
-	// can't be left resumably-open, so failing it is correct — and the
-	// conversation's cleanup then tears the worktree down. A durably-parked open
-	// conversation (snapshot taken,
+	// reaches failConversation only in the warm window after a no-conclusion
+	// turn flipped it open but before idle hibernation took its workspace
+	// snapshot (e.g. a proc.Send error on the next correction attempt). With no
+	// durable snapshot yet, the conversation can't be left resumably-open, so
+	// failing it is correct — and the conversation's cleanup then tears the
+	// worktree down. A durably-parked open conversation (snapshot taken,
 	// worktree kept) is only ever woken by a follow-up, which flips it to
-	// `running` before any failConversation could see it, so this never clobbers a
-	// resumable conversation.
+	// `running` before any failConversation could see it, so this never
+	// clobbers a resumable conversation.
 	//
 	// failureKind is the machine-readable failure discriminator
 	// (domain.ConversationFailureKind vocabulary); "" → NULL (unclassified).
@@ -351,8 +350,8 @@ type ConversationStore interface {
 	// enumerate here, and now takes the same set from the close transaction
 	// itself (TaskStore.CloseWithConversationCancelIntentSystem) so the
 	// conversations it stops are the conversations it stamped. Kept as the
-	// admin-pool arm of a pair whose
-	// app-pool half is live, and covered by the store conformance.
+	// admin-pool arm of a pair whose app-pool half is live, and covered by
+	// the store conformance.
 	ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// ActiveIDsForTeamSystem returns the IDs of every active conversation owned by the
@@ -493,9 +492,9 @@ type ConversationStore interface {
 	// withdrawn-pending exclusion and the same COALESCE(seq, id) ordering.
 	// Each conversation's messages are contiguous, so the caller groups by
 	// ConversationID with per-conversation order preserved; order across distinct
-	// conversations is unspecified (the
-	// SQLite read chunks its IN-list). Backs the Board's aggregated
-	// include=messages read. Empty conversationIDs returns nil.
+	// conversations is unspecified (the SQLite read chunks its IN-list). Backs
+	// the Board's aggregated include=messages read. Empty conversationIDs
+	// returns nil.
 	MessagesForConversations(ctx context.Context, orgID string, conversationIDs []string) ([]domain.Message, error)
 
 	// ListForAssemblySystem returns every row a native loop needs to rebuild this
@@ -786,10 +785,10 @@ type ConversationStore interface {
 	// ran" watermark the artifact-change feedback ledger derives
 	// against. ok=false (zero time) when the conversation has no agent messages
 	// yet, so the caller falls back to the conversation's start. User messages
-	// are excluded
-	// so a just-recorded resume message can't poison the watermark, and the
-	// agent's own messages advance it past anything injected live. Admin pool:
-	// the resume path runs on a detached goroutine with no JWT claims.
+	// are excluded so a just-recorded resume message can't poison the
+	// watermark, and the agent's own messages advance it past anything injected
+	// live. Admin pool: the resume path runs on a detached goroutine with no
+	// JWT claims.
 	LastAgentActivityAtSystem(ctx context.Context, orgID, conversationID string) (at time.Time, ok bool, err error)
 
 	// ListReapableSnapshotKeysSystem returns the (org, blueprint_run_id) of
@@ -798,16 +797,15 @@ type ConversationStore interface {
 	// parked or concluded before cutoff. These are the workspace snapshot keys
 	// the retention reaper may safely drop. A blueprint_run with any such
 	// conversation still within the TTL is omitted (its shared blob is still
-	// wanted). The
-	// timestamp is COALESCE(parked_at, completed_at, started_at): parked_at tracks
-	// an open conversation's last park (stamped by MarkOpen, cleared by the
-	// resume flips, so a repeatedly-resumed long-lived conversation is keyed off
-	// its most recent park rather
-	// than its initial start), completed_at covers the terminals, and started_at
-	// is a legacy fallback. `failed` is absent on purpose — a failed conversation's blob is
+	// wanted). The timestamp is COALESCE(parked_at, completed_at, started_at):
+	// parked_at tracks an open conversation's last park (stamped by MarkOpen,
+	// cleared by the resume flips, so a repeatedly-resumed long-lived
+	// conversation is keyed off its most recent park rather than its initial
+	// start), completed_at covers the terminals, and started_at is a legacy
+	// fallback. `failed` is absent on purpose — a failed conversation's blob is
 	// dropped at the failure, not aged out. System-wide / no org scoping — the
-	// retention sweep is a maintenance job that spans tenants; the admin pool is
-	// the right door (BYPASSRLS) since the reaper holds no JWT claims.
+	// retention sweep is a maintenance job that spans tenants; the admin pool
+	// is the right door (BYPASSRLS) since the reaper holds no JWT claims.
 	ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error)
 
 	// TokenTotalsSystem sums token usage across all assistant messages
@@ -825,10 +823,10 @@ type ConversationStore interface {
 	// stamps across every conversation in blueprintRunID EXCEPT
 	// excludeConversationID. agentmeta.Build adds this to the authoring
 	// conversation's own cost so a multi-step blueprint's published review/PR
-	// discloses
-	// the total spend across all steps, not just the step that authored
-	// it. Routes through the admin pool in Postgres — the footer builds
-	// from claims-less contexts (agent subprocess, post-approval submit).
+	// discloses the total spend across all steps, not just the step that
+	// authored it. Routes through the admin pool in Postgres — the footer
+	// builds from claims-less contexts (agent subprocess, post-approval
+	// submit).
 	BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeConversationID string) (float64, error)
 
 	// BlueprintSiblingDurationMsSystem sums the claims' duration_ms

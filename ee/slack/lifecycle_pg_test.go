@@ -242,9 +242,9 @@ type slackConversationFixture struct {
 func seedSlackMessageConversation(t *testing.T, h *pgtest.Harness, orgID, creatorID, teamID, workspaceID, apiAppID, channel, ts, threadTS string) slackConversationFixture {
 	t.Helper()
 	// A conversation exists because the bot was engaged; the
-	// conversation-status tests that use
-	// this fixture don't depend on the mention flag, so seed the explicit-
-	// mention case (Mentioned=true) as the representative one.
+	// conversation-status tests that use this fixture don't depend on the
+	// mention flag, so seed the explicit-mention case (Mentioned=true) as
+	// the representative one.
 	eventID, meta := seedSlackMessageEvent(t, h, orgID, workspaceID, apiAppID, channel, ts, threadTS, true)
 
 	// seedSlackMessageEvent already created the entity; find it via the event
@@ -971,9 +971,8 @@ func TestLifecycleAdapter_ConversationStatus_GatedStopChainSurvivesChurn(t *test
 	// Resolve-order assertion: W1's delayed clear must resolve BEFORE W3's
 	// probe — never after. A broken chain lets W3 sail through its gate
 	// (and W2's, transitively) before W1's clear ever resolves, so the
-	// conversation
-	// ends with a stale empty clear as the LAST recorded call despite W3
-	// being alive.
+	// conversation ends with a stale empty clear as the LAST recorded call
+	// despite W3 being alive.
 	calls := fake.statusCalls()
 	clearIdx, probeIdx := -1, -1
 	for i, c := range calls {
@@ -999,12 +998,11 @@ func TestLifecycleAdapter_ConversationStatus_GatedStopChainSurvivesChurn(t *test
 
 // TestLifecycleAdapter_ConversationStatus_NonSlackConversation_CachedAfterFirstLookup pins the
 // per-conversationID cache: after the first system:conversation:status resolves
-// a conversation as
-// non-Slack, the underlying data is mutated to look Slack-shaped (entity
-// source flipped to 'slack', task's event_type flipped to slack:message) —
-// if resolution were re-run on a later sentinel for the SAME conversationID, it would
-// now (incorrectly) start a worker and call Slack. It must not: the cached
-// negative verdict is never re-queried.
+// a conversation as non-Slack, the underlying data is mutated to look
+// Slack-shaped (entity source flipped to 'slack', task's event_type flipped to
+// slack:message) — if resolution were re-run on a later sentinel for the SAME
+// conversationID, it would now (incorrectly) start a worker and call Slack. It
+// must not: the cached negative verdict is never re-queried.
 func TestLifecycleAdapter_ConversationStatus_NonSlackConversation_CachedAfterFirstLookup(t *testing.T) {
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	taskID, conversationID := seedGitHubTaskAndConversation(t, h, orgID, owner, teamID)

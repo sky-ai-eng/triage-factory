@@ -29,9 +29,9 @@ const (
 //
 // Settled-spend semantics: TotalCostUSD and the four token counts are 0 for an
 // in-flight (non-terminal) delegated conversation or curator turn and carry
-// their real values once a
-// terminal write lands (normal completion, cancel, infra-failure, or a
-// boot-time orphan sweep). System rows are always terminal.
+// their real values once a terminal write lands (normal completion, cancel,
+// infra-failure, or a boot-time orphan sweep). System rows are always
+// terminal.
 //
 // Nullable columns are pointers: TeamID is set only for 'run' rows (curator +
 // system are org-level, but TFAC-476 attributes a curator turn to its

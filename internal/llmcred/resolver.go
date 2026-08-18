@@ -15,11 +15,10 @@
 //
 // Two mint flavors, deliberately not merged: executor-bound mints (the
 // per-claim bundle) carry the network condition and a per-conversation
-// RoleSessionName;
-// brain-bound mints (scorer / profiler / connect probe) carry NO network
-// condition (they run from control-process egress) and a stable session
-// name. A merged implementation would ship a scorer that 403s only in fleet
-// deployments with the egress knob set.
+// RoleSessionName; brain-bound mints (scorer / profiler / connect probe)
+// carry NO network condition (they run from control-process egress) and a
+// stable session name. A merged implementation would ship a scorer that
+// 403s only in fleet deployments with the egress knob set.
 //
 // Callers: the bundle provisioner (internal/credprovision), the
 // scorer/profiler/classifier via agentproc.Run's LLMResolver hook, the
@@ -256,10 +255,10 @@ func (r *Resolver) mint(ctx context.Context, orgID, roleARN string, opts mintOpt
 
 // cacheKey scopes a mint cache entry. Executor-bound mints key on the
 // per-conversation session name (one live credential per conversation →
-// O(conversations)); brain-bound
-// mints key on the stable session name (one per org → O(orgs)). The
-// networkBound flag is folded in so the two flavors never share a cached
-// credential (they carry different session policies).
+// O(conversations)); brain-bound mints key on the stable session name
+// (one per org → O(orgs)). The networkBound flag is folded in so the two
+// flavors never share a cached credential (they carry different session
+// policies).
 func cacheKey(orgID string, opts mintOptions) string {
 	bound := "sys"
 	if opts.networkBound {

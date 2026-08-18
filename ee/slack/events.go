@@ -88,13 +88,11 @@ func (p SlackMessagePredicate) Matches(m SlackMessageMetadata) bool {
 //
 // A follow-up message on an entity whose task already has an active auto
 // conversation folds into that conversation instead of enqueueing a second
-// pending_firing — but
-// that is now the universal same-task absorption rule in internal/routing's
-// tryAutoDelegate (a firing whose own task holds the live conversation
-// injects), not
-// a per-type declaration on this schema. A fresh message (no active
-// conversation) is
-// unaffected — it still fires a new blueprint run exactly as before.
+// pending_firing — but that is now the universal same-task absorption rule
+// in internal/routing's tryAutoDelegate (a firing whose own task holds the
+// live conversation injects), not a per-type declaration on this schema. A
+// fresh message (no active conversation) is unaffected — it still fires a
+// new blueprint run exactly as before.
 func init() {
 	events.Register(events.NewSchema[SlackMessageMetadata, SlackMessagePredicate](
 		domain.EventSlackMessage, events.OwnershipOwned))

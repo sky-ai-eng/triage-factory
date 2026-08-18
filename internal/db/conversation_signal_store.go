@@ -8,12 +8,12 @@ import (
 )
 
 // ConversationSignalStore is the cross-pod conversation-control outbox
-// (TFAC-585, Postgres
-// only — see docs/for-agents/specs/horizontal-scaling/README.md §5.2, "RunController
-// gets its intended second implementation"). Every method is admin-pool,
-// no claims-scoped variant and no "...System" suffix: conversation_signals is pure
-// system-to-system coordination, never read under a user's RLS context —
-// same unsuffixed shape as ConversationQueueStore/EventQueueStore.
+// (TFAC-585, Postgres only — see
+// docs/for-agents/specs/horizontal-scaling/README.md §5.2, "RunController gets
+// its intended second implementation"). Every method is admin-pool, no
+// claims-scoped variant and no "...System" suffix: conversation_signals is pure
+// system-to-system coordination, never read under a user's RLS context — same
+// unsuffixed shape as ConversationQueueStore/EventQueueStore.
 //
 // The SQLite implementation returns ErrNotApplicableInLocal from every
 // method (see internal/db/sqlite/conversation_signals.go): local mode is always its

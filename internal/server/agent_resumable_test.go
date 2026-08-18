@@ -64,9 +64,9 @@ func TestHandleAgentStatus_ResumableWorkspaceExpired(t *testing.T) {
 }
 
 // TestHandleAgentStatus_ResumableParkedConversation: the unchanged case. A
-// parked conversation
-// with a live workspace under a running blueprint reads resumable, with no
-// reason attached — the composer stays live and the follow-up works.
+// parked conversation with a live workspace under a running blueprint
+// reads resumable, with no reason attached — the composer stays live and
+// the follow-up works.
 func TestHandleAgentStatus_ResumableParkedConversation(t *testing.T) {
 	s := newTestServer(t)
 	withEmptyBlobStore(t, s)

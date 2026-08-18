@@ -818,9 +818,8 @@ func (s *Spawner) processCompletion(
 	}
 
 	// Attach the conversation's memory to every entity it materially engaged —
-	// the
-	// primary (task) entity plus everything it produced — so the narrative is
-	// reachable from all of them, not just the denormalized primary on
+	// the primary (task) entity plus everything it produced — so the narrative
+	// is reachable from all of them, not just the denormalized primary on
 	// conversation_memory.entity_id. Cancellation-detached for the same reason
 	// the upsert above is: a cancelled turn still owns its terminal
 	// bookkeeping.

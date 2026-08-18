@@ -245,8 +245,8 @@ type ResumeOptions struct {
 	// prompts (TFAC-392), and stamps the resumed conversation's
 	// agenthost.ConversationInfo.TeamID so the capture writers can attribute
 	// artifacts (TFAC-458). The claim captures it from the conversation row
-	// (conv.TeamID, NOT NULL); empty falls back
-	// to the schema defaults for the absent-auto-deny resolve.
+	// (conv.TeamID, NOT NULL); empty falls back to the schema defaults for
+	// the absent-auto-deny resolve.
 	TeamID string
 
 	// sidecar, when non-nil (TF_ROLE=executor), is the run network +

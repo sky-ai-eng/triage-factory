@@ -363,15 +363,14 @@ func invalidEnvelopeCorrection() string {
 }
 
 // markConversationOpen flips a conversation's status to `open` under a race
-// guard, then nudges
-// the board + UI. The shared flip for every park: the warm path (the live
-// driver's no-conclusion turn, where the process stays warm in s.procs and
-// there's nothing to snapshot yet), parkConversationOpen (process gone — snapshots
-// first), and a cancel (park.reason names the stop). Flipping on the
-// no-conclusion turn, rather than only at idle, is what makes a crash in the
-// warm window recover correctly: the boot reconcile leaves `open` runs alone,
-// since a restart provides no input to resume them. Nil-safe so the no-DB
-// driver tests can exercise the loop.
+// guard, then nudges the board + UI. The shared flip for every park: the warm
+// path (the live driver's no-conclusion turn, where the process stays warm in
+// s.procs and there's nothing to snapshot yet), parkConversationOpen (process
+// gone — snapshots first), and a cancel (park.reason names the stop). Flipping
+// on the no-conclusion turn, rather than only at idle, is what makes a crash in
+// the warm window recover correctly: the boot reconcile leaves `open` runs
+// alone, since a restart provides no input to resume them. Nil-safe so the
+// no-DB driver tests can exercise the loop.
 //
 // Routing has three arms, and which one a park takes says who is speaking. An
 // engagement parking its own run (claimID set) goes through the claim fence,

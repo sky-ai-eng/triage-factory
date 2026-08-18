@@ -64,8 +64,7 @@ type FactoryReadStore interface {
 	TaskCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error)
 
 	// ActiveConversations returns every conversation currently in-flight
-	// (exactly those an
-	// unreleased claim is driving) joined with its
+	// (exactly those an unreleased claim is driving) joined with its
 	// task and entity. Ordered by started_at DESC so the overlay can
 	// render most-recent-first without client-side sorting.
 	//

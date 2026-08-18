@@ -9,11 +9,10 @@ import (
 )
 
 // seedConversationOnTeam inserts a minimal non-blueprint conversation owned
-// by teamID with the
-// given status, via the admin pool. origin='manual' sidesteps the
-// conversations_origin_requires_parents CHECK (no blueprint_run/task/prompt needed);
-// trigger_type='manual' pairs with a non-NULL creator per
-// conversations_creator_matches_trigger_type.
+// by teamID with the given status, via the admin pool. origin='manual'
+// sidesteps the conversations_origin_requires_parents CHECK (no
+// blueprint_run/task/prompt needed); trigger_type='manual' pairs with a
+// non-NULL creator per conversations_creator_matches_trigger_type.
 func seedConversationOnTeam(t *testing.T, h *Harness, orgID, creatorID, teamID, status string) string {
 	t.Helper()
 	var id string
@@ -29,9 +28,8 @@ func seedConversationOnTeam(t *testing.T, h *Harness, orgID, creatorID, teamID, 
 // TestConversationStore_Postgres_ActiveIDsForTeamSystem pins the team-archive
 // force-stop enumeration on Postgres (TFAC-448): only active conversations
 // owned by the queried team are returned — terminal conversations are
-// excluded, and
-// a sibling team's active conversation is not picked up (the team_id WHERE
-// clause).
+// excluded, and a sibling team's active conversation is not picked up (the
+// team_id WHERE clause).
 func TestConversationStore_Postgres_ActiveIDsForTeamSystem(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)

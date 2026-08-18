@@ -158,9 +158,9 @@ type ArtifactStore interface {
 	// from the table) have no entry — the caller treats a missing key as 0. It
 	// batches the conversation-list path's per-card count into one query so
 	// listing a task's conversations stays O(1) in artifact reads rather than
-	// N+1 (the conversation response's
-	// artifact_count, internal/server/agent.go). An empty conversationIDs returns an
-	// empty map without touching the DB.
+	// N+1 (the conversation response's artifact_count,
+	// internal/server/agent.go). An empty conversationIDs returns an empty map
+	// without touching the DB.
 	//
 	// Mirrors ListByConversation's pool/RLS conventions: app pool in Postgres
 	// (RLS-active, so the count is team-scoped exactly like the rows it
@@ -171,14 +171,14 @@ type ArtifactStore interface {
 
 	// ListByConversations returns the artifacts for every given conversation as
 	// one flat slice, each ordered newest-first (created_at DESC, id DESC) so a
-	// conversation's rows
-	// match ListByConversation's order once grouped. It lets a caller projecting many
-	// conversations fetch their artifacts in a single query instead of an N+1 of
-	// per-conversation ListByConversation calls — the conversation-list response
-	// uses it to resolve
-	// pending_kind for the parked conversations in a task's conversation list
-	// (internal/server/agent.go). Each artifact carries its ConversationID, so the
-	// caller groups by it; an empty conversationIDs returns nil without touching the DB.
+	// conversation's rows match ListByConversation's order once grouped. It
+	// lets a caller projecting many conversations fetch their artifacts in a
+	// single query instead of an N+1 of per-conversation ListByConversation
+	// calls — the conversation-list response uses it to resolve pending_kind
+	// for the parked conversations in a task's conversation list
+	// (internal/server/agent.go). Each artifact carries its ConversationID, so
+	// the caller groups by it; an empty conversationIDs returns nil without
+	// touching the DB.
 	//
 	// Mirrors ListByConversation's pool/RLS conventions: app pool in Postgres
 	// (RLS-active, team-scoped), the one connection in SQLite. orgID stays

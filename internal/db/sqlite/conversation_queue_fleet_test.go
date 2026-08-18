@@ -62,10 +62,9 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 	}
 
 	// Complete one conversation with a claim so the timing read has a terminal
-	// row
-	// with a queue wait and a duration. Both claim identity AND duration
-	// live on the claims row now (the timing read derives claimed_at from
-	// the latest claim, duration from the claims' telemetry SUM).
+	// row with a queue wait and a duration. Both claim identity AND duration
+	// live on the claims row now (the timing read derives claimed_at from the
+	// latest claim, duration from the claims' telemetry SUM).
 	if _, err := conn.Exec(`
 		UPDATE conversations SET status='completed',
 		       completed_at=datetime(started_at, '+7 seconds')
@@ -112,8 +111,8 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 	}
 
 	// until bound is honored: an upper bound before both conversations'
-	// started_at
-	// (which are ~now) excludes them; a bound in the future includes both.
+	// started_at (which are ~now) excludes them; a bound in the future
+	// includes both.
 	past := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 	if ts, _ := stores.ConversationQueue.RecentConversationTimingsForOrgSystem(ctx, org, time.Unix(0, 0), past, 0); len(ts) != 0 {
 		t.Fatalf("RecentConversationTimingsForOrgSystem with until in the past = %d, want 0 (upper bound applied)", len(ts))

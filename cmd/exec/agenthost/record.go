@@ -35,8 +35,8 @@ func withWriteInfo(
 
 // stampActionIdentityInfo fills the conversation/org/team/actor common to
 // every bot-attributed action from info. The action-specific fields
-// (provider,
-// action, target, credential, from/to, dedup) are set by the caller.
+// (provider, action, target, credential, from/to, dedup) are set by the
+// caller.
 func stampActionIdentityInfo(act *domain.ExternalAction, info ConversationInfo) {
 	act.OrgID = info.OrgID
 	act.TeamID = info.TeamID

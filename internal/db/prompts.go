@@ -116,9 +116,9 @@ type PromptStore interface {
 	// GetSystem mirrors Get but routes through the admin pool in
 	// Postgres AND does NOT filter deleted_at — so a soft-deleted prompt
 	// still resolves for in-flight conversations and past-conversation
-	// timelines. The
-	// router's breaker-tripped toast looks up the prompt name from its
-	// eventbus subscriber goroutine, which has no JWT-claims context.
+	// timelines. The router's breaker-tripped toast looks up the prompt
+	// name from its eventbus subscriber goroutine, which has no
+	// JWT-claims context.
 	GetSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error)
 
 	// IncrementUsageSystem mirrors IncrementUsage but routes through

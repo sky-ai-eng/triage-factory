@@ -213,10 +213,10 @@ func writeReviewNotPending(w http.ResponseWriter, state string) {
 // (SubmitReview — one POST carrying commit_id + event + body + footer + the staged
 // comments[]), stamps the submitted review's id + URL onto the artifact, records
 // the human verdict into conversation_memory, and runs the shared
-// conversation/task/blueprint
-// bookkeeping. Nothing touched GitHub before this point (the review was staged
-// entirely TF-side), so concurrent runs on one PR each submit their own review
-// here — GitHub allows unlimited submitted reviews per identity.
+// conversation/task/blueprint bookkeeping. Nothing touched GitHub before this
+// point (the review was staged entirely TF-side), so concurrent runs on one PR
+// each submit their own review here — GitHub allows unlimited submitted reviews
+// per identity.
 //
 // The pending → submitted flip is a CAS CLAIM taken BEFORE the GitHub write, so
 // the submit is at-most-once: of two racing approves (two tabs, two pods) exactly
@@ -442,8 +442,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// Step 3: terminal-on-last task closure. Approval is a decoupled sidecar — it
 	// never flips conversation status or resumes/terminates a blueprint. The
 	// only lifecycle effect is closing the task when this was the LAST
-	// unresolved artifact on an
-	// already-terminal blueprint; otherwise a no-op.
+	// unresolved artifact on an already-terminal blueprint; otherwise a no-op.
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, fresh.ConversationID)
 
 	// Tell the drafting agent its review was submitted (live or via the ledger).

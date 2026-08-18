@@ -86,13 +86,10 @@ func (a *App) startWorkers(ctx context.Context) {
 
 	// Dispatcher workers (executor/all): the conversation-queue dispatcher
 	// (claims + executes queued conversations, reconciling crash-stranded
-	// conversations on boot) and the
-	// workspace-snapshot retention reaper (bounds durable
-	// parked/aborted-conversation snapshot blobs by TTL; a no-op when no blob
-	// store is wired). A control
-	// pod builds the spawner but never claims delegated conversations, so
-	// neither
-	// runs there.
+	// conversations on boot) and the workspace-snapshot retention reaper
+	// (bounds durable parked/aborted-conversation snapshot blobs by TTL; a
+	// no-op when no blob store is wired). A control pod builds the spawner
+	// but never claims delegated conversations, so neither runs there.
 	if a.plan.dispatcher {
 		go a.spawner.RunDispatcher(ctx, delegate.DefaultDispatchScanInterval)
 		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
@@ -137,8 +134,8 @@ func (a *App) startWorkers(ctx context.Context) {
 
 	// Fleet telemetry sampler (TFAC-589): every role writes one instance_stats
 	// row a minute (cpu/load/mem/oom deployment-wide; claim-scoped fields only
-	// on
-	// executor-capable roles) and reaps the ~30d tail. The dashboard reads it.
+	// on executor-capable roles) and reaps the ~30d tail. The dashboard reads
+	// it.
 	go a.spawner.RunInstanceStatSampler(ctx, delegate.DefaultInstanceStatSampleInterval, delegate.DefaultInstanceStatRetention)
 
 	// WS backplane workers (TFAC-584) — nil in local mode / before

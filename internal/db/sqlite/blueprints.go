@@ -1005,15 +1005,14 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	now := time.Now().UTC()
 	// Flip the blueprint_run terminal AND cancel any still-active child
 	// conversation in one transaction, so a terminal parent can never be
-	// observed (or
-	// committed) alongside a live child. inTx composes with the caller's tx when
-	// MarkRunStatus runs inside SyntheticClaimsWithTx (manual path) and opens a
-	// fresh one on the bare admin/system handle — either way the two writes are
-	// all-or-nothing. Without a non-terminal child a cancel that raced the
-	// dispatcher's claim/setup window (or a parked `open` step the
-	// sequence-cancel path skips) would strand a child 'running', keeping the
-	// dispatcher on phantom work and pinning its feature branch in a worktree,
-	// requeuing forever.
+	// observed (or committed) alongside a live child. inTx composes with the
+	// caller's tx when MarkRunStatus runs inside SyntheticClaimsWithTx (manual
+	// path) and opens a fresh one on the bare admin/system handle — either way
+	// the two writes are all-or-nothing. Without a non-terminal child a cancel
+	// that raced the dispatcher's claim/setup window (or a parked `open` step
+	// the sequence-cancel path skips) would strand a child 'running', keeping
+	// the dispatcher on phantom work and pinning its feature branch in a
+	// worktree, requeuing forever.
 	var changed bool
 	err := inTx(ctx, s.q, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
@@ -1045,11 +1044,11 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 }
 
 // parkOrphanedChildConversations parks every still-mid-flight child
-// conversation of
-// blueprintRunID `open` and releases those children's active claims. Called by
-// MarkRunStatus's atomic flip; ConversationQueueStore.ReconcileOrphanedConversations applies the
-// same predicate in its own boot sweep (it can't share this body — different
-// store, different scope).
+// conversation of blueprintRunID `open` and releases those children's active
+// claims. Called by MarkRunStatus's atomic flip;
+// ConversationQueueStore.ReconcileOrphanedConversations applies the same
+// predicate in its own boot sweep (it can't share this body — different store,
+// different scope).
 //
 // A park, not a terminal: the child neither failed nor concluded, it was
 // stopped when its parent ended. Read the `open` as "stopped without

@@ -190,8 +190,7 @@ func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
 
 // seedSQLiteConversationForTaskMemory seeds the entity + event + prompt +
 // task + conversation FK chain conversation_memory needs. Direct INSERTs
-// keep the
-// fixture path schema-coupled and short — matches the SwipeStore
+// keep the fixture path schema-coupled and short — matches the SwipeStore
 // / EventStore conformance seed pattern.
 func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (conversationID, entityID string) {
 	t.Helper()
@@ -244,8 +243,7 @@ func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 // blueprint + blueprint_run FK chain a conversation_memory.blueprint_run_id can point
 // at (the column FKs blueprint_runs(id) ON DELETE SET NULL). Returns the
 // blueprint_run id. Independent of seedSQLiteConversationForTaskMemory's
-// conversation — the
-// round-trip test only needs a valid FK target.
+// conversation — the round-trip test only needs a valid FK target.
 func seedSQLiteBlueprintRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (blueprintRunID string) {
 	t.Helper()
 	now := time.Now().UTC()

@@ -476,12 +476,11 @@ func (a *lifecycleAdapter) handleConversationStatus(ctx context.Context, evt dom
 }
 
 // handleConversationActivity forwards a tool-activity sentinel to its
-// conversation's live
-// worker, if any. A conversation with no cached entry yet (activity arrived before
-// this adapter ever saw a system:conversation:status for it) or no active worker
-// (not "running", or not a Slack conversation at all) is silently ignored — the
-// verdict-priming event is always system:conversation:status, per the cache contract
-// above.
+// conversation's live worker, if any. A conversation with no cached entry yet
+// (activity arrived before this adapter ever saw a system:conversation:status
+// for it) or no active worker (not "running", or not a Slack conversation at
+// all) is silently ignored — the verdict-priming event is always
+// system:conversation:status, per the cache contract above.
 func (a *lifecycleAdapter) handleConversationActivity(ctx context.Context, evt domain.Event, conversations map[string]*conversationEntry) {
 	var meta events.SystemConversationActivityMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {

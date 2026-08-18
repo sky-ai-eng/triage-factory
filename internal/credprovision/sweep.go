@@ -88,9 +88,8 @@ func sweepAwaiting(ctx context.Context, mgr *Manager) {
 // RunRefreshSweep re-mints and re-seals the GitHub tokens of every active
 // (claimed, non-terminal) conversation whose sealed bundle is older than
 // refreshAfter (TFAC-614) — GitHub installation tokens are hour-lived,
-// engagements
-// aren't. Piggybacks no new scheduler cadence beyond its own ticker, per the
-// same brain-unit shape as RunAwaitingSweep.
+// engagements aren't. Piggybacks no new scheduler cadence beyond its own
+// ticker, per the same brain-unit shape as RunAwaitingSweep.
 func RunRefreshSweep(ctx context.Context, mgr *Manager, interval, refreshAfter time.Duration) {
 	if mgr == nil {
 		return

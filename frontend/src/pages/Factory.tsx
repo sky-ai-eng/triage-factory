@@ -840,8 +840,8 @@ function entityLabel(e: FactoryEntity): string {
 //
 // The active arm is the shared predicate rather than a list of names, so
 // every claim phase — including a conversation parked awaiting its
-// credential
-// bundle — reads as working instead of falling through to the inert grey.
+// credential bundle — reads as working instead of falling through to the
+// inert grey.
 function conversationStatusColor(status: ConversationStatusValue): string {
   if (isActiveStatus(status)) return '#3f6b4d' // --color-claim (sage)
   switch (status) {

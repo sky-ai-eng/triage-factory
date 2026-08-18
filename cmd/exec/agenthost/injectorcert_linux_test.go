@@ -10,10 +10,9 @@ import (
 
 // TestWriteFreshInjectorCert_ReplacesStaleFile pins the remove-before-create
 // rule on the per-conversation gh-injector cert. The path is keyed by
-// conversation id, so a
-// second engagement of one conversation writes exactly where the first one
-// did; without the remove the new sidecar inherits the old file rather than
-// owning its own.
+// conversation id, so a second engagement of one conversation writes exactly
+// where the first one did; without the remove the new sidecar inherits the
+// old file rather than owning its own.
 //
 // The mode is the observable, and it is exact: open(O_CREATE) applies its
 // permission argument only when it CREATES the file, so a stale file staged at

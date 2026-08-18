@@ -35,8 +35,8 @@ type ExecutorClaimRow struct {
 // mutations: the states this read must render (a released claim carrying
 // teardown actuals, a live one carrying none, an ordering across claims minted
 // inside the same second) accumulate across a conversation's whole life
-// through several
-// subsystems, and no single store call the suite could make reaches them.
+// through several subsystems, and no single store call the suite could make
+// reaches them.
 type ExecutorClaimsSeeder struct {
 	// Conversation stages one conversation in the given terminal state and returns its
 	// id. failureKind may be empty (an unclassified or non-failed run).

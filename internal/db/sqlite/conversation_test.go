@@ -66,10 +66,9 @@ func newSQLiteForConversationTest(t *testing.T) *sql.DB {
 
 // seedSQLiteConversation inserts a conversations row directly (the seeder's
 // Conversation callback + the direct tests below share it). Raw SQL keeps
-// the seed
-// independent of the store under test; the trigger_type↔creator CHECK is
-// satisfied by pairing 'manual' with the sentinel user and 'event' with
-// NULL.
+// the seed independent of the store under test; the trigger_type↔creator
+// CHECK is satisfied by pairing 'manual' with the sentinel user and 'event'
+// with NULL.
 func seedSQLiteConversation(t *testing.T, conn *sql.DB, conv domain.Conversation) string {
 	t.Helper()
 	id := conv.ID
@@ -313,9 +312,9 @@ func TestConversationStore_SQLite_RuntimeDefaultsToSDK(t *testing.T) {
 // TestConversationStore_SQLite_ActiveIDsForTeamSystem pins the team-archive
 // force-stop enumeration: conversations on the team in the active set
 // (NOT completed/failed) are returned; terminal conversations are excluded.
-// SQLite hardcodes
-// conversations.team_id to the local sentinel, so the cross-team negative case
-// lives in the Postgres tests; here we pin the status predicate + team scoping.
+// SQLite hardcodes conversations.team_id to the local sentinel, so the
+// cross-team negative case lives in the Postgres tests; here we pin the status
+// predicate + team scoping.
 func TestConversationStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
 	conn := newSQLiteForConversationTest(t)
 	seed := newSQLiteConversationSeeder(conn)

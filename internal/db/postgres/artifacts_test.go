@@ -328,8 +328,8 @@ func TestArtifactStore_Postgres_RLS_WritePath(t *testing.T) {
 // TestArtifactStore_Postgres_ListByTeam_IncludesDetached pins the
 // audit-ledger invariant: an artifact whose conversation was purged
 // (conversation_id NULL) is still the team's and must come back from
-// ListByTeam. Guards against a
-// future `AND conversation_id IS NOT NULL` creeping into the query. TFAC-455.
+// ListByTeam. Guards against a future `AND conversation_id IS NOT NULL`
+// creeping into the query. TFAC-455.
 func TestArtifactStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

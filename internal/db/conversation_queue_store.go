@@ -266,8 +266,7 @@ type ConversationQueueStore interface {
 	// one-active-auto-run index the orphan was holding, so the task's
 	// already-queued firing intent drains into a fresh, fully-minted
 	// blueprint run instead of retrying against the index forever. Both
-	// dialects: local mode
-	// has the same crash window and no reaper.
+	// dialects: local mode has the same crash window and no reaper.
 	//
 	// Cross-org system sweep; returns the total count of rows healed across
 	// all arms.
@@ -283,11 +282,11 @@ type ConversationQueueStore interface {
 
 	// RecentConversationTimingsSystem returns the timing projection of every
 	// conversation started at-or-after `since`, newest first, capped at
-	// `limit` rows — the fleet
-	// dashboard's source for queue-wait and run-duration percentiles and
-	// failure-kind rates (TFAC-589). Percentiles are computed Go-side (portable
-	// across SQLite/Postgres, matching the usage handler's aggregation style),
-	// so this returns rows, not aggregates. Cross-org system read.
+	// `limit` rows — the fleet dashboard's source for queue-wait and
+	// run-duration percentiles and failure-kind rates (TFAC-589). Percentiles
+	// are computed Go-side (portable across SQLite/Postgres, matching the usage
+	// handler's aggregation style), so this returns rows, not aggregates.
+	// Cross-org system read.
 	RecentConversationTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.ConversationTiming, error)
 
 	// QueuedConversationAgesSystem returns every conversation currently matching the

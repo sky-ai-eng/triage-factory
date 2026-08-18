@@ -97,10 +97,10 @@ type ConversationSeeder struct {
 
 	// SetBlueprintRunStatus raw-updates a blueprint_run's status, WITHOUT
 	// touching its child conversations (a plain UPDATE, not
-	// BlueprintStore.MarkRunStatus,
-	// which now cascades a terminal flip onto children). Used to stage the
-	// "parked conversation under an already-terminal parent" precondition the
-	// worktree-preserve filter must exclude.
+	// BlueprintStore.MarkRunStatus, which now cascades a terminal flip onto
+	// children). Used to stage the "parked conversation under an
+	// already-terminal parent" precondition the worktree-preserve filter must
+	// exclude.
 	SetBlueprintRunStatus func(t *testing.T, blueprintRunID, status string)
 
 	// StampAgentClaim sets the task's claimed_by_agent_id directly.
@@ -1372,8 +1372,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		t.Run("RefusedWrite_LeavesClaimActive", func(t *testing.T) {
 			// A guarded no-op must not release: complete the conversation,
 			// re-mint a claim (simulating a racing engagement), then fail — the
-			// guard
-			// refuses and the claim stays live.
+			// guard refuses and the claim stays live.
 			conversationID := stage(t)
 			if err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
@@ -2278,8 +2277,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// the task. Manual delegations are excluded (by design — manual is
 		// decoupled from the auto-queue gate); terminal conversations don't
 		// count either. A sibling task on the same entity is invisible here,
-		// which
-		// is the whole point of the unit being the task.
+		// which is the whole point of the unit being the task.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "ha-ent")
@@ -2331,8 +2329,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Same predicate as HasActiveAutoConversationForTask (non-terminal,
 		// trigger_type='event'), but returns the conversation ID instead of a
 		// bool — a busy gate is the additive-injection path, which needs the
-		// conversation to
-		// fold the new event into.
+		// conversation to fold the new event into.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "ha-id-ent")
@@ -2424,9 +2421,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		// open WITH a worktree but under an already-terminal blueprint_run →
 		// excluded: a parked conversation under a terminal parent is not
-		// resumable, so its
-		// worktree must not be preserved (else the boot reconcile orphans the row
-		// and leaves its checked-out branch on disk).
+		// resumable, so its worktree must not be preserved (else the boot
+		// reconcile orphans the row and leaves its checked-out branch on disk).
 		orphanTaskID := seed.Task(t, seed.Entity(t, "parked-orphan"), domain.EventGitHubPROpened,
 			seed.Event(t, seed.Entity(t, "parked-orphan-ev"), domain.EventGitHubPROpened))
 		orphanBR := seed.BlueprintRun(t, orphanTaskID)
@@ -3339,9 +3335,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	t.Run("MessagesForConversations_BatchedAcrossConversations", func(t *testing.T) {
 		// The batched twin of Messages: one query returns every message
 		// for many conversations, grouped by ConversationID with each
-		// conversation's messages still
-		// in insertion (id ASC) order. Empty input is a no-op. Backs the
-		// Board's aggregated include=messages read.
+		// conversation's messages still in insertion (id ASC) order.
+		// Empty input is a no-op. Backs the Board's aggregated
+		// include=messages read.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 
@@ -3482,9 +3478,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		brID := seed.BlueprintRun(t, taskID)
 
 		// Two conversations sharing one blueprint_run — sibling steps. (The
-		// seeder
-		// mints a fresh blueprint_run per call, so we reuse brID directly
-		// to stage the multi-step shape the footer aggregates over.)
+		// seeder mints a fresh blueprint_run per call, so we reuse brID
+		// directly to stage the multi-step shape the footer aggregates
+		// over.)
 		step1 := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
@@ -3560,9 +3556,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		brID := seed.BlueprintRun(t, taskID)
 
 		// Two conversations sharing one blueprint_run — sibling steps. Duration
-		// lives
-		// on the claim Complete releases, so each step goes live (minting a
-		// claim) before it completes.
+		// lives on the claim Complete releases, so each step goes live (minting
+		// a claim) before it completes.
 		step1 := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
@@ -3703,8 +3698,7 @@ func seedConversationWithBlueprintForTest(t *testing.T, orgID string, seed Conve
 // seedConversationForTaskTest creates a conversation on an existing task,
 // used by tests that need multiple conversations on the same parent. Each
 // conversation gets its own freshly-minted blueprint_run; independent
-// firings on a shared
-// task is the realistic shape.
+// firings on a shared task is the realistic shape.
 func seedConversationForTaskTest(t *testing.T, orgID, taskID, status string, seed ConversationSeeder) string {
 	t.Helper()
 	_ = orgID

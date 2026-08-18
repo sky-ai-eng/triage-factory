@@ -26,10 +26,10 @@ func seedConversationAction(t *testing.T, s *Server, conversationID string, a do
 
 // TestHandleAgentActions pins the conversation-scoped action read — the half
 // of "what did this conversation do" that the artifact list structurally
-// cannot answer. The two rows
-// here are exactly that case: a review-thread reply and a refused merge both
-// produce no artifact, so before this endpoint a conversation whose only external
-// acts were these read as a conversation that did nothing.
+// cannot answer. The two rows here are exactly that case: a review-thread reply
+// and a refused merge both produce no artifact, so before this endpoint a
+// conversation whose only external acts were these read as a conversation that
+// did nothing.
 func TestHandleAgentActions(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "acts", "completed")
@@ -92,8 +92,8 @@ func TestHandleAgentActions(t *testing.T) {
 
 // TestHandleAgentActions_Empty pins that a conversation that touched nothing
 // outside the box answers with an empty items array rather than null — the
-// RunStation renders
-// "no external actions yet" off it, which is itself an answer.
+// RunStation renders "no external actions yet" off it, which is itself an
+// answer.
 func TestHandleAgentActions_Empty(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "noacts", "completed")

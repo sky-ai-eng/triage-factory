@@ -388,15 +388,14 @@ func rollbackPRSetupLocked(ctx context.Context, bareDir, wtDir, rootKey string, 
 // blueprint's steps share the branch, as they share the tree) and the
 // conversation's own id where there is no blueprint. The namespace exists so
 // two concurrent runs reviewing the SAME PR (sharing one bare) never share a
-// branch ref — git refuses to fetch
-// into, or `worktree add`, a local branch already checked out in another live
-// worktree of the same bare, so a per-PR-only name (the old triagefactory/pr-N)
-// would make the second run's materialization fail (TFAC-87/TFAC-502). One
-// uniform scheme for fork AND own-repo PRs (own-repo used to reuse the head
-// branch name itself, which collided the same way). The triagefactory/ prefix
-// reserves the namespace from any literal contributor branch. Centralized so
-// CreateForPR, the push-tracking config, and the cleanup paths can't drift on
-// the convention.
+// branch ref — git refuses to fetch into, or `worktree add`, a local branch
+// already checked out in another live worktree of the same bare, so a
+// per-PR-only name (the old triagefactory/pr-N) would make the second run's
+// materialization fail (TFAC-87/TFAC-502). One uniform scheme for fork AND
+// own-repo PRs (own-repo used to reuse the head branch name itself, which
+// collided the same way). The triagefactory/ prefix reserves the namespace from
+// any literal contributor branch. Centralized so CreateForPR, the push-tracking
+// config, and the cleanup paths can't drift on the convention.
 func prLocalBranch(rootKey string, prNumber int) string {
 	return fmt.Sprintf("triagefactory/%s/pr-%d", rootKey, prNumber)
 }

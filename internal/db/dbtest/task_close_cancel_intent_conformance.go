@@ -18,10 +18,10 @@ import (
 type TaskCloseCancelIntentFactory func(t *testing.T) (store db.TaskStore, orgID string, seed TaskCloseCancelIntentSeeder)
 
 // TaskCloseCancelIntentSeeder stages the (task, event, blueprint,
-// conversation) graph
-// the close transaction spans, and reads back what it wrote. Production mints
-// these rows through several stores at once; the callbacks write them directly
-// against each backend's own schema so the suite stays schema-blind.
+// conversation) graph the close transaction spans, and reads back what it
+// wrote. Production mints these rows through several stores at once; the
+// callbacks write them directly against each backend's own schema so the suite
+// stays schema-blind.
 type TaskCloseCancelIntentSeeder struct {
 	// Task stages a fresh entity + queued task and returns the task id.
 	// Each call must produce a distinct entity so the tasks dedup index
@@ -38,8 +38,7 @@ type TaskCloseCancelIntentSeeder struct {
 	BlueprintAndConversation func(t *testing.T, taskID, blueprintStatus, convStatus string) (blueprintRunID, convID string)
 
 	// BareConversation stages a conversation on taskID with NO blueprint
-	// parent, in
-	// the given stored status. Returns its id.
+	// parent, in the given stored status. Returns its id.
 	BareConversation func(t *testing.T, taskID, convStatus string) (convID string)
 
 	// CancelRequested reads a blueprint_run's cancel_requested flag.
@@ -58,13 +57,12 @@ type TaskCloseCancelIntentSeeder struct {
 //
 // The negative space is where the pressure is. The stamp is what makes a
 // failed kill self-healing, but it is also permanent: a stamped conversation
-// is one the
-// claim gate will never drive again. So the two subtests that assert nothing
-// happened — a finished blueprint left alone, and a replayed close on a task
-// that is already terminal — are load-bearing in a way the happy path isn't.
-// A conversation may legitimately be resumed under a closed task (a finished
-// blueprint's final step), and a close that reached back and stamped one would
-// kill work the user just asked for.
+// is one the claim gate will never drive again. So the two subtests that
+// assert nothing happened — a finished blueprint left alone, and a replayed
+// close on a task that is already terminal — are load-bearing in a way the
+// happy path isn't. A conversation may legitimately be resumed under a closed
+// task (a finished blueprint's final step), and a close that reached back and
+// stamped one would kill work the user just asked for.
 //
 // Every subtest passes closeEventType and closingEventID as the pair the
 // callers do: an event-driven close names both, a non-event close names
@@ -129,8 +127,7 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 	t.Run("Already_terminal_task_stamps_nothing", func(t *testing.T) {
 		// The replay case. The second close finds the task done and must be
 		// inert — the conversation active by then may be one a user resumed
-		// after the
-		// first close landed.
+		// after the first close landed.
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 		eventID := seed.Event(t, taskID)

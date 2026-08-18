@@ -58,9 +58,8 @@ func NormalizeJiraKey(key string) string {
 // It is the single home of the (provider, target) → entity mapping shared by
 // the exec-funnel touch resolver (resolveTouchedEntityInfo) and the
 // conversation-end produced-artifact attach (the delegate spawner). GitHub
-// targets must parse
-// as owner/repo#N; Jira targets are issue keys; Slack targets are a
-// SlackSourceID channel/root_ts.
+// targets must parse as owner/repo#N; Jira targets are issue keys; Slack
+// targets are a SlackSourceID channel/root_ts.
 //
 // NOTE: this assumes every GitHub target is a PR (kind="pr"). Exec only writes
 // PRs/reviews today, so that holds — but a GitHub *issue* shares the

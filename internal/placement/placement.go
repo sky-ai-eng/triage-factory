@@ -9,10 +9,10 @@
 // preference*: nothing here carries correctness. A self-contained multi-mode
 // conversation rehydrates on any executor, so a stale, wrong, or absent
 // placement answer only costs a cold clone, never a broken conversation. That
-// is why the map is
-// a pure function of live membership rather than a stored routing table —
-// any pod computes it identically, a join/leave reshuffles only the affected
-// keys, and there is no mutable state to drift or rebalance.
+// is why the map is a pure function of live membership rather than a stored
+// routing table — any pod computes it identically, a join/leave reshuffles
+// only the affected keys, and there is no mutable state to drift or
+// rebalance.
 //
 // This file is the pure kernel: a deterministic, seed-free weighted
 // rendezvous ranking with no I/O. resolver.go layers live-membership +

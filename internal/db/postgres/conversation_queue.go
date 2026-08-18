@@ -18,13 +18,13 @@ import (
 
 // conversationQueueStore is the Postgres impl of db.ConversationQueueStore —
 // the durable conversation queue the delegation dispatcher drains. Wired
-// against the admin pool in
-// postgres.New: the dispatcher is a system worker with no per-user identity.
-// The RLS policies are defense-in-depth (admin bypasses them) and org_id
-// is bound where it is known. Ownership state lives on claims: a claim row
-// is minted at ClaimNextConversation and released (requeued/reaped) by the recovery
-// paths, all inside the claiming statement's data-modifying CTEs so a crash
-// can't separate the status flip from the claim bookkeeping.
+// against the admin pool in postgres.New: the dispatcher is a system worker
+// with no per-user identity. The RLS policies are defense-in-depth (admin
+// bypasses them) and org_id is bound where it is known. Ownership state lives
+// on claims: a claim row is minted at ClaimNextConversation and released
+// (requeued/reaped) by the recovery paths, all inside the claiming statement's
+// data-modifying CTEs so a crash can't separate the status flip from the claim
+// bookkeeping.
 type conversationQueueStore struct {
 	conn *sql.DB
 }

@@ -312,9 +312,10 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, out)
 }
 
-// conversationActionListRequest is the body of
-// POST /api/agent/conversations/{conversationID}/actions/list. The conversation is the
-// path id and the read has no filters of its own, so the body is paging alone.
+// conversationActionListRequest is the body of POST
+// /api/agent/conversations/{conversationID}/actions/list. The conversation is
+// the path id and the read has no filters of its own, so the body is paging
+// alone.
 type conversationActionListRequest struct {
 	httpx.PageRequest
 }

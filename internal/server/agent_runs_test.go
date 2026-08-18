@@ -72,9 +72,8 @@ func TestHandleConversations_Batched(t *testing.T) {
 	}
 
 	// Messages: only the primary conversation per task, keyed by conversation id
-	// (the older conversation's
-	// transcript is deliberately excluded — bounded payload, matches the
-	// single-task path's latestConversation in Board.tsx).
+	// (the older conversation's transcript is deliberately excluded — bounded
+	// payload, matches the single-task path's latestConversation in Board.tsx).
 	if _, ok := resp.Messages[olderA]; ok {
 		t.Errorf("messages included older conversation %s; want only primary conversations", olderA)
 	}
@@ -425,8 +424,7 @@ func TestConversationResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 
 // listConversations reads one task's conversations off the batched list route
 // and unwraps the task-keyed map, so a test asserting on conversation rows
-// doesn't restate
-// the grouping every time.
+// doesn't restate the grouping every time.
 func listConversations(t *testing.T, s *Server, taskID string) []map[string]any {
 	t.Helper()
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",

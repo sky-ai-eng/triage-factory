@@ -36,15 +36,15 @@ type SealedBundle struct {
 // ClaimCredentialsStore owns the claim_credentials table — the sealed
 // per-claim credential bundle channel. An executor parks a claimed
 // conversation's active claim in phase='awaiting_credentials'; the brain
-// resolves that conversation's LLM/GitHub/
-// Jira credentials, seals them to the claimant's published instances
-// pubkey, and writes exactly one row keyed by the conversation's ACTIVE claim id.
-// Method signatures still take conversationID (the conversation id) — the impl
-// resolves the active claim internally, so callers never handle claim ids.
-// Admin-pool-only in Postgres, same posture as InstanceStore/ConversationSignalStore:
-// this table never serves a request handler, and unlike ConversationPendingInputStore
-// its payload is credential-bearing ciphertext, so there is no app-pool
-// grant at all.
+// resolves that conversation's LLM/GitHub/Jira credentials, seals them to the
+// claimant's published instances pubkey, and writes exactly one row keyed by
+// the conversation's ACTIVE claim id. Method signatures still take
+// conversationID (the conversation id) — the impl resolves the active claim
+// internally, so callers never handle claim ids. Admin-pool-only in Postgres,
+// same posture as InstanceStore/ConversationSignalStore: this table never
+// serves a request handler, and unlike ConversationPendingInputStore its
+// payload is credential-bearing ciphertext, so there is no app-pool grant at
+// all.
 //
 // One row per claim (a re-claim after a crash is a NEW claim with its own
 // fresh seal), replaced wholesale on every write (Put is an upsert) — a

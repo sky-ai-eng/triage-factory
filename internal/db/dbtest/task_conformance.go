@@ -541,10 +541,9 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	// Folding an event into a live conversation is the bot committing to the
-	// task, so
-	// the 'injected' mark and the claim are one durable step: either both land
-	// or neither does, and the board can never show the task free under the
-	// conversation the event was folded into.
+	// task, so the 'injected' mark and the claim are one durable step: either
+	// both land or neither does, and the board can never show the task free
+	// under the conversation the event was folded into.
 	t.Run("MarkEventInjectedSystem_stamps_the_claim_with_the_mark", func(t *testing.T) {
 		s, orgID, _, agentID, _, seed, _ := mk(t)
 		_, eventID, taskID := seed(t, "inject-claim")

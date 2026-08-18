@@ -125,11 +125,10 @@ func (p SystemTaskDelegationBlockedSubtasksPredicate) Matches(m SystemTaskDelega
 // -----------------------------------------------------------------------------
 // system:conversation:status / system:conversation:activity — EE-observable
 // conversation-lifecycle sentinels (TFAC-592), mirroring the two websocket
-// choke points in
-// internal/delegate/spawner.go onto the bus. Deliberately minimal: no
-// TaskID/EntitySource, so consumers resolve conversation→task→entity context
-// themselves (and cache it) rather than costing a DB read on the hot
-// broadcast path.
+// choke points in internal/delegate/spawner.go onto the bus. Deliberately
+// minimal: no TaskID/EntitySource, so consumers resolve
+// conversation→task→entity context themselves (and cache it) rather than
+// costing a DB read on the hot broadcast path.
 // -----------------------------------------------------------------------------
 
 type SystemConversationStatusMetadata struct {
@@ -138,10 +137,9 @@ type SystemConversationStatusMetadata struct {
 	FailureKind    string `json:"failure_kind,omitempty"` // set on the failed arm only
 	// Resumable rides the parked status when the conversation's workspace
 	// snapshot lands after the park was already announced — the moment a
-	// follow-up
-	// becomes possible, which no status change of its own marks. A pointer
-	// because absence means "unchanged, ask the conversation read", which is
-	// not the same claim as false.
+	// follow-up becomes possible, which no status change of its own marks. A
+	// pointer because absence means "unchanged, ask the conversation read",
+	// which is not the same claim as false.
 	Resumable *bool `json:"resumable,omitempty"`
 }
 

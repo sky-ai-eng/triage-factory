@@ -101,11 +101,10 @@ func expectNoCredRequest(t *testing.T, msgs <-chan ctlbus.Message) {
 
 // TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell pins the widening
 // signal: a genuinely new conversation_worktrees row means the conversation's
-// authorized
-// repo set grew past what its sealed credential bundle covers, so the insert
-// fires the same cred_request the claim's own credential request fires. A
-// conflicting insert (the row already existed) widens nothing and must stay
-// silent, or every idempotent `workspace add` would re-mint the
+// authorized repo set grew past what its sealed credential bundle covers, so
+// the insert fires the same cred_request the claim's own credential request
+// fires. A conflicting insert (the row already existed) widens nothing and must
+// stay silent, or every idempotent `workspace add` would re-mint the
 // conversation's tokens.
 func TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -142,9 +141,9 @@ func TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T
 	expectNoCredRequest(t, msgs)
 
 	// A NEW ref in a repo the conversation already holds is a genuinely new
-	// row, but
-	// credentials are minted per repo — the authorized set is unchanged, so
-	// re-sealing would spend GitHub App mint quota on a byte-identical grant.
+	// row, but credentials are minted per repo — the authorized set is
+	// unchanged, so re-sealing would spend GitHub App mint quota on a
+	// byte-identical grant.
 	secondRef := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "sky-ai-eng/other-repo", Path: "/runs/" + conversationID + "/sky-ai-eng/other-repo/pr-42", Ref: "pr-42"}
 	inserted, _, err = stores.ConversationWorktrees.InsertSystem(ctx, orgID, secondRef)
 	if err != nil || !inserted {

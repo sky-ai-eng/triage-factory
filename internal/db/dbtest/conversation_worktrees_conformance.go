@@ -105,8 +105,8 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 	t.Run("Insert_distinct_refs_same_repo_coexist", func(t *testing.T) {
 		// The (conversation, repo, ref) PK lets one conversation hold two
 		// worktrees in one repo (two PRs reviewed in one interactive
-		// conversation — TFAC-502). Both
-		// inserts must succeed and List must return both.
+		// conversation — TFAC-502). Both inserts must succeed and List
+		// must return both.
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "tworef")
 		for _, w := range []domain.ConversationWorktree{

@@ -9,8 +9,7 @@ import (
 )
 
 // seedPgActiveClaim mints an active claims row for the conversation — the
-// engagement
-// the bundle channel keys rows by.
+// engagement the bundle channel keys rows by.
 func seedPgActiveClaim(t *testing.T, h *pgtest.Harness, orgID, conversationID, executorID string, bootEpoch int64) string {
 	t.Helper()
 	var id string

@@ -53,9 +53,8 @@ describe('TelemetryRail queued readout', () => {
 
 // The token readouts come off the conversation row — the SUM the detail read
 // already computes, the same numbers the usage dashboard reports — rather
-// than a walk
-// of the held transcript. The transcript here carries different counts on
-// purpose: a rail that still summed it would show those instead.
+// than a walk of the held transcript. The transcript here carries different
+// counts on purpose: a rail that still summed it would show those instead.
 describe('TelemetryRail token readouts', () => {
   const held: Message[] = [
     {

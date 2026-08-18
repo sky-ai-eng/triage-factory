@@ -201,8 +201,8 @@ func TestProcessQueuedEvent_ObligationFailure_RequeuesThenRoutesOnRecovery(t *te
 // obligation stage the other three can't reach: the task is already minted
 // when the trigger's fire fails, so the retry runs against existing state.
 // It must still end at exactly one task AND exactly one conversation — the
-// task
-// dedup index and the (event, trigger) replay fence each doing their half.
+// task dedup index and the (event, trigger) replay fence each doing their
+// half.
 func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 	database := newTestDB(t)
 	entityID := setupFenceScenario(t, database)
@@ -262,11 +262,9 @@ func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 	}
 
 	// Now the negative space, with the conversation terminal so the task's
-	// auto-run
-	// gate is OPEN — otherwise a busy gate, not the fence, would be what
-	// stopped the second conversation and this would prove nothing. Re-arm the
-	// row and
-	// route the same event a third time.
+	// auto-run gate is OPEN — otherwise a busy gate, not the fence, would be
+	// what stopped the second conversation and this would prove nothing.
+	// Re-arm the row and route the same event a third time.
 	fenceCompleteConversations(t, database, entityID)
 	if _, err := database.Exec(`UPDATE event_queue SET status = 'pending', attempts = 0`); err != nil {
 		t.Fatalf("re-arm the row: %v", err)

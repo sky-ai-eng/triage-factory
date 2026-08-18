@@ -1071,11 +1071,11 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 		stepArg = *abortedAtStep
 	}
 	// Flip the blueprint_run terminal AND cancel any still-active child
-	// conversation in
-	// one transaction, so the two writes commit together — a terminal parent is
-	// never committed alongside a live child. inTx composes with the caller's tx
-	// when markBlueprintRunStatus runs inside a SyntheticClaims tx (manual/app
-	// path) and opens a fresh one on the bare admin handle (event/system path).
+	// conversation in one transaction, so the two writes commit together — a
+	// terminal parent is never committed alongside a live child. inTx composes
+	// with the caller's tx when markBlueprintRunStatus runs inside a
+	// SyntheticClaims tx (manual/app path) and opens a fresh one on the bare
+	// admin handle (event/system path).
 	//
 	// RLS scope: the admin pool bypasses RLS; on the app pool the child-cancel
 	// runs under the caller's claims, but a blueprint's child steps share its

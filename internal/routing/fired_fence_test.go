@@ -24,9 +24,8 @@ import (
 // (delegate.Spawner.Delegate → BlueprintStore.CreateRunIfNotFiredSystem): the
 // relocated replay fence lives on blueprint_runs, so it mints a blueprint_run
 // fenced on (triggering_event_id, trigger_id) + a linked conversation row,
-// and returns
-// delegate.ErrAlreadyFired when the fence trips. This lets the router
-// integration tests exercise the real ErrAlreadyFired handling in
+// and returns delegate.ErrAlreadyFired when the fence trips. This lets the
+// router integration tests exercise the real ErrAlreadyFired handling in
 // tryAutoDelegate without standing up a worktree + agent. A manual call
 // (TriggerType != "event") inserts unconditionally, matching the spawner's
 // manual branch.
@@ -204,10 +203,9 @@ func TestHandleEvent_DistinctEvents_FireIndependently(t *testing.T) {
 // TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate covers the drain
 // path's fence handling: a pending firing whose triggering event
 // already has a committed blueprint run (a prior drain fired it but died
-// before
-// MarkFired, or the immediate path fired it before this firing was popped)
-// must skip with reason "already_fired" rather than spawn a duplicate or
-// retry forever.
+// before MarkFired, or the immediate path fired it before this firing was
+// popped) must skip with reason "already_fired" rather than spawn a
+// duplicate or retry forever.
 func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
@@ -215,9 +213,8 @@ func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 
 	// A blueprint_run for (eventID, triggerID) already committed (the relocated
 	// fence's firing unit), plus its step conversation — the prior firing that
-	// the drain
-	// must detect as already-fired. Resolve the trigger's real blueprint id (the
-	// trigger seed remapped it to a wrapping blueprint).
+	// the drain must detect as already-fired. Resolve the trigger's real
+	// blueprint id (the trigger seed remapped it to a wrapping blueprint).
 	var blueprintID string
 	if err := database.QueryRow(`SELECT blueprint_id FROM event_handlers WHERE id = ?`, triggerID).Scan(&blueprintID); err != nil {
 		t.Fatalf("resolve blueprint id: %v", err)

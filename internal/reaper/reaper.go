@@ -68,15 +68,14 @@ func ParseMaxAttempts(raw string) (int, error) {
 }
 
 // RunReaper is the leader reaper's tick loop: every interval, sweep
-// conversations
-// whose owning executor's heartbeat has gone stale past staleThreshold,
-// requeuing or terminal-failing them (attempts-capped at maxAttempts) or
-// finalizing them cancelled (blueprint already cancel-requested) — see
-// Store.ReapDeadExecutors. Brain-gated: callers start this only while
-// holding the background-brain lease (internal/app's startBrain/stopBrain),
-// and stop it on ctx cancellation the same way every other brain component
-// does. A nil store makes this a logged no-op, mirroring
-// Spawner.RunInstanceHeartbeat's nil-seam contract.
+// conversations whose owning executor's heartbeat has gone stale past
+// staleThreshold, requeuing or terminal-failing them (attempts-capped at
+// maxAttempts) or finalizing them cancelled (blueprint already
+// cancel-requested) — see Store.ReapDeadExecutors. Brain-gated: callers
+// start this only while holding the background-brain lease (internal/app's
+// startBrain/stopBrain), and stop it on ctx cancellation the same way every
+// other brain component does. A nil store makes this a logged no-op,
+// mirroring Spawner.RunInstanceHeartbeat's nil-seam contract.
 func RunReaper(ctx context.Context, store Store, interval time.Duration, staleThreshold time.Duration, maxAttempts int) {
 	if store == nil {
 		reaperLog.Warn("leader reaper not started: no Store wired")

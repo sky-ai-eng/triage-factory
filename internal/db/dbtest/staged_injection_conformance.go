@@ -167,9 +167,9 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 		seed.DeleteConversation(t, conversationID)
 		// FlushPending filters only by (org_id, conversation_id), so a non-empty
-		// result here
-		// would mean the rows survived the conversation deletion — i.e. the
-		// cascade didn't fire. Empty proves the FK ON DELETE CASCADE took them.
+		// result here would mean the rows survived the conversation deletion —
+		// i.e. the cascade didn't fire. Empty proves the FK ON DELETE CASCADE
+		// took them.
 		got, err := store.FlushPendingSystem(ctx, orgID, conversationID)
 		if err != nil {
 			t.Fatalf("flush after delete: %v", err)

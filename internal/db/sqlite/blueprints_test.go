@@ -262,8 +262,7 @@ func TestBlueprintStore_SQLite_StepPlanRoundTrip(t *testing.T) {
 // TestBlueprintStore_SQLite_ActorAgentRoundTrip pins that the executing-bot
 // actor freezes on the blueprint_run at CreateRun and reads back on GetRun (the
 // reactor relies on this to inherit it onto each step conversation). The
-// fenced event
-// insert carries it too, and an empty actor round-trips as empty.
+// fenced event insert carries it too, and an empty actor round-trips as empty.
 func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -343,8 +342,8 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 // requeue intends: the fenced insert is a delegation's commitment point, so
 // the task's agent claim commits in the same transaction as the blueprint_run
 // row. Three arms — the stamp lands with the blueprint run, a refused stamp
-// does NOT roll the blueprint run back,
-// and a fenced replay re-stamps nothing.
+// does NOT roll the blueprint run back, and a fenced replay re-stamps
+// nothing.
 func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
