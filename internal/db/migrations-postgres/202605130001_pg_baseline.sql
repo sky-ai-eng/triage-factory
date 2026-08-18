@@ -38,11 +38,11 @@
 --      / unique here is this category, not a divergence.
 --   3. Attribution refs (creator_user_id and the like — the "who authored
 --      this" columns). Postgres FK-constrains these with ON DELETE CASCADE;
---      SQLite leaves them bare TEXT (or NO-ACTION on runs). Deliberate: local
---      mode is N=1 and the sentinel user is never deleted. NARROW scope — this
---      does NOT cover identity/ownership user_id PKs (user_settings,
---      user_github/jira_identities, memberships, org_memberships),
---      which carry the users(id) FK in BOTH dialects.
+--      SQLite leaves them bare TEXT (or NO-ACTION on conversations).
+--      Deliberate: local mode is N=1 and the sentinel user is never deleted.
+--      NARROW scope — this does NOT cover identity/ownership user_id PKs
+--      (user_settings, user_github/jira_identities, memberships,
+--      org_memberships), which carry the users(id) FK in BOTH dialects.
 --   4. Tables that exist in one dialect only. instance_config is SQLite-only
 --      (host port lives in container env under multi mode). sessions and
 --      project_knowledge are Postgres-only (multi-mode auth + shared KB).
@@ -1156,10 +1156,11 @@ CREATE TABLE public.prompts (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     model text DEFAULT ''::text NOT NULL,
     system_slug text,
-    -- deleted_at soft-deletes a prompt: the row + its runs stay (runs.prompt_id
-    -- is RESTRICT, so a hard DELETE on a prompt with run history would error);
-    -- request-facing reads filter deleted_at IS NULL, the ...System reads keep
-    -- resolving it for in-flight runs + past-run timelines. Load-bearing once
+    -- deleted_at soft-deletes a prompt: the row + its conversations stay
+    -- (conversations.prompt_id has no ON DELETE action, so a hard DELETE on a
+    -- prompt with conversation history would error); request-facing reads
+    -- filter deleted_at IS NULL, the ...System reads keep resolving it for
+    -- in-flight conversations + past-conversation timelines. Load-bearing once
     -- every new prompt is auto-wrapped as a 1-step blueprint (the step FK is
     -- RESTRICT), so hard-delete is impossible.
     deleted_at timestamp with time zone,
@@ -1229,16 +1230,16 @@ CREATE TABLE public.repositories (
 -- Name: artifacts; Type: TABLE; Schema: public; Owner: -
 --
 
--- artifacts (TFAC-455): the single durable, run-attributed, polymorphic
--- record of everything a run produces in an external system (a pushed
--- branch, a draft/open PR, a draft/submitted review, a Jira/Linear issue,
--- a comment). One row per external object; provider + kind discriminate
--- the shape. All capture writers UPSERT on (org_id, dedup_key) so the same
--- logical object is one row. Replaces the never-written run_artifacts
--- placeholder. team_id is denormalized from the run so reads scope by team
--- exactly like runs; conversation_id is nullable (ON DELETE SET NULL) so a row
--- survives a run purge for audit. state is per-kind lifecycle (domain
--- consts, no CHECK — extensible).
+-- artifacts (TFAC-455): the single durable, conversation-attributed,
+-- polymorphic record of everything a conversation produces in an external
+-- system (a pushed branch, a draft/open PR, a draft/submitted review, a
+-- Jira/Linear issue, a comment). One row per external object; provider +
+-- kind discriminate the shape. All capture writers UPSERT on
+-- (org_id, dedup_key) so the same logical object is one row. team_id is
+-- denormalized from the conversation so reads scope by team exactly like
+-- conversations; conversation_id is nullable (ON DELETE SET NULL) so a row
+-- survives a conversation purge for audit. state is per-kind lifecycle
+-- (domain consts, no CHECK — extensible).
 CREATE TABLE public.artifacts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     conversation_id uuid,
@@ -1513,8 +1514,8 @@ CREATE TABLE public.conversations (
     -- nothing else touches it.
     status text,
     model text,
-    -- sdk_session_id is the SDK-runtime resume handle — the union of the
-    -- former runs.session_id and projects.curator_session_id. Meaningless
+    -- sdk_session_id is the SDK-runtime resume handle, one column for every
+    -- conversation type (delegated and curator turns alike). Meaningless
     -- (and left NULL) under runtime='native', where the message rows are
     -- the resume state.
     sdk_session_id text,
@@ -2299,11 +2300,11 @@ ALTER TABLE ONLY public.conversation_memory
 
 
 --
--- Name: conversation_memory conversation_memory_run_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_memory conversation_memory_conversation_id_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.conversation_memory
-    ADD CONSTRAINT conversation_memory_run_id_key UNIQUE (conversation_id);
+    ADD CONSTRAINT conversation_memory_conversation_id_key UNIQUE (conversation_id);
 
 
 --
@@ -2961,9 +2962,10 @@ CREATE INDEX idx_conversations_parent ON public.conversations USING btree (paren
 -- Name: conversations_event_trigger_fence; Type: INDEX; Schema: public; Owner: -
 --
 -- Fired-fence: one event firing one trigger materializes at most
--- one run. Partial WHERE triggering_event_id IS NOT NULL so manual and
--- blueprint-step runs (NULL) never participate — multiple manual runs of one
--- task stay allowed, and two distinct event instances still fire independently.
+-- one conversation. Partial WHERE triggering_event_id IS NOT NULL so manual
+-- and blueprint-step conversations (NULL) never participate — multiple
+-- manual conversations on one task stay allowed, and two distinct event
+-- instances still fire independently.
 
 CREATE UNIQUE INDEX conversations_event_trigger_fence ON public.conversations USING btree (triggering_event_id, trigger_id) WHERE (triggering_event_id IS NOT NULL);
 
@@ -3586,11 +3588,11 @@ ALTER TABLE ONLY public.external_actions
 
 
 --
--- Name: external_actions external_actions_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: external_actions external_actions_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.external_actions
-    ADD CONSTRAINT external_actions_run_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
+    ADD CONSTRAINT external_actions_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
 
 
 --
@@ -3602,15 +3604,16 @@ ALTER TABLE ONLY public.artifacts
 
 
 --
--- Name: artifacts artifacts_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: artifacts artifacts_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
--- Single-column ref to runs(id) with ON DELETE SET NULL: the artifact
--- outlives a purged run for the audit ledger. A composite (conversation_id, org_id)
--- ref like the other run children can't SET NULL here because org_id is
--- NOT NULL — and the artifact's own org_id_fkey already pins the org.
+-- Single-column ref to conversations(id) with ON DELETE SET NULL: the
+-- artifact outlives a purged conversation for the audit ledger. A composite
+-- (conversation_id, org_id) ref like the other conversation children can't
+-- SET NULL here because org_id is NOT NULL — and the artifact's own
+-- org_id_fkey already pins the org.
 ALTER TABLE ONLY public.artifacts
-    ADD CONSTRAINT artifacts_run_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
+    ADD CONSTRAINT artifacts_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
 
 
 --
@@ -3638,11 +3641,11 @@ ALTER TABLE ONLY public.conversation_memory
 
 
 --
--- Name: conversation_memory conversation_memory_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_memory conversation_memory_conversation_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.conversation_memory
-    ADD CONSTRAINT conversation_memory_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT conversation_memory_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3662,11 +3665,11 @@ ALTER TABLE ONLY public.conversation_memory_entities
 
 
 --
--- Name: conversation_memory_entities conversation_memory_entities_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_memory_entities conversation_memory_entities_conversation_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.conversation_memory_entities
-    ADD CONSTRAINT conversation_memory_entities_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT conversation_memory_entities_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3705,11 +3708,11 @@ ALTER TABLE ONLY public.conversation_worktrees
 
 
 --
--- Name: conversation_worktrees conversation_worktrees_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_worktrees conversation_worktrees_conversation_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.conversation_worktrees
-    ADD CONSTRAINT conversation_worktrees_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT conversation_worktrees_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3777,8 +3780,9 @@ ALTER TABLE ONLY public.conversations
 -- Name: conversations conversations_triggering_event_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 -- Composite FK mirrors pending_firings.triggering_event_id. NULL
--- triggering_event_id (manual / blueprint-step runs) skips the check under
--- MATCH SIMPLE, so only event-fired runs are tied to a real event row.
+-- triggering_event_id (manual / blueprint-step conversations) skips the
+-- check under MATCH SIMPLE, so only event-fired conversations are tied to a
+-- real event row.
 
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
@@ -5752,8 +5756,8 @@ ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON T
 --
 -- blueprint_steps is the ordered step list; blueprint_runs is the in-flight
 -- instance for a multi-step blueprint (sharing one worktree, each step's
--- terminal runs.outcome driving advancement). Per-step runtime state stays
--- on runs (linked via runs.blueprint_run_id);
+-- terminal conversations.outcome driving advancement). Per-step runtime
+-- state stays on conversations (linked via conversations.blueprint_run_id);
 -- blueprint-wide abort/complete state lives on blueprint_runs.
 --
 -- Multi-tenant pattern matches the rest of the baseline: composite FKs
@@ -5851,23 +5855,24 @@ CREATE TABLE public.blueprint_runs (
     -- (system-emitted by the router via the admin pool); manual
     -- runs carry the human delegator. The matching
     -- blueprint_runs_creator_matches_trigger_type CHECK below pairs the
-    -- two so the seeder can't drift. Mirrors the runs table's
-    -- runs_creator_matches_trigger_type pattern.
+    -- two so the seeder can't drift. Mirrors the conversations table's
+    -- conversations_creator_matches_trigger_type pattern.
     creator_user_id uuid,
     blueprint_id text NOT NULL,
     task_id uuid NOT NULL,
     trigger_type text NOT NULL,
     trigger_id uuid,
     -- triggering_event_id is the event instance that auto-fired this blueprint
-    -- run (NULL for manual). The blueprint_run is the firing unit, so the replay
-    -- fence (blueprint_runs_event_trigger_fence below) lives here, relocated off
-    -- runs. Step runs are not separately fenced (orchestrator-internal).
+    -- run (NULL for manual). The blueprint_run is the firing unit, so the
+    -- replay fence (blueprint_runs_event_trigger_fence below) lives here —
+    -- step conversations are not separately fenced (orchestrator-internal).
     triggering_event_id uuid,
     -- actor_agent_id is the bot that executes this blueprint run, resolved once
     -- at the delegation entry point and frozen here at mint (alongside
-    -- creator_user_id / trigger_id — the "who/why" provenance axes). Every step
-    -- run inherits it onto runs.actor_agent_id, so the execution attribution is
-    -- stable across all steps and immune to a later task-claim change (a user
+    -- creator_user_id / trigger_id — the "who/why" provenance axes). Every
+    -- step conversation inherits it onto conversations.actor_agent_id, so the
+    -- execution attribution is stable across all steps and immune to a later
+    -- task-claim change (a user
     -- takeover clears tasks.claimed_by_agent_id but does not rewrite who ran the
     -- bot's steps). Nullable: a run minted before the org agent bootstrapped, or
     -- whose agent row was later deleted (ON DELETE SET NULL), carries no actor.
@@ -6011,9 +6016,9 @@ ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_task_fkey            FOREIGN KEY (task_id, org_id)         REFERENCES public.tasks(id, org_id);
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_trigger_fkey         FOREIGN KEY (trigger_id, org_id)      REFERENCES public.event_handlers(id, org_id);
--- Composite FK mirrors runs.triggering_event_id. NULL triggering_event_id
--- (manual blueprint runs) skips the check; org_id is pinned so a cross-org
--- event reference is impossible.
+-- Composite FK mirrors conversations.triggering_event_id. NULL
+-- triggering_event_id (manual blueprint runs) skips the check; org_id is
+-- pinned so a cross-org event reference is impossible.
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
 -- Composite (id, org_id) FK like conversations_actor_agent_fkey: the actor must belong to
@@ -6022,10 +6027,10 @@ ALTER TABLE ONLY public.blueprint_runs
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_actor_agent_fkey FOREIGN KEY (actor_agent_id, org_id) REFERENCES public.agents(id, org_id) ON DELETE SET NULL;
 
--- fired_run_id records the blueprint_run a firing produced (the firing unit is
--- the blueprint_run now), so it references blueprint_runs, not runs — the
--- spawner returns the blueprint_run id synchronously at fire time, before any
--- step run row exists. Must live after blueprint_runs is created.
+-- fired_run_id records the blueprint_run a firing produced (the firing unit
+-- is the blueprint_run), so it references blueprint_runs — the spawner
+-- returns the blueprint_run id synchronously at fire time, before any step
+-- conversation row exists. Must live after blueprint_runs is created.
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_fired_run_id_org_id_fkey FOREIGN KEY (fired_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
 
@@ -6067,7 +6072,7 @@ CREATE POLICY blueprint_steps_all ON public.blueprint_steps FOR ALL
 -- event-triggered runs. The blueprint_runs_creator_matches_trigger_type CHECK
 -- pairs trigger_type with creator nullability: trigger_type='event' rows have
 -- creator_user_id NULL (system-emitted via the admin pool by the router /
--- spawner). Per-command split mirrors the runs table.
+-- spawner). Per-command split mirrors the conversations table.
 CREATE POLICY blueprint_runs_select ON public.blueprint_runs FOR SELECT
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
@@ -6659,7 +6664,7 @@ CREATE TABLE public.event_queue (
     enqueued_at  timestamp with time zone NOT NULL DEFAULT now(),
     claimed_at   timestamp with time zone,
     processed_at timestamp with time zone,
-    -- executor_id / boot_epoch (TFAC-578) are runs.executor_id/boot_epoch's
+    -- executor_id / boot_epoch (TFAC-578) are claims.executor_id/boot_epoch's
     -- twins: stamped atomically at claim (pending -> processing) so
     -- ResetProcessing can self-sweep only its own instance's orphaned rows
     -- (executor_id = self AND boot_epoch < the current boot's epoch), never
@@ -8156,8 +8161,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.marketplace_installs TO tf_
 -- the objective social-proof metric votes/installs can't fake: how much real
 -- work listings' copies have actually done, and how well. Copy linkage is
 -- marketplace_installs.root_object_id (TFAC-535: no provenance columns on
--- prompts/blueprints), joined to runs.prompt_id for kind=prompt listings and
--- blueprint_runs.blueprint_id for kind=blueprint listings.
+-- prompts/blueprints), joined to conversations.prompt_id for kind=prompt
+-- listings and blueprint_runs.blueprint_id for kind=blueprint listings.
 --
 -- Written exclusively by MarketplaceStore.RecomputeStatsSystem (admin pool,
 -- bypasses RLS) — a cross-team, cross-run aggregate can't be computed at
@@ -8209,8 +8214,8 @@ GRANT SELECT ON TABLE public.marketplace_listing_stats TO tf_app;
 -- purpose — every TF process registers (control pods too, for
 -- deployment-wide visibility: versions, lease holder, health), not just
 -- executors; "executor" stays the *role* name everywhere else
--- (runs.executor_id keeps its shipped meaning: the id of the instance
--- acting as a run's executor).
+-- (claims.executor_id keeps its shipped meaning: the id of the instance
+-- driving a claimed engagement).
 --
 -- id is text, not uuid: it is minted OUTSIDE Postgres, by a file under
 -- <TF_STATE_ROOT>/instance-id (internal/instance) read/created once per
@@ -8255,7 +8260,7 @@ CREATE TABLE public.instances (
     -- restart on purpose, this one must NOT (an old-epoch key sealing a
     -- bundle nobody can decrypt anymore is exactly the crash window
     -- TFAC-614's epoch check exists to catch). NULL for a control/all row
-    -- that never provisions or claims runs.
+    -- that never provisions or claims conversations.
     pubkey             text
 );
 
@@ -8479,10 +8484,10 @@ REVOKE ALL ON public.instance_stats FROM anon, authenticated, service_role;
 
 -- sandbox_stats: the per-sandbox resource series — one row per live jail per
 -- sampler tick, appended by the executor's existing instance-stat sampler and
--- read by the per-run usage-over-time surface.
+-- read by the per-conversation usage-over-time surface.
 --
--- This is the SHAPE of a run's consumption while it runs, which the claim's
--- end-state actuals (claims.peak_mem_mb / claims.cpu_usec, read once at
+-- This is the SHAPE of an engagement's consumption while it runs, which the
+-- claim's end-state actuals (claims.peak_mem_mb / claims.cpu_usec, read once at
 -- teardown) cannot give. The two disagree slightly by design: a periodic
 -- sampler misses the sub-minute spikes the kernel high-watermark catches. The
 -- series is shape, the teardown snapshot is truth, and they are never
@@ -8653,8 +8658,8 @@ REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
 
 -- conversation_signals (TFAC-585): the cross-pod run-control outbox — a control pod's
 -- delivery of cancel/interrupt/steer/permission/inject to the executor that
--- owns a run's live process (runs.executor_id), for the case where the
--- local process registry (Spawner.procs) misses. See
+-- owns the conversation's live process (claims.executor_id), for the case
+-- where the local process registry (Spawner.procs) misses. See
 -- docs/for-agents/specs/horizontal-scaling/README.md §5.2 for the full design
 -- (RunController's intended second implementation).
 --
@@ -8679,13 +8684,13 @@ REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
 -- body — riding the outbox row, not the NOTIFY payload, so there is no
 -- 8 KB size concern. `target` is the executor id (internal/instance,
 -- text — see instances.id above) the signal is delivered to; no FK, same
--- as runs.executor_id/event_queue.executor_id (a tombstoned/GC'd instance
+-- as claims.executor_id/event_queue.executor_id (a tombstoned/GC'd instance
 -- leaves a signal to expire harmlessly, never cascades).
 --
--- Acked rows are purged after 24h (TF_RUN_SIGNAL_PURGE_AFTER, audit
--- convenience window); unacked rows simply expire harmlessly if the owner
--- never returns — the fleet reaper (TFAC-586) owns a dead executor's runs,
--- not this table.
+-- Acked rows are purged after 24h (TF_CONVERSATION_SIGNAL_PURGE_AFTER,
+-- audit convenience window); unacked rows simply expire harmlessly if the
+-- owner never returns — the fleet reaper (TFAC-586) owns a dead executor's
+-- conversations, not this table.
 CREATE TABLE public.conversation_signals (
     id         bigint GENERATED BY DEFAULT AS IDENTITY,
     org_id     uuid NOT NULL,
@@ -8705,12 +8710,12 @@ ALTER TABLE ONLY public.conversation_signals
 ALTER TABLE ONLY public.conversation_signals
     ADD CONSTRAINT conversation_signals_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.conversation_signals
-    ADD CONSTRAINT conversation_signals_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT conversation_signals_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
--- The owner's apply-loop scan: unacked rows targeting me, oldest id first
--- (§5.2's "apply signals per run in id order" — ascending id across the
--- whole target is a superset ordering that trivially preserves per-run
--- order too).
+-- The owner's apply-loop scan: unacked rows targeting me, oldest id first —
+-- signals apply per conversation in id order, and ascending id across the
+-- whole target is a superset ordering that trivially preserves
+-- per-conversation order too (§5.2).
 CREATE INDEX idx_conversation_signals_target_unacked ON public.conversation_signals USING btree (target, id) WHERE (acked_at IS NULL);
 -- The 24h purge sweep.
 CREATE INDEX idx_conversation_signals_acked ON public.conversation_signals USING btree (acked_at) WHERE (acked_at IS NOT NULL);
@@ -8836,11 +8841,11 @@ ALTER TABLE ONLY public.messages
     ADD CONSTRAINT messages_claim_id_fkey FOREIGN KEY (claim_id) REFERENCES public.claims(id) ON DELETE SET NULL;
 
 
--- claim_credentials: the sealed per-claim credential bundle channel — the
--- unification of the former run_credentials and curator_turn_credentials,
--- which were column-for-column identical because the system always sealed
--- per engagement. An executor claims a conversation and parks the claim in
--- phase='awaiting_credentials'; the brain resolves the engagement's
+-- claim_credentials: the sealed per-claim credential bundle channel — one
+-- channel for both surfaces (delegated engagements and curator turns), one
+-- sealed bundle per engagement. An executor claims a conversation and parks
+-- the claim in phase='awaiting_credentials'; the brain resolves the
+-- engagement's
 -- LLM/GitHub/Jira credentials, seals them (credseal, an X25519 sealed box)
 -- to the claim's published cred_pubkey, and writes exactly one row here.
 -- One row per claim (PK claim_id), replaced wholesale on every write —
@@ -9155,8 +9160,8 @@ GRANT SELECT, INSERT, DELETE ON TABLE public.instance_stats TO tf_system;
 -- its twin, this one only ever has work to do where the jails are — the
 -- executor, which is also the only pod whose admin pool binds this role — so
 -- there is no other pod whose success could stand in for it. SELECT for the
--- per-run usage read, granted here for the instance_stats reason: the posture
--- matches regardless of which admin role a pod's pool binds.
+-- per-conversation usage read, granted here for the instance_stats reason:
+-- the posture matches regardless of which admin role a pod's pool binds.
 GRANT SELECT, INSERT, DELETE ON TABLE public.sandbox_stats TO tf_system;
 -- operators: the deployment-operator identity. The fleet gate + the operator
 -- CLI read/write it via the admin pool; granted to tf_system so the operator
@@ -9164,7 +9169,8 @@ GRANT SELECT, INSERT, DELETE ON TABLE public.sandbox_stats TO tf_system;
 GRANT SELECT, INSERT, DELETE ON TABLE public.operators TO tf_system;
 -- placement_overrides (TFAC-587): SELECT-only. The dispatcher's post-step
 -- reactor enqueues the next blueprint step on the executor, and the
--- placement stamp it computes reads any override for the run's key. Writes
+-- placement stamp it computes reads any override for the conversation's
+-- placement key. Writes
 -- (pin / replica count) are an operator action on a control pod, never the
 -- executor's path.
 GRANT SELECT ON TABLE public.placement_overrides TO tf_system;
@@ -9212,8 +9218,9 @@ GRANT SELECT ON TABLE public.system_llm_runs TO tf_system;
 -- serves the sidecar's relayed `exec slack` calls against these, resolving an
 -- authorization decision or a workspace IDENTITY, never a bot token (that rides
 -- the sealed bundle). All read-only — the executor authorizes and selects, it
--- never mutates Slack config: team_slack_channels gates whether the run's team
--- tracks the channel (TracksChannelSystem), slack_channels maps a channel to its
+-- never mutates Slack config: team_slack_channels gates whether the
+-- conversation's team tracks the channel (TracksChannelSystem),
+-- slack_channels maps a channel to its
 -- workspace (Channels.GetSystem), org_slack_workspaces picks which connected app
 -- identity to act as (Workspaces.GetByWorkspaceAppSystem / ListAllSystem).
 GRANT SELECT ON TABLE public.team_slack_channels TO tf_system;
