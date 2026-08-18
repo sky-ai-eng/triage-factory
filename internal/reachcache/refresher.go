@@ -194,18 +194,39 @@ func (r *Refresher) RunOrg(ctx context.Context, orgID string, force bool) (bool,
 // pass is a decision about the same enumeration a write would have dated, so
 // it earns the same quiet period — and a stamp can never outlast a later
 // successful write's freshness, because the TTL gate answers first for as long
-// as that write is fresh.
+// as that write is fresh. An expired stamp is deleted on the read that finds
+// it expired: it has answered its last question.
 func (r *Refresher) recentlyDeclined(orgID string) bool {
 	r.declinedMu.Lock()
 	defer r.declinedMu.Unlock()
 	at, ok := r.declined[orgID]
-	return ok && r.now().Sub(at) < r.ttl
+	if !ok {
+		return false
+	}
+	if r.now().Sub(at) >= r.ttl {
+		delete(r.declined, orgID)
+		return false
+	}
+	return true
 }
 
+// markDeclined stamps orgID's declined pass, and sweeps every expired stamp
+// while it holds the lock. The sweep is what keeps the map bounded: entries
+// are only ever added here, and an org that never refreshes again never
+// revisits its own stamp — so without it, a long-lived process would retain a
+// stamp for every org that ever declined, long after those stamps stopped
+// answering anything. Pruning at the growth point caps the map at the orgs
+// declined within roughly one TTL window.
 func (r *Refresher) markDeclined(orgID string) {
 	r.declinedMu.Lock()
 	defer r.declinedMu.Unlock()
-	r.declined[orgID] = r.now()
+	now := r.now()
+	for org, at := range r.declined {
+		if now.Sub(at) >= r.ttl {
+			delete(r.declined, org)
+		}
+	}
+	r.declined[orgID] = now
 }
 
 func (r *Refresher) clearDeclined(orgID string) {

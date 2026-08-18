@@ -139,6 +139,40 @@ func TestRunOrgDeclinedPassArmsTheBackoff(t *testing.T) {
 	}
 }
 
+// Expired stamps must be removed, not just ignored: entries only ever appear
+// on a decline, and an org that never refreshes again never revisits its own —
+// so without pruning, a long-lived process would grow the map with every org
+// that ever declined. Removal has two doors, and each gets pinned: the read
+// that finds a stamp expired deletes it, and a decline for any org sweeps
+// every other org's expired stamp.
+func TestDeclinedStampsAreRemovedOnceExpired(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	r := &Refresher{
+		declined: make(map[string]time.Time),
+		ttl:      time.Hour,
+		now:      func() time.Time { return now },
+	}
+
+	r.markDeclined("org-1")
+	now = now.Add(r.ttl)
+	if r.recentlyDeclined("org-1") {
+		t.Fatal("stamp outlived the TTL window")
+	}
+	if _, ok := r.declined["org-1"]; ok {
+		t.Error("recentlyDeclined left an expired stamp behind")
+	}
+
+	r.markDeclined("org-1")
+	now = now.Add(r.ttl)
+	r.markDeclined("org-2")
+	if _, ok := r.declined["org-1"]; ok {
+		t.Error("another org's decline left an expired stamp behind")
+	}
+	if !r.recentlyDeclined("org-2") {
+		t.Error("the sweep removed the fresh stamp it was stamping")
+	}
+}
+
 func TestRunOrgDeclinedBackoffExpiresWithTheTTL(t *testing.T) {
 	ctx := context.Background()
 	var truncate, pages int32
