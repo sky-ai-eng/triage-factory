@@ -7,7 +7,7 @@ Postgres. Same binary, same mechanism from N=1 self-host to an N-pod
 fleet; no k8s, no service mesh, no pod-to-pod RPC, no shared filesystem.
 
 Status: **accepted design** (this is the "dedicated design session" the
-epic called for). Tracked as **TFAC-71**. Builds on the run-queue /
+epic called for). Tracked as **TFAC-71**. Builds on the conversation-queue /
 live-run / steering line (TFAC-13 → TFAC-305 → TFAC-309), the memory
 guardrail (TFAC-552), the curator storage design (TFAC-60/61), and the
 sandbox-fleet profiles spec (`docs/for-agents/specs/sandbox-fleet/`).

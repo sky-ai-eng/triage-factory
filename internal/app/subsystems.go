@@ -654,7 +654,7 @@ func (a *App) buildRouting() {
 	a.router.SetEventPublisher(a.bus)
 	// Ownership-scoped boot recovery (TFAC-578): the router's event_queue
 	// self-sweep needs the same persistent instance-registry identity the
-	// spawner's run-queue self-sweep already uses (registerInstance minted it
-	// at boot, above).
+	// spawner's conversation-queue self-sweep already uses (registerInstance
+	// minted it at boot, above).
 	a.router.SetExecutorID(a.identity.ID, a.bootEpoch)
 }

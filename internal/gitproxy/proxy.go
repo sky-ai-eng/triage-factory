@@ -197,9 +197,9 @@ type Config struct {
 	// in via this flag.
 	AllowNonLoopback bool
 
-	// ConversationID is the run identifier this proxy serves. Carried for
-	// future per-run policy / observability; the proxy itself does not
-	// branch on it today.
+	// ConversationID is the conversation this proxy serves. Carried for
+	// future per-conversation policy / observability; the proxy itself does
+	// not branch on it today.
 	ConversationID string
 
 	// IncomingToken, when non-empty, is the per-run secret every request

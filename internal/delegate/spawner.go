@@ -302,7 +302,7 @@ type Spawner struct {
 	// SetCuratorTurnDriver). nil where no curator runtime is built.
 	curatorTurnDriver CuratorTurnDriver
 
-	dispatchWake          chan struct{}                                     // best-effort latency nudge for the run-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
+	dispatchWake          chan struct{}                                     // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
 	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
 	eventPublisher        EventPublisher                                    // nil-safe; set post-construction via SetEventPublisher — mirrors run status/activity onto the bus (TFAC-592)
 	waitForClassification func(ctx context.Context, orgID, entityID string) // hook that blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. orgID scopes the classification read to the run's tenant — the read goes through the org-scoped admin-pool store, not a raw query. Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.

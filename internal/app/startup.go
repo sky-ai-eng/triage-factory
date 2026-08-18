@@ -84,8 +84,9 @@ func (a *App) startWorkers(ctx context.Context) {
 		a.startKnowledgeWatcher()
 	}
 
-	// Dispatcher workers (executor/all): the run-queue dispatcher (claims +
-	// executes queued runs, reconciling crash-stranded runs on boot) and the
+	// Dispatcher workers (executor/all): the conversation-queue dispatcher
+	// (claims + executes queued conversations, reconciling crash-stranded
+	// conversations on boot) and the
 	// workspace-snapshot retention reaper (bounds durable parked/aborted-run
 	// snapshot blobs by TTL; a no-op when no blob store is wired). A control
 	// pod builds the spawner but never claims delegated runs, so neither
@@ -102,9 +103,9 @@ func (a *App) startWorkers(ctx context.Context) {
 	// self-holds the brain — nothing ever relays into a local process, so
 	// there is no reason to open a Postgres LISTEN connection at all.
 	// startCtlListener (ctl.go) is the ONE tf_ctl LISTEN per pod, every
-	// role: it routes run-signal doorbells to the spawner, session kicks to
-	// the WS backplane, and trigger/PollSoon relays to handleCtlMessage
-	// (which holder-gates them).
+	// role: it routes conversation-signal doorbells to the spawner, session
+	// kicks to the WS backplane, and trigger/PollSoon relays to
+	// handleCtlMessage (which holder-gates them).
 	if runmode.Current() == runmode.ModeMulti {
 		a.startCtlListener(ctx)
 		// The signal apply loop only makes sense on dispatcher-capable

@@ -32,9 +32,10 @@ type fleetQueueShareDTO struct {
 	AtCap             bool   `json:"at_cap"`
 }
 
-// handleFleetQueue surfaces one org's run-queue share against its concurrency
-// cap: active vs queued runs, the configured cap, and whether the org is at cap
-// (its queued runs invisible to claims until an active one finishes). This is
+// handleFleetQueue surfaces one org's conversation-queue share against its
+// concurrency cap: active vs queued runs, the configured cap, and whether the
+// org is at cap (its queued runs invisible to claims until an active one
+// finishes). This is
 // the org-facing read-out of the per-org cap + fair-claim feature — an org
 // admin (or the org owner) checking their own tenant's standing.
 //

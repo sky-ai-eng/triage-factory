@@ -321,10 +321,11 @@ type Config struct {
 	// never the production shape — both modes supply it.
 	AuthorizeWrite AuthorizeWrite
 
-	// ConversationID names the run this injector serves, for log attribution only. It is
-	// never sent upstream and never reaches an audit row — those are attributed
-	// by the orchestrator from its own run identity, never from anything the
-	// sidecar names. Empty is fine; it costs a log line its run.
+	// ConversationID names the conversation this injector serves, for log
+	// attribution only. It is never sent upstream and never reaches an audit
+	// row — those are attributed by the orchestrator from its own conversation
+	// identity, never from anything the sidecar names. Empty is fine; it costs
+	// a log line its conversation.
 	ConversationID string
 
 	// AllowNonLoopback opts into binding a non-loopback address (the veth IP the

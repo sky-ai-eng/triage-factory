@@ -16,7 +16,7 @@ import (
 // per consuming subsystem). dispatchCtl routes each payload by its JSON
 // "kind" to the subsystem that owns it:
 //
-//	"new"/"ack"           → the spawner's run-signal doorbells (TFAC-585)
+//	"new"/"ack"           → the spawner's conversation-signal doorbells (TFAC-585)
 //	"trigger"/"pollsoon"  → the brain trigger/PollSoon relay (TFAC-583),
 //	                        holder-gated inside handleCtlMessage
 //	"kick"                → the WS backplane's cross-pod session kick

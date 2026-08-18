@@ -16,8 +16,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 )
 
-// reaperFixture is one claimed run + its owning blueprint_run + the
-// executor instance that (nominally) owns it, ready for a test to
+// reaperFixture is one claimed conversation + its owning blueprint_run +
+// the executor instance that (nominally) owns it, ready for a test to
 // manipulate (backdate the heartbeat, bump attempts, request a cancel)
 // before calling ReapDeadExecutors.
 type reaperFixture struct {
@@ -28,8 +28,8 @@ type reaperFixture struct {
 }
 
 // seedReaperFixture mints an org, a blueprint/task/prompt chain, a running
-// blueprint_run, and one claimed run under a freshly-registered executor
-// instance — the live claim the reaper will find.
+// blueprint_run, and one claimed conversation under a freshly-registered
+// executor instance — the live claim the reaper will find.
 //
 // priorOutcomes is the claim history to lay down behind that live claim,
 // oldest first, one released claim per entry. Every entry is produced by the
@@ -426,13 +426,13 @@ func TestReapDeadExecutors_FreshHeartbeatNeverReaped(t *testing.T) {
 	}
 }
 
-// TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID pins
+// TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesClaimsExecutorID pins
 // the registry GC: only rows past staleAfter are deleted, and the claim
 // that referenced the GC'd instance survives with its executor_id intact —
 // claims.executor_id carries no FK to instances (verified separately by
 // TestClaimsExecutorID_HasNoForeignKeyToInstances), so a delete here can
 // never cascade into audit history.
-func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID(t *testing.T) {
+func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesClaimsExecutorID(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()

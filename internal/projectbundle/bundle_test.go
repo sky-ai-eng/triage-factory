@@ -454,7 +454,7 @@ func TestDecodeZipJSONLines_EnforcesRowLimit(t *testing.T) {
 	})
 	zf := entries[curatorClaimsPath]
 	if zf == nil {
-		t.Fatal("missing curator requests entry")
+		t.Fatal("missing curator claims entry")
 	}
 	var seen int
 	err := decodeZipJSONLines(

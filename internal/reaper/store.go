@@ -371,10 +371,10 @@ func (s *pgStore) FailBlueprintRunsOrphanedAtMint(ctx context.Context, grace tim
 func (s *pgStore) CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error) {
 	// A home is dead when its instances row is missing (GC'd or never
 	// registered) or its heartbeat is older than the threshold — the same
-	// missing-or-stale predicate ReapDeadExecutors uses for a run's executor.
-	// An outcome/error release only: the messages ledger already holds
-	// whatever the stranded turn streamed, and a turn whose home died never
-	// reported a cost lump to settle.
+	// missing-or-stale predicate ReapDeadExecutors uses for a conversation's
+	// executor. An outcome/error release only: the messages ledger already
+	// holds whatever the stranded turn streamed, and a turn whose home died
+	// never reported a cost lump to settle.
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE claims
 		SET released_at = now(),

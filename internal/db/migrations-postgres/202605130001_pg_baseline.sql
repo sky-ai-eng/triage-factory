@@ -405,15 +405,16 @@ $$;
 --
 -- An archived team (teams.deleted_at IS NOT NULL) is write-blocked end-to-end
 -- (TFAC-448): the membership join to teams adds deleted_at IS NULL, so every
--- team-scoped write policy keyed on user_can_write_team (tasks, runs, prompts,
--- blueprints, event_handlers, projects, team_agents) — plus the
+-- team-scoped write policy keyed on user_can_write_team (tasks, conversations,
+-- prompts, blueprints, event_handlers, projects, team_agents) — plus the
 -- RequireTeamWrite / RequireTaskWrite handler gates that call it — reject the
 -- write at the row level. This is the DB backstop that covers the task-scoped
 -- mutations (swipe / snooze / requeue / advance) whose team is derived from the
 -- task, not the URL. The team-settings family gates on user_is_team_admin
 -- instead, so those handlers add the explicit authz.VerifyTeamNotArchived gate.
--- Archive itself stamps deleted_at via teams_update (org-admin) and reaps runs
--- on the admin pool (BYPASSRLS), so neither path is blocked by this filter.
+-- Archive itself stamps deleted_at via teams_update (org-admin) and reaps
+-- conversations on the admin pool (BYPASSRLS), so neither path is blocked by
+-- this filter.
 
 -- +goose StatementBegin
 CREATE FUNCTION tf.user_can_write_team(target_team uuid) RETURNS boolean
@@ -617,9 +618,10 @@ CREATE TABLE public.access_change_log (
 -- can't diverge from the action. action is a free-text discriminator (no CHECK —
 -- extensible, like access_change_log); credential names the org credential used
 -- (github_app | jira_org); from_state/to_state carry a transition's endpoints;
--- conversation_id is the producing run (the agent's, or the drafter's for an approval, FK
--- ON DELETE SET NULL so it outlives a run purge); actor_user_id is the human
--- authorizer/initiator (NULL for an autonomous system write). dedup_key is the
+-- conversation_id is the producing conversation (the agent's, or the drafter's
+-- for an approval, FK ON DELETE SET NULL so it outlives a conversation purge);
+-- actor_user_id is the human authorizer/initiator (NULL for an autonomous
+-- system write). dedup_key is the
 -- natural per-action key — a branch push (the one true double-capture case: the
 -- pre-push hook AND the git-proxy backstop both observe it) carries a
 -- deterministic key so the twin collapses under ON CONFLICT DO NOTHING; every
@@ -1576,7 +1578,7 @@ CREATE TABLE public.conversations (
     CONSTRAINT conversations_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT conversations_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
     -- A 'blueprint'-origin conversation carries its full parentage
-    -- (blueprint_run + task + prompt), preserving the runs-era invariant.
+    -- (blueprint_run + task + prompt).
     CONSTRAINT conversations_origin_requires_parents CHECK (((origin = 'blueprint'::text AND blueprint_run_id IS NOT NULL AND task_id IS NOT NULL AND prompt_id IS NOT NULL) OR (origin <> 'blueprint'::text)))
 );
 
@@ -1825,7 +1827,7 @@ CREATE TABLE public.teams (
     -- Request-facing team reads filter deleted_at IS NULL (the team vanishes
     -- from selectors); the ...System reads omit the filter so the archive /
     -- restore / preview paths + in-flight reaping still resolve it. The team's
-    -- durable work (tasks, runs, memory) is never hard-deleted.
+    -- durable work (tasks, conversations, memory) is never hard-deleted.
     deleted_at timestamp with time zone,
     -- shipped_defaults_backfilled_at is the durable per-team marker that the
     -- one-time grandfather backfill preceding the boot-time shipped-defaults
@@ -2437,8 +2439,8 @@ ALTER TABLE ONLY public.teams
 -- it is declared here so it precedes both.
 --
 -- This is the schema's established shape for "these two rows must belong to
--- the same tenant": agents, entities, runs, tasks and blueprint_runs all pair
--- an (id, org_id) unique constraint with a composite foreign key.
+-- the same tenant": agents, entities, conversations, tasks and blueprint_runs
+-- all pair an (id, org_id) unique constraint with a composite foreign key.
 ALTER TABLE ONLY public.teams
     ADD CONSTRAINT teams_id_org_id_key UNIQUE (id, org_id);
 
@@ -2734,10 +2736,10 @@ CREATE INDEX idx_external_actions_team_occurred ON public.external_actions USING
 
 
 --
--- Name: idx_external_actions_run; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_external_actions_conversation; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_external_actions_run ON public.external_actions USING btree (conversation_id);
+CREATE INDEX idx_external_actions_conversation ON public.external_actions USING btree (conversation_id);
 
 
 --
@@ -2765,10 +2767,10 @@ CREATE INDEX idx_artifacts_org_created ON public.artifacts USING btree (org_id, 
 
 
 --
--- Name: idx_artifacts_run; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_artifacts_conversation; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_artifacts_run ON public.artifacts USING btree (conversation_id);
+CREATE INDEX idx_artifacts_conversation ON public.artifacts USING btree (conversation_id);
 
 
 --
@@ -2786,10 +2788,10 @@ CREATE INDEX idx_conversation_memory_entity_blueprint ON public.conversation_mem
 
 
 --
--- Name: idx_conversation_memory_run; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_conversation_memory_conversation; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_conversation_memory_run ON public.conversation_memory USING btree (conversation_id);
+CREATE INDEX idx_conversation_memory_conversation ON public.conversation_memory USING btree (conversation_id);
 
 
 --
@@ -2826,10 +2828,10 @@ CREATE INDEX idx_messages_user ON public.messages USING btree (user_id) WHERE (u
 
 
 --
--- Name: idx_conversation_worktrees_run; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_conversation_worktrees_conversation; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_conversation_worktrees_run ON public.conversation_worktrees USING btree (conversation_id);
+CREATE INDEX idx_conversation_worktrees_conversation ON public.conversation_worktrees USING btree (conversation_id);
 
 
 --
@@ -3578,8 +3580,9 @@ ALTER TABLE ONLY public.access_change_log
 -- Name: external_actions external_actions_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
--- org_id CASCADE (drop an org's log with the org); conversation_id SET NULL (the action
--- outlives a purged run for the audit trail, like artifacts). team_id and
+-- org_id CASCADE (drop an org's log with the org); conversation_id SET NULL
+-- (the action outlives a purged conversation for the audit trail, like
+-- artifacts). team_id and
 -- actor_user_id are deliberately FK-free so the audit row outlives the team/user
 -- it references — an audit log must outlive its subjects (same rule as
 -- access_change_log).
@@ -4606,11 +4609,12 @@ CREATE POLICY external_actions_all ON public.external_actions USING (((org_id = 
 
 ALTER TABLE public.artifacts ENABLE ROW LEVEL SECURITY;
 
--- artifacts mirror the runs team-visibility branch: team-scoped read via
--- team_id, the same write pool/scope runs use. artifacts carry no
+-- artifacts mirror the conversations team-visibility branch: team-scoped read
+-- via team_id, the same write pool/scope conversations use. artifacts carry no
 -- private/org visibility (no visibility / creator_user_id columns), so the
--- policies are the team predicates from runs, swapped onto this table —
--- user_in_team for SELECT, user_can_write_team for INSERT/UPDATE/DELETE.
+-- policies are the team predicates from conversations, swapped onto this
+-- table — user_in_team for SELECT, user_can_write_team for
+-- INSERT/UPDATE/DELETE.
 
 --
 -- Name: artifacts artifacts_delete; Type: POLICY; Schema: public; Owner: -
@@ -5960,7 +5964,7 @@ CREATE INDEX idx_conversations_queued_preferred ON public.conversations (preferr
 -- idx_claims_one_active (partial on released_at IS NULL, bounded by fleet
 -- capacity) — there is no conversation-side status to index for it any more.
 -- idx_conversations_org_status still covers the org-scoped outcome reads.
--- Replay fence (relocated from runs): one event firing one trigger materializes
+-- Replay fence: one event firing one trigger materializes
 -- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
 -- manual blueprint runs (NULL) never participate.
 CREATE UNIQUE INDEX blueprint_runs_event_trigger_fence ON public.blueprint_runs (triggering_event_id, trigger_id) WHERE (triggering_event_id IS NOT NULL);
@@ -7125,9 +7129,9 @@ CREATE UNIQUE INDEX sso_connections_provider_uniq ON public.sso_connections (pro
 -- (id, org_id) is trivially unique (id is already the PK), declared so
 -- sso_domains can FK the *pair* and pin a domain to its connection's own org
 -- at the schema level — the same (id, org_id)-unique + composite-FK pattern
--- the rest of the schema uses (agents, entities, runs, tasks, blueprint_runs,
--- teams). RLS gates the org_id *column* on write, but only this FK keeps a
--- domain's connection_id in the same org as its org_id.
+-- the rest of the schema uses (agents, entities, conversations, tasks,
+-- blueprint_runs, teams). RLS gates the org_id *column* on write, but only
+-- this FK keeps a domain's connection_id in the same org as its org_id.
 ALTER TABLE public.sso_connections ADD CONSTRAINT sso_connections_id_org_id_key UNIQUE (id, org_id);
 
 CREATE TABLE public.sso_domains (
@@ -9106,10 +9110,11 @@ GRANT SELECT ON TABLE public.llm_spend TO tf_app;
 
 GRANT USAGE ON SCHEMA public, tf TO tf_system;
 
--- Run lifecycle: claim CAS / requeue / complete / resume+executor stamps
--- (SELECT, UPDATE) and the dispatcher's own queue inserts — both the
+-- Conversation lifecycle: claim CAS / requeue / complete / resume+executor
+-- stamps (SELECT, UPDATE) and the dispatcher's own queue inserts — both the
 -- initial blueprint-step enqueue and every subsequent step (SELECT,
--- INSERT). No DELETE — runs are never removed, only status-terminated.
+-- INSERT). No DELETE — conversations are never removed, only
+-- status-terminated.
 GRANT SELECT, INSERT, UPDATE ON TABLE public.conversations TO tf_system;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.messages TO tf_system;
 GRANT USAGE, SELECT ON SEQUENCE public.messages_id_seq TO tf_system;

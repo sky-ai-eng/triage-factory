@@ -14,9 +14,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// fairnessFixture is one org's ready-to-enqueue run-queue fixture: a blueprint
-// + task + prompt every run enqueued under that org hangs off, plus the org's
-// creator user id. Each run gets its own blueprint_run — see enqueue.
+// fairnessFixture is one org's ready-to-enqueue conversation-queue fixture: a
+// blueprint + task + prompt every conversation enqueued under that org hangs
+// off, plus the org's
+// creator user id. Each conversation gets its own blueprint_run — see
+// enqueue.
 type fairnessFixture struct {
 	orgID, userID          string
 	bpID, taskID, promptID string

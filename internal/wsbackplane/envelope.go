@@ -66,7 +66,7 @@ type wsEnvelope struct {
 
 // kickEnvelope is the tf_ctl NOTIFY payload shape for the cross-pod
 // session kick (TFAC-584). Kind is always "kick": tf_ctl is a shared,
-// kind-discriminated channel (run-signal doorbells and brain trigger
+// kind-discriminated channel (conversation-signal doorbells and brain trigger
 // relays ride it too) and internal/app's unified dispatcher routes on
 // that field — see ChannelCtl's doc comment. Sid/OrgID are optional
 // narrowing filters, mirroring websocket.Hub.CloseUserConnections's own

@@ -10,7 +10,7 @@ import "time"
 // RunDispatcher (dispatcherRunning) and heartbeatOnce
 // (lastHeartbeatWriteNanos), and by the drain verb (draining, TFAC-586).
 
-// DispatcherAlive reports whether the run-queue dispatcher loop is
+// DispatcherAlive reports whether the conversation-queue dispatcher loop is
 // currently running. False before RunDispatcher starts, after it returns
 // (ctx cancel / shutdown), or when no ConversationQueueStore was wired.
 func (s *Spawner) DispatcherAlive() bool {

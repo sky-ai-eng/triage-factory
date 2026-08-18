@@ -7,8 +7,9 @@
 // This package owns only the PUBLISH half (plus the channel name and the
 // Message wire shape). The LISTEN half is internal/app's unified tf_ctl
 // dispatcher (internal/app/ctl.go) — one dedicated connection per pod
-// serving every tf_ctl consumer (relay messages, run-signal doorbells,
-// session kicks), with the "only the brain acts on relay traffic" rule
+// serving every tf_ctl consumer (relay messages, conversation-signal
+// doorbells, session kicks), with the "only the brain acts on relay traffic"
+// rule
 // enforced by a holder gate at dispatch (internal/app/relay.go's
 // handleCtlMessage) rather than by lease-scoped subscription.
 //
@@ -29,7 +30,7 @@ import (
 
 // Channel is the Postgres NOTIFY/LISTEN channel name every relay message
 // rides. The same channel carries TFAC-584's session kicks, TFAC-585's
-// run-signal doorbells, TFAC-614's cred_request doorbell, the
+// conversation-signal doorbells, TFAC-614's cred_request doorbell, the
 // curator_cred_request doorbell, and the curator homing doorbells (spec §6.3) —
 // payloads are discriminated by their JSON "kind" field (see
 // internal/app/ctl.go), so Message kinds must stay disjoint from theirs

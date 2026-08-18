@@ -76,7 +76,7 @@ func TestExecutorPlan_ExcludesEveryBrainAndHTTPSubsystem(t *testing.T) {
 
 	// And it MUST start exactly the sandbox-worker set.
 	if !p.dispatcher {
-		t.Error("executor must start the run-queue dispatcher")
+		t.Error("executor must start the conversation-queue dispatcher")
 	}
 	if !p.executorHealthz {
 		t.Error("executor must start the localhost healthz listener")
