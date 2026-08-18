@@ -224,6 +224,11 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 	return os.ReadFile(name)
 }
 
+// skillsExcludePath is the capture's git-pathspec spelling of the skills path
+// — forward slashes always, unlike skillsLinkRel's OS-path form, because it
+// is handed to git as a pathspec rather than resolved on the filesystem.
+const skillsExcludePath = ".claude/skills"
+
 // changeScopedPathspecLimit caps how many changed paths the scoped stage in
 // captureUncommitted will name before falling back to the full `add -A`.
 // Pathspec matching is a per-index-entry scan over the pathspec set, so a
@@ -276,7 +281,12 @@ func changedPathsVsHEAD(ctx context.Context, wtPath string) (paths []string, ok 
 			return nil, false
 		}
 		xy := tok[:2]
-		paths = append(paths, tok[3:])
+		// A collapsed untracked-directory record ends in "/". The pathspec is
+		// written under :(literal) magic, which keeps that slash literally and
+		// then matches no path at all (nothing ends in a slash) — strip it, so
+		// the pathspec names the directory and directory-prefix matching
+		// covers its contents.
+		paths = append(paths, strings.TrimSuffix(tok[3:], "/"))
 		// A rename/copy record carries its second pathname as the following
 		// token. Both sides belong in the set (one holds the content, the
 		// other the deletion), which also makes the parse indifferent to
@@ -284,7 +294,7 @@ func changedPathsVsHEAD(ctx context.Context, wtPath string) (paths []string, ok 
 		if strings.ContainsAny(xy, "RC") && i+1 < len(tokens) {
 			i++
 			if other := tokens[i]; other != "" {
-				paths = append(paths, other)
+				paths = append(paths, strings.TrimSuffix(other, "/"))
 			}
 		}
 		if len(paths) > changeScopedPathspecLimit {
@@ -296,11 +306,26 @@ func changedPathsVsHEAD(ctx context.Context, wtPath string) (paths []string, ok 
 
 // stageChangedPaths stages the pre-pass's changed paths into the temp index.
 // The pathspecs travel by file, NUL-separated — never argv, so the set can't
-// hit a command-length limit and a path is arbitrary bytes — and under
-// --literal-pathspecs, because these are filenames, not patterns: a name
-// containing a glob metacharacter must match itself, and must not be
-// re-interpreted into a wildcard that could explicitly name an ignored file
-// (which `git add` refuses outright, where recursing past one is silent).
+// hit a command-length limit and a path is arbitrary bytes. Each changed path
+// is written under `:(literal)` magic, because these are filenames, not
+// patterns: a name containing a glob metacharacter must match itself, and
+// must not be re-interpreted into a wildcard that could explicitly name an
+// ignored file (which `git add` refuses outright, where recursing past one is
+// silent). Per-entry magic rather than the --literal-pathspecs global flag
+// because the same set carries the capture's exclusions as `:(exclude)`
+// specs, and the global flag would strip that magic too.
+//
+// Carrying the exclusions here — instead of add-then-`reset` the way the full
+// stage does — is load-bearing for performance, not tidiness. `git reset`
+// ends by refreshing the index it touched, and refreshing this HEAD-seeded
+// temp index (whose entries carry no stat information) re-hashes every file
+// in the tree: the exact O(tree) cost the scoped stage exists to avoid, paid
+// right back by the cleanup. Never staging the excluded paths reaches the
+// same index state — the read-tree seed already holds HEAD's entries for
+// them — with no reset to trigger the refresh. It also handles the collapsed
+// untracked-dir case (`?? .claude/` when nothing under it is tracked): the
+// exclusion applies inside the recursive add, so a skills tree under an
+// otherwise-captured directory still stays out.
 func stageChangedPaths(ctx context.Context, wtPath string, env []string, paths []string) error {
 	f, err := os.CreateTemp("", "tf-pathspec-*")
 	if err != nil {
@@ -309,15 +334,21 @@ func stageChangedPaths(ctx context.Context, wtPath string, env []string, paths [
 	name := f.Name()
 	defer func() { _ = os.Remove(name) }()
 	for _, p := range paths {
-		if _, err := f.WriteString(p + "\x00"); err != nil {
+		if _, err := f.WriteString(":(literal)" + p + "\x00"); err != nil {
 			_ = f.Close()
 			return fmt.Errorf("write pathspec: %w", err)
+		}
+	}
+	for _, excl := range []string{ScratchDir, skillsExcludePath} {
+		if _, err := f.WriteString(":(exclude)" + excl + "\x00"); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("write exclude pathspec: %w", err)
 		}
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("flush pathspec: %w", err)
 	}
-	_, err = gitCapture(ctx, wtPath, env, "--literal-pathspecs", "add", "-A", "--pathspec-from-file="+name, "--pathspec-file-nul")
+	_, err = gitCapture(ctx, wtPath, env, "add", "-A", "--pathspec-from-file="+name, "--pathspec-file-nul")
 	return err
 }
 
@@ -395,38 +426,49 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 		if _, err := gitCapture(ctx, wtPath, env, "add", "-A"); err != nil {
 			return nil, fmt.Errorf("stage worktree: %w", err)
 		}
-	}
-	// `reset` rather than `rm --cached`, for the reason spelled out at the
-	// `.claude/skills` drop below: reset restores HEAD's entry for the path, so a
-	// repo that legitimately TRACKS files under our directory doesn't come back
-	// from the snapshot with them recorded as deletions. For the ordinary
-	// untracked case it drops the entry outright, which is what we want — the
-	// working-tree files stay on disk either way, only the temp index changes.
-	if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", ScratchDir); err != nil {
-		return nil, fmt.Errorf("drop %s from temp index: %w", ScratchDir, err)
-	}
-	// Keep `.claude/skills` out of the delta for the same reason: it is TF
-	// mechanism, not the agent's work. In a sandboxed tree the path is our symlink
-	// to the read-only skills mount, and in local mode it's the materialized
-	// SKILL.md — carrying either would persist TF plumbing into a snapshot that a
-	// future restore re-establishes for itself.
-	//
-	// `reset` rather than `rm --cached`: reset restores HEAD's entry for the path,
-	// so a repo that legitimately TRACKS `.claude/skills` doesn't come back from
-	// the snapshot with those files recorded as deletions (which is exactly what
-	// dropping them from the staged set would produce, since HEAD still has them).
-	//
-	// Guarded on the path actually appearing in the diff so the reset only ever
-	// runs with a matching pathspec. Most captures — every non-blueprint run, and
-	// any repo without a `.claude` — have nothing there at all, and `git reset`'s
-	// treatment of a pathspec that matches neither the index nor HEAD is not a
-	// contract worth betting EVERY snapshot capture on. When the diff is empty the
-	// reset would be a no-op anyway, so the guard costs nothing but the read.
-	if changed, err := gitCapture(ctx, wtPath, env, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-only", "HEAD", "--", ".claude/skills"); err != nil {
-		return nil, fmt.Errorf("check .claude/skills in temp index: %w", err)
-	} else if len(bytes.TrimSpace(changed)) > 0 {
-		if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", ".claude/skills"); err != nil {
-			return nil, fmt.Errorf("drop .claude/skills from temp index: %w", err)
+		// The full stage's exclusions are add-then-reset; the scoped stage
+		// carries them as `:(exclude)` pathspecs instead and MUST NOT run
+		// these resets — `git reset` ends by refreshing the index, and
+		// refreshing the temp index's zero-stat entries re-hashes the whole
+		// tree, the exact cost the scoped stage exists to avoid. After the
+		// full `add -A` the refresh is cheap (add just wrote fresh stat
+		// information for everything it touched), so the resets stay here.
+		//
+		// `reset` rather than `rm --cached`, for the reason spelled out at the
+		// `.claude/skills` drop below: reset restores HEAD's entry for the path,
+		// so a repo that legitimately TRACKS files under our directory doesn't
+		// come back from the snapshot with them recorded as deletions. For the
+		// ordinary untracked case it drops the entry outright, which is what we
+		// want — the working-tree files stay on disk either way, only the temp
+		// index changes.
+		if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", ScratchDir); err != nil {
+			return nil, fmt.Errorf("drop %s from temp index: %w", ScratchDir, err)
+		}
+		// Keep `.claude/skills` out of the delta for the same reason: it is TF
+		// mechanism, not the agent's work. In a sandboxed tree the path is our
+		// symlink to the read-only skills mount, and in local mode it's the
+		// materialized SKILL.md — carrying either would persist TF plumbing into
+		// a snapshot that a future restore re-establishes for itself.
+		//
+		// `reset` rather than `rm --cached`: reset restores HEAD's entry for the
+		// path, so a repo that legitimately TRACKS `.claude/skills` doesn't come
+		// back from the snapshot with those files recorded as deletions (which is
+		// exactly what dropping them from the staged set would produce, since
+		// HEAD still has them).
+		//
+		// Guarded on the path actually appearing in the diff so the reset only
+		// ever runs with a matching pathspec. Most captures — every
+		// non-blueprint run, and any repo without a `.claude` — have nothing
+		// there at all, and `git reset`'s treatment of a pathspec that matches
+		// neither the index nor HEAD is not a contract worth betting EVERY
+		// snapshot capture on. When the diff is empty the reset would be a
+		// no-op anyway, so the guard costs nothing but the read.
+		if staged, err := gitCapture(ctx, wtPath, env, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-only", "HEAD", "--", skillsExcludePath); err != nil {
+			return nil, fmt.Errorf("check %s in temp index: %w", skillsExcludePath, err)
+		} else if len(bytes.TrimSpace(staged)) > 0 {
+			if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", skillsExcludePath); err != nil {
+				return nil, fmt.Errorf("drop %s from temp index: %w", skillsExcludePath, err)
+			}
 		}
 	}
 	patch, err := gitCapture(ctx, wtPath, env, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--binary", "HEAD")

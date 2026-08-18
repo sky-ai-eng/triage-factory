@@ -176,6 +176,40 @@ func TestCaptureUncommitted_ScopedMatchesFullStage(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{"untracked .claude with skills and a sibling", func(t *testing.T, wt string) {
+			// The collapsed `?? .claude/` status entry: the scoped stage must
+			// keep skills out via its :(exclude) pathspec while still
+			// capturing the sibling — matching the full stage's
+			// add-everything-then-reset-skills result.
+			skill := filepath.Join(wt, ".claude", "skills", "step-0", "SKILL.md")
+			if err := os.MkdirAll(filepath.Dir(skill), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(skill, []byte("---\nname: step-0\n---\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(wt, ".claude", "keep.md"), []byte("sibling\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"tracked _tfac file modified", func(t *testing.T, wt string) {
+			// A repo that legitimately TRACKS files under the scratch dir: the
+			// full stage restores HEAD's entry via reset, the scoped stage
+			// never stages it — both must keep the change out of the patch
+			// without recording a deletion.
+			p := filepath.Join(wt, ScratchDir, "pinned.txt")
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("pinned\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitIn(t, wt, "add", "-f", ScratchDir+"/pinned.txt")
+			gitIn(t, wt, "-c", "user.email=t@e.c", "-c", "user.name=T", "commit", "-q", "-m", "track scratch file")
+			if err := os.WriteFile(p, []byte("locally modified\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
 		{"staged new file deleted from worktree", func(t *testing.T, wt string) {
 			// The one shape whose pathspec matches nothing in the temp-index
 			// world (the file is in neither HEAD nor the worktree), so the
