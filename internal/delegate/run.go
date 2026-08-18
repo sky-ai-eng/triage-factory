@@ -200,6 +200,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			creatorUserID: creatorUserID,
 			claimID:       cfg.claimID,
 			reason:        db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+			runtime:       domain.ConversationRuntimeSDK,
 		}, sessionID)
 		parked = true
 		return fenced
@@ -618,6 +619,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				triggerType:   triggerType,
 				creatorUserID: creatorUserID,
 				claimID:       cfg.claimID,
+				runtime:       domain.ConversationRuntimeSDK,
 			},
 			opts:        baseOpts,
 			perms:       perms,
@@ -789,6 +791,7 @@ func (s *Spawner) processCompletion(
 			creatorUserID: creatorUserID,
 			claimID:       claimID,
 			reason:        db.ParkIdle(),
+			runtime:       domain.ConversationRuntimeSDK,
 		}, sessionID)
 		return true, fencedOut
 	}
@@ -907,7 +910,7 @@ func (s *Spawner) processCompletion(
 	// accepted and a claim minted — for a workspace that, the other way round, is
 	// still being written.
 	if status == "completed" {
-		if err := s.snapshotWorkspace(ctx, orgID, runID, namespace, claudeCwd, sessionID); err != nil {
+		if err := s.snapshotWorkspace(ctx, orgID, runID, namespace, claudeCwd, sessionID, domain.ConversationRuntimeSDK); err != nil {
 			delegateLog.Warn("snapshot workspace for completed run failed", "run", runID, "outcome", outcome, "error", err)
 		}
 	}

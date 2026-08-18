@@ -3,6 +3,9 @@ package delegate
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -440,6 +443,61 @@ func TestNoWireProtocolCarriesTraceContext(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestEveryParkContextNamesItsRuntime pins the workspace.snapshot span
+// family's runtime attribute at its source. parkRunOpen threads
+// park.runtime onto every snapshot span, and the attribute is load-bearing
+// there: transcript sizes without it read as a property of all snapshots
+// instead of delegated-SDK-run data. The field's zero value is a silent
+// omission — a park built without it still compiles, parks, and snapshots,
+// just with the family unlabeled — and that is exactly how the resume
+// driver's park shipped without one. So: every liveParkContext composite
+// literal in production code states its runtime. A site that genuinely
+// cannot know its engine has no precedent today and would need a decision,
+// not an omission.
+func TestEveryParkContextNamesItsRuntime(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob package files: %v", err)
+	}
+	found := 0
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		parsed, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		ast.Inspect(parsed, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			ident, ok := lit.Type.(*ast.Ident)
+			if !ok || ident.Name != "liveParkContext" {
+				return true
+			}
+			found++
+			for _, elt := range lit.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "runtime" {
+					return true
+				}
+			}
+			t.Errorf("%s: liveParkContext literal without a runtime field — this park's workspace.snapshot spans would emit unlabeled; state the engine (or take the conversation about why this site cannot know it)",
+				fset.Position(lit.Pos()))
+			return true
+		})
+	}
+	if found == 0 {
+		t.Fatal("no liveParkContext literals found in production code — the guard would pass vacuously")
 	}
 }
 

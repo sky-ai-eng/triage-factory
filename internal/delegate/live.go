@@ -61,6 +61,11 @@ type liveParkContext struct {
 	// reason is why: db.ParkIdle() for a turn that simply ended,
 	// db.ParkStopped(...) for a cancel. See ConversationStore.ParkOpen.
 	reason db.Park
+	// runtime is the conversation's engine, for the workspace-snapshot span
+	// family (see snapshotWorkspace). Each construction site states it from
+	// what it structurally is — the SDK and native drivers each build their
+	// own park — rather than re-reading the row.
+	runtime string
 }
 
 // liveOutcome is the disposition of one agent invocation, produced
@@ -471,7 +476,7 @@ func (s *Spawner) parkRunOpen(ctx context.Context, park liveParkContext, session
 	// deliberately-stopped run with no workspace at all.
 	snapshotted := false
 	if park.claudeCwd != "" && park.namespace != "" {
-		if err := s.snapshotWorkspace(context.WithoutCancel(ctx), park.orgID, park.runID, park.namespace, park.claudeCwd, sessionID); err != nil {
+		if err := s.snapshotWorkspace(context.WithoutCancel(ctx), park.orgID, park.runID, park.namespace, park.claudeCwd, sessionID, park.runtime); err != nil {
 			delegateLog.Warn("snapshot workspace before parking open failed", "run", park.runID, "error", err)
 		} else {
 			snapshotted = true
