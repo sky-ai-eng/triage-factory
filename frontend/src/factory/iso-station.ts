@@ -1097,12 +1097,12 @@ export function buildStationMesh(
     queuedCores.push(core)
   }
 
-  // ─── Run chip pool (main tray) ───────────────────────────────────────
+  // ─── Conversation chip pool (main tray) ────────────────────────────
   // Pre-build MAX_CONVERSATIONS chips arrayed in a grid in the front portion
   // of the main tray (label takes the back). setConversationCount toggles
   // visibility on the first n.
 
-  const runLayout = layoutChipGrid({
+  const conversationLayout = layoutChipGrid({
     bounds: mainTray,
     cols: 9,
     chipDiam: RUN_CHIP_DIAM,
@@ -1112,10 +1112,10 @@ export function buildStationMesh(
     front: mainTray.y0,
     back: labelFrontEdge - 4,
   })
-  const runShells: Mesh[] = []
-  const runCores: Mesh[] = []
+  const conversationShells: Mesh[] = []
+  const conversationCores: Mesh[] = []
   for (let i = 0; i < MAX_CONVERSATIONS; i++) {
-    const pos = runLayout[i]
+    const pos = conversationLayout[i]
     if (!pos) break
     const chipZCenter = mainTray.floorZ + RUN_CHIP_H / 2
     const shell = MeshBuilder.CreateCylinder(
@@ -1131,7 +1131,7 @@ export function buildStationMesh(
     // Bake a phase offset onto the mesh so the per-chip pulse looks
     // like independent rhythms rather than a synchronized wave.
     ;(shell.metadata ??= {}).pulsePhase = (i * 0.37) % (2 * Math.PI)
-    runShells.push(shell)
+    conversationShells.push(shell)
 
     const core = MeshBuilder.CreateCylinder(
       `run-core-${i}`,
@@ -1143,7 +1143,7 @@ export function buildStationMesh(
     core.material = materials.runCore
     core.parent = root
     core.setEnabled(false)
-    runCores.push(core)
+    conversationCores.push(core)
   }
 
   // ─── Scanner laser ───────────────────────────────────────────────────
@@ -1168,7 +1168,7 @@ export function buildStationMesh(
   // ─── Live state + animation ──────────────────────────────────────────
 
   let queuedVisible = 0
-  let runVisible = 0
+  let conversationVisible = 0
 
   const setQueuedCount = (n: number) => {
     const target = Math.max(0, Math.min(n, queuedShells.length))
@@ -1181,14 +1181,14 @@ export function buildStationMesh(
     queuedVisible = target
   }
   const setConversationCount = (n: number) => {
-    const target = Math.max(0, Math.min(n, runShells.length))
-    if (target === runVisible) return
-    for (let i = 0; i < runShells.length; i++) {
+    const target = Math.max(0, Math.min(n, conversationShells.length))
+    if (target === conversationVisible) return
+    for (let i = 0; i < conversationShells.length; i++) {
       const on = i < target
-      runShells[i].setEnabled(on)
-      runCores[i].setEnabled(on)
+      conversationShells[i].setEnabled(on)
+      conversationCores[i].setEnabled(on)
     }
-    runVisible = target
+    conversationVisible = target
     scanner.setEnabled(target > 0)
   }
 
@@ -1205,18 +1205,18 @@ export function buildStationMesh(
   // per-chip pulse. Cheap: only updates visible meshes.
   scene.onBeforeRenderObservable.add(() => {
     const now = performance.now() / 1000
-    if (runVisible > 0) {
+    if (conversationVisible > 0) {
       // Linear loop along y.
       const frac = (now / SCANNER_PERIOD_SECONDS) % 1
       scanner.position.y = scannerYStart + frac * (scannerYEnd - scannerYStart)
       // Per-chip pulse: scale.x = scale.y = 1 + amplitude * sin(...).
       // Apply to both shell and core so they breathe together.
       const omega = (2 * Math.PI) / PULSE_PERIOD_SECONDS
-      for (let i = 0; i < runVisible; i++) {
-        const phase = (runShells[i].metadata?.pulsePhase as number) ?? 0
+      for (let i = 0; i < conversationVisible; i++) {
+        const phase = (conversationShells[i].metadata?.pulsePhase as number) ?? 0
         const s = 1 + PULSE_AMPLITUDE * Math.sin(omega * now + phase)
-        runShells[i].scaling.set(s, s, 1)
-        runCores[i].scaling.set(s, s, 1)
+        conversationShells[i].scaling.set(s, s, 1)
+        conversationCores[i].scaling.set(s, s, 1)
       }
     }
   })

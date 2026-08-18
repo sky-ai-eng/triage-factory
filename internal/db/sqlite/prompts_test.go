@@ -94,7 +94,7 @@ func seedSQLiteConversationsForStats(t *testing.T, conn *sql.DB, promptID string
 			INSERT INTO conversations (id, task_id, prompt_id, status, started_at, blueprint_run_id)
 			VALUES (?, ?, ?, ?, ?, ?)
 		`, conversationID, taskID, promptID, status, startedAt, blueprintRunID); err != nil {
-			t.Fatalf("seed run %d: %v", i, err)
+			t.Fatalf("seed conversation %d: %v", i, err)
 		}
 		// The accounting the stats read derives from: one cost-stamped
 		// ledger row + one released claim carrying the duration telemetry.
@@ -102,13 +102,13 @@ func seedSQLiteConversationsForStats(t *testing.T, conn *sql.DB, promptID string
 			INSERT INTO messages (conversation_id, role, subtype, content, cost_usd, created_at)
 			VALUES (?, 'assistant', '', 'work', 0.01, ?)
 		`, conversationID, startedAt); err != nil {
-			t.Fatalf("seed run message %d: %v", i, err)
+			t.Fatalf("seed conversation message %d: %v", i, err)
 		}
 		if _, err := conn.Exec(`
 			INSERT INTO claims (id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, duration_ms)
 			VALUES (?, ?, 'exec-p', 1, ?, ?, 'completed', 100)
 		`, uuid.New().String(), conversationID, startedAt, startedAt); err != nil {
-			t.Fatalf("seed run claim %d: %v", i, err)
+			t.Fatalf("seed conversation claim %d: %v", i, err)
 		}
 		ids = append(ids, conversationID)
 	}

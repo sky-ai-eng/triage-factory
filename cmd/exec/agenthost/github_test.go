@@ -157,7 +157,7 @@ func startGitHubDaemon(t *testing.T, resolver ghclient.Resolver, info Conversati
 func emptyStores() db.Stores { return db.Stores{} }
 
 func ghInfo() ConversationInfo {
-	return ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "run-1"}
+	return ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"}
 }
 
 // TestServer_GithubAddComment_RoutesHostSide is the Property-B test: the

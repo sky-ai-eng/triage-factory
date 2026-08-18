@@ -180,7 +180,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			t.Fatalf("ConversationQueue.ClaimNextConversation: %v", err)
 		}
 		if claimed == nil || claimed.ID != conversationID {
-			t.Fatalf("ClaimNextConversation = %+v, want the just-enqueued run", claimed)
+			t.Fatalf("ClaimNextConversation = %+v, want the just-enqueued conversation", claimed)
 		}
 
 		if err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, executorID, 1); err != nil {
@@ -549,7 +549,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 // seedQueuedConversation mints a fresh conversations row via the tf_system-backed
 // ConversationQueue.EnqueueConversation (the same INSERT the dispatcher's reactor performs
 // for every subsequent blueprint step), so each subtest below gets its
-// own run without re-running the claim subtest's side effects.
+// own conversation without re-running the claim subtest's side effects.
 func seedQueuedConversation(t *testing.T, h *Harness, stores db.Stores, ctx context.Context, orgID, taskID, promptID, blueprintRunID string) string {
 	t.Helper()
 	conversationID := newUUID(t, h)

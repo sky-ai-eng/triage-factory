@@ -19,7 +19,7 @@ import (
 
 // TestConversationStore_SQLite runs the shared conformance suite against
 // the SQLite ConversationStore impl. Each subtest gets a fresh in-memory
-// DB so the run lifecycle assertions don't bleed across.
+// DB so the conversation lifecycle assertions don't bleed across.
 func TestConversationStore_SQLite(t *testing.T) {
 	dbtest.RunConversationStoreConformance(t, func(t *testing.T) (db.ConversationStore, string, string, dbtest.ConversationSeeder) {
 		t.Helper()
@@ -65,7 +65,8 @@ func newSQLiteForConversationTest(t *testing.T) *sql.DB {
 }
 
 // seedSQLiteConversation inserts a conversations row directly (the seeder's
-// Run callback + the direct tests below share it). Raw SQL keeps the seed
+// Conversation callback + the direct tests below share it). Raw SQL keeps
+// the seed
 // independent of the store under test; the trigger_type↔creator CHECK is
 // satisfied by pairing 'manual' with the sentinel user and 'event' with
 // NULL.
@@ -107,7 +108,7 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 		Entity: func(t *testing.T, suffix string) string {
 			t.Helper()
 			id := uuid.New().String()
-			sourceID := fmt.Sprintf("agentrun-%s-%s", suffix, id[:8])
+			sourceID := fmt.Sprintf("conv-%s-%s", suffix, id[:8])
 			if _, err := conn.Exec(`
 				INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
 				VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?)
@@ -223,7 +224,7 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 		},
 		SetBlueprintRunStatus: func(t *testing.T, blueprintRunID, status string) {
 			t.Helper()
-			// Raw UPDATE — must NOT cascade onto child runs (unlike
+			// Raw UPDATE — must NOT cascade onto child conversations (unlike
 			// BlueprintStore.MarkRunStatus), so the parked child stays parked.
 			if _, err := conn.Exec(`UPDATE blueprint_runs SET status = ? WHERE id = ?`, status, blueprintRunID); err != nil {
 				t.Fatalf("set blueprint_run status: %v", err)
@@ -310,8 +311,9 @@ func TestConversationStore_SQLite_RuntimeDefaultsToSDK(t *testing.T) {
 }
 
 // TestConversationStore_SQLite_ActiveIDsForTeamSystem pins the team-archive
-// force-stop enumeration: runs on the team in the active set
-// (NOT completed/failed) are returned; terminal runs are excluded. SQLite hardcodes
+// force-stop enumeration: conversations on the team in the active set
+// (NOT completed/failed) are returned; terminal conversations are excluded.
+// SQLite hardcodes
 // conversations.team_id to the local sentinel, so the cross-team negative case
 // lives in the Postgres tests; here we pin the status predicate + team scoping.
 func TestConversationStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
@@ -345,6 +347,6 @@ func TestConversationStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
 		got[id] = true
 	}
 	if len(ids) != 2 || !got[running] || !got[open] {
-		t.Fatalf("ActiveIDsForTeamSystem = %v; want exactly the running + open runs (%s, %s)", ids, running, open)
+		t.Fatalf("ActiveIDsForTeamSystem = %v; want exactly the running + open conversations (%s, %s)", ids, running, open)
 	}
 }

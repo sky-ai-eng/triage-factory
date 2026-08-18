@@ -78,7 +78,7 @@ type PromptStore interface {
 	// Delete soft-deletes a prompt (stamps deleted_at). The row + the
 	// conversations referencing it stay as the durable audit trail —
 	// conversations.prompt_id is RESTRICT, so
-	// a hard DELETE on a prompt with run history would error, and
+	// a hard DELETE on a prompt with conversation history would error, and
 	// auto-wrapping every new prompt as a 1-step blueprint (the step FK
 	// is also RESTRICT) makes hard-delete impossible. Request-facing
 	// reads (List/Get/GetBySystemSlug)
@@ -88,7 +88,7 @@ type PromptStore interface {
 
 	// Hide soft-deletes a prompt (hidden=true) — the system/imported analog of
 	// Delete. Used so shipped/imported prompts disappear from List but remain
-	// available to historical runs that already reference them.
+	// available to historical conversations that already reference them.
 	Hide(ctx context.Context, orgID string, id string) error
 
 	// Unhide reverses Hide.
@@ -100,7 +100,7 @@ type PromptStore interface {
 	CountConversationReferences(ctx context.Context, orgID string, id string) (int, error)
 
 	// IncrementUsage bumps usage_count by 1. Called from the
-	// delegate spawner when a run picks the prompt; the count
+	// delegate spawner when a conversation picks the prompt; the count
 	// drives the prompts page's sort heuristic.
 	IncrementUsage(ctx context.Context, orgID string, id string) error
 
@@ -115,7 +115,8 @@ type PromptStore interface {
 
 	// GetSystem mirrors Get but routes through the admin pool in
 	// Postgres AND does NOT filter deleted_at — so a soft-deleted prompt
-	// still resolves for in-flight runs and past-run timelines. The
+	// still resolves for in-flight conversations and past-conversation
+	// timelines. The
 	// router's breaker-tripped toast looks up the prompt name from its
 	// eventbus subscriber goroutine, which has no JWT-claims context.
 	GetSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error)

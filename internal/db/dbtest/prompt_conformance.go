@@ -313,7 +313,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	})
 
 	t.Run("Delete_WithConversationHistory_Succeeds", func(t *testing.T) {
-		// Regression: a user prompt with run history must be
+		// Regression: a user prompt with conversation history must be
 		// deletable without hitting the conversations.prompt_id RESTRICT FK (a hard DELETE
 		// would 500). Soft-delete sidesteps the FK and keeps the audit trail.
 		store, orgID, teamID, seedConversations := factory(t)
@@ -323,13 +323,13 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 		seedConversations(t, "rh-1", []string{"completed", "failed"})
 		if err := store.Delete(ctx, orgID, "rh-1"); err != nil {
-			t.Fatalf("delete prompt with run history failed (the FK-500 regression): %v", err)
+			t.Fatalf("delete prompt with conversation history failed (the FK-500 regression): %v", err)
 		}
 		if got, _ := store.Get(ctx, orgID, "rh-1"); got != nil {
 			t.Fatalf("Get after delete = %+v; want nil", got)
 		}
 		if got, _ := store.GetSystem(ctx, orgID, "rh-1"); got == nil {
-			t.Fatalf("GetSystem after delete = nil; the row + its runs must survive as the audit trail")
+			t.Fatalf("GetSystem after delete = nil; the row + its conversations must survive as the audit trail")
 		}
 	})
 

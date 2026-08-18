@@ -65,7 +65,7 @@ type Message struct {
 	OrgID          string `json:"org_id"`
 	Source         string `json:"source,omitempty"`
 	Force          bool   `json:"force,omitempty"`
-	ConversationID string `json:"run_id,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
 	ProjectID      string `json:"project_id,omitempty"`
 	Op             string `json:"op,omitempty"`
 }

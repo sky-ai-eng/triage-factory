@@ -32,7 +32,7 @@ func (r *gateRuntime) Record(_ context.Context, _ *domain.Artifact, act *domain.
 
 func newGateClient(pinnedRepos []string, rt *gateRuntime) *LocalClient {
 	return &LocalClient{
-		info:      ConversationInfo{OrgID: "org-1", ConversationID: "run-1", TeamID: "team-1", PinnedRepos: pinnedRepos},
+		info:      ConversationInfo{OrgID: "org-1", ConversationID: "conv-1", TeamID: "team-1", PinnedRepos: pinnedRepos},
 		rt:        rt,
 		gateWired: true,
 	}

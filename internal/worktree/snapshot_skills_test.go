@@ -15,18 +15,18 @@ import (
 // sandboxingWorktree stands up a real branch worktree with the sandbox path live,
 // so the tree carries the jail's `.claude/skills` symlink exactly as a production
 // multi-mode build leaves it. Returns the worktree dir and its HEAD sha.
-func sandboxingWorktree(t *testing.T, conversationID string) (wtDir, head string) {
+func sandboxingWorktree(t *testing.T, rootKey string) (wtDir, head string) {
 	t.Helper()
 	withTestHome(t)
 	paths.SetForTest(t, t.TempDir())
 	runmode.SetForTest(t, runmode.ModeMulti)
 
 	upstream := makeTestUpstream(t)
-	wtDir, err := CreateForBranch(context.Background(), "acme", "repo", upstream, "main", "aa/feature", conversationID)
+	wtDir, err := CreateForBranch(context.Background(), "acme", "repo", upstream, "main", "aa/feature", rootKey)
 	if err != nil {
 		t.Fatalf("CreateForBranch: %v", err)
 	}
-	t.Cleanup(func() { _ = RemoveAt(wtDir, conversationID) })
+	t.Cleanup(func() { _ = RemoveAt(wtDir, rootKey) })
 	assertSkillsSymlink(t, wtDir)
 
 	out, err := exec.Command("git", "-C", wtDir, "rev-parse", "HEAD").Output()
@@ -43,8 +43,8 @@ func sandboxingWorktree(t *testing.T, conversationID string) (wtDir, head string
 // writing through a symlink, which it refuses outright. Either way the rebuilt
 // tree converges on the symlink, which is what the next step's mount needs.
 func TestRestoreWorkspaceGit_PreFixSkillsPatchConvergesToSymlink(t *testing.T) {
-	const conversationID = "restore-skills-run"
-	wtDir, head := sandboxingWorktree(t, conversationID)
+	const rootKey = "restore-skills-run"
+	wtDir, head := sandboxingWorktree(t, rootKey)
 
 	// Craft the pre-fix patch shape: an uncommitted, in-worktree SKILL.md under
 	// the very path restore now wants to own. Built with the worktree's own index
@@ -88,13 +88,13 @@ func TestRestoreWorkspaceGit_PreFixSkillsPatchConvergesToSymlink(t *testing.T) {
 // patch, and no step of the pipeline errors out.
 func TestCaptureWorkspaceGit_NoSkillsPathStillCaptures(t *testing.T) {
 	withTestHome(t)
-	const conversationID = "capture-no-skills-run"
+	const rootKey = "capture-no-skills-run"
 	upstream := makeTestUpstream(t)
-	wtDir, err := CreateForBranch(context.Background(), "acme", "repo", upstream, "main", "aa/feature", conversationID)
+	wtDir, err := CreateForBranch(context.Background(), "acme", "repo", upstream, "main", "aa/feature", rootKey)
 	if err != nil {
 		t.Fatalf("CreateForBranch: %v", err)
 	}
-	t.Cleanup(func() { _ = RemoveAt(wtDir, conversationID) })
+	t.Cleanup(func() { _ = RemoveAt(wtDir, rootKey) })
 	// Local mode (the default here): no symlink is planted, and this repo tracks
 	// no .claude — the ordinary non-blueprint shape.
 	if _, err := os.Lstat(filepath.Join(wtDir, ".claude")); !os.IsNotExist(err) {
@@ -119,8 +119,8 @@ func TestCaptureWorkspaceGit_NoSkillsPathStillCaptures(t *testing.T) {
 // must not come back from a snapshot recorded as deletions just because TF took
 // the path over.
 func TestCaptureWorkspaceGit_ExcludesSkillsPath(t *testing.T) {
-	const conversationID = "capture-skills-run"
-	wtDir, _ := sandboxingWorktree(t, conversationID)
+	const rootKey = "capture-skills-run"
+	wtDir, _ := sandboxingWorktree(t, rootKey)
 
 	// A repo that commits its own project skills — the case a naive
 	// `rm --cached` exclusion would record as a deletion.

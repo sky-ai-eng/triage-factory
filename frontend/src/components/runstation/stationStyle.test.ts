@@ -15,10 +15,11 @@ const conversation = (over: Partial<Conversation>): Conversation =>
   }) as Conversation
 
 describe('stationState', () => {
-  // A stopped run parks `open`, which used to be a distinct CANCELLED light.
-  // The station's answer is that the machine is powered and waiting, not dark:
-  // the run is resumable, and the dock's composer says so right below this.
-  it('lights a parked run as IDLE — powered and waiting, not concluded', () => {
+  // A stopped conversation parks `open`, which used to be a distinct
+  // CANCELLED light. The station's answer is that the machine is powered and
+  // waiting, not dark: the conversation is resumable, and the dock's composer
+  // says so right below this.
+  it('lights a parked conversation as IDLE — powered and waiting, not concluded', () => {
     const state = stationState(conversation({ Status: 'open' }))
     expect(state.key).toBe('open')
     expect(state.label).toBe('IDLE')
@@ -61,7 +62,7 @@ describe('stationState', () => {
   // The machine wears ONE light, so a mid-chain step wearing the same green
   // DONE plate as a finished task is the whole bug: the viewer reads the
   // biggest thing on the page and concludes the work stopped.
-  describe('a completed run is three endings, not one', () => {
+  describe('a completed conversation is three endings, not one', () => {
     const step = (index: number, total: number, outcome: string) =>
       conversation({
         Status: 'completed',
@@ -81,7 +82,7 @@ describe('stationState', () => {
       expect(state.belt).toBeGreaterThan(0)
     })
 
-    it('keeps the unqualified DONE for the last step and the single-prompt run', () => {
+    it('keeps the unqualified DONE for the last step and the single-prompt conversation', () => {
       expect(stationState(step(3, 4, 'continue')).label).toBe('DONE')
       expect(stationState(step(0, 1, 'continue')).label).toBe('DONE')
       // A mid-chain `finish` ended the whole workflow: the task IS over.

@@ -18,7 +18,7 @@ import (
 // and then fail only in a real multi-mode deployment, because RLS evaluation
 // calls current_user_id() and a JWT-less background job has no permission to
 // execute it. The failure surfaces as a permission-denied error on the
-// executor at the first assembly, with the run already claimed.
+// executor at the first assembly, with the conversation already claimed.
 //
 // So this test wires the pools the way production wires them (distinct admin
 // and app connections) and drives the methods with NO user context, which is

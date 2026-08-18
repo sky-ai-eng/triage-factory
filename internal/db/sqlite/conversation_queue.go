@@ -550,10 +550,10 @@ func (s *conversationQueueStore) FleetQueueShares(ctx context.Context) ([]db.Org
 }
 
 func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Context) (int, error) {
-	// Boot self-heal: park child runs left mid-flight under a blueprint_run
-	// that is already terminal. This is the mirror of ResetProcessingConversations
-	// (which requeues active runs under a *running* parent): a child alive
-	// under a terminal parent will never be claimed (ClaimNextConversation gates on a
+	// Boot self-heal: park child conversations left mid-flight under a
+	// blueprint_run that is already terminal. This is the mirror of ResetProcessingConversations
+	// (which requeues active conversations under a *running* parent): a child
+	// alive under a terminal parent will never be claimed (ClaimNextConversation gates on a
 	// running parent) nor reset, so without this it sits mid-flight forever —
 	// the dispatcher treats it as live work and its worktree pins the feature
 	// branch, requeuing any sibling fetch into a forever-failing loop.

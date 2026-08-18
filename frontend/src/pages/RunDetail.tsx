@@ -42,12 +42,13 @@ export default function RunDetail() {
 
   const [chainSteps, setChainSteps] = useState<Conversation[] | null>(null)
   // Per-step labels for the chain track, index-aligned with chainSteps. Kept
-  // beside them rather than folded in because the track's segments are runs,
-  // and a not-yet-spawned step has a name but no run.
+  // beside them rather than folded in because the track's segments are
+  // conversations, and a not-yet-spawned step has a name but no conversation.
   const [chainStepLabels, setChainStepLabels] = useState<ChainStepLabel[] | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [stopPending, setStopPending] = useState(false)
-  // Approval is derived now, not a stored run status: the run's unresolved
+  // Approval is derived now, not a stored conversation status: the
+  // conversation's unresolved
   // artifact set (draft PRs + ready reviews) surfaces at the top of the
   // station's artifact lists (the dock popover + the telemetry rail).
   // `activeArtifact` is the one per-item editor currently open (you edit one at
@@ -96,7 +97,8 @@ export default function RunDetail() {
         const padded: Conversation[] = data.steps.map((s, i) => {
           if (s.run) return s.run
           // Synthetic row for a step that hasn't been spawned; its status is
-          // empty because it has no run, not a name outside the vocabulary.
+          // empty because it has no conversation, not a name outside the
+          // vocabulary.
           return {
             ID: `__pending-${conversation.blueprint_run_id}-${i}`,
             TaskID: conversation.TaskID,
@@ -116,7 +118,7 @@ export default function RunDetail() {
     }
   }, [conversation?.blueprint_run_id, conversation?.TaskID])
 
-  // Stop the run: the agent stops, the conversation parks `open`, and its
+  // Stop the conversation: the agent stops, it parks `open`, and its
   // blueprint and task stay exactly where they were — so the composer's offer
   // to pick the work back up is true. stopPending disables the controls while
   // the POST is in flight so rapid clicks can't stack requests ahead of the WS
@@ -133,8 +135,9 @@ export default function RunDetail() {
     }
   }, [conversation, stopPending])
 
-  // Steer a run: a free-form message lands on the live process (or wakes an
-  // `open` run via resume). The backend records + broadcasts it as an
+  // Steer a conversation: a free-form message lands on the live process (or
+  // wakes an `open` conversation via resume). The backend records +
+  // broadcasts it as an
   // `message` event, so useConversationDetail's append renders it — no optimistic insert.
   const handleMessage = useCallback(
     async (text: string) => {
@@ -154,7 +157,8 @@ export default function RunDetail() {
 
   // doRequeue fires the actual requeue. Return-to-queue is a task-level
   // force-resolve-all: the backend tears down every unresolved artifact (closes
-  // draft PRs, discards pending reviews — branches kept) and cancels a live run.
+  // draft PRs, discards pending reviews — branches kept) and cancels a live
+  // conversation.
   const doRequeue = useCallback(async () => {
     if (!conversation?.TaskID) return
     setRequeueBusy(true)
@@ -169,7 +173,8 @@ export default function RunDetail() {
   }, [navigate, orgHref, conversation?.TaskID])
 
   // handleRequeue gates the destructive teardown behind the confirmation modal
-  // whenever the run still has unresolved artifacts; otherwise it requeues
+  // whenever the conversation still has unresolved artifacts; otherwise it
+  // requeues
   // straight away (nothing to resolve).
   const handleRequeue = useCallback(() => {
     if (!conversation) return

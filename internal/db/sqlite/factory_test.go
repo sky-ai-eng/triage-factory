@@ -126,7 +126,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 				INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id)
 				VALUES (?, ?, ?, ?, 'manual', ?)
 			`, id, taskID, factoryTestPromptID, stored, blueprintRunID); err != nil {
-				t.Fatalf("seed run: %v", err)
+				t.Fatalf("seed conversation: %v", err)
 			}
 			if status == "running" {
 				if _, err := conn.Exec(`

@@ -19,8 +19,8 @@ type ClaimCredentialsFactory func(t *testing.T) (store db.ConversationQueueStore
 // to stage and observe states the store's own guarded flips can't produce
 // on demand.
 type ClaimCredentialsSeeder struct {
-	// EnqueueConversation stages one claimable queued run (under a running
-	// blueprint_run) and returns its id.
+	// EnqueueConversation stages one claimable queued conversation (under a
+	// running blueprint_run) and returns its id.
 	EnqueueConversation func(t *testing.T) (conversationID string)
 
 	// ConversationStatus reads the conversation's STORED conversations.status directly (SQL
@@ -64,7 +64,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 			t.Fatalf("ClaimNextConversation: %v", err)
 		}
 		if got == nil || got.ID != conversationID {
-			t.Fatalf("ClaimNextConversation = %+v, want run %s", got, conversationID)
+			t.Fatalf("ClaimNextConversation = %+v, want conversation %s", got, conversationID)
 		}
 		return got
 	}

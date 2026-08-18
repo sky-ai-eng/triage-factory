@@ -14,7 +14,7 @@ import (
 // TestConversationStore_Postgres_LookupOrgForConversationSystem_ReturnsRealOrgID
 // pins the cold-start identity probe that cmd/exec convident depends
 // on: a delegated agent subprocess only has TRIAGE_FACTORY_CONVERSATION_ID in
-// its env, so the lookup has to discover the run's owning org by
+// its env, so the lookup has to discover the conversation's owning org by
 // conversationID alone. Returns the real Postgres org UUID, NOT the local-mode
 // sentinel — the exact regression this ticket exists to fix.
 func TestConversationStore_Postgres_LookupOrgForConversationSystem_ReturnsRealOrgID(t *testing.T) {
@@ -80,9 +80,9 @@ func TestConversationStore_Postgres_LookupOrgForConversationSystem_UnknownReturn
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	got, err := stores.Conversations.LookupOrgForConversationSystem(context.Background(), uuid.New().String())
 	if err != nil {
-		t.Fatalf("LookupOrgForConversationSystem on unknown run: %v", err)
+		t.Fatalf("LookupOrgForConversationSystem on unknown conversation: %v", err)
 	}
 	if got != "" {
-		t.Errorf("LookupOrgForConversationSystem on unknown run = %q; want empty string", got)
+		t.Errorf("LookupOrgForConversationSystem on unknown conversation = %q; want empty string", got)
 	}
 }

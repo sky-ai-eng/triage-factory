@@ -66,7 +66,7 @@ func seedMarketplaceStatsTask(t *testing.T, h *Harness, orgID, userID, teamID st
 // seedPromptConversation records one conversations row against promptID, started at
 // startedAt, with the given terminal status ('completed' or 'failed').
 // conversations.blueprint_run_id is NOT NULL, so this mints a throwaway
-// single-step blueprint_run to hang the run off, mirroring
+// single-step blueprint_run to hang the conversation off, mirroring
 // seedPgConversationsForStats.
 func seedPromptConversation(t *testing.T, h *Harness, orgID, userID, teamID, taskID, promptID, status string, startedAt time.Time) {
 	t.Helper()

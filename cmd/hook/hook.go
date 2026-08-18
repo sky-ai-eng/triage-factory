@@ -35,8 +35,9 @@ import (
 // Handle dispatches `triagefactory hook <verb> ...`. Recording verbs are
 // best-effort by contract: the calling git hook swallows their failures, so a
 // recording miss never blocks the push. A bug in our own hook (unknown verb,
-// missing verb) exits non-zero to surface it; operational failures (no run
-// context, DB/daemon trouble) warn and return so the verb stays best-effort.
+// missing verb) exits non-zero to surface it; operational failures (no
+// conversation context, DB/daemon trouble) warn and return so the verb stays
+// best-effort.
 //
 // check-push is the one verb that can refuse, and it says so with the
 // dedicated ExitRefused status — never with the exit codes above, which the

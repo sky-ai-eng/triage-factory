@@ -31,7 +31,7 @@ func TestConversationPendingInputStore_Postgres(t *testing.T) {
 			DeleteConversation: func(t *testing.T, conversationID string) {
 				t.Helper()
 				if _, err := h.AdminDB.Exec(`DELETE FROM conversations WHERE id = $1`, conversationID); err != nil {
-					t.Fatalf("delete run: %v", err)
+					t.Fatalf("delete conversation: %v", err)
 				}
 			},
 			// Through the production writer, not a test-local INSERT: the

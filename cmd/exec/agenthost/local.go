@@ -2560,10 +2560,11 @@ func jiraAction(a domain.Artifact, action, from, to string) *domain.ExternalActi
 
 // branchPushActionInfo builds the ActionBranchPushed row for a branch artifact,
 // or nil for any other kind. The dedup key is deterministic —
-// branch:<run>:<ref>:<sha> — so the git pre-push hook and the git-proxy
-// backstop, which both observe the same push, collapse to one row; a force-push
-// (new sha) is recorded distinctly. The push lands on GitHub under whichever org
-// credential the run's git path carries, which is why the caller supplies it.
+// branch:<conversationID>:<ref>:<sha> — so the git pre-push hook and the
+// git-proxy backstop, which both observe the same push, collapse to one row; a
+// force-push (new sha) is recorded distinctly. The push lands on GitHub under
+// whichever org credential the conversation's git path carries, which is why
+// the caller supplies it.
 // Free-function form (the counterpart of the LocalClient method) so the direct
 // runtime — which owns UpsertArtifact but holds no LocalClient — can build it
 // from a ConversationInfo directly.

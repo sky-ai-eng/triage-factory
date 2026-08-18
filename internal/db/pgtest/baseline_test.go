@@ -1584,10 +1584,11 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 // TestRLS_ChildTablesInheritParentVisibility — denormalized child
 // rows (task_events, messages, conversation_memory, conversation_memory_entities,
 // conversation_worktrees, pending_firings) must NOT be visible to org members
-// who can't see the parent task/run. Earlier policies gated only on
+// who can't see the parent task/conversation. Earlier policies gated only on
 // org_id, leaking metadata across users in the same org. EXISTS-on-parent
 // inherits the parent table's RLS. (artifacts is excluded: it scopes
-// directly on team_id like runs, not via EXISTS-on-run, so it has its
+// directly on team_id like conversations, not via EXISTS-on-conversation,
+// so it has its
 // own team-visibility coverage in artifacts_test.go.)
 func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	h := Shared(t)
@@ -1597,7 +1598,7 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	bob := SeedUser(t, h, "bob")
 	AddOrgMember(t, h, bob, orgA, teamA, "member", "member")
 
-	// Alice creates a task + a run + child rows. All in orgA. The
+	// Alice creates a task + a conversation + child rows. All in orgA. The
 	// team-default would make these rows visible to bob too
 	// (same team), which would hide the "child inherits parent
 	// visibility" property this test pins. Pin the parents at
@@ -1624,7 +1625,7 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 		INSERT INTO conversations (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id, status)
 		VALUES ($1, $2, $3, 'private', $4, $5, $6, 'running') RETURNING id
 	`, orgA, alice, teamA, taskID, prompt, bpRun).Scan(&conversationID); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 	// Seed one child row per parent kind we care about.
 	MustExec(t, h.AdminDB, `INSERT INTO task_events (org_id, task_id, event_id, kind)
@@ -1656,7 +1657,7 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 		t.Fatalf("alice query: %v", err)
 	}
 
-	// Bob (same org, NOT the run/task creator) must see ZERO of these
+	// Bob (same org, NOT the conversation/task creator) must see ZERO of these
 	// child rows — tasks_select and conversations_select gate on creator, so
 	// the EXISTS-on-parent in each child policy returns false for him.
 	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
@@ -2481,7 +2482,7 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id, status)
 		VALUES ($1, $2, $3, $4, $5, $6, 'running') RETURNING id
 	`, orgA, alice, teamA, taskID, promptID, bpRun).Scan(&conversationID); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 	var ehID string
 	if err := h.AdminDB.QueryRow(`
@@ -2592,7 +2593,7 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 	carol := SeedUser(t, h, "carol")
 	AddOrgMember(t, h, carol, orgA, teamA, "member", "member") // org member but not admin
 
-	// Seed an entity + event + parent task + prompt so the task/runs
+	// Seed an entity + event + parent task + prompt so the task/conversations
 	// INSERTs below have parents to reference (created via AdminDB so
 	// the seeds themselves bypass the policy we're testing).
 	entityA := seedEntity(t, h, orgA, "github", "octo/repo#org-insert")

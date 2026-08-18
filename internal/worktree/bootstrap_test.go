@@ -197,7 +197,7 @@ func TestCreateForPR_ForkPR(t *testing.T) {
 	}
 
 	// The local branch is namespaced per run under
-	// triagefactory/<conversationID>/pr-<n> so two concurrent runs on the same PR
+	// triagefactory/<rootKey>/pr-<n> so two concurrent runs on the same PR
 	// (sharing one bare) never collide on a branch ref.
 	out, err = exec.Command("git", "-C", wtPath, "rev-parse", "--abbrev-ref", "HEAD").Output()
 	if err != nil {
@@ -248,9 +248,9 @@ func TestCreateForPR_ForkPR(t *testing.T) {
 
 // TestCleanupPRConfig_RemovesForkPRArtifacts is the regression test
 // for the bare-repo accumulation bug: every fork PR delegation adds
-// a per-run tfpush-<conversationID>-<n> remote, a per-run
-// branch.triagefactory/<conversationID>/pr-<n>.* config block, and the
-// triagefactory/<conversationID>/pr-<n> branch to the shared bare. Without
+// a per-run tfpush-<rootKey>-<n> remote, a per-run
+// branch.triagefactory/<rootKey>/pr-<n>.* config block, and the
+// triagefactory/<rootKey>/pr-<n> branch to the shared bare. Without
 // CleanupPRConfig, repeated PR runs leak these into the config file
 // indefinitely. After CleanupPRConfig, all three artifacts must be
 // gone — and the bare must still be functional (no collateral
@@ -487,7 +487,7 @@ func TestCreateForPR_DeletedFork_PushFailsAfterPriorOwnRepoPR(t *testing.T) {
 // TestSweepStaleForkPRConfig_ReclaimsOwnRepoPR is the regression for
 // the per-run leak: when a run's inline cleanup doesn't fire (e.g. a
 // cancel above the runAgent defer, or a crash), the bare keeps the
-// per-run branch.triagefactory/<conversationID>/pr-<n>.* tracking config + branch.
+// per-run branch.triagefactory/<rootKey>/pr-<n>.* tracking config + branch.
 // Once the worktree dir is gone, the sweep must reclaim them by walking the
 // marker — uniformly for fork and own-repo PRs, which now share the same
 // per-run branch shape.
@@ -642,7 +642,7 @@ func TestSweepStaleForkPRConfig_PreservesUserAddedRemotes(t *testing.T) {
 // TestSweepStaleForkPRConfig_RemovesOrphanedRemotes is the regression
 // test for the cancelled/taken-over leak path: when inline cleanup
 // in the runAgent defer doesn't fire, per-run PR branches + their
-// tfpush-<conversationID>-<n> remotes accumulate in the bare. The sweep is the
+// tfpush-<rootKey>-<n> remotes accumulate in the bare. The sweep is the
 // bootstrap-time backstop that walks the bare's per-run PR branch markers
 // and removes any whose branch isn't held by a live worktree, reconstructing
 // the per-run remote from each branch name.
@@ -662,10 +662,10 @@ func TestSweepStaleForkPRConfig_RemovesOrphanedRemotes(t *testing.T) {
 	// Stand up the per-run PR config that PR setup would have produced for two
 	// PRs that are now orphaned (no worktree). The trackedBranchMarkerKey on the
 	// per-run branch is what makes the sweep find them, and the branch name is
-	// what lets it reconstruct the matching tfpush-<conversationID>-<n> remote.
-	prConversationID := func(n int) string { return fmt.Sprintf("sweep-run-%d", n) }
-	prRemote := func(n int) string { return fmt.Sprintf("tfpush-%s-%d", prConversationID(n), n) }
-	prBranch := func(n int) string { return fmt.Sprintf("triagefactory/%s/pr-%d", prConversationID(n), n) }
+	// what lets it reconstruct the matching tfpush-<rootKey>-<n> remote.
+	prRootKey := func(n int) string { return fmt.Sprintf("sweep-run-%d", n) }
+	prRemote := func(n int) string { return fmt.Sprintf("tfpush-%s-%d", prRootKey(n), n) }
+	prBranch := func(n int) string { return fmt.Sprintf("triagefactory/%s/pr-%d", prRootKey(n), n) }
 	for _, n := range []int{50, 51} {
 		remote := prRemote(n)
 		branch := prBranch(n)
@@ -724,7 +724,7 @@ func TestSweepStaleForkPRConfig_RemovesOrphanedRemotes(t *testing.T) {
 
 // TestSweepStaleForkPRConfig_PreservesLiveWorktree is the safety
 // regression: the sweep must NOT reclaim a per-run PR branch (and its
-// tfpush-<conversationID>-<n> remote) whose branch is checked out by a live worktree
+// tfpush-<rootKey>-<n> remote) whose branch is checked out by a live worktree
 // (a delegated run is still using it for push/pull). With the worktree
 // present, both the remote and the branch tracking config must survive.
 func TestSweepStaleForkPRConfig_PreservesLiveWorktree(t *testing.T) {
@@ -914,7 +914,7 @@ func TestCreateForPR_OwnRepoPR_FetchesViaPullRef(t *testing.T) {
 
 // TestCreateForPR_TrackingRefMaterialized guards against a regression where
 // configurePRPushTracking points branch.<local>.remote / .merge at the
-// tfpush-<conversationID>-<n> remote's PR head branch, but that remote is never
+// tfpush-<rootKey>-<n> remote's PR head branch, but that remote is never
 // fetched (fetches route through refs/pull/<n>/head on the upstream
 // instead) — so without materializing the tracking ref locally, git can't
 // resolve the configured upstream and `git status` reports "the upstream is

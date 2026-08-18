@@ -12,16 +12,16 @@ import (
 // its seeder stages rows under, and the seeder.
 type FleetQueueSharesFactory func(t *testing.T) (store db.ConversationQueueStore, orgID string, seed FleetQueueSharesSeeder)
 
-// FleetQueueSharesSeeder stages the run + settings states FleetQueueShares
-// reads. The store's own guarded flips can't reach terminal/dormant/active
+// FleetQueueSharesSeeder stages the conversation + settings states
+// FleetQueueShares reads. The store's own guarded flips can't reach terminal/dormant/active
 // statuses on demand, so ForceStatus writes them directly.
 type FleetQueueSharesSeeder struct {
-	// EnqueueConversation stages one queued run (under a running blueprint_run) and
-	// returns its id.
+	// EnqueueConversation stages one queued conversation (under a running
+	// blueprint_run) and returns its id.
 	EnqueueConversation func(t *testing.T) (conversationID string)
 
-	// ForceStatus rewrites a run's status directly, bypassing the store's
-	// guards.
+	// ForceStatus rewrites a conversation's status directly, bypassing the
+	// store's guards.
 	ForceStatus func(t *testing.T, conversationID, status string)
 
 	// SetMaxConcurrentRuns upserts the org's max_concurrent_runs cap; a nil
@@ -31,8 +31,8 @@ type FleetQueueSharesSeeder struct {
 
 // RunFleetQueueSharesConformance covers the per-backend FleetQueueShares
 // contract: it counts an org's active (slot-occupying: an unreleased claim,
-// whatever phase that claim is in) and queued (needs-driving) runs, excludes
-// terminal and hibernated (`open`) runs from both, and
+// whatever phase that claim is in) and queued (needs-driving) conversations,
+// excludes terminal and hibernated (`open`) conversations from both, and
 // reports the configured cap — nil for an unset or non-positive value.
 // Multi-org fairness ordering is a Postgres-only concern exercised in that
 // backend's own tests; this suite runs single-org against both dialects
@@ -60,14 +60,15 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 	t.Run("counts_active_queued_and_cap", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 
-		// No runs → the org contributes no row.
+		// No conversations → the org contributes no row.
 		if s, found := shareFor(t, store, orgID); found {
 			t.Fatalf("empty queue reported a share %+v, want the org omitted", s)
 		}
 
 		// 2 active + 1 still queued. Active is an engagement now, so the two
-		// active runs are made active by actually claiming them — which is
-		// also the only way to reach the state, the conversation row itself
+		// active conversations are made active by actually claiming them —
+		// which is also the only way to reach the state, the conversation row
+		// itself
 		// carrying no "running" any more.
 		seed.EnqueueConversation(t)
 		seed.EnqueueConversation(t)
@@ -112,7 +113,7 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 		}
 	})
 
-	t.Run("terminal_and_dormant_runs_excluded", func(t *testing.T) {
+	t.Run("terminal_and_dormant_conversations_excluded", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 
 		queued := seed.EnqueueConversation(t) // counts as queued

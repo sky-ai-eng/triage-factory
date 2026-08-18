@@ -197,7 +197,8 @@ func TestConversationQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 		t.Fatalf("attempts after requeue+reclaim = %d, want 2", reclaimed.Attempts)
 	}
 
-	// Now the run is 'running' again (mid-flight). ResetProcessingConversations should
+	// Now the conversation is 'running' again (mid-flight).
+	// ResetProcessingConversations should
 	// flip it back to 'queued'.
 	n, err := stores.ConversationQueue.ResetProcessingConversations(ctx, sqliteRQExecutorID, sqliteRQBootEpoch+1)
 	if err != nil {

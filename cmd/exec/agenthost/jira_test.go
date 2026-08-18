@@ -151,7 +151,7 @@ func TestServer_JiraGetIssue_RoutesHostSide(t *testing.T) {
 	defer jira.Close()
 
 	client := startJiraDaemon(t, jiraStores(jira.URL, "org-pat"),
-		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "run-1"})
+		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"})
 
 	issue, err := client.JiraGetIssue(context.Background(), "PROJ-1")
 	if err != nil {
@@ -182,7 +182,7 @@ func TestLocalClient_JiraGetIssue_ExecutorBundleFirst(t *testing.T) {
 	defer jira.Close()
 
 	stores := db.Stores{Secrets: disabledJiraSecrets{}, Orgs: fakeJiraOrgs{}}
-	lc := NewLocal(stores, ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "run-1"})
+	lc := NewLocal(stores, ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"})
 
 	t.Run("no proxy creds: hits the disabled secret store (the pre-fix executor failure)", func(t *testing.T) {
 		_, err := lc.JiraGetIssue(context.Background(), "PROJ-1")
@@ -218,7 +218,7 @@ func TestServer_JiraCreateIssue_RoundTrip(t *testing.T) {
 	defer jira.Close()
 
 	client := startJiraDaemon(t, jiraStores(jira.URL, "org-pat"),
-		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "run-1"})
+		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"})
 
 	key, err := client.JiraCreateIssue(context.Background(), "PROJ", "Task", "do a thing", "", "", "")
 	if err != nil {
@@ -238,7 +238,7 @@ func TestServer_JiraSearchIssues_RoundTrip(t *testing.T) {
 	defer jira.Close()
 
 	client := startJiraDaemon(t, jiraStores(jira.URL, "org-pat"),
-		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "run-1"})
+		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"})
 
 	issues, err := client.JiraSearchIssues(context.Background(), "project = PROJ", nil, 50)
 	if err != nil {
@@ -261,7 +261,7 @@ func TestServer_JiraUpdateIssue_FieldsCrossWire(t *testing.T) {
 	defer jira.Close()
 
 	client := startJiraDaemon(t, jiraStores(jira.URL, "org-pat"),
-		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "run-1"})
+		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"})
 
 	newSummary := "rewritten summary"
 	err := client.JiraUpdateIssue(context.Background(), "PROJ-1", jiraclient.UpdateIssueFields{Summary: &newSummary})
@@ -288,7 +288,7 @@ func TestServer_JiraTransition_ClientSideRejectionPropagates(t *testing.T) {
 	defer jira.Close()
 
 	client := startJiraDaemon(t, jiraStores(jira.URL, "org-pat"),
-		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "run-1"})
+		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"})
 
 	err := client.JiraTransitionTo(context.Background(), "PROJ-1", "Done")
 	if err == nil {
@@ -315,7 +315,7 @@ func TestServer_JiraTransition_APIErrorPropagates(t *testing.T) {
 	defer jira.Close()
 
 	client := startJiraDaemon(t, jiraStores(jira.URL, "org-pat"),
-		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "run-1"})
+		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"})
 
 	err := client.JiraTransitionTo(context.Background(), "PROJ-1", "Done")
 	if err == nil {
@@ -339,7 +339,7 @@ func TestLocalClient_JiraGetIssue_DirectPath(t *testing.T) {
 	defer jira.Close()
 
 	client := NewLocal(jiraStores(jira.URL, "org-pat"),
-		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "run-1"})
+		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"})
 
 	issue, err := client.JiraGetIssue(context.Background(), "PROJ-7")
 	if err != nil {
@@ -358,7 +358,7 @@ func TestLocalClient_JiraGetIssue_DirectPath(t *testing.T) {
 // CLI printed pre-refactor — in local mode directly, and over IPC as the
 // response error string.
 func TestJira_NotConfigured_BothModes(t *testing.T) {
-	info := ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "run-1"}
+	info := ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"}
 
 	// Assert on the actionable "run triagefactory" guidance: it's absent
 	// from the raw resolver sentinel ("jira: no system credential for

@@ -28,7 +28,8 @@ type RepoReferenceFactory func(t *testing.T) (stores db.Stores, orgID, teamID st
 //     is absent, because in multi mode that path runs on the executor, which
 //     holds no INSERT on the table at all.
 //   - Untracking deletes the tracking row and NOTHING else. A registry row
-//     outlives the tracking decision that created it, because a run's worktree
+//     outlives the tracking decision that created it, because a
+//     conversation's worktree
 //     ledger, a pinned project or a task may still name the repository —
 //     tracking is forward-only in both directions.
 //

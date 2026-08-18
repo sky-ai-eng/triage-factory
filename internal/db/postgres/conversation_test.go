@@ -22,7 +22,7 @@ import (
 // every method through its happy and edge paths.
 func TestConversationStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	// Wire both pools against AdminDB so the run lifecycle
+	// Wire both pools against AdminDB so the conversation lifecycle
 	// statements run without a JWT-claims tx. Production wiring
 	// uses the app pool, but the conformance suite is about
 	// behavior, not auth; the cross-org leakage test below
@@ -47,7 +47,7 @@ func seedPgConversationOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, agen
 	orgID = uuid.New().String()
 	userID = uuid.New().String()
 	agentID = uuid.New().String()
-	email := fmt.Sprintf("agentrun-%s@test.local", userID[:8])
+	email := fmt.Sprintf("conv-%s@test.local", userID[:8])
 
 	h.SeedAuthUser(t, userID, email)
 	if _, err := h.AdminDB.Exec(
@@ -94,7 +94,7 @@ func seedPgConversationPrompt(t *testing.T, h *pgtest.Harness, orgID, userID str
 }
 
 // newPgConversationSeeder builds the FactorySeeder-style callbacks the
-// conformance harness uses to stage non-run fixture rows. INSERTs
+// conformance harness uses to stage non-conversation fixture rows. INSERTs
 // carry org_id explicitly so the cross-org leakage test below can
 // reuse the same seeder for two orgs in parallel.
 func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) dbtest.ConversationSeeder {
@@ -103,7 +103,7 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 		Entity: func(t *testing.T, suffix string) string {
 			t.Helper()
 			id := uuid.New().String()
-			sourceID := fmt.Sprintf("agentrun-%s-%s", suffix, id[:8])
+			sourceID := fmt.Sprintf("conv-%s-%s", suffix, id[:8])
 			if _, err := conn.Exec(`
 				INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
 				VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6)
@@ -227,7 +227,7 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 		},
 		SetBlueprintRunStatus: func(t *testing.T, blueprintRunID, status string) {
 			t.Helper()
-			// Raw UPDATE — must NOT cascade onto child runs (unlike
+			// Raw UPDATE — must NOT cascade onto child conversations (unlike
 			// BlueprintStore.MarkRunStatus), so the parked child stays parked.
 			if _, err := conn.Exec(`UPDATE blueprint_runs SET status = $1 WHERE id = $2`, status, blueprintRunID); err != nil {
 				t.Fatalf("set blueprint_run status: %v", err)
@@ -277,7 +277,8 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 // TestConversationStore_Postgres_CrossOrgLeakage pins the defense-in-
 // depth guarantee: even with the org_id filter as the only line of
 // defense (AdminDB bypasses RLS), org A's queries can't see org B's
-// runs. In production the RLS policies add a second layer; this test
+// conversations. In production the RLS policies add a second layer; this
+// test
 // validates the WHERE-clause filter on its own so a regression there
 // can't silently rely on RLS to compensate.
 func TestConversationStore_Postgres_CrossOrgLeakage(t *testing.T) {
@@ -294,7 +295,7 @@ func TestConversationStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	// Seed an entity + task + run in each org via the AdminDB so
+	// Seed an entity + task + conversation in each org via the AdminDB so
 	// the FK chain is satisfied.
 	mkChain := func(t *testing.T, orgID, userID, promptID, conversationID string) (taskID string) {
 		t.Helper()
@@ -333,16 +334,16 @@ func TestConversationStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	taskA := mkChain(t, orgA, userA, "p_xleak_A", convA)
 	_ = mkChain(t, orgB, userB, "p_xleak_B", convB)
 
-	// Org A's view must NOT see B's run.
+	// Org A's view must NOT see B's conversation.
 	if got, err := stores.Conversations.Get(ctx, orgA, convB); err != nil {
 		t.Fatalf("Get cross-org: %v", err)
 	} else if got != nil {
-		t.Errorf("orgA Get returned orgB run %s; defense-in-depth filter leaked", convB)
+		t.Errorf("orgA Get returned orgB conversation %s; defense-in-depth filter leaked", convB)
 	}
 	if got, err := stores.Conversations.Get(ctx, orgB, convA); err != nil {
 		t.Fatalf("Get cross-org reverse: %v", err)
 	} else if got != nil {
-		t.Errorf("orgB Get returned orgA run %s", convA)
+		t.Errorf("orgB Get returned orgA conversation %s", convA)
 	}
 
 	// ListForTask scoped to orgB looking at orgA's task must
@@ -350,12 +351,13 @@ func TestConversationStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	if convs, err := stores.Conversations.ListForTask(ctx, orgB, taskA); err != nil {
 		t.Fatalf("ListForTask cross-org: %v", err)
 	} else if len(convs) != 0 {
-		t.Errorf("orgB ListForTask(orgA task) returned %d runs; want 0", len(convs))
+		t.Errorf("orgB ListForTask(orgA task) returned %d conversations; want 0", len(convs))
 	}
 }
 
 // TestConversationStore_Postgres_CrossOrgRLSDenied pins the production
-// RLS layer for runs. Where TestConversationStore_Postgres_CrossOrgLeakage
+// RLS layer for conversations. Where
+// TestConversationStore_Postgres_CrossOrgLeakage
 // above wires both pools against AdminDB to prove the defense-in-depth
 // WHERE-clause filter is intact, this test runs the store through the
 // app pool under tf_app with real JWT claims so the actual
@@ -371,7 +373,7 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	seedPgConversationPromptIn(t, h, "p_rls_A", orgA, alice)
 	seedPgConversationPromptIn(t, h, "p_rls_B", orgB, bob)
 
-	// Seed entity + event + task + run in orgA via admin so the row
+	// Seed entity + event + task + conversation in orgA via admin so the row
 	// exists. Whether bob (claims orgB) can see/mutate it is the
 	// question.
 	entityA := uuid.New().String()
@@ -405,7 +407,7 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 		        'p_rls_A', 'running', 'm', $4, 'manual', $5)
 	`, convA, orgA, taskA, alice, blueprintRunA); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 	ctx := context.Background()
 
@@ -432,7 +434,7 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 				return fmt.Errorf("Get: %w", err)
 			}
 			if conv != nil {
-				t.Errorf("bob Get(orgA, runA) returned %+v; RLS USING filter leaked orgA's run to orgB", conv)
+				t.Errorf("bob Get(orgA, runA) returned %+v; RLS USING filter leaked orgA's conversation to orgB", conv)
 			}
 			return nil
 		})
@@ -442,9 +444,9 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	})
 
 	t.Run("cross_org_write_filtered", func(t *testing.T) {
-		// The insert path moved to the admin-pool run queue (nothing
+		// The insert path moved to the admin-pool conversation queue (nothing
 		// mints conversations under tf_app), so the write arm to pin is
-		// an UPDATE: bob's lifecycle write against orgA's run must be
+		// an UPDATE: bob's lifecycle write against orgA's conversation must be
 		// silently filtered by the USING clause — no rows touched.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
 			return pgstore.NewForTx(tx, pgtest.SecretKey).Conversations.SetWorktreePath(ctx, orgA, convA, "/tmp/bob-was-here")
@@ -457,13 +459,13 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 			t.Fatalf("read back: %v", err)
 		}
 		if wt.Valid && wt.String == "/tmp/bob-was-here" {
-			t.Errorf("cross-org UPDATE landed; RLS USING filter leaked orgA's run to orgB")
+			t.Errorf("cross-org UPDATE landed; RLS USING filter leaked orgA's conversation to orgB")
 		}
 	})
 }
 
 // TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims
-// pins the routing the delegate spawner uses for manual-run
+// pins the routing the delegate spawner uses for manual-conversation
 // bookkeeping: lifecycle writes (Complete, ParkOpen,
 // MarkQueuedForResume) wrapped in SyntheticClaimsWithTx must pass RLS under
 // tf_app and land the expected status. Mirrors the spawner's per-call-site
@@ -516,7 +518,8 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	// Seed a manual run row owned by userID — the queue's EnqueueConversation does
+	// Seed a manual conversation row owned by userID — the queue's
+	// EnqueueConversation does
 	// this in production before any lifecycle write runs.
 	lcBlueprintRun := seedPgBlueprintRun(t, h, orgID, userID, taskID)
 	conversationID := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
@@ -526,7 +529,7 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	})
 
 	// Drive each lifecycle write through SyntheticClaimsWithTx — the
-	// shape the spawner uses for every manual-run bookkeeping point.
+	// shape the spawner uses for every manual-conversation bookkeeping point.
 
 	// ParkOpen (park) then MarkQueuedForResume (resume-by-enqueue) — the
 	// open→queued CAS the resume path drives under the user's claims.
@@ -659,7 +662,8 @@ func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, conv domain.Co
 // given task so a standalone conversations insert can satisfy the origin
 // CHECK's blueprint_run_id FK (→ blueprint_runs(id)). Mirrors the
 // conformance seeder's BlueprintRun, but exposed as a plain helper for
-// the RLS/cross-org tests that seed runs outside the conformance suite.
+// the RLS/cross-org tests that seed conversations outside the conformance
+// suite.
 // Postgres requires org_id on both rows; trigger_type='manual' also
 // requires a non-NULL creator_user_id (blueprint_runs_creator_matches_trigger_type
 // CHECK).

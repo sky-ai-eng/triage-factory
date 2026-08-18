@@ -21,7 +21,7 @@ func TestWorkspaceCloneAuth(t *testing.T) {
 
 	t.Run("local mode injects nothing", func(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeLocal)
-		c := &LocalClient{info: ConversationInfo{OrgID: "org", ConversationID: "run"}}
+		c := &LocalClient{info: ConversationInfo{OrgID: "org", ConversationID: "conv"}}
 		if got := c.workspaceCloneAuth(ctx, "sky-ai-eng", cloneURL); got != (worktree.CloneAuth{}) {
 			t.Errorf("local clone auth = %+v, want the inert zero value", got)
 		}
@@ -30,7 +30,7 @@ func TestWorkspaceCloneAuth(t *testing.T) {
 	t.Run("executor sidecar routes through the git proxy with the placeholder", func(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeMulti)
 		c := &LocalClient{
-			info: ConversationInfo{OrgID: "org", ConversationID: "run"},
+			info: ConversationInfo{OrgID: "org", ConversationID: "conv"},
 			proxyCreds: &ProxyCredentials{
 				GitProxyURL:   "http://10.42.0.1:4100",
 				GitProxyToken: "per-run-placeholder",
@@ -50,7 +50,7 @@ func TestWorkspaceCloneAuth(t *testing.T) {
 		runmode.SetForTest(t, runmode.ModeMulti)
 		// proxyCreds present (executor) but the run started no git proxy. The
 		// resolver is nil here; a fall-through to it is the panic this guards.
-		c := &LocalClient{info: ConversationInfo{OrgID: "org", ConversationID: "run"}, proxyCreds: &ProxyCredentials{}}
+		c := &LocalClient{info: ConversationInfo{OrgID: "org", ConversationID: "conv"}, proxyCreds: &ProxyCredentials{}}
 		if got := c.workspaceCloneAuth(ctx, "sky-ai-eng", cloneURL); got != (worktree.CloneAuth{}) {
 			t.Errorf("no-git-proxy clone auth = %+v, want the inert zero value", got)
 		}

@@ -285,7 +285,8 @@ func TestConversationQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 }
 
 // TestConversationQueueStore_Postgres_ReconcileOrphanedConversations heals the desync where a
-// child run is left non-terminal under an already-terminal blueprint_run: the
+// child conversation is left non-terminal under an already-terminal
+// blueprint_run: the
 // boot sweep cancels it (stamping completed_at) and only it, leaving a child
 // under a still-running parent untouched.
 func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testing.T) {
@@ -356,7 +357,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 		t.Errorf("unclaimed orphan = (%q, parked=%v), want (open, true)", st, parked)
 	}
 	if st, _ := pgConversationStatus(t, h, healthyID); st != "" {
-		t.Errorf("healthy run status = %q, want none (must not touch a mid-flight child under a running parent)", st)
+		t.Errorf("healthy conversation status = %q, want none (must not touch a mid-flight child under a running parent)", st)
 	}
 
 	// Idempotent: a second sweep finds nothing.

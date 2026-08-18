@@ -56,9 +56,9 @@ import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
 // debounce delays that.
 const REFETCH_DEBOUNCE_MS = 250
 
-// Drop target ID for the runs tray inside the station drawer. A
+// Drop target ID for the conversations tray inside the station drawer. A
 // constant string is fine — the drawer only renders one station at a
-// time, so there's never more than one runs-drop target on the page.
+// time, so there's never more than one drop target on the page.
 const RUNS_DROP_ID = 'factory-runs-drop'
 
 // Cinematic auto-attract: idle this long (ms) with the factory tab
@@ -554,7 +554,8 @@ function StationChassis({ info }: { info: ClickedStationInfo | null }) {
           key: r.run.ID,
           dot: conversationStatusColor(r.run.Status),
           body: <ConversationRow conversation={r.run} task={r.task} />,
-          // Clicking a run opens its full-screen station page in a new tab.
+          // Clicking a conversation opens its full-screen station page in a
+          // new tab.
           href: orgHref(`/runs/${r.run.ID}`),
         }))}
         dropId={RUNS_DROP_ID}
@@ -830,14 +831,16 @@ function entityLabel(e: FactoryEntity): string {
   return e.source_id || e.id.slice(0, 8)
 }
 
-// Status-keyed colors for the run-row indicator dot and the inline
+// Status-keyed colors for the conversation-row indicator dot and the inline
 // status label. Pulled from the project palette tokens so the trays
 // feel cohesive with the rest of the app: claim/sage for active,
 // snooze/amber for parked, dismiss/rose for failed, secondary for the
-// rest (queued, and completed — a finished run is unremarkable here).
+// rest (queued, and completed — a finished conversation is unremarkable
+// here).
 //
 // The active arm is the shared predicate rather than a list of names, so
-// every claim phase — including a run parked awaiting its credential
+// every claim phase — including a conversation parked awaiting its
+// credential
 // bundle — reads as working instead of falling through to the inert grey.
 function conversationStatusColor(status: ConversationStatusValue): string {
   if (isActiveStatus(status)) return '#3f6b4d' // --color-claim (sage)

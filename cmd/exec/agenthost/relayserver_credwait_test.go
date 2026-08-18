@@ -61,7 +61,7 @@ func (s *stubWorktrees) DeleteByPathSystem(context.Context, string, string, stri
 func credWaitServer(t *testing.T, rows []domain.ConversationWorktree, sealedAt func() time.Time) (*RelayServer, *int32) {
 	t.Helper()
 	stores := db.Stores{ConversationWorktrees: &stubWorktrees{rows: rows}}
-	srv := NewRelayServer(stores, ConversationInfo{OrgID: "org", ConversationID: "run"}, nil)
+	srv := NewRelayServer(stores, ConversationInfo{OrgID: "org", ConversationID: "conv"}, nil)
 	var relayed int32
 	srv.SetCredentialRefresh(&CredentialRefresh{
 		SealedAt: func(context.Context) (time.Time, bool, error) {
@@ -82,7 +82,7 @@ func credWaitServer(t *testing.T, rows []domain.ConversationWorktree, sealedAt f
 // materialization exactly as they did before, with no store read and no delay.
 func TestAwaitCredentialsForRepo_UnwiredIsNoOp(t *testing.T) {
 	// Nil ConversationWorktrees would panic if the wait ever read the ledger.
-	srv := NewRelayServer(db.Stores{}, ConversationInfo{OrgID: "org", ConversationID: "run"}, nil)
+	srv := NewRelayServer(db.Stores{}, ConversationInfo{OrgID: "org", ConversationID: "conv"}, nil)
 	if err := srv.awaitCredentialsForRepo(context.Background(), "sky-ai-eng", "triage-factory"); err != nil {
 		t.Fatalf("unwired wait returned %v, want nil", err)
 	}
@@ -238,7 +238,7 @@ func TestAwaitCredentialsForRepo_RelayFailureFailsTheOp(t *testing.T) {
 	reserved := time.Now()
 	rows := []domain.ConversationWorktree{{RepoID: "sky-ai-eng/triage-factory", Ref: "@default", CreatedAt: reserved}}
 	stores := db.Stores{ConversationWorktrees: &stubWorktrees{rows: rows}}
-	srv := NewRelayServer(stores, ConversationInfo{OrgID: "org", ConversationID: "run"}, nil)
+	srv := NewRelayServer(stores, ConversationInfo{OrgID: "org", ConversationID: "conv"}, nil)
 	srv.SetCredentialRefresh(&CredentialRefresh{
 		SealedAt: func(context.Context) (time.Time, bool, error) { return reserved.Add(time.Second), true, nil },
 		Relay:    func(context.Context) error { return errors.New("sidecar supervision channel is gone") },
@@ -276,7 +276,7 @@ func TestAwaitCredentialsForRepo_RelayGetsItsOwnBudget(t *testing.T) {
 	reserved := time.Now()
 	rows := []domain.ConversationWorktree{{RepoID: "sky-ai-eng/triage-factory", Ref: "@default", CreatedAt: reserved}}
 	stores := db.Stores{ConversationWorktrees: &stubWorktrees{rows: rows}}
-	srv := NewRelayServer(stores, ConversationInfo{OrgID: "org", ConversationID: "run"}, nil)
+	srv := NewRelayServer(stores, ConversationInfo{OrgID: "org", ConversationID: "conv"}, nil)
 
 	var relayDeadline time.Duration
 	srv.SetCredentialRefresh(&CredentialRefresh{

@@ -69,7 +69,7 @@ func TestTaskStore_CloseWithConversationCancelIntent_Postgres(t *testing.T) {
 				}
 				return brID, convID
 			},
-			BareRun: func(t *testing.T, taskID, convStatus string) string {
+			BareConversation: func(t *testing.T, taskID, convStatus string) string {
 				t.Helper()
 				convID := uuid.New().String()
 				// origin='interactive': the origin CHECK demands the blueprint

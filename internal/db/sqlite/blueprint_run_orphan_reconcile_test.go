@@ -17,14 +17,15 @@ func childConversationStatusDB(t *testing.T, conn *sql.DB, id string) string {
 	t.Helper()
 	var s sql.NullString
 	if err := conn.QueryRow(`SELECT status FROM conversations WHERE id = ?`, id).Scan(&s); err != nil {
-		t.Fatalf("read run %s status: %v", id, err)
+		t.Fatalf("read conversation %s status: %v", id, err)
 	}
 	return s.String
 }
 
 // TestMarkRunStatus_ParksOrphanedChild_OnTerminal pins the atomic
 // guarantee: flipping a blueprint_run to a terminal status must park any
-// still-mid-flight child run in the same call, so a cancel that raced the
+// still-mid-flight child conversation in the same call, so a cancel that
+// raced the
 // dispatcher can't strand a child mid-flight (which keeps the dispatcher on
 // phantom work and pins its feature branch in a worktree, requeuing forever).
 func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
@@ -73,14 +74,14 @@ func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
 	}
 
 	if got := childConversationStatusDB(t, conn, "oa-child"); got != "open" {
-		t.Errorf("child run status = %q, want open (must not strand a child under a terminal parent)", got)
+		t.Errorf("child conversation status = %q, want open (must not strand a child under a terminal parent)", got)
 	}
 	var parkedAt any
 	if err := conn.QueryRow(`SELECT parked_at FROM conversations WHERE id = 'oa-child'`).Scan(&parkedAt); err != nil {
 		t.Fatalf("read parked_at: %v", err)
 	}
 	if parkedAt == nil {
-		t.Error("parked child run has NULL parked_at; the retention sweep keys off it")
+		t.Error("parked child conversation has NULL parked_at; the retention sweep keys off it")
 	}
 	var releasedAt any
 	var outcome string
@@ -129,7 +130,7 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 	}
 
 	if got := childConversationStatusDB(t, conn, "of-child"); got != "completed" {
-		t.Errorf("child run status = %q, want completed (a terminal child must not be re-cancelled)", got)
+		t.Errorf("child conversation status = %q, want completed (a terminal child must not be re-cancelled)", got)
 	}
 	var outcome string
 	if err := conn.QueryRow(`SELECT COALESCE(outcome,'') FROM conversations WHERE id = 'of-child'`).Scan(&outcome); err != nil {

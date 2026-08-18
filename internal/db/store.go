@@ -79,7 +79,7 @@ type Stores struct {
 	Users UsersStore
 
 	// Tasks owns the tasks table — lifecycle, claims, dedup,
-	// swipe-triggered transitions, plus the run-history queries
+	// swipe-triggered transitions, plus the conversation-history queries
 	// powering the auto-delegate breaker. App pool in Postgres
 	// (RLS-active) since the queue + per-task surface is request-
 	// driven; the AI scorer reads tasks via the admin-pooled
@@ -102,17 +102,19 @@ type Stores struct {
 	// a request handler.
 	Conversations ConversationStore
 
-	// Artifacts owns the artifacts table — the durable, run-attributed,
-	// polymorphic record of everything a run produces externally (branch,
+	// Artifacts owns the artifacts table — the durable,
+	// conversation-attributed, polymorphic record of everything a conversation
+	// produces externally (branch,
 	// PR, review, issue, comment). Deduped per (org_id, dedup_key) so all
 	// of TFAC-454's capture writers UPSERT to one row. App pool in
-	// Postgres (team-scoped RLS via team_id, like runs); consumers are the
-	// exec choke point + reconciliation (writers) and run-detail / C2
+	// Postgres (team-scoped RLS via team_id, like conversations); consumers
+	// are the exec choke point + reconciliation (writers) and
+	// conversation-detail / C2
 	// (readers). See TFAC-455.
 	Artifacts ArtifactStore
 
 	// Entities owns the entities table — the long-lived source
-	// objects (PR, Jira issue) every event/task/run hangs off. App
+	// objects (PR, Jira issue) every event/task/conversation hangs off. App
 	// pool in Postgres; consumers are the tracker, projectclassify,
 	// delegate context loaders, the scorer, and the server panels.
 	Entities EntityStore
@@ -128,7 +130,7 @@ type Stores struct {
 
 	// PendingFirings owns the pending_firings table — the FIFO queue
 	// of intent-to-auto-delegate rows the router enqueues when an
-	// entity already has an active auto run. Admin pool in Postgres
+	// entity already has an active auto conversation. Admin pool in Postgres
 	// (the router has no per-user identity; system service).
 	PendingFirings PendingFiringsStore
 
@@ -156,7 +158,8 @@ type Stores struct {
 	// worker run as background goroutines with no per-user identity.
 	EventQueue EventQueueStore
 
-	// ConversationQueue owns the run queue — the work list the delegation dispatcher
+	// ConversationQueue owns the conversation queue — the work list the
+	// delegation dispatcher
 	// drains to drive blueprints through their steps (sibling of EventQueue).
 	// A blueprint step is enqueued as a conversations row with no stored
 	// status — the absence of an outcome is what makes it claimable;
@@ -166,13 +169,14 @@ type Stores struct {
 	// a background worker with no per-user identity.
 	ConversationQueue ConversationQueueStore
 
-	// TaskMemory owns the conversation_memory table — per-run agent narrative
+	// TaskMemory owns the conversation_memory table — per-conversation agent
+	// narrative
 	// + human verdict, read back by the delegate spawner to
 	// materialize prior context into fresh worktrees. Holds both
 	// pools: app for request-handler equivalents (review/PR submit,
-	// swipe-discard cleanup, factory/run-summary reads) and admin for
-	// the spawner's runAgent goroutine (post-completion upsert + run-
-	// start materializer, both without a JWT-claims context).
+	// swipe-discard cleanup, factory/conversation-summary reads) and admin
+	// for the spawner's runAgent goroutine (post-completion upsert +
+	// engagement-start materializer, both without a JWT-claims context).
 	TaskMemory TaskMemoryStore
 
 	// ConversationWorktrees owns the conversation_worktrees table — one row per
@@ -395,18 +399,20 @@ type Stores struct {
 	// deployment config, not tenant data.
 	Operators OperatorStore
 
-	// ConversationSignals owns the conversation_signals table — the cross-pod run-control
+	// ConversationSignals owns the conversation_signals table — the cross-pod
+	// conversation-control
 	// outbox (TFAC-585). Postgres only: the SQLite impl is a stub
 	// returning ErrNotApplicableInLocal from every method, mirroring
-	// MarketplaceStore/InvitesStore — local mode is always its own run's
-	// owner, so no code path may reach this store there.
+	// MarketplaceStore/InvitesStore — local mode owns every live conversation
+	// itself, so no code path may reach this store there.
 	ConversationSignals ConversationSignalStore
 
 	// ConversationPendingInput is the durable half of resume-by-enqueue (TFAC-585):
-	// the message recorded before a parked run's continuation is re-queued
+	// the message recorded before a parked conversation's continuation is
+	// re-queued
 	// as ordinary claimable work, stored as an undelivered user messages
 	// row. Both dialects (unlike ConversationSignals): local mode's dispatcher
-	// claims its own resumed runs through the identical queue path.
+	// claims its own resumed conversations through the identical queue path.
 	ConversationPendingInput ConversationPendingInputStore
 
 	// Permissions owns the conversation_permissions table — the durable

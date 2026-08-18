@@ -85,12 +85,12 @@ describe('ScreenTranscript system-authored rows', () => {
 // verdict block has nothing to render. This is the display half of that
 // contract.
 describe('ScreenTranscript verdict', () => {
-  it('renders no verdict for a settled run with no summary', () => {
+  it('renders no verdict for a settled conversation with no summary', () => {
     render(<ScreenTranscript conversation={conversation({ Status: 'open' })} messages={[]} />)
     expect(screen.queryByText('IDLE')).not.toBeInTheDocument()
   })
 
-  it('renders the verdict when a run actually concluded with one', () => {
+  it('renders the verdict when a conversation actually concluded with one', () => {
     render(
       <ScreenTranscript
         conversation={conversation({

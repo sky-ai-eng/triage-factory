@@ -323,7 +323,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 	t.Run("GetMemoriesForEntity_orders_by_created_at_ASC", func(t *testing.T) {
 		// Materializer reads in oldest-first order so the next agent
 		// reading prior memories sees them chronologically. Insert two
-		// runs on the same entity with a sleep between them and pin
+		// conversations on the same entity with a sleep between them and pin
 		// the slice order.
 		s, orgID, seed := mk(t)
 		conv1, entityID := seed.Conversation(t, "order-first")

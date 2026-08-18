@@ -10,8 +10,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// conversationSignalStore is the Postgres impl of db.ConversationSignalStore — the cross-pod
-// run-control outbox (TFAC-585). Admin-pool only: conversation_signals carries no
+// conversationSignalStore is the Postgres impl of db.ConversationSignalStore —
+// the cross-pod conversation-control outbox (TFAC-585). Admin-pool only:
+// conversation_signals carries no
 // app-pool policy (RLS enabled, REVOKE ALL from the app roles — see the
 // migration), so every statement here runs against the admin/BYPASSRLS
 // pool, mirroring InstanceStore's shape.

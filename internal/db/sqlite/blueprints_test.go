@@ -139,9 +139,9 @@ func seedEntityEventTask(t *testing.T, conn *sql.DB, suffix string) *domain.Task
 	return task
 }
 
-// TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip protects the 16-column
+// TestBlueprintStore_SQLite_ConversationsForBlueprint_RoundTrip protects the 16-column
 // SELECT/Scan pair in ConversationsForBlueprint against silent column-order drift.
-func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
+func TestBlueprintStore_SQLite_ConversationsForBlueprint_RoundTrip(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints
 	ctx := context.Background()
@@ -185,22 +185,22 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
 		t.Fatalf("ConversationsForBlueprint: %v", err)
 	}
 	if len(convs) != 2 {
-		t.Fatalf("expected 2 runs, got %d", len(convs))
+		t.Fatalf("expected 2 conversations, got %d", len(convs))
 	}
 	if convs[0].ID != "blueprint-step-run-0" || convs[1].ID != "blueprint-step-run-1" {
 		t.Errorf("unexpected order: %v", []string{convs[0].ID, convs[1].ID})
 	}
 	if convs[0].BlueprintStepIndex == nil || *convs[0].BlueprintStepIndex != 0 {
-		t.Errorf("run[0].BlueprintStepIndex = %v, want 0", convs[0].BlueprintStepIndex)
+		t.Errorf("convs[0].BlueprintStepIndex = %v, want 0", convs[0].BlueprintStepIndex)
 	}
 	if convs[1].BlueprintStepIndex == nil || *convs[1].BlueprintStepIndex != 1 {
-		t.Errorf("run[1].BlueprintStepIndex = %v, want 1", convs[1].BlueprintStepIndex)
+		t.Errorf("convs[1].BlueprintStepIndex = %v, want 1", convs[1].BlueprintStepIndex)
 	}
 	if convs[0].PromptID != "step-prompt-1" {
-		t.Errorf("run[0].PromptID = %q, want step-prompt-1", convs[0].PromptID)
+		t.Errorf("convs[0].PromptID = %q, want step-prompt-1", convs[0].PromptID)
 	}
 	if convs[0].Model != "claude-sonnet-4-6" {
-		t.Errorf("run[0].Model = %q, want claude-sonnet-4-6", convs[0].Model)
+		t.Errorf("convs[0].Model = %q, want claude-sonnet-4-6", convs[0].Model)
 	}
 }
 
@@ -261,7 +261,8 @@ func TestBlueprintStore_SQLite_StepPlanRoundTrip(t *testing.T) {
 
 // TestBlueprintStore_SQLite_ActorAgentRoundTrip pins that the executing-bot
 // actor freezes on the blueprint_run at CreateRun and reads back on GetRun (the
-// reactor relies on this to inherit it onto each step run). The fenced event
+// reactor relies on this to inherit it onto each step conversation). The
+// fenced event
 // insert carries it too, and an empty actor round-trips as empty.
 func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 	conn := openSQLiteForTest(t)
@@ -338,10 +339,11 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 }
 
 // TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim pins the coupling
-// that makes "unclaimed with a live run" mean only what a user requeue
-// intends: the fenced insert is a delegation's commitment point, so the task's
-// agent claim commits in the same transaction as the run row. Three arms —
-// the stamp lands with the run, a refused stamp does NOT roll the run back,
+// that makes "unclaimed with a live conversation" mean only what a user
+// requeue intends: the fenced insert is a delegation's commitment point, so
+// the task's agent claim commits in the same transaction as the blueprint_run
+// row. Three arms — the stamp lands with the blueprint run, a refused stamp
+// does NOT roll the blueprint run back,
 // and a fenced replay re-stamps nothing.
 func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
 	conn := openSQLiteForTest(t)
@@ -470,12 +472,12 @@ func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
 	})
 }
 
-// TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome pins the
-// channel that replaced the old per-step verdict: a step run's terminal
-// conversations.outcome (and outcome_reason) round-trips through
-// ConversationsForBlueprint, which is what the run-detail handler renders and what
-// the orchestrator advances on.
-func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
+// TestBlueprintStore_SQLite_ConversationsForBlueprint_SurfacesOutcome pins the
+// channel that replaced the old per-step verdict: a step conversation's
+// terminal conversations.outcome (and outcome_reason) round-trips through
+// ConversationsForBlueprint, which is what the conversation-detail handler
+// renders and what the orchestrator advances on.
+func TestBlueprintStore_SQLite_ConversationsForBlueprint_SurfacesOutcome(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	blueprints := stores.Blueprints

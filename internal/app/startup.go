@@ -87,9 +87,11 @@ func (a *App) startWorkers(ctx context.Context) {
 	// Dispatcher workers (executor/all): the conversation-queue dispatcher
 	// (claims + executes queued conversations, reconciling crash-stranded
 	// conversations on boot) and the
-	// workspace-snapshot retention reaper (bounds durable parked/aborted-run
-	// snapshot blobs by TTL; a no-op when no blob store is wired). A control
-	// pod builds the spawner but never claims delegated runs, so neither
+	// workspace-snapshot retention reaper (bounds durable
+	// parked/aborted-conversation snapshot blobs by TTL; a no-op when no blob
+	// store is wired). A control
+	// pod builds the spawner but never claims delegated conversations, so
+	// neither
 	// runs there.
 	if a.plan.dispatcher {
 		go a.spawner.RunDispatcher(ctx, delegate.DefaultDispatchScanInterval)
@@ -134,7 +136,8 @@ func (a *App) startWorkers(ctx context.Context) {
 	go a.spawner.RunInstanceHeartbeat(ctx, delegate.DefaultInstanceHeartbeatInterval)
 
 	// Fleet telemetry sampler (TFAC-589): every role writes one instance_stats
-	// row a minute (cpu/load/mem/oom deployment-wide; run-scoped fields only on
+	// row a minute (cpu/load/mem/oom deployment-wide; claim-scoped fields only
+	// on
 	// executor-capable roles) and reaps the ~30d tail. The dashboard reads it.
 	go a.spawner.RunInstanceStatSampler(ctx, delegate.DefaultInstanceStatSampleInterval, delegate.DefaultInstanceStatRetention)
 
@@ -185,11 +188,11 @@ func (a *App) startWorkers(ctx context.Context) {
 	worktree.StartReaper(ctx, worktree.DefaultPolicy(), 0)
 }
 
-// cleanupWorktrees removes orphaned worktrees from crashed runs. Parked
-// `open` runs are preserved whole — their worktree dir
+// cleanupWorktrees removes orphaned worktrees from crashed conversations.
+// Parked `open` conversations are preserved whole — their worktree dir
 // and ~/.claude/projects session JSONL are the warm resume cache. A load
-// failure just forgoes that optimization; those runs still resume by
-// rehydrating from snapshot.
+// failure just forgoes that optimization; those conversations still resume
+// by rehydrating from snapshot.
 //
 // Non-local modes get the worktree-dir + bare-repo sweep but skip
 // ~/.claude/projects entirely: the preserve set is keyed by the synthetic

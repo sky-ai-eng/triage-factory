@@ -2,9 +2,10 @@ import type { Conversation } from '../../types'
 import { chainPosition, completionKind, isActiveConversation } from '../../lib/conversationStatus'
 import { hasUnresolvedArtifacts } from '../../lib/approval'
 
-// stationStyle — the design system for the run-station HMI. It maps a run's
-// status to the single "light" the whole machine wears, plus the motion knobs
-// (scanner / vent heat / belt speed) that make a live run feel like a station on
+// stationStyle — the design system for the run-station HMI. It maps a
+// conversation's status to the single "light" the whole machine wears, plus
+// the motion knobs (scanner / vent heat / belt speed) that make a live
+// conversation feel like a station on
 // the factory line. Pure module (no JSX) so the presentational components in
 // runstation/* import it freely and Fast Refresh stays happy.
 //
@@ -30,7 +31,7 @@ export interface StationState {
   light: string
   /** Uppercase status word shown in the label plate. */
   label: string
-  /** A live run breathes, scans, runs hot, and moves the belt. */
+  /** A live conversation breathes, scans, runs hot, and moves the belt. */
   live: boolean
   /** The scanner sweep runs only while a turn is actively executing. */
   scanner: boolean
@@ -44,7 +45,8 @@ export interface StationState {
 // light from the factory's LED perimeter, toned for the warm field.
 export const HMI_CYAN = 'var(--hmi-cyan)'
 
-// stationState collapses the run lifecycle into the machine's lit state. Every
+// stationState collapses the conversation lifecycle into the machine's lit
+// state. Every
 // active status — each setup phase and running alike — reads as one thing: the
 // machine is hot and scanning.
 export function stationState(conversation: Conversation): StationState {
@@ -59,9 +61,10 @@ export function stationState(conversation: Conversation): StationState {
       belt: 1,
     }
   }
-  // Approval is derived, not a stored status (TFAC-382/TFAC-492): a settled run
-  // (idle / terminal) that still holds unresolved draft PRs or ready reviews
-  // wears the amber "your move" light, regardless of its run status. A live run
+  // Approval is derived, not a stored status (TFAC-382/TFAC-492): a settled
+  // conversation (idle / terminal) that still holds unresolved draft PRs or
+  // ready reviews wears the amber "your move" light, regardless of its stored
+  // status. A live conversation
   // keeps WORKING (handled above) — the dock surfaces the approval affordance
   // without recoloring the whole machine mid-turn.
   if (hasUnresolvedArtifacts(conversation)) {
@@ -173,7 +176,8 @@ export function tint(color: string, pct: number): string {
   return `color-mix(in srgb, ${color} ${pct}%, transparent)`
 }
 
-// liveHeat — vent-heat 0..1 for a live run: idles at the state's base heat and
+// liveHeat — vent-heat 0..1 for a live conversation: idles at the state's
+// base heat and
 // flares toward 1 when the agent just emitted (a tool call / message in the last
 // few seconds), decaying over ~6s. Reads as the machine pulsing hot as work
 // flows through it.

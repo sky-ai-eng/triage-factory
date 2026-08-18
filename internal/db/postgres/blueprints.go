@@ -1016,7 +1016,7 @@ func getRunForBlueprintRun(ctx context.Context, q queryer, getRun func(context.C
 }
 
 // readConversationBlueprintPointer reads conversations.blueprint_run_id +
-// blueprint_step_index for a single run.
+// blueprint_step_index for a single conversation.
 func readConversationBlueprintPointer(ctx context.Context, q queryer, orgID, conversationID string) (string, *int, error) {
 	var (
 		blueprintRunID sql.NullString
@@ -1070,7 +1070,8 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 	if abortedAtStep != nil {
 		stepArg = *abortedAtStep
 	}
-	// Flip the blueprint_run terminal AND cancel any still-active child run in
+	// Flip the blueprint_run terminal AND cancel any still-active child
+	// conversation in
 	// one transaction, so the two writes commit together — a terminal parent is
 	// never committed alongside a live child. inTx composes with the caller's tx
 	// when markBlueprintRunStatus runs inside a SyntheticClaims tx (manual/app

@@ -31,7 +31,7 @@ func TestConversationPendingInputStore_SQLite(t *testing.T) {
 			DeleteConversation: func(t *testing.T, conversationID string) {
 				t.Helper()
 				if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
-					t.Fatalf("delete run: %v", err)
+					t.Fatalf("delete conversation: %v", err)
 				}
 			},
 			StagePending: func(t *testing.T, conversationID, userID, message string) {
@@ -75,7 +75,7 @@ func seedSQLiteConversationForPendingInput(t *testing.T, conn *sql.DB, suffix st
 	if _, err := conn.Exec(
 		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, id,
 	); err != nil {
-		t.Fatalf("seed run %s (%s): %v", id, fmt.Sprintf("pending-input-%s", suffix), err)
+		t.Fatalf("seed conversation %s (%s): %v", id, fmt.Sprintf("pending-input-%s", suffix), err)
 	}
 	return id
 }

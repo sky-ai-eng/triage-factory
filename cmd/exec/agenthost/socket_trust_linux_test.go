@@ -21,7 +21,7 @@ import (
 // real sandboxed run's agenthost mount being rejected by the broker.
 func TestSocketPath_MatchesBrokerTrustedDerivation(t *testing.T) {
 	for _, conversationID := range []string{
-		"run-1", "itestSomeTestName", "00000000-0000-0000-0000-0000000000aa",
+		"conv-1", "itestSomeTestName", "00000000-0000-0000-0000-0000000000aa",
 		"weird/../chars\x00 here!", "",
 	} {
 		got := filepath.Join(hostSocketRoot, sanitizeSocketName(conversationID)+".sock")
@@ -51,7 +51,7 @@ func TestDefaultSocketPath_MatchesBrokerTrustedDestination(t *testing.T) {
 // byte or every gh-channel run's cert mount is rejected.
 func TestCertPath_MatchesBrokerTrustedDerivation(t *testing.T) {
 	for _, conversationID := range []string{
-		"run-1", "itestSomeTestName", "00000000-0000-0000-0000-0000000000aa",
+		"conv-1", "itestSomeTestName", "00000000-0000-0000-0000-0000000000aa",
 		"weird/../chars\x00 here!", "",
 	} {
 		got := CertPathFor(conversationID)

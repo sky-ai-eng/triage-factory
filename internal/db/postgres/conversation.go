@@ -349,7 +349,8 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 // there is no admin-pool "...System" variant. The active claim releases as
 // 'requeued' (ownership is re-established when ClaimNextConversation mints a fresh
 // claim, exactly like a fresh EnqueueConversation'd row). preferred_executor_id is
-// cleared: a long-parked run's old stamp is exactly the outlives-a-dwell
+// cleared: a long-parked conversation's old stamp is exactly the
+// outlives-a-dwell
 // case placement calls out — NULL re-queues it as unowned/
 // immediately-claimable, and the claiming executor re-warms and re-earns
 // affinity on the next enqueue. queued_at is NOT re-stamped: it records when
@@ -388,11 +389,12 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 }
 
 func (s *conversationStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {
-	// Snapshot-bearing runs (parked `open` / any `completed` terminal) grouped by
-	// their shared snapshot key (org, blueprint_run_id); a key is reapable once
-	// its newest such run last parked or concluded before the cutoff. The
-	// timestamp is COALESCE(parked_at, completed_at, started_at): parked_at for an
-	// open run (re-stamped each park, so resumes don't age it), completed_at for a
+	// Snapshot-bearing conversations (parked `open` / any `completed` terminal)
+	// grouped by their shared snapshot key (org, blueprint_run_id); a key is
+	// reapable once its newest such conversation last parked or concluded before
+	// the cutoff. The timestamp is COALESCE(parked_at, completed_at,
+	// started_at): parked_at for an open conversation (re-stamped each park, so
+	// resumes don't age it), completed_at for a
 	// terminal, started_at a legacy fallback. Admin pool — the retention sweep is
 	// a tenant-spanning system job with no JWT claims.
 	rows, err := s.admin.QueryContext(ctx, `
@@ -640,7 +642,8 @@ func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context
 
 func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, failureKind string) (bool, error) {
 	// 'open' is deliberately failable here — see
-	// ConversationStore.MarkFailedIfActive: a warm 'open' run has no durable
+	// ConversationStore.MarkFailedIfActive: a warm 'open' conversation has no
+	// durable
 	// snapshot yet, so an infra error reaching failConversation must terminate it.
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, $1),
@@ -825,8 +828,9 @@ func (s *conversationStore) ListForTask(ctx context.Context, orgID, taskID strin
 
 func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string, opts db.ListOpts) ([]domain.Conversation, int, error) {
 	// task_id is a uuid column: a non-UUID id (these are client-supplied on the
-	// batched run-list path) would fail Postgres parsing with 22P02 → 500
-	// before the row filter runs, so drop invalid ids up front and treat them
+	// batched conversation-list path) would fail Postgres parsing with 22P02 →
+	// 500 before the row filter runs, so drop invalid ids up front and treat
+	// them
 	// as "no rows" — the read-method convention in uuid.go.
 	taskIDs = filterValidUUIDs(taskIDs)
 	if len(taskIDs) == 0 {
@@ -842,7 +846,7 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 	// task_id is a uuid column, so the slice binds as a uuid[] literal
 	// through one $N (pgUUIDArray), like artifactStore.ListByConversations — not a
 	// raw []string. Same projection as ListForTask; the caller groups the
-	// flat result by run.TaskID.
+	// flat result by TaskID.
 	query := `
 		SELECT ` + pgConversationColumns + `
 		FROM conversations r
@@ -874,7 +878,8 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 	return convs, total, rows.Err()
 }
 
-// HasActiveAutoConversationForTask: any non-terminal trigger_type='event' run on the
+// HasActiveAutoConversationForTask: any non-terminal trigger_type='event'
+// conversation on the
 // task. Manual delegations are excluded. Used by the router's per-task firing
 // gate.
 func (s *conversationStore) HasActiveAutoConversationForTask(ctx context.Context, orgID, taskID string) (bool, error) {
@@ -975,8 +980,9 @@ func (s *conversationStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, t
 }
 
 // ListParkedWorktreePathsSystem returns the worktree dirs the startup sweep
-// must keep warm — parked `open` runs whose owning blueprint_run is still
-// 'running'. A parked run under an already-terminal blueprint_run is NOT
+// must keep warm — parked `open` conversations whose owning blueprint_run is
+// still 'running'. A parked conversation under an already-terminal
+// blueprint_run is NOT
 // resumable (every resume path gates on cr.Status == running), so its
 // worktree must NOT be preserved: preserving it would leave a checked-out
 // branch on disk that the boot reconcile then orphans by cancelling the row,
@@ -1068,10 +1074,12 @@ func (s *conversationStore) InsertMessageForClaimSystem(ctx context.Context, org
 	return id, nil
 }
 
-// LastAgentActivityAtSystem returns the created_at of the run's newest non-user
+// LastAgentActivityAtSystem returns the created_at of the conversation's
+// newest non-user
 // message (the artifact-change ledger watermark). Ordered by id DESC
 // (the monotonic sequence) so the watermark is the genuinely last-inserted agent
-// row. Admin pool: the resume path holds no JWT claims. ok=false when the run has
+// row. Admin pool: the resume path holds no JWT claims. ok=false when the
+// conversation has
 // no agent message yet.
 func (s *conversationStore) LastAgentActivityAtSystem(ctx context.Context, orgID, conversationID string) (time.Time, bool, error) {
 	var at time.Time
@@ -1221,7 +1229,7 @@ const pgMessageColumns = `id, conversation_id, COALESCE(user_id::text, ''), COAL
 
 // scanMessageRows drains a messages result set selecting
 // pgMessageColumns into domain.Message values. Shared by the
-// single-run Messages and the batched MessagesForConversations.
+// single-conversation Messages and the batched MessagesForConversations.
 func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 	var messages []domain.Message
 	for rows.Next() {
@@ -1400,8 +1408,9 @@ func (s *conversationStore) MessagesForConversations(ctx context.Context, orgID 
 	// App pool (RLS-active): conversation_id is a uuid column, so the slice
 	// binds as a uuid[] literal through one $N (pgUUIDArray), mirroring
 	// artifactStore.ListByConversations. Ordering on (conversation_id, the effective
-	// assembly key) so the caller groups by ConversationID with each run's messages in
-	// the same order the single-run display read gives them.
+	// assembly key) so the caller groups by ConversationID with each
+	// conversation's messages in the same order the single-conversation display
+	// read gives them.
 	// Withdrawn-pending rows are hidden, same as Messages.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
@@ -1418,7 +1427,8 @@ func (s *conversationStore) MessagesForConversations(ctx context.Context, orgID 
 }
 
 // ListForAssemblySystem returns every row a native loop needs to rebuild this
-// run's exact LLM context, ordered by the effective assembly key COALESCE(seq,
+// conversation's exact LLM context, ordered by the effective assembly key
+// COALESCE(seq,
 // id). window_state='inactive' rows are excluded (superseded by
 // compaction); 'elided' and undelivered rows are included — see the
 // interface doc for the full contract. Pure read over messages; no

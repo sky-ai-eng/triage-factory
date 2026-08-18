@@ -209,7 +209,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 				        'team', $4, $5, 'manual', $6, $7)
 			`, id, orgID, userID, taskID, promptID, stored, brID); err != nil {
-				t.Fatalf("seed run: %v", err)
+				t.Fatalf("seed conversation: %v", err)
 			}
 			if status == "running" {
 				if _, err := conn.Exec(`

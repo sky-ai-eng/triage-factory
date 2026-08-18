@@ -190,10 +190,12 @@ func TestBlueprintStore_Postgres_ReplaceAndListSteps(t *testing.T) {
 }
 
 // TestBlueprintStore_Postgres_RunLifecycle exercises CreateRun → GetRun →
-// ConversationsForBlueprint (surfacing the step run's terminal conversations.outcome) →
+// ConversationsForBlueprint (surfacing the step conversation's terminal
+// conversations.outcome) →
 // TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild pins the
 // atomic guarantee: flipping a blueprint_run to a terminal status parks any
-// still-mid-flight child run in the same transaction (stamping parked_at), so
+// still-mid-flight child conversation in the same transaction (stamping
+// parked_at), so
 // a terminal parent is never observed alongside a live child. Mirrors the
 // SQLite coverage to prevent Postgres/SQLite divergence.
 func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) {
@@ -342,19 +344,19 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 		t.Errorf("round-tripped step plan[0] = %+v, want frozen prompt %s body 'do the step'", cr.StepPlan[0], stepPromptID)
 	}
 
-	// Seed a step run, persist a terminal outcome the way processCompletion
-	// does, and confirm ConversationsForBlueprint surfaces it — the channel the
+	// Seed a step conversation, persist a terminal outcome the way
+	// processCompletion does, and confirm ConversationsForBlueprint surfaces it — the channel the
 	// orchestrator advances on (the successor to the old per-step verdict).
 	stepConversationID := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, blueprintRunID, 0)
 	if err := stores.Conversations.CompleteSystem(ctx, orgID, stepConversationID, "completed", 0, 0, 0, "did the thing", "finish", "", ""); err != nil {
-		t.Fatalf("complete step run: %v", err)
+		t.Fatalf("complete step conversation: %v", err)
 	}
 	stepConversations, err := blueprints.ConversationsForBlueprint(ctx, orgID, blueprintRunID)
 	if err != nil {
 		t.Fatalf("ConversationsForBlueprint: %v", err)
 	}
 	if len(stepConversations) != 1 || stepConversations[0].Outcome != "finish" {
-		t.Errorf("ConversationsForBlueprint = %+v, want one run with outcome=finish", stepConversations)
+		t.Errorf("ConversationsForBlueprint = %+v, want one conversation with outcome=finish", stepConversations)
 	}
 
 	// Mark the blueprint completed; second attempt should be no-op.
@@ -648,7 +650,8 @@ func TestBlueprintStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("ListStepsSystem(orgA, blueprintIDB) leaked %d rows, want 0", len(stepsA))
 	}
 
-	// ConversationsForBlueprintSystem on org A must not return cross-org step runs.
+	// ConversationsForBlueprintSystem on org A must not return cross-org step
+	// conversations.
 	convsCrossOrg, err := blueprints.ConversationsForBlueprintSystem(ctx, orgA, crB)
 	if err != nil {
 		t.Fatalf("ConversationsForBlueprintSystem cross-org: %v", err)
@@ -770,7 +773,7 @@ func TestBlueprintStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 // seedPgOrgForBlueprints creates the (org, user, membership) triplet
 // blueprint row writes need to satisfy creator_user_id FK resolution.
 // Returns both ids — blueprint tests also need the userID directly for
-// seeding tasks / runs whose RLS predicate gates on
+// seeding tasks / conversations whose RLS predicate gates on
 // creator_user_id = tf.current_user_id().
 func seedPgOrgForBlueprints(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	t.Helper()
@@ -991,7 +994,7 @@ func seedPgStepConversation(t *testing.T, h *pgtest.Harness, orgID, userID, task
 		INSERT INTO conversations (id, org_id, creator_user_id, team_id, task_id, prompt_id, status, model, started_at, blueprint_run_id, blueprint_step_index)
 		VALUES ($1, $2, $3, $4, $5, $6, 'running', 'claude-sonnet-4-6', now(), $7, $8)
 	`, conversationID, orgID, userID, teamID, taskID, promptID, blueprintRunID, stepIdx); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 	return conversationID
 }

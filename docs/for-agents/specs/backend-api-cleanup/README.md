@@ -536,8 +536,8 @@ kinds (`artifacts_handler.go:144-146` — nonexistence conflated with
 unsupported-representation); `GET …/github/app` returns 200 `app:null`
 where install-url and cutover-preflight 404 the same absent-App state;
 `connect_available` lives on the *jira app* status but the *github
-identity* status; the run projection mixes PascalCase legacy keys with
-snake_case additions in one object (`agent.go:388-430`), and the
+identity* status; the conversation projection mixes PascalCase legacy keys
+with snake_case additions in one object (`agent.go:388-430`), and the
 factory snapshot deliberately clones that accident into a second route
 (`factory_handler.go:62-82`).
 

@@ -33,7 +33,7 @@ func TestConversationWorktreeStore_SQLite(t *testing.T) {
 			DeleteConversation: func(t *testing.T, conversationID string) {
 				t.Helper()
 				if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
-					t.Fatalf("delete run: %v", err)
+					t.Fatalf("delete conversation: %v", err)
 				}
 			},
 			Repo: func(t *testing.T, slug string) {
@@ -76,7 +76,8 @@ func TestConversationWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 }
 
 // seedSQLiteConversationForWorktree seeds the entity + event + prompt + task
-// + run FK chain conversation_worktrees needs. Mirrors the seedSQLiteConversationFor
+// + conversation FK chain conversation_worktrees needs. Mirrors the
+// seedSQLiteConversationFor
 // TaskMemory shape so both stores' tests stay reading like siblings.
 func seedSQLiteConversationForWorktree(t *testing.T, conn *sql.DB, suffix string) string {
 	t.Helper()
@@ -115,7 +116,7 @@ func seedSQLiteConversationForWorktree(t *testing.T, conn *sql.DB, suffix string
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model, blueprint_run_id) VALUES (?, ?, 'p_run_worktree', 'running', 'm', ?)
 	`, conversationID, taskID, blueprintRunID); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 	return conversationID
 }

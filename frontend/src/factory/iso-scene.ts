@@ -766,7 +766,7 @@ const stationSpec = (
   col: number,
   row: number,
   queued: number,
-  runs: number,
+  conversations: number,
   label: string,
   eventType: string,
 ): Station => ({
@@ -783,7 +783,7 @@ const stationSpec = (
   // layer.
   id: eventType,
   queuedCount: queued,
-  conversationCount: runs,
+  conversationCount: conversations,
   label,
   ports: [
     { kind: 'input', direction: 'west', offset: 0.5, recessDepth: DEFAULT_PORT_RECESS_DEPTH },

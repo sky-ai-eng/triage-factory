@@ -30,7 +30,7 @@ func TestServer_PanickingVerb_FailsRPCAndKeepsServing(t *testing.T) {
 		panic("verb exploded mid-dispatch")
 	})
 
-	info := ConversationInfo{OrgID: "org-1", ConversationID: "run-panic"}
+	info := ConversationInfo{OrgID: "org-1", ConversationID: "conv-panic"}
 	client := startExtensionTestDaemon(t, info)
 
 	// The client's contract for a mid-request death: EOF, surfaced as a failed
@@ -63,7 +63,7 @@ func TestServer_PanickingVerb_FailsRPCAndKeepsServing(t *testing.T) {
 // working RPC into a failed one, using the mechanism added to prevent exactly
 // that.
 func TestHandleConn_NilMethodSeenServesNormally(t *testing.T) {
-	info := ConversationInfo{OrgID: "org-1", ConversationID: "run-nil-out"}
+	info := ConversationInfo{OrgID: "org-1", ConversationID: "conv-nil-out"}
 	stores, _ := newTestDB(t)
 	srv := NewServer(stores, info, nil)
 

@@ -349,8 +349,8 @@ func (s *curatorStore) FailedTurnAttemptsSystem(ctx context.Context, orgID, conv
 	// failures, and a withdrawn turn (message deleted → message_id NULLed)
 	// matches nothing. The zero-message NOT EXISTS stays load-bearing: a
 	// claim that delivered the turn also carries its message_id, and
-	// counting a post-delivery run crash would cap the turn for a failure
-	// that is not the input's fault.
+	// counting a post-delivery engagement crash would cap the turn for a
+	// failure that is not the input's fault.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT COALESCE(cl.error, '')
 		FROM claims cl

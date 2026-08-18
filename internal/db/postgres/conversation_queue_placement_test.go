@@ -20,7 +20,8 @@ import (
 var placementClaimCfg = db.ClaimPlacement{Enabled: true, AgingInterval: 20 * time.Second, Liveness: 12 * time.Second}
 
 // enqueuePgConversationPreferred mints a fresh blueprint_run + task + prompt and
-// enqueues one queued run stamped with preferred. Returns the run id.
+// enqueues one queued conversation stamped with preferred. Returns the
+// conversation id.
 func enqueuePgConversationPreferred(t *testing.T, h *pgtest.Harness, stores db.Stores, orgID, userID, preferred string) string {
 	t.Helper()
 	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
@@ -69,7 +70,8 @@ func readPreferred(t *testing.T, h *pgtest.Harness, conversationID string) (stri
 }
 
 // TestPlacementClaim_TierOneExclusiveToOwner is the warm-cache property: a
-// fresh run whose live preferred owner exists is claimable ONLY by that owner
+// fresh conversation whose live preferred owner exists is claimable ONLY by
+// that owner
 // — a non-owner executor sees nothing (skips it) until it ages.
 func TestPlacementClaim_TierOneExclusiveToOwner(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -87,23 +89,24 @@ func TestPlacementClaim_TierOneExclusiveToOwner(t *testing.T) {
 		t.Fatalf("preferred_executor_id = (%q, %v), want exec-a", got, ok)
 	}
 
-	// A non-owner (B) must NOT claim a fresh, live-owned run.
+	// A non-owner (B) must NOT claim a fresh, live-owned conversation.
 	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
 	if err != nil {
 		t.Fatalf("B claim: %v", err)
 	}
 	if got != nil {
-		t.Fatalf("exec-b claimed exec-a's fresh run %q — tier-1 affinity not exclusive", got.ID)
+		t.Fatalf("exec-b claimed exec-a's fresh conversation %q — tier-1 affinity not exclusive", got.ID)
 	}
 
 	// The owner claims it.
 	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
 	if err != nil || got == nil || got.ID != conversationID {
-		t.Fatalf("A claim = (%+v, %v), want run %s", got, err, conversationID)
+		t.Fatalf("A claim = (%+v, %v), want conversation %s", got, err, conversationID)
 	}
 }
 
-// TestPlacementClaim_AgesToSpillover: once a run ages past the tier-2 window,
+// TestPlacementClaim_AgesToSpillover: once a conversation ages past the
+// tier-2 window,
 // any executor may claim it — affinity loses to capacity.
 func TestPlacementClaim_AgesToSpillover(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -118,11 +121,12 @@ func TestPlacementClaim_AgesToSpillover(t *testing.T) {
 
 	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
 	if err != nil || got == nil || got.ID != conversationID {
-		t.Fatalf("aged run should spill to exec-b: got=(%+v, %v)", got, err)
+		t.Fatalf("aged conversation should spill to exec-b: got=(%+v, %v)", got, err)
 	}
 }
 
-// TestPlacementClaim_DeadPreferredSpillsImmediately: a fresh run whose
+// TestPlacementClaim_DeadPreferredSpillsImmediately: a fresh conversation
+// whose
 // preferred owner's heartbeat is stale spills at once, without waiting out the
 // aging window — the "dead preferred" tier-2 branch.
 func TestPlacementClaim_DeadPreferredSpillsImmediately(t *testing.T) {
@@ -139,12 +143,13 @@ func TestPlacementClaim_DeadPreferredSpillsImmediately(t *testing.T) {
 
 	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
 	if err != nil || got == nil || got.ID != conversationID {
-		t.Fatalf("dead-owner fresh run should spill immediately: got=(%+v, %v)", got, err)
+		t.Fatalf("dead-owner fresh conversation should spill immediately: got=(%+v, %v)", got, err)
 	}
 }
 
 // TestPlacementClaim_DrainingAndGatedPreferredSpill: a draining or
-// dispatch-gated owner is not a live claimant — its fresh runs spill at once.
+// dispatch-gated owner is not a live claimant — its fresh conversations
+// spill at once.
 func TestPlacementClaim_DrainingAndGatedPreferredSpill(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -160,7 +165,7 @@ func TestPlacementClaim_DrainingAndGatedPreferredSpill(t *testing.T) {
 		conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-drain")
 		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-helper", 1, placementClaimCfg)
 		if err != nil || got == nil || got.ID != conversationID {
-			t.Fatalf("draining owner's run should spill: got=(%+v, %v)", got, err)
+			t.Fatalf("draining owner's conversation should spill: got=(%+v, %v)", got, err)
 		}
 	})
 
@@ -170,12 +175,13 @@ func TestPlacementClaim_DrainingAndGatedPreferredSpill(t *testing.T) {
 		conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-gated")
 		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-helper", 1, placementClaimCfg)
 		if err != nil || got == nil || got.ID != conversationID {
-			t.Fatalf("gated owner's run should spill: got=(%+v, %v)", got, err)
+			t.Fatalf("gated owner's conversation should spill: got=(%+v, %v)", got, err)
 		}
 	})
 }
 
-// TestPlacementClaim_NullPreferredClaimableImmediately: a run with no stamp
+// TestPlacementClaim_NullPreferredClaimableImmediately: a conversation with
+// no stamp
 // (unowned) is claimable by anyone at once — no aging wait. This is what makes
 // requeue-to-NULL a correct, no-latency recovery.
 func TestPlacementClaim_NullPreferredClaimableImmediately(t *testing.T) {
@@ -190,12 +196,13 @@ func TestPlacementClaim_NullPreferredClaimableImmediately(t *testing.T) {
 
 	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
 	if err != nil || got == nil || got.ID != conversationID {
-		t.Fatalf("unowned run should be immediately claimable: got=(%+v, %v)", got, err)
+		t.Fatalf("unowned conversation should be immediately claimable: got=(%+v, %v)", got, err)
 	}
 }
 
-// TestPlacementClaim_OwnerPrefersOwnFirst: with both its own fresh run and an
-// older aged foreign run claimable, an executor takes its OWN first (tier 1
+// TestPlacementClaim_OwnerPrefersOwnFirst: with both its own fresh
+// conversation and an older aged foreign conversation claimable, an executor
+// takes its OWN first (tier 1
 // before tier 2) — warm cache wins over pure FIFO.
 func TestPlacementClaim_OwnerPrefersOwnFirst(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -207,10 +214,11 @@ func TestPlacementClaim_OwnerPrefersOwnFirst(t *testing.T) {
 	registerLiveExecutor(t, stores, "exec-a")
 	registerLiveExecutor(t, stores, "exec-b")
 
-	// An OLDER foreign run (preferred=B), aged so exec-a may claim it via tier 2.
+	// An OLDER foreign conversation (preferred=B), aged so exec-a may claim it
+	// via tier 2.
 	foreign := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-b")
 	backdatePgConversationStarted(t, h, foreign, 2*time.Minute)
-	// A NEWER own run (preferred=A), fresh.
+	// A NEWER own conversation (preferred=A), fresh.
 	own := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 
 	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
@@ -218,13 +226,14 @@ func TestPlacementClaim_OwnerPrefersOwnFirst(t *testing.T) {
 		t.Fatalf("A claim: (%+v, %v)", got, err)
 	}
 	if got.ID != own {
-		t.Fatalf("exec-a claimed %q, want its own fresh run %q first (tier 1 before the older aged foreign %q)", got.ID, own, foreign)
+		t.Fatalf("exec-a claimed %q, want its own fresh conversation %q first (tier 1 before the older aged foreign %q)", got.ID, own, foreign)
 	}
 }
 
 // TestPlacementClaim_DisabledIgnoresPreferred is the feature-flag-off parity
-// case: a disabled ClaimPlacement claims the globally-oldest run regardless of
-// its stamp — dropping the placement layer changes nothing about which run a
+// case: a disabled ClaimPlacement claims the globally-oldest conversation
+// regardless of its stamp — dropping the placement layer changes nothing
+// about which conversation a
 // dispatcher gets.
 func TestPlacementClaim_DisabledIgnoresPreferred(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -234,7 +243,8 @@ func TestPlacementClaim_DisabledIgnoresPreferred(t *testing.T) {
 	orgID, userID := seedPgOrgForBlueprints(t, h)
 
 	registerLiveExecutor(t, stores, "exec-a")
-	// Fresh run stamped to exec-a; a DIFFERENT executor claims with placement
+	// Fresh conversation stamped to exec-a; a DIFFERENT executor claims with
+	// placement
 	// OFF and must still get it (global-oldest, stamp ignored).
 	conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "exec-a")
 
@@ -245,7 +255,8 @@ func TestPlacementClaim_DisabledIgnoresPreferred(t *testing.T) {
 }
 
 // TestPlacementClaim_RequeueClearsPreferred: the requeue/reset paths clear the
-// stamp so a requeued run never carries a stale preference toward the executor
+// stamp so a requeued conversation never carries a stale preference toward
+// the executor
 // that just failed it.
 func TestPlacementClaim_RequeueClearsPreferred(t *testing.T) {
 	h := pgtest.Shared(t)

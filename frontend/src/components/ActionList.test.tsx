@@ -106,7 +106,7 @@ describe('ActionList', () => {
     ).toBeInTheDocument()
   })
 
-  it('says a run touched nothing outside the box, rather than hiding', async () => {
+  it('says a conversation touched nothing outside the box, rather than hiding', async () => {
     mockActions([])
     render(<ActionList conversationId="r1" />)
     expect(await screen.findByText('No external actions yet.')).toBeInTheDocument()

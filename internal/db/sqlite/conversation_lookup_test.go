@@ -48,6 +48,6 @@ func TestConversationStore_SQLite_LookupOrgForConversationSystem_UnknownReturnsE
 		t.Fatalf("LookupOrgForConversationSystem: %v", err)
 	}
 	if got != "" {
-		t.Errorf("LookupOrgForConversationSystem on unknown run = %q; want empty string", got)
+		t.Errorf("LookupOrgForConversationSystem on unknown conversation = %q; want empty string", got)
 	}
 }

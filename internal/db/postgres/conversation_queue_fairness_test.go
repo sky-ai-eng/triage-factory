@@ -35,11 +35,12 @@ func newFairnessFixture(t *testing.T, h *pgtest.Harness) fairnessFixture {
 	}
 }
 
-// enqueue stages one queued run under the fixture, optionally stamped with a
-// preferred executor. Returns the run id.
+// enqueue stages one queued conversation under the fixture, optionally
+// stamped with a preferred executor. Returns the conversation id.
 //
-// One blueprint_run per run, each on step 0: fairness is about many runs
-// competing for slots at the same instant, and a blueprint only ever offers the
+// One blueprint_run per conversation, each on step 0: fairness is about many
+// conversations competing for slots at the same instant, and a blueprint only
+// ever offers the
 // one step its current_step_index names — sibling steps of a single blueprint
 // are queued in sequence, never together.
 func (f *fairnessFixture) enqueue(t *testing.T, stores db.Stores, preferred string) string {
@@ -66,10 +67,11 @@ func setPgOrgCap(t *testing.T, h *pgtest.Harness, orgID string, cap *int) {
 	`, orgID, cap)
 }
 
-// forcePgRunning makes a run occupy a slot the way the real system does —
+// forcePgRunning makes a conversation occupy a slot the way the real system
+// does —
 // by minting an unreleased claim on it. "Active" is an engagement now, not a
 // stored status, so this is both what the fairness CTE counts and what makes
-// the run un-claimable.
+// the conversation un-claimable.
 func forcePgRunning(t *testing.T, h *pgtest.Harness, conversationID string) {
 	t.Helper()
 	pgtest.MustExec(t, h.AdminDB, `
@@ -79,8 +81,9 @@ func forcePgRunning(t *testing.T, h *pgtest.Harness, conversationID string) {
 }
 
 // TestClaimFairness_BurstDoesNotStarveOtherOrg is the headline acceptance: org
-// A floods 100 queued runs (all older), org B enqueues 1 (newer). Pure FIFO
-// would claim B's run 101st — after A's entire backlog. Fairness (fewest-active
+// A floods 100 queued conversations (all older), org B enqueues 1 (newer).
+// Pure FIFO would claim B's conversation 101st — after A's entire backlog.
+// Fairness (fewest-active
 // org first) instead hands the very next free slot after A's first claim to B.
 func TestClaimFairness_BurstDoesNotStarveOtherOrg(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -95,8 +98,9 @@ func TestClaimFairness_BurstDoesNotStarveOtherOrg(t *testing.T) {
 		a.enqueue(t, stores, "")
 	}
 	bConv := b.enqueue(t, stores, "")
-	// Make every A run strictly older than B's so pure FIFO would drain all 100
-	// A runs before ever reaching B — isolating fairness as the reason B jumps
+	// Make every A conversation strictly older than B's so pure FIFO would
+	// drain all 100 A conversations before ever reaching B — isolating fairness
+	// as the reason B jumps
 	// the queue.
 	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET started_at = now() - interval '1 hour' WHERE org_id = $1`, a.orgID)
 
@@ -111,13 +115,13 @@ func TestClaimFairness_BurstDoesNotStarveOtherOrg(t *testing.T) {
 	// Claim 1: both orgs at 0 active, tie broken by started_at → A's oldest.
 	c1 := claim()
 	if c1 == nil || c1.OrgID != a.orgID {
-		t.Fatalf("claim 1 = %+v, want an org-A run (oldest, both at 0 active)", c1)
+		t.Fatalf("claim 1 = %+v, want an org-A conversation (oldest, both at 0 active)", c1)
 	}
 	// Claim 2: A now has 1 active, B has 0 → fairness picks B, NOT A's 2nd-oldest
 	// of 99 remaining. This is the whole point: B waits one slot, not a backlog.
 	c2 := claim()
 	if c2 == nil || c2.OrgID != b.orgID || c2.ID != bConv {
-		t.Fatalf("claim 2 = %+v, want org-B run %s (fewest-active wins over A's older backlog)", c2, bConv)
+		t.Fatalf("claim 2 = %+v, want org-B conversation %s (fewest-active wins over A's older backlog)", c2, bConv)
 	}
 }
 
@@ -144,7 +148,8 @@ func TestClaimCap_BlocksAtCapAndReconfiguresLive(t *testing.T) {
 		return got
 	}
 
-	// Cap 2: exactly two claims succeed, the org then has 2 active runs.
+	// Cap 2: exactly two claims succeed, the org then has 2 active
+	// conversations.
 	setCap(2)
 	if claim() == nil {
 		t.Fatal("first claim under cap=2 must succeed")
@@ -153,7 +158,7 @@ func TestClaimCap_BlocksAtCapAndReconfiguresLive(t *testing.T) {
 		t.Fatal("second claim under cap=2 must succeed")
 	}
 	// At cap: a third claim sees the org at 2 active (>= cap) and finds nothing,
-	// even though 3 runs are still queued.
+	// even though 3 conversations are still queued.
 	if got := claim(); got != nil {
 		t.Fatalf("claim at cap=2 with 2 active returned %+v, want nil (org invisible at cap)", got)
 	}
@@ -177,8 +182,8 @@ func TestClaimCap_BlocksAtCapAndReconfiguresLive(t *testing.T) {
 
 // TestClaimFairness_ComposesWithinPlacementTiers pins spec §6.2 composition:
 // fairness orders WITHIN a placement tier, but never across tiers — a tier-1
-// (preferred=me) run is claimed before a tier-2 run regardless of which org
-// has fewer active runs.
+// (preferred=me) conversation is claimed before a tier-2 conversation
+// regardless of which org has fewer active conversations.
 func TestClaimFairness_ComposesWithinPlacementTiers(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -195,7 +200,8 @@ func TestClaimFairness_ComposesWithinPlacementTiers(t *testing.T) {
 		a = newFairnessFixture(t, h)
 		b = newFairnessFixture(t, h)
 		registerLiveExecutor(t, stores, "exec-a")
-		// Org A carries an active run; both A and B have a fresh tier-1 run
+		// Org A carries an active conversation; both A and B have a fresh tier-1
+		// conversation
 		// (preferred = exec-a). Within tier 1, fairness gives B (0 active) the
 		// slot over A (1 active).
 		forcePgRunning(t, h, a.enqueue(t, stores, ""))
@@ -207,7 +213,7 @@ func TestClaimFairness_ComposesWithinPlacementTiers(t *testing.T) {
 			t.Fatalf("claim: (%+v, %v)", got, err)
 		}
 		if got.ID != bTier1 {
-			t.Fatalf("claimed %q, want org-B tier-1 run %q (fewest-active within tier 1; A's %q has an active run)", got.ID, bTier1, aTier1)
+			t.Fatalf("claimed %q, want org-B tier-1 conversation %q (fewest-active within tier 1; A's %q has an active conversation)", got.ID, bTier1, aTier1)
 		}
 	})
 
@@ -216,10 +222,11 @@ func TestClaimFairness_ComposesWithinPlacementTiers(t *testing.T) {
 		a = newFairnessFixture(t, h)
 		b = newFairnessFixture(t, h)
 		registerLiveExecutor(t, stores, "exec-a")
-		// Org A: a fresh tier-1 run (preferred = exec-a) AND an active run.
-		// Org B: an aged tier-2 run (preferred elsewhere, past the aging
-		// window) and zero active runs. Despite B being the fairer org, the
-		// tier-1 run is claimed first — tier dominates fairness.
+		// Org A: a fresh tier-1 conversation (preferred = exec-a) AND an active
+		// conversation. Org B: an aged tier-2 conversation (preferred elsewhere,
+		// past the aging window) and zero active conversations. Despite B being
+		// the fairer org, the tier-1 conversation is claimed first — tier
+		// dominates fairness.
 		forcePgRunning(t, h, a.enqueue(t, stores, ""))
 		aTier1 := a.enqueue(t, stores, "exec-a")
 		bTier2 := b.enqueue(t, stores, "exec-other")
@@ -230,7 +237,7 @@ func TestClaimFairness_ComposesWithinPlacementTiers(t *testing.T) {
 			t.Fatalf("claim: (%+v, %v)", got, err)
 		}
 		if got.ID != aTier1 {
-			t.Fatalf("claimed %q, want org-A tier-1 run %q (tier 1 before tier 2, even though B is fairer)", got.ID, aTier1)
+			t.Fatalf("claimed %q, want org-A tier-1 conversation %q (tier 1 before tier 2, even though B is fairer)", got.ID, aTier1)
 		}
 	})
 }
@@ -252,7 +259,8 @@ func TestClaimFairness_ExplainAnalyzeSanity(t *testing.T) {
 		a.enqueue(t, stores, "")
 		b.enqueue(t, stores, "")
 	}
-	// Some active runs across both orgs so the org_active CTE has real groups.
+	// Some active conversations across both orgs so the org_active CTE has
+	// real groups.
 	forcePgRunning(t, h, a.enqueue(t, stores, ""))
 	forcePgRunning(t, h, b.enqueue(t, stores, ""))
 

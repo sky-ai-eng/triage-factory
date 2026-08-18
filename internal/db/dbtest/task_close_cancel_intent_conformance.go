@@ -17,7 +17,8 @@ import (
 // backends disagree on nearly every column of the latter two.
 type TaskCloseCancelIntentFactory func(t *testing.T) (store db.TaskStore, orgID string, seed TaskCloseCancelIntentSeeder)
 
-// TaskCloseCancelIntentSeeder stages the (task, event, blueprint, run) graph
+// TaskCloseCancelIntentSeeder stages the (task, event, blueprint,
+// conversation) graph
 // the close transaction spans, and reads back what it wrote. Production mints
 // these rows through several stores at once; the callbacks write them directly
 // against each backend's own schema so the suite stays schema-blind.
@@ -36,9 +37,10 @@ type TaskCloseCancelIntentSeeder struct {
 	// = SQL NULL, the mid-flight state). Returns both ids.
 	BlueprintAndConversation func(t *testing.T, taskID, blueprintStatus, convStatus string) (blueprintRunID, convID string)
 
-	// BareRun stages a conversation on taskID with NO blueprint parent, in
+	// BareConversation stages a conversation on taskID with NO blueprint
+	// parent, in
 	// the given stored status. Returns its id.
-	BareRun func(t *testing.T, taskID, convStatus string) (convID string)
+	BareConversation func(t *testing.T, taskID, convStatus string) (convID string)
 
 	// CancelRequested reads a blueprint_run's cancel_requested flag.
 	CancelRequested func(t *testing.T, blueprintRunID string) bool
@@ -51,11 +53,12 @@ type TaskCloseCancelIntentSeeder struct {
 }
 
 // RunTaskCloseCancelIntentConformance is the shared suite for
-// TaskStore.CloseWithConversationCancelIntentSystem — the close that carries the stop
-// intent for its own runs.
+// TaskStore.CloseWithConversationCancelIntentSystem — the close that carries
+// the stop intent for its own conversations.
 //
 // The negative space is where the pressure is. The stamp is what makes a
-// failed kill self-healing, but it is also permanent: a stamped run is one the
+// failed kill self-healing, but it is also permanent: a stamped conversation
+// is one the
 // claim gate will never drive again. So the two subtests that assert nothing
 // happened — a finished blueprint left alone, and a replayed close on a task
 // that is already terminal — are load-bearing in a way the happy path isn't.
@@ -72,7 +75,7 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 	t.Helper()
 	ctx := context.Background()
 
-	t.Run("Closes_stamps_active_runs_and_returns_them", func(t *testing.T) {
+	t.Run("Closes_stamps_active_conversations_and_returns_them", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 		eventID := seed.Event(t, taskID)
@@ -125,7 +128,8 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 
 	t.Run("Already_terminal_task_stamps_nothing", func(t *testing.T) {
 		// The replay case. The second close finds the task done and must be
-		// inert — the run active by then may be one a user resumed after the
+		// inert — the conversation active by then may be one a user resumed
+		// after the
 		// first close landed.
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
@@ -154,7 +158,7 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		}
 	})
 
-	t.Run("Task_with_no_runs_closes_plainly", func(t *testing.T) {
+	t.Run("Task_with_no_conversations_closes_plainly", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 		eventID := seed.Event(t, taskID)
@@ -174,14 +178,14 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		}
 	})
 
-	t.Run("Blueprintless_run_is_returned_and_stamps_nothing", func(t *testing.T) {
+	t.Run("Blueprintless_conversation_is_returned_and_stamps_nothing", func(t *testing.T) {
 		// A conversation with no blueprint parent still gets stopped — it is
 		// in the returned set — but there is no sequence to call off, so the
 		// stamp has nothing to write and must not error trying.
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 		eventID := seed.Event(t, taskID)
-		convID := seed.BareRun(t, taskID, "")
+		convID := seed.BareConversation(t, taskID, "")
 
 		closed, conversationIDs, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {

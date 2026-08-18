@@ -1004,7 +1004,8 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	}
 	now := time.Now().UTC()
 	// Flip the blueprint_run terminal AND cancel any still-active child
-	// run in one transaction, so a terminal parent can never be observed (or
+	// conversation in one transaction, so a terminal parent can never be
+	// observed (or
 	// committed) alongside a live child. inTx composes with the caller's tx when
 	// MarkRunStatus runs inside SyntheticClaimsWithTx (manual path) and opens a
 	// fresh one on the bare admin/system handle — either way the two writes are
@@ -1043,7 +1044,8 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	return changed, nil
 }
 
-// parkOrphanedChildConversations parks every still-mid-flight child run of
+// parkOrphanedChildConversations parks every still-mid-flight child
+// conversation of
 // blueprintRunID `open` and releases those children's active claims. Called by
 // MarkRunStatus's atomic flip; ConversationQueueStore.ReconcileOrphanedConversations applies the
 // same predicate in its own boot sweep (it can't share this body — different

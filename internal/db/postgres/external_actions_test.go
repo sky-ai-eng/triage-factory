@@ -181,7 +181,8 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 // TestExternalActionStore_Postgres_ListByConversation pins the conversation-scoped read on the app
 // pool: one conversation's rows, and — because the read runs under the same
 // org-scoped policy as ListByTeam — nothing at all for a member of another org
-// who guesses a run id. The handler's own run-visibility check is what narrows
+// who guesses a conversation id. The handler's own conversation-visibility
+// check is what narrows
 // this within an org; RLS is the backstop across orgs.
 func TestExternalActionStore_Postgres_ListByConversation(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -192,8 +193,9 @@ func TestExternalActionStore_Postgres_ListByConversation(t *testing.T) {
 	ctx := context.Background()
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	// One row on the run, one with no run at all — the shape a purged run leaves
-	// behind (FK ON DELETE SET NULL), which must not surface under any run.
+	// One row on the conversation, one with no conversation at all — the shape
+	// a purged conversation leaves behind (FK ON DELETE SET NULL), which must
+	// not surface under any conversation.
 	for _, act := range []domain.ExternalAction{
 		{
 			OrgID: orgA, TeamID: teamA, Provider: domain.ArtifactProviderGitHub,
@@ -217,7 +219,7 @@ func TestExternalActionStore_Postgres_ListByConversation(t *testing.T) {
 			return err
 		}
 		if len(rows) != 1 || rows[0].Action != domain.ActionGHChannelWrite {
-			t.Errorf("alice ListByConversation saw %+v, want just the run's own row", rows)
+			t.Errorf("alice ListByConversation saw %+v, want just the conversation's own row", rows)
 		}
 		return nil
 	}); err != nil {

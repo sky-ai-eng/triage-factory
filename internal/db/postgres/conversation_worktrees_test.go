@@ -100,11 +100,13 @@ func expectNoCredRequest(t *testing.T, msgs <-chan ctlbus.Message) {
 }
 
 // TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell pins the widening
-// signal: a genuinely new conversation_worktrees row means the run's authorized
+// signal: a genuinely new conversation_worktrees row means the conversation's
+// authorized
 // repo set grew past what its sealed credential bundle covers, so the insert
 // fires the same cred_request the claim's own credential request fires. A
 // conflicting insert (the row already existed) widens nothing and must stay
-// silent, or every idempotent `workspace add` would re-mint the run's tokens.
+// silent, or every idempotent `workspace add` would re-mint the
+// conversation's tokens.
 func TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -129,17 +131,18 @@ func TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T
 	}
 	got := awaitCredRequest(t, msgs)
 	if got.OrgID != orgID || got.ConversationID != conversationID {
-		t.Errorf("doorbell = %+v, want org %s run %s", got, orgID, conversationID)
+		t.Errorf("doorbell = %+v, want org %s conversation %s", got, orgID, conversationID)
 	}
 
-	// Re-adding the same (run, repo, ref) conflicts: nothing widened.
+	// Re-adding the same (conversation, repo, ref) conflicts: nothing widened.
 	inserted, _, err = stores.ConversationWorktrees.InsertSystem(ctx, orgID, row)
 	if err != nil || inserted {
 		t.Fatalf("InsertSystem (conflict): inserted=%v err=%v, want inserted=false", inserted, err)
 	}
 	expectNoCredRequest(t, msgs)
 
-	// A NEW ref in a repo the run already holds is a genuinely new row, but
+	// A NEW ref in a repo the conversation already holds is a genuinely new
+	// row, but
 	// credentials are minted per repo — the authorized set is unchanged, so
 	// re-sealing would spend GitHub App mint quota on a byte-identical grant.
 	secondRef := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "sky-ai-eng/other-repo", Path: "/runs/" + conversationID + "/sky-ai-eng/other-repo/pr-42", Ref: "pr-42"}
@@ -156,7 +159,7 @@ func TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T
 		t.Fatalf("InsertSystem (new repo): inserted=%v err=%v, want inserted=true", inserted, err)
 	}
 	if got := awaitCredRequest(t, msgs); got.ConversationID != conversationID {
-		t.Errorf("doorbell = %+v, want run %s", got, conversationID)
+		t.Errorf("doorbell = %+v, want conversation %s", got, conversationID)
 	}
 }
 

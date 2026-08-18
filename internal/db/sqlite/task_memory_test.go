@@ -189,7 +189,8 @@ func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
 }
 
 // seedSQLiteConversationForTaskMemory seeds the entity + event + prompt +
-// task + run FK chain conversation_memory needs. Direct INSERTs keep the
+// task + conversation FK chain conversation_memory needs. Direct INSERTs
+// keep the
 // fixture path schema-coupled and short — matches the SwipeStore
 // / EventStore conformance seed pattern.
 func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (conversationID, entityID string) {
@@ -219,7 +220,7 @@ func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 	taskID := uuid.New().String()
 	// 'done' is the terminal task status (an earlier version of the seed used
 	// 'completed', which was never a valid task value — 'completed'
-	// is run-level; a later CHECK constraint caught the latent bug).
+	// is conversation-level; a later CHECK constraint caught the latent bug).
 	if _, err := conn.Exec(`
 		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
 		VALUES (?, ?, ?, ?, 'done')
@@ -234,7 +235,7 @@ func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 		INSERT INTO conversations (id, task_id, prompt_id, status, blueprint_run_id, blueprint_step_index)
 		VALUES (?, ?, 'p_task_memory', 'completed', ?, ?)
 	`, conversationID, taskID, blueprintRunID, dbtest.TaskMemorySeedStepIndex); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 	return conversationID, entityID
 }
@@ -242,7 +243,8 @@ func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 // seedSQLiteBlueprintRunForTaskMemory seeds the entity + event + task +
 // blueprint + blueprint_run FK chain a conversation_memory.blueprint_run_id can point
 // at (the column FKs blueprint_runs(id) ON DELETE SET NULL). Returns the
-// blueprint_run id. Independent of seedSQLiteConversationForTaskMemory's run — the
+// blueprint_run id. Independent of seedSQLiteConversationForTaskMemory's
+// conversation — the
 // round-trip test only needs a valid FK target.
 func seedSQLiteBlueprintRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (blueprintRunID string) {
 	t.Helper()

@@ -8,7 +8,8 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
-// seedPgActiveClaim mints an active claims row for the run — the engagement
+// seedPgActiveClaim mints an active claims row for the conversation — the
+// engagement
 // the bundle channel keys rows by.
 func seedPgActiveClaim(t *testing.T, h *pgtest.Harness, orgID, conversationID, executorID string, bootEpoch int64) string {
 	t.Helper()
@@ -23,7 +24,7 @@ func seedPgActiveClaim(t *testing.T, h *pgtest.Harness, orgID, conversationID, e
 }
 
 // TestClaimCredentialsStore_Postgres_PutGet pins the basic round trip through
-// the run's active claim, plus the no-active-claim no-op.
+// the conversation's active claim, plus the no-active-claim no-op.
 // Skips cleanly when Docker isn't available (pgtest.Shared).
 func TestClaimCredentialsStore_Postgres_PutGet(t *testing.T) {
 	h := pgtest.Shared(t)

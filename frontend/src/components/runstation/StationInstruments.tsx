@@ -139,10 +139,11 @@ export function TelemetryRail({
         )}
       </Section>
 
-      {/* Artifacts — everything the run produced (branch / PR / review / issue /
-          comment), with the run's unresolved rows sorted first and dismissable
-          in place; PR/review rows open their approval overlays, the rest link
-          out. Gated on artifact_count (free on the run) so a run that produced
+      {/* Artifacts — everything the conversation produced (branch / PR /
+          review / issue / comment), with its unresolved rows sorted first and
+          dismissable in place; PR/review rows open their approval overlays,
+          the rest link out. Gated on artifact_count (free on the
+          conversation) so a conversation that produced
           nothing skips both the section and its fetch — matching the board
           card's affordance, which hides at 0. */}
       {(conversation.artifact_count ?? 0) > 0 && (
@@ -157,13 +158,16 @@ export function TelemetryRail({
         </Section>
       )}
 
-      {/* Actions — every external write this run made, artifact-bearing or not.
+      {/* Actions — every external write this conversation made,
+          artifact-bearing or not.
           Unlike Artifacts above, this section is NOT gated on a count: an empty
-          Actions list is an answer ("this run touched nothing outside the box"),
+          Actions list is an answer ("this conversation touched nothing outside
+          the box"),
           where a hidden one is indistinguishable from a surface that was never
           built — which is how the reply that started this went unnoticed.
-          Refetched when the run's status or turn count moves, so a live run's
-          list fills in without a request per streamed row. */}
+          Refetched when the conversation's status or turn count moves, so a
+          live conversation's list fills in without a request per streamed
+          row. */}
       <Section label="Actions">
         <ActionList
           conversationId={conversation.ID}

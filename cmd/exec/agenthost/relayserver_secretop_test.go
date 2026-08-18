@@ -116,7 +116,7 @@ func TestRelayServer_ServesNoCredentialBearingOp(t *testing.T) {
 
 	// (2) A credential-shaped request is unsupported. A zero-value stores and a
 	// nil git gate are fine: the switch default returns before touching either.
-	srv := NewRelayServer(db.Stores{}, ConversationInfo{OrgID: "org", ConversationID: "run"}, nil)
+	srv := NewRelayServer(db.Stores{}, ConversationInfo{OrgID: "org", ConversationID: "conv"}, nil)
 	ctx := context.Background()
 	for _, op := range []string{"get_provider_credential", "resolve_secret", "unseal_bundle", "provider_credential", "get_llm_credential"} {
 		_, err := srv.DispatchCall(ctx, agentproc.RelayNamespaceCore, op, nil)
@@ -151,7 +151,7 @@ func (c recordingRelayConn) notify(namespace, op string, _ any) {
 // above would fail the test.
 func TestRelayRuntime_ProviderCredentialNeverRelays(t *testing.T) {
 	sentinel := json.RawMessage(`{"bot_token":"xoxb-sealed-in-this-run"}`)
-	rt := newRelayRuntime(recordingRelayConn{t: t}, ConversationInfo{OrgID: "org", ConversationID: "run"},
+	rt := newRelayRuntime(recordingRelayConn{t: t}, ConversationInfo{OrgID: "org", ConversationID: "conv"},
 		func(namespace string) (json.RawMessage, bool) {
 			if namespace != "slack" {
 				return nil, false

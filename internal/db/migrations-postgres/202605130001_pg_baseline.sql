@@ -8660,7 +8660,8 @@ REVOKE ALL ON public.ws_presence FROM PUBLIC;
 REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
 
 
--- conversation_signals (TFAC-585): the cross-pod run-control outbox — a control pod's
+-- conversation_signals (TFAC-585): the cross-pod conversation-control outbox
+-- — a control pod's
 -- delivery of cancel/interrupt/steer/permission/inject to the executor that
 -- owns the conversation's live process (claims.executor_id), for the case
 -- where the local process registry (Spawner.procs) misses. See

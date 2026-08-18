@@ -12,7 +12,8 @@ import (
 
 // TestConversationQueueStore_SQLite_FleetReads exercises the fleet-dashboard + org-ops
 // reads (TFAC-589): queue depth, queued ages (cross-org + org-scoped), and the
-// run-timing projection with its terminal-run duration/claim stamps.
+// conversation-timing projection with its terminal-conversation
+// duration/claim stamps.
 func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -44,7 +45,7 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 		}
 	}
 
-	// Two queued runs.
+	// Two queued conversations.
 	if n, err := stores.ConversationQueue.CountQueuedSystem(ctx); err != nil || n != 2 {
 		t.Fatalf("CountQueuedSystem = (%d, %v), want 2", n, err)
 	}
@@ -60,7 +61,8 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 		t.Fatalf("QueuedConversationAgesForOrgSystem(other org) = %d, want 0", len(q))
 	}
 
-	// Complete one run with a claim so the timing read has a terminal row
+	// Complete one conversation with a claim so the timing read has a terminal
+	// row
 	// with a queue wait and a duration. Both claim identity AND duration
 	// live on the claims row now (the timing read derives claimed_at from
 	// the latest claim, duration from the claims' telemetry SUM).
@@ -68,7 +70,7 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 		UPDATE conversations SET status='completed',
 		       completed_at=datetime(started_at, '+7 seconds')
 		WHERE id='fr-run-0'`); err != nil {
-		t.Fatalf("complete run: %v", err)
+		t.Fatalf("complete conversation: %v", err)
 	}
 	if _, err := conn.Exec(`
 		INSERT INTO claims (id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, duration_ms)
@@ -92,13 +94,13 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 		}
 	}
 	if completed == nil {
-		t.Fatal("expected a completed run in the timing read")
+		t.Fatal("expected a completed conversation in the timing read")
 	}
 	if completed.DurationMS == nil || *completed.DurationMS != 5000 {
 		t.Fatalf("completed duration = %v, want 5000", completed.DurationMS)
 	}
 	if completed.ClaimedAt == nil {
-		t.Fatalf("completed run should carry claimed_at for the queue-wait metric")
+		t.Fatalf("completed conversation should carry claimed_at for the queue-wait metric")
 	}
 
 	// Org filter on the timing read (no until bound).
@@ -109,7 +111,8 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 		t.Fatalf("RecentConversationTimingsForOrgSystem(other org) = %d, want 0", len(ts))
 	}
 
-	// until bound is honored: an upper bound before both runs' started_at
+	// until bound is honored: an upper bound before both conversations'
+	// started_at
 	// (which are ~now) excludes them; a bound in the future includes both.
 	past := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 	if ts, _ := stores.ConversationQueue.RecentConversationTimingsForOrgSystem(ctx, org, time.Unix(0, 0), past, 0); len(ts) != 0 {

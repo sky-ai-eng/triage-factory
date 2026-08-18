@@ -45,7 +45,7 @@ describe('RunStation composer gate', () => {
   })
   afterEach(() => vi.unstubAllGlobals())
 
-  it('offers the input on a parked run the server says is resumable', () => {
+  it('offers the input on a parked conversation the server says is resumable', () => {
     station({ Status: 'open', resumable: true })
     expect(composer()).toBeInTheDocument()
   })
@@ -75,7 +75,7 @@ describe('RunStation composer gate', () => {
     expect(screen.getByText(/blueprint/i)).toBeInTheDocument()
   })
 
-  it('says nothing about resuming a failed run', () => {
+  it('says nothing about resuming a failed conversation', () => {
     // Not a resumable status to begin with, so there is no offer to withdraw
     // and no explanation to give.
     station({ Status: 'failed' })

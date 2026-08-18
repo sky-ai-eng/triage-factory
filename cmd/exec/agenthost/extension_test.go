@@ -72,7 +72,7 @@ func TestRegisterExtension_PanicsOnDuplicate(t *testing.T) {
 func TestLocalClient_CallExtension_UnknownNamespace(t *testing.T) {
 	t.Cleanup(ResetExtensions)
 	stores, _ := newTestDB(t)
-	c := NewLocal(stores, ConversationInfo{OrgID: "org-1", ConversationID: "run-1"})
+	c := NewLocal(stores, ConversationInfo{OrgID: "org-1", ConversationID: "conv-1"})
 
 	if _, err := c.CallExtension(context.Background(), "nope", "do", nil); err == nil {
 		t.Fatal("expected an error for an unregistered namespace")
@@ -94,7 +94,7 @@ func TestLocalClient_CallExtension_NoProvider_NotEnabled(t *testing.T) {
 	})
 
 	stores, _ := newTestDB(t)
-	c := NewLocal(stores, ConversationInfo{OrgID: "org-1", ConversationID: "run-1"})
+	c := NewLocal(stores, ConversationInfo{OrgID: "org-1", ConversationID: "conv-1"})
 
 	_, err := c.CallExtension(context.Background(), "fake", "do", nil)
 	if err == nil {
@@ -114,7 +114,7 @@ func TestLocalClient_CallExtension_Entitled_InvokesHandlerWithConversationInfo(t
 	t.Cleanup(entitlements.Reset)
 	entitlements.RegisterProvider(entitlements.Static(fakeExtensionFeature))
 
-	info := ConversationInfo{OrgID: "org-1", UserID: "user-1", ConversationID: "run-1", TeamID: "team-1"}
+	info := ConversationInfo{OrgID: "org-1", UserID: "user-1", ConversationID: "conv-1", TeamID: "team-1"}
 	var gotInfo ConversationInfo
 	var gotMethod string
 	var gotArgs json.RawMessage
@@ -180,7 +180,7 @@ func TestIPCClient_CallExtension_EntitledRoundTrip(t *testing.T) {
 		return json.RawMessage(fmt.Sprintf(`{"echo":%q}`, method)), nil
 	})
 
-	client := startExtensionTestDaemon(t, ConversationInfo{OrgID: "org-1", ConversationID: "run-1"})
+	client := startExtensionTestDaemon(t, ConversationInfo{OrgID: "org-1", ConversationID: "conv-1"})
 
 	result, err := client.CallExtension(context.Background(), "fake", "post", json.RawMessage(`{"a":1}`))
 	if err != nil {
@@ -203,7 +203,7 @@ func TestIPCClient_CallExtension_DaemonRefusal_SurfacesErrorString(t *testing.T)
 		return nil, nil
 	})
 
-	client := startExtensionTestDaemon(t, ConversationInfo{OrgID: "org-1", ConversationID: "run-1"})
+	client := startExtensionTestDaemon(t, ConversationInfo{OrgID: "org-1", ConversationID: "conv-1"})
 
 	_, err := client.CallExtension(context.Background(), "fake", "post", nil)
 	if err == nil {
