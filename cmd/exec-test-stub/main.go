@@ -94,7 +94,7 @@ func run() error {
 		return fmt.Errorf("daemon error: %s", resp.Error)
 	}
 	// Echo the result JSON to stdout — the test asserts on the
-	// presence of the run id we registered on the host side.
+	// presence of the conversation id we registered on the host side.
 	fmt.Printf("%s\n", string(resp.Result))
 	return nil
 }

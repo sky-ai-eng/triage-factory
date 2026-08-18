@@ -65,7 +65,7 @@ func newConversationSink(s *Spawner, orgID, conversationID, claimID, triggerType
 }
 
 // OnSession persists the captured session_id and re-broadcasts the
-// running status so the UI re-fetches the run row and picks up
+// running status so the UI re-fetches the conversation row and picks up
 // SessionID. The "Take over" button is gated on session id presence;
 // without this nudge it stays hidden until the next status flip
 // (often "running" → terminal), which is too late to be useful.

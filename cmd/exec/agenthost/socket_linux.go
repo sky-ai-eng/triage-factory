@@ -134,7 +134,7 @@ func StartWithServer(server *Server, conversationID string) (*HostDaemon, sandbo
 	// is refused to this one with EPERM. The orchestrator clears a
 	// predecessor's per-run files at cell bring-up, before this process is
 	// launched (sandbox.ClearRunCellFiles) — that, not this line, is what
-	// makes a successor engagement of the same run come up.
+	// makes a successor engagement of the same conversation come up.
 	_ = os.Remove(sockPath)
 
 	listener, err := net.Listen("unix", sockPath)
@@ -291,7 +291,8 @@ func WriteInjectorCert(conversationID string, certPEM []byte) error {
 // already at the path first — the same remove-before-create rule
 // StartWithServer applies to the socket, for the same reason and one more.
 //
-// The path is keyed by run id, so sequential engagements of one conversation
+// The path is keyed by conversation id, so sequential engagements of one
+// conversation
 // share it, and a truncate-in-place would hand the new injector the previous
 // engagement's file: wrong mode, wrong owner, and — under a mid-teardown
 // overlap — a window where the cert the jail mounts is not the one the serving

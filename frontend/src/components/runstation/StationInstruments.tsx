@@ -22,8 +22,8 @@ interface Props {
   /** Open an artifact's approval overlay (PR / review) — wired up the page to
    *  RunDetail's overlay state. */
   onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
-  /** Re-pull the run projection after an in-place dismiss in the Artifacts
-   *  list (the list refetches its own rows). */
+  /** Re-pull the conversation projection after an in-place dismiss in the
+   *  Artifacts list (the list refetches its own rows). */
   onArtifactResolved?: () => void
 }
 

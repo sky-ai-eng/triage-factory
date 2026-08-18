@@ -362,7 +362,8 @@ func invalidEnvelopeCorrection() string {
 		"(on finish/continue) or a \"reason\" (on abort), and no other text."
 }
 
-// markConversationOpen flips a run's status to `open` under a race guard, then nudges
+// markConversationOpen flips a conversation's status to `open` under a race
+// guard, then nudges
 // the board + UI. The shared flip for every park: the warm path (the live
 // driver's no-conclusion turn, where the process stays warm in s.procs and
 // there's nothing to snapshot yet), parkConversationOpen (process gone — snapshots

@@ -39,12 +39,12 @@ func newTestStores(t *testing.T) (db.Stores, string) {
 	if _, err := conn.Exec(`INSERT INTO orgs (id, slug, name) VALUES (?, 'local', 'Local')`, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("seed org: %v", err)
 	}
-	// Minimal valid run: event-triggered (creator_user_id NULL) + a
+	// Minimal valid conversation: event-triggered (creator_user_id NULL) + a
 	// non-blueprint origin so the parent-pairing CHECKs don't demand a
 	// task/prompt/blueprint chain. org_id/team_id default to the local
 	// sentinels. The artifact only needs conversation_id to satisfy its FK.
 	if _, err := conn.Exec(`INSERT INTO conversations (id, trigger_type, creator_user_id, origin, status) VALUES ('r1', 'event', NULL, 'interactive', 'running')`); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 	return sqlitestore.New(conn), "r1"
 }
@@ -97,7 +97,7 @@ func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
 	}
 	if a.ConversationID != conversationID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
-		t.Errorf("identity not stamped: run=%q org=%q team=%q", a.ConversationID, a.OrgID, a.TeamID)
+		t.Errorf("identity not stamped: conversation=%q org=%q team=%q", a.ConversationID, a.OrgID, a.TeamID)
 	}
 	var d pushDetails
 	if err := json.Unmarshal([]byte(a.DetailsJSON), &d); err != nil {
@@ -133,7 +133,8 @@ func TestRecordPush_RepushUpsertsOneRow(t *testing.T) {
 }
 
 // TestRecordPush_EventTriggeredUsesSystemPool exercises the admin-pool
-// branch (an auto-delegated run has no user identity). In SQLite both pools
+// branch (an auto-delegated conversation has no user identity). In SQLite
+// both pools
 // are the one connection, so success here just confirms the branch writes a
 // row rather than erroring.
 func TestRecordPush_EventTriggeredUsesSystemPool(t *testing.T) {

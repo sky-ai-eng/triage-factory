@@ -240,11 +240,12 @@ type ResumeOptions struct {
 	// (dispatchResumeClaim → conv.BlueprintRunID).
 	Namespace string
 
-	// TeamID is the run's owning team. Resolves the presence-gated
-	// absent-auto-deny policy for the resumed run's permission prompts
-	// (TFAC-392), and stamps the resumed run's agenthost.ConversationInfo.TeamID so
-	// the capture writers can attribute artifacts (TFAC-458). The claim
-	// captures it from the run row (conv.TeamID, NOT NULL); empty falls back
+	// TeamID is the conversation's owning team. Resolves the presence-gated
+	// absent-auto-deny policy for the resumed conversation's permission
+	// prompts (TFAC-392), and stamps the resumed conversation's
+	// agenthost.ConversationInfo.TeamID so the capture writers can attribute
+	// artifacts (TFAC-458). The claim captures it from the conversation row
+	// (conv.TeamID, NOT NULL); empty falls back
 	// to the schema defaults for the absent-auto-deny resolve.
 	TeamID string
 

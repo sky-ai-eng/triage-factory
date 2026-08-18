@@ -41,9 +41,9 @@ export interface StationActions {
    *  the telemetry rail's Artifacts list, the dock's approval popover, or the
    *  dock button directly when exactly one item is unresolved. */
   onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
-  /** Re-pull the run projection after an in-place artifact dismiss (the
-   *  artifact list refetches its own rows; the counts and the derived approval
-   *  state live on the run row). */
+  /** Re-pull the conversation projection after an in-place artifact dismiss
+   *  (the artifact list refetches its own rows; the counts and the derived
+   *  approval state live on the conversation row). */
   onArtifactResolved?: () => void
   /** Steer the run with a free-form message (live process or `open` resume). */
   onMessage?: (text: string) => void

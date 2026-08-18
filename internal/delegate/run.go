@@ -127,17 +127,17 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 
 // runAgent is the generic agent execution loop. Works for any task type.
 //
-// creatorUserID carries the user identity for manual runs; it's the
+// creatorUserID carries the user identity for manual conversations; it's the
 // synthetic-claims subject the goroutine's write batches run under so
 // RLS policies on the writes pass under tf_app. Empty for event-
-// triggered runs (those write through the admin-pool `...System`
+// triggered conversations (those write through the admin-pool `...System`
 // methods, no JWT-claims context).
-// priorSessionID is the run row's existing session_id at claim time — empty
-// for a first claim, non-empty when the dispatcher re-claims a run stranded
-// mid-flight by a crash. When present and the session transcript survived
-// alongside the warm worktree, the agent resumes that session instead of
-// starting fresh, so a restart continues the run rather than re-running it
-// from scratch.
+// priorSessionID is the conversation row's existing session_id at claim time
+// — empty for a first claim, non-empty when the dispatcher re-claims a
+// conversation stranded mid-flight by a crash. When present and the session
+// transcript survived alongside the warm worktree, the agent resumes that
+// session instead of starting fresh, so a restart continues the conversation
+// rather than re-running it from scratch.
 //
 // Returns fenced: true when the DB refused this engagement's writes because
 // its claim was released out from under it. Nothing was recorded and nothing

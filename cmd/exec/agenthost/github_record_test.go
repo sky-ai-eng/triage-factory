@@ -49,9 +49,10 @@ func startFakeGitHubComments(t *testing.T) *httptest.Server {
 
 // newGithubRecordingClient builds a LocalClient wired to a real SQLite store
 // bundle (live Artifacts / Tx) and a fake resolver pointing at ghURL, seeds a
-// run for the artifacts FK to anchor on, and returns the bundle + run identity
-// + client. eventTriggered picks the write path withWrite routes through: admin
-// pool (no user) when true, a synthetic-claims tx (manual run) when false.
+// conversation for the artifacts FK to anchor on, and returns the bundle +
+// conversation identity + client. eventTriggered picks the write path withWrite routes through: admin
+// pool (no user) when true, a synthetic-claims tx (manual conversation) when
+// false.
 func newGithubRecordingClient(t *testing.T, ghURL string, eventTriggered bool) (db.Stores, ConversationInfo, *LocalClient) {
 	_, stores, info, client := newGithubRecordingClientConn(t, ghURL, eventTriggered)
 	return stores, info, client
@@ -78,7 +79,7 @@ func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered boo
 	if _, err := conn.Exec(
 		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, conversationID,
 	); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 
 	stores := sqlitestore.New(conn)
@@ -126,7 +127,7 @@ func TestLocalClient_GithubAddComment_RecordsArtifact(t *testing.T) {
 				t.Errorf("comment artifact mismatch: %+v", a)
 			}
 			if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
-				t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
+				t.Errorf("attribution mismatch: conversation=%q team=%q", a.ConversationID, a.TeamID)
 			}
 		})
 	}

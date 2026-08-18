@@ -2492,7 +2492,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		taskA := seed.Task(t, entA, domain.EventGitHubPROpened, evA)
 		taskB := seed.Task(t, entB, domain.EventGitHubPROpened, evB)
 
-		// A has an open run; B has only a running run.
+		// A has an open conversation; B has only a running one.
 		convA := seedConversationForTaskTest(t, orgID, taskA, "running", seed)
 		if _, err := store.ParkOpen(ctx, orgID, convA, db.ParkIdle()); err != nil {
 			t.Fatalf("open A: %v", err)
@@ -3481,7 +3481,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 		brID := seed.BlueprintRun(t, taskID)
 
-		// Two runs sharing one blueprint_run — sibling steps. (The seeder
+		// Two conversations sharing one blueprint_run — sibling steps. (The
+		// seeder
 		// mints a fresh blueprint_run per call, so we reuse brID directly
 		// to stage the multi-step shape the footer aggregates over.)
 		step1 := seed.Conversation(t, domain.Conversation{
@@ -3524,7 +3525,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if !near(sib, 0.02) {
 			t.Errorf("sibling cost excluding step1 = %v, want 0.02 (step2 only)", sib)
 		}
-		// A blueprint_run with no other runs sums to 0, not an error.
+		// A blueprint_run with no other conversations sums to 0, not an error.
 		sib, err = store.BlueprintSiblingCostUSDSystem(ctx, orgID, uuid.New().String(), step1)
 		if err != nil {
 			t.Fatalf("BlueprintSiblingCostUSDSystem(empty): %v", err)
@@ -3558,7 +3559,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 		brID := seed.BlueprintRun(t, taskID)
 
-		// Two runs sharing one blueprint_run — sibling steps. Duration lives
+		// Two conversations sharing one blueprint_run — sibling steps. Duration
+		// lives
 		// on the claim Complete releases, so each step goes live (minting a
 		// claim) before it completes.
 		step1 := seed.Conversation(t, domain.Conversation{
@@ -3597,7 +3599,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if ms != 2000 {
 			t.Errorf("sibling duration excluding step1 = %d, want 2000 (step2 only)", ms)
 		}
-		// A blueprint_run with no other runs sums to 0, not an error.
+		// A blueprint_run with no other conversations sums to 0, not an error.
 		ms, err = store.BlueprintSiblingDurationMsSystem(ctx, orgID, uuid.New().String(), step1)
 		if err != nil {
 			t.Fatalf("BlueprintSiblingDurationMsSystem(empty): %v", err)

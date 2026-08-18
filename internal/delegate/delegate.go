@@ -38,9 +38,9 @@ import (
 //     is the source of truth for cleanup, which iterates the table at
 //     runAgent terminal.
 type runConfig struct {
-	orgID     string  // tenant scope for every store call inside this run's goroutine — set once in Delegate from opts.OrgID, then read everywhere via cfg.orgID instead of being threaded positionally
-	claimID   string  // the engagement driving this run — the claims row ClaimNextConversation minted, threaded through so teardown can stamp the run's measured sandbox cost by id (an active-claim lookup would race the release). Empty on paths with no claimed run in scope, which record no actuals.
-	teamID    string  // the run's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed run row; read at construction to populate agenthost.ConversationInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Also stamped on the run-bearing terminal literals (dispatchClaimedConversation / handlePreAgentFailure); empty only on the CancelBlueprint / paused-cleanup paths that have a task but no claimed run in scope.
+	orgID     string  // tenant scope for every store call inside this conversation's goroutine — set once in Delegate from opts.OrgID, then read everywhere via cfg.orgID instead of being threaded positionally
+	claimID   string  // the engagement driving this conversation — the claims row ClaimNextConversation minted, threaded through so teardown can stamp the claim's measured sandbox cost by id (an active-claim lookup would race the release). Empty on paths with no claimed conversation in scope, which record no actuals.
+	teamID    string  // the conversation's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed conversation row; read at construction to populate agenthost.ConversationInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Also stamped on the conversation-bearing terminal paths (dispatchClaimedConversation / handlePreAgentFailure); empty only on the CancelBlueprint / paused-cleanup paths that have a task but no claimed conversation in scope.
 	scope     string  // what the agent is scoped to (repo, PR, issue)
 	toolsRef  string  // tool documentation to inject
 	wtPath    string  // initial cwd: GitHub PR worktree, or Jira run-root
@@ -129,7 +129,7 @@ type DelegateOpts struct {
 	// OrgIDFrom accessors; router-triggered calls pass the local-
 	// mode sentinel until the per-org router lands. The goroutine
 	// caches this on cfg.orgID and every downstream store call
-	// (run row, side-tables, memory, chain steps) routes under it.
+	// (conversation row, side-tables, memory, chain steps) routes under it.
 	// Required — callers must always set this; the spawner trusts
 	// the input and does not re-validate.
 	OrgID string

@@ -2,8 +2,8 @@ package domain
 
 import "time"
 
-// Spend categories — the axis the llm_spend view (TFAC-472) normalizes the
-// three source tables onto. A delegated run is 'manual' (per-user) or
+// Spend categories — the axis the llm_spend view (TFAC-472) normalizes its
+// sources onto. A delegated conversation is 'manual' (per-user) or
 // 'autonomous' (event-triggered) by its trigger_type; a curator turn is
 // 'curator'; a headless system job (scorer / repo-profiler / classifier) is
 // 'system_overhead'. The dashboards + safety cap group on these.
@@ -14,9 +14,10 @@ const (
 	SpendCategorySystemOverhead = "system_overhead"
 )
 
-// Spend sources — which underlying table a SpendRow came from. Mirrors the
-// view's `source` discriminator so callers can attribute a row back to runs /
-// curator_requests / system_llm_runs without re-querying.
+// Spend sources — the view's `source` discriminator, so callers can tell a
+// row's origin without re-querying. 'run' and 'curator' rows both derive from
+// conversation messages (delegated conversations and curator turns);
+// 'system' rows come from system_llm_runs. The values are persisted strings.
 const (
 	SpendSourceRun     = "run"
 	SpendSourceCurator = "curator"
@@ -27,18 +28,19 @@ const (
 // spend from any of the three sources. Read-only; assembled by db.SpendStore.
 //
 // Settled-spend semantics: TotalCostUSD and the four token counts are 0 for an
-// in-flight (non-terminal) run/curator turn and carry their real values once a
+// in-flight (non-terminal) delegated conversation or curator turn and carry
+// their real values once a
 // terminal write lands (normal completion, cancel, infra-failure, or a
 // boot-time orphan sweep). System rows are always terminal.
 //
-// Nullable columns are pointers: TeamID is set only for runs (curator +
+// Nullable columns are pointers: TeamID is set only for 'run' rows (curator +
 // system are org-level, but TFAC-476 attributes a curator turn to its
 // project's team); Subtype carries the job name for system rows (NULL
-// otherwise); CreatorUserID is the human for runs/curator (NULL for system);
-// ActorAgentID is the executing org agent for runs (NULL for curator/system);
-// TriggerID is the event_handler that fired an autonomous run (NULL for
-// manual runs, curator, and system — TFAC-478); Model is NULL for curator
-// turns.
+// otherwise); CreatorUserID is the human for 'run'/'curator' rows (NULL for
+// system); ActorAgentID is the executing org agent for 'run' rows (NULL for
+// curator/system); TriggerID is the event_handler that fired an autonomous
+// conversation (NULL for manual conversations, curator, and system —
+// TFAC-478); Model is NULL for curator turns.
 type SpendRow struct {
 	Source              string    `json:"source"`
 	SourceID            string    `json:"source_id"`

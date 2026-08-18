@@ -46,8 +46,8 @@ func dialSandbox(ctx context.Context, socketPath string) (Client, error) {
 }
 
 // NewLocalFromEnv constructs the client for a process that has already
-// resolved itself to be the host CLI: it resolves run identity from the
-// environment against the supplied stores and serves every call in-process.
+// resolved itself to be the host CLI: it resolves conversation identity from
+// the environment against the supplied stores and serves every call in-process.
 // This is the only construction path that consults convident, and the only one
 // that needs stores at all.
 //

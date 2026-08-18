@@ -9,7 +9,8 @@ import (
 )
 
 // TestWriteFreshInjectorCert_ReplacesStaleFile pins the remove-before-create
-// rule on the per-run gh-injector cert. The path is keyed by run id, so a
+// rule on the per-conversation gh-injector cert. The path is keyed by
+// conversation id, so a
 // second engagement of one conversation writes exactly where the first one
 // did; without the remove the new sidecar inherits the old file rather than
 // owning its own.
@@ -20,7 +21,7 @@ import (
 // was unlinked first. (The inode number cannot stand in for this — filesystems
 // hand the just-freed inode straight back to the next create.)
 func TestWriteFreshInjectorCert_ReplacesStaleFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "run-1-gh-injector.crt")
+	path := filepath.Join(t.TempDir(), "conv-1-gh-injector.crt")
 	if err := os.WriteFile(path, []byte("STALE PREDECESSOR PEM"), 0o600); err != nil {
 		t.Fatalf("seed stale cert: %v", err)
 	}
@@ -47,7 +48,7 @@ func TestWriteFreshInjectorCert_ReplacesUnwritableFile(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root bypasses the file mode this case turns on; the mode assertion above covers the rule for every uid")
 	}
-	path := filepath.Join(t.TempDir(), "run-2-gh-injector.crt")
+	path := filepath.Join(t.TempDir(), "conv-2-gh-injector.crt")
 	if err := os.WriteFile(path, []byte("STALE"), 0o440); err != nil {
 		t.Fatalf("seed stale cert: %v", err)
 	}
@@ -67,7 +68,7 @@ func TestWriteFreshInjectorCert_ReplacesUnwritableFile(t *testing.T) {
 // remove — so the remove-first cannot have made a first write conditional on
 // one having happened before.
 func TestWriteFreshInjectorCert_NoStaleFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "run-3-gh-injector.crt")
+	path := filepath.Join(t.TempDir(), "conv-3-gh-injector.crt")
 	if err := writeFreshInjectorCert(path, []byte("FRESH PEM")); err != nil {
 		t.Fatalf("writeFreshInjectorCert on a clean path: %v", err)
 	}
