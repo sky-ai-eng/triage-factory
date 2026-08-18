@@ -661,7 +661,7 @@ func (s *Server) swipeTeardownConversations(r *http.Request, orgID, userID, id, 
 		ids, e = tx.Conversations.ActiveIDsForTask(cleanupCtx, orgID, id)
 		return e
 	}); err != nil {
-		swipeLog.Error("active-run lookup failed", "task", id, "error", err)
+		swipeLog.Error("active-conversation lookup failed", "task", id, "error", err)
 		return
 	}
 	// A swipe is the task's own disposition, so the blueprints behind these
@@ -669,7 +669,7 @@ func (s *Server) swipeTeardownConversations(r *http.Request, orgID, userID, id, 
 	// conversation stop is for a user pausing work they mean to come back to.
 	for _, conversationID := range ids {
 		if err := s.spawner.StopAndCancelBlueprint(orgID, conversationID, userID, delegate.StopCauseTaskDispositioned); err != nil {
-			swipeLog.Warn("stop run failed", "conversation", conversationID, "action", action, "task", id, "error", err)
+			swipeLog.Warn("stop conversation failed", "conversation", conversationID, "action", action, "task", id, "error", err)
 		}
 	}
 }

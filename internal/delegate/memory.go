@@ -174,7 +174,7 @@ func fingerprintAgentMemoryFile(cwd string) *memoryFingerprint {
 	}
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		delegateLog.Warn("fingerprint inherited memory file failed; this run's memory will be taken at face value", "cwd", cwd, "error", err)
+		delegateLog.Warn("fingerprint inherited memory file failed; this conversation's memory will be taken at face value", "cwd", cwd, "error", err)
 		return nil
 	}
 	var fp memoryFingerprint
@@ -534,9 +534,9 @@ func (s *Spawner) attachConversationMemoryEntities(ctx context.Context, orgID, c
 	if s.taskMemory == nil {
 		return
 	}
-	// primary — the task's entity always carries the run's memory.
+	// primary — the task's entity always carries the conversation's memory.
 	if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, primaryEntityID, domain.MemoryRolePrimary); err != nil {
-		delegateLog.Warn("attach primary entity to run memory failed", "conversation", conversationID, "entity", primaryEntityID, "error", err)
+		delegateLog.Warn("attach primary entity to conversation memory failed", "conversation", conversationID, "entity", primaryEntityID, "error", err)
 	}
 
 	if s.artifacts == nil || s.entities == nil {
@@ -556,12 +556,12 @@ func (s *Spawner) attachConversationMemoryEntities(ctx context.Context, orgID, c
 		}
 		ent, _, err := s.entities.FindOrCreateSystem(ctx, orgID, source, sourceID, kind, "", a.URL)
 		if err != nil || ent == nil {
-			delegateLog.Warn("resolve produced entity for run memory failed",
+			delegateLog.Warn("resolve produced entity for conversation memory failed",
 				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)
 			continue
 		}
 		if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, ent.ID, domain.MemoryRoleProduced); err != nil {
-			delegateLog.Warn("attach produced entity to run memory failed", "conversation", conversationID, "entity", ent.ID, "error", err)
+			delegateLog.Warn("attach produced entity to conversation memory failed", "conversation", conversationID, "entity", ent.ID, "error", err)
 		}
 	}
 }

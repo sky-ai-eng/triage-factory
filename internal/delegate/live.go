@@ -433,7 +433,7 @@ func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext
 		return true
 	}
 	if err != nil {
-		delegateLog.Warn("mark run open failed", "conversation", park.conversationID, "error", err)
+		delegateLog.Warn("mark conversation open failed", "conversation", park.conversationID, "error", err)
 		return false
 	}
 	if !flipped {

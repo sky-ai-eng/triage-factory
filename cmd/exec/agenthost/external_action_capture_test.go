@@ -23,14 +23,16 @@ import (
 // The TFAC-483 capture tests prove the bot funnels append the right
 // external_actions audit row alongside the artifact upsert — the finer-grained
 // action discriminator the artifact's state can't carry, the org credential, the
-// run + actor attribution, and the branch hook+proxy dedup. The LocalClient is
-// the one seam the multi daemon dispatches through, so this covers both modes.
+// conversation + actor attribution, and the branch hook+proxy dedup. The
+// LocalClient is the one seam the multi daemon dispatches through, so this
+// covers both modes.
 
 // newCaptureStores builds a real SQLite store bundle (Artifacts + ExternalActions
-// + Tx live) with a seeded run, no Jira credential needed (the branch path and
-// the injected-error paths don't call out). eventTriggered picks the write path:
-// admin pool (no user) when true, a synthetic-claims tx (manual run, with a user)
-// when false.
+// + Tx live) with a seeded conversation, no Jira credential needed (the
+// branch path and the injected-error paths don't call out). eventTriggered
+// picks the write path:
+// admin pool (no user) when true, a synthetic-claims tx (manual
+// conversation, with a user) when false.
 func newCaptureStores(t *testing.T, eventTriggered bool) (db.Stores, ConversationInfo) {
 	_, stores, info := newCaptureStoresConn(t, eventTriggered)
 	return stores, info
@@ -53,7 +55,7 @@ func newCaptureStoresConn(t *testing.T, eventTriggered bool) (*sql.DB, db.Stores
 	}
 	const conversationID = "11111111-1111-1111-1111-111111111111"
 	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, conversationID); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 	userID := ""
 	if !eventTriggered {
@@ -79,8 +81,9 @@ func listExternalActions(t *testing.T, stores db.Stores) []domain.ExternalAction
 
 // TestCapture_JiraActions_RecordExternalActions pins that a Jira create and a
 // transition each append one external_actions row with the right action (finer
-// than the artifact's created/updated state), the org Jira credential, the run +
-// actor attribution, and the transition's to_state — across both write paths.
+// than the artifact's created/updated state), the org Jira credential, the
+// conversation + actor attribution, and the transition's to_state — across
+// both write paths.
 func TestCapture_JiraActions_RecordExternalActions(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -132,8 +135,8 @@ func TestCapture_JiraActions_RecordExternalActions(t *testing.T) {
 
 // TestCapture_BranchPush_RecordsActionAndDedupsTwin pins the branch capture: a
 // push records ActionBranchPushed under the github credential with the
-// deterministic run:ref:sha dedup key, and a second observation of the SAME push
-// (the git hook+proxy twin) collapses to one action row.
+// deterministic conversation:ref:sha dedup key, and a second observation of
+// the SAME push (the git hook+proxy twin) collapses to one action row.
 func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -459,8 +462,9 @@ func TestCapture_EventPath_RecordFailure_DoesNotFailAction(t *testing.T) {
 	}
 }
 
-// assertActor checks the actor model: an event-triggered (autonomous) run has no
-// actor (NULL); a manual run carries the kicking-off user.
+// assertActor checks the actor model: an event-triggered (autonomous)
+// conversation has no actor (NULL); a manual conversation carries the
+// kicking-off user.
 func assertActor(t *testing.T, a domain.ExternalAction, eventTriggered bool) {
 	t.Helper()
 	if eventTriggered {
@@ -529,7 +533,7 @@ func TestCapture_EgressDenied_RecordsOneRowPerConversationAndHost(t *testing.T) 
 		t.Errorf("egress row mismatch: %+v", gh)
 	}
 	if gh.ConversationID != info.ConversationID {
-		t.Errorf("conversation = %q, want the run's own %q", gh.ConversationID, info.ConversationID)
+		t.Errorf("conversation = %q, want the conversation's own %q", gh.ConversationID, info.ConversationID)
 	}
 	if want := domain.EgressDenialDedupKey(info.ConversationID, "api.github.com:443"); gh.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", gh.DedupKey, want)
@@ -939,7 +943,7 @@ func TestCapture_GraphQLOverCapStillLandsAnAttributedRow(t *testing.T) {
 		t.Errorf("action = %q, want graphql_write — the act is unknown, the write is not", row.Action)
 	}
 	if row.ConversationID != info.ConversationID {
-		t.Errorf("conversation = %q, want the run that made the write %q", row.ConversationID, info.ConversationID)
+		t.Errorf("conversation = %q, want the conversation that made the write %q", row.ConversationID, info.ConversationID)
 	}
 	if row.Credential != domain.CredentialGitHubApp {
 		t.Errorf("credential = %q, want the org credential it spent", row.Credential)
@@ -971,9 +975,9 @@ func TestCapture_GraphQLOverCapStillLandsAnAttributedRow(t *testing.T) {
 
 // TestCapture_GithubReviewDismiss_RecordsArtifactlessAction covers the last
 // exec-gh verb that reached GitHub under the org credential and left nothing
-// behind — neither an artifact (correctly: the act produces no object this run
-// owns) nor an audit row (not correctly: the log of record is supposed to have
-// no fourth state where a write simply happened invisibly).
+// behind — neither an artifact (correctly: the act produces no object this
+// conversation owns) nor an audit row (not correctly: the log of record is
+// supposed to have no fourth state where a write simply happened invisibly).
 //
 // It is the act the action vocabulary used to assert could not happen — "a dismiss is a local
 // state flip, not an org-credential write". That is true of abandoning a

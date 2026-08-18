@@ -11,7 +11,8 @@ import (
 // RunConversationPendingInputStoreConformance. Returns:
 //   - the wired ConversationPendingInputStore impl,
 //   - the orgID and a userID to pass to every call,
-//   - a ConversationPendingInputSeeder the harness uses to stage the run FK chain.
+//   - a ConversationPendingInputSeeder the harness uses to stage the
+//     conversation FK chain.
 type ConversationPendingInputStoreFactory func(t *testing.T) (store db.ConversationPendingInputStore, orgID, userID string, seed ConversationPendingInputSeeder)
 
 // ConversationPendingInputSeeder is a bag of callbacks the conformance suite uses to
@@ -29,8 +30,8 @@ type ConversationPendingInputSeeder struct {
 	// column the writer stops setting fails here rather than in production.
 	StagePending func(t *testing.T, conversationID, userID, message string)
 
-	// DeleteConversation removes the run row so the FK ON DELETE CASCADE subtest can
-	// verify a purged run takes its pending input with it.
+	// DeleteConversation removes the conversation row so the FK ON DELETE CASCADE
+	// subtest can verify a purged conversation takes its pending input with it.
 	DeleteConversation func(t *testing.T, conversationID string)
 
 	// SecondUser returns a second user id valid for the same org, so the
@@ -42,8 +43,8 @@ type ConversationPendingInputSeeder struct {
 // RunConversationPendingInputStoreConformance covers the ConversationPendingInputStore
 // contract every backend impl must hold (TFAC-585): consume is destructive and
 // exactly once, the append-and-join queue contract, Peek and Consume agreeing
-// on what is pending, per-run isolation, absence reads as ok=false (never an
-// error), and FK cascade. Rows are staged through the production writer (see
+// on what is pending, per-conversation isolation, absence reads as ok=false
+// (never an error), and FK cascade. Rows are staged through the production writer (see
 // ConversationPendingInputSeeder.StagePending), because a reader that only agrees with
 // its own test-local INSERT proves nothing.
 func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPendingInputStoreFactory) {
@@ -111,7 +112,7 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 			t.Fatalf("consume: %v", err)
 		}
 		if ok {
-			t.Error("consume of an unstaged run reported ok=true")
+			t.Error("consume of an unstaged conversation reported ok=true")
 		}
 	})
 
@@ -223,7 +224,7 @@ func RunConversationPendingInputStoreConformance(t *testing.T, mk ConversationPe
 			t.Fatalf("consume after delete: %v", err)
 		}
 		if ok {
-			t.Error("pending input survived run deletion (cascade did not fire)")
+			t.Error("pending input survived conversation deletion (cascade did not fire)")
 		}
 	})
 }

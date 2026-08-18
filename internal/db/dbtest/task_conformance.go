@@ -690,7 +690,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Fatalf("AdvanceStatusForUser: %v", err)
 		}
 		if ok {
-			t.Error("AdvanceStatusForUser landed on bot-claimed task; should refuse (status owned by run lifecycle)")
+			t.Error("AdvanceStatusForUser landed on bot-claimed task; should refuse (status owned by the conversation lifecycle)")
 		}
 		got, _ := s.Get(ctx, orgID, taskID)
 		if got.Status != "queued" {

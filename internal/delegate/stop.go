@@ -424,9 +424,10 @@ func classifyFailureKind(err error) domain.ConversationFailureKind {
 //
 // Returns fenced: true when the terminal was refused because the claim is
 // released. Nothing was written, and the caller must not go on to react to
-// the run's state either — the row it would read belongs to the successor.
+// the conversation's state either — the row it would read belongs to the
+// successor.
 func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, triggerType, creatorUserID, errMsg string, kind domain.ConversationFailureKind) (fenced bool) {
-	delegateLog.Error("run failed", "conversation", conversationID, "error", errMsg, "failure_kind", string(kind))
+	delegateLog.Error("conversation failed", "conversation", conversationID, "error", errMsg, "failure_kind", string(kind))
 
 	bgCtx := context.Background()
 
@@ -493,7 +494,7 @@ func (s *Spawner) failConversation(orgID, conversationID, taskID, claimID, trigg
 		return true
 	}
 	if markErr != nil {
-		delegateLog.Warn("failed to mark run as failed", "conversation", conversationID, "error", markErr)
+		delegateLog.Warn("failed to mark conversation as failed", "conversation", conversationID, "error", markErr)
 	}
 
 	s.updateBreakerCounter(taskID, triggerType, "failed")

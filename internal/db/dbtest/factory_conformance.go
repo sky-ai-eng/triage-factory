@@ -255,11 +255,11 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		}
 
 		if gotIDs[conversationTerminal] {
-			t.Errorf("terminal run %s leaked into ActiveConversations — status filter failed", conversationTerminal)
+			t.Errorf("terminal conversation %s leaked into ActiveConversations — status filter failed", conversationTerminal)
 		}
 		for _, id := range []string{conversationNoRow, conversationNullContent, conversationEmptyContent, conversationWhitespace, conversationPopulated} {
 			if !gotIDs[id] {
-				t.Errorf("active run %s missing from ActiveConversations", id)
+				t.Errorf("active conversation %s missing from ActiveConversations", id)
 			}
 		}
 
@@ -272,7 +272,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		}
 		for id, expected := range want {
 			if gotMem[id] != expected {
-				t.Errorf("run %s: memory_missing = %v, want %v", id, gotMem[id], expected)
+				t.Errorf("conversation %s: memory_missing = %v, want %v", id, gotMem[id], expected)
 			}
 		}
 	})

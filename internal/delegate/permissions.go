@@ -581,7 +581,7 @@ func (s *Spawner) broadcastPermissionResolved(orgID, conversationID, toolCallID 
 // run.go/resume.go.
 func (s *Spawner) AutoApprovePermissionHandler(conversationID string) agentproc.PermissionHandler {
 	return func(req agentproc.PermissionRequest) agentproc.PermissionDecision {
-		delegateLog.Info("off-allowlist tool auto-approved in sandboxed run", "conversation", conversationID, "tool_call_id", req.ToolCallID, "tool", req.ToolName)
+		delegateLog.Info("off-allowlist tool auto-approved in the sandbox", "conversation", conversationID, "tool_call_id", req.ToolCallID, "tool", req.ToolName)
 		return agentproc.PermissionDecision{Behavior: "allow"}
 	}
 }

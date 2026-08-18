@@ -107,14 +107,14 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 			// a failed base-URL resolve must SKIP the lookup, not pass host="": on a
 			// GHE org an empty host would query the wrong (default) host and silently
 			// miss — or mis-resolve — the human's identity. Both failures are
-			// non-fatal (the run proceeds without a trailer) and debug-logged so an
-			// operator can diagnose a missing/wrong trailer without it surfacing as a
-			// run error.
+			// non-fatal (the conversation proceeds without a trailer) and debug-logged
+			// so an operator can diagnose a missing/wrong trailer without it surfacing
+			// as a conversation error.
 			if host, herr := s.ghResolver.BaseURLFor(ctx, orgID); herr != nil {
-				delegateLog.Debug("resolve org github base for co-author lookup failed; manual run will omit the trailer",
+				delegateLog.Debug("resolve org github base for co-author lookup failed; manual conversation will omit the trailer",
 					"org", orgID, "error", herr)
 			} else if login, err := stores.Users.GetGitHubLoginSystem(ctx, creatorUserID, host); err != nil {
-				delegateLog.Debug("resolve co-author github login failed; manual run will omit the trailer",
+				delegateLog.Debug("resolve co-author github login failed; manual conversation will omit the trailer",
 					"creator", creatorUserID, "error", err)
 			} else {
 				coLogin = login
@@ -350,7 +350,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// the tree is still writable — once, up front, so no later step needs a
 		// write here at all. No-op in local mode, where the directory is real.
 		if err := worktree.EnsureSandboxMemoryLink(ctx, claudeCwd); err != nil {
-			delegateLog.Warn("plant sandbox memory symlink failed; this run reads no prior memory", "conversation", conversationID, "cwd", claudeCwd, "error", err)
+			delegateLog.Warn("plant sandbox memory symlink failed; this conversation reads no prior memory", "conversation", conversationID, "cwd", claudeCwd, "error", err)
 		}
 	}
 
@@ -500,7 +500,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	resumeSession := ""
 	if priorSessionID != "" && sessionTranscriptExists(claudeCwd, priorSessionID) {
 		resumeSession = priorSessionID
-		delegateLog.Info("run re-claimed mid-flight; resuming session", "conversation", conversationID, "session", priorSessionID)
+		delegateLog.Info("conversation re-claimed mid-flight; resuming session", "conversation", conversationID, "session", priorSessionID)
 	}
 
 	// teamID nil-derefs to "" (resolveAbsentAutoDeny then falls back to
@@ -528,7 +528,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		ghChannel = localGH
 	}
 
-	delegateLog.Info("claude starting for run", "conversation", conversationID, "cwd", claudeCwd)
+	delegateLog.Info("claude starting for conversation", "conversation", conversationID, "cwd", claudeCwd)
 	baseOpts := agentproc.RunOptions{
 		Cwd:       claudeCwd,
 		Model:     model,
@@ -804,7 +804,7 @@ func (s *Spawner) processCompletion(
 	// history.
 	agentContent, fileState := readConversationMemory(claudeCwd, priorMemory)
 	if err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID, blueprintRunID, agentContent); err != nil {
-		delegateLog.Warn("upsert memory for run failed", "conversation", conversationID, "error", err)
+		delegateLog.Warn("upsert memory for conversation failed", "conversation", conversationID, "error", err)
 	}
 	switch fileState {
 	case memoryFileMissing:
@@ -814,10 +814,11 @@ func (s *Spawner) processCompletion(
 	case memoryFileReadErr:
 		delegateLog.Debug("memory file unreadable at termination (agent_content NULL)", "conversation", conversationID)
 	case memoryFileStale:
-		delegateLog.Debug("memory file holds exactly the content this run inherited; it belongs to the previous step (agent_content NULL)", "conversation", conversationID)
+		delegateLog.Debug("memory file holds exactly the content this conversation inherited; it belongs to the previous step (agent_content NULL)", "conversation", conversationID)
 	}
 
-	// Attach the run's memory to every entity it materially engaged — the
+	// Attach the conversation's memory to every entity it materially engaged —
+	// the
 	// primary (task) entity plus everything it produced — so the narrative is
 	// reachable from all of them, not just the denormalized primary on
 	// conversation_memory.entity_id. Cancellation-detached for the same reason
@@ -911,7 +912,7 @@ func (s *Spawner) processCompletion(
 	// still being written.
 	if status == "completed" {
 		if err := s.snapshotWorkspace(ctx, orgID, conversationID, namespace, claudeCwd, sessionID, domain.ConversationRuntimeSDK); err != nil {
-			delegateLog.Warn("snapshot workspace for completed run failed", "conversation", conversationID, "outcome", outcome, "error", err)
+			delegateLog.Warn("snapshot workspace for completed conversation failed", "conversation", conversationID, "outcome", outcome, "error", err)
 		}
 	}
 
@@ -940,7 +941,7 @@ func (s *Spawner) processCompletion(
 		return true, true
 	}
 	if completeErr != nil {
-		delegateLog.Warn("record completion for run failed", "conversation", conversationID, "error", completeErr)
+		delegateLog.Warn("record completion for conversation failed", "conversation", conversationID, "error", completeErr)
 	}
 
 	s.updateBreakerCounter(task.ID, triggerType, status)

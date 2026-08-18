@@ -170,7 +170,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("Get fields drift: %+v", got)
 		}
 		if got.Attempts != 0 || got.ClaimedAt != nil || got.ExecutorID != "" {
-			t.Errorf("never-claimed run carries claim state: attempts=%d claimedAt=%v executor=%q",
+			t.Errorf("never-claimed conversation carries claim state: attempts=%d claimedAt=%v executor=%q",
 				got.Attempts, got.ClaimedAt, got.ExecutorID)
 		}
 	})
@@ -1026,7 +1026,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Already terminal → refused.
 		doneConversation := seedConversationForTest(t, orgID, seed, "completed")
 		if ok, _ := store.MarkFailedIfActive(ctx, orgID, doneConversation, ""); ok {
-			t.Errorf("MarkFailedIfActive flipped a completed run; want refused")
+			t.Errorf("MarkFailedIfActive flipped a completed conversation; want refused")
 		}
 	})
 
@@ -1059,16 +1059,16 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 		}
 		if !found {
-			t.Errorf("cancel-parked run's snapshot key %q is not reapable; its workspace blob would leak forever", got.BlueprintRunID)
+			t.Errorf("cancel-parked conversation's snapshot key %q is not reapable; its workspace blob would leak forever", got.BlueprintRunID)
 		}
-		// A parked run cancels again (the gesture still has to finalize the
+		// A parked conversation cancels again (the gesture still has to finalize the
 		// blueprint), but a terminal one is refused.
 		if ok, err := store.ParkOpen(ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
-			t.Errorf("re-cancel a parked run: ok=%v err=%v, want true/nil", ok, err)
+			t.Errorf("re-cancel a parked conversation: ok=%v err=%v, want true/nil", ok, err)
 		}
 		doneConversation := seedConversationForTest(t, orgID, seed, "completed")
 		if ok, err := store.ParkOpen(ctx, orgID, doneConversation, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || ok {
-			t.Errorf("cancel a completed run: ok=%v err=%v, want false/nil", ok, err)
+			t.Errorf("cancel a completed conversation: ok=%v err=%v, want false/nil", ok, err)
 		}
 	})
 
@@ -1762,7 +1762,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("Get: err=%v got=%v", err, got)
 		}
 		if got.Status != "open" || got.ParkReason != domain.ParkReasonUserCancelled {
-			t.Errorf("run = (%q, %q), want (open, user_cancelled)", got.Status, got.ParkReason)
+			t.Errorf("conversation = (%q, %q), want (open, user_cancelled)", got.Status, got.ParkReason)
 		}
 		claims := seed.ClaimRows(t, conversationID)
 		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "cancelled" {
@@ -1908,7 +1908,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("Get: err=%v got=%v", err, got)
 		}
 		if got.Status != "failed" || got.FailureKind != domain.ConversationFailureCrash {
-			t.Errorf("run = (%q, %q), want (failed, %s)", got.Status, got.FailureKind, domain.ConversationFailureCrash)
+			t.Errorf("conversation = (%q, %q), want (failed, %s)", got.Status, got.FailureKind, domain.ConversationFailureCrash)
 		}
 		claims := seed.ClaimRows(t, conversationID)
 		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "failed" {
@@ -2169,10 +2169,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			gotByID[r.ID] = r.TriggerType
 		}
 		if gotByID[manualID] != "manual" {
-			t.Errorf("manual run TriggerType = %q, want manual", gotByID[manualID])
+			t.Errorf("manual conversation TriggerType = %q, want manual", gotByID[manualID])
 		}
 		if gotByID[eventID] != "event" {
-			t.Errorf("event run TriggerType = %q, want event", gotByID[eventID])
+			t.Errorf("event conversation TriggerType = %q, want event", gotByID[eventID])
 		}
 	})
 
@@ -2211,10 +2211,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			byTask[r.TaskID] = append(byTask[r.TaskID], r.ID)
 		}
 		if len(byTask[taskA]) != 2 {
-			t.Errorf("task A: got %v, want 2 runs", byTask[taskA])
+			t.Errorf("task A: got %v, want 2 conversations", byTask[taskA])
 		}
 		if len(byTask[taskB]) != 1 {
-			t.Errorf("task B: got %v, want 1 run", byTask[taskB])
+			t.Errorf("task B: got %v, want 1 conversation", byTask[taskB])
 		}
 		seen := map[string]bool{}
 		for _, ids := range byTask {
@@ -2224,7 +2224,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		for _, want := range []string{convA1, convA2, convB1} {
 			if !seen[want] {
-				t.Errorf("run %s missing from batched result", want)
+				t.Errorf("conversation %s missing from batched result", want)
 			}
 		}
 		if total != 3 {
@@ -2281,25 +2281,26 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
-		// No runs → false.
+		// No conversations → false.
 		if has, _ := store.HasActiveAutoConversationForTask(ctx, orgID, taskID); has {
-			t.Error("HasActiveAutoConversationForTask with no runs: true, want false")
+			t.Error("HasActiveAutoConversationForTask with no conversations: true, want false")
 		}
 
-		// Manual run — must NOT trip the gate.
+		// Manual conversation — must NOT trip the gate.
 		_ = seedConversationForTaskTest(t, orgID, taskID, "running", seed)
 		if has, _ := store.HasActiveAutoConversationForTask(ctx, orgID, taskID); has {
-			t.Error("manual run tripped the auto-run gate; gate must be event-only")
+			t.Error("manual conversation tripped the auto gate; gate must be event-only")
 		}
 
-		// Add an active event-trigger run on the same task — gate flips true.
+		// Add an active event-trigger conversation on the same task — gate flips
+		// true.
 		eventConversationID := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})
 		if has, _ := store.HasActiveAutoConversationForTask(ctx, orgID, taskID); !has {
-			t.Error("active event-trigger run should trip the gate")
+			t.Error("active event-trigger conversation should trip the gate")
 		}
 
 		// A second task on the SAME entity is unaffected — the gate is the
@@ -2317,7 +2318,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("Complete: %v", err)
 		}
 		if has, _ := store.HasActiveAutoConversationForTask(ctx, orgID, taskID); has {
-			t.Error("terminal event run + active manual should NOT trip the gate")
+			t.Error("terminal event conversation + active manual should NOT trip the gate")
 		}
 	})
 
@@ -2388,7 +2389,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("Complete: %v", err)
 		}
 		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
-			t.Errorf("terminal event run + active manual: id=%q err=%v, want empty", id, err)
+			t.Errorf("terminal event conversation + active manual: id=%q err=%v, want empty", id, err)
 		}
 	})
 
@@ -2443,7 +2444,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Error("open worktree missing from ListParkedWorktreePathsSystem")
 		}
 		if got["/tmp/triagefactory-runs/completed"] {
-			t.Error("completed worktree leaked — status filter failed (completed runs no longer park)")
+			t.Error("completed worktree leaked — status filter failed (completed conversations no longer park)")
 		}
 		if got["/tmp/triagefactory-runs/running"] {
 			t.Error("running worktree leaked — status filter failed")
@@ -2499,7 +2500,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("entA missing from open set")
 		}
 		if _, ok := got[entB]; ok {
-			t.Errorf("entB leaked — only entA has an open run")
+			t.Errorf("entB leaked — only entA has an open conversation")
 		}
 	})
 
@@ -3224,7 +3225,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("Messages(otherConversationID): %v", err)
 		}
 		if len(otherMsgs) != 1 || otherMsgs[0].Delivered == nil || *otherMsgs[0].Delivered {
-			t.Errorf("otherConversationID message Delivered = %+v, want still false (run-scoped, must not leak across runs)", otherMsgs)
+			t.Errorf("otherConversationID message Delivered = %+v, want still false (conversation-scoped, must not leak across conversations)", otherMsgs)
 		}
 	})
 
@@ -3364,10 +3365,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			byConversation[m.ConversationID] = append(byConversation[m.ConversationID], m.Content)
 		}
 		if got := byConversation[convA]; len(got) != 2 || got[0] != "a-first" || got[1] != "a-second" {
-			t.Errorf("run A messages = %v, want [a-first a-second] (per-run order preserved)", got)
+			t.Errorf("conversation A messages = %v, want [a-first a-second] (per-conversation order preserved)", got)
 		}
 		if got := byConversation[convB]; len(got) != 1 || got[0] != "b-only" {
-			t.Errorf("run B messages = %v, want [b-only]", got)
+			t.Errorf("conversation B messages = %v, want [b-only]", got)
 		}
 	})
 
@@ -3640,7 +3641,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 				t.Fatalf("Get %s: err=%v got=%v", id, err, got)
 			}
 			if got.MemoryMissing != expected {
-				t.Errorf("run %s: memory_missing=%v, want %v", id, got.MemoryMissing, expected)
+				t.Errorf("conversation %s: memory_missing=%v, want %v", id, got.MemoryMissing, expected)
 			}
 		}
 	})

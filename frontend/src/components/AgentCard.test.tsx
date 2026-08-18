@@ -44,12 +44,12 @@ describe('AgentCard artifacts affordance', () => {
   beforeEach(() => vi.restoreAllMocks())
   afterEach(() => vi.unstubAllGlobals())
 
-  it('hides the affordance when the run produced no artifacts', () => {
+  it('hides the affordance when the conversation produced no artifacts', () => {
     renderCard({ artifact_count: 0 })
     expect(screen.queryByRole('button', { name: /artifact/ })).not.toBeInTheDocument()
   })
 
-  it('shows the count and opens a popover that lists the run’s artifacts', async () => {
+  it('shows the count and opens a popover that lists the conversation’s artifacts', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -183,7 +183,7 @@ describe('AgentCard attention row', () => {
     fireEvent.click(row)
 
     // The popover (the same list the footer button opens) raises with the
-    // run's artifacts; nothing opened directly.
+    // conversation's artifacts; nothing opened directly.
     expect(await screen.findByText('org/repo#18')).toBeInTheDocument()
     expect(globalThis.fetch).toHaveBeenCalledWith(
       '/api/agent/conversations/r1/artifacts',
@@ -194,7 +194,7 @@ describe('AgentCard attention row', () => {
 })
 
 describe('AgentCard failure-kind rendering', () => {
-  it('renders the memory-limit verdict + knob copy for a summaryless killed run', () => {
+  it('renders the memory-limit verdict + knob copy for a summaryless killed conversation', () => {
     // an infrastructure failure writes no ResultSummary — the kind alone must surface the block.
     renderCard({ Status: 'failed', ResultSummary: '', FailureKind: 'memory_limit' })
     expect(screen.getByText('Killed: memory limit')).toBeInTheDocument()
@@ -227,7 +227,7 @@ describe('AgentCard queued rendering', () => {
 })
 
 describe('AgentCard queue-dwell footer', () => {
-  it('shows how long a started run waited in the queue', () => {
+  it('shows how long a started conversation waited in the queue', () => {
     renderCard({
       Status: 'running',
       QueuedAt: '2026-06-25T00:00:00Z',
@@ -256,11 +256,11 @@ describe('AgentCard queue-dwell footer', () => {
 })
 
 describe('AgentCard parked rendering', () => {
-  // A stopped run parks `open` — it is neither working nor concluded — and the
-  // card has to say so itself. Left to the live-feed fallback it shows a
-  // motionless ticker of the turn that already ended, which reads as a run
-  // still in flight.
-  it('names the parked state and offers the run’s two exits', () => {
+  // A stopped conversation parks `open` — it is neither working nor concluded
+  // — and the card has to say so itself. Left to the live-feed fallback it shows a
+  // motionless ticker of the turn that already ended, which reads as a
+  // conversation still in flight.
+  it('names the parked state and offers the conversation’s two exits', () => {
     const onRequeue = vi.fn()
     render(
       <MemoryRouter>
@@ -273,7 +273,7 @@ describe('AgentCard parked rendering', () => {
     )
     expect(screen.getByText(/idle — stopped without concluding, resumable/)).toBeInTheDocument()
     // Return to queue is the give-up exit; the expand link is the resume one
-    // (the composer lives in the run view).
+    // (the composer lives in RunStation).
     expect(screen.getByRole('button', { name: 'Return to queue' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /expand run details/i })).toBeInTheDocument()
   })

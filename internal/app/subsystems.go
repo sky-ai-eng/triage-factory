@@ -247,7 +247,7 @@ func (a *App) buildExecution() error {
 	rawMaxConcurrentClaims := os.Getenv("TF_MAX_CONCURRENT_CLAIMS")
 	capRuns := delegate.DefaultMaxConcurrentClaims
 	if n, clamped, err := delegate.ParseMaxConcurrentClaims(rawMaxConcurrentClaims); err != nil {
-		appLog.Warn("max concurrent runs", "error", err)
+		appLog.Warn("max concurrent claims", "error", err)
 	} else if clamped {
 		// Distinct from the effective-cap log below: an operator asked for more
 		// than the sandbox subnet allocator can ever honor, not just a value
@@ -256,7 +256,7 @@ func (a *App) buildExecution() error {
 		// host would never see their setting got capped.
 		capRuns = n
 		a.spawner.SetMaxConcurrentClaims(n)
-		appLog.Warn("max concurrent runs requested above sandbox ceiling; clamped", "requested", rawMaxConcurrentClaims, "cap", n)
+		appLog.Warn("max concurrent claims requested above sandbox ceiling; clamped", "requested", rawMaxConcurrentClaims, "cap", n)
 	} else if n != delegate.DefaultMaxConcurrentClaims {
 		capRuns = n
 		a.spawner.SetMaxConcurrentClaims(n)
@@ -265,9 +265,9 @@ func (a *App) buildExecution() error {
 	// burst of delegations queues behind this number, and "runs sit queued"
 	// must trace back to it from the boot log alone (local mode skips the
 	// multi-only capacity advertisement below entirely).
-	appLog.Info("run concurrency cap", "cap", capRuns, "env", "TF_MAX_CONCURRENT_CLAIMS")
+	appLog.Info("claim concurrency cap", "cap", capRuns, "env", "TF_MAX_CONCURRENT_CLAIMS")
 	// Memory guardrail companion to the cap above: the cap bounds how many
-	// runs may execute, the floor stops new claims when the host is out of
+	// engagements may execute, the floor stops new claims when the host is out of
 	// headroom regardless of the cap. Fails open off-Linux and when the
 	// probe can't read /proc/meminfo. Resolved before the capacity warning
 	// below so that warning can say whether the floor is actually armed,
@@ -303,13 +303,13 @@ func (a *App) buildExecution() error {
 				appLog.Warn("platform reserve", "error", rerr)
 			}
 			derived := delegate.DerivedRunCapacityWithReserve(total, reserve)
-			appLog.Info("host run capacity",
+			appLog.Info("host claim capacity",
 				"mem_total_mb", total,
-				"budget_per_run_mb", delegate.DefaultClaimMemoryBudgetMB,
+				"budget_per_claim_mb", delegate.DefaultClaimMemoryBudgetMB,
 				"platform_reserve_mb", reserve,
 				"derived_capacity", derived)
 			if capRuns > derived {
-				msg := "max concurrent runs exceeds derived host capacity; the host may not have enough RAM to run the cap concurrently"
+				msg := "max concurrent claims exceeds derived host capacity; the host may not have enough RAM to run the cap concurrently"
 				if floor > 0 {
 					msg += " (the dispatch memory floor may throttle before the cap is reached, but is not guaranteed to be the first limiter)"
 				} else {

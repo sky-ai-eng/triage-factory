@@ -112,7 +112,7 @@ func (a *App) openStores(ctx context.Context) error {
 		a.appDB = appDB
 		if a.plan.role == runmode.RoleExecutor {
 			if secretenv.Get(pgstore.EnvSecretEncryptionKey) != "" {
-				appLog.Warn("TF_SECRET_ENCRYPTION_KEY is set but ignored on TF_ROLE=executor — executors never hold the secret-decryption key; per-run credentials arrive via sealed bundles instead (TFAC-614)")
+				appLog.Warn("TF_SECRET_ENCRYPTION_KEY is set but ignored on TF_ROLE=executor — executors never hold the secret-decryption key; per-claim credentials arrive via sealed bundles instead (TFAC-614)")
 			}
 			a.stores = pgstore.NewWithoutSecrets(adminDB, appDB)
 		} else {

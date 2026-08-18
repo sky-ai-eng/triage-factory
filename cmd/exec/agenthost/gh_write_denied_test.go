@@ -52,7 +52,7 @@ func TestCapture_GHWriteDenied_RecordsEveryRefusal(t *testing.T) {
 			t.Errorf("refusal row mismatch: %+v", a)
 		}
 		if a.ConversationID != info.ConversationID {
-			t.Errorf("conversation = %q, want the run's own %q", a.ConversationID, info.ConversationID)
+			t.Errorf("conversation = %q, want the conversation's own %q", a.ConversationID, info.ConversationID)
 		}
 		if a.DedupKey == "" {
 			t.Error("refusals must not collapse — each attempt is its own event")

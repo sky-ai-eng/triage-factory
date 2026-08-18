@@ -660,7 +660,7 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 		// brain seals to it (credprovision reads claim.CredPubKey).
 		if _, err := s.conversationQueue.MarkAwaitingCredentials(provCtx, orgID, conversationID, sidecarPubKeyB64); err != nil {
 			recordSpanError(span, err)
-			return nil, 0, fmt.Errorf("mark awaiting-credentials for run %s: %w", conversationID, err)
+			return nil, 0, fmt.Errorf("mark awaiting-credentials for conversation %s: %w", conversationID, err)
 		}
 
 		timeout, pollInterval := s.awaitingCredentialsKnobs()
@@ -672,7 +672,7 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 			polls++
 			b, ok, err := s.claimCredentials.Get(provCtx, orgID, conversationID)
 			if err != nil {
-				dispatchLog.Warn("read run credential bundle failed; retrying", "conversation", conversationID, "error", err)
+				dispatchLog.Warn("read claim credential bundle failed; retrying", "conversation", conversationID, "error", err)
 			} else if ok && b.ExecutorID == myID && b.BootEpoch == myBootEpoch {
 				// Opaque ciphertext — the orchestrator relays it verbatim and
 				// never opens it (only the sidecar's private key can). Gate on the
@@ -695,7 +695,7 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 				return nil, 0, provCtx.Err()
 			case <-ticker.C:
 				if time.Now().After(deadline) {
-					err := fmt.Errorf("timed out waiting for run %s credential bundle (brain not provisioning)", conversationID)
+					err := fmt.Errorf("timed out waiting for conversation %s credential bundle (brain not provisioning)", conversationID)
 					span.SetAttributes(telemetry.Count(polls))
 					recordSpanError(span, err)
 					return nil, 0, err

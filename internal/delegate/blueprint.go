@@ -224,7 +224,7 @@ func (s *Spawner) reclaimBlueprintStepStaging(ctx context.Context, orgID, bluepr
 	}
 	stepConversations, err := s.blueprints.ConversationsForBlueprintSystem(ctx, orgID, blueprintRunID)
 	if err != nil {
-		blueprintLog.Warn("list step runs for staging reclaim failed", "blueprint_run", blueprintRunID, "error", err)
+		blueprintLog.Warn("list step conversations for staging reclaim failed", "blueprint_run", blueprintRunID, "error", err)
 		return
 	}
 	for _, sr := range stepConversations {
@@ -254,11 +254,11 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 		// Jira blueprints materialize worktrees lazily via `workspace add`, which
 		// keys conversation_worktrees rows AND the on-disk run-root (runDir) by each
 		// *step's* conversation_id (the agent's TRIAGE_FACTORY_CONVERSATION_ID), not the
-		// blueprint_run_id. Iterate every step run so we find + remove their
+		// blueprint_run_id. Iterate every step conversation so we find + remove their
 		// worktrees and their run-root dirs.
 		stepConversations, err := s.blueprints.ConversationsForBlueprintSystem(context.Background(), cfg.orgID, blueprintRunID)
 		if err != nil {
-			blueprintLog.Warn("list step runs for cleanup failed", "blueprint_run", blueprintRunID, "error", err)
+			blueprintLog.Warn("list step conversations for cleanup failed", "blueprint_run", blueprintRunID, "error", err)
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -448,9 +448,9 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 		// subprocess kills — the cancel_requested signal above still stops the
 		// queue from advancing and we finalize the blueprint below, but a
 		// currently-running subprocess will run to completion (then short-circuit
-		// in the reactor on the non-running blueprint). Log so that wasteful run
+		// in the reactor on the non-running blueprint). Log so that wasteful execution
 		// is diagnosable.
-		blueprintLog.Warn("list active step runs failed; a live subprocess may run to completion", "blueprint_run", blueprintRunID, "error", err)
+		blueprintLog.Warn("list active step conversations failed; a live subprocess may run to completion", "blueprint_run", blueprintRunID, "error", err)
 	} else {
 		s.mu.Lock()
 		for _, conversationID := range stepIDs {
@@ -479,7 +479,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	// (that is the branch condition). Same category as Spawner.Cancel.
 	for _, conversationID := range stepIDs {
 		if _, mErr := s.conversations.ParkOpenSystem(context.Background(), orgID, conversationID, db.ParkStopped(domain.ParkReasonBlueprintCancelled, "Blueprint cancelled by user")); mErr != nil {
-			blueprintLog.Warn("park cancelled step run failed", "step_conversation", conversationID, "error", mErr)
+			blueprintLog.Warn("park cancelled step conversation failed", "step_conversation", conversationID, "error", mErr)
 		}
 	}
 
@@ -614,7 +614,7 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepConversationID, userID s
 
 	stepConversation, err := s.conversations.GetSystem(context.Background(), orgID, stepConversationID)
 	if err != nil || stepConversation == nil {
-		blueprintLog.Warn("read step run failed", "step_conversation", stepConversationID, "error", err)
+		blueprintLog.Warn("read step conversation failed", "step_conversation", stepConversationID, "error", err)
 		return
 	}
 	// Still dormant after the resume (went open again) → the blueprint stays
@@ -715,7 +715,7 @@ func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, bl
 	}
 	convs, err := s.blueprints.ConversationsForBlueprintSystem(ctx, orgID, blueprintRunID)
 	if err != nil {
-		blueprintLog.Warn("list step runs for unresolved-artifact check failed; treating as unresolved (fail open)", "blueprint_run", blueprintRunID, "error", err)
+		blueprintLog.Warn("list step conversations for unresolved-artifact check failed; treating as unresolved (fail open)", "blueprint_run", blueprintRunID, "error", err)
 		return true
 	}
 	return s.conversationsHaveUnresolvedArtifacts(ctx, orgID, convs)

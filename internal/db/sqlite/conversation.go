@@ -182,7 +182,7 @@ func (s *conversationStore) Complete(ctx context.Context, orgID, conversationID,
 				// No message rows at all: the spend has no ledger row to
 				// live on. Loud, so the dropped dollars are at least
 				// observable.
-				conversationLog.Warn("run cost has no message row to settle on; spend unrecorded",
+				conversationLog.Warn("conversation cost has no message row to settle on; spend unrecorded",
 					"conversation_id", conversationID, "cost_usd", costUSD)
 			}
 		}

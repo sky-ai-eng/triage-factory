@@ -26,15 +26,16 @@ import (
 // in workflow scripts but fine in a test.
 var memBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// seedAuthoringMemory inserts one prior run + its conversation_memory row + the
-// conversation_memory_entities join row on entityID, with explicit content and
+// seedAuthoringMemory inserts one prior conversation + its
+// conversation_memory row + the conversation_memory_entities join row on
+// entityID, with explicit content and
 // created_at so the read's composition and ordering are pinned. role is the
 // join row's classification (primary/produced/touched). human "" leaves
 // human_content NULL (agent-only composition).
 func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, conversationID, agent, human string, createdAt time.Time, role string) {
 	t.Helper()
 	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, conversationID); err != nil {
-		t.Fatalf("seed authoring run: %v", err)
+		t.Fatalf("seed authoring conversation: %v", err)
 	}
 	var humanVal any
 	if human != "" {
@@ -68,7 +69,7 @@ func seedEntity(t *testing.T, stores db.Stores, orgID, source, sourceID, title s
 // TestLocalClient_MemoryLoad_HitComposesAndLimits pins the hit path: the entity
 // resolves, Count is the pre-limit total, Memories is the most recent N (tail of
 // the ASC store order) composed with the human-feedback separator where present,
-// and a durable 'touched' row lands for the reading run.
+// and a durable 'touched' row lands for the reading conversation.
 func TestLocalClient_MemoryLoad_HitComposesAndLimits(t *testing.T) {
 	conn, stores, info, client := newGithubRecordingClientConn(t, "http://unused", true)
 	ctx := context.Background()
@@ -78,8 +79,8 @@ func TestLocalClient_MemoryLoad_HitComposesAndLimits(t *testing.T) {
 	// composition separator is exercised; the tail (limit 2) drops the oldest.
 	seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, uuid.New().String(), "oldest agent note", "", memBase, domain.MemoryRolePrimary)
 	seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, uuid.New().String(), "middle agent note", "", memBase.Add(time.Hour), domain.MemoryRolePrimary)
-	newestRun := uuid.New().String()
-	seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, newestRun, "newest agent note", "human verdict", memBase.Add(2*time.Hour), domain.MemoryRolePrimary)
+	newestConv := uuid.New().String()
+	seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, newestConv, "newest agent note", "human verdict", memBase.Add(2*time.Hour), domain.MemoryRolePrimary)
 
 	res, err := client.MemoryLoad(ctx, "github", "octo/repo#7", 2)
 	if err != nil {
@@ -105,8 +106,8 @@ func TestLocalClient_MemoryLoad_HitComposesAndLimits(t *testing.T) {
 		t.Errorf("Memories[0].Content = %q, want the middle note (oldest dropped by the limit)", res.Memories[0].Content)
 	}
 	newest := res.Memories[1]
-	if newest.ConversationID != newestRun {
-		t.Errorf("Memories[1].ConversationID = %q, want the newest run %q", newest.ConversationID, newestRun)
+	if newest.ConversationID != newestConv {
+		t.Errorf("Memories[1].ConversationID = %q, want the newest conversation %q", newest.ConversationID, newestConv)
 	}
 	if !strings.Contains(newest.Content, "## Human feedback (post-run)") {
 		t.Errorf("newest Content = %q, want it composed with the human-feedback separator", newest.Content)
@@ -115,7 +116,8 @@ func TestLocalClient_MemoryLoad_HitComposesAndLimits(t *testing.T) {
 		t.Errorf("newest Content = %q, want both halves present", newest.Content)
 	}
 
-	// Loading IS an address: the reading run gets a durable touch on the entity.
+	// Loading IS an address: the reading conversation gets a durable touch on the
+	// entity.
 	if role := touchRole(t, conn, info.ConversationID, entityID); role != domain.MemoryRoleTouched {
 		t.Errorf("touch role = %q, want %q", role, domain.MemoryRoleTouched)
 	}
@@ -154,13 +156,13 @@ func TestLocalClient_MemoryLoad_Miss_NoEntityNoTouch(t *testing.T) {
 	if ent != nil {
 		t.Errorf("a miss must mint no entity, got %+v", ent)
 	}
-	// No touch row for the reading run at all.
+	// No touch row for the reading conversation at all.
 	var n int
 	if err := conn.QueryRow(`SELECT count(*) FROM conversation_memory_entities WHERE conversation_id = ?`, info.ConversationID).Scan(&n); err != nil {
 		t.Fatalf("count touch rows: %v", err)
 	}
 	if n != 0 {
-		t.Errorf("miss recorded %d touch row(s) for the reading run, want 0", n)
+		t.Errorf("miss recorded %d touch row(s) for the reading conversation, want 0", n)
 	}
 }
 
@@ -218,15 +220,16 @@ func TestServer_MemoryLoad_RoundTrip(t *testing.T) {
 	stores, conn := newTestDB(t)
 	orgID := runmode.LocalDefaultOrgID
 
-	// A reading run for the touch FK, and an entity with one prior memory.
-	readerRun := uuid.New().String()
-	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, readerRun); err != nil {
-		t.Fatalf("seed reader run: %v", err)
+	// A reading conversation for the touch FK, and an entity with one prior
+	// memory.
+	readerConv := uuid.New().String()
+	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, readerConv); err != nil {
+		t.Fatalf("seed reader conversation: %v", err)
 	}
 	entityID := seedEntity(t, stores, orgID, "jira", "SKY-123", "A ticket")
 	seedAuthoringMemory(t, conn, orgID, entityID, uuid.New().String(), "prior narrative", "", memBase, domain.MemoryRolePrimary)
 
-	info := ConversationInfo{OrgID: orgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: readerRun, IsEventTriggered: true}
+	info := ConversationInfo{OrgID: orgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: readerConv, IsEventTriggered: true}
 	sockPath := tempSocket(t)
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -256,7 +259,7 @@ func TestServer_MemoryLoad_RoundTrip(t *testing.T) {
 		t.Errorf("Content = %q, want %q", res.Memories[0].Content, "prior narrative")
 	}
 	// The touch landed daemon-side.
-	if role := touchRole(t, conn, readerRun, entityID); role != domain.MemoryRoleTouched {
+	if role := touchRole(t, conn, readerConv, entityID); role != domain.MemoryRoleTouched {
 		t.Errorf("touch role = %q, want %q", role, domain.MemoryRoleTouched)
 	}
 }

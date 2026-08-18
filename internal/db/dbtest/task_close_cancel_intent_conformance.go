@@ -86,10 +86,10 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 			t.Error("closed = false, want true — the task was active")
 		}
 		if len(conversationIDs) != 1 || conversationIDs[0] != convID {
-			t.Errorf("run ids = %v, want exactly [%s] — the caller stops what the tx stamped", conversationIDs, convID)
+			t.Errorf("conversation ids = %v, want exactly [%s] — the caller stops what the tx stamped", conversationIDs, convID)
 		}
 		if !seed.CancelRequested(t, brID) {
-			t.Error("cancel_requested = false; the close must carry the stop intent for its active runs")
+			t.Error("cancel_requested = false; the close must carry the stop intent for its active conversations")
 		}
 		if got := seed.TaskStatus(t, taskID); got != "done" {
 			t.Errorf("task status = %q, want done", got)
@@ -116,7 +116,7 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 			t.Error("closed = false, want true")
 		}
 		if len(conversationIDs) != 0 {
-			t.Errorf("run ids = %v, want none — a terminal conversation is not stopped", conversationIDs)
+			t.Errorf("conversation ids = %v, want none — a terminal conversation is not stopped", conversationIDs)
 		}
 		if seed.CancelRequested(t, brID) {
 			t.Error("cancel_requested = true on a finished blueprint; the post-close resume flow is now refused forever")
@@ -144,10 +144,10 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 			t.Error("closed = true on an already-terminal task, want false")
 		}
 		if len(conversationIDs) != 0 {
-			t.Errorf("run ids = %v, want none — a replay must not re-stop anything", conversationIDs)
+			t.Errorf("conversation ids = %v, want none — a replay must not re-stop anything", conversationIDs)
 		}
 		if seed.CancelRequested(t, brID) {
-			t.Error("cancel_requested = true; a replayed close reached back and stamped a run started after it")
+			t.Error("cancel_requested = true; a replayed close reached back and stamped a conversation started after it")
 		}
 		if n := seed.CloseAuditCount(t, taskID); n != 1 {
 			t.Errorf("close-audit rows after the replay = %d, want 1 — the audit row is INSERT-or-nothing", n)
@@ -191,7 +191,7 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 			t.Error("closed = false, want true")
 		}
 		if len(conversationIDs) != 1 || conversationIDs[0] != convID {
-			t.Errorf("run ids = %v, want exactly [%s]", conversationIDs, convID)
+			t.Errorf("conversation ids = %v, want exactly [%s]", conversationIDs, convID)
 		}
 	})
 

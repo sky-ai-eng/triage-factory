@@ -137,7 +137,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 			}
 		}
 		if !found {
-			t.Errorf("run %s missing from ListAwaitingCredentials", conversationID)
+			t.Errorf("conversation %s missing from ListAwaitingCredentials", conversationID)
 		}
 	})
 

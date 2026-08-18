@@ -575,8 +575,9 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	if sidecar != nil {
 		cloneAuth = worktree.CloneAuthViaGitProxy(sidecar.res.GitProxyURL, cloneHostBase(upstreamCloneURL), sidecar.res.GitProxyToken)
 	}
-	// rootKey (the blueprint run id), not this step's run id, keys the worktree
-	// dir + its per-run push config — the PR worktree IS the shared run-root, and
+	// rootKey (the blueprint run id), not this step's conversation id, keys the
+	// worktree dir + its per-run push config — the PR worktree IS the shared
+	// run-root, and
 	// a cold rehydrate rebuilds it under the same key. CleanupPRConfig reclaims
 	// via filepath.Base(wtPath), so it follows this key automatically.
 	cloneCtx, cloneSpan := tracer.Start(ctx, "engagement.clone")
@@ -595,7 +596,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	// setWorktreePath already logged the ownership loss, and this line's
 	// subject is a write that failed on a row this engagement still owns.
 	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, conversationID, claimID, wtPath); err != nil && !errors.Is(err, db.ErrClaimReleased) {
-		delegateLog.Warn("update worktree path for run failed", "conversation", conversationID, "error", err)
+		delegateLog.Warn("update worktree path for conversation failed", "conversation", conversationID, "error", err)
 	}
 
 	// Record the eager worktree in conversation_worktrees so the least-privilege gates
@@ -669,7 +670,7 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 	}
 	sk, err := prskeleton.FetchPR(ctx, ghClient, owner, repo, prNumber)
 	if err != nil {
-		delegateLog.Warn("fetch PR history skeleton failed; run continues without it",
+		delegateLog.Warn("fetch PR history skeleton failed; the conversation continues without it",
 			"repo", owner+"/"+repo, "pr", prNumber, "error", err)
 		return ""
 	}
@@ -698,14 +699,14 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
 	// The run-root is a blueprint-run resource — shared across every step and
 	// rebuilt under the same key on a cold rehydrate — so it is keyed by rootKey
-	// (the blueprint run id), not this step's run id. conversationID still stamps the
-	// per-run worktree_path record below.
+	// (the blueprint run id), not this step's conversation id. conversationID
+	// still stamps the per-conversation worktree_path record below.
 	runRoot, err := worktree.MakeRunRoot(rootKey)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
 	if err := s.setWorktreePath(context.Background(), orgID, conversationID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
-		delegateLog.Warn("set worktree_path for Jira run failed; resume will reject this run", "conversation", conversationID, "error", err)
+		delegateLog.Warn("set worktree_path for Jira conversation failed; resume will reject this conversation", "conversation", conversationID, "error", err)
 	}
 
 	// Block briefly so the project classifier can decide this
@@ -738,17 +739,17 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID,
 //     template — GH tools are included because the agent acquires repos on
 //     demand and then needs the gh verbs, the same reasoning as the Jira
 //     arm's GH+Jira composition. No registered reference is not an error:
-//     the run still works with base tools.
+//     the conversation still works with base tools.
 func (s *Spawner) setupSlack(ctx context.Context, orgID, conversationID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
-	// Keyed by rootKey (the blueprint run id), not this step's run id — the
-	// run-root is blueprint-scoped and cold-rehydrates under the same key. See
-	// setupJira.
+	// Keyed by rootKey (the blueprint run id), not this step's conversation id
+	// — the run-root is blueprint-scoped and cold-rehydrates under the same key.
+	// See setupJira.
 	runRoot, err := worktree.MakeRunRoot(rootKey)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
 	if err := s.setWorktreePath(context.Background(), orgID, conversationID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
-		delegateLog.Warn("set worktree_path for Slack run failed; resume will reject this run", "conversation", conversationID, "error", err)
+		delegateLog.Warn("set worktree_path for Slack conversation failed; resume will reject this conversation", "conversation", conversationID, "error", err)
 	}
 
 	toolsRef := agentprompt.GitHubToolsReference()

@@ -29,7 +29,7 @@ function conversation(over: Partial<Conversation>): Conversation {
   return {
     ID: CONVERSATION_ID,
     // Empty so the hook skips the parent-task fetch: this suite is about the
-    // run row's readouts.
+    // conversation row's readouts.
     TaskID: '',
     Status: 'running',
     Model: 'claude-opus-5',
@@ -53,8 +53,8 @@ function message(over: Partial<Message>): Message {
   }
 }
 
-// The rows the server holds for this run, which both transcript reads answer
-// from: the unbounded one returns all of them, a `?since_id=N` one returns
+// The rows the server holds for this conversation, which both transcript
+// reads answer from: the unbounded one returns all of them, a `?since_id=N` one returns
 // what sits above the watermark. A test models a dropped websocket frame by
 // pushing here and never dispatching the event.
 let serverMessages: Message[]
@@ -74,10 +74,11 @@ let olderPages: Record<string, { rows: Message[]; next: string }>
 // before this page". '' = the first read reached the beginning.
 let firstPageOlderToken: string
 
-// Route the reads the mounted view makes; everything but the run row and the
-// transcript is empty. `transcript` lets a test hold the initial transcript
-// read open — the run row lands first, so that read's duration is the window
-// in which the run's SUM is displayed without the ids inside it being known yet.
+// Route the reads the mounted view makes; everything but the conversation
+// row and the transcript is empty. `transcript` lets a test hold the initial transcript
+// read open — the conversation row lands first, so that read's duration is the
+// window in which the conversation's SUM is displayed without the ids inside it
+// being known yet.
 function mockFetch(transcript?: Promise<Message[]>) {
   const fetchMock = vi.fn((url: string) => {
     const [path, query] = url.split('?')
@@ -205,7 +206,7 @@ describe('useConversationDetail live cost accumulation', () => {
     expect(screen.getByText('$0.2500')).toBeInTheDocument()
 
     // The server's SUM is the authority: it lands whether or not it agrees with
-    // what the client accumulated, so drift can't compound across a run.
+    // what the client accumulated, so drift can't compound across a conversation.
     serverConversation = conversation({ TotalCostUSD: 2.64, Status: 'completed' })
     send({
       type: 'conversation_update',
@@ -215,28 +216,30 @@ describe('useConversationDetail live cost accumulation', () => {
     expect(await screen.findByText('$2.64')).toBeInTheDocument()
   })
 
-  it('does not strand a stamp that streams in before the run row lands', async () => {
+  it('does not strand a stamp that streams in before the conversation row lands', async () => {
     render(<Harness />)
 
     // The hook registers its websocket handler on the first render, so a row can
-    // stream in while the run fetch is still in flight — with no run object to
-    // fold into. The readout settling on the server's SUM (rather than on
+    // stream in while the conversation fetch is still in flight — with no
+    // conversation object to fold into. The readout settling on the server's SUM (rather than on
     // 0.20 + 0.05) is what pins that this event landed in that window.
     const row = message({ id: 11, cost_usd: 0.05 })
     send({ type: 'message', conversation_id: CONVERSATION_ID, data: row })
     expect(await screen.findByText('$0.2000')).toBeInTheDocument()
 
     // Nothing was recorded as counted, so the row's dollars are still foldable
-    // rather than stranded — marking it would have lost them for the whole run.
+    // rather than stranded — marking it would have lost them for the
+    // whole conversation.
     send({ type: 'message', conversation_id: CONVERSATION_ID, data: row })
     expect(screen.getByText('$0.2500')).toBeInTheDocument()
   })
 
   it('does not re-count a row the just-fetched SUM already covers', async () => {
-    // The run row is read before the transcript, so for the length of that
-    // second read the displayed SUM's covered ids are unknown. A row inside it
+    // The conversation row is read before the transcript, so for the length
+    // of that second read the displayed SUM's covered ids are unknown. A row inside it
     // that gets replayed over the websocket in that window must not be folded —
-    // this is the mirror of the pre-run-row case above, and it over-reports.
+    // this is the mirror of the pre-conversation-row case above, and it
+    // over-reports.
     const transcript = deferred<Message[]>()
     mockFetch(transcript.promise)
     render(<Harness />)
@@ -279,8 +282,8 @@ describe('useConversationDetail live cost accumulation', () => {
   })
 })
 
-// The token rollups ride the same mechanism as cost: the run row's SUMs are the
-// authority, and each streamed row's usage folds on top so a live engagement's
+// The token rollups ride the same mechanism as cost: the conversation row's
+// SUMs are the authority, and each streamed row's usage folds on top so a live engagement's
 // readouts advance between conversation_update refetches. They keep their own
 // baseline, since usage lands on nearly every assistant row while the cost
 // stamp settles once at the end.
@@ -303,8 +306,8 @@ describe('useConversationDetail live token accumulation', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   it('shows the server’s sums rather than a walk of the transcript', async () => {
-    // The transcript's own counts are deliberately not the run row's: the SUM
-    // covers every row ever written, including any the client never held.
+    // The transcript's own counts are deliberately not the conversation
+    // row's: the SUM covers every row ever written, including any the client never held.
     serverMessages = [message({ id: 11, input_tokens: 7, output_tokens: 7 })]
     render(<Harness />)
     expect(await screen.findByText('1k')).toBeInTheDocument()
@@ -341,7 +344,7 @@ describe('useConversationDetail live token accumulation', () => {
   })
 
   it('does not re-count a row the just-fetched SUM already covers', async () => {
-    // Same window as the cost path: between the run row landing and the
+    // Same window as the cost path: between the conversation row landing and the
     // transcript landing, the ids inside the displayed SUM aren't known, so a
     // websocket replay of one of them must not fold.
     const transcriptRead = deferred<Message[]>()
@@ -427,8 +430,8 @@ function transcript(): string {
   return screen.getByTestId('transcript').textContent ?? ''
 }
 
-// Settle the run and wait for the refetch it triggers to actually land, so a
-// following tick sees the settled row rather than racing it.
+// Settle the conversation and wait for the refetch it triggers to actually
+// land, so a following tick sees the settled row rather than racing it.
 async function settleConversation() {
   serverConversation = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
   send({
@@ -570,7 +573,7 @@ describe('useConversationDetail transcript reconciliation', () => {
     expect(screen.getByTestId('cost').textContent).toBe('0.25')
   })
 
-  it('issues no repair reads for a run already settled when the station opened', async () => {
+  it('issues no repair reads for a conversation already settled when the station opened', async () => {
     serverConversation = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
     const fetchMock = mockFetch()
     render(<TranscriptHarness />)
@@ -584,17 +587,17 @@ describe('useConversationDetail transcript reconciliation', () => {
     expect(sinceRequests(fetchMock)).toEqual([])
     expect(transcript()).toBe('first')
     // The artifact half of the same tick is untouched — only the transcript
-    // repair is gated on the run being live.
+    // repair is gated on the conversation being live.
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/artifacts/refresh'))).toBe(
       true,
     )
   })
 
-  it('repairs the last row when the frame carrying it is dropped as the run settles', async () => {
+  it('repairs the last row when the frame carrying it is dropped as the conversation settles', async () => {
     // Status and transcript arrive as separate frames, so the hub can drop the
     // final `message` and still deliver the `conversation_update` that settles
-    // the run. Gating on "live right now" would shut the repair off over a
-    // transcript still missing its last row.
+    // the conversation. Gating on "live right now" would shut the repair off
+    // over a transcript still missing its last row.
     render(<TranscriptHarness />)
     await waitFor(() => expect(transcript()).toBe('first'))
 
@@ -612,12 +615,13 @@ describe('useConversationDetail transcript reconciliation', () => {
 
     await settleConversation()
 
-    // The run is settled, so its transcript is final: one read closes it out.
+    // The conversation is settled, so its transcript is final: one read
+    // closes it out.
     await tick()
     expect(sinceRequests(fetchMock)).toHaveLength(1)
 
-    // And no tick after that asks again — a settled run left open on screen
-    // must not poll forever.
+    // And no tick after that asks again — a settled conversation left open
+    // on screen must not poll forever.
     await tick()
     await tick()
     expect(sinceRequests(fetchMock)).toHaveLength(1)
@@ -649,8 +653,8 @@ describe('useConversationDetail transcript reconciliation', () => {
   })
 })
 
-// The composer's gate as the user experiences it: a parked run whose workspace
-// hadn't landed yet renders the blocked copy, and the announcement that it has
+// The composer's gate as the user experiences it: a parked conversation
+// whose workspace hadn't landed yet renders the blocked copy, and the announcement that it has
 // landed turns the input back on with no reload.
 function ComposerHarness() {
   const { conversation } = useConversationDetail(CONVERSATION_ID)
@@ -663,8 +667,8 @@ function ComposerHarness() {
 }
 
 describe('useConversationDetail resumability', () => {
-  // The run row read, parked from the second call on: the mount gets an
-  // answer, and every refetch after it hangs. Anything that changes on screen
+  // The conversation row read, parked from the second call on: the mount
+  // gets an answer, and every refetch after it hangs. Anything that changes on screen
   // past that point can only have come from the websocket frame.
   let parkedRefetch: ReturnType<typeof deferred<Conversation>>
 
@@ -675,12 +679,13 @@ describe('useConversationDetail resumability', () => {
       const [path] = url.split('?')
       if (path !== `/api/agent/conversations/${CONVERSATION_ID}`) {
         // Everything else this mount pulls — transcript, artifacts, pending
-        // permissions — is empty here; the run row is the whole subject.
+        // permissions — is empty here; the conversation row is the whole subject.
         return Promise.resolve({ ok: true, status: 200, ...jsonBody([]) })
       }
       conversationReads++
-      // The run row goes through apiJSON now, so the stub has to answer text()
-      // as well — jsonBody awaits the promise, which is what parks the refetch.
+      // The conversation row goes through apiJSON now, so the stub has to
+      // answer text() as well — jsonBody awaits the promise, which is what
+      // parks the refetch.
       const body =
         conversationReads === 1 ? Promise.resolve(serverConversation) : parkedRefetch.promise
       return Promise.resolve({ ok: true, status: 200, ...jsonBody(body) })
@@ -776,8 +781,8 @@ describe('useConversationDetail transcript back-paging', () => {
   })
 
   it('walks backward through history, prepending each page in id order', async () => {
-    // The regression this closes: the transcript read is bounded, so a long run
-    // opens on its tail. Without a way back, everything before that page was
+    // The regression this closes: the transcript read is bounded, so a long
+    // conversation opens on its tail. Without a way back, everything before that page was
     // unreachable with nothing on screen saying so.
     serverMessages = [message({ id: 30 }), message({ id: 31 })]
     firstPageOlderToken = 'tok-20'
@@ -801,8 +806,8 @@ describe('useConversationDetail transcript back-paging', () => {
   })
 
   it('does not fold an older page into the live totals', async () => {
-    // Older rows are already inside the run row's SUM, so folding them would
-    // add dollars that are already counted. Under-reporting self-corrects on
+    // Older rows are already inside the conversation row's SUM, so folding
+    // them would add dollars that are already counted. Under-reporting self-corrects on
     // the next read; over-reporting compounds.
     serverConversation = conversation({ TotalCostUSD: 0.2 })
     serverMessages = [message({ id: 30 })]
@@ -814,7 +819,7 @@ describe('useConversationDetail transcript back-paging', () => {
 
     // Drive the back-page through a second probe on the same hook instance is
     // not possible, so assert the invariant the fold would break: the rail
-    // still reads the run row's SUM after the page lands.
+    // still reads the conversation row's SUM after the page lands.
     render(<PagingProbe />)
     await waitFor(() => expect(screen.getByTestId('has-older')).toHaveTextContent('yes'))
     screen.getByRole('button', { name: 'load earlier' }).click()

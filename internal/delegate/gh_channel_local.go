@@ -63,9 +63,9 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 		// Expected on an unpinned platform and on any host that can't reach
 		// the release; both are ordinary, so say what was lost and move on.
 		if errors.Is(err, ghbin.ErrUnsupportedPlatform) {
-			delegateLog.Info("no pinned gh for this platform; run continues on the scoped exec verbs", "conversation", conversationID)
+			delegateLog.Info("no pinned gh for this platform; the agent continues on the scoped exec verbs", "conversation", conversationID)
 		} else {
-			delegateLog.Warn("provision pinned gh failed; run continues on the scoped exec verbs", "conversation", conversationID, "error", err)
+			delegateLog.Warn("provision pinned gh failed; the agent continues on the scoped exec verbs", "conversation", conversationID, "error", err)
 		}
 		return nil, noopChannelCloser{}
 	}
@@ -132,7 +132,7 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 		},
 	})
 	if err != nil {
-		delegateLog.Warn("start local gh channel failed; run continues on the scoped exec verbs", "conversation", conversationID, "error", err)
+		delegateLog.Warn("start local gh channel failed; the agent continues on the scoped exec verbs", "conversation", conversationID, "error", err)
 		return nil, noopChannelCloser{}
 	}
 

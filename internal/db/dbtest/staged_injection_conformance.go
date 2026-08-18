@@ -12,8 +12,8 @@ import (
 // RunStagedInjectionStoreConformance. Returns:
 //   - the wired StagedInjectionStore impl,
 //   - the orgID to pass to every call,
-//   - a StagedInjectionSeeder the harness uses to stage the run FK chain
-//     (a staged injection is a messages row, whose conversation_id FKs
+//   - a StagedInjectionSeeder the harness uses to stage the conversation FK
+//     chain (a staged injection is a messages row, whose conversation_id FKs
 //     conversations; backends seed conversations differently).
 type StagedInjectionStoreFactory func(t *testing.T) (store db.StagedInjectionStore, orgID string, seed StagedInjectionSeeder)
 
@@ -24,14 +24,15 @@ type StagedInjectionSeeder struct {
 	// seeds so unique indexes don't collide.
 	Conversation func(t *testing.T, suffix string) (conversationID string)
 
-	// DeleteConversation removes the run row so the FK ON DELETE CASCADE subtest can
-	// verify a purged run takes its undelivered injections with it.
+	// DeleteConversation removes the conversation row so the FK ON DELETE CASCADE
+	// subtest can verify a purged conversation takes its undelivered injections
+	// with it.
 	DeleteConversation func(t *testing.T, conversationID string)
 }
 
 // RunStagedInjectionStoreConformance covers the StagedInjectionStore contract every
-// backend impl must hold (TFAC-501): append, flush-once (destructive), per-run
-// isolation, and FK cascade.
+// backend impl must hold (TFAC-501): append, flush-once (destructive),
+// per-conversation isolation, and FK cascade.
 func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -66,7 +67,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		if !bodies["first"] || !bodies["second"] {
 			t.Errorf("flush missing a body: got %q and %q", got[0].Body, got[1].Body)
 		}
-		// Every row carries its run/org/producer back.
+		// Every row carries its conversation/org/producer back.
 		for _, n := range got {
 			if n.ConversationID != conversationID || n.OrgID != orgID || n.Producer != domain.StagedInjectionProducerPRNewCommits {
 				t.Errorf("row fields not preserved: %+v", n)
@@ -91,7 +92,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 			t.Fatalf("flush: %v", err)
 		}
 		if len(got) != 0 {
-			t.Errorf("flush of an unstaged run returned %d injections, want 0", len(got))
+			t.Errorf("flush of an unstaged conversation returned %d injections, want 0", len(got))
 		}
 	})
 
@@ -107,15 +108,16 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 			t.Fatalf("flush B: %v", err)
 		}
 		if len(got) != 0 {
-			t.Errorf("run B flush leaked run A's injection: %+v", got)
+			t.Errorf("conversation B flush leaked conversation A's injection: %+v", got)
 		}
-		// Run A's injection is still there (B's flush must not have drained it).
+		// Conversation A's injection is still there (B's flush must not have
+		// drained it).
 		gotA, err := store.FlushPendingSystem(ctx, orgID, convA)
 		if err != nil {
 			t.Fatalf("flush A: %v", err)
 		}
 		if len(gotA) != 1 || gotA[0].Body != "for-A" {
-			t.Errorf("run A injection missing after B flush: %+v", gotA)
+			t.Errorf("conversation A injection missing after B flush: %+v", gotA)
 		}
 	})
 
@@ -165,14 +167,14 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 		seed.DeleteConversation(t, conversationID)
 		// FlushPending filters only by (org_id, run_id), so a non-empty result here
-		// would mean the rows survived the run deletion — i.e. the cascade didn't
-		// fire. Empty proves the FK ON DELETE CASCADE took them.
+		// would mean the rows survived the conversation deletion — i.e. the
+		// cascade didn't fire. Empty proves the FK ON DELETE CASCADE took them.
 		got, err := store.FlushPendingSystem(ctx, orgID, conversationID)
 		if err != nil {
 			t.Fatalf("flush after delete: %v", err)
 		}
 		if len(got) != 0 {
-			t.Errorf("staged injections survived run deletion (cascade did not fire): %+v", got)
+			t.Errorf("staged injections survived conversation deletion (cascade did not fire): %+v", got)
 		}
 	})
 }

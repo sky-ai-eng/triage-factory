@@ -122,29 +122,29 @@ func (s *Spawner) reconcileConversationQueue(ctx context.Context) {
 	executorID, bootEpoch := s.executorIdentity()
 	n, err := s.conversationQueue.ResetProcessingConversations(ctx, executorID, bootEpoch)
 	if err != nil {
-		dispatchLog.Error("boot reconcile: reset in-flight runs failed", "error", err)
+		dispatchLog.Error("boot reconcile: reset in-flight conversations failed", "error", err)
 		return
 	}
 	if n > 0 {
-		dispatchLog.Info("boot reconcile: re-queued in-flight runs stranded by a crash", "count", n)
+		dispatchLog.Info("boot reconcile: re-queued in-flight conversations stranded by a crash", "count", n)
 	}
 
-	// Mirror sweep for the opposite desync — child runs left
+	// Mirror sweep for the opposite desync — child conversations left
 	// non-terminal under an already-terminal blueprint_run. ResetProcessingConversations
 	// above only requeues under a *running* parent, so these orphans are
 	// invisible to it; left alone, an orphan still reading as claimable keeps
 	// the dispatcher on phantom work and pins its feature branch in a worktree, requeuing any
 	// sibling fetch forever. Cancel them so the row stops looking live (the
 	// worktree.Cleanup sweep already reclaimed the on-disk dir for non-parked
-	// runs). The atomic cancel in MarkRunStatus prevents new desyncs; this heals
+	// conversations). The atomic cancel in MarkRunStatus prevents new desyncs; this heals
 	// rows broken before that landed.
 	c, err := s.conversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil {
-		dispatchLog.Error("boot reconcile: cancel orphaned child runs failed", "error", err)
+		dispatchLog.Error("boot reconcile: cancel orphaned child conversations failed", "error", err)
 		return
 	}
 	if c > 0 {
-		dispatchLog.Info("boot reconcile: healed orphaned child runs and run↔claim desyncs", "count", c)
+		dispatchLog.Info("boot reconcile: healed orphaned child conversations and conversation↔claim desyncs", "count", c)
 	}
 }
 
@@ -219,7 +219,7 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		conv, err := s.conversationQueue.ClaimNextConversation(ctx, executorID, bootEpoch, s.claimPlacement())
 		if err != nil {
 			<-sem
-			dispatchLog.Warn("claim next run failed; retrying on the next scan", "error", err)
+			dispatchLog.Warn("claim next conversation failed; retrying on the next scan", "error", err)
 			return
 		}
 		if conv == nil {
@@ -1393,13 +1393,13 @@ func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, c
 	}
 	dispatchLog.Warn("engagement failed before the agent ran, requeuing", "conversation", conv.ID, "attempt", conv.Attempts, "error", cause)
 	if err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, cause.Error()); err != nil {
-		dispatchLog.Warn("requeue run after a pre-agent failure failed", "conversation", conv.ID, "error", err)
+		dispatchLog.Warn("requeue conversation after a pre-agent failure failed", "conversation", conv.ID, "error", err)
 	}
 	return true
 }
 
-// disposeOfExhaustedConversation answers for a run that failed the same way
-// maxClaimAttempts times over. What that means depends entirely on whether
+// disposeOfExhaustedConversation answers for a conversation that failed the
+// same way maxClaimAttempts times over. What that means depends entirely on whether
 // anything has been said yet, and the two answers are opposites.
 //
 // A conversation with a transcript is work in progress — a resumed thread, a
@@ -1446,7 +1446,7 @@ func (s *Spawner) conversationHasTranscript(orgID, conversationID string) bool {
 	}
 	rows, err := s.conversations.ListForAssemblySystem(context.Background(), orgID, conversationID)
 	if err != nil {
-		dispatchLog.Warn("read transcript to decide an exhausted run's disposition failed; treating it as work in progress",
+		dispatchLog.Warn("read transcript to decide an exhausted conversation's disposition failed; treating it as work in progress",
 			"conversation", conversationID, "error", err)
 		return true
 	}
@@ -1489,7 +1489,7 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversati
 	}
 	if s.pendingInput != nil {
 		if _, _, _, err := s.pendingInput.Consume(bgCtx, orgID, conv.ID); err != nil {
-			dispatchLog.Warn("settle pending input before parking a run that could not start failed", "conversation", conv.ID, "error", err)
+			dispatchLog.Warn("settle pending input before parking a conversation that could not start failed", "conversation", conv.ID, "error", err)
 		}
 	}
 	if _, err := s.conversations.ParkOpenForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, db.ParkStopped(domain.ParkReasonLaunchFailed, "")); err != nil {
@@ -1498,7 +1498,7 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversati
 				"conversation", conv.ID, "claim_id", conv.ClaimID, "org_id", orgID)
 			return
 		}
-		dispatchLog.Warn("park run that could not start failed", "conversation", conv.ID, "error", err)
+		dispatchLog.Warn("park conversation that could not start failed", "conversation", conv.ID, "error", err)
 		return
 	}
 	s.broadcastConversationUpdate(orgID, conv.ID, "open")
@@ -1506,20 +1506,21 @@ func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversati
 	toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s could not start: %s", shortConversationID(conv.ID), truncateToastMsg(cause.Error(), 160)))
 }
 
-// failClaimedConversation marks an orphaned claimed run failed (its blueprint_run
-// vanished, so there is nothing to drive). Best-effort, and fenced on this
-// claim like every other terminal an engagement writes: if the claim is gone,
-// a successor holds the run and reaches this same branch itself.
+// failClaimedConversation marks an orphaned claimed conversation failed (its
+// blueprint_run vanished, so there is nothing to drive). Best-effort, and
+// fenced on this claim like every other terminal an engagement writes: if the
+// claim is gone, a successor holds the conversation and reaches this same
+// branch itself.
 func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversation, reason string) {
-	dispatchLog.Error("marking run failed", "conversation", conv.ID, "reason", reason)
+	dispatchLog.Error("marking conversation failed", "conversation", conv.ID, "reason", reason)
 	_, err := s.conversations.MarkFailedIfActiveForClaimSystem(context.Background(), orgID, conv.ID, conv.ClaimID, "")
 	if errors.Is(err, db.ErrClaimReleased) {
-		dispatchLog.Error("claim fence refused the orphaned-run terminal — a successor owns this conversation; recording nothing",
+		dispatchLog.Error("claim fence refused the orphaned-conversation terminal — a successor owns this conversation; recording nothing",
 			"conversation", conv.ID, "claim_id", conv.ClaimID, "org_id", orgID, "error", err)
 		return
 	}
 	if err != nil {
-		dispatchLog.Warn("mark orphaned run failed", "conversation", conv.ID, "error", err)
+		dispatchLog.Warn("mark orphaned conversation failed", "conversation", conv.ID, "error", err)
 	}
 }
 

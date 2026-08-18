@@ -186,7 +186,7 @@ func (s *Spawner) dispatchMemGated() bool {
 	gated := avail < floor
 	if s.memGated.CompareAndSwap(!gated, gated) {
 		if gated {
-			dispatchLog.Warn("dispatch paused: available memory below floor; queued runs deferred until it recovers",
+			dispatchLog.Warn("dispatch paused: available memory below floor; queued conversations deferred until it recovers",
 				"available_mb", avail, "floor_mb", floor)
 		} else {
 			dispatchLog.Info("dispatch resumed: available memory recovered above floor",
@@ -200,7 +200,7 @@ func (s *Spawner) dispatchMemGated() bool {
 // concurrency slot is occupied and the dispatcher is about to block waiting
 // for one, with work actually queued behind it. Logged once per episode (not
 // per blocked acquire) so a busy host doesn't emit a line every scan tick,
-// and skipped entirely when nothing is queued — four long runs on an idle
+// and skipped entirely when nothing is queued — four long engagements on an idle
 // queue is full utilization, not a backlog worth announcing. This is the
 // queue-side twin of dispatchMemGated's transition log: without it, a burst
 // of delegations sits visibly "queued" in the UI while the log shows nothing,
@@ -214,7 +214,7 @@ func (s *Spawner) noteCapAcquireBlocked(ctx context.Context, capN int) {
 		return
 	}
 	if s.capSaturated.CompareAndSwap(false, true) {
-		dispatchLog.Info("run concurrency cap reached; queued runs start as slots free",
+		dispatchLog.Info("claim concurrency cap reached; queued conversations start as slots free",
 			"cap", capN, "queued", queued, "env", "TF_MAX_CONCURRENT_CLAIMS")
 	}
 }
@@ -224,7 +224,7 @@ func (s *Spawner) noteCapAcquireBlocked(ctx context.Context, capN int) {
 // its blocked twin above.
 func (s *Spawner) noteCapAcquireImmediate(capN int) {
 	if s.capSaturated.CompareAndSwap(true, false) {
-		dispatchLog.Info("run concurrency below cap; dispatching queued runs immediately", "cap", capN)
+		dispatchLog.Info("claim concurrency below cap; dispatching queued conversations immediately", "cap", capN)
 	}
 }
 
@@ -294,7 +294,7 @@ func (s *Spawner) deregisterProc(conversationID string) {
 // keeps the unfenced active-claim write for callers with no engagement in
 // scope. A refusal is logged loudly and nothing else changes — the engagement
 // carries on to its first transcript write, which meets the same fence and
-// abandons the run properly.
+// abandons the conversation properly.
 func (s *Spawner) stampExecutor(orgID, conversationID, claimID string) {
 	if s.conversations == nil {
 		return
@@ -310,7 +310,7 @@ func (s *Spawner) stampExecutor(orgID, conversationID, claimID string) {
 		delegateLog.Error("claim fence refused the go-live executor stamp — a successor owns this conversation",
 			"executor", executorID, "conversation", conversationID, "claim_id", claimID, "org_id", orgID, "error", err)
 	} else if err != nil {
-		delegateLog.Warn("stamp executor on run failed", "executor", executorID, "conversation", conversationID, "error", err)
+		delegateLog.Warn("stamp executor on conversation failed", "executor", executorID, "conversation", conversationID, "error", err)
 	}
 }
 

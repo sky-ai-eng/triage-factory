@@ -650,7 +650,7 @@ func (s *Spawner) publishEvent(orgID, eventType string, metadata any) {
 	}
 	raw, err := json.Marshal(metadata)
 	if err != nil {
-		delegateLog.Warn("marshal run lifecycle event metadata failed", "event_type", eventType, "error", err)
+		delegateLog.Warn("marshal conversation lifecycle event metadata failed", "event_type", eventType, "error", err)
 		return
 	}
 	pub.Publish(domain.Event{
@@ -1138,7 +1138,7 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, conversationID, claimI
 		delegateLog.Error("claim fence refused a phase write — this executor no longer owns the conversation",
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "phase", phase, "error", err)
 	} else if err != nil {
-		delegateLog.Warn("update phase for run failed", "conversation", conversationID, "error", err)
+		delegateLog.Warn("update phase for conversation failed", "conversation", conversationID, "error", err)
 	}
 	display := phase
 	if display == "" {

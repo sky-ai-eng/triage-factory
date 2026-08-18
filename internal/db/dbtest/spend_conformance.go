@@ -350,7 +350,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		winBuckets, err := fx.Store.SpendByCategorySystem(ctx, fx.OrgID, t2, time.Time{})
 		win := spendByCat(t, winBuckets, err)
 		if _, ok := win[domain.SpendCategoryManual]; ok {
-			t.Errorf("SpendByCategorySystem(since=t2) included the t1 manual run; lower bound not applied")
+			t.Errorf("SpendByCategorySystem(since=t2) included the t1 manual conversation; lower bound not applied")
 		}
 		assertCost(t, "system.win.autonomous", win[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
 	})
@@ -406,7 +406,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		winBuckets, err := fx.Store.SpendByCategorySystemForTeam(ctx, fx.OrgID, fx.TeamID, t2, time.Time{})
 		winTeam := spendByCat(t, winBuckets, err)
 		if _, ok := winTeam[domain.SpendCategoryManual]; ok {
-			t.Errorf("SpendByCategorySystemForTeam(since=t2) included the t1 manual run; lower bound not applied")
+			t.Errorf("SpendByCategorySystemForTeam(since=t2) included the t1 manual conversation; lower bound not applied")
 		}
 		assertCost(t, "team.win.autonomous", winTeam[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
 	})
@@ -539,10 +539,10 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			t.Fatalf("ListSpendSystem since: %v", err)
 		}
 		if _, ok := indexSpend(t, since)[conversationID]; ok {
-			t.Errorf("ListSpendSystem(since=t2) included the t1 run; lower bound not applied")
+			t.Errorf("ListSpendSystem(since=t2) included the t1 conversation; lower bound not applied")
 		}
 
-		// TeamID filter narrows to the team's rows (run + team-attributed
+		// TeamID filter narrows to the team's rows (conversation + team-attributed
 		// curator); the NULL-team system row is excluded.
 		team := fx.TeamID
 		teamRows, err := fx.Store.ListSpendSystem(ctx, fx.OrgID, domain.SpendFilter{TeamID: &team})
@@ -554,7 +554,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			t.Errorf("ListSpendSystem(TeamID) included the NULL-team system row")
 		}
 		if _, ok := tIDs[conversationID]; !ok {
-			t.Errorf("ListSpendSystem(TeamID) missing the team's run")
+			t.Errorf("ListSpendSystem(TeamID) missing the team's conversation")
 		}
 	})
 

@@ -194,7 +194,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if n, err := s.countActiveRuns(ctx); err != nil {
-		serverLog.Warn("readyz: count active runs failed", "error", err)
+		serverLog.Warn("readyz: count active conversations failed", "error", err)
 	} else {
 		resp.ActiveRuns = n
 	}

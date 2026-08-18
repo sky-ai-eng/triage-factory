@@ -59,10 +59,10 @@ func startFakeJira(t *testing.T) *httptest.Server {
 
 // newJiraRecordingStores builds a real SQLite store bundle (so Artifacts / Tx /
 // Orgs are live) with the Jira credential faked to point at jiraURL, seeds a
-// run for the artifacts FK to anchor on, and returns the bundle + the run
-// identity. eventTriggered picks the write path withWrite routes through:
-// admin pool (no user) when true, a synthetic-claims tx (manual run) when
-// false — both are exercised across the tests below.
+// conversation for the artifacts FK to anchor on, and returns the bundle + the
+// conversation identity. eventTriggered picks the write path withWrite routes
+// through: admin pool (no user) when true, a synthetic-claims tx (manual
+// conversation) when false — both are exercised across the tests below.
 func newJiraRecordingStores(t *testing.T, jiraURL string, eventTriggered bool) (db.Stores, ConversationInfo) {
 	_, stores, info := newJiraRecordingStoresConn(t, jiraURL, eventTriggered)
 	return stores, info
@@ -87,7 +87,7 @@ func newJiraRecordingStoresConn(t *testing.T, jiraURL string, eventTriggered boo
 	if _, err := conn.Exec(
 		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, conversationID,
 	); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 
 	stores := sqlitestore.New(conn)
@@ -142,7 +142,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 					t.Errorf("create artifact mismatch: %+v", a)
 				}
 				if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
-					t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
+					t.Errorf("attribution mismatch: conversation=%q team=%q", a.ConversationID, a.TeamID)
 				}
 			})
 

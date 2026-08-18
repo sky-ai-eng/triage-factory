@@ -35,7 +35,7 @@ func newStores(t *testing.T) (db.Stores, *sql.DB) {
 
 // seedBlueprintRun mints a fresh blueprint + blueprint_run for taskID
 // and returns its id. conversations.blueprint_run_id is NOT NULL, so every
-// seeded run needs a parent blueprint_run. SQLite blueprint_runs has no
+// seeded conversation needs a parent blueprint_run. SQLite blueprint_runs has no
 // org_id/creator_user_id columns; org_id on blueprints takes its
 // local-sentinel DEFAULT.
 func seedBlueprintRun(t *testing.T, conn *sql.DB, taskID string) string {
@@ -57,9 +57,10 @@ func seedBlueprintRun(t *testing.T, conn *sql.DB, taskID string) string {
 	return brID
 }
 
-// seedConversation stamps a task + run with the requested trigger_type so the
-// resolver has a row to find. Manual runs get LocalDefaultUserID per
-// schema CHECK; event runs leave creator_user_id NULL.
+// seedConversation stamps a task + conversation with the requested
+// trigger_type so the resolver has a row to find. Manual conversations get
+// LocalDefaultUserID per schema CHECK; event conversations leave
+// creator_user_id NULL.
 func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, conversationID, triggerType string) {
 	t.Helper()
 	ctx := context.Background()
@@ -115,17 +116,17 @@ func TestResolveConversationIdentity_ManualConversation(t *testing.T) {
 		t.Fatalf("ResolveConversationIdentity: %v", err)
 	}
 	if ident.IsEventTriggered {
-		t.Errorf("manual run resolved as event-triggered: %+v", ident)
+		t.Errorf("manual conversation resolved as event-triggered: %+v", ident)
 	}
 	if ident.UserID == "" {
-		t.Errorf("manual run UserID empty; schema CHECK requires non-NULL creator_user_id for trigger_type='manual' (got %+v)", ident)
+		t.Errorf("manual conversation UserID empty; schema CHECK requires non-NULL creator_user_id for trigger_type='manual' (got %+v)", ident)
 	}
 	if ident.ConversationID != "m1" {
 		t.Errorf("ConversationID = %q, want m1", ident.ConversationID)
 	}
 	// TeamID rides off conversations.team_id (TFAC-458) — the local-mode ConversationInfo
 	// source the capture writers stamp artifacts.team_id from. Create lands
-	// every local run on the sole team.
+	// every local conversation on the sole team.
 	if ident.TeamID != runmode.LocalDefaultTeamID {
 		t.Errorf("TeamID = %q, want %q", ident.TeamID, runmode.LocalDefaultTeamID)
 	}
@@ -140,7 +141,7 @@ func TestResolveConversationIdentity_EventTriggeredConversation(t *testing.T) {
 		t.Fatalf("ResolveConversationIdentity: %v", err)
 	}
 	if !ident.IsEventTriggered {
-		t.Errorf("event-triggered run resolved as manual: %+v", ident)
+		t.Errorf("event-triggered conversation resolved as manual: %+v", ident)
 	}
 	if ident.UserID != "" {
 		t.Errorf("event-triggered UserID should be empty (schema NULL); got %q", ident.UserID)
@@ -153,8 +154,8 @@ func TestResolveConversationIdentity_EventTriggeredConversation(t *testing.T) {
 }
 
 // TestResolveConversationIdentity_TeamIDFromRow pins that TeamID is read straight
-// off the run's row (conversations.team_id), not synthesized from a
-// constant: a run whose team_id has been moved off the local sentinel
+// off the conversation's row (conversations.team_id), not synthesized from a
+// constant: a conversation whose team_id has been moved off the local sentinel
 // resolves to that exact value. This is the local-resolver half of the
 // TFAC-458 "ConversationInfo carries TeamID" contract the capture writers depend on.
 func TestResolveConversationIdentity_TeamIDFromRow(t *testing.T) {

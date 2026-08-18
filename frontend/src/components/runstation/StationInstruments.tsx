@@ -39,7 +39,7 @@ export function TelemetryRail({
   onOpenArtifact,
   onArtifactResolved,
 }: Props) {
-  // The token rollups ride the run row (the run read SUMs them per
+  // The token rollups ride the conversation row (the detail read SUMs them per
   // conversation), so the rail shows the same authoritative numbers the usage
   // dashboard does rather than re-summing the transcript — useConversationDetail keeps
   // them advancing mid-engagement by folding each streamed row's usage on top.

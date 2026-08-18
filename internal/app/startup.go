@@ -121,7 +121,7 @@ func (a *App) startWorkers(ctx context.Context) {
 		if a.plan.brain {
 			purgeAge, perr := delegate.ParseConversationSignalPurgeAge(os.Getenv("TF_CONVERSATION_SIGNAL_PURGE_AFTER"))
 			if perr != nil {
-				appLog.Warn("run signal purge age", "error", perr)
+				appLog.Warn("conversation signal purge age", "error", perr)
 			}
 			go a.spawner.ConversationSignalPurgeReaper(ctx, delegate.DefaultConversationSignalPurgeInterval, purgeAge)
 		}

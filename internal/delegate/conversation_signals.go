@@ -739,7 +739,7 @@ func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.Conversati
 // delivered-marker to re-ack (never re-deliver) on the next drain.
 func (s *Spawner) ackSignal(ctx context.Context, id int64, result string) bool {
 	if err := s.conversationSignals.Ack(ctx, id, result); err != nil {
-		delegateLog.Error("ack run_signal failed", "signal_id", id, "result", result, "error", err)
+		delegateLog.Error("ack conversation signal failed", "signal_id", id, "result", result, "error", err)
 		return false
 	}
 	if err := s.notifyCtl(ctx, "ack", id); err != nil {

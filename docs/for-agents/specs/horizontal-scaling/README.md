@@ -1338,8 +1338,9 @@ gracefully at the choke point rather than erroring into agents).
   fleet by being operators of that deployment. Same code, same API,
   zero drift.
 - **The scheduler's bookkeeping is the telemetry.** The registry
-  (§4.1), the runs table's existing timing columns, and one small
-  sample table are the entire data model — no parallel pipeline.
+  (§4.1), the existing timing columns on `conversations` and
+  `claims`, and one small sample table are the entire data model —
+  no parallel pipeline.
 
 ### 8.2 Data model
 

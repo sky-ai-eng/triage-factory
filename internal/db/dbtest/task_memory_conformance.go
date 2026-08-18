@@ -14,7 +14,7 @@ import (
 // RunTaskMemoryStoreConformance. Returns:
 //   - the wired TaskMemoryStore impl,
 //   - the orgID to pass to every call,
-//   - a TaskMemorySeeder the harness uses to drop the entity + run FK
+//   - a TaskMemorySeeder the harness uses to drop the entity + conversation FK
 //     chain (conversation_memory FKs to conversations which FKs to tasks
 //     which FKs to events which FKs to entities — the backends seed those rows
 //     differently and the conformance harness shouldn't bake one
@@ -59,7 +59,7 @@ type TaskMemorySeeder struct {
 	// The conversation it inserts carries TaskMemorySeedPromptName as its
 	// prompt's name and TaskMemorySeedStepIndex as its blueprint step index.
 	// suffix discriminates per-subtest seeds so the unique indexes on
-	// entities/runs don't collide.
+	// entities/conversations don't collide.
 	Conversation func(t *testing.T, suffix string) (conversationID, entityID string)
 
 	// BlueprintRun seeds a blueprint + blueprint_run row so a conversation_memory
@@ -115,14 +115,15 @@ func memoryForConversation(t *testing.T, ctx context.Context, s db.TaskMemorySto
 //     Content via the agent + separator + human format when both
 //     halves are populated — including a row whose denormalized
 //     rm.entity_id points elsewhere, as long as a join row ties the
-//     run to the queried entity.
+//     conversation to the queried entity.
 //   - RecordEntityTouchSystem upserts a join row with role-precedence
 //     upgrade (primary > produced > touched) and is idempotent.
 //
 // Every UpsertAgentMemory(System) call below is paired with a
 // RecordEntityTouchSystem(..., domain.MemoryRolePrimary) call — the
-// join row a real run's completion will write once the run-end attach
-// ticket lands. Without it, GetMemoriesForEntity's join-based read
+// join row a real conversation's completion will write once the
+// completion-attach ticket lands. Without it, GetMemoriesForEntity's
+// join-based read
 // would see nothing (this ticket does not touch UpsertAgentMemorySystem
 // itself; see the migration's non-goals).
 func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
@@ -310,7 +311,8 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 
 	t.Run("UpdateConversationMemoryHumanContentSystem_missing_row_logged_not_fatal", func(t *testing.T) {
 		// The external transition already landed on GitHub; a missing
-		// conversation_memory row (purged / detached run) must not error the cycle.
+		// conversation_memory row (purged / detached conversation) must not error
+		// the cycle.
 		s, orgID, _ := mk(t)
 		if err := s.UpdateConversationMemoryHumanContentSystem(ctx, orgID, "00000000-0000-0000-0000-0000000000fe", "**Post-run outcome** — anything"); err != nil {
 			t.Errorf("expected nil error on missing row (logged warning); got %v", err)
@@ -334,7 +336,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		// suspenders.
 		time.Sleep(1100 * time.Millisecond)
 		conv2, _ := seed.Conversation(t, "order-second")
-		// Re-use the same entity by overriding the seeded run's entity_id.
+		// Re-use the same entity by overriding the seeded conversation's entity_id.
 		// The Run seeder returns a fresh entity per call; the test wants
 		// the second memory on the same entity. Seeder shape can't be
 		// changed mid-call, so write the second memory under conv2 +
@@ -416,9 +418,9 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 
 	t.Run("GetMemoriesForEntity_finds_row_via_touched_join_on_different_entity", func(t *testing.T) {
 		// The read path walks conversation_memory_entities membership, not the
-		// denormalized rm.entity_id column — a run whose primary entity
+		// denormalized rm.entity_id column — a conversation whose primary entity
 		// is A must still surface for entity B once a join row ties
-		// (run, B) at any role, even 'touched'.
+		// (conversation, B) at any role, even 'touched'.
 		s, orgID, seed := mk(t)
 		conversationID, entityA := seed.Conversation(t, "touch-join-a")
 		_, entityB := seed.Conversation(t, "touch-join-b")
@@ -433,15 +435,15 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 			t.Fatalf("GetMemoriesForEntity(entityB): %v", err)
 		}
 		if len(memsB) != 1 || memsB[0].ConversationID != conversationID || memsB[0].Content != "cross-entity narrative" {
-			t.Fatalf("GetMemoriesForEntity(entityB) = %+v, want the run's memory via the touched join", memsB)
+			t.Fatalf("GetMemoriesForEntity(entityB) = %+v, want the conversation's memory via the touched join", memsB)
 		}
 	})
 
 	t.Run("blueprint_run_id_round_trips", func(t *testing.T) {
 		// The denormalized blueprint_run_id is what groups one blueprint
-		// run's memory under a shared namespace folder. Pin that it survives
-		// the write and both read paths, and that an empty value
-		// canonicalizes to SQL NULL (the N=1 / standalone-run case).
+		// conversation's memory under a shared namespace folder. Pin that it
+		// survives the write and both read paths, and that an empty value
+		// canonicalizes to SQL NULL (the N=1 / standalone-conversation case).
 		s, orgID, seed := mk(t)
 		conversationID, entityID := seed.Conversation(t, "bp-roundtrip")
 		blueprintRunID := seed.BlueprintRun(t, "bp-roundtrip")
@@ -467,8 +469,8 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 			t.Errorf("GetMemoriesForEntity BlueprintRunID = %q, want %q", mems[0].BlueprintRunID, blueprintRunID)
 		}
 
-		// Standalone run: empty blueprintRunID canonicalizes to SQL NULL and
-		// reads back empty.
+		// Standalone conversation: empty blueprintRunID canonicalizes to SQL NULL
+		// and reads back empty.
 		conv2, ent2 := seed.Conversation(t, "bp-null")
 		if err := s.UpsertAgentMemory(ctx, orgID, conv2, ent2, "", "standalone memory"); err != nil {
 			t.Fatalf("UpsertAgentMemory standalone: %v", err)

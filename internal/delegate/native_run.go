@@ -96,7 +96,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		worktree.AdoptLegacyScratchDir(ctx, claudeCwd)
 		owned = scanRepoFiles(ctx, claudeCwd)
 		if err := worktree.EnsureSandboxMemoryLink(ctx, claudeCwd); err != nil {
-			delegateLog.Warn("plant sandbox memory symlink failed; this run reads no prior memory", "conversation", conversationID, "cwd", claudeCwd, "error", err)
+			delegateLog.Warn("plant sandbox memory symlink failed; this conversation reads no prior memory", "conversation", conversationID, "cwd", claudeCwd, "error", err)
 		}
 	}
 
@@ -594,7 +594,7 @@ func (s *Spawner) recordNativeResult(
 	// the refusal IS the record, and writing a terminal here is exactly what
 	// the fence exists to prevent.
 	if result.Err != nil && errors.Is(result.Err, db.ErrClaimReleased) {
-		delegateLog.Error("engagement fenced out mid-run; a successor owns the conversation",
+		delegateLog.Error("engagement fenced out mid-flight; a successor owns the conversation",
 			"conversation", conversationID, "claim", cfg.claimID, "error", result.Err)
 		return true
 	}
@@ -640,12 +640,12 @@ func (s *Spawner) recordNativeResult(
 		return false
 	}
 
-	// Concluded. Record the run's memory exactly as processCompletion does —
-	// row presence means "the run terminated", NULL content means the agent
-	// wrote no usable memory file.
+	// Concluded. Record the conversation's memory exactly as processCompletion
+	// does — row presence means "the conversation terminated", NULL content
+	// means the agent wrote no usable memory file.
 	agentContent, fileState := readConversationMemory(claudeCwd, priorMemory)
 	if err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID, cfg.blueprintRunID, agentContent); err != nil {
-		delegateLog.Warn("upsert memory for run failed", "conversation", conversationID, "error", err)
+		delegateLog.Warn("upsert memory for conversation failed", "conversation", conversationID, "error", err)
 	}
 	if fileState != memoryFilePresent {
 		delegateLog.Debug("no usable memory file at termination", "conversation", conversationID, "state", fileState)
@@ -679,7 +679,7 @@ func (s *Spawner) recordNativeResult(
 				"conversation", conversationID, "claim", cfg.claimID)
 			return true
 		}
-		delegateLog.Warn("record completion for run failed", "conversation", conversationID, "error", err)
+		delegateLog.Warn("record completion for conversation failed", "conversation", conversationID, "error", err)
 	}
 
 	s.updateBreakerCounter(task.ID, triggerType, "completed")

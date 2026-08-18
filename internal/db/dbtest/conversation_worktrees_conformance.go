@@ -12,7 +12,7 @@ import (
 // RunConversationWorktreeStoreConformance. Returns:
 //   - the wired ConversationWorktreeStore impl,
 //   - the orgID to pass to every call,
-//   - a ConversationWorktreeSeeder the harness uses to stage the run FK
+//   - a ConversationWorktreeSeeder the harness uses to stage the conversation FK
 //     chain (conversation_worktrees FKs to conversations; backends seed those rows
 //     differently and the conformance harness shouldn't bake one
 //     shape's schema into the assertions).
@@ -24,11 +24,11 @@ type ConversationWorktreeSeeder struct {
 	// Conversation inserts the entity + event + prompt + task + conversation FK chain
 	// needed to attach a conversation_worktrees row, and returns the conversationID.
 	// suffix discriminates per-subtest seeds so the unique indexes on
-	// entities/runs don't collide.
+	// entities/conversations don't collide.
 	Conversation func(t *testing.T, suffix string) (conversationID string)
 
-	// DeleteConversation removes the run row so the cascade-on-delete subtest
-	// can verify the FK ON DELETE CASCADE.
+	// DeleteConversation removes the conversation row so the cascade-on-delete
+	// subtest can verify the FK ON DELETE CASCADE.
 	DeleteConversation func(t *testing.T, conversationID string)
 
 	// Repo ensures a registry row exists for an "owner/repo" slug.
@@ -42,7 +42,8 @@ type ConversationWorktreeSeeder struct {
 
 // insertWorktree reserves a worktree through the store, ensuring the
 // repository it names has a registry row first — the production ordering
-// (a repository is tracked, then a run checks it out) expressed as a fixture.
+// (a repository is tracked, then a conversation checks it out) expressed as a
+// fixture.
 func insertWorktree(t *testing.T, store db.ConversationWorktreeStore, seed ConversationWorktreeSeeder, orgID string, w domain.ConversationWorktree) (bool, string, error) {
 	t.Helper()
 	seed.Repo(t, w.RepoID)
@@ -102,8 +103,9 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 	})
 
 	t.Run("Insert_distinct_refs_same_repo_coexist", func(t *testing.T) {
-		// The (run, repo, ref) PK lets one run hold two worktrees in one
-		// repo (two PRs reviewed in one interactive run — TFAC-502). Both
+		// The (conversation, repo, ref) PK lets one conversation hold two
+		// worktrees in one repo (two PRs reviewed in one interactive
+		// conversation — TFAC-502). Both
 		// inserts must succeed and List must return both.
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "tworef")
@@ -260,7 +262,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 			t.Fatalf("list after cascade: %v", err)
 		}
 		if len(rows) != 0 {
-			t.Errorf("expected 0 rows after run delete cascade, got %d", len(rows))
+			t.Errorf("expected 0 rows after conversation delete cascade, got %d", len(rows))
 		}
 	})
 }
