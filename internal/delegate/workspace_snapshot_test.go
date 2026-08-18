@@ -36,7 +36,7 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 	const sessionID = "sess-warm"
 	writeSession(t, wtPath, sessionID, `{"type":"summary"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -94,7 +94,7 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	const sessionID = "sess-cold"
 	sessPath := writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"cold"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptBearingSnapshotIsResumable(t *testin
 	const sessionID = "sess-present"
 	writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"present"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	if err := os.RemoveAll(wtPath); err != nil { // host loss: only the snapshot remains
@@ -198,7 +198,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testin
 	const sessionID = "sess-lost"
 	// Deliberately NO writeSession: the run carries a session id but its
 	// transcript is not on disk when the snapshot is taken.
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	if err := os.RemoveAll(wtPath); err != nil {
@@ -234,7 +234,7 @@ func TestSnapshotWorkspace_StoresGzip(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch note")
 
 	const conversationID = "wt-gzip"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -267,7 +267,7 @@ func TestEnsureWorkspace_ColdPath_CorruptGzipChecksumErrors(t *testing.T) {
 	const conversationID = "wt-corrupt"
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "_tfac", "ci-logs", "x.log"), "log bytes the gzip trailer checksums over")
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, src, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, src, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -319,7 +319,7 @@ func TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob(t *testing.T) {
 		strings.Repeat("=== RUN   TestSomething\n--- PASS: TestSomething (0.01s)\n", 2000))
 
 	const conversationID = "wt-fat"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, conversationID))
@@ -365,7 +365,7 @@ func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\ndetached edit\n")
 	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -412,7 +412,7 @@ func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nwork in progress\n")
 	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -602,5 +602,125 @@ func assertMissing(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("%s exists or errored unexpectedly (%v); it should have been excluded from the snapshot", path, err)
+	}
+}
+
+// TestSnapshotWorkspace_PhaseSpans pins the span family a slow park is read
+// through: the punctual workspace.snapshot root split into capture / archive /
+// put children, each carrying the sizes that explain its own duration, all
+// stamped with the runtime whose snapshot this was. The worktree carries one
+// member of every kind so every size attribute has something real to measure.
+func TestSnapshotWorkspace_PhaseSpans(t *testing.T) {
+	read := recordSpans(t)
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s := newStorageSpawner(t)
+
+	const runID = "wt-spans"
+	wtPath, _, _ := setupTestWorktree(t, runID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+
+	writeFile(t, filepath.Join(wtPath, "agent.txt"), "committed by agent")
+	gitT(t, wtPath, "add", "agent.txt")
+	gitT(t, wtPath, "commit", "-m", "agent work")
+	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nuncommitted edit\n")
+	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "build.log"), strings.Repeat("ci log line\n", 200))
+	const sessionID = "sess-spans"
+	writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"spans"}`)
+
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
+		t.Fatalf("snapshotWorkspace: %v", err)
+	}
+
+	spans := read()
+	roots := spansNamed(spans, "workspace.snapshot")
+	if len(roots) != 1 {
+		t.Fatalf("workspace.snapshot spans = %d, want 1", len(roots))
+	}
+	root := roots[0]
+	if got := spanAttr(t, root, "runtime").AsString(); got != domain.ConversationRuntimeSDK {
+		t.Errorf("runtime = %q, want %q", got, domain.ConversationRuntimeSDK)
+	}
+	total := spanAttr(t, root, "size_bytes").AsInt64()
+	if total <= 0 {
+		t.Errorf("root size_bytes = %d, want > 0", total)
+	}
+
+	// The phases are CHILDREN of the punctual root — one trace per snapshot,
+	// since the whole operation is bounded work in one frame — and each is
+	// self-describing: runtime rides on every phase because the dashboard
+	// reads the sizes off the phase spans alone, where the parent's
+	// attributes are out of reach.
+	for _, name := range []string{"workspace.snapshot.capture", "workspace.snapshot.archive", "workspace.snapshot.put"} {
+		phases := spansNamed(spans, name)
+		if len(phases) != 1 {
+			t.Fatalf("%s spans = %d, want 1", name, len(phases))
+		}
+		p := phases[0]
+		if p.Parent().SpanID() != root.SpanContext().SpanID() {
+			t.Errorf("%s parents to %v, want the workspace.snapshot span", name, p.Parent().SpanID())
+		}
+		if got := spanAttr(t, p, "runtime").AsString(); got != domain.ConversationRuntimeSDK {
+			t.Errorf("%s runtime = %q, want %q", name, got, domain.ConversationRuntimeSDK)
+		}
+	}
+
+	capture := spansNamed(spans, "workspace.snapshot.capture")[0]
+	for _, key := range []string{"snapshot.bundle_bytes", "snapshot.patch_bytes", "snapshot.transcript_bytes"} {
+		if got := spanAttr(t, capture, key).AsInt64(); got <= 0 {
+			t.Errorf("capture %s = %d, want > 0 for a worktree carrying that member", key, got)
+		}
+	}
+
+	archive := spansNamed(spans, "workspace.snapshot.archive")[0]
+	raw := spanAttr(t, archive, "snapshot.raw_bytes").AsInt64()
+	gz := spanAttr(t, archive, "size_bytes").AsInt64()
+	if raw <= 0 || gz <= 0 {
+		t.Fatalf("archive raw_bytes=%d size_bytes=%d, want both > 0", raw, gz)
+	}
+	if raw <= gz {
+		t.Errorf("raw_bytes (%d) <= size_bytes (%d); the members are compressible text plus tar padding, so raw in must exceed compressed out — this pair is what a codec change proves itself against", raw, gz)
+	}
+	if gz != total {
+		t.Errorf("archive size_bytes = %d, root size_bytes = %d; both name the one staged blob", gz, total)
+	}
+
+	put := spansNamed(spans, "workspace.snapshot.put")[0]
+	if got := spanAttr(t, put, "size_bytes").AsInt64(); got != gz {
+		t.Errorf("put size_bytes = %d, want the staged blob's %d", got, gz)
+	}
+}
+
+// TestSnapshotWorkspace_PhaseSpans_NonGitNoSession is the other end of the
+// coverage matrix: a native conversation never snapshots a transcript and a
+// non-git run-root has no delta, so those sizes report zero rather than
+// vanishing — a dashboard reading transcript sizes filters on runtime, and
+// the explicit zero keeps a native row from reading as a failed capture.
+func TestSnapshotWorkspace_PhaseSpans_NonGitNoSession(t *testing.T) {
+	read := recordSpans(t)
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s := newStorageSpawner(t)
+
+	wtPath := t.TempDir()
+	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch note")
+
+	const runID = "wt-spans-native"
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, "", domain.ConversationRuntimeNative); err != nil {
+		t.Fatalf("snapshotWorkspace: %v", err)
+	}
+
+	spans := read()
+	capture := spansNamed(spans, "workspace.snapshot.capture")
+	if len(capture) != 1 {
+		t.Fatalf("workspace.snapshot.capture spans = %d, want 1", len(capture))
+	}
+	if got := spanAttr(t, capture[0], "runtime").AsString(); got != domain.ConversationRuntimeNative {
+		t.Errorf("runtime = %q, want %q", got, domain.ConversationRuntimeNative)
+	}
+	for _, key := range []string{"snapshot.bundle_bytes", "snapshot.patch_bytes", "snapshot.transcript_bytes"} {
+		if got := spanAttr(t, capture[0], key).AsInt64(); got != 0 {
+			t.Errorf("capture %s = %d, want an explicit 0 for a member this snapshot doesn't carry", key, got)
+		}
 	}
 }

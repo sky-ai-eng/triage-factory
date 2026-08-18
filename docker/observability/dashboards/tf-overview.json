@@ -262,7 +262,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "Every verb, not just reads — the mutating routes are where the slow work usually is (writes, delegation dispatch). Server spans are named \"<METHOD> <route pattern>\", never the concrete path, so no repo name or other tenant data reaches this list. Click a row to open that trace's waterfall. The DB spans underneath usually explain the time. Empty is the healthy state.",
+      "description": "Every verb, not just reads \u2014 the mutating routes are where the slow work usually is (writes, delegation dispatch). Server spans are named \"<METHOD> <route pattern>\", never the concrete path, so no repo name or other tenant data reaches this list. Click a row to open that trace's waterfall. The DB spans underneath usually explain the time. Empty is the healthy state.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -2045,12 +2045,511 @@
     },
     {
       "collapsed": false,
-      "description": "Audit records that never reached the log of record. Every external write an agent makes is applied upstream before TF records it, so recording is best-effort by contract at every stage that follows \u2014 the sidecar's send, the orchestrator's decode, a provider handler's own dispatch, the database write \u2014 and a failure at any of them is swallowed rather than allowed to unwind an act that already happened. These panels are the measurement that swallow needs. Flat zero is the expected shape, and the only interesting one: a single drop is a hole in the log, not a blip to smooth over. One residual is deliberately outside what this can see \u2014 a notify written as a run is torn down loses to the connection close, and takes the report of its own loss with it.",
+      "description": "Every park and every non-failed terminal writes the run's workspace to the blob store, and the status flip that follows is serialized behind that write \u2014 so a stop that sat in WORKING for a minute is answerable here. One punctual `workspace.snapshot` trace per snapshot, linked back to its engagement, with three children naming where the time went: `capture` (the git delta + transcript read), `archive` (the tar walk + gzip), `put` (the blob write). Coverage is both modes \u2014 tracing is gated solely on TF_TRACES_ENDPOINT, and local mode emits this family in full. The capture phase is the one that differs by mode: local runs it in-process, multi routes it through the privileged capture child, which is span-free by standing decision \u2014 the executor-side `capture` span IS its measurement. `runtime` rides on every span because the members are not runtime-agnostic: only a delegated SDK run snapshots a session transcript, so transcript sizes are SDK-run data, never a property of all snapshots.",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 86
+      },
+      "id": 31,
+      "panels": [],
+      "title": "Workspace snapshots \u2014 the park and the terminal",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per snapshot, most recent first; `Duration` is the whole write \u2014 and the lower bound on how long the run's status flip waited behind it. `size_bytes` is the compressed blob as stored, the parked-window storage cost. A slow row's phase split is one click away: open the Span ID for the waterfall. Empty means nothing parked or concluded in the window.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "size_bytes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "runtime"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "size_bytes"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "conversation.id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 240
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 87
+      },
+      "id": 32,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"workspace.snapshot\" } | select(span.runtime, span.size_bytes, span.conversation.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Workspace snapshots \u2014 duration and footprint",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "Mean wall clock per phase, fleet-wide: which of the three costs a slow snapshot is actually paying. `capture` is the git bundle/diff plus the transcript read (in multi mode, the whole privileged capture child, timed from the executor side); `archive` is the tar walk plus gzip; `put` is the blob upload. The phases are sequential and sum to roughly the parent \u2014 unlike the setup phases, nothing here nests.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 95
+      },
+      "id": 33,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Mean",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (span_name) (rate(traces_spanmetrics_latency_sum{span_name=~\"workspace\\\\.snapshot\\\\.(capture|archive|put)\"}[$__rate_interval])) / sum by (span_name) (rate(traces_spanmetrics_latency_count{span_name=~\"workspace\\\\.snapshot\\\\.(capture|archive|put)\"}[$__rate_interval]))",
+          "legendFormat": "{{span_name}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Snapshot phase breakdown \u2014 mean duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "What the capture phase read, per snapshot: the git bundle (committed work), the uncommitted patch, and the session transcript. `transcript_bytes` is populated only where `runtime` is `sdk` \u2014 native conversations never snapshot a transcript, so a zero on a native row is the member not existing, not a failed read. A non-git run-root (a Jira lazy run) reports zero bundle and patch the same way.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "snapshot.bundle_bytes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "snapshot.patch_bytes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "snapshot.transcript_bytes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "runtime"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 95
+      },
+      "id": 34,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"workspace.snapshot.capture\" } | select(span.snapshot.bundle_bytes, span.snapshot.patch_bytes, span.snapshot.transcript_bytes, span.runtime)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Capture members \u2014 bundle, patch, transcript",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "The archive phase's report card: `snapshot.raw_bytes` went into the compressor, `size_bytes` came out as the stored blob. Ratio from the pair, throughput from either against the row's duration \u2014 which is exactly the before/after a codec change has to prove itself against, from the field rather than a benchmark.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "snapshot.raw_bytes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "size_bytes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "runtime"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 95
+      },
+      "id": 35,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"workspace.snapshot.archive\" } | select(span.snapshot.raw_bytes, span.size_bytes, span.runtime)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Archive compression \u2014 raw in, gzipped out",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "description": "Audit records that never reached the log of record. Every external write an agent makes is applied upstream before TF records it, so recording is best-effort by contract at every stage that follows \u2014 the sidecar's send, the orchestrator's decode, a provider handler's own dispatch, the database write \u2014 and a failure at any of them is swallowed rather than allowed to unwind an act that already happened. These panels are the measurement that swallow needs. Flat zero is the expected shape, and the only interesting one: a single drop is a hole in the log, not a blip to smooth over. One residual is deliberately outside what this can see \u2014 a notify written as a run is torn down loses to the connection close, and takes the report of its own loss with it.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 103
       },
       "id": 27,
       "panels": [],
@@ -2090,7 +2589,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 87
+        "y": 104
       },
       "id": 28,
       "options": {
@@ -2176,7 +2675,7 @@
         "h": 8,
         "w": 9,
         "x": 6,
-        "y": 87
+        "y": 104
       },
       "id": 29,
       "options": {
@@ -2231,7 +2730,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 87
+        "y": 104
       },
       "id": 30,
       "options": {

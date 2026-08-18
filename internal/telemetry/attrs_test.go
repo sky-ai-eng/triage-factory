@@ -44,6 +44,10 @@ var approvedKeys = []string{
 	"queue.wait_ms",
 	"runtime",
 	"size_bytes",
+	"snapshot.bundle_bytes",
+	"snapshot.patch_bytes",
+	"snapshot.raw_bytes",
+	"snapshot.transcript_bytes",
 	"source",
 	"task.id",
 	"team.id",
@@ -61,6 +65,8 @@ func TestAttributeHelpersEmitOnlyApprovedKeys(t *testing.T) {
 		Attempt(2), Count(3), Job("scorer"), Provider("anthropic"),
 		Transport("direct"), QueueWait(1500 * time.Millisecond),
 		Op("SetupNetwork"), Workspace("rehydrated"), SizeBytes(4096),
+		SnapshotBundleBytes(1024), SnapshotPatchBytes(512),
+		SnapshotTranscriptBytes(2048), SnapshotRawBytes(8192),
 		AgentCostUSD(0.42), AgentDuration(9000),
 	}
 	for _, kv := range produced {
@@ -99,6 +105,8 @@ func TestEveryAttributeHelperIsCovered(t *testing.T) {
 		"Outcome": true, "Runtime": true, "Attempt": true, "Count": true,
 		"Job": true, "Provider": true, "Transport": true, "QueueWait": true,
 		"Op": true, "Workspace": true, "SizeBytes": true,
+		"SnapshotBundleBytes": true, "SnapshotPatchBytes": true,
+		"SnapshotTranscriptBytes": true, "SnapshotRawBytes": true,
 		"AgentCostUSD": true, "AgentDuration": true,
 	}
 	sort.Strings(declared)

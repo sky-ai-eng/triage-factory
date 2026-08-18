@@ -42,6 +42,10 @@ const (
 	keyOp             = attribute.Key("op")
 	keyWorkspace      = attribute.Key("workspace.provenance")
 	keySizeBytes      = attribute.Key("size_bytes")
+	keySnapBundle     = attribute.Key("snapshot.bundle_bytes")
+	keySnapPatch      = attribute.Key("snapshot.patch_bytes")
+	keySnapTranscript = attribute.Key("snapshot.transcript_bytes")
+	keySnapRaw        = attribute.Key("snapshot.raw_bytes")
 	keyAgentCostUSD   = attribute.Key("agent.cost_usd")
 	keyAgentDuration  = attribute.Key("agent.duration_ms")
 )
@@ -125,6 +129,19 @@ func QueueWait(d time.Duration) attribute.KeyValue {
 // SizeBytes is how much a span moved — a workspace snapshot's compressed
 // footprint, say. A magnitude, never a filename or a key.
 func SizeBytes(n int64) attribute.KeyValue { return keySizeBytes.Int64(n) }
+
+// The workspace-snapshot member sizes, one per thing the snapshot carries,
+// plus the pre-compression total. They exist because SizeBytes alone could
+// not say where a slow snapshot's bytes came from: the git delta, the
+// scratch tree, or the transcript are captured, archived, and uploaded by
+// three different phases, and sizing a fix (shallower delta, faster codec,
+// multipart PUT) needs the split. snapshot.raw_bytes against the archive
+// span's SizeBytes is the compression ratio. All magnitudes — the member
+// NAMES are fixed format strings, so no key here can carry tenant data.
+func SnapshotBundleBytes(n int64) attribute.KeyValue     { return keySnapBundle.Int64(n) }
+func SnapshotPatchBytes(n int64) attribute.KeyValue      { return keySnapPatch.Int64(n) }
+func SnapshotTranscriptBytes(n int64) attribute.KeyValue { return keySnapTranscript.Int64(n) }
+func SnapshotRawBytes(n int64) attribute.KeyValue        { return keySnapRaw.Int64(n) }
 
 // AgentCostUSD and AgentDuration are the agent runtime's OWN accounting of
 // a finished engagement, carried onto the terminal span because neither is

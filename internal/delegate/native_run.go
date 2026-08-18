@@ -70,6 +70,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			creatorUserID:  creatorUserID,
 			claimID:        cfg.claimID,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+			runtime:        domain.ConversationRuntimeNative,
 		}, "")
 		return engagementDisposition{fenced: fenced}
 	}
@@ -610,6 +611,7 @@ func (s *Spawner) recordNativeResult(
 			creatorUserID:  creatorUserID,
 			claimID:        cfg.claimID,
 			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+			runtime:        domain.ConversationRuntimeNative,
 		}, "")
 
 	case agentloop.ResultFailed:
@@ -633,6 +635,7 @@ func (s *Spawner) recordNativeResult(
 			triggerType:    triggerType,
 			creatorUserID:  creatorUserID,
 			reason:         db.ParkIdle(),
+			runtime:        domain.ConversationRuntimeNative,
 		}, "")
 		return false
 	}
@@ -653,7 +656,7 @@ func (s *Spawner) recordNativeResult(
 	// workspace to the next step and an `abort` leaves a message-resumable
 	// conversation; both can be picked up on an executor that never held
 	// this worktree, so the blob has to exist by the time the status commits.
-	if err := s.snapshotWorkspace(ctx, orgID, conversationID, namespace, claudeCwd, ""); err != nil {
+	if err := s.snapshotWorkspace(ctx, orgID, conversationID, namespace, claudeCwd, "", domain.ConversationRuntimeNative); err != nil {
 		delegateLog.Warn("snapshot workspace at native conclusion failed", "conversation", conversationID, "error", err)
 	}
 
