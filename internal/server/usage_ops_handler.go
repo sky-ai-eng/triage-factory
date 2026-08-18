@@ -47,8 +47,9 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if h.conversationQueue == nil {
-		// This pod holds no run-queue reader — deployment shape, not an outage.
-		writeNotConfigured(w, "the run queue reader is not configured on this deployment")
+		// This pod holds no conversation-queue reader — deployment shape, not
+		// an outage.
+		writeNotConfigured(w, "the conversation queue reader is not configured on this deployment")
 		return
 	}
 	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())

@@ -298,23 +298,24 @@ func GHBinaryPath() string {
 	return filepath.Join(GHBinDir(), "gh")
 }
 
-// GHChannelRunDir is one local-mode run's private gh-channel directory:
-// <StateRoot>/gh-channel/<conversationID>. It holds the per-run injector trust file and
-// the per-run gh config dir, and is removed when the run ends.
+// GHChannelDir is one local-mode conversation's private gh-channel directory:
+// <StateRoot>/gh-channel/<conversationID>. It holds the engagement's injector
+// trust file and gh config dir — created at engagement start and removed when
+// the engagement ends.
 //
 // The config dir matters as much as the cert: local mode runs the agent under
 // the user's own HOME, so without an explicit GH_CONFIG_DIR gh would read the
 // user's ~/.config/gh — including the hosts entry carrying their personal
-// credential. Pointing it at an empty per-run dir is the local-mode analogue of
-// the jail's HOME isolation in multi mode.
-func GHChannelRunDir(conversationID string) string {
+// credential. Pointing it at an empty per-conversation dir is the local-mode
+// analogue of the jail's HOME isolation in multi mode.
+func GHChannelDir(conversationID string) string {
 	return filepath.Join(StateRoot(), "gh-channel", sanitizePathSegment(conversationID))
 }
 
-// sanitizePathSegment reduces an id to a filesystem-safe single segment. Run ids
-// are UUIDs in every production caller, so this is defense in depth against a
-// future caller with a less constrained shape — never a path separator, never a
-// climb out of the parent.
+// sanitizePathSegment reduces an id to a filesystem-safe single segment.
+// Conversation ids are UUIDs in every production caller, so this is defense in
+// depth against a future caller with a less constrained shape — never a path
+// separator, never a climb out of the parent.
 func sanitizePathSegment(id string) string {
 	clean := strings.Map(func(r rune) rune {
 		switch {

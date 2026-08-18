@@ -660,10 +660,11 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, f
 
 // pgConversationColumns is the SELECT list scanned into a domain.Conversation
 // via scanConversation. Owned here on ConversationStore; sibling Postgres
-// stores that need to project a run (e.g. factoryReadStore.ActiveConversations)
-// already use their own copy because they also project task+entity
-// JOINs. Keeping this here keeps the simple "just the run" projection
-// uncoupled from those. task_id/status/team_id COALESCE to ” because a
+// stores that need to project a conversation (e.g.
+// factoryReadStore.ActiveConversations) already use their own copy because
+// they also project task+entity JOINs. Keeping this here keeps the simple
+// "just the conversation" projection uncoupled from those.
+// task_id/status/team_id COALESCE to ” because a
 // non-delegation conversation may carry NULLs there; the claim-derived
 // fields (incl. duration/turns telemetry) come from the `cl` lateral and
 // the ledger-derived accounting (cost + tokens) from the `msum` lateral

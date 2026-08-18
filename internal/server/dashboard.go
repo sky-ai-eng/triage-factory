@@ -311,10 +311,11 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	}
 
 	// Audit the org-credential board-drag draft toggle (TFAC-483): a
-	// human-authorized, org-executed GitHub write. No run (a direct dashboard
-	// action, not an agent's) and no team (an org-wide PR with no team context),
-	// so it surfaces in the org governance feed, not a team feed. Best-effort in
-	// its own tx after the pessimistic GitHub write — never fails the toggle.
+	// human-authorized, org-executed GitHub write. No conversation (a direct
+	// dashboard action, not an agent's) and no team (an org-wide PR with no
+	// team context), so it surfaces in the org governance feed, not a team
+	// feed. Best-effort in its own tx after the pessimistic GitHub write —
+	// never fails the toggle.
 	draftAction := domain.ActionPRMarkedReady
 	draftFrom, draftTo := domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen
 	if draft {

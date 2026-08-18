@@ -309,13 +309,13 @@ func TestHandleSwipe_DismissCleansUpPendingApprovalConversation(t *testing.T) {
 // awaiting approval. The complete swipe action flips the task to
 // 'done' (so the card lands in the Done column rather than
 // disappearing from the board, the way dismiss makes it) but reuses
-// the same cleanup — pending_reviews row gone, conversation flipped
-// to cancelled, agent_content preserved, human_content recording
-// the user's verdict with a complete-flavored marker that's distinct
-// from both the requeue and dismiss shapes. Future agents reading
-// memory should be able to tell "the human resolved this themselves
-// without applying my prepared review" from "the human walked away
-// from the entity entirely."
+// the same cleanup — review artifact flipped to dismissed, the
+// completed conversation left untouched, agent_content preserved,
+// human_content recording the user's verdict with a complete-flavored
+// marker that's distinct from both the requeue and dismiss shapes.
+// Future agents reading memory should be able to tell "the human
+// resolved this themselves without applying my prepared review" from
+// "the human walked away from the entity entirely."
 func TestHandleSwipe_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)

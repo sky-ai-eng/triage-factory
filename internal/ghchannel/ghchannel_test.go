@@ -21,7 +21,7 @@ import (
 func okConfig(t *testing.T) Config {
 	t.Helper()
 	return Config{
-		ConversationID: "run-1",
+		ConversationID: "conv-1",
 		Upstream:       "https://api.github.com",
 		BinDir:         t.TempDir(),
 		TokenSource:    func(context.Context) (string, error) { return "ghs_real", nil },
@@ -38,7 +38,7 @@ func TestStart_RequiresInputs(t *testing.T) {
 		mutate func(*Config)
 		want   string
 	}{
-		{"no run id", func(c *Config) { c.ConversationID = "" }, "ConversationID"},
+		{"no conversation id", func(c *Config) { c.ConversationID = "" }, "ConversationID"},
 		{"no bin dir", func(c *Config) { c.BinDir = "" }, "BinDir"},
 		{"no token source", func(c *Config) { c.TokenSource = nil }, "TokenSource"},
 	} {
@@ -115,10 +115,10 @@ func TestStart_TrustFileIsPrivateAndComplete(t *testing.T) {
 		t.Errorf("trust file carries %d certificates, want the system roots alongside the run's leaf", n)
 	}
 
-	// The config dir sits under the run's own directory, so Close reclaims it
+	// The config dir sits under the channel directory, so Close reclaims it
 	// with everything else.
-	if !strings.HasPrefix(ch.ConfigDir, paths.GHChannelRunDir("run-1")+string(filepath.Separator)) {
-		t.Errorf("ConfigDir = %q, want it under the run directory", ch.ConfigDir)
+	if !strings.HasPrefix(ch.ConfigDir, paths.GHChannelDir("conv-1")+string(filepath.Separator)) {
+		t.Errorf("ConfigDir = %q, want it under the channel directory", ch.ConfigDir)
 	}
 }
 
@@ -134,7 +134,7 @@ func TestStart_PlaceholderIsPerRun(t *testing.T) {
 	t.Cleanup(func() { _ = first.Close() })
 
 	second := okConfig(t)
-	second.ConversationID = "run-2"
+	second.ConversationID = "conv-2"
 	other, err := Start(second)
 	if err != nil {
 		t.Fatalf("Start second: %v", err)
