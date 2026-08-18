@@ -38,8 +38,8 @@ func (r UserRepo) ExternalID() string {
 
 // ListUserRepos returns all repositories the authenticated user has access to,
 // sorted by most recently pushed. Paginates until all repos are fetched, or
-// maxFetchPages is reached (TFAC-571) — truncation logs a WARN rather than
-// silently returning a partial list.
+// maxRepoMirrorPages is reached — truncation logs a WARN rather than silently
+// returning a partial list.
 func (c *Client) ListUserRepos(ctx context.Context) ([]UserRepo, error) {
 	repos, _, err := c.ListUserReposComplete(ctx)
 	return repos, err
@@ -60,22 +60,28 @@ func (c *Client) ListUserRepos(ctx context.Context) ([]UserRepo, error) {
 // "GitHub said there were more than we read" is not a distinguishable state and
 // a short page is the only end-of-list signal there is.
 func (c *Client) ListUserReposComplete(ctx context.Context) ([]UserRepo, bool, error) {
+	const perPage = 100
 	var all []UserRepo
 
 	for page := 1; ; page++ {
-		if page > maxFetchPages {
+		if page > maxRepoMirrorPages {
 			githubLog.Warn("user repos list truncated at page cap; some repos may be missing",
-				"resource", "user/repos", "page_cap", maxFetchPages)
+				"resource", "user/repos", "page_cap", maxRepoMirrorPages)
 			return all, false, nil
 		}
-		repos, err := c.ListUserReposPage(ctx, 100, page)
+		repos, err := c.ListUserReposPage(ctx, perPage, page)
 		if err != nil {
 			return nil, false, err
 		}
-		if len(repos) == 0 {
+		all = append(all, repos...)
+		// A short page is the end of the list. Walking on until an empty page
+		// costs one extra request per enumeration, and at the cap it costs the
+		// answer itself: a walk whose last allowed page came back short but
+		// non-empty would step onto the cap check above and report the complete
+		// listing it is already holding as truncated.
+		if len(repos) < perPage {
 			break
 		}
-		all = append(all, repos...)
 	}
 
 	return all, true, nil
@@ -111,8 +117,8 @@ func (c *Client) ListUserReposPage(ctx context.Context, perPage, page int) ([]Us
 // installation access token…"), so only call it on an App-issued client. The
 // poller uses the result to map each configured repo onto the installation
 // whose token can reach it. Paginates until all repos are fetched, or
-// maxFetchPages is reached (TFAC-571) — an installation grant beyond 1,000
-// repos truncates with a logged WARN rather than silently under-covering the
+// maxRepoMirrorPages is reached — an installation grant beyond 10,000 repos
+// truncates with a logged WARN rather than silently under-covering the
 // poll's tracked-repo intersection.
 //
 // A partial list is fine for the poller: the intersection it computes just
@@ -140,9 +146,9 @@ func (c *Client) ListInstallationReposComplete(ctx context.Context) ([]UserRepo,
 	total := -1 // -1 until GitHub has told us; a grant of 0 is a legitimate answer
 
 	for page := 1; ; page++ {
-		if page > maxFetchPages {
+		if page > maxRepoMirrorPages {
 			githubLog.Warn("installation repos list truncated at page cap; some repos may be missing from the poll's tracked-repo intersection",
-				"resource", "installation/repositories", "page_cap", maxFetchPages)
+				"resource", "installation/repositories", "page_cap", maxRepoMirrorPages)
 			return all, false, nil
 		}
 		repos, pageTotal, err := c.ListInstallationReposPage(ctx, 100, page)

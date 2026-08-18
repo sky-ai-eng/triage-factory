@@ -31,6 +31,19 @@
 // readiness discriminator rather than an empty list, so "we have not looked yet"
 // never renders as "you have no repositories". A multi-second enumeration inside
 // the read is exactly what this package exists to move off it.
+//
+// # A refusal is also an answer, briefly
+//
+// A pass that completes and declines to write — a truncated enumeration kept
+// out of the mirror rather than mirrored as if whole — arms an in-memory,
+// TTL-length gate on further non-forced passes for that org. Without it, a
+// mirror that never moves reads as stale to every read, and each read re-kicks
+// the very enumeration that just declined: the unbounded loop the TTL exists
+// to prevent, charged against the rate-limit budget the pollers need. The gate
+// is in memory on purpose — the durable state stays honest (nothing was
+// observed), a process restart retries once, and every force bypasses it, so
+// the refresh control and a credential change punch through exactly as they
+// punch through the TTL.
 package reachcache
 
 import (
@@ -38,6 +51,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -70,16 +84,26 @@ const TTL = 6 * time.Hour
 // reconcile, unchanged".
 type grantRefresher func(ctx context.Context, orgID string) error
 
-// Refresher refreshes one org's reachable mirror. It is stateless — every
-// credential is resolved fresh per pass through the resolver — so a config
-// change that hot-swaps credentials is honored without rebuilding it, and one
-// instance serves every org.
+// Refresher refreshes one org's reachable mirror. Every credential is resolved
+// fresh per pass through the resolver, so a config change that hot-swaps
+// credentials is honored without rebuilding it, and one instance serves every
+// org. Its only in-process state is the per-org declined-pass stamp, which
+// every force bypasses.
 type Refresher struct {
 	classes  *ClassResolver
 	mirror   db.ReachableReposStore
 	resolver github.Resolver
 	grant    grantRefresher
 	ws       *websocket.Hub
+
+	// declined records, per org, when the last pass completed WITHOUT writing —
+	// a truncated enumeration refused, or an org with nothing to enumerate
+	// against. Such a pass leaves the mirror's stored state exactly as stale as
+	// it found it, so without this stamp every subsequent read would re-kick the
+	// same enumeration immediately. Guarded by declinedMu: one Refresher is
+	// shared across every per-org runner.
+	declinedMu sync.Mutex
+	declined   map[string]time.Time
 
 	// ttl and now are the seams the TTL tests drive. Defaulted in NewRefresher;
 	// nothing in production sets them.
@@ -97,6 +121,7 @@ func NewRefresher(classes *ClassResolver, mirror db.ReachableReposStore, resolve
 		resolver: resolver,
 		grant:    grant,
 		ws:       ws,
+		declined: make(map[string]time.Time),
 		ttl:      TTL,
 		now:      time.Now,
 	}
@@ -130,6 +155,14 @@ func (r *Refresher) RunOrg(ctx context.Context, orgID string, force bool) (bool,
 	if !force && !state.StaleAt(r.now(), r.ttl) {
 		return false, nil
 	}
+	// A pass that completed and declined to write left the stored state exactly
+	// as stale as it found it, so the TTL gate above can never absorb the next
+	// kick — this one does, for the same window a write would have bought.
+	// Non-forced only: everything that changes what the enumeration would
+	// return (a credential save, the picker's refresh control) forces.
+	if !force && r.recentlyDeclined(orgID) {
+		return false, nil
+	}
 
 	switch class {
 	case domain.GitHubCredentialClassBYOApp:
@@ -142,13 +175,64 @@ func (r *Refresher) RunOrg(ctx context.Context, orgID string, force bool) (bool,
 		}
 	case domain.GitHubCredentialClassPAT:
 		refreshed, err := r.refreshPAT(ctx, orgID)
-		if err != nil || !refreshed {
+		if err != nil {
 			return false, err
+		}
+		if !refreshed {
+			r.markDeclined(orgID)
+			return false, nil
 		}
 	}
 
+	r.clearDeclined(orgID)
 	r.announce(orgID)
 	return true, nil
+}
+
+// recentlyDeclined reports whether the last completed pass for orgID declined
+// to write within the TTL window. The window is the TTL itself: a declined
+// pass is a decision about the same enumeration a write would have dated, so
+// it earns the same quiet period — and a stamp can never outlast a later
+// successful write's freshness, because the TTL gate answers first for as long
+// as that write is fresh. An expired stamp is deleted on the read that finds
+// it expired: it has answered its last question.
+func (r *Refresher) recentlyDeclined(orgID string) bool {
+	r.declinedMu.Lock()
+	defer r.declinedMu.Unlock()
+	at, ok := r.declined[orgID]
+	if !ok {
+		return false
+	}
+	if r.now().Sub(at) >= r.ttl {
+		delete(r.declined, orgID)
+		return false
+	}
+	return true
+}
+
+// markDeclined stamps orgID's declined pass, and sweeps every expired stamp
+// while it holds the lock. The sweep is what keeps the map bounded: entries
+// are only ever added here, and an org that never refreshes again never
+// revisits its own stamp — so without it, a long-lived process would retain a
+// stamp for every org that ever declined, long after those stamps stopped
+// answering anything. Pruning at the growth point caps the map at the orgs
+// declined within roughly one TTL window.
+func (r *Refresher) markDeclined(orgID string) {
+	r.declinedMu.Lock()
+	defer r.declinedMu.Unlock()
+	now := r.now()
+	for org, at := range r.declined {
+		if now.Sub(at) >= r.ttl {
+			delete(r.declined, org)
+		}
+	}
+	r.declined[orgID] = now
+}
+
+func (r *Refresher) clearDeclined(orgID string) {
+	r.declinedMu.Lock()
+	defer r.declinedMu.Unlock()
+	delete(r.declined, orgID)
 }
 
 // refreshPAT re-enumerates GET /user/repos and replaces the org's pat-class
