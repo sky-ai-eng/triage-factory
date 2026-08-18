@@ -492,7 +492,7 @@ type githubReviewIDResult struct {
 }
 
 // resetReviewDraftArgs carries the PR coordinates `start-review --fresh` resets
-// the run's local draft for.
+// the conversation's local draft for.
 type resetReviewDraftArgs struct {
 	githubRepoRef
 	Number int `json:"number"`
@@ -507,8 +507,8 @@ type resetReviewDraftResult struct {
 }
 
 // updateStagedReviewCommentArgs / deleteStagedReviewCommentArgs address one
-// comment on the run's review draft by its TF-local id (not a repo-scoped op —
-// the host resolves the owning draft from the run's artifacts).
+// comment on the conversation's review draft by its TF-local id (not a repo-scoped op —
+// the host resolves the owning draft from the conversation's artifacts).
 type updateStagedReviewCommentArgs struct {
 	CommentID string `json:"comment_id"`
 	Body      string `json:"body"`

@@ -586,10 +586,10 @@ func (s *RelayServer) repoReservedAt(ctx context.Context, repoID string) (time.T
 }
 
 // ObservationArtifact turns a gh-injector observation into the domain artifact
-// the recording side upserts. The run identity (ConversationID/OrgID/TeamID) is
+// the recording side upserts. The conversation identity (ConversationID/OrgID/TeamID) is
 // stamped downstream by RecordExternalWrite from the caller's ConversationInfo — never
-// from the wire — so a sidecar cannot attribute an artifact to another run. A
-// review anchors to conversationID for its dedup key (the same run-scoped key a TF-side
+// from the wire — so a sidecar cannot attribute an artifact to another conversation. A
+// review anchors to conversationID for its dedup key (the same conversation-scoped key a TF-side
 // draft would use, so a gh submit migrates a draft in place). ok is false for a
 // malformed observation (missing coordinates), which is dropped.
 //

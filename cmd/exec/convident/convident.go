@@ -77,8 +77,9 @@ type ConversationIdentity struct {
 	// messages.
 	ConversationID string
 
-	// TeamID is the conversation's owning team (conversations.team_id, NOT NULL), read
-	// straight off the conversation row GetSystem already loads — no task hop.
+	// TeamID is the conversation's owning team (conversations.team_id — nullable at
+	// the schema level, NOT NULL enforced by CHECK for every team-visibility
+	// conversation), read straight off the conversation row GetSystem already loads — no task hop.
 	// Carried onto the local-mode ConversationInfo (TFAC-458) so the capture
 	// writers can stamp artifacts.team_id (NOT NULL per TFAC-455 F1).
 	TeamID string

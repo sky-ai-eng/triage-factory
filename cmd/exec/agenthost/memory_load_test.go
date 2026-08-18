@@ -75,7 +75,7 @@ func TestLocalClient_MemoryLoad_HitComposesAndLimits(t *testing.T) {
 	ctx := context.Background()
 
 	entityID := seedEntity(t, stores, runmode.LocalDefaultOrgID, "github", "octo/repo#7", "A PR")
-	// Three prior runs, oldest→newest. The newest carries human feedback so the
+	// Three prior conversations, oldest→newest. The newest carries human feedback so the
 	// composition separator is exercised; the tail (limit 2) drops the oldest.
 	seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, uuid.New().String(), "oldest agent note", "", memBase, domain.MemoryRolePrimary)
 	seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, uuid.New().String(), "middle agent note", "", memBase.Add(time.Hour), domain.MemoryRolePrimary)

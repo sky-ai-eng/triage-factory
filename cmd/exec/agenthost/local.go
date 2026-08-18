@@ -161,7 +161,7 @@ func (c *LocalClient) Close() error { return nil }
 // one per PR — TFAC-494), so it resolves by the handle the agent passes (the
 // artifact id) rather than just the first pending review, which could be a
 // different PR's draft. An empty handle (defensive — exec always passes one)
-// falls back to the run's sole pending review. Returns an actionable error when
+// falls back to the conversation's sole pending review. Returns an actionable error when
 // no matching pending review exists.
 func (c *LocalClient) conversationReviewArtifact(ctx context.Context, reviewID string) (*domain.Artifact, error) {
 	arts, err := c.listArtifactsByConversation(ctx)
@@ -182,7 +182,7 @@ func (c *LocalClient) conversationReviewArtifact(ctx context.Context, reviewID s
 }
 
 // FinalizeReviewDraft is the host side of `gh pr finalize-review`: it locates the
-// run's review artifact, gates on comment freshness vs. the PR's current head,
+// conversation's review artifact, gates on comment freshness vs. the PR's current head,
 // stages the body + event, snapshots the agent's draft (body + event + the
 // locally staged inline comments) into details.proposed as the approve-time
 // human-feedback baseline, and sets the ready sentinel
@@ -1504,7 +1504,7 @@ func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo str
 	return detail, nil
 }
 
-// touchPR records a durable run→entity touch for the PR owner/repo#number an
+// touchPR records a durable conversation→entity touch for the PR owner/repo#number an
 // addressed read just resolved — best-effort via the runtime, so it relays to
 // the orchestrator on the sidecar and never fails the read. URL is left empty:
 // the poll cycle owns stub enrichment. Set-returning GitHub reads (pr list,
@@ -1597,13 +1597,13 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 	return number, htmlURL, nodeID, nil
 }
 
-// GithubCreatePendingReview records this run's review draft — a fully TF-side
-// artifact, with zero GitHub writes (TFAC-494). It mints a run-scoped `review`
+// GithubCreatePendingReview records this conversation's review draft — a fully TF-side
+// artifact, with zero GitHub writes (TFAC-494). It mints a conversation-scoped `review`
 // artifact (state=pending, no ready sentinel, empty ExternalID; the reviewed
 // commitSHA pinned into details for the atomic submit at approval) and returns
 // the artifact id as the local review handle the agent passes to add/finalize.
 //
-// Because the dedup key is run-scoped, two runs (different teams, a re-delegate,
+// Because the dedup key is conversation-scoped, two conversations (different teams, a re-delegate,
 // interactive steering) reviewing the same PR each get their own draft row and
 // never collide — the multi-tenant pending-review-slot collision the
 // GitHub-native model (TFAC-463) introduced is gone, along with the identity
@@ -1618,9 +1618,9 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 	return stored.ID, nil
 }
 
-// GithubAddPendingReviewComment appends one inline comment to this run's review
+// GithubAddPendingReviewComment appends one inline comment to this conversation's review
 // draft, staged entirely TF-side (TFAC-494) — no GitHub *write*. It locates the
-// run's pending review artifact, validates the local handle, mints a stable
+// conversation's pending review artifact, validates the local handle, mints a stable
 // TF-local comment id, appends it to details.StagedComments, and returns the id.
 // body already carries the severity badge baked in (the caller bakes it);
 // line>0 with a non-nil startLine makes it a multi-line range.
@@ -1784,7 +1784,7 @@ func (c *LocalClient) UpdateStagedReviewComment(ctx context.Context, commentID, 
 	return nil
 }
 
-// DeleteStagedReviewComment removes one staged comment from this run's review
+// DeleteStagedReviewComment removes one staged comment from this conversation's review
 // draft by its TF-local id. Pure local write, no GitHub call. An unknown id is an
 // error.
 func (c *LocalClient) DeleteStagedReviewComment(ctx context.Context, commentID string) error {

@@ -29,7 +29,7 @@ describe('ActionList', () => {
   beforeEach(() => vi.restoreAllMocks())
   afterEach(() => vi.unstubAllGlobals())
 
-  it('fetches the run-scoped endpoint and names each write', async () => {
+  it('fetches the conversation-scoped endpoint and names each write', async () => {
     const fetchMock = mockActions([
       action({ id: 'a1', action: 'comment_posted', target: 'org/repo#18' }),
       action({ id: 'a2', action: 'branch_pushed', target: 'org/repo' }),

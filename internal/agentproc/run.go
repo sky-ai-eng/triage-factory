@@ -111,7 +111,7 @@ type RunOptions struct {
 	GitUserEmail string
 
 	// TraceID is stamped onto every emitted message's ConversationID field.
-	// Storage-neutral: delegate uses the agent run UUID, the curator
+	// Storage-neutral: delegate uses the conversation id, the curator
 	// uses its own message-group id.
 	TraceID string
 

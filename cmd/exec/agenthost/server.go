@@ -105,8 +105,8 @@ type Server struct {
 }
 
 // NewServer constructs a Server bound to (stores, info). info comes
-// from the spawner's per-run map — it carries the run's owning org
-// and the kicking-off user identity (empty for event-triggered runs).
+// from the spawner's per-conversation map — it carries the conversation's owning org
+// and the kicking-off user identity (empty for event-triggered conversations).
 // proxyCreds is non-nil only for a TF_ROLE=executor run; nil disables the
 // proxy branch and every gh/jira verb resolves through ghResolver / the Jira
 // resolver exactly as before.

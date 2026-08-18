@@ -257,7 +257,7 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (_ *ToolHostJail,
 	}()
 
 	if opts.ConversationID == "" {
-		return nil, fmt.Errorf("agentproc: tool host launch requires a run id")
+		return nil, fmt.Errorf("agentproc: tool host launch requires a conversation id")
 	}
 	if opts.Worktree == "" {
 		return nil, fmt.Errorf("agentproc: tool host launch requires a worktree")

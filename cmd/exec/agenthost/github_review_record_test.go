@@ -38,7 +38,7 @@ func reviewDiffServer(t *testing.T, headSHA *string) *httptest.Server {
 }
 
 // TestLocalClient_GithubCreatePendingReview_RecordsLocalDraft pins that
-// start-review lands one run-scoped `review` artifact with ZERO GitHub writes:
+// start-review lands one conversation-scoped `review` artifact with ZERO GitHub writes:
 // state=pending (no ready sentinel), empty ExternalID (no GitHub review until
 // approval), the head SHA pinned into details, deduped on
 // github:review:owner/repo#<number>:<conversation_id> — across both write paths. The
@@ -213,8 +213,8 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 	}
 }
 
-// TestLocalClient_MultipleReviewDrafts_ResolveByHandle pins that when one run
-// holds several review drafts (run-scoped dedup, one per PR — TFAC-494),
+// TestLocalClient_MultipleReviewDrafts_ResolveByHandle pins that when one conversation
+// holds several review drafts (conversation-scoped dedup, one per PR — TFAC-494),
 // add-review-comment and finalize-review act on the draft named by the handle, not
 // just the first pending review. A naive "first pending review" lookup would
 // stage/finalize against the wrong PR's draft.
@@ -223,7 +223,7 @@ func TestLocalClient_MultipleReviewDrafts_ResolveByHandle(t *testing.T) {
 	srv := reviewDiffServer(t, &head)
 	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
 
-	// Two drafts on different PRs in the same run.
+	// Two drafts on different PRs in the same conversation.
 	h7, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "sha7", nil)
 	if err != nil {
 		t.Fatalf("create review 7: %v", err)

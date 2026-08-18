@@ -26,7 +26,7 @@ describe('jsonBody', () => {
 
   it('awaits a promised body, so a parked read still answers', async () => {
     // useConversationDetail's tests hold the transcript read open to exercise the window
-    // where the run's SUM is displayed before the ids inside it are known.
+    // where the conversation's SUM is displayed before the ids inside it are known.
     let settle!: (v: unknown) => void
     const stub = jsonBody(
       new Promise((resolve) => {

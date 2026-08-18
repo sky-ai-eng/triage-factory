@@ -6,10 +6,9 @@
 
 ## Phase 1: main() startup sequence (pre-server-construction)
 
-### 1. Cleanup of orphaned worktrees reads taken-over runs from the local sentinel org only
-- **Where:** `main.go:559` — `stores.AgentRuns.ListTakenOverIDsSystem(ctx, runmode.LocalDefaultOrg)`
-- **Local purpose:** Cleanup of worktrees from crashed runs; preserves `~/.claude/projects/` JSONLs for any run still flagged `taken_over` so the user can `triagefactory resume`. Runs **unconditionally** in both modes.
-- **Multi-mode:** Wrong shape. In multi mode the lookup returns nothing (no runs ever exist under the synthetic org), and `worktree.CleanupWithOptions` proceeds with an empty preserve set — so taken-over runs in **real** tenant orgs would have their `~/.claude/projects/` entries nuked. Fix: gate this whole block on `ModeLocal` (the `resume` CLI is local-only anyway per the comment on `cmd/resume/resume.go:62`), or iterate `stores.Orgs.ListActiveSystem` and union the preserve sets.
+### 1. Cleanup of orphaned worktrees reads taken-over runs from the local sentinel org only — FIXED
+- **Was:** `main.go:559` — `stores.AgentRuns.ListTakenOverIDsSystem(ctx, runmode.LocalDefaultOrg)`, running unconditionally in both modes and preserving `~/.claude/projects/` JSONLs for any run still flagged `taken_over` so the user could `triagefactory resume`. In multi mode the lookup returned nothing (no rows ever exist under the synthetic org), so `worktree.CleanupWithOptions` proceeded with an empty preserve set and would have nuked `~/.claude/projects/` entries for taken-over conversations in **real** tenant orgs.
+- **Fixed** as this entry prescribed, via a mode gate: `App.cleanupWorktrees` (`internal/app/startup.go:196`) now branches on `a.local()` — multi mode skips the `~/.claude/projects` preserve-set read entirely and calls `worktree.CleanupWithOptions(worktree.CleanupOptions{SkipClaudeProjectCleanup: true})`, while local mode reads parked worktree paths under the sentinel org via `stores.Conversations.ListParkedWorktreePathsSystem` — "taken over" is now "parked" (a conversation status), and the store/method both moved off the retired `agent_runs`/`AgentRuns` surface onto `conversations`/`Conversations`. No sentinel-org read reaches multi mode on this path.
 
 ### 2. Local GitHub-identity bootstrap — REMOVED (SKY-458)
 - **Was:** `bootstrapLocalGitHubIdentity`, which derived the local user's
@@ -59,10 +58,10 @@
   - Add an orgID dimension throughout (map `orgID → map[event_type]int`), hydrate one row per org, and have `Snapshot(orgID)` return the per-tenant slice.
   - Either way: this is **not safe to ship to multi-tenant** in its current shape.
 
-### 9. `CancelOrphanedNonTerminalCuratorRequests` cancels every tenant's queued/running curator rows
-- **Where:** `main.go:884` → `internal/db/curator.go:223`
+### 9. Startup recovery cancels every tenant's queued/running curator turns
+- **Where (as originally audited):** `main.go:884` → `internal/db/curator.go:223`, running an unqualified `UPDATE curator_requests SET status='cancelled' WHERE status IN ('queued', 'running')`. There is no `curator_requests` table anymore — curator turns are `conversations` rows (`type='curator'`) like every other engagement, so this citation is stale on two counts: the table name and, likely, the file/line (main.go is now a ~200-line boot-identity dispatcher; the startup sequence this item describes moved into `internal/app` as part of the horizontal-scaling work). Re-auditing the equivalent current-day cancel-on-restart behavior for curator conversations is unconfirmed and out of scope for this pass — flagging rather than re-diagnosing.
 - **Local purpose:** Startup recovery; cancels stranded curator turns so the user re-sends rather than getting a delayed mystery reply.
-- **Multi-mode:** Runs an unqualified `UPDATE curator_requests SET status='cancelled' WHERE status IN ('queued', 'running')` — process-wide. In a hosted deploy that restarts (e.g. rolling deploy of the binary), this nukes *every* tenant's in-flight chat. Arguably correct — a binary restart genuinely kills every per-project goroutine in the process — but it's worth deciding explicitly. If you accept it as correct, leave a comment; if not, scope it per-org-of-this-pod or rework to soft-cancel only orgs whose live agent goroutine had a known PID.
+- **Multi-mode:** The underlying concern (an unqualified cross-tenant cancel on restart) may still be worth deciding explicitly wherever this logic now lives. If you accept it as correct, leave a comment; if not, scope it per-org-of-this-pod or rework to soft-cancel only orgs whose live agent goroutine had a known PID.
 
 ### 10. Curator's `materializePinnedRepos` reads `repositories` under the sentinel org — FIXED
 - **Was:** `repos.Get(ctx, runmode.LocalDefaultOrgID, slug)`, per-dispatch, refreshing pinned-repo worktrees inside each curator chat. Per-dispatch rather than strictly startup, but the curator runtime is constructed at startup and the path is reached on every chat send. In multi mode it read the wrong org and would always return nil (no rows under the synthetic org), silently dropping every pinned repo from every multi-mode chat.
@@ -114,15 +113,15 @@
 
 ## Phase 5: CLI surface (delegated-agent entry points)
 
-### 19. `runident.ResolveRunIdentity` always returns `runmode.LocalDefaultOrg` as the run's orgID
-- **Where:** `cmd/exec/runident/runident.go:109` — `orgID := runmode.LocalDefaultOrg`
-- **Local purpose:** Every `triagefactory exec ...` invocation by a delegated agent resolves its (orgID, userID, runID) via this helper. Local mode collapses to the sentinel.
-- **Multi-mode:** TODO at line 106 calls this out — "SKY-269 will replace runmode.LocalDefaultOrg with the run's real org_id." Until then, **every multi-mode delegated agent's `triagefactory exec ...` call writes against the wrong org**. The fix is local: `orgID = run.OrgID` from the `agent_runs` row, which we already have in scope. Should land before any multi-mode delegation can fire.
+### 19. `runident.ResolveRunIdentity` always returns `runmode.LocalDefaultOrg` as the run's orgID — FIXED (SKY-269)
+- **Was:** `cmd/exec/runident/runident.go:109` — `orgID := runmode.LocalDefaultOrg`, unconditionally, so every multi-mode delegated agent's `triagefactory exec ...` call would have written against the wrong org.
+- **Local purpose:** Every `triagefactory exec ...` invocation by a delegated agent resolves its (orgID, userID, conversationID) via this helper. Local mode collapses to the sentinel.
+- **Fixed**, and the package renamed along the way: `cmd/exec/runident` is now `cmd/exec/convident`, and `ResolveConversationIdentity` (`cmd/exec/convident/convident.go:115`) resolves the real orgID with two admin-pool reads — `stores.Conversations.LookupOrgForConversationSystem` by conversationID alone, then `stores.Conversations.GetSystem(ctx, orgID, conversationID)` — no sentinel-org fallback remains on this path in either mode.
 
-### 20. `cmd/exec/exec.go` credential resolver hardcodes the sentinel
-- **Where:** `cmd/exec/exec.go:105` — `orgID := runmode.LocalDefaultOrgID` (with the comment "Local mode collapses to runmode.LocalDefaultOrgID, but the resolver shape stays multi-mode ready")
-- **Local purpose:** When `ResolveRunIdentity` errors (e.g. `--help` invocation without a real run), defaults to sentinel for credential lookup.
-- **Multi-mode:** Coupled to #19 — once `runident` returns the real orgID, this site stays correct because it reads `ident.OrgID` on success. The only remaining concern is the error fallback: in multi mode an exec invocation without a valid run shouldn't fall back to the sentinel (which has no creds anyway) — it should refuse. Minor; the actual bug surface is #19.
+### 20. `cmd/exec/exec.go` credential resolver hardcodes the sentinel — citation stale, unconfirmed
+- **Where (as originally audited):** `cmd/exec/exec.go:105` — `orgID := runmode.LocalDefaultOrgID`. This exact site no longer exists in `cmd/exec/exec.go`; credential resolution in multi mode has since moved to the sealed per-claim bundle model (executor credentials arrive pre-sealed to the claim, never resolved from the secret store — see the root `CLAUDE.md`'s "Sandbox, isolation, and executor credentials" section), which may have obsoleted this item entirely. Re-auditing is out of scope for this pass — flagging rather than re-diagnosing.
+- **Local purpose:** When `ResolveConversationIdentity` (formerly `ResolveRunIdentity`, `cmd/exec/runident` → `cmd/exec/convident`) errors (e.g. `--help` invocation without a real conversation), defaults to sentinel for credential lookup.
+- **Multi-mode:** Was coupled to #19, which is now fixed — `ResolveConversationIdentity` returns the real orgID on success. Whether the error-fallback concern below still applies to current credential-resolution code is unconfirmed: in multi mode an exec invocation without a valid conversation shouldn't fall back to the sentinel (which has no creds anyway) — it should refuse.
 
 ### 21. `cmd/resume/resume.go` reads taken-over runs from the sentinel org
 - **Where:** `cmd/resume/resume.go:69`
@@ -131,8 +130,8 @@
 
 ## Phase 6: SQLite store internal sentinels (defense-in-depth, not boot-path)
 
-### 22. `internal/db/sqlite/agentrun.go:46` defaults `CreatorUserID` to the sentinel
-- **Where:** SQLite store `Create` defaults manual-run `CreatorUserID` to `runmode.LocalDefaultUserID` when caller leaves it empty.
+### 22. SQLite store defaults `CreatorUserID` to the sentinel
+- **Where:** `internal/db/sqlite/conversation_queue.go:168` (file renamed off the retired `agentrun.go`) — SQLite store `Create` defaults manual-conversation `CreatorUserID` to `runmode.LocalDefaultUserID` when caller leaves it empty.
 - **Local purpose:** Convenience for SQLite-only paths where the caller (pre-D-Claims test fixtures, spawner without explicit user) doesn't thread a user id.
 - **Multi-mode:** Only reachable via the SQLite store, which only runs in local mode (the postgres store is constructed in `case ModeMulti`). No multi-mode impact. Belongs to the "SQLite-only defaults" set — fine as-is.
 

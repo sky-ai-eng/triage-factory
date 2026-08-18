@@ -69,13 +69,15 @@ const ProtocolVersion = 1
 // since the routing decision is collapsed into the Client methods
 // below).
 //
-// TeamID is the run's owning team (conversations.team_id, NOT NULL). The capture
+// TeamID is the conversation's owning team (conversations.team_id — nullable at
+// the schema level, but the CHECK constraint requires it non-NULL for every
+// team-visibility conversation, which delegation always is). The capture
 // writers (TFAC-459 Jira, TFAC-460 pre-push, GitHub-native rework) stamp
 // artifacts.team_id off it (NOT NULL per TFAC-455 F1), so it must be
-// populated on every construction path: the spawner reads it off the run
-// row (no task hop), and the local resolver carries it from
+// populated on every construction path: the spawner reads it off the
+// conversation row (no task hop), and the local resolver carries it from
 // ConversationIdentity. Empty only on synthetic ConversationInfos that don't back a real
-// run (test seams).
+// conversation (test seams).
 //
 // Mirrors convident.ConversationIdentity but lives in this package so the IPC
 // wire shape doesn't depend on convident's import graph (convident
@@ -150,8 +152,8 @@ type ReviewFinalizeResult struct {
 }
 
 // MemoryLoadResult is what MemoryLoad returns: the entity's coordinates plus
-// the prior run memory attached to it, team-visibility-scoped to the run's
-// team. EntityID is empty and Memories empty when the entity is unknown (a
+// the prior conversation memory attached to it, team-visibility-scoped to the
+// conversation's team. EntityID is empty and Memories empty when the entity is unknown (a
 // miss is a normal outcome, not an error). Count is the total number of
 // memories under the visibility scope BEFORE the limit is applied, so the
 // agent can tell "there are more than I asked for" from "that's everything".
@@ -164,7 +166,7 @@ type MemoryLoadResult struct {
 	Memories []MemoryLoadEntry `json:"memories"`
 }
 
-// MemoryLoadEntry is one prior run's memory on the entity — the agent
+// MemoryLoadEntry is one prior conversation's memory on the entity — the agent
 // narrative composed with the human's post-run verdict, exactly as the
 // spawn-time materializer composes it (agent content + a
 // "## Human feedback (post-run)" separator).
@@ -187,17 +189,17 @@ type MemoryLoadEntry struct {
 // across both implementations and avoids the trap of "works in local,
 // dies in sandbox."
 type Client interface {
-	// LookupConversation returns the run identity the client is acting on
+	// LookupConversation returns the conversation identity the client is acting on
 	// behalf of. The daemon resolves identity from the socket's per-
-	// run map; LocalClient resolves from TRIAGE_FACTORY_CONVERSATION_ID at
+	// conversation map; LocalClient resolves from TRIAGE_FACTORY_CONVERSATION_ID at
 	// construction time. Idempotent and cheap — the LocalClient
 	// returns its cached value, the IPCClient does one round-trip.
 	LookupConversation(ctx context.Context) (ConversationInfo, error)
 
 	// --- review draft finalization (gh pr finalize-review) ---
 	//
-	// FinalizeReviewDraft finalizes the run's fully TF-side `review` draft: it
-	// locates the run's review artifact, stages body + event, snapshots the
+	// FinalizeReviewDraft finalizes the conversation's fully TF-side `review` draft: it
+	// locates the conversation's review artifact, stages body + event, snapshots the
 	// agent's draft (body + event + the locally staged inline comments) into
 	// details.proposed, and sets the ready sentinel (details_json.review_event).
 	//
@@ -213,13 +215,13 @@ type Client interface {
 	FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) (ReviewFinalizeResult, error)
 
 	// ResetReviewDraft is the host side of `gh pr start-review --fresh`: a pure
-	// local reset of this run's review draft for owner/repo#number, with zero
+	// local reset of this conversation's review draft for owner/repo#number, with zero
 	// GitHub calls. It clears the staged comments and the body/event ready
 	// sentinel (and the write-once Proposed snapshot) back to an empty pending
 	// draft, keeping the artifact row, its handle, and its pinned head SHA so the
 	// agent can restart the review cleanly. Returns the draft's handle and that
 	// preserved head SHA (so the CLI can echo the same commit_sha a normal
-	// start-review prints), or ("", "") when the run has no draft for that PR (the
+	// start-review prints), or ("", "") when the conversation has no draft for that PR (the
 	// caller falls through to a normal start-review). Post-494 there is no GitHub
 	// pending review to delete and no identity / anti-hijack logic — the draft
 	// lives entirely in the artifact.
@@ -348,7 +350,7 @@ type Client interface {
 	// --- review draft staging (gh pr start-review / add-review-comment) ---
 	//
 	// A review is staged entirely TF-side (TFAC-494) — start-review records a
-	// run-scoped `review` artifact and add-review-comment appends to its
+	// conversation-scoped `review` artifact and add-review-comment appends to its
 	// details.staged_comments, both pure local writes with zero GitHub calls. The
 	// review never occupies GitHub's one-per-identity pending-review slot during
 	// the draft window; the atomic create+submit happens at approval. These bridge
@@ -358,11 +360,11 @@ type Client interface {
 	//
 	// GithubCreatePendingReview returns the local review handle; the comments param
 	// is unused (start-review seeds none). GithubAddPendingReviewComment returns a
-	// stable TF-local comment id. Concurrent runs on one PR never collide — the
-	// dedup key is run-scoped — so there is no identity branch and no collision
+	// stable TF-local comment id. Concurrent conversations on one PR never collide — the
+	// dedup key is conversation-scoped — so there is no identity branch and no collision
 	// error.
 	//
-	// GithubAddPendingReviewComment's commitSHA is the run's worktree HEAD: the
+	// GithubAddPendingReviewComment's commitSHA is the conversation's worktree HEAD: the
 	// commit the CLI validated the comment's (path, line, start_line) against and
 	// the commit the submitted comment anchors to. The CLI passes it because the
 	// agent reads the diff from its checkout, not the live PR head — sourcing the
@@ -374,7 +376,7 @@ type Client interface {
 	GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int, commitSHA string) (commentID string, err error)
 
 	// UpdateStagedReviewComment / DeleteStagedReviewComment mutate one inline
-	// comment on this run's TF-side review draft, addressed by the stable TF-local
+	// comment on this conversation's TF-side review draft, addressed by the stable TF-local
 	// comment id add-review-comment minted (a non-numeric id, distinct from the
 	// REST numeric ids GithubUpdate/DeleteComment take). They rewrite the matching
 	// entry in the review artifact's details.staged_comments — a pure local write,
@@ -382,7 +384,7 @@ type Client interface {
 	// counterpart of the comment-update / comment-delete REST path; the CLI picks
 	// between them by try-parsing the id as an int. UpdateStagedReviewComment's
 	// body already carries the (re-baked) severity badge — the CLI bakes it, as it
-	// does for add-review-comment. An unknown id is an error (the run has no staged
+	// does for add-review-comment. An unknown id is an error (the conversation has no staged
 	// comment with that id). These replace the GraphQL pending-review-comment
 	// mutations the GitHub-native model used, removed by TFAC-494.
 	UpdateStagedReviewComment(ctx context.Context, commentID, body string) error
@@ -402,7 +404,7 @@ type Client interface {
 	// so the per-job fallback fires.
 	GithubDownloadArtifact(ctx context.Context, owner, repo, path string, dst io.Writer, maxBytes int64) (int64, error)
 
-	// RecordReadTouch records a durable run→entity touch for an addressed read
+	// RecordReadTouch records a durable conversation→entity touch for an addressed read
 	// whose host method can't cheaply build the entity target itself — today
 	// `gh pr thread-view`, where the PR number the touch keys on is a CLI
 	// positional the ghAPI seam (a deliberate mirror of *github.Client, which
@@ -414,14 +416,14 @@ type Client interface {
 	// just costs one touch row.
 	RecordReadTouch(ctx context.Context, provider, target, url string)
 
-	// MemoryLoad returns the prior run memory attached to the entity identified
-	// by (source, sourceID), team-visibility-scoped to the run's team. source is
+	// MemoryLoad returns the prior conversation memory attached to the entity identified
+	// by (source, sourceID), team-visibility-scoped to the conversation's team. source is
 	// an entity source value ("github" | "jira" | "slack"); sourceID is that
 	// source's natural key (github "owner/repo#N", jira "KEY-123", slack
 	// "<channel>/<thread_ts>"). A lookup of an unknown entity is a miss, not an
 	// error: it returns an empty result with no EntityID and records no touch —
 	// memory load never mints an entity (unlike the addressed-read touch path).
-	// A hit records a run→entity 'touched' row best-effort (loading IS an
+	// A hit records a conversation→entity 'touched' row best-effort (loading IS an
 	// address) and returns up to limit of the most recent memories, with Count
 	// the pre-limit total under the visibility scope.
 	MemoryLoad(ctx context.Context, source, sourceID string, limit int) (*MemoryLoadResult, error)

@@ -245,7 +245,7 @@ func (r resolvedEntity) matches(provider, target string) bool {
 }
 
 // recordTouchInfo persists the write funnel's touched entity: it unwraps the
-// external action into its (provider, target, url) and records the run→entity
+// external action into its (provider, target, url) and records the conversation→entity
 // touch. A nil action (an audit-only write with no external action) touches
 // nothing. See recordEntityTouch for the best-effort + outside-the-tx contract.
 //
@@ -299,7 +299,7 @@ func stampPROwnership(ctx context.Context, stores db.Stores, info ConversationIn
 		return
 	}
 	// Defensive: auto-fire is gated on an owned task and artifacts.team_id is
-	// NOT NULL, so a run without a team should not reach here. If one does,
+	// NOT NULL, so a conversation without a team should not reach here. If one does,
 	// there is no owner to record and the entity keeps its NULL.
 	if info.TeamID == "" || stores.Entities == nil {
 		return
@@ -332,8 +332,8 @@ func stampPROwnership(ctx context.Context, stores db.Stores, info ConversationIn
 // loadEntityMemory is the host side of `exec memory load`: it looks up the
 // entity for (source, sourceID) by its natural key — LOOKUP ONLY, never
 // FindOrCreate, so a load of something unknown is a miss, not a stub mint — and
-// on a hit returns that entity's prior run memory scoped to the run's team,
-// plus records a best-effort run→entity 'touched' row (loading IS an address).
+// on a hit returns that entity's prior conversation memory scoped to the conversation's team,
+// plus records a best-effort conversation→entity 'touched' row (loading IS an address).
 //
 // Unlike recordEntityTouch's resolve-or-create, a miss here records NOTHING and
 // returns an empty result with an empty EntityID — the deliberate asymmetry the

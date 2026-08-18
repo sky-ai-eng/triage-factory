@@ -83,7 +83,7 @@ type Runtime interface {
 	// already-applied action, so it needs no error return.
 	Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction)
 
-	// RecordReadTouch persists a durable run→entity touch for an addressed read
+	// RecordReadTouch persists a durable conversation→entity touch for an addressed read
 	// (a verb targeting one entity by id/key/ts): it resolves-or-creates the
 	// entity for (provider, target, url) and records a role='touched' row. Void
 	// and best-effort like Record — a read never fails on its touch — and, like
@@ -94,10 +94,10 @@ type Runtime interface {
 
 	// MemoryLoad resolves the entity for (source, sourceID) by its natural key
 	// — LOOKUP ONLY, it never mints an entity — and, on a hit, returns that
-	// entity's prior run memory (team-visibility-scoped to the run's team,
+	// entity's prior conversation memory (team-visibility-scoped to the conversation's team,
 	// composed exactly as the spawn-time materializer composes it) capped at the
 	// most recent `limit`, with Count the pre-limit scoped total. A hit records a
-	// run→entity 'touched' row best-effort (loading IS an address); a miss
+	// conversation→entity 'touched' row best-effort (loading IS an address); a miss
 	// returns an empty result and records nothing. Relayed to the orchestrator on
 	// the sidecar so the reads + the touch land where the stores live.
 	MemoryLoad(ctx context.Context, source, sourceID string, limit int) (*MemoryLoadResult, error)
