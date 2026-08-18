@@ -919,11 +919,11 @@ func TestProjectKnowledge_OCC(t *testing.T) {
 	}
 }
 
-// TestProjectKnowledge_RunValidation — passing a p_updated_by_run that
-// belongs to another user fails because runs RLS hides it. Without
-// this gate, a caller could attribute their KB write to someone else's
-// run, polluting audit chronology.
-func TestProjectKnowledge_RunValidation(t *testing.T) {
+// TestProjectKnowledge_ConversationValidation — passing a
+// p_updated_by_conversation that belongs to another user fails because
+// conversations RLS hides it. Without this gate, a caller could attribute
+// their KB write to someone else's conversation, polluting audit chronology.
+func TestProjectKnowledge_ConversationValidation(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
@@ -939,7 +939,7 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 		t.Fatalf("seed KB: %v", err)
 	}
 
-	// Seed bob's run in his own org. Use AdminDB so we don't have to
+	// Seed bob's conversation in his own org. Use AdminDB so we don't have to
 	// build the full task/event/prompt chain.
 	bobOrg := SeedOrg(t, h, "bob-other-org", bob)
 	bobTeam := SeedTeam(t, h, bobOrg, "default")
@@ -953,21 +953,21 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id, status)
 		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4, $5, 'running') RETURNING id
 	`, bobOrg, bob, bobTask, bobPrompt, bobBR).Scan(&bobConversation); err != nil {
-		t.Fatalf("seed bob run: %v", err)
+		t.Fatalf("seed bob conversation: %v", err)
 	}
 
-	// Alice tries to attribute her KB update to bob's run. RLS on
-	// runs hides bob's row from alice's session, so the EXISTS check
+	// Alice tries to attribute her KB update to bob's conversation. RLS on
+	// conversations hides bob's row from alice's session, so the EXISTS check
 	// inside the function fails.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		var v int
 		return tx.QueryRow(
 			`SELECT update_project_knowledge($1, $2, $3, $4)`,
-			pkID, 1, "v2-with-stolen-run", bobConversation,
+			pkID, 1, "v2-with-stolen-conversation", bobConversation,
 		).Scan(&v)
 	})
 	if err == nil {
-		t.Fatalf("update with stolen run did not error — run validation broken")
+		t.Fatalf("update with stolen conversation did not error — conversation validation broken")
 	}
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {

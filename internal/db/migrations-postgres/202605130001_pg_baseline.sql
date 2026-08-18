@@ -140,7 +140,7 @@ CREATE TYPE public.org_role AS ENUM (
 --
 
 -- +goose StatementBegin
-CREATE FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_run uuid DEFAULT NULL::uuid) RETURNS integer
+CREATE FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid DEFAULT NULL::uuid) RETURNS integer
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -153,13 +153,13 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  -- If a run is being attributed, it must be one the caller can see
+  -- If a conversation is being attributed, it must be one the caller can see
   -- through conversations RLS (their own, in their current org). A forged
-  -- p_updated_by_run from another user fails this check because the
+  -- p_updated_by_conversation from another user fails this check because the
   -- conversations SELECT policy gates on the caller's org + visibility arm.
-  IF p_updated_by_run IS NOT NULL
-     AND NOT EXISTS (SELECT 1 FROM conversations WHERE id = p_updated_by_run) THEN
-    RAISE EXCEPTION 'run % not accessible to caller', p_updated_by_run
+  IF p_updated_by_conversation IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM conversations WHERE id = p_updated_by_conversation) THEN
+    RAISE EXCEPTION 'conversation % not accessible to caller', p_updated_by_conversation
       USING ERRCODE = '42501';
   END IF;
 
@@ -167,7 +167,7 @@ BEGIN
      SET content = p_content,
          version = version + 1,
          last_updated_by = v_user_id,
-         last_updated_by_run = p_updated_by_run,
+         last_updated_by_conversation = p_updated_by_conversation,
          updated_at = now()
    WHERE id = p_id
      AND version = p_expected_version
@@ -1075,7 +1075,7 @@ CREATE TABLE public.project_knowledge (
     content text DEFAULT ''::text NOT NULL,
     version integer DEFAULT 1 NOT NULL,
     last_updated_by uuid,
-    last_updated_by_run uuid,
+    last_updated_by_conversation uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -3451,11 +3451,11 @@ ALTER TABLE ONLY public.project_knowledge
 
 
 --
--- Name: project_knowledge project_knowledge_last_updated_by_run_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: project_knowledge project_knowledge_last_updated_by_conversation_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.project_knowledge
-    ADD CONSTRAINT project_knowledge_last_updated_by_run_fkey FOREIGN KEY (last_updated_by_run, org_id) REFERENCES public.conversations(id, org_id) ON DELETE SET NULL;
+    ADD CONSTRAINT project_knowledge_last_updated_by_conversation_fkey FOREIGN KEY (last_updated_by_conversation, org_id) REFERENCES public.conversations(id, org_id) ON DELETE SET NULL;
 
 
 --
@@ -5061,16 +5061,16 @@ GRANT USAGE ON SCHEMA tf TO tf_app;
 
 
 --
--- Name: FUNCTION update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_run uuid); Type: ACL; Schema: public; Owner: -
+-- Name: FUNCTION update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid); Type: ACL; Schema: public; Owner: -
 --
 
-REVOKE ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_run uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid) FROM PUBLIC;
 -- supabase_admin's ALTER DEFAULT PRIVILEGES auto-grants public-schema
 -- functions to anon/authenticated/service_role at CREATE time. Strip them —
 -- only tf_app should call this OCC helper.
-REVOKE ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_run uuid) FROM anon, authenticated, service_role;
-GRANT ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_run uuid) TO postgres;
-GRANT ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_run uuid) TO tf_app;
+REVOKE ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid) FROM anon, authenticated, service_role;
+GRANT ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid) TO postgres;
+GRANT ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid) TO tf_app;
 
 
 --
